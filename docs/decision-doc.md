@@ -13,9 +13,22 @@ My original estimate of 15-22 days assumed I understood GT's surface. Phase 0 re
 - Cross-rig infrastructure workers (Dogs), Mountain-Eater epic orchestration, capacity-controlled scheduler, synthesis (cross-leg aggregation), Wasteland federation via DoltHub
 - A composition system (extends / expansions / aspects) that's genuinely well-designed
 
-**Updated estimate:** **24-37 days of focused work**, or **5-7 calendar weeks** at the pace described earlier (3-4 hours/day of Ryan direction, 2-3 polecat PRs/day). Closer to the high end if Tier 2 workflows must be feature-complete by cutover.
+**Updated estimate:** **27-40 days of focused work**, or **6-8 calendar weeks** at the pace described earlier (3-4 hours/day of Ryan direction, 2-3 polecat PRs/day). Includes:
+- 2-3 extra formulas in scope (6 total, not 4) per Ryan's direction
+- Persona/vernacular configurability system (Sith Fleet / Pirate Crew / etc.)
+- SQLite + Quantum instead of Postgres + Oban (no estimate change)
 
 This is honest. I would rather over-estimate now than discover scope mid-flight.
+
+## Decisions locked (from 2026-05-18 review)
+
+1. **Database:** **SQLite** (Ash data layer is swappable; migrate to Postgres later only if needed). **Job scheduling:** Quantum + GenServer queues. Skip Oban entirely until/unless we hit SQLite scale limits.
+2. **Claude session model:** **Port-only** (no tmux). Polecat output streams to LiveView dashboard. Attach via `iex --remsh` if live debugging needed.
+3. **Reviewer polecat output:** **Markdown files** at `reviews/<branch>.md` in the local repo. Builder polecat reads, responds in-line, reviewer re-reviews until clean.
+4. **Audit retention:** **Forever for now.** Add cleanup tools in Phase 5.
+5. **`hq-spq`:** **Close as duplicate** of `mol-pr-feedback-patrol` (which already exists in GT).
+6. **Formulas to port (6):** `mol-polecat-work`, `mol-polecat-code-review`, `mol-pr-feedback-patrol`, `mol-refinery-patrol`, `mol-polecat-conflict-resolve`, `shiny`. Add more on evidence.
+7. **NEW: Persona / vernacular configurability.** User-facing strings (and CLI command aliases) configurable via `config/personas/<name>.exs`. Ship 3 starter personas: `gas-town` (default), `sith-fleet`, `pirate-crew`. Internal Elixir names stay stable; only the user-facing layer translates.
 
 ## Tier 1 — Definitely port (MVP core)
 
@@ -158,9 +171,16 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 
 **Phase 3 milestone:** can run the full lifecycle in Elixir without GT. Old GT can be paused.
 
+### Phase 3.5: Persona system (1-2 days)
+
+P-1. **gte-P1 Vernacular module + persona config loader** — `Vernacular.label(:polecat)` returns string per loaded persona. Config files at `config/personas/*.exs`. [needs: gte-001]
+P-2. **gte-P2 Ship 3 starter personas** — `gas-town.exs` (default), `sith-fleet.exs`, `pirate-crew.exs`. Each defines noun/verb mapping for all internal concepts. [needs: gte-P1]
+P-3. **gte-P3 CLI command aliases** — `bd2 deploy` resolves to `sling` when sith-fleet active. Aliases defined in persona file. [needs: gte-006, gte-P2]
+P-4. **gte-P4 LiveView vernacular integration** — dashboard reads `Vernacular.label/1` for all user-facing strings. [needs: gte-024, gte-P2]
+
 ### Phase 4: LiveView + migration cutover (3-5 days)
 
-24. **gte-024 Dashboard LiveView** — active polecats, recent beads, PRs in flight, escalations. [needs: gte-022, gte-023]
+24. **gte-024 Dashboard LiveView** — active polecats, recent beads, PRs in flight, escalations. Uses Vernacular module. [needs: gte-022, gte-023, gte-P1]
 25. **gte-025 Audit log LiveView** — searchable history of every action. [needs: gte-002]
 26. **gte-026 Final data migration** — re-run gte-007 against latest GT state. Cutover plan. [needs: all above]
 27. **gte-027 Run both systems in parallel for 3-5 days** — verify Elixir handles real work. [needs: gte-026]
@@ -178,12 +198,7 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 
 ## Open questions
 
-1. **Database choice.** Postgres is the obvious pick (Ash works best with it). SQLite is tempting for "local-only" simplicity but loses concurrent-write story. Recommend Postgres. **Action: confirm.**
-2. **Where does Claude Code actually run?** Today GT spawns `claude --dangerously-skip-permissions` in a tmux session. We can do the same (Port + tmux), or just Port without tmux (simpler, no attach-from-terminal). **Recommend: Port without tmux.** You attach via `iex --remsh` if needed.
-3. **Reviewer polecat output format.** Local repo means no GitHub inline comments by default. Options: (a) `reviews/<branch>.md` written by reviewer polecat, builder reads/responds in markdown; (b) review beads linked to the work bead. **Recommend (a)** for the local-repo flow — simpler, single source of truth in the repo.
-4. **Audit-log retention.** Every state transition goes into `audit_events` table. With high polecat throughput this grows. Default 90 days? Configurable? **Recommend: keep forever for now, add cleanup in Phase 5.**
-5. **`hq-spq` (refinery PR-shepherd bead I filed earlier today).** `mol-pr-feedback-patrol` already exists. Close `hq-spq` as duplicate, or keep open as "verify it actually runs"? **Recommend: close as duplicate, note the formula exists.**
-6. **The full GT formula library — port all 47 or just the ones we use?** Strongly recommend **only the ones we use**. Today's session used `mol-polecat-work`, `mol-refinery-patrol` (indirectly), `mol-pr-feedback-patrol` (we'd benefit from), `mol-polecat-code-review` (for our peer-review process). That's 4. Skip the other 43 unless evidence emerges they're needed.
+All resolved 2026-05-18. See "Decisions locked" section above.
 
 ## Risks (honest)
 
