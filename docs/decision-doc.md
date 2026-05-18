@@ -28,7 +28,37 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
 4. **Audit retention:** **Forever for now.** Add cleanup tools in Phase 5.
 5. **`hq-spq`:** **Close as duplicate** of `mol-pr-feedback-patrol` (which already exists in GT).
 6. **Formulas to port (6):** `mol-polecat-work`, `mol-polecat-code-review`, `mol-pr-feedback-patrol`, `mol-refinery-patrol`, `mol-polecat-conflict-resolve`, `shiny`. Add more on evidence.
-7. **NEW: Persona / vernacular configurability.** User-facing strings (and CLI command aliases) configurable via `config/personas/<name>.exs`. Ship 3 starter personas: `gas-town` (default), `sith-fleet`, `pirate-crew`. Internal Elixir names stay stable; only the user-facing layer translates.
+7. **NEW: Persona / vernacular configurability — DB-stored, user-defined.** User-facing strings (and CLI command aliases) stored as a JSON column on the `Workspace` (or "Fleet") Ash resource. **No code-shipped persona list** — users define their own vocabulary in the DB at setup time. Ryan's example: "Fleet" where each rig is a ship, each ship has a captain, he's the admiral. Internal Elixir names (`Polecat.GenServer`, `Refinery`, etc.) stay stable; the user-facing layer reads from `Workspace.vernacular` at runtime.
+
+   **Schema:**
+   ```
+   workspaces table:
+     id, name, description, vernacular (JSON), created_at, updated_at
+
+   vernacular JSON shape (all keys optional, fall back to "gas-town" defaults):
+     {
+       "coordinator": "Admiral",      // internal: mayor
+       "worker": "Acolyte",           // internal: polecat
+       "merge_queue": "Reclamation",  // internal: refinery
+       "monitor": "Inquisitor",       // internal: witness
+       "watchdog": "Grand Moff",      // internal: deacon
+       "issue": "Directive",          // internal: bead
+       "batch": "Strike Force",       // internal: convoy
+       "rig": "Ship",                 // internal: rig
+       "epic": "Campaign",            // internal: mountain
+       "aliases": {
+         "deploy": "sling",           // CLI: bd2 deploy → sling
+         "report": "done",
+         "muster": "ready"
+       },
+       "emoji": {
+         "worker": "⚔️",
+         "issue": "📜"
+       }
+     }
+   ```
+
+   `Vernacular.label(:worker)` reads current workspace's `vernacular["worker"]`, falls back to "polecat". `Vernacular.alias(:deploy)` returns `:sling`. Everything is data, not code.
 
 ## Tier 1 — Definitely port (MVP core)
 
@@ -171,12 +201,12 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 
 **Phase 3 milestone:** can run the full lifecycle in Elixir without GT. Old GT can be paused.
 
-### Phase 3.5: Persona system (1-2 days)
+### Phase 3.5: Vernacular system (1-2 days)
 
-P-1. **gte-P1 Vernacular module + persona config loader** — `Vernacular.label(:polecat)` returns string per loaded persona. Config files at `config/personas/*.exs`. [needs: gte-001]
-P-2. **gte-P2 Ship 3 starter personas** — `gas-town.exs` (default), `sith-fleet.exs`, `pirate-crew.exs`. Each defines noun/verb mapping for all internal concepts. [needs: gte-P1]
-P-3. **gte-P3 CLI command aliases** — `bd2 deploy` resolves to `sling` when sith-fleet active. Aliases defined in persona file. [needs: gte-006, gte-P2]
-P-4. **gte-P4 LiveView vernacular integration** — dashboard reads `Vernacular.label/1` for all user-facing strings. [needs: gte-024, gte-P2]
+P-1. **gte-P1 Ash `Workspace` resource with JSON vernacular column** — user creates a workspace, optionally sets vernacular at creation. Default = `gas-town` baked-in fallback. [needs: gte-001, gte-002]
+P-2. **gte-P2 `Vernacular` module** — `Vernacular.label(:worker)` reads current workspace's JSON, falls back to defaults. Process-dictionary cache per request/CLI invocation. [needs: gte-P1]
+P-3. **gte-P3 CLI alias resolution** — `bd2 deploy` looks up "deploy" in workspace.vernacular.aliases, resolves to `sling`, dispatches. Unknown aliases error with helpful "did you mean" output. [needs: gte-006, gte-P2]
+P-4. **gte-P4 LiveView vernacular integration + setup wizard** — dashboard reads `Vernacular.label/1` for all strings. Settings page exposes JSON editor for vernacular (with live preview). [needs: gte-024, gte-P2]
 
 ### Phase 4: LiveView + migration cutover (3-5 days)
 
