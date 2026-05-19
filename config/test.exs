@@ -22,6 +22,9 @@ config :gt_elixir_web, GtElixirWeb.Endpoint,
   secret_key_base: "tP+Fx7+LODDAMtW348NLPMEFQgFBNOCXEW1X3LdQHm5YMSdusJH7vaCC+c18IJgi",
   server: false
 
+# Route GtElixir.GitHub HTTP calls through Req.Test stubs.
+config :gt_elixir, :github_http_stub, true
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 
