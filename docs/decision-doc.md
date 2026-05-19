@@ -13,10 +13,13 @@ My original estimate of 15-22 days assumed I understood GT's surface. Phase 0 re
 - Cross-rig infrastructure workers (Dogs), Mountain-Eater epic orchestration, capacity-controlled scheduler, synthesis (cross-leg aggregation), Wasteland federation via DoltHub
 - A composition system (extends / expansions / aspects) that's genuinely well-designed
 
-**Updated estimate:** **27-40 days of focused work**, or **6-8 calendar weeks** at the pace described earlier (3-4 hours/day of Ryan direction, 2-3 polecat PRs/day). Includes:
+**Updated estimate:** **28-42 days of focused work**, or **6-8 calendar weeks** at the pace described earlier (3-4 hours/day of Ryan direction, 2-3 polecat PRs/day). Includes:
 - 2-3 extra formulas in scope (6 total, not 4) per Ryan's direction
-- Persona/vernacular configurability system (Sith Fleet / Pirate Crew / etc.)
+- Persona/vernacular configurability system (DB-stored, user-defined)
+- External tracker abstraction with pluggable adapters (`Tracker.None` MVP, `Tracker.Jira` MVP, `Tracker.Linear` / `Tracker.GitHub` deferred)
 - SQLite + Quantum instead of Postgres + Oban (no estimate change)
+
+**Bead count: 33** (gte-001 through gte-028 + gte-P1 through gte-P4 + gte-029).
 
 This is honest. I would rather over-estimate now than discover scope mid-flight.
 
@@ -59,6 +62,47 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
    ```
 
    `Vernacular.label(:worker)` reads current workspace's `vernacular["worker"]`, falls back to "polecat". `Vernacular.alias(:deploy)` returns `:sling`. Everything is data, not code.
+
+8. **NEW (2026-05-19): External tracker abstraction.** gt-elixir must support multiple external trackers (Jira for work, Linear / GitHub Issues / Notion for personal projects, or NO external tracker for local-only). Tracker behaviour with pluggable adapters. Original plan was Jira-centric; this corrects it.
+
+   **Behaviour** (`gt_core/lib/gt_core/trackers/tracker.ex`):
+   - `fetch(ref) :: {:ok, map} | {:error, term}`
+   - `transition(ref, to) :: :ok | {:error, term}`
+   - `update_fields(ref, fields) :: :ok | {:error, term}`
+   - `link_for(ref) :: String.t()`
+   - `parse_ref(string) :: {:ok, ref} | :error`
+   - `list_transitions(ref) :: {:ok, [atom]} | {:error, term}`
+
+   **Adapters:**
+   - `Tracker.None` — no external tracker (MVP, Phase 2). Bead system is the only source of truth.
+   - `Tracker.Jira` — Atlassian REST + ADF (MVP, Phase 3). Replaces original gte-019 scope.
+   - `Tracker.Linear` — Markdown + GraphQL (Phase 5, deferred).
+   - `Tracker.GitHub` — Markdown + REST (Phase 5, deferred).
+
+   **Issue resource columns (updated):**
+   - `tracker_type :: enum(:none, :jira, :linear, :github)` (default `:none`; inherited from workspace if not set per-bead)
+   - `tracker_ref :: String.t() | nil` (the external ID, e.g. `"VR-17585"`)
+   - Removed: free-form `external_ref` string.
+
+   **Rich content (qa_notes, deployment_notes, description, acceptance):** stored in bead as **Markdown**. Adapters convert at write time. Jira: Markdown → ADF (helper from 2026-05-18). Linear/GitHub: Markdown is native. None: no-op.
+
+   **Per-workspace tracker config (extends the vernacular JSON):**
+   ```json
+   {
+     "vernacular": { ... },
+     "tracker": {
+       "type": "jira",
+       "config": {
+         "host": "leotechnologies.atlassian.net",
+         "project_key": "VR",
+         "credentials_ref": "env:JIRA_TOKEN"
+       }
+     }
+   }
+   ```
+   For personal projects: `"tracker": {"type": "none"}` and the bead system stands alone.
+
+   **Per-bead override:** if a workspace has Jira default but you want one bead untracked (e.g., infra work), set `bead.tracker_type = :none`.
 
 ## Tier 1 — Definitely port (MVP core)
 
@@ -166,7 +210,7 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 ### Phase 1: bead ledger + CLI shim (4-6 days)
 
 1. **gte-001 Phoenix umbrella scaffold** — create umbrella, add `gt_core` + `gt_web` apps, add Ash + ash_postgres + ash_authentication deps, set up Postgres for dev. Acceptance: `mix test` passes empty suite, `mix phx.server` starts.
-2. **gte-002 Ash Issue resource** — fields, actions (create/read/update/close), `status` FSM (open/in_progress/closed), `priority` (P0-P4), `issue_type` enum, audit via `ash_paper_trail`. Acceptance: unit tests cover create/close/status-transition. [needs: gte-001]
+2. **gte-002 Ash Issue resource** — fields, actions (create/read/update/close), `status` FSM (open/in_progress/closed), `priority` (P0-P4), `issue_type` enum, audit via `ash_paper_trail`. **External tracker:** `tracker_type` (enum :none/:jira/:linear/:github, default :none) + `tracker_ref` (string nullable). Rich-content fields (description, acceptance, notes, qa_notes, deployment_notes) stored as **Markdown** (adapters convert on write). Acceptance: unit tests cover create/close/status-transition, tracker_type defaults to :none and can be overridden. [needs: gte-001]
 3. **gte-003 Ash Dependency resource** — bead-to-bead edges (blocks/depends-on/relates-to). Acceptance: query `Issue.ready/0` returns beads with no open deps. [needs: gte-002]
 4. **gte-004 Ash Convoy resource** — batch of beads with status, progress derived from members. Acceptance: convoy closes when all member beads close. [needs: gte-002]
 5. **gte-005 REST API for CLI** — `POST /api/issues`, `GET /api/issues/:id`, `PATCH /api/issues/:id/status`, etc. JSON over local socket. Acceptance: curl-able. [needs: gte-002, gte-003, gte-004]
@@ -185,7 +229,7 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 13. **gte-013 Claude session Port wrapper** — spawn Claude Code in the worktree, capture stdout, detect completion signal. [needs: gte-011]
 14. **gte-014 Workflow behaviour + macro DSL** — `use Workflow, steps: [:load, :design, :implement, :verify, :submit]`, step deps, vars. [needs: gte-001]
 15. **gte-015 WorkflowMachine GenStateMachine** — execute a workflow instance. Persist state to bead. [needs: gte-014, gte-002]
-16. **gte-016 Workflows.Work module** — implement `mol-polecat-work` semantics as `use Workflow`. [needs: gte-015]
+16. **gte-016 Workflows.Work module** — implement `mol-polecat-work` semantics as `use Workflow`. **Submit step is tracker-polymorphic:** calls `Tracker.transition(bead, :done)` via the bead's adapter. Works for `:none`-tracked beads (no-op) and Jira-tracked beads (transitions to Code Complete). [needs: gte-015, gte-019]
 17. **gte-017 sling command** — `bd2 sling <bead> <rig>` → spawn polecat, attach workflow. Acceptance: end-to-end works on a no-op task. [needs: gte-012, gte-016]
 
 **Phase 2 milestone:** use Elixir-side polecats to build Phase 3 + 4. Two-stage dogfooding.
@@ -193,17 +237,21 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 ### Phase 3: PR + Jira watchers + peer review (4-6 days)
 
 18. **gte-018 GitHub module** — open PR, get state, list reviews, comment, resolve thread, merge. [needs: gte-001]
-19. **gte-019 Jira module** — fetch issue, transition, write custom fields (ADF). [needs: gte-001]
-20. **gte-020 PRTemplate module** — read `.github/pull_request_template.md`, fill sections from bead context. [needs: gte-018]
+19. **gte-019 Tracker behaviour + Tracker.None adapter + ref types** — define the `Tracker` behaviour and ship the no-op `Tracker.None` adapter. Define the `tracker_type` enum + `tracker_ref` types. Helper functions: `Tracker.for_bead/1` (resolve adapter from bead's `tracker_type`), `Tracker.parse_ref/2` (delegate to adapter). Acceptance: behaviour defined with @callback specs, None adapter passes all callbacks as no-ops, ref parsing round-trips. [needs: gte-001, gte-002]
+
+  *(Note: original gte-019 was Jira-specific; that scope moved to gte-029 after the 2026-05-19 tracker abstraction decision.)*
+20. **gte-020 PRTemplate module** — read `.github/pull_request_template.md`, fill sections from bead context. **Tracker-agnostic:** the section-fill logic doesn't assume Jira; pulls the Jira link from `Tracker.link_for(bead)` (returns empty string for `:none`-tracked beads). [needs: gte-018, gte-019]
 21. **gte-021 Workflows.CodeReview module** — peer-review formula. Output: `reviews/<branch>.md` (local repo) OR GH inline comments (remote). Configurable. [needs: gte-015, gte-018]
 22. **gte-022 Workflows.PRPatrol GenServer** — replaces `mol-pr-feedback-patrol`. Subscribes to GH webhooks or polls. Dispatches polecats on actionable PRs. [needs: gte-018, gte-017]
 23. **gte-023 Merge queue (Refinery) GenServer** — subscribes to `polecat:done` events, opens PRs, monitors approval+CI, merges. [needs: gte-018, gte-022]
+
+29. **gte-029 Tracker.Jira adapter implementing Tracker behaviour** — full Jira adapter: fetch issue, transition, write custom fields (ADF), list transitions, parse `"jira:VR-####"` refs, build links. Markdown → ADF conversion for rich-content writes. Uses Req. **Replaces the original gte-019 Jira-specific scope.** [needs: gte-019, gte-001]
 
 **Phase 3 milestone:** can run the full lifecycle in Elixir without GT. Old GT can be paused.
 
 ### Phase 3.5: Vernacular system (1-2 days)
 
-P-1. **gte-P1 Ash `Workspace` resource with JSON vernacular column** — user creates a workspace, optionally sets vernacular at creation. Default = `gas-town` baked-in fallback. [needs: gte-001, gte-002]
+P-1. **gte-P1 Ash `Workspace` resource with JSON config (vernacular + tracker)** — user creates a workspace, optionally sets vernacular and tracker config at creation. Default = `gas-town` vernacular + `:none` tracker (baked-in fallbacks). Single JSON `config` column holds both vernacular and tracker sub-objects. [needs: gte-001, gte-002]
 P-2. **gte-P2 `Vernacular` module** — `Vernacular.label(:worker)` reads current workspace's JSON, falls back to defaults. Process-dictionary cache per request/CLI invocation. [needs: gte-P1]
 P-3. **gte-P3 CLI alias resolution** — `bd2 deploy` looks up "deploy" in workspace.vernacular.aliases, resolves to `sling`, dispatches. Unknown aliases error with helpful "did you mean" output. [needs: gte-006, gte-P2]
 P-4. **gte-P4 LiveView vernacular integration + setup wizard** — dashboard reads `Vernacular.label/1` for all strings. Settings page exposes JSON editor for vernacular (with live preview). [needs: gte-024, gte-P2]
@@ -225,6 +273,8 @@ P-4. **gte-P4 LiveView vernacular integration + setup wizard** — dashboard rea
 - `Workflows.PRDReview` — port `mol-prd-review` convoy
 - Mountain-Eater equivalent (`Convoy.Mountain` flag + stall detection)
 - Capacity-controlled scheduler (max concurrent polecats)
+- **`Tracker.Linear` adapter** — Markdown + GraphQL
+- **`Tracker.GitHub` adapter** — Markdown + REST
 
 ## Open questions
 
