@@ -119,6 +119,13 @@ defmodule GtElixir.Beads.Issue do
       change {GtElixir.Beads.Issue.Changes.GuardStatus, action: :close}
       change set_attribute(:status, :closed)
       change set_attribute(:closed_at, &DateTime.utc_now/0)
+
+      # After closing, check whether any system-managed convoy this issue belongs
+      # to should auto-close. Safe no-op when issue isn't a member of any convoy.
+      change after_action(fn _changeset, issue, _context ->
+               GtElixir.Beads.Convoy.maybe_auto_close_for_issue(issue)
+               {:ok, issue}
+             end)
     end
 
     update :reopen do
@@ -227,6 +234,18 @@ defmodule GtElixir.Beads.Issue do
       allow_nil? false
       public? true
       attribute_writable? true
+    end
+
+    has_many :convoy_memberships, GtElixir.Beads.ConvoyMembership do
+      destination_attribute :issue_id
+      public? true
+    end
+
+    many_to_many :convoys, GtElixir.Beads.Convoy do
+      through GtElixir.Beads.ConvoyMembership
+      source_attribute_on_join_resource :issue_id
+      destination_attribute_on_join_resource :convoy_id
+      public? true
     end
   end
 
