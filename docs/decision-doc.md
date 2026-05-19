@@ -17,7 +17,7 @@ My original estimate of 15-22 days assumed I understood GT's surface. Phase 0 re
 - 2-3 extra formulas in scope (6 total, not 4) per Ryan's direction
 - Persona/vernacular configurability system (DB-stored, user-defined)
 - External tracker abstraction with pluggable adapters (`Tracker.None` MVP, `Tracker.Jira` MVP, `Tracker.Linear` / `Tracker.GitHub` deferred)
-- SQLite + Quantum instead of Postgres + Oban (no estimate change)
+- Postgres + Quantum (switched from SQLite 2026-05-19 — see decision 1)
 
 **Bead count: 33** (gte-001 through gte-028 + gte-P1 through gte-P4 + gte-029).
 
@@ -25,7 +25,7 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
 
 ## Decisions locked (from 2026-05-18 review)
 
-1. **Database:** **SQLite** (Ash data layer is swappable; migrate to Postgres later only if needed). **Job scheduling:** Quantum + GenServer queues. Skip Oban entirely until/unless we hit SQLite scale limits.
+1. **Database:** **Postgres** (via `ash_postgres`). Was SQLite originally; switched 2026-05-19 after verifying `ash_sqlite` is still 0.x (v0.2.17) and explicitly missing Aggregate support — needed for our `Convoy.progress` derived field. `ash_postgres` is at v2.9+ (mature) and is the canonical Ash data layer. Local Postgres is run via `compose.yml` at the repo root (`docker compose up -d`). **Job scheduling:** Quantum + GenServer queues. Skip Oban for now but keep the option open (Oban + Postgres is the gold standard if we need it later — switching is trivial since we're already on Postgres).
 2. **Claude session model:** **Port-only** (no tmux). Polecat output streams to LiveView dashboard. Attach via `iex --remsh` if live debugging needed.
 3. **Reviewer polecat output:** **Markdown files** at `reviews/<branch>.md` in the local repo. Builder polecat reads, responds in-line, reviewer re-reviews until clean.
 4. **Audit retention:** **Forever for now.** Add cleanup tools in Phase 5.
