@@ -142,7 +142,10 @@ defmodule GtElixir.Beads.Issue do
       primary_key? true
       allow_nil? false
       public? true
-      constraints match: ~r/^[a-z][a-z0-9]*-[a-z0-9]+$/
+      # Pattern allows uppercase to accommodate phase markers (gte-P1) and
+      # Verus-style mixed-case IDs from the Dolt import. Newly generated IDs
+      # are still lowercase (see Changes.GenerateId).
+      constraints match: ~r/^[a-z][a-zA-Z0-9]*-[a-zA-Z0-9]+$/
     end
 
     attribute :title, :string do
