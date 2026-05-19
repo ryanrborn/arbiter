@@ -65,7 +65,7 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
 
 8. **NEW (2026-05-19): External tracker abstraction.** gt-elixir must support multiple external trackers (Jira for work, Linear / GitHub Issues / Notion for personal projects, or NO external tracker for local-only). Tracker behaviour with pluggable adapters. Original plan was Jira-centric; this corrects it.
 
-   **Behaviour** (`gt_core/lib/gt_core/trackers/tracker.ex`):
+   **Behaviour** (`gt_elixir/lib/gt_elixir/trackers/tracker.ex`):
    - `fetch(ref) :: {:ok, map} | {:error, term}`
    - `transition(ref, to) :: :ok | {:error, term}`
    - `update_fields(ref, fields) :: :ok | {:error, term}`
@@ -168,34 +168,31 @@ These don't justify their cost in the Elixir version:
 ## Architecture sketch
 
 ```
-gt-elixir/
+gt-elixir/                       # repo root
 ├── apps/
-│   ├── gt_core/              # Bead ledger, workflow engine, audit
-│   │   ├── lib/gt_core/
-│   │   │   ├── beads/        # Ash domain: Issue, Convoy, Dependency, AuditEvent
-│   │   │   ├── workflows/    # Workflow behaviour + WorkflowMachine
+│   ├── gt_elixir/                # Ash domain + workflow engine (business logic)
+│   │   ├── lib/gt_elixir/
+│   │   │   ├── beads/            # Ash resources: Issue, Convoy, Dependency, AuditEvent, Workspace
+│   │   │   ├── trackers/         # Tracker behaviour + None / Jira adapters
+│   │   │   ├── workflows/        # Workflow behaviour + WorkflowMachine
+│   │   │   ├── polecats/         # Polecat lifecycle (added Phase 2)
+│   │   │   ├── integrations/     # GitHub + Jira clients (added Phase 3)
 │   │   │   └── application.ex
-│   ├── gt_polecat/           # Polecat lifecycle, worktree, Claude session
-│   │   ├── lib/gt_polecat/
-│   │   │   ├── supervisor.ex
-│   │   │   ├── polecat.ex    # GenServer per active polecat
-│   │   │   ├── worktree.ex
-│   │   │   └── claude_port.ex
-│   ├── gt_integrations/      # External APIs
-│   │   ├── lib/gt_integrations/
-│   │   │   ├── github.ex
-│   │   │   └── jira.ex
-│   ├── gt_web/               # Phoenix + LiveView dashboard
-│   │   └── lib/gt_web/
-│   │       ├── live/dashboard_live.ex
-│   │       └── controllers/api_controller.ex  # REST for CLI shim
-│   └── gt_cli/               # Escript bd2 / gt2
-│       └── lib/gt_cli/
+│   ├── gt_elixir_web/            # Phoenix + LiveView dashboard + REST API for CLI
+│   │   ├── lib/gt_elixir_web/
+│   │   │   ├── live/dashboard_live.ex
+│   │   │   ├── controllers/api_controller.ex  # REST for CLI shim
+│   │   │   └── ...
+│   │   └── assets/               # Tailwind v4 + DaisyUI + heroicons (phx.new default)
+│   └── gt_elixir_cli/            # Escript bd2 (CLI talks to gt_elixir_web's REST API)
+│       └── lib/gt_elixir_cli/
+├── compose.yml                   # Postgres for local dev
 ├── config/
 │   ├── config.exs
-│   └── runtime.exs           # Team integration branch mapping
+│   └── runtime.exs               # Workspace defaults: team integration-branch mapping
 └── docs/
-    ├── decision-doc.md       # this file
+    ├── decision-doc.md           # this file
+    ├── postgres-setup.md
     └── workflows.md
 ```
 
@@ -209,7 +206,7 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 
 ### Phase 1: bead ledger + CLI shim (4-6 days)
 
-1. **gte-001 Phoenix umbrella scaffold** — create umbrella, add `gt_core` + `gt_web` apps, add Ash + ash_postgres + ash_authentication deps, set up Postgres for dev. Acceptance: `mix test` passes empty suite, `mix phx.server` starts.
+1. **gte-001 Phoenix umbrella scaffold via Igniter** — `mix igniter.new gt_elixir --with=phx.new --with-args="--umbrella --no-mailer" --install ash,ash_postgres,ash_paper_trail,ash_phoenix`. Adds `gt_elixir_cli` as a fourth umbrella app via `cd apps && mix new gt_elixir_cli`. Postgres started via `docker compose up -d`. Acceptance: `mix test` passes empty suite, `mix phx.server` starts and serves a DaisyUI-styled landing page, Repo connects to Postgres, Ash domain registered in supervision tree.
 2. **gte-002 Ash Issue resource** — fields, actions (create/read/update/close), `status` FSM (open/in_progress/closed), `priority` (P0-P4), `issue_type` enum, audit via `ash_paper_trail`. **External tracker:** `tracker_type` (enum :none/:jira/:linear/:github, default :none) + `tracker_ref` (string nullable). Rich-content fields (description, acceptance, notes, qa_notes, deployment_notes) stored as **Markdown** (adapters convert on write). Acceptance: unit tests cover create/close/status-transition, tracker_type defaults to :none and can be overridden. [needs: gte-001]
 3. **gte-003 Ash Dependency resource** — bead-to-bead edges (blocks/depends-on/relates-to). Acceptance: query `Issue.ready/0` returns beads with no open deps. [needs: gte-002]
 4. **gte-004 Ash Convoy resource** — batch of beads with status, progress derived from members. Acceptance: convoy closes when all member beads close. [needs: gte-002]
