@@ -27,5 +27,6 @@ defmodule GtElixir.Beads do
     resource GtElixir.Beads.Issue.Version
     resource GtElixir.Beads.Convoy
     resource GtElixir.Beads.ConvoyMembership
+    resource GtElixir.Beads.Dependency
   end
 end
