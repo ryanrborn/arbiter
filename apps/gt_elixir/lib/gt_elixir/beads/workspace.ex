@@ -55,13 +55,13 @@ defmodule GtElixir.Beads.Workspace do
 
     create :create do
       primary? true
-      accept [:name, :description, :config]
+      accept [:name, :description, :prefix, :config]
       change {GtElixir.Beads.Workspace.Changes.ValidateConfig, []}
     end
 
     update :update do
       primary? true
-      accept [:name, :description, :config]
+      accept [:name, :description, :prefix, :config]
       require_atomic? false
       change {GtElixir.Beads.Workspace.Changes.ValidateConfig, []}
     end
@@ -79,6 +79,18 @@ defmodule GtElixir.Beads.Workspace do
     attribute :description, :string do
       public? true
       constraints max_length: 500, trim?: true
+    end
+
+    attribute :prefix, :string do
+      allow_nil? false
+      public? true
+      default "bd"
+      constraints min_length: 1, max_length: 16, trim?: true, match: ~r/^[a-z][a-z0-9]*$/
+
+      description """
+      Short identifier prepended to every Issue ID in this workspace (e.g. "bd-3o8",
+      "verus-VR-17575"). Lowercase letters + digits only, max 16 chars.
+      """
     end
 
     attribute :config, :map do
