@@ -1,0 +1,25 @@
+defmodule GtElixir.Beads do
+  @moduledoc """
+  Ash domain for the bead ledger.
+
+  Holds workspaces, issues, dependencies, convoys, and audit events. This module
+  is the entry point for code that creates / reads / updates beads — call
+  through `Ash` (e.g. `Ash.create(GtElixir.Beads.Workspace, attrs)`).
+
+  Resources land here as they're built across the gte-* beads:
+
+    * `GtElixir.Beads.Workspace` — gte-P1 (this bead) — workspace with config JSON
+      (vernacular + tracker config). Default workspace ships gas-town vocab + `:none`
+      tracker.
+    * `GtElixir.Beads.Issue` — gte-002 — Ash issue resource with status FSM, audit
+      via paper_trail, tracker_type/tracker_ref fields.
+    * `GtElixir.Beads.Dependency` — gte-003 — bead-to-bead edges (blocks, depends_on).
+    * `GtElixir.Beads.Convoy` — gte-004 — batches of beads with derived progress.
+  """
+
+  use Ash.Domain
+
+  resources do
+    resource GtElixir.Beads.Workspace
+  end
+end
