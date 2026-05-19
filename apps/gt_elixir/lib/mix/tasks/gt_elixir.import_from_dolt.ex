@@ -56,7 +56,12 @@ defmodule Mix.Tasks.GtElixir.ImportFromDolt do
   def run(args) do
     {opts, _, _} =
       OptionParser.parse(args,
-        strict: [hq_path: :string, server_path: :string, path: :keep]
+        strict: [
+          hq_path: :string,
+          server_path: :string,
+          path: :keep,
+          sync_status: :boolean
+        ]
       )
 
     Mix.Task.run("app.start")
@@ -75,7 +80,11 @@ defmodule Mix.Tasks.GtElixir.ImportFromDolt do
       exit({:shutdown, 1})
     end
 
-    Enum.each(sources, &import_source/1)
+    sync_status? = Keyword.get(opts, :sync_status, false)
+
+    if sync_status?, do: Mix.shell().info("(status-sync mode: will UPDATE existing rows)")
+
+    Enum.each(sources, &import_source(&1, sync_status?))
 
     Mix.shell().info("\n=== Import complete ===")
   end
@@ -94,7 +103,7 @@ defmodule Mix.Tasks.GtElixir.ImportFromDolt do
     |> then(&(list ++ &1))
   end
 
-  defp import_source({name, path}) do
+  defp import_source({name, path}, sync_status?) do
     Mix.shell().info("\n→ Importing from #{name} (#{path})")
 
     unless File.dir?(path) do
@@ -114,6 +123,11 @@ defmodule Mix.Tasks.GtElixir.ImportFromDolt do
       Mix.shell().info(
         "  ✓ inserted #{n_inserted} new issues (#{length(issues) - n_inserted} already present)"
       )
+
+      if sync_status? do
+        n_synced = sync_issue_statuses(issues)
+        Mix.shell().info("  ✓ synced status for #{n_synced} existing issues")
+      end
 
       deps = dolt_query(path, "SELECT * FROM dependencies")
       n_deps = bulk_insert_dependencies(deps)
@@ -214,6 +228,28 @@ defmodule Mix.Tasks.GtElixir.ImportFromDolt do
       )
 
     n
+  end
+
+  # Sync mutable fields (status, closed_at, updated_at) on existing rows.
+  # Distinct from bulk_insert_issues which DO NOTHING on conflict — this is the
+  # "refresh from canonical Dolt" pathway used for the Phase 1 dogfood
+  # switchover. Untouched: title/description/etc. (we don't want to clobber
+  # local edits made via bd2 after the initial import).
+  defp sync_issue_statuses(rows) do
+    Enum.reduce(rows, 0, fn row, acc ->
+      status = row["status"] |> Mapper.map_status() |> Atom.to_string()
+      closed_at = Mapper.parse_dt(row["closed_at"])
+      updated_at = Mapper.parse_dt(row["updated_at"]) || DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      {n, _} =
+        GtElixir.Repo.query!(
+          "UPDATE issues SET status = $1, closed_at = $2, updated_at = $3 WHERE id = $4 AND (status != $1 OR (closed_at IS DISTINCT FROM $2))",
+          [status, closed_at, updated_at, row["id"]]
+        )
+        |> then(&{&1.num_rows, &1})
+
+      acc + n
+    end)
   end
 
   # ---- Dependencies ----
