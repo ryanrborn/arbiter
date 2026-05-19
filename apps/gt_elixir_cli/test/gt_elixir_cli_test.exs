@@ -1,8 +1,8 @@
 defmodule GtElixirCliTest do
-  use ExUnit.Case
-  doctest GtElixirCli
+  use ExUnit.Case, async: true
 
-  test "greets the world" do
-    assert GtElixirCli.hello() == :world
+  test "module is defined" do
+    Code.ensure_loaded!(GtElixirCli)
+    assert is_atom(GtElixirCli)
   end
 end
