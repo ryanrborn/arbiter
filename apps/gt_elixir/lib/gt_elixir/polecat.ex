@@ -291,6 +291,16 @@ defmodule GtElixir.Polecat do
     {:reply, :ok, %State{state | meta: Map.put(state.meta, key, value)}}
   end
 
+  @impl true
+  def terminate(_reason, %State{bead_id: bead_id}) do
+    # Explicitly unregister so callers that ask `whereis/1` immediately after
+    # `GenServer.stop/1` see `nil` deterministically. Registry's own
+    # monitor-based cleanup runs asynchronously and was the source of a flaky
+    # test where `whereis/1` returned the dead pid briefly after stop.
+    PRegistry.unregister(bead_id)
+    :ok
+  end
+
   # ---- child_spec --------------------------------------------------------
 
   @doc false

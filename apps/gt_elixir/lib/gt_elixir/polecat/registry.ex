@@ -27,4 +27,16 @@ defmodule GtElixir.Polecat.Registry do
       [] -> nil
     end
   end
+
+  @doc """
+  Explicitly remove this process's registration. Called from the polecat's
+  `terminate/2` callback so callers observe `whereis/1 == nil` synchronously
+  after `GenServer.stop/1` returns, rather than waiting on Registry's async
+  monitor cleanup.
+  """
+  @spec unregister(String.t()) :: :ok
+  def unregister(bead_id) when is_binary(bead_id) do
+    Registry.unregister(__MODULE__, bead_id)
+    :ok
+  end
 end
