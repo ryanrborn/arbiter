@@ -5,6 +5,22 @@
 **Author:** Mayor (acting under autonomy grant from Ryan)
 **Scope:** Define what to port from Gas Town, what to drop, what to defer. Produce a bead graph for Phases 1-4 implementation.
 
+## Dogfood switchover — 2026-05-19
+
+**Phase 1 complete.** As of gte-008 (this bead), gt-elixir port progress is tracked in **bd2** (the Phoenix/Postgres-backed CLI in this repo), not in the legacy bd/Dolt tooling. All 33 gte- beads (gte-001..028, gte-P1..P4, gte-029) were imported into `apps/gt_elixir`'s Postgres via `mix gt_elixir.import_from_dolt --hq-path ... --sync-status`; statuses match the Dolt source at switchover time.
+
+The mayor's runtime (GT, in `~/dev/gt`) still uses bd for ALL non-gte work (cross-rig coordination, polecat work, etc.); the switchover is scoped strictly to the gt-elixir port itself. Once Phase 4 ships, the broader bd-to-bd2 migration will be considered.
+
+**Verification at switchover:**
+
+```
+$ BD2_WORKSPACE=hq apps/gt_elixir_cli/bd2 list --json | jq '[.data[] | select(.id|startswith("gte-"))] | length'
+33
+
+$ apps/gt_elixir_cli/bd2 ready --json | jq '.data | length'
+68
+```
+
 ## Revised time estimate (read first)
 
 My original estimate of 15-22 days assumed I understood GT's surface. Phase 0 research revealed substantially more sophistication than I saw in one operational session:
