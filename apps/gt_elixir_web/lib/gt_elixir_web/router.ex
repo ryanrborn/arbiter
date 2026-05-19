@@ -20,10 +20,33 @@ defmodule GtElixirWeb.Router do
     get "/", PageController, :home
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", GtElixirWeb do
-  #   pipe_through :api
-  # end
+  scope "/api", GtElixirWeb.Api do
+    pipe_through :api
+
+    # Issues
+    get "/issues/ready", IssueController, :ready
+    get "/issues", IssueController, :index
+    post "/issues", IssueController, :create
+    get "/issues/:id", IssueController, :show
+    patch "/issues/:id", IssueController, :update
+    put "/issues/:id", IssueController, :update
+    post "/issues/:id/close", IssueController, :close
+    post "/issues/:id/reopen", IssueController, :reopen
+
+    # Dependencies
+    post "/dependencies", DependencyController, :create
+    delete "/dependencies/:from/:to", DependencyController, :delete
+
+    # Convoys
+    post "/convoys", ConvoyController, :create
+    get "/convoys/:id", ConvoyController, :show
+    post "/convoys/:id/close", ConvoyController, :close
+
+    # Workspaces
+    get "/workspaces", WorkspaceController, :index
+    post "/workspaces", WorkspaceController, :create
+    get "/workspaces/:id", WorkspaceController, :show
+  end
 
   # Enable LiveDashboard in development
   if Application.compile_env(:gt_elixir_web, :dev_routes) do
