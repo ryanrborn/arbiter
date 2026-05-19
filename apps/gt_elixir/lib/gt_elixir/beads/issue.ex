@@ -257,4 +257,65 @@ defmodule GtElixir.Beads.Issue do
 
   @doc "List of valid tracker_type atoms."
   def tracker_types, do: @tracker_types
+
+  @gating_dep_types [:blocks, :depends_on]
+
+  @doc """
+  Returns the list of "ready" issues — issues whose `status == :open` and which
+  have no open gating dependencies (`:blocks` or `:depends_on` edges) whose
+  target (`to_issue`) is itself not closed.
+
+  Informational dep types (`:relates_to`, `:discovered_from`, `:parent_of`) do
+  NOT gate readiness — only `:blocks` and `:depends_on` count.
+
+  Done in two passes:
+
+    1. Read all open issues.
+    2. Read all gating Dependency rows where `from_issue_id` is in that set;
+       join their `to_issue` and check status.
+    3. Reject open issues that have at least one unclosed gating target.
+
+  At our scale (~thousands of issues) this is fine. If the graph grows, push the
+  filter into Postgres with a `not exists` subquery as a read action.
+  """
+  def ready do
+    open_issues = Ash.read!(__MODULE__) |> Enum.filter(&(&1.status == :open))
+
+    if open_issues == [] do
+      []
+    else
+      open_ids = MapSet.new(open_issues, & &1.id)
+
+      gating_deps =
+        GtElixir.Beads.Dependency
+        |> Ash.read!()
+        |> Enum.filter(fn d ->
+          d.type in @gating_dep_types and MapSet.member?(open_ids, d.from_issue_id)
+        end)
+
+      if gating_deps == [] do
+        open_issues
+      else
+        target_ids = gating_deps |> Enum.map(& &1.to_issue_id) |> Enum.uniq()
+
+        targets_by_id =
+          target_ids
+          |> Enum.map(&Ash.get!(__MODULE__, &1))
+          |> Map.new(&{&1.id, &1})
+
+        blocked_from_ids =
+          gating_deps
+          |> Enum.filter(fn d ->
+            case Map.fetch(targets_by_id, d.to_issue_id) do
+              {:ok, target} -> target.status != :closed
+              :error -> false
+            end
+          end)
+          |> Enum.map(& &1.from_issue_id)
+          |> MapSet.new()
+
+        Enum.reject(open_issues, fn i -> MapSet.member?(blocked_from_ids, i.id) end)
+      end
+    end
+  end
 end
