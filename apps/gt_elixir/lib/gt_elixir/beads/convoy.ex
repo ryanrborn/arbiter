@@ -78,7 +78,8 @@ defmodule GtElixir.Beads.Convoy do
       primary_key? true
       allow_nil? false
       public? true
-      constraints match: ~r/^[a-z][a-z0-9]*-cv-[a-z0-9]+$/
+      # Allow uppercase to match Issue's pattern; see Issue.ex for rationale.
+      constraints match: ~r/^[a-z][a-zA-Z0-9]*-cv-[a-zA-Z0-9]+$/
     end
 
     attribute :title, :string do
