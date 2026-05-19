@@ -248,7 +248,8 @@ defmodule Mix.Tasks.GtElixir.ImportFromDolt do
 
               type ->
                 %{
-                  id: Ecto.UUID.bingenerate(),
+                  # Dependency.id is Ash.Type.UUIDv7 — must be v7, not v4.
+                  id: Ash.UUIDv7.bingenerate(),
                   from_issue_id: row["issue_id"],
                   to_issue_id: row["depends_on_id"],
                   type: Atom.to_string(type),
