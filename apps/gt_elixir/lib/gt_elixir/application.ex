@@ -10,7 +10,9 @@ defmodule GtElixir.Application do
     children = [
       GtElixir.Repo,
       {DNSCluster, query: Application.get_env(:gt_elixir, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: GtElixir.PubSub}
+      {Phoenix.PubSub, name: GtElixir.PubSub},
+      {Registry, keys: :unique, name: GtElixir.Polecat.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: GtElixir.Polecat.Supervisor}
       # Start a worker by calling: GtElixir.Worker.start_link(arg)
       # {GtElixir.Worker, arg}
     ]
