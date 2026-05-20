@@ -218,6 +218,23 @@ defmodule GtElixir.Polecat.SlingTest do
       assert result.worktree_path == nil
     end
 
+    test "per-workspace rig_paths overrides the Application env", %{repo: repo} do
+      {:ok, ws_local} =
+        Ash.create(Workspace, %{
+          name: "per-ws-#{System.unique_integer([:positive])}",
+          prefix: "pw",
+          config: %{"rig_paths" => %{"per-ws/rig" => repo}}
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id})
+
+      # `per-ws/rig` is NOT in Application env — only in this workspace's
+      # config. Sling must still find it.
+      {:ok, result} = Sling.sling(bead.id, rig: "per-ws/rig", start_driver: false)
+      assert is_binary(result.worktree_path)
+      assert File.dir?(result.worktree_path)
+    end
+
     test "skips worktree when provision_worktree: false", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
 

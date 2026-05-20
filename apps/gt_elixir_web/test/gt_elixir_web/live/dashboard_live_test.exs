@@ -37,6 +37,27 @@ defmodule GtElixirWeb.DashboardLiveTest do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "No active"
     end
+
+    test "shows a live indicator when the WebSocket is connected", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+      rendered = render(view)
+      assert rendered =~ ~s(id="live-indicator")
+      assert rendered =~ "live"
+      assert rendered =~ "badge-success"
+      refute rendered =~ "stale"
+    end
+
+    test "initial static render (no WebSocket) shows the stale indicator", %{conn: conn} do
+      # Phoenix.ConnTest.get/2 returns the pre-connection HTTP render — the
+      # second-pass connected mount is what `live/2` triggers. The static
+      # render mirrors what a browser sees before its LiveView socket
+      # finishes connecting (or after it drops).
+      conn = get(conn, "/")
+      html = Phoenix.ConnTest.html_response(conn, 200)
+      assert html =~ ~s(id="live-indicator")
+      assert html =~ "stale"
+      assert html =~ "badge-warning"
+    end
   end
 
   describe "recent beads section" do

@@ -42,6 +42,7 @@ defmodule GtElixir.Polecat.Driver do
 
   alias GtElixir.Beads.Issue
   alias GtElixir.Polecat
+  alias GtElixir.Polecat.Worktree
   alias GtElixir.Workflows.Machine
 
   @default_interval_ms 100
@@ -53,7 +54,9 @@ defmodule GtElixir.Polecat.Driver do
           machine_id: String.t(),
           machine_pid: pid(),
           interval_ms: non_neg_integer(),
-          max_ticks: non_neg_integer()
+          max_ticks: non_neg_integer(),
+          worktree_path: String.t() | nil,
+          cleanup_worktree: boolean()
         ]
 
   @spec start(opts()) :: DynamicSupervisor.on_start_child()
@@ -87,6 +90,8 @@ defmodule GtElixir.Polecat.Driver do
       machine_pid: Keyword.fetch!(opts, :machine_pid),
       interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
       max_ticks: Keyword.get(opts, :max_ticks, @default_max_ticks),
+      worktree_path: Keyword.get(opts, :worktree_path),
+      cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false),
       ticks: 0
     }
 
@@ -112,6 +117,7 @@ defmodule GtElixir.Polecat.Driver do
       {:ok, :completed} ->
         safe(fn -> Polecat.complete(state.polecat_pid, :workflow_completed) end)
         close_bead(state.bead_id)
+        maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
       {:ok, next_step} when is_atom(next_step) ->
@@ -174,5 +180,45 @@ defmodule GtElixir.Polecat.Driver do
 
         :error
     end
+  end
+
+  # Best-effort worktree cleanup after a successful workflow.
+  #
+  # Skipped when:
+  #   - `cleanup_worktree` is false (default)
+  #   - `worktree_path` is nil (no worktree was provisioned)
+  #   - the worktree has uncommitted changes (operator should inspect)
+  #
+  # Failures are logged but never propagated — the bead is already closed
+  # and the workflow is done, so we don't want to crash the Driver over a
+  # cleanup hiccup.
+  defp maybe_cleanup_worktree(%{cleanup_worktree: false}), do: :ok
+  defp maybe_cleanup_worktree(%{worktree_path: nil}), do: :ok
+
+  defp maybe_cleanup_worktree(%{worktree_path: path, bead_id: bead_id}) do
+    case Worktree.has_uncommitted?(path) do
+      {:ok, false} ->
+        case Worktree.cleanup(path) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Polecat.Driver: cleanup_worktree failed for bead=#{bead_id}: #{inspect(reason)}"
+            )
+        end
+
+      {:ok, true} ->
+        Logger.info(
+          "Polecat.Driver: worktree has uncommitted changes for bead=#{bead_id}; skipping cleanup"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat.Driver: cleanup probe failed for bead=#{bead_id}: #{inspect(reason)}"
+        )
+    end
+
+    :ok
   end
 end
