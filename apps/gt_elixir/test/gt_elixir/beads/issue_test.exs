@@ -221,4 +221,40 @@ defmodule GtElixir.Beads.IssueTest do
       assert Issue.tracker_types() == ~w(none jira linear github)a
     end
   end
+
+  describe "ready/1 with :workspace_id" do
+    test "filters to a single workspace's open issues" do
+      {:ok, ws_a} =
+        Ash.create(GtElixir.Beads.Workspace, %{
+          name: "wa-#{System.unique_integer([:positive])}",
+          prefix: "wa"
+        })
+
+      {:ok, ws_b} =
+        Ash.create(GtElixir.Beads.Workspace, %{
+          name: "wb-#{System.unique_integer([:positive])}",
+          prefix: "wb"
+        })
+
+      {:ok, in_a} = Ash.create(Issue, %{title: "a", workspace_id: ws_a.id})
+      {:ok, _in_b} = Ash.create(Issue, %{title: "b", workspace_id: ws_b.id})
+
+      ids = Issue.ready(workspace_id: ws_a.id) |> Enum.map(& &1.id)
+      assert in_a.id in ids
+      refute Enum.any?(ids, &String.starts_with?(&1, "wb-"))
+    end
+
+    test "no opts → all workspaces (unchanged from ready/0)" do
+      {:ok, ws} =
+        Ash.create(GtElixir.Beads.Workspace, %{
+          name: "wa0-#{System.unique_integer([:positive])}",
+          prefix: "wa0"
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "z", workspace_id: ws.id})
+
+      ids = Issue.ready() |> Enum.map(& &1.id)
+      assert bead.id in ids
+    end
+  end
 end

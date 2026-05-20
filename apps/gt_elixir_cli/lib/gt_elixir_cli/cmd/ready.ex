@@ -1,20 +1,44 @@
 defmodule GtElixirCli.Cmd.Ready do
   @moduledoc """
-  `bd2 ready` — list issues that are ready to work on (`GET /api/issues/ready`).
+  `bd2 ready [--all] [--json]` — list issues ready to work on
+  (`GET /api/issues/ready`).
 
-  The server-side `Issue.ready/0` query is what "ready" means; this command
-  is a thin shell over it.
+  By default filters to the active workspace (resolved via `BD2_WORKSPACE`
+  or the workspace named `default`). Pass `--all` to see ready issues
+  across every workspace — useful for cross-workspace coordination but
+  noisy when imported data dominates other workspaces.
+
+  The server-side `Issue.ready/1` query is what "ready" means; this
+  command is a thin shell over it.
   """
 
-  alias GtElixirCli.{Client, Output}
+  alias GtElixirCli.{Client, Output, Workspace}
+
+  @switches [json: :boolean, all: :boolean]
 
   def run(argv) do
-    mode = Output.mode(argv)
+    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    mode = if opts[:json], do: :json, else: :text
 
-    case Client.get("/api/issues/ready") do
+    params = ready_params(opts)
+
+    case Client.get("/api/issues/ready", params) do
       {:ok, %{"data" => issues}} -> Output.emit_issue_list(issues, mode)
       {:ok, other} -> Output.emit_issue_list(List.wrap(other), mode)
       {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp ready_params(opts) do
+    cond do
+      opts[:all] == true ->
+        []
+
+      true ->
+        case Workspace.resolve() do
+          {:ok, %{"id" => ws_id}} -> [workspace_id: ws_id]
+          {:error, _} -> []
+        end
     end
   end
 end

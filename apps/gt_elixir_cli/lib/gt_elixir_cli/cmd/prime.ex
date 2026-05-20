@@ -53,10 +53,12 @@ defmodule GtElixirCli.Cmd.Prime do
   # ---- gather ------------------------------------------------------------
 
   defp gather do
+    workspace = gather_workspace()
+
     %{
-      workspace: gather_workspace(),
+      workspace: workspace,
       polecats: gather_polecats(),
-      ready: gather_ready()
+      ready: gather_ready(workspace)
     }
   end
 
@@ -75,8 +77,16 @@ defmodule GtElixirCli.Cmd.Prime do
     end
   end
 
-  defp gather_ready do
-    case Client.get("/api/issues/ready") do
+  # Scope ready beads to the active workspace when we know it, so prime
+  # doesn't drown the user in imported-from-other-workspaces noise.
+  defp gather_ready({:ok, %{"id" => ws_id}}) do
+    do_gather_ready(workspace_id: ws_id)
+  end
+
+  defp gather_ready(_), do: do_gather_ready([])
+
+  defp do_gather_ready(params) do
+    case Client.get("/api/issues/ready", params) do
       {:ok, %{"data" => list}} -> {:ok, list}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}

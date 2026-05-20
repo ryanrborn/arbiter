@@ -296,9 +296,16 @@ defmodule GtElixir.Beads.Issue do
   Informational dep types (`:relates_to`, `:discovered_from`, `:parent_of`) do
   NOT gate readiness — only `:blocks` and `:depends_on` count.
 
+  ## Options
+
+    * `:workspace_id` — when set, restrict open issues to a single
+      workspace. Gating dependencies are still consulted across
+      workspaces (a bead in workspace A can be blocked by a bead in
+      workspace B). Default: no filter (all workspaces).
+
   Done in two passes:
 
-    1. Read all open issues.
+    1. Read all open issues (filtered by workspace if given).
     2. Read all gating Dependency rows where `from_issue_id` is in that set;
        join their `to_issue` and check status.
     3. Reject open issues that have at least one unclosed gating target.
@@ -306,8 +313,15 @@ defmodule GtElixir.Beads.Issue do
   At our scale (~thousands of issues) this is fine. If the graph grows, push the
   filter into Postgres with a `not exists` subquery as a read action.
   """
-  def ready do
-    open_issues = Ash.read!(__MODULE__) |> Enum.filter(&(&1.status == :open))
+  def ready(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    open_issues =
+      __MODULE__
+      |> Ash.read!()
+      |> Enum.filter(fn i ->
+        i.status == :open and (is_nil(workspace_id) or i.workspace_id == workspace_id)
+      end)
 
     if open_issues == [] do
       []
