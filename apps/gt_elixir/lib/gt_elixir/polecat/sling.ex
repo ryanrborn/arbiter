@@ -44,7 +44,9 @@ defmodule GtElixir.Polecat.Sling do
 
   alias GtElixir.Beads.Issue
   alias GtElixir.Polecat
+  alias GtElixir.Polecat.BranchNamer
   alias GtElixir.Polecat.Driver
+  alias GtElixir.Polecat.Worktree
   alias GtElixir.Workflows.Machine
   alias GtElixir.Workflows.Work
 
@@ -59,7 +61,8 @@ defmodule GtElixir.Polecat.Sling do
           polecat_pid: pid(),
           machine_id: String.t(),
           machine_pid: pid(),
-          driver_pid: pid() | nil
+          driver_pid: pid() | nil,
+          worktree_path: String.t() | nil
         }
 
   @spec sling(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
@@ -67,8 +70,10 @@ defmodule GtElixir.Polecat.Sling do
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
          {:ok, bead} <- transition_to_in_progress(bead),
+         {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
          {:ok, polecat_pid} <- start_polecat(bead, opts),
-         {:ok, machine_id, machine_pid} <- attach_and_start_machine(bead, opts),
+         {:ok, machine_id, machine_pid} <-
+           attach_and_start_machine(bead, worktree_path, opts),
          {:ok, driver_pid} <-
            maybe_start_driver(bead, polecat_pid, machine_id, machine_pid, opts) do
       {:ok,
@@ -77,7 +82,8 @@ defmodule GtElixir.Polecat.Sling do
          polecat_pid: polecat_pid,
          machine_id: machine_id,
          machine_pid: machine_pid,
-         driver_pid: driver_pid
+         driver_pid: driver_pid,
+         worktree_path: worktree_path
        }}
     else
       err -> err
@@ -120,15 +126,49 @@ defmodule GtElixir.Polecat.Sling do
     end
   end
 
-  defp attach_and_start_machine(%Issue{id: id}, opts) do
+  defp attach_and_start_machine(%Issue{id: id}, worktree_path, opts) do
     workflow = Keyword.get(opts, :workflow_module, Work)
-    vars = %{bead_id: id, worktree_path: nil, rig: Keyword.get(opts, :rig)}
+    vars = %{bead_id: id, worktree_path: worktree_path, rig: Keyword.get(opts, :rig)}
 
     with {:ok, machine_id} <- Machine.attach(workflow, id, vars),
          {:ok, pid} <- Machine.start(machine_id) do
       {:ok, machine_id, pid}
     else
       err -> {:error, {:machine_start_failed, err}}
+    end
+  end
+
+  # Provision a fresh git worktree on a per-bead branch.
+  #
+  # Behaviour:
+  #   - `provision_worktree: false` in opts → skip, return `{:ok, nil}`.
+  #   - rig has no `:gt_elixir | :rig_paths` config entry → skip, return
+  #     `{:ok, nil}` (the default no-op stance, so tests that don't set up
+  #     rig_paths continue to work).
+  #   - Otherwise, derive a branch name from the bead via `BranchNamer` and
+  #     call `Worktree.create/3`. Returns `{:ok, path}` or `{:error, ...}`.
+  defp maybe_provision_worktree(%Issue{} = bead, opts) do
+    cond do
+      Keyword.get(opts, :provision_worktree, true) == false ->
+        {:ok, nil}
+
+      true ->
+        rig = Keyword.get(opts, :rig)
+        rig_paths = Application.get_env(:gt_elixir, :rig_paths, %{})
+
+        case Map.get(rig_paths, rig) do
+          nil ->
+            {:ok, nil}
+
+          repo_path when is_binary(repo_path) ->
+            branch = BranchNamer.derive(bead)
+            base_branch = Keyword.get(opts, :base_branch, "main")
+
+            case Worktree.create(repo_path, branch, base_branch) do
+              {:ok, path} -> {:ok, path}
+              {:error, reason} -> {:error, {:worktree_failed, reason}}
+            end
+        end
     end
   end
 

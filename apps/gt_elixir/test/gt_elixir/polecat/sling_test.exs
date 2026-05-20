@@ -73,9 +73,87 @@ defmodule GtElixir.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
       {:ok, result} = Sling.sling(bead.id, rig: "test/rig", start_driver: false)
 
-      for key <- [:bead, :polecat_pid, :machine_id, :machine_pid, :driver_pid] do
+      for key <- [:bead, :polecat_pid, :machine_id, :machine_pid, :driver_pid, :worktree_path] do
         assert Map.has_key?(result, key), "missing #{key}"
       end
+    end
+  end
+
+  describe "worktree provisioning" do
+    @env_key :rig_paths
+
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "sling-wt-#{:erlang.unique_integer([:positive])}")
+      repo = Path.join(tmp, "source")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      worktree_root = Path.join(tmp, "worktrees")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt_root = Application.get_env(:gt_elixir, :worktree_root)
+      prior_rig_paths = Application.get_env(:gt_elixir, @env_key)
+
+      Application.put_env(:gt_elixir, :worktree_root, worktree_root)
+      Application.put_env(:gt_elixir, @env_key, %{"st/rig" => repo})
+
+      on_exit(fn ->
+        if prior_wt_root,
+          do: Application.put_env(:gt_elixir, :worktree_root, prior_wt_root),
+          else: Application.delete_env(:gt_elixir, :worktree_root)
+
+        if prior_rig_paths,
+          do: Application.put_env(:gt_elixir, @env_key, prior_rig_paths),
+          else: Application.delete_env(:gt_elixir, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo: repo, worktree_root: worktree_root}
+    end
+
+    test "creates a worktree on a derived branch when rig is configured",
+         %{ws: ws, worktree_root: root} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "implement the thing",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      {:ok, result} =
+        Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+
+      assert is_binary(result.worktree_path)
+      assert String.starts_with?(result.worktree_path, root)
+      assert File.dir?(result.worktree_path)
+
+      # Branch matches BranchNamer's derivation.
+      branch = GtElixir.Polecat.BranchNamer.derive(bead)
+      assert {:ok, ^branch} = GtElixir.Polecat.Worktree.current_branch(result.worktree_path)
+    end
+
+    test "skips worktree when rig is not in rig_paths", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "unmapped", workspace_id: ws.id})
+
+      {:ok, result} = Sling.sling(bead.id, rig: "no-such-rig", start_driver: false)
+      assert result.worktree_path == nil
+    end
+
+    test "skips worktree when provision_worktree: false", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id, rig: "st/rig", start_driver: false, provision_worktree: false)
+
+      assert result.worktree_path == nil
     end
   end
 end

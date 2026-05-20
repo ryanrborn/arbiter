@@ -1,6 +1,14 @@
 import Config
 config :ash, policies: [show_policy_breakdowns?: true]
 
+# Rig → git-repo path mapping consumed by `GtElixir.Polecat.Sling` when it
+# provisions a worktree for a freshly-slung polecat. Beads slung with a rig
+# string not in this map skip worktree provisioning entirely (which is
+# tolerated by the current placeholder workflow).
+config :gt_elixir, :rig_paths, %{
+  "gt-elixir" => Path.expand("~/dev/gt-elixir")
+}
+
 # Configure your database — matches compose.yml's Postgres container
 config :gt_elixir, GtElixir.Repo,
   username: "gt_elixir",
