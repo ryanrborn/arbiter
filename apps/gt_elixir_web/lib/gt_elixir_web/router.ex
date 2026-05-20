@@ -20,6 +20,7 @@ defmodule GtElixirWeb.Router do
     get "/", PageController, :home
 
     live "/workspace/:id/settings/vernacular", WorkspaceVernacularLive
+    live "/audit", AuditLogLive
   end
 
   scope "/api", GtElixirWeb.Api do
