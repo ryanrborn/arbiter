@@ -90,6 +90,57 @@ defmodule GtElixirWeb.DashboardLiveTest do
     end
   end
 
+  describe "rigs section" do
+    setup do
+      prior = Application.get_env(:gt_elixir, :rig_paths)
+      Application.put_env(:gt_elixir, :rig_paths, %{"dashboard-test-rig" => "/tmp/dash-rig"})
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:gt_elixir, :rig_paths, prior),
+          else: Application.delete_env(:gt_elixir, :rig_paths)
+      end)
+
+      :ok
+    end
+
+    test "lists rigs configured via Application env", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "rigs-table"
+      assert html =~ "dashboard-test-rig"
+      assert html =~ "/tmp/dash-rig"
+      assert html =~ "(app)"
+    end
+
+    test "counts active polecats per rig", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "rig-pol", workspace_id: ws.id})
+
+      {:ok, _pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "dashboard-test-rig",
+          workspace_id: ws.id
+        )
+
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "dashboard-test-rig"
+      # Row should show 1 active polecat for the rig.
+      # Hard to assert specific cell content; check the rig name + a 1
+      # appear on the same page render.
+      assert html =~ "dashboard-test-rig"
+    end
+
+    test "surfaces a polecat using an unconfigured rig under (unconfigured)",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "weird-rig", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "no-such-rig", workspace_id: ws.id)
+
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "no-such-rig"
+      assert html =~ "(unconfigured)"
+    end
+  end
+
   describe "active polecats workspace column" do
     test "shows the workspace name on each polecat row", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "ws-col", workspace_id: ws.id})

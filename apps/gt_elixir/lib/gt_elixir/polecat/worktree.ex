@@ -197,6 +197,54 @@ defmodule GtElixir.Polecat.Worktree do
     Path.join(root, leaf)
   end
 
+  @doc """
+  List the linked worktrees attached to the repo at `repo_path`, excluding
+  the main worktree.
+
+  Each entry is a map with `:path` and `:branch`. Returns `[]` if the path
+  isn't a git repo, git isn't on PATH, or anything else goes wrong — this
+  is a "best effort" stat helper, not a strict API.
+  """
+  @spec list(path()) :: [%{path: path(), branch: String.t() | nil}]
+  def list(repo_path) when is_binary(repo_path) do
+    case run_git(["worktree", "list", "--porcelain"], cd: repo_path) do
+      {:ok, output} ->
+        output
+        |> parse_worktree_list()
+        # First entry is the main worktree; the user wants linked ones only.
+        |> Enum.drop(1)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp parse_worktree_list(output) do
+    output
+    |> String.split("\n\n", trim: true)
+    |> Enum.map(&parse_worktree_block/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp parse_worktree_block(block) do
+    block
+    |> String.split("\n", trim: true)
+    |> Enum.reduce(%{}, fn line, acc ->
+      case String.split(line, " ", parts: 2) do
+        ["worktree", path] -> Map.put(acc, :path, path)
+        ["branch", ref] -> Map.put(acc, :branch, strip_branch_ref(ref))
+        _ -> acc
+      end
+    end)
+    |> case do
+      %{path: _} = entry -> Map.put_new(entry, :branch, nil)
+      _ -> nil
+    end
+  end
+
+  defp strip_branch_ref("refs/heads/" <> name), do: name
+  defp strip_branch_ref(other), do: other
+
   # ---- internals ----------------------------------------------------------
 
   defp resolve_branch(path, opts) do

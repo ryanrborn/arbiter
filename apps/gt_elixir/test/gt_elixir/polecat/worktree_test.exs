@@ -139,4 +139,31 @@ defmodule GtElixir.Polecat.WorktreeTest do
       assert {:error, {:git_failed, _}} = Worktree.push(path, remote: "nope")
     end
   end
+
+  describe "list/1" do
+    test "returns linked worktrees with branch names, excluding the main",
+         %{repo: repo} do
+      {:ok, a} = Worktree.create(repo, "feature/list-a", "main")
+      {:ok, b} = Worktree.create(repo, "feature/list-b", "main")
+
+      worktrees = Worktree.list(repo)
+
+      assert length(worktrees) == 2
+      paths = Enum.map(worktrees, & &1.path)
+      assert a in paths
+      assert b in paths
+
+      branches = Enum.map(worktrees, & &1.branch)
+      assert "feature/list-a" in branches
+      assert "feature/list-b" in branches
+    end
+
+    test "returns [] when there are no linked worktrees", %{repo: repo} do
+      assert [] = Worktree.list(repo)
+    end
+
+    test "returns [] for a non-existent path" do
+      assert [] = Worktree.list("/tmp/definitely-not-a-repo-#{:erlang.unique_integer([:positive])}")
+    end
+  end
 end

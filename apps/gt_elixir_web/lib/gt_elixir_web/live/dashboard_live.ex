@@ -27,6 +27,7 @@ defmodule GtElixirWeb.DashboardLive do
   alias GtElixir.Beads.Issue
   alias GtElixir.Beads.Workspace
   alias GtElixir.Polecat
+  alias GtElixir.Polecat.Worktree
   alias GtElixir.Vernacular
   require Ash.Query
 
@@ -48,6 +49,7 @@ defmodule GtElixirWeb.DashboardLive do
      |> assign(:live, live?)
      |> assign(:worker_label, Vernacular.label(:worker))
      |> refresh_workspaces()
+     |> refresh_rigs()
      |> refresh_polecats()
      |> refresh_recent_beads()}
   end
@@ -64,7 +66,8 @@ defmodule GtElixirWeb.DashboardLive do
     {:noreply,
      socket
      |> refresh_polecats()
-     |> refresh_workspaces()}
+     |> refresh_workspaces()
+     |> refresh_rigs()}
   end
 
   # ---- data ----
@@ -170,6 +173,93 @@ defmodule GtElixirWeb.DashboardLive do
     end)
   end
 
+  # ---- rigs ----
+
+  defp refresh_rigs(socket) do
+    workspaces = socket.assigns[:workspaces_by_id] |> values_or_load()
+
+    paths_by_rig = collect_rig_paths(workspaces)
+    polecats_by_rig = group_polecats_by_rig()
+
+    rigs =
+      paths_by_rig
+      |> Map.merge(rigs_from_polecats(polecats_by_rig, paths_by_rig))
+      |> Enum.map(fn {name, entry} ->
+        path = entry.path
+
+        worktree_count =
+          case path do
+            nil -> 0
+            p when is_binary(p) -> safe_worktree_count(p)
+          end
+
+        %{
+          name: name,
+          path: path,
+          source: entry.source,
+          polecats: Map.get(polecats_by_rig, name, 0),
+          worktrees: worktree_count
+        }
+      end)
+      |> Enum.sort_by(& &1.name)
+
+    assign(socket, :rigs, rigs)
+  end
+
+  defp values_or_load(nil), do: load_workspaces()
+  defp values_or_load(%{} = m), do: Map.values(m)
+
+  # Build {rig_name => %{path:, source:}} from every workspace's
+  # config["rig_paths"] plus the application-env fallback. Workspace
+  # entries win over app-env when names collide.
+  defp collect_rig_paths(workspaces) do
+    app_paths =
+      :gt_elixir
+      |> Application.get_env(:rig_paths, %{})
+      |> Map.new(fn {name, path} -> {name, %{path: path, source: "(app)"}} end)
+
+    workspaces
+    |> Enum.reduce(app_paths, fn ws, acc ->
+      ws_rig_paths =
+        case ws.config do
+          %{"rig_paths" => paths} when is_map(paths) -> paths
+          _ -> %{}
+        end
+
+      Enum.reduce(ws_rig_paths, acc, fn {name, path}, acc ->
+        Map.put(acc, name, %{path: path, source: ws.name})
+      end)
+    end)
+  end
+
+  defp group_polecats_by_rig do
+    try do
+      Polecat.list_children()
+    rescue
+      _ -> []
+    end
+    |> Enum.reduce(%{}, fn p, acc ->
+      rig = p.rig || "(none)"
+      Map.update(acc, rig, 1, &(&1 + 1))
+    end)
+  end
+
+  # A polecat can be running against a rig name that isn't in any
+  # `rig_paths` config (default-rig "unknown", a typo, or an inherited
+  # legacy value). Surface those as well so the operator can see them.
+  defp rigs_from_polecats(polecats_by_rig, configured) do
+    polecats_by_rig
+    |> Map.keys()
+    |> Enum.reject(&Map.has_key?(configured, &1))
+    |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)
+  end
+
+  defp safe_worktree_count(path) do
+    Worktree.list(path) |> length()
+  rescue
+    _ -> 0
+  end
+
   defp runtime_seconds(%DateTime{} = started_at, %DateTime{} = now) do
     DateTime.diff(now, started_at, :second)
   end
@@ -242,6 +332,41 @@ defmodule GtElixirWeb.DashboardLive do
                   <td class="text-right">{ws.open}</td>
                   <td class="text-right">{ws.in_progress}</td>
                   <td class="text-right">{ws.closed}</td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        <% end %>
+      </section>
+
+      <section class="card bg-base-200 p-4 mb-6">
+        <h2 class="text-lg font-semibold mb-3">
+          Rigs ({length(@rigs)})
+        </h2>
+        <%= if @rigs == [] do %>
+          <p class="text-base-content/60 italic">
+            No rigs configured. Add entries to <code>:gt_elixir, :rig_paths</code>
+            in config or to a workspace's <code>config["rig_paths"]</code>.
+          </p>
+        <% else %>
+          <table class="table table-sm" id="rigs-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Path</th>
+                <th>Source</th>
+                <th class="text-right">Active {String.capitalize(@worker_label)}s</th>
+                <th class="text-right">Worktrees</th>
+              </tr>
+            </thead>
+            <tbody>
+              <%= for rig <- @rigs do %>
+                <tr>
+                  <td><code class="text-xs">{rig.name}</code></td>
+                  <td class="text-xs text-base-content/80">{rig.path || "(no path)"}</td>
+                  <td class="text-xs">{rig.source}</td>
+                  <td class="text-right">{rig.polecats}</td>
+                  <td class="text-right">{rig.worktrees}</td>
                 </tr>
               <% end %>
             </tbody>
