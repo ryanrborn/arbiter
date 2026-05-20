@@ -64,5 +64,58 @@ defmodule GtElixirWeb.PolecatDetailLiveTest do
 
       assert render(view) =~ "fresh-line"
     end
+
+    test "shows the workspace context when the bead exists", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "pd-ws", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
+
+      {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
+      assert html =~ "Workspace:"
+      assert html =~ ws.name
+    end
+
+    test "Stop button kills the polecat and redirects to /", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "pd-stop", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
+
+      {:ok, view, html} = live(conn, ~p"/polecats/#{bead.id}")
+      assert html =~ "Stop polecat"
+
+      result = render_click(view, "stop")
+
+      # push_navigate emits a {:live_redirect, ...} return from render_click.
+      assert {:error, {:live_redirect, %{to: "/"}}} = result
+      assert Polecat.whereis(bead.id) == nil
+    end
+
+    test "no Stop button when the polecat is :completed", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "pd-done", workspace_id: ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      :ok = Polecat.advance(pid, :design)
+      :ok = Polecat.complete(pid, :done)
+
+      {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
+      refute html =~ "Stop polecat"
+    end
+
+    test "renders the workflow step bar when a MachineState exists",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "pd-wf", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
+
+      {:ok, _machine_id} =
+        GtElixir.Workflows.Machine.attach(GtElixir.Workflows.Work, bead.id, %{
+          bead_id: bead.id,
+          worktree_path: nil,
+          rig: "r"
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
+
+      assert html =~ "Workflow:"
+      # Work's first step is :load_context.
+      assert html =~ "load_context"
+      assert html =~ "submit"
+    end
   end
 end
