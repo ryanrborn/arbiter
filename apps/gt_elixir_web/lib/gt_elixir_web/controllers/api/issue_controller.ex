@@ -37,8 +37,14 @@ defmodule GtElixirWeb.Api.IssueController do
     end
   end
 
-  def ready(conn, _params) do
-    issues = Issue.ready()
+  def ready(conn, params) do
+    opts =
+      case params["workspace_id"] do
+        ws when is_binary(ws) and ws != "" -> [workspace_id: ws]
+        _ -> []
+      end
+
+    issues = Issue.ready(opts)
     render(conn, :index, issues: issues)
   end
 
