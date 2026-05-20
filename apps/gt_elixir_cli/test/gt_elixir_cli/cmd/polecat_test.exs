@@ -40,6 +40,44 @@ defmodule GtElixirCli.Cmd.PolecatTest do
     end
   end
 
+  describe "polecat list" do
+    test "renders a table of active polecats" do
+      stub_get("/api/polecats", %{
+        "data" => [
+          %{
+            "bead_id" => "bd-001",
+            "status" => "running",
+            "current_step" => "implement",
+            "rig" => "test/rig",
+            "started_at" => "2026-05-20T19:00:00Z"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["list"]) end)
+      assert exit_code == 0
+      assert out =~ "Active polecats (1)"
+      assert out =~ "bd-001"
+      assert out =~ "status=running"
+    end
+
+    test "(none) when no active polecats" do
+      stub_get("/api/polecats", %{"data" => []})
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["list"]) end)
+      assert exit_code == 0
+      assert out =~ "no active polecats"
+    end
+
+    test "ls is an alias for list" do
+      stub_get("/api/polecats", %{"data" => []})
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["ls"]) end)
+      assert exit_code == 0
+      assert out =~ "no active polecats"
+    end
+  end
+
   describe "polecat stop" do
     test "POSTs to the stop endpoint" do
       stub_post("/api/polecats/bd-003/stop", %{"bead_id" => "bd-003", "stopped" => true})

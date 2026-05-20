@@ -60,5 +60,15 @@ defmodule GtElixirCli.Cmd.Sling do
     IO.puts("  Status:   #{bead["status"]}")
     IO.puts("  Polecat:  #{polecat["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
+
+    case payload["worktree_path"] do
+      nil -> :ok
+      path -> IO.puts("  Worktree: #{path}")
+    end
+
+    case payload["claude_started"] do
+      true -> IO.puts("  Claude:   started")
+      _ -> :ok
+    end
   end
 end
