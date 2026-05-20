@@ -1,23 +1,30 @@
 defmodule GtElixirCli.Cmd.Sling do
   @moduledoc """
-  `bd2 sling <bead-id> [<rig>]` — spawn a polecat to work on a bead.
+  `bd2 sling <bead-id> [<rig>] [--with-claude]` — spawn a polecat to work
+  on a bead.
 
   POSTs to `/api/polecats/sling`. The server transitions the bead to
   `:in_progress`, starts a polecat GenServer under
-  `GtElixir.Polecat.Supervisor`, and attaches `GtElixir.Workflows.Work` via
-  the WorkflowMachine.
+  `GtElixir.Polecat.Supervisor`, attaches `GtElixir.Workflows.Work` via
+  the WorkflowMachine, and (with `--with-claude`) spawns a Claude
+  subprocess in the polecat's worktree.
 
   Flags:
-    --json    emit JSON instead of human-readable text
+    --with-claude  spawn a real Claude subprocess in the worktree.
+                   Requires a worktree (rig must be in
+                   `:gt_elixir, :rig_paths`) and the `claude` CLI on PATH.
+                   **This consumes Anthropic API credits.** Off by default.
+    --json         emit JSON instead of human-readable text
   """
 
   alias GtElixirCli.{Client, Output}
 
-  @switches [json: :boolean]
+  @switches [json: :boolean, with_claude: :boolean]
 
   def run(argv) do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
+    with_claude = opts[:with_claude] || false
 
     {bead_id, rig} =
       case rest do
@@ -30,6 +37,7 @@ defmodule GtElixirCli.Cmd.Sling do
     body =
       %{"bead_id" => bead_id}
       |> maybe_put("rig", rig)
+      |> maybe_put("with_claude", if(with_claude, do: true, else: nil))
 
     case Client.post("/api/polecats/sling", body) do
       {:ok, payload} -> emit(payload, mode)

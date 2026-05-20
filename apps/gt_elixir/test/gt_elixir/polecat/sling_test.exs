@@ -79,6 +79,77 @@ defmodule GtElixir.Polecat.SlingTest do
     end
   end
 
+  describe "Claude session (start_claude opt)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "sling-claude-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      %{tmp: tmp}
+    end
+
+    test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
+
+      {:ok, result} = Sling.sling(bead.id, rig: "test/rig", start_driver: false)
+      assert result.claude_port == nil
+    end
+
+    test "start_claude: true with claude_command spawns a subprocess in the worktree",
+         %{ws: ws, tmp: tmp} do
+      {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
+
+      # Use the tmp dir as a stand-in worktree by passing it through manually.
+      # Sling.maybe_provision_worktree returns nil when rig is unmapped, but
+      # we need a worktree_path for ClaudeSession; so we point a tmp rig at
+      # a real git repo and let Sling provision the worktree itself.
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      Application.put_env(:gt_elixir, :worktree_root, Path.join(tmp, "wt"))
+      Application.put_env(:gt_elixir, :rig_paths, %{"claude/rig" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:gt_elixir, :worktree_root)
+        Application.delete_env(:gt_elixir, :rig_paths)
+      end)
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "claude/rig",
+          start_driver: false,
+          start_claude: true,
+          # Stand-in for `claude --print prompt` — runs and exits quickly,
+          # but proves ClaudeSession.start was wired into Sling.
+          claude_command: ["echo", "hello from a polecat"]
+        )
+
+      assert is_port(result.claude_port)
+      assert is_binary(result.worktree_path)
+    end
+
+    test "start_claude: true without a worktree returns {:error, :missing_worktree}",
+         %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
+
+      assert {:error, :missing_worktree} =
+               Sling.sling(bead.id,
+                 rig: "no-such-rig",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["echo", "x"]
+               )
+    end
+  end
+
   describe "worktree provisioning" do
     @env_key :rig_paths
 
