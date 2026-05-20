@@ -18,10 +18,15 @@ defmodule GtElixir.Polecat.Sling do
   1. Load + validate the bead. Bead must not be `:closed`.
   2. Transition bead to `:in_progress` (via the bead's `:update` action,
      skipping the `:close` FSM path).
-  3. Start a polecat under `GtElixir.Polecat.Supervisor` for the bead.
-  4. Attach `GtElixir.Workflows.Work` via `Workflows.Machine.attach/3` and
-     start the machine.
-  5. Start a `GtElixir.Polecat.Driver` under the same supervisor — it
+  3. Provision a git worktree on a per-bead branch — skipped when the
+     rig isn't in `:gt_elixir, :rig_paths` or `provision_worktree: false`.
+  4. Start a polecat under `GtElixir.Polecat.Supervisor` for the bead.
+  5. **Optionally** spawn a Claude subprocess in the worktree via
+     `ClaudeSession.start/1`. Opt-in via `start_claude: true` — defaults
+     to `false` to avoid silent paid-API invocations. Requires a worktree.
+  6. Attach `GtElixir.Workflows.Work` via `Workflows.Machine.attach/3`
+     and start the machine.
+  7. Start a `GtElixir.Polecat.Driver` under the same supervisor — it
      ticks the machine forward and closes the bead when the workflow
      completes. Skipped when `start_driver: false`.
 
@@ -29,11 +34,13 @@ defmodule GtElixir.Polecat.Sling do
 
   ```
   {:ok, %{
-    bead: %Issue{},            # updated, status: :in_progress
+    bead: %Issue{},              # updated, status: :in_progress
     polecat_pid: pid(),
     machine_id: String.t(),
     machine_pid: pid(),
-    driver_pid: pid() | nil    # nil if start_driver: false
+    driver_pid: pid() | nil,     # nil if start_driver: false
+    worktree_path: String.t() | nil,  # nil if rig unconfigured / opted out
+    claude_port: port() | nil    # nil unless start_claude: true
   }}
   ```
 
@@ -45,6 +52,7 @@ defmodule GtElixir.Polecat.Sling do
   alias GtElixir.Beads.Issue
   alias GtElixir.Polecat
   alias GtElixir.Polecat.BranchNamer
+  alias GtElixir.Polecat.ClaudeSession
   alias GtElixir.Polecat.Driver
   alias GtElixir.Polecat.Worktree
   alias GtElixir.Workflows.Machine
@@ -53,7 +61,9 @@ defmodule GtElixir.Polecat.Sling do
   @type sling_opts :: [
           rig: String.t() | nil,
           workflow_module: module(),
-          start_driver: boolean()
+          start_driver: boolean(),
+          start_claude: boolean(),
+          claude_command: [String.t()] | nil
         ]
 
   @type sling_result :: %{
@@ -62,7 +72,8 @@ defmodule GtElixir.Polecat.Sling do
           machine_id: String.t(),
           machine_pid: pid(),
           driver_pid: pid() | nil,
-          worktree_path: String.t() | nil
+          worktree_path: String.t() | nil,
+          claude_port: port() | nil
         }
 
   @spec sling(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
@@ -72,6 +83,8 @@ defmodule GtElixir.Polecat.Sling do
          {:ok, bead} <- transition_to_in_progress(bead),
          {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
          {:ok, polecat_pid} <- start_polecat(bead, opts),
+         {:ok, claude_port} <-
+           maybe_start_claude(bead, polecat_pid, worktree_path, opts),
          {:ok, machine_id, machine_pid} <-
            attach_and_start_machine(bead, worktree_path, opts),
          {:ok, driver_pid} <-
@@ -83,7 +96,8 @@ defmodule GtElixir.Polecat.Sling do
          machine_id: machine_id,
          machine_pid: machine_pid,
          driver_pid: driver_pid,
-         worktree_path: worktree_path
+         worktree_path: worktree_path,
+         claude_port: claude_port
        }}
     else
       err -> err
@@ -170,6 +184,73 @@ defmodule GtElixir.Polecat.Sling do
             end
         end
     end
+  end
+
+  # Spawn a Claude subprocess in the worktree, attached to the polecat.
+  #
+  # **Opt-in only.** Defaults to `start_claude: false` so callers must
+  # explicitly authorize the (paid, autonomous) agent invocation. The CLI
+  # surfaces this via the `--with-claude` flag on `bd2 sling`.
+  #
+  # Requires a worktree (Layer 3) — returns `{:error, :missing_worktree}`
+  # if start_claude is true but worktree_path is nil. This prevents
+  # silently launching Claude with `cd: nil`.
+  #
+  # The `:claude_command` opt is the test escape hatch: when set, it
+  # overrides the default `["claude", "--print", prompt]` argv so tests
+  # can spawn `echo` or a script instead of the real Claude CLI.
+  defp maybe_start_claude(_bead, _polecat_pid, _worktree_path, opts)
+       when not is_list(opts) do
+    {:ok, nil}
+  end
+
+  defp maybe_start_claude(%Issue{} = bead, polecat_pid, worktree_path, opts) do
+    case Keyword.get(opts, :start_claude, false) do
+      false ->
+        {:ok, nil}
+
+      true when is_nil(worktree_path) ->
+        {:error, :missing_worktree}
+
+      true ->
+        session_opts =
+          [owner: polecat_pid, worktree_path: worktree_path] ++
+            case Keyword.get(opts, :claude_command) do
+              nil -> [prompt: prompt_for(bead)]
+              cmd when is_list(cmd) -> [command: cmd]
+            end
+
+        case ClaudeSession.start(session_opts) do
+          {:ok, port} -> {:ok, port}
+          {:error, reason} -> {:error, {:claude_start_failed, reason}}
+        end
+    end
+  end
+
+  @doc false
+  def prompt_for(%Issue{} = bead) do
+    """
+    You are a polecat working autonomously on bead #{bead.id}.
+
+    Title: #{bead.title}
+
+    Description:
+    #{bead.description || "(none)"}
+
+    Acceptance:
+    #{bead.acceptance || "(none)"}
+
+    Your current directory is a fresh git worktree on a per-bead branch.
+    Work the bead to completion: load context, design, implement, test,
+    commit on this branch, then push and open a PR if appropriate.
+
+    When you are completely done, print the line:
+
+        gt done
+
+    on a line by itself, exactly. The polecat watches your stdout and
+    will mark the bead complete when it sees that marker.
+    """
   end
 
   defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, opts) do

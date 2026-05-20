@@ -11,7 +11,9 @@ defmodule GtElixirWeb.Api.PolecatJSON do
       machine: %{
         id: result.machine_id,
         pid: inspect(result.machine_pid)
-      }
+      },
+      worktree_path: Map.get(result, :worktree_path),
+      claude_started: not is_nil(Map.get(result, :claude_port))
     }
   end
 

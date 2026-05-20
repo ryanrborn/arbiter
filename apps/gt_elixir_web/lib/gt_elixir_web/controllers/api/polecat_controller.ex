@@ -49,7 +49,14 @@ defmodule GtElixirWeb.Api.PolecatController do
   end
 
   defp sling_opts(params) do
-    [rig: params["rig"]]
+    [rig: params["rig"], start_claude: truthy(params["with_claude"])]
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
+
+  defp truthy(nil), do: nil
+  defp truthy(true), do: true
+  defp truthy("true"), do: true
+  defp truthy(false), do: false
+  defp truthy("false"), do: false
+  defp truthy(_), do: nil
 end
