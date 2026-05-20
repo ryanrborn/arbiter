@@ -21,15 +21,19 @@ defmodule GtElixir.Polecat.Sling do
   3. Start a polecat under `GtElixir.Polecat.Supervisor` for the bead.
   4. Attach `GtElixir.Workflows.Work` via `Workflows.Machine.attach/3` and
      start the machine.
+  5. Start a `GtElixir.Polecat.Driver` under the same supervisor — it
+     ticks the machine forward and closes the bead when the workflow
+     completes. Skipped when `start_driver: false`.
 
   ## Returns
 
   ```
   {:ok, %{
-    bead: %Issue{},          # updated, status: :in_progress
+    bead: %Issue{},            # updated, status: :in_progress
     polecat_pid: pid(),
     machine_id: String.t(),
-    machine_pid: pid()
+    machine_pid: pid(),
+    driver_pid: pid() | nil    # nil if start_driver: false
   }}
   ```
 
@@ -40,19 +44,22 @@ defmodule GtElixir.Polecat.Sling do
 
   alias GtElixir.Beads.Issue
   alias GtElixir.Polecat
+  alias GtElixir.Polecat.Driver
   alias GtElixir.Workflows.Machine
   alias GtElixir.Workflows.Work
 
   @type sling_opts :: [
           rig: String.t() | nil,
-          workflow_module: module()
+          workflow_module: module(),
+          start_driver: boolean()
         ]
 
   @type sling_result :: %{
           bead: Issue.t(),
           polecat_pid: pid(),
           machine_id: String.t(),
-          machine_pid: pid()
+          machine_pid: pid(),
+          driver_pid: pid() | nil
         }
 
   @spec sling(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
@@ -61,13 +68,16 @@ defmodule GtElixir.Polecat.Sling do
          :ok <- ensure_not_closed(bead),
          {:ok, bead} <- transition_to_in_progress(bead),
          {:ok, polecat_pid} <- start_polecat(bead, opts),
-         {:ok, machine_id, machine_pid} <- attach_and_start_machine(bead, opts) do
+         {:ok, machine_id, machine_pid} <- attach_and_start_machine(bead, opts),
+         {:ok, driver_pid} <-
+           maybe_start_driver(bead, polecat_pid, machine_id, machine_pid, opts) do
       {:ok,
        %{
          bead: bead,
          polecat_pid: polecat_pid,
          machine_id: machine_id,
-         machine_pid: machine_pid
+         machine_pid: machine_pid,
+         driver_pid: driver_pid
        }}
     else
       err -> err
@@ -119,6 +129,36 @@ defmodule GtElixir.Polecat.Sling do
       {:ok, machine_id, pid}
     else
       err -> {:error, {:machine_start_failed, err}}
+    end
+  end
+
+  defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, opts) do
+    case Keyword.get(opts, :start_driver, true) do
+      false ->
+        {:ok, nil}
+
+      true ->
+        driver_opts =
+          [
+            bead_id: id,
+            polecat_pid: polecat_pid,
+            machine_id: machine_id,
+            machine_pid: machine_pid
+          ]
+          |> maybe_put_opt(opts, :interval_ms)
+          |> maybe_put_opt(opts, :max_ticks)
+
+        case Driver.start(driver_opts) do
+          {:ok, pid} -> {:ok, pid}
+          {:error, reason} -> {:error, {:driver_start_failed, reason}}
+        end
+    end
+  end
+
+  defp maybe_put_opt(driver_opts, sling_opts, key) do
+    case Keyword.fetch(sling_opts, key) do
+      {:ok, val} -> Keyword.put(driver_opts, key, val)
+      :error -> driver_opts
     end
   end
 end

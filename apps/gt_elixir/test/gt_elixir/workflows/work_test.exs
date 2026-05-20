@@ -32,7 +32,7 @@ defmodule GtElixir.Workflows.WorkTest do
   end
 
   describe "run_step/2 — :load_context" do
-    test "loads the bead and stores it in state", %{ws: ws} do
+    test "succeeds and marks load_context_done when the bead exists", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "T", workspace_id: ws.id})
 
       assert {:ok, state} =
@@ -42,7 +42,11 @@ defmodule GtElixir.Workflows.WorkTest do
                  rig: "test/rig"
                })
 
-      assert state.bead.id == bead.id
+      assert state[:load_context_done] == true
+      # The Issue struct is intentionally NOT stored — state must be
+      # JSON-serializable for `Workflows.Machine` persistence. `:submit`
+      # re-fetches by bead_id.
+      refute Map.has_key?(state, :bead)
     end
 
     test "missing bead returns {:error, _}" do
@@ -67,11 +71,16 @@ defmodule GtElixir.Workflows.WorkTest do
     test ":none-tracked beads no-op", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "T", workspace_id: ws.id, tracker_type: :none})
 
-      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{bead: bead})
+      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{bead_id: bead.id})
     end
 
-    test "missing :bead in state returns an error" do
-      assert {:error, {:missing_bead, _}} = Work.run_step(:submit, %{})
+    test "missing :bead_id in state returns an error" do
+      assert {:error, {:missing_var, :bead_id}} = Work.run_step(:submit, %{})
+    end
+
+    test "bead_id pointing at a deleted bead returns {:error, {:bead_not_found, _}}" do
+      assert {:error, {:bead_not_found, "wt-no-such-bead"}} =
+               Work.run_step(:submit, %{bead_id: "wt-no-such-bead"})
     end
 
     test ":jira-tracked beads dispatch through the Jira adapter (config_missing path)" do
@@ -86,7 +95,7 @@ defmodule GtElixir.Workflows.WorkTest do
           tracker_ref: "VR-1"
         })
 
-      result = Work.run_step(:submit, %{bead: bead})
+      result = Work.run_step(:submit, %{bead_id: bead.id})
       assert match?({:error, _}, result)
     end
 
