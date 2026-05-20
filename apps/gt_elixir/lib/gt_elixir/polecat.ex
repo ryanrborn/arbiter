@@ -246,7 +246,22 @@ defmodule GtElixir.Polecat do
       meta: Keyword.get(opts, :meta, %{})
     }
 
+    broadcast_lifecycle(:started, state)
+
     {:ok, state}
+  end
+
+  @doc false
+  def broadcast_lifecycle(event, %State{} = state) when event in [:started, :stopped] do
+    Phoenix.PubSub.broadcast(
+      GtElixir.PubSub,
+      "polecats",
+      {:polecat_lifecycle, event, snapshot(state)}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   @impl true
@@ -430,12 +445,13 @@ defmodule GtElixir.Polecat do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   @impl true
-  def terminate(_reason, %State{bead_id: bead_id}) do
+  def terminate(_reason, %State{bead_id: bead_id} = state) do
     # Explicitly unregister so callers that ask `whereis/1` immediately after
     # `GenServer.stop/1` see `nil` deterministically. Registry's own
     # monitor-based cleanup runs asynchronously and was the source of a flaky
     # test where `whereis/1` returned the dead pid briefly after stop.
     PRegistry.unregister(bead_id)
+    broadcast_lifecycle(:stopped, state)
     :ok
   end
 

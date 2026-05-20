@@ -17,7 +17,8 @@ defmodule GtElixirWeb.Router do
   scope "/", GtElixirWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    live "/", DashboardLive
+    get "/about", PageController, :home
 
     live "/workspace/:id/settings/vernacular", WorkspaceVernacularLive
     live "/audit", AuditLogLive
