@@ -3,7 +3,7 @@ defmodule GtElixir.TrackersTest do
 
   alias GtElixir.Beads.Issue
   alias GtElixir.Trackers
-  alias GtElixir.Trackers.None
+  alias GtElixir.Trackers.{Jira, None}
 
   describe "for_bead/1 and for_type/1" do
     test "returns Tracker.None for :none-typed issues" do
@@ -15,18 +15,18 @@ defmodule GtElixir.TrackersTest do
       assert Trackers.for_type(:none) == None
     end
 
-    test "for_type/1 raises ArgumentError for unregistered types (e.g. :jira pre-Phase-3)" do
-      assert_raise ArgumentError, ~r/no tracker adapter registered for :jira/, fn ->
-        Trackers.for_type(:jira)
-      end
+    test "for_type/1 returns Tracker.Jira for :jira (wired in gte-029)" do
+      assert Trackers.for_type(:jira) == Jira
+    end
 
-      assert_raise ArgumentError, ~r/registered: \[:none\]/, fn ->
+    test "for_type/1 raises ArgumentError for unregistered types (e.g. :linear pre-Phase-5)" do
+      assert_raise ArgumentError, ~r/no tracker adapter registered for :linear/, fn ->
         Trackers.for_type(:linear)
       end
     end
 
     test "adapters/0 exposes the registered map" do
-      assert Trackers.adapters() == %{none: None}
+      assert Trackers.adapters() == %{none: None, jira: Jira}
     end
   end
 

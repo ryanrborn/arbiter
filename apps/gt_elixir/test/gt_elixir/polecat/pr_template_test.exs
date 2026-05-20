@@ -137,16 +137,17 @@ defmodule GtElixir.Polecat.PRTemplateTest do
       assert PRTemplate.fill("type: {{tracker.type}}", bead) == "type: none"
     end
 
-    test "unregistered tracker type (e.g. :jira pre-Phase-3) — safe_link_for catches the raise" do
+    test "unregistered tracker type (:linear / :github pre-Phase-5) — safe_link_for catches the raise" do
       # Trackers.link_for raises ArgumentError for unregistered tracker types.
       # PRTemplate should treat that as no-link and drop the line, not crash.
+      # (:jira is registered as of gte-029; :linear and :github remain Phase 5.)
       bead = %Issue{
         id: "x-1",
         title: "t",
         priority: 2,
         issue_type: :task,
-        tracker_type: :jira,
-        tracker_ref: "VR-1"
+        tracker_type: :linear,
+        tracker_ref: "LIN-1"
       }
 
       template = "Link: {{tracker.link}}"
