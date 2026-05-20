@@ -44,21 +44,33 @@ defmodule GtElixirCli.Main do
     end
   end
 
-  defp dispatch("show", args), do: GtElixirCli.Cmd.Show.run(args)
-  defp dispatch("create", args), do: GtElixirCli.Cmd.Create.run(args)
-  defp dispatch("close", args), do: GtElixirCli.Cmd.Close.run(args)
-  defp dispatch("list", args), do: GtElixirCli.Cmd.List.run(args)
-  defp dispatch("update", args), do: GtElixirCli.Cmd.Update.run(args)
-  defp dispatch("dep", args), do: GtElixirCli.Cmd.Dep.run(args)
-  defp dispatch("ready", args), do: GtElixirCli.Cmd.Ready.run(args)
-  defp dispatch("doctor", args), do: GtElixirCli.Cmd.Doctor.run(args)
-  defp dispatch("where", args), do: GtElixirCli.Cmd.Where.run(args)
+  defp dispatch(cmd, args) do
+    case GtElixirCli.AliasResolver.resolve(cmd) do
+      {:ok, canonical} ->
+        dispatch_known(canonical, args)
 
-  defp dispatch(cmd, _args) do
-    IO.puts(:stderr, "bd2: unknown command: #{cmd}")
-    IO.puts(:stderr, "Run `bd2 help` for usage.")
-    GtElixirCli.Output.halt(2)
+      {:unknown, suggestions} ->
+        IO.puts(:stderr, "bd2: unknown command: #{cmd}")
+
+        if suggestions != [] do
+          IO.puts(:stderr, "Did you mean: #{Enum.join(suggestions, ", ")}?")
+        end
+
+        IO.puts(:stderr, "Run `bd2 help` for usage.")
+        GtElixirCli.Output.halt(2)
+    end
   end
+
+  defp dispatch_known("show", args), do: GtElixirCli.Cmd.Show.run(args)
+  defp dispatch_known("create", args), do: GtElixirCli.Cmd.Create.run(args)
+  defp dispatch_known("close", args), do: GtElixirCli.Cmd.Close.run(args)
+  defp dispatch_known("list", args), do: GtElixirCli.Cmd.List.run(args)
+  defp dispatch_known("update", args), do: GtElixirCli.Cmd.Update.run(args)
+  defp dispatch_known("dep", args), do: GtElixirCli.Cmd.Dep.run(args)
+  defp dispatch_known("ready", args), do: GtElixirCli.Cmd.Ready.run(args)
+  defp dispatch_known("doctor", args), do: GtElixirCli.Cmd.Doctor.run(args)
+  defp dispatch_known("where", args), do: GtElixirCli.Cmd.Where.run(args)
+  defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do
     IO.puts(@moduledoc)
