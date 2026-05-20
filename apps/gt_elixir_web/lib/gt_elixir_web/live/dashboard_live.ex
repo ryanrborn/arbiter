@@ -34,7 +34,9 @@ defmodule GtElixirWeb.DashboardLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket) do
+    live? = connected?(socket)
+
+    if live? do
       Phoenix.PubSub.subscribe(GtElixir.PubSub, @beads_topic)
       Phoenix.PubSub.subscribe(GtElixir.PubSub, @polecats_topic)
     end
@@ -42,6 +44,7 @@ defmodule GtElixirWeb.DashboardLive do
     {:ok,
      socket
      |> assign(:now, DateTime.utc_now())
+     |> assign(:live, live?)
      |> assign(:worker_label, Vernacular.label(:worker))
      |> refresh_polecats()
      |> refresh_recent_beads()}
@@ -100,7 +103,27 @@ defmodule GtElixirWeb.DashboardLive do
   def render(assigns) do
     ~H"""
     <div class="p-6 max-w-7xl mx-auto">
-      <h1 class="text-2xl font-bold mb-6">Dashboard</h1>
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold">Dashboard</h1>
+        <span
+          id="live-indicator"
+          class={[
+            "badge badge-sm",
+            if(@live, do: "badge-success", else: "badge-warning")
+          ]}
+          title={
+            if @live,
+              do: "WebSocket connected — updates arrive in real time",
+              else: "Static render — refresh the page to reconnect"
+          }
+        >
+          <%= if @live do %>
+            ● live
+          <% else %>
+            ⚠ stale (refresh)
+          <% end %>
+        </span>
+      </div>
 
       <div class="grid grid-cols-2 gap-6">
         <section class="card bg-base-200 p-4">

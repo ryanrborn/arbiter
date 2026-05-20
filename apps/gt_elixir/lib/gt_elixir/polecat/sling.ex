@@ -50,6 +50,7 @@ defmodule GtElixir.Polecat.Sling do
   """
 
   alias GtElixir.Beads.Issue
+  alias GtElixir.Beads.Workspace
   alias GtElixir.Polecat
   alias GtElixir.Polecat.BranchNamer
   alias GtElixir.Polecat.ClaudeSession
@@ -63,7 +64,8 @@ defmodule GtElixir.Polecat.Sling do
           workflow_module: module(),
           start_driver: boolean(),
           start_claude: boolean(),
-          claude_command: [String.t()] | nil
+          claude_command: [String.t()] | nil,
+          cleanup_worktree: boolean()
         ]
 
   @type sling_result :: %{
@@ -88,7 +90,7 @@ defmodule GtElixir.Polecat.Sling do
          {:ok, machine_id, machine_pid} <-
            attach_and_start_machine(bead, worktree_path, opts),
          {:ok, driver_pid} <-
-           maybe_start_driver(bead, polecat_pid, machine_id, machine_pid, opts) do
+           maybe_start_driver(bead, polecat_pid, machine_id, machine_pid, worktree_path, opts) do
       {:ok,
        %{
          bead: bead,
@@ -156,11 +158,20 @@ defmodule GtElixir.Polecat.Sling do
   #
   # Behaviour:
   #   - `provision_worktree: false` in opts → skip, return `{:ok, nil}`.
-  #   - rig has no `:gt_elixir | :rig_paths` config entry → skip, return
-  #     `{:ok, nil}` (the default no-op stance, so tests that don't set up
-  #     rig_paths continue to work).
+  #   - rig has no mapping in workspace config or Application env → skip,
+  #     return `{:ok, nil}` (the default no-op stance).
   #   - Otherwise, derive a branch name from the bead via `BranchNamer` and
   #     call `Worktree.create/3`. Returns `{:ok, path}` or `{:error, ...}`.
+  #
+  # ## Rig path lookup order
+  #
+  #   1. Bead's workspace config (`workspace.config["rig_paths"][rig]`)
+  #      — per-workspace, runtime-settable, owns the source of truth.
+  #   2. Application env (`:gt_elixir, :rig_paths`) — global fallback,
+  #      configured in `config/dev.exs` for dev convenience.
+  #
+  # First hit wins. This lets workspaces override the global default
+  # without changing application config.
   defp maybe_provision_worktree(%Issue{} = bead, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
@@ -168,9 +179,8 @@ defmodule GtElixir.Polecat.Sling do
 
       true ->
         rig = Keyword.get(opts, :rig)
-        rig_paths = Application.get_env(:gt_elixir, :rig_paths, %{})
 
-        case Map.get(rig_paths, rig) do
+        case resolve_rig_path(bead, rig) do
           nil ->
             {:ok, nil}
 
@@ -183,6 +193,37 @@ defmodule GtElixir.Polecat.Sling do
               {:error, reason} -> {:error, {:worktree_failed, reason}}
             end
         end
+    end
+  end
+
+  defp resolve_rig_path(_bead, nil), do: nil
+
+  defp resolve_rig_path(%Issue{workspace_id: ws_id}, rig) when is_binary(rig) do
+    workspace_path(ws_id, rig) || application_path(rig)
+  end
+
+  defp workspace_path(nil, _rig), do: nil
+
+  defp workspace_path(ws_id, rig) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{config: %{} = config}} ->
+        case get_in(config, ["rig_paths", rig]) do
+          path when is_binary(path) and path != "" -> path
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp application_path(rig) do
+    rig_paths = Application.get_env(:gt_elixir, :rig_paths, %{})
+    case Map.get(rig_paths, rig) do
+      path when is_binary(path) and path != "" -> path
+      _ -> nil
     end
   end
 
@@ -253,7 +294,7 @@ defmodule GtElixir.Polecat.Sling do
     """
   end
 
-  defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, opts) do
+  defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, worktree_path, opts) do
     case Keyword.get(opts, :start_driver, true) do
       false ->
         {:ok, nil}
@@ -264,7 +305,9 @@ defmodule GtElixir.Polecat.Sling do
             bead_id: id,
             polecat_pid: polecat_pid,
             machine_id: machine_id,
-            machine_pid: machine_pid
+            machine_pid: machine_pid,
+            worktree_path: worktree_path,
+            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false)
           ]
           |> maybe_put_opt(opts, :interval_ms)
           |> maybe_put_opt(opts, :max_ticks)
