@@ -70,6 +70,7 @@ defmodule GtElixirCli.Main do
   defp dispatch_known("ready", args), do: GtElixirCli.Cmd.Ready.run(args)
   defp dispatch_known("doctor", args), do: GtElixirCli.Cmd.Doctor.run(args)
   defp dispatch_known("where", args), do: GtElixirCli.Cmd.Where.run(args)
+  defp dispatch_known("sling", args), do: GtElixirCli.Cmd.Sling.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do
