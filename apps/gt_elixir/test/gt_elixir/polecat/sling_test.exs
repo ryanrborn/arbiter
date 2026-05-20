@@ -148,6 +148,59 @@ defmodule GtElixir.Polecat.SlingTest do
                  claude_command: ["echo", "x"]
                )
     end
+
+    test "start_claude: true implies claude_driven Driver mode (no workflow ticking)",
+         %{ws: ws, tmp: tmp} do
+      {:ok, bead} = Ash.create(Issue, %{title: "drvr-mode", workspace_id: ws.id})
+
+      repo = Path.join(tmp, "drvrepo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      Application.put_env(:gt_elixir, :worktree_root, Path.join(tmp, "drv-wt"))
+      Application.put_env(:gt_elixir, :rig_paths, %{"drvr/rig" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:gt_elixir, :worktree_root)
+        Application.delete_env(:gt_elixir, :rig_paths)
+      end)
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "drvr/rig",
+          start_claude: true,
+          claude_command: ["true"],
+          # Speed up the polecat-status polling for the assertion below.
+          interval_ms: 5,
+          max_ticks: 50
+        )
+
+      assert is_pid(result.driver_pid)
+
+      # If the Driver were in workflow mode, the no-op steps would close
+      # the bead in ~500ms. Wait that long and verify the bead is still
+      # :in_progress — the Driver is waiting on the polecat instead.
+      Process.sleep(150)
+
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :in_progress
+
+      # Now simulate Claude completion and let the Driver react.
+      :ok = Polecat.advance(result.polecat_pid, :running)
+      :ok = Polecat.complete(result.polecat_pid, :claude_done)
+
+      ref = Process.monitor(result.driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :closed
+    end
   end
 
   describe "worktree provisioning" do
