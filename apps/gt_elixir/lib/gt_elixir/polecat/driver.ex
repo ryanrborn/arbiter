@@ -1,40 +1,51 @@
 defmodule GtElixir.Polecat.Driver do
   @moduledoc """
-  Ticks a `GtElixir.Workflows.Machine` forward and mirrors its progress
-  onto the paired `GtElixir.Polecat`. Closes the bead when the workflow
-  completes.
+  Drives a bead to completion. Has two modes:
 
-  Started by `GtElixir.Polecat.Sling.sling/2` after a polecat and machine
-  are paired. Lives under `GtElixir.Polecat.Supervisor`.
+  ### Workflow mode (default)
 
-  ## Lifecycle
+  Ticks `GtElixir.Workflows.Machine` forward and mirrors its progress onto
+  the paired `GtElixir.Polecat`. Closes the bead when the workflow
+  completes. Used for bookkeeping-only polecats.
+
+  ### Claude-driven mode (`claude_driven: true`)
+
+  A Claude subprocess is doing the real work; the Driver does NOT tick the
+  Machine. Instead it polls the polecat's status and closes the bead when
+  the polecat reaches `:completed` (typically triggered by Claude printing
+  `gt done` on stdout — see `Polecat.ClaudeSession`).
+
+  This mode resolves the Driver/Claude race that `bd2 sling --with-claude`
+  exposed: the bookkeeping workflow used to finish in ~500ms and close the
+  bead before Claude had time to respond.
+
+  ## Lifecycle (workflow mode)
 
   - On start: schedules the first tick immediately.
   - On each tick: calls `Machine.advance/1` and reacts:
     - `{:ok, :completed}` → `Polecat.complete/2`, close the bead, stop.
     - `{:ok, next_step}` → `Polecat.advance/2`, schedule next tick.
     - `{:error, reason}` → `Polecat.fail/2`, stop (bead remains `:in_progress`).
-  - On polecat or machine `:DOWN`: stop cleanly; if the machine died first,
-    mark the polecat `:failed`.
 
-  ## Safety backstop
+  ## Lifecycle (claude-driven mode)
 
-  A `:max_ticks` option (default 50) bounds the loop so a buggy workflow
-  can't spin forever. 50 ticks at 100ms is 5 seconds of placeholder
-  workflow time — plenty for the no-op steps in `Workflows.Work`. Real
-  workflows that need to wait on async events should use `Polecat.await/2`
-  (and a future event-driven driver) rather than longer ticks.
+  - On start: schedules the first polecat check.
+  - On each check: reads polecat status:
+    - `:completed` → close the bead, optionally cleanup worktree, stop.
+    - `:failed` → log, stop (bead remains `:in_progress` for inspection).
+    - `:idle | :running | :awaiting` → schedule next check.
 
-  ## What this does NOT do (yet)
+  ## Shared lifecycle
 
-  - Launch a Claude subprocess. The workflow's `run_step/2` is currently a
-    no-op for `:design`/`:implement`/`:pre_verify`. Wiring
-    `GtElixir.Polecat.ClaudeSession.start/1` into the polecat's
-    `:running` transition is the next bead.
-  - Provision a worktree. `Sling` still passes `worktree_path: nil`.
-    Worktree provisioning is the bead after that.
-  - Retry on failure. A failed workflow leaves the bead in `:in_progress`
-    for operator inspection.
+  - On polecat or machine `:DOWN`: stop cleanly; if the machine died first
+    (workflow mode), mark the polecat `:failed`.
+
+  ## Safety backstops
+
+  `:max_ticks` bounds the loop. Defaults differ by mode:
+    - workflow mode: 50 ticks × 100ms = 5 seconds (plenty for no-op steps).
+    - claude-driven mode: 1800 ticks × 1000ms = 30 minutes (room for real
+      Claude work; tune via the `:max_ticks` and `:interval_ms` opts).
   """
 
   use GenServer
@@ -45,8 +56,11 @@ defmodule GtElixir.Polecat.Driver do
   alias GtElixir.Polecat.Worktree
   alias GtElixir.Workflows.Machine
 
-  @default_interval_ms 100
-  @default_max_ticks 50
+  @workflow_default_interval_ms 100
+  @workflow_default_max_ticks 50
+
+  @claude_default_interval_ms 1_000
+  @claude_default_max_ticks 1_800
 
   @type opts :: [
           bead_id: String.t(),
@@ -56,7 +70,8 @@ defmodule GtElixir.Polecat.Driver do
           interval_ms: non_neg_integer(),
           max_ticks: non_neg_integer(),
           worktree_path: String.t() | nil,
-          cleanup_worktree: boolean()
+          cleanup_worktree: boolean(),
+          claude_driven: boolean()
         ]
 
   @spec start(opts()) :: DynamicSupervisor.on_start_child()
@@ -83,13 +98,16 @@ defmodule GtElixir.Polecat.Driver do
 
   @impl true
   def init(opts) do
+    claude_driven = Keyword.get(opts, :claude_driven, false)
+
     state = %{
       bead_id: Keyword.fetch!(opts, :bead_id),
       polecat_pid: Keyword.fetch!(opts, :polecat_pid),
       machine_id: Keyword.fetch!(opts, :machine_id),
       machine_pid: Keyword.fetch!(opts, :machine_pid),
-      interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
-      max_ticks: Keyword.get(opts, :max_ticks, @default_max_ticks),
+      claude_driven: claude_driven,
+      interval_ms: Keyword.get(opts, :interval_ms, default_interval_for(claude_driven)),
+      max_ticks: Keyword.get(opts, :max_ticks, default_max_ticks_for(claude_driven)),
       worktree_path: Keyword.get(opts, :worktree_path),
       cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false),
       ticks: 0
@@ -98,9 +116,18 @@ defmodule GtElixir.Polecat.Driver do
     Process.monitor(state.polecat_pid)
     Process.monitor(state.machine_pid)
 
-    schedule_tick(0)
+    schedule_first(state)
     {:ok, state}
   end
+
+  defp default_interval_for(true), do: @claude_default_interval_ms
+  defp default_interval_for(false), do: @workflow_default_interval_ms
+
+  defp default_max_ticks_for(true), do: @claude_default_max_ticks
+  defp default_max_ticks_for(false), do: @workflow_default_max_ticks
+
+  defp schedule_first(%{claude_driven: true}), do: Process.send_after(self(), :check_polecat, 0)
+  defp schedule_first(%{claude_driven: false}), do: Process.send_after(self(), :tick, 0)
 
   @impl true
   def handle_info(:tick, %{ticks: t, max_ticks: m} = state) when t >= m do
@@ -110,6 +137,40 @@ defmodule GtElixir.Polecat.Driver do
 
     safe(fn -> Polecat.fail(state.polecat_pid, {:driver_timeout, m}) end)
     {:stop, :normal, state}
+  end
+
+  def handle_info(:check_polecat, %{ticks: t, max_ticks: m} = state) when t >= m do
+    Logger.warning(
+      "Polecat.Driver (claude_driven) hit max_ticks=#{m} for bead=#{state.bead_id}; stopping"
+    )
+
+    {:stop, :normal, state}
+  end
+
+  def handle_info(:check_polecat, state) do
+    case safe_polecat_state(state.polecat_pid) do
+      %{status: :completed} ->
+        close_bead(state.bead_id)
+        maybe_cleanup_worktree(state)
+        {:stop, :normal, state}
+
+      %{status: :failed} ->
+        Logger.warning(
+          "Polecat.Driver (claude_driven): polecat failed for bead=#{state.bead_id}; leaving bead :in_progress"
+        )
+
+        {:stop, :normal, state}
+
+      %{status: status} when status in [:idle, :running, :awaiting] ->
+        Process.send_after(self(), :check_polecat, state.interval_ms)
+        {:noreply, %{state | ticks: state.ticks + 1}}
+
+      nil ->
+        # Polecat snapshot unavailable (process likely dead) — the :DOWN
+        # handler will fire next, just stop trying for now.
+        Process.send_after(self(), :check_polecat, state.interval_ms)
+        {:noreply, %{state | ticks: state.ticks + 1}}
+    end
   end
 
   def handle_info(:tick, state) do
@@ -158,6 +219,14 @@ defmodule GtElixir.Polecat.Driver do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp safe_polecat_state(pid) do
+    Polecat.state(pid)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp safe(fun) do

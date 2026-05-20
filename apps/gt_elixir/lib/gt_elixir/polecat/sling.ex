@@ -300,6 +300,14 @@ defmodule GtElixir.Polecat.Sling do
         {:ok, nil}
 
       true ->
+        # When Claude is in charge of doing the real work, the Driver
+        # waits on the polecat's completion instead of ticking the
+        # bookkeeping Machine to closure. This avoids the race where the
+        # no-op workflow's 5 steps finish in ~500ms and close the bead
+        # before Claude has time to respond.
+        claude_driven =
+          Keyword.get(opts, :claude_driven, Keyword.get(opts, :start_claude, false))
+
         driver_opts =
           [
             bead_id: id,
@@ -307,7 +315,8 @@ defmodule GtElixir.Polecat.Sling do
             machine_id: machine_id,
             machine_pid: machine_pid,
             worktree_path: worktree_path,
-            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false)
+            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false),
+            claude_driven: claude_driven
           ]
           |> maybe_put_opt(opts, :interval_ms)
           |> maybe_put_opt(opts, :max_ticks)
