@@ -64,13 +64,23 @@ defmodule GtElixir.Workflows.Work do
     vars: []
 
   @impl true
-  def run_step(:load_context, %{bead_id: bead_id} = state) do
-    case Ash.get(Issue, bead_id) do
-      {:ok, issue} ->
-        {:ok, Map.put(state, :bead, issue)}
+  def run_step(:load_context, state) do
+    case fetch_var(state, :bead_id) do
+      {:ok, bead_id} ->
+        case Ash.get(Issue, bead_id) do
+          {:ok, %Issue{}} ->
+            # Don't put the struct into state — `Workflows.Machine`
+            # JSON-encodes state on every persist, and Ash structs aren't
+            # Jason-serializable. Just record that we successfully loaded;
+            # `:submit` re-fetches.
+            {:ok, Map.put(state, :load_context_done, true)}
 
-      {:error, _} = err ->
-        err
+          {:error, _} = err ->
+            err
+        end
+
+      :error ->
+        {:error, {:missing_var, :bead_id}}
     end
   end
 
@@ -89,31 +99,44 @@ defmodule GtElixir.Workflows.Work do
     {:ok, Map.put(state, :pre_verify_done, true)}
   end
 
-  def run_step(:submit, %{bead: %Issue{} = bead} = state) do
-    # Polymorphic dispatch via the bead's tracker. None-tracked beads no-op
-    # silently; Jira/Linear/GitHub beads call out through their adapter.
-    # Trackers.transition raises ArgumentError for unregistered types (e.g.
-    # :linear pre-Phase-5); we let that propagate so misconfigured beads
-    # surface loudly rather than silently failing to notify.
-    case safe_transition(bead) do
-      :ok ->
-        {:ok, Map.put(state, :submit_result, :ok)}
-
-      {:error, reason} = err ->
-        {:error,
-         Map.put(state, :submit_result, {:error, reason})
-         |> Map.put(:error_reason, reason)}
-        # ^^ workflow runner treats this as failed; reason propagates up
-        err
-    end
-  end
-
   def run_step(:submit, state) do
-    # If :load_context didn't store the bead (shouldn't happen given needs:
-    # but be defensive), fall through with a clear error.
-    {:error, {:missing_bead, state}}
+    # Re-fetch the bead by id rather than reading a struct from state
+    # (state is JSON-roundtripped between steps; structs don't survive).
+    case fetch_var(state, :bead_id) do
+      {:ok, bead_id} ->
+        case Ash.get(Issue, bead_id) do
+          {:ok, %Issue{} = bead} ->
+            case safe_transition(bead) do
+              :ok ->
+                {:ok, Map.put(state, :submit_result, :ok)}
+
+              {:error, reason} = err ->
+                _ =
+                  state
+                  |> Map.put(:submit_result, {:error, reason})
+                  |> Map.put(:error_reason, reason)
+
+                err
+            end
+
+          {:error, _} ->
+            {:error, {:bead_not_found, bead_id}}
+        end
+
+      :error ->
+        {:error, {:missing_var, :bead_id}}
+    end
   end
 
   defp safe_transition(%Issue{tracker_type: :none}), do: :ok
   defp safe_transition(%Issue{} = bead), do: Trackers.transition(bead, :closed)
+
+  # Tolerate both atom-keyed (direct test callers) and string-keyed
+  # (`Workflows.Machine` after JSON roundtrip) state maps.
+  defp fetch_var(state, key) when is_atom(key) do
+    case Map.fetch(state, key) do
+      {:ok, val} -> {:ok, val}
+      :error -> Map.fetch(state, Atom.to_string(key))
+    end
+  end
 end

@@ -12,6 +12,8 @@ defmodule GtElixir.Polecat do
   ## Status FSM
 
       :idle      → :running     (advance/2 from :idle)
+      :idle      → :failed      (fail/2 — "stillborn" polecat, e.g. machine
+                                  died before any step ran)
       :running   → :awaiting    (await/2  — parked waiting on external event)
       :awaiting  → :running     (resume/1)
       :running   → :completed   (complete/2 — normal exit)
@@ -324,7 +326,7 @@ defmodule GtElixir.Polecat do
   end
 
   def handle_call({:fail, reason}, _from, %State{status: status} = state)
-      when status in [:running, :awaiting] do
+      when status in [:idle, :running, :awaiting] do
     meta =
       case reason do
         nil -> state.meta
