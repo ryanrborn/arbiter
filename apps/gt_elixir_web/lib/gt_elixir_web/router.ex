@@ -18,6 +18,8 @@ defmodule GtElixirWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+
+    live "/workspace/:id/settings/vernacular", WorkspaceVernacularLive
   end
 
   scope "/api", GtElixirWeb.Api do
