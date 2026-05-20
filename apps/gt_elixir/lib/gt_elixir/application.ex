@@ -12,7 +12,8 @@ defmodule GtElixir.Application do
       {DNSCluster, query: Application.get_env(:gt_elixir, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: GtElixir.PubSub},
       {Registry, keys: :unique, name: GtElixir.Polecat.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: GtElixir.Polecat.Supervisor}
+      {DynamicSupervisor, strategy: :one_for_one, name: GtElixir.Polecat.Supervisor},
+      {Registry, keys: :unique, name: GtElixir.Workflows.MachineRegistry}
       # Start a worker by calling: GtElixir.Worker.start_link(arg)
       # {GtElixir.Worker, arg}
     ]

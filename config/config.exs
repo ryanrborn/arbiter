@@ -51,7 +51,7 @@ config :spark,
 # Configure Mix tasks and generators
 config :gt_elixir,
   ecto_repos: [GtElixir.Repo],
-  ash_domains: [GtElixir.Beads]
+  ash_domains: [GtElixir.Beads, GtElixir.Workflows]
 
 config :gt_elixir_web,
   ecto_repos: [GtElixir.Repo],
