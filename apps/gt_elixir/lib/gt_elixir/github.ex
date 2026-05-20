@@ -169,6 +169,46 @@ defmodule GtElixir.GitHub do
     end
   end
 
+  @typedoc """
+  Verdict event for a PR review. Maps to GitHub's `event` field on
+  `POST /repos/:owner/:repo/pulls/:number/reviews`:
+
+    * `:approve`         → `APPROVE`
+    * `:request_changes` → `REQUEST_CHANGES`
+    * `:comment`         → `COMMENT`
+  """
+  @type review_event :: :approve | :request_changes | :comment
+
+  @doc """
+  Submit a top-level review on a PR with an approve / request-changes /
+  comment verdict. This is the typed Elixir replacement for the Go GT's
+  `gh pr review --approve / --request-changes` shell-out.
+
+  `body` is the review summary; pass `""` for an approve-with-no-comment.
+
+  Returns `{:ok, review_payload}` on success.
+  """
+  @spec pr_review(repo, pr_number, review_event, String.t(), opts) :: result(map())
+  def pr_review(repo, pr_number, event, body \\ "", opts \\ [])
+      when event in [:approve, :request_changes, :comment] do
+    payload = %{
+      "body" => body,
+      "event" => event_to_github(event)
+    }
+
+    request(
+      :post,
+      "/repos/#{repo}/pulls/#{pr_number}/reviews",
+      [json: payload],
+      opts
+    )
+    |> handle_json()
+  end
+
+  defp event_to_github(:approve), do: "APPROVE"
+  defp event_to_github(:request_changes), do: "REQUEST_CHANGES"
+  defp event_to_github(:comment), do: "COMMENT"
+
   @doc """
   Merge a PR. `strategy` is one of `:merge`, `:squash`, `:rebase` and maps
   to GitHub's `merge_method` parameter.
