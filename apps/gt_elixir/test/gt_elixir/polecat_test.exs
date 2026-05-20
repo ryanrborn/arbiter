@@ -232,4 +232,36 @@ defmodule GtElixir.PolecatTest do
       assert Polecat.whereis(bead_id) == nil
     end
   end
+
+  describe "list_children/0" do
+    test "lists active polecat snapshots; crashed entries are omitted" do
+      {_pid_a, bead_a} = start_polecat()
+      {_pid_b, bead_b} = start_polecat()
+      {pid_c, _bead_c} = start_polecat()
+
+      ids = Polecat.list_children() |> Enum.map(& &1.bead_id) |> Enum.sort()
+      assert bead_a in ids
+      assert bead_b in ids
+      assert length(ids) >= 3
+
+      ref = Process.monitor(pid_c)
+      Process.exit(pid_c, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^pid_c, :killed}, 1_000
+      Process.sleep(50)
+
+      after_ids = Polecat.list_children() |> Enum.map(& &1.bead_id)
+      assert bead_a in after_ids
+      assert bead_b in after_ids
+      # crashed polecat (bead_c) is gone
+    end
+
+    test "snapshots include :pid and the standard state keys" do
+      {pid, _bead} = start_polecat()
+      [entry | _] = Polecat.list_children() |> Enum.filter(&(&1.pid == pid))
+
+      for key <- [:bead_id, :workspace_id, :rig, :current_step, :status, :started_at, :meta] do
+        assert Map.has_key?(entry, key), "missing #{inspect(key)} in #{inspect(entry)}"
+      end
+    end
+  end
 end
