@@ -76,6 +76,16 @@ defmodule GtElixir.GitHub do
     |> handle_json()
   end
 
+  @doc """
+  List open PRs for a repo. Returns the JSON array (each entry has at least
+  `number`, `title`, `state`, `head.sha`, `head.ref`, `user.login`).
+  """
+  @spec pr_list_open(repo, opts) :: result([map()])
+  def pr_list_open(repo, opts \\ []) do
+    request(:get, "/repos/#{repo}/pulls", [params: [state: "open", per_page: 100]], opts)
+    |> handle_json()
+  end
+
   @doc "List reviews (approvals, change-requests, comments) on a PR."
   @spec pr_list_reviews(repo, pr_number, opts) :: result([map()])
   def pr_list_reviews(repo, pr_number, opts \\ []) do
