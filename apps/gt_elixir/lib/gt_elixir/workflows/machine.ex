@@ -117,9 +117,27 @@ defmodule GtElixir.Workflows.Machine do
   The process is registered under `GtElixir.Workflows.MachineRegistry`
   with `id` as the key, so a subsequent `start/1` with the same id while
   the machine is alive returns `{:error, {:already_started, pid}}`.
+
+  The machine runs under `GtElixir.Workflows.MachineSupervisor` (a
+  `DynamicSupervisor`), so it is **not** linked to the caller. This
+  matters for short-lived callers like HTTP request handlers: linking
+  would cause the machine to die when the handler returned.
   """
   @spec start(id()) :: {:ok, pid()} | {:error, term()}
   def start(id) when is_binary(id) do
+    case DynamicSupervisor.start_child(
+           GtElixir.Workflows.MachineSupervisor,
+           {__MODULE__, id}
+         ) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:error, {:already_started, pid}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec start_link(id()) :: GenStateMachine.on_start()
+  def start_link(id) when is_binary(id) do
     with {:ok, row} <- get_row(id),
          {:ok, mod} <- load_workflow_module(row.workflow_module) do
       data = %Data{
@@ -132,8 +150,20 @@ defmodule GtElixir.Workflows.Machine do
         state: row.state || %{}
       }
 
-      GenStateMachine.start_link(__MODULE__, {row.status, data}, name: MachineRegistry.via_tuple(id))
+      GenStateMachine.start_link(__MODULE__, {row.status, data},
+        name: MachineRegistry.via_tuple(id)
+      )
     end
+  end
+
+  @doc false
+  def child_spec(id) when is_binary(id) do
+    %{
+      id: {__MODULE__, id},
+      start: {__MODULE__, :start_link, [id]},
+      restart: :temporary,
+      type: :worker
+    }
   end
 
   @doc "Return the pid for `id`, or `nil`."
