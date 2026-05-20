@@ -34,14 +34,32 @@ Run through this before starting the cutover window.
 
 Do these in order. Each step has a verification check before moving on.
 
-### 1. Stop the GT daemon
+### 1. Stop GT
+
+GT is several pieces (mayor session, polecat workers, refineries,
+witnesses, deacon, Dolt server). The right command depends on whether you
+want a reversible pause or a permanent shutdown:
 
 ```bash
-gt stop                      # graceful shutdown of mayor + workers
-gt dolt status               # confirm everything's idle
+gt down                      # reversible pause: stops infra, KEEPS worktrees
+# OR
+gt shutdown                  # done-for-the-day: stops infra AND cleans up
+                             # polecat worktrees/branches (uncommitted work
+                             # is protected). Use this for cutover.
+gt dolt status               # confirm Dolt server is also down
 ```
 
-**Verify:** `pgrep -f 'gt.*mayor'` returns nothing.
+`gt down` and `gt shutdown` both stop the global mayor, per-rig
+refineries/witnesses/crew, the deacon/boot watchdogs, the Go daemon,
+and the Dolt SQL server. `gt down` leaves polecat worktrees on disk so
+in-progress work can be resumed; `gt shutdown` cleans them up (skipping
+any with uncommitted changes).
+
+For the cutover you generally want **`gt shutdown`** — you're committing
+to the new world, not pausing.
+
+**Verify:** `pgrep -af 'gt mayor|polecat|refinery|witness|dolt sql-server'`
+returns nothing.
 
 ### 2. Run the importer one last time
 
