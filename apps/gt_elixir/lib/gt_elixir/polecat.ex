@@ -127,6 +127,38 @@ defmodule GtElixir.Polecat do
   def whereis(bead_id) when is_binary(bead_id), do: PRegistry.whereis(bead_id)
 
   @doc """
+  Return a list of active polecat snapshots — one entry per child under
+  `GtElixir.Polecat.Supervisor`. Crashed / stopped polecats are omitted.
+
+  Each entry is the same snapshot map `state/1` returns (bead_id,
+  workspace_id, rig, current_step, status, started_at, step_started_at,
+  meta), plus `:pid`.
+  """
+  @spec list_children() :: [map()]
+  def list_children do
+    GtElixir.Polecat.Supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_id, pid, :worker, _modules} when is_pid(pid) ->
+        case Process.alive?(pid) && safe_snapshot(pid) do
+          %{} = snap -> [Map.put(snap, :pid, pid)]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  defp safe_snapshot(pid) do
+    GenServer.call(pid, :snapshot, 500)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  @doc """
   Return a snapshot of the polecat's state, or `nil` if no polecat is
   registered for the given bead_id.
   """
