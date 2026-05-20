@@ -78,7 +78,11 @@ defmodule GtElixir.Polecat do
       :status,
       :started_at,
       :step_started_at,
-      :meta
+      :meta,
+      # Map of port -> session config + accumulator. Internal — never exposed
+      # via snapshot/1; relevant fields (output_lines, exit_status) are
+      # mirrored into meta for snapshot consumers.
+      claude_sessions: %{}
     ]
   end
 
@@ -322,6 +326,108 @@ defmodule GtElixir.Polecat do
   def handle_call({:report, key, value}, _from, %State{} = state) do
     {:reply, :ok, %State{state | meta: Map.put(state.meta, key, value)}}
   end
+
+  # Open a Claude session port. Called by GtElixir.Polecat.ClaudeSession.start/1
+  # so this process (the polecat) owns the port. We stash session config keyed
+  # by the port itself so multiple concurrent sessions (future) wouldn't
+  # collide.
+  def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
+    try do
+      port = GtElixir.Polecat.ClaudeSession.open_port(port_args)
+
+      session =
+        session_config
+        |> Map.put(:port, port)
+        |> Map.put(:output_lines, [])
+        |> Map.put(:exit_status, nil)
+        |> Map.put(:exited_at, nil)
+
+      sessions = Map.put(state.claude_sessions, port, session)
+      new_state = %State{state | claude_sessions: sessions}
+      new_state = sync_session_meta(new_state, port)
+
+      {:reply, {:ok, port}, new_state}
+    rescue
+      e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+    end
+  end
+
+  # ---- Port message routing (Claude session I/O) -------------------------
+
+  @impl true
+  def handle_info({port, {:data, {:eol, line}}}, %State{} = state) when is_port(port) do
+    {:noreply, on_port_data(state, port, line)}
+  end
+
+  def handle_info({port, {:data, {:noeol, partial}}}, %State{} = state) when is_port(port) do
+    {:noreply, on_port_data(state, port, partial)}
+  end
+
+  def handle_info({port, {:exit_status, status}}, %State{} = state) when is_port(port) do
+    case Map.fetch(state.claude_sessions, port) do
+      {:ok, session} ->
+        updated = GtElixir.Polecat.ClaudeSession.handle_exit(session, status)
+        sessions = Map.put(state.claude_sessions, port, updated)
+        new_state = %State{state | claude_sessions: sessions}
+        {:noreply, sync_session_meta(new_state, port)}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:__claude_session_done__, _line}, %State{status: :running} = state) do
+    # "gt done" was detected in child output — auto-complete the polecat.
+    # Mirrors the :running → :completed transition from handle_call({:complete, _}).
+    meta = Map.put(state.meta, :result, :claude_done)
+    {:noreply, %State{state | status: :completed, meta: meta}}
+  end
+
+  def handle_info({:__claude_session_done__, _line}, %State{} = state) do
+    # Status not :running (e.g. :idle or already completed). Ignore the
+    # signal — the polecat hasn't entered a workflow step yet, or has
+    # already terminated, so completion would be an invalid transition.
+    {:noreply, state}
+  end
+
+  # ---- helpers -----------------------------------------------------------
+
+  defp on_port_data(%State{} = state, port, line) do
+    case Map.fetch(state.claude_sessions, port) do
+      {:ok, session} ->
+        updated = GtElixir.Polecat.ClaudeSession.handle_data(session, line)
+        sessions = Map.put(state.claude_sessions, port, updated)
+        new_state = %State{state | claude_sessions: sessions}
+        sync_session_meta(new_state, port)
+
+      :error ->
+        state
+    end
+  end
+
+  # Mirror the most useful session fields (output_lines, exit_status) into the
+  # top-level meta so callers reading `Polecat.state(pid).meta` see them
+  # without having to know about the internal :claude_sessions map.
+  # When there are multiple concurrent sessions this surfaces the most recent
+  # one; for now there's only ever one.
+  defp sync_session_meta(%State{claude_sessions: sessions, meta: meta} = state, port) do
+    case Map.get(sessions, port) do
+      %{} = session ->
+        meta =
+          meta
+          |> Map.put(:output_lines, Enum.reverse(session.output_lines))
+          |> Map.put(:exit_status, session.exit_status)
+          |> maybe_put(:exited_at, session.exited_at)
+
+        %State{state | meta: meta}
+
+      _ ->
+        state
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   @impl true
   def terminate(_reason, %State{bead_id: bead_id}) do
