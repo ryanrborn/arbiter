@@ -86,6 +86,11 @@ defmodule GtElixir.Beads.Issue do
 
       change {GtElixir.Beads.Issue.Changes.GenerateId, []}
       change {GtElixir.Beads.Issue.Changes.InheritTrackerType, []}
+
+      change after_action(fn _, issue, _ ->
+               GtElixir.Beads.Issue.broadcast_lifecycle(:created, issue)
+               {:ok, issue}
+             end)
     end
 
     update :update do
@@ -110,6 +115,11 @@ defmodule GtElixir.Beads.Issue do
 
       # Allow open ⇄ in_progress, but block transitions involving :closed via :update
       change {GtElixir.Beads.Issue.Changes.GuardStatus, action: :update}
+
+      change after_action(fn _, issue, _ ->
+               GtElixir.Beads.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
     end
 
     update :close do
@@ -124,6 +134,7 @@ defmodule GtElixir.Beads.Issue do
       # to should auto-close. Safe no-op when issue isn't a member of any convoy.
       change after_action(fn _changeset, issue, _context ->
                GtElixir.Beads.Convoy.maybe_auto_close_for_issue(issue)
+               GtElixir.Beads.Issue.broadcast_lifecycle(:closed, issue)
                {:ok, issue}
              end)
     end
@@ -134,7 +145,21 @@ defmodule GtElixir.Beads.Issue do
       change {GtElixir.Beads.Issue.Changes.GuardStatus, action: :reopen}
       change set_attribute(:status, :open)
       change set_attribute(:closed_at, nil)
+
+      change after_action(fn _, issue, _ ->
+               GtElixir.Beads.Issue.broadcast_lifecycle(:reopened, issue)
+               {:ok, issue}
+             end)
     end
+  end
+
+  @doc false
+  def broadcast_lifecycle(event, issue)
+      when event in [:created, :updated, :closed, :reopened] do
+    Phoenix.PubSub.broadcast(GtElixir.PubSub, "beads", {:bead_lifecycle, event, issue})
+    :ok
+  rescue
+    _ -> :ok
   end
 
   attributes do
