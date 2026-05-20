@@ -145,7 +145,14 @@ defmodule GtElixirWeb.DashboardLive do
               <tbody>
                 <%= for p <- @polecats do %>
                   <tr>
-                    <td><code class="text-xs">{p.bead_id}</code></td>
+                    <td>
+                      <.link
+                        navigate={~p"/polecats/#{p.bead_id}"}
+                        class="link link-hover"
+                      >
+                        <code class="text-xs">{p.bead_id}</code>
+                      </.link>
+                    </td>
                     <td>{p.current_step}</td>
                     <td>
                       <span class="badge badge-sm">{p.status}</span>

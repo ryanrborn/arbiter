@@ -22,6 +22,7 @@ defmodule GtElixirWeb.Router do
 
     live "/workspace/:id/settings/vernacular", WorkspaceVernacularLive
     live "/audit", AuditLogLive
+    live "/polecats/:bead_id", PolecatDetailLive
   end
 
   scope "/api", GtElixirWeb.Api do
