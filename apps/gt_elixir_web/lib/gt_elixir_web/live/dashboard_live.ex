@@ -25,6 +25,7 @@ defmodule GtElixirWeb.DashboardLive do
   use GtElixirWeb, :live_view
 
   alias GtElixir.Beads.Issue
+  alias GtElixir.Beads.Workspace
   alias GtElixir.Polecat
   alias GtElixir.Vernacular
   require Ash.Query
@@ -46,17 +47,24 @@ defmodule GtElixirWeb.DashboardLive do
      |> assign(:now, DateTime.utc_now())
      |> assign(:live, live?)
      |> assign(:worker_label, Vernacular.label(:worker))
+     |> refresh_workspaces()
      |> refresh_polecats()
      |> refresh_recent_beads()}
   end
 
   @impl true
   def handle_info({:bead_lifecycle, _event, _issue}, socket) do
-    {:noreply, refresh_recent_beads(socket)}
+    {:noreply,
+     socket
+     |> refresh_recent_beads()
+     |> refresh_workspaces()}
   end
 
   def handle_info({:polecat_lifecycle, _event, _snapshot}, socket) do
-    {:noreply, refresh_polecats(socket)}
+    {:noreply,
+     socket
+     |> refresh_polecats()
+     |> refresh_workspaces()}
   end
 
   # ---- data ----
@@ -69,6 +77,14 @@ defmodule GtElixirWeb.DashboardLive do
         _ -> []
       end
 
+    workspaces_by_id =
+      socket.assigns[:workspaces_by_id] || index_workspaces(load_workspaces())
+
+    polecats =
+      Enum.map(polecats, fn p ->
+        Map.put(p, :workspace_name, workspace_label(workspaces_by_id, p.workspace_id))
+      end)
+
     assign(socket, :polecats, polecats)
   end
 
@@ -80,6 +96,78 @@ defmodule GtElixirWeb.DashboardLive do
       |> Ash.read!()
 
     assign(socket, :recent_beads, beads)
+  end
+
+  # ---- workspaces ----
+
+  defp refresh_workspaces(socket) do
+    workspaces = load_workspaces()
+    issues_by_workspace = group_issues_by_workspace_and_status()
+    polecats_by_workspace = group_polecats_by_workspace()
+
+    stats =
+      Enum.map(workspaces, fn ws ->
+        issue_counts = Map.get(issues_by_workspace, ws.id, %{})
+
+        %{
+          id: ws.id,
+          name: ws.name,
+          prefix: ws.prefix,
+          tracker_type: get_in(ws.config || %{}, ["tracker", "type"]) || "none",
+          polecats: Map.get(polecats_by_workspace, ws.id, 0),
+          open: Map.get(issue_counts, :open, 0),
+          in_progress: Map.get(issue_counts, :in_progress, 0),
+          closed: Map.get(issue_counts, :closed, 0)
+        }
+      end)
+      |> Enum.sort_by(& &1.name)
+
+    socket
+    |> assign(:workspaces, stats)
+    |> assign(:workspaces_by_id, index_workspaces(workspaces))
+  end
+
+  defp load_workspaces do
+    Ash.read!(Workspace)
+  rescue
+    _ -> []
+  end
+
+  defp index_workspaces(workspaces) do
+    Map.new(workspaces, fn ws -> {ws.id, ws} end)
+  end
+
+  defp workspace_label(_workspaces_by_id, nil), do: "(none)"
+
+  defp workspace_label(workspaces_by_id, ws_id) do
+    case Map.fetch(workspaces_by_id, ws_id) do
+      {:ok, ws} -> ws.name
+      :error -> "(unknown)"
+    end
+  end
+
+  defp group_issues_by_workspace_and_status do
+    Issue
+    |> Ash.Query.select([:id, :status, :workspace_id])
+    |> Ash.read!()
+    |> Enum.reduce(%{}, fn i, acc ->
+      Map.update(acc, i.workspace_id, %{i.status => 1}, fn ws_counts ->
+        Map.update(ws_counts, i.status, 1, &(&1 + 1))
+      end)
+    end)
+  rescue
+    _ -> %{}
+  end
+
+  defp group_polecats_by_workspace do
+    try do
+      Polecat.list_children()
+    rescue
+      _ -> []
+    end
+    |> Enum.reduce(%{}, fn p, acc ->
+      Map.update(acc, p.workspace_id, 1, &(&1 + 1))
+    end)
   end
 
   defp runtime_seconds(%DateTime{} = started_at, %DateTime{} = now) do
@@ -125,6 +213,42 @@ defmodule GtElixirWeb.DashboardLive do
         </span>
       </div>
 
+      <section class="card bg-base-200 p-4 mb-6">
+        <h2 class="text-lg font-semibold mb-3">
+          Workspaces ({length(@workspaces)})
+        </h2>
+        <%= if @workspaces == [] do %>
+          <p class="text-base-content/60 italic">No workspaces.</p>
+        <% else %>
+          <table class="table table-sm" id="workspaces-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Prefix</th>
+                <th>Tracker</th>
+                <th class="text-right">Active {String.capitalize(@worker_label)}s</th>
+                <th class="text-right">Open</th>
+                <th class="text-right">In&nbsp;progress</th>
+                <th class="text-right">Closed</th>
+              </tr>
+            </thead>
+            <tbody>
+              <%= for ws <- @workspaces do %>
+                <tr>
+                  <td>{ws.name}</td>
+                  <td><code class="text-xs">{ws.prefix}</code></td>
+                  <td class="text-xs">{ws.tracker_type}</td>
+                  <td class="text-right">{ws.polecats}</td>
+                  <td class="text-right">{ws.open}</td>
+                  <td class="text-right">{ws.in_progress}</td>
+                  <td class="text-right">{ws.closed}</td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        <% end %>
+      </section>
+
       <div class="grid grid-cols-2 gap-6">
         <section class="card bg-base-200 p-4">
           <h2 class="text-lg font-semibold mb-3">
@@ -137,6 +261,7 @@ defmodule GtElixirWeb.DashboardLive do
               <thead>
                 <tr>
                   <th>Bead</th>
+                  <th>Workspace</th>
                   <th>Step</th>
                   <th>Status</th>
                   <th>Runtime</th>
@@ -153,6 +278,7 @@ defmodule GtElixirWeb.DashboardLive do
                         <code class="text-xs">{p.bead_id}</code>
                       </.link>
                     </td>
+                    <td class="text-xs">{Map.get(p, :workspace_name) || "(none)"}</td>
                     <td>{p.current_step}</td>
                     <td>
                       <span class="badge badge-sm">{p.status}</span>
@@ -183,7 +309,11 @@ defmodule GtElixirWeb.DashboardLive do
             <tbody>
               <%= for b <- @recent_beads do %>
                 <tr>
-                  <td><code class="text-xs">{b.id}</code></td>
+                  <td>
+                    <.link navigate={~p"/beads/#{b.id}"} class="link link-hover">
+                      <code class="text-xs">{b.id}</code>
+                    </.link>
+                  </td>
                   <td>{b.title}</td>
                   <td>
                     <span class={status_badge_class(b.status)}>{b.status}</span>

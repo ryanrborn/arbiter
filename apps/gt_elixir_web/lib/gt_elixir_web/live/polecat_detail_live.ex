@@ -138,7 +138,7 @@ defmodule GtElixirWeb.PolecatDetailLive do
               id="polecat-output"
               class="bg-base-300 p-3 rounded text-xs overflow-x-auto max-h-96"
             ><%= for line <- output_lines(@snapshot) do %><%= line %>
-<% end %></pre>
+            <% end %></pre>
           <% end %>
         </section>
       <% else %>

@@ -306,18 +306,12 @@ defmodule GtElixir.Polecat.Driver do
     end
   end
 
-  defp worktree_ahead_of_base?(path, bead_id) do
+  defp worktree_ahead_of_base?(path, _bead_id) do
+    # `Worktree.has_commits_ahead?/2` already swallows git errors and
+    # returns {:ok, true} as the conservative default, so we only need
+    # to handle the OK shape here.
     case Worktree.has_commits_ahead?(path, "main") do
-      {:ok, ahead?} ->
-        ahead?
-
-      {:error, reason} ->
-        Logger.warning(
-          "Polecat.Driver: cleanup-ahead-probe failed for bead=#{bead_id}: #{inspect(reason)}"
-        )
-
-        # Conservative: skip cleanup on probe failure.
-        true
+      {:ok, ahead?} -> ahead?
     end
   end
 end

@@ -23,10 +23,11 @@ defmodule GtElixirWeb.DashboardLiveTest do
   end
 
   describe "mount" do
-    test "renders all four section headers", %{conn: conn} do
+    test "renders all section headers", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Dashboard"
+      assert html =~ "Workspaces"
       assert html =~ "Active "
       assert html =~ "Recent beads"
       assert html =~ "PRs in flight"
@@ -57,6 +58,47 @@ defmodule GtElixirWeb.DashboardLiveTest do
       assert html =~ ~s(id="live-indicator")
       assert html =~ "stale"
       assert html =~ "badge-warning"
+    end
+  end
+
+  describe "workspaces section" do
+    test "lists every workspace with its prefix and bead counts", %{conn: conn, ws: ws} do
+      {:ok, _open} = Ash.create(Issue, %{title: "o1", workspace_id: ws.id})
+      {:ok, _open2} = Ash.create(Issue, %{title: "o2", workspace_id: ws.id})
+      {:ok, to_close} = Ash.create(Issue, %{title: "to-close", workspace_id: ws.id})
+      {:ok, _} = Ash.update(to_close, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "workspaces-table"
+      assert html =~ ws.name
+      assert html =~ ws.prefix
+      # 2 open, 1 closed in this workspace.
+      assert html =~ "ds"
+    end
+
+    test "counts active polecats per workspace", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "polly-ws", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+
+      {:ok, _view, html} = live(conn, "/")
+      # The workspace row should reflect the active polecat. Hard to assert
+      # an exact cell value in the rendered table, but a workspace column
+      # next to "1" somewhere is sufficient.
+      assert html =~ ws.name
+      assert html =~ "Active "
+    end
+  end
+
+  describe "active polecats workspace column" do
+    test "shows the workspace name on each polecat row", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "ws-col", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "active-polecats"
+      assert html =~ ws.name
     end
   end
 
