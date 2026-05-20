@@ -13,7 +13,8 @@ defmodule GtElixir.Application do
       {Phoenix.PubSub, name: GtElixir.PubSub},
       {Registry, keys: :unique, name: GtElixir.Polecat.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: GtElixir.Polecat.Supervisor},
-      {Registry, keys: :unique, name: GtElixir.Workflows.MachineRegistry}
+      {Registry, keys: :unique, name: GtElixir.Workflows.MachineRegistry},
+      {DynamicSupervisor, strategy: :one_for_one, name: GtElixir.Workflows.MachineSupervisor}
       # Start a worker by calling: GtElixir.Worker.start_link(arg)
       # {GtElixir.Worker, arg}
     ]
