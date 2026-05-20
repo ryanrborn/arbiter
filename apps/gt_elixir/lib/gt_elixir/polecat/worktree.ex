@@ -130,6 +130,37 @@ defmodule GtElixir.Polecat.Worktree do
   end
 
   @doc """
+  Return `{:ok, true}` if the worktree's current branch has commits not
+  present on `base_ref` (default `"main"`), else `{:ok, false}`.
+
+  Counterpart to `has_uncommitted?/1`. Together they let a cleanup policy
+  ask "is it safe to throw this worktree away?": safe means **no**
+  uncommitted changes AND **no** commits-ahead-of-base. The latter
+  matters for local-only repos where the worktree branch is the only
+  copy of those commits.
+
+  When the base ref doesn't resolve (e.g., the parent repo has no `main`),
+  returns `{:ok, true}` to be safe — we'd rather skip cleanup than delete
+  potentially-valuable commits.
+  """
+  @spec has_commits_ahead?(path(), String.t()) :: {:ok, boolean()} | {:error, error_reason()}
+  def has_commits_ahead?(path, base_ref \\ "main") when is_binary(path) do
+    case run_git(["rev-list", "--count", base_ref <> "..HEAD"], cd: path) do
+      {:ok, count_str} ->
+        case Integer.parse(String.trim(count_str)) do
+          {0, _} -> {:ok, false}
+          {n, _} when n > 0 -> {:ok, true}
+          _ -> {:ok, true}
+        end
+
+      {:error, _} ->
+        # Base ref doesn't exist or git failed — conservative: assume there
+        # might be commits worth preserving.
+        {:ok, true}
+    end
+  end
+
+  @doc """
   Push the worktree at `path` to a remote.
 
   ## Options

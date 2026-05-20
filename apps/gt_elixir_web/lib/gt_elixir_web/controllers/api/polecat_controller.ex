@@ -6,9 +6,10 @@ defmodule GtElixirWeb.Api.PolecatController do
 
   Routes:
 
-    * `POST /api/polecats/sling`        — :sling (body: `bead_id`, optional `rig`, `with_claude`)
-    * `GET  /api/polecats`              — :index (list active polecats)
-    * `GET  /api/polecats/:bead_id`     — :show (full snapshot inc. recent output)
+    * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `with_claude`)
+    * `GET  /api/polecats`                 — :index (list active polecats)
+    * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output)
+    * `POST /api/polecats/:bead_id/stop`   — :stop (terminate polecat cleanly)
   """
 
   use GtElixirWeb, :controller
@@ -66,6 +67,20 @@ defmodule GtElixirWeb.Api.PolecatController do
   end
 
   def show(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+
+  def stop(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
+    case Polecat.stop(bead_id, :normal) do
+      :ok ->
+        conn
+        |> put_status(:ok)
+        |> json(%{bead_id: bead_id, stopped: true})
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+    end
+  end
+
+  def stop(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
 
   defp sling_opts(params) do
     [rig: params["rig"], start_claude: truthy(params["with_claude"])]

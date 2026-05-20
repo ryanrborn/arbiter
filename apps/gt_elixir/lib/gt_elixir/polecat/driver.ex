@@ -265,8 +265,18 @@ defmodule GtElixir.Polecat.Driver do
   defp maybe_cleanup_worktree(%{worktree_path: nil}), do: :ok
 
   defp maybe_cleanup_worktree(%{worktree_path: path, bead_id: bead_id}) do
-    case Worktree.has_uncommitted?(path) do
-      {:ok, false} ->
+    cond do
+      worktree_dirty?(path, bead_id) ->
+        Logger.info(
+          "Polecat.Driver: worktree has uncommitted changes for bead=#{bead_id}; skipping cleanup"
+        )
+
+      worktree_ahead_of_base?(path, bead_id) ->
+        Logger.info(
+          "Polecat.Driver: worktree has commits ahead of base for bead=#{bead_id}; skipping cleanup"
+        )
+
+      true ->
         case Worktree.cleanup(path) do
           :ok ->
             :ok
@@ -276,18 +286,38 @@ defmodule GtElixir.Polecat.Driver do
               "Polecat.Driver: cleanup_worktree failed for bead=#{bead_id}: #{inspect(reason)}"
             )
         end
-
-      {:ok, true} ->
-        Logger.info(
-          "Polecat.Driver: worktree has uncommitted changes for bead=#{bead_id}; skipping cleanup"
-        )
-
-      {:error, reason} ->
-        Logger.warning(
-          "Polecat.Driver: cleanup probe failed for bead=#{bead_id}: #{inspect(reason)}"
-        )
     end
 
     :ok
+  end
+
+  defp worktree_dirty?(path, bead_id) do
+    case Worktree.has_uncommitted?(path) do
+      {:ok, dirty} ->
+        dirty
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat.Driver: cleanup-dirty-probe failed for bead=#{bead_id}: #{inspect(reason)}"
+        )
+
+        # Conservative: treat probe failure as "might be dirty" — skip cleanup.
+        true
+    end
+  end
+
+  defp worktree_ahead_of_base?(path, bead_id) do
+    case Worktree.has_commits_ahead?(path, "main") do
+      {:ok, ahead?} ->
+        ahead?
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat.Driver: cleanup-ahead-probe failed for bead=#{bead_id}: #{inspect(reason)}"
+        )
+
+        # Conservative: skip cleanup on probe failure.
+        true
+    end
   end
 end
