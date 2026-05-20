@@ -59,6 +59,25 @@ defmodule GtElixirWeb.DashboardLiveTest do
       assert render(view) =~ "newly-created-bead-title"
     end
 
+    test "creating a new bead via the REST API also pushes a PubSub update",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-97ijhk — the original report was that `bd create`
+      # (which posts to POST /api/issues) did not update an open dashboard.
+      # If the test above passes but this one fails, the API controller is
+      # bypassing the broadcast somehow.
+      {:ok, view, _html} = live(conn, "/")
+
+      refute render(view) =~ "via-rest-api-title"
+
+      post_conn =
+        Phoenix.ConnTest.build_conn()
+        |> post(~p"/api/issues", %{title: "via-rest-api-title", workspace_id: ws.id})
+
+      assert post_conn.status == 201
+
+      assert render(view) =~ "via-rest-api-title"
+    end
+
     test "closing a bead pushes a PubSub update and the new status renders", %{
       conn: conn,
       ws: ws
