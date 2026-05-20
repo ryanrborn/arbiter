@@ -6,8 +6,9 @@ defmodule GtElixirWeb.Api.PolecatController do
 
   Routes:
 
-    * `POST /api/polecats/sling`  — :sling (body: `bead_id`, optional `rig`)
-    * `GET  /api/polecats`        — :index (list active polecats)
+    * `POST /api/polecats/sling`        — :sling (body: `bead_id`, optional `rig`, `with_claude`)
+    * `GET  /api/polecats`              — :index (list active polecats)
+    * `GET  /api/polecats/:bead_id`     — :show (full snapshot inc. recent output)
   """
 
   use GtElixirWeb, :controller
@@ -47,6 +48,24 @@ defmodule GtElixirWeb.Api.PolecatController do
   def index(conn, _params) do
     render(conn, :index, children: Polecat.list_children())
   end
+
+  def show(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
+    case Polecat.whereis(bead_id) do
+      nil ->
+        {:error, :not_found}
+
+      pid ->
+        case Polecat.state(pid) do
+          %{} = snap ->
+            render(conn, :show, snapshot: Map.put(snap, :pid, pid))
+
+          _ ->
+            {:error, :not_found}
+        end
+    end
+  end
+
+  def show(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
 
   defp sling_opts(params) do
     [rig: params["rig"], start_claude: truthy(params["with_claude"])]

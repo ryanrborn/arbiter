@@ -54,6 +54,7 @@ defmodule GtElixirWeb.Router do
     # Polecats (workflow runner)
     post "/polecats/sling", PolecatController, :sling
     get "/polecats", PolecatController, :index
+    get "/polecats/:bead_id", PolecatController, :show
   end
 
   # Enable LiveDashboard in development
