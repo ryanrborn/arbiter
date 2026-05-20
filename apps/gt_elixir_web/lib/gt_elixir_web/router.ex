@@ -55,6 +55,7 @@ defmodule GtElixirWeb.Router do
     post "/polecats/sling", PolecatController, :sling
     get "/polecats", PolecatController, :index
     get "/polecats/:bead_id", PolecatController, :show
+    post "/polecats/:bead_id/stop", PolecatController, :stop
   end
 
   # Enable LiveDashboard in development

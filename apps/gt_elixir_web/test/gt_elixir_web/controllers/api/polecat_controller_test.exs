@@ -53,4 +53,26 @@ defmodule GtElixirWeb.Api.PolecatControllerTest do
       assert body["failure_reason"] =~ "claude_crashed"
     end
   end
+
+  describe "POST /api/polecats/:bead_id/stop" do
+    test "terminates a running polecat", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      ref = Process.monitor(polecat_pid)
+
+      conn = post(conn, ~p"/api/polecats/#{bead.id}/stop", %{})
+      body = json_response(conn, 200)
+
+      assert body["bead_id"] == bead.id
+      assert body["stopped"] == true
+
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}, 1_000
+      assert Polecat.whereis(bead.id) == nil
+    end
+
+    test "returns 404 for an unknown bead_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/polecats/no-such-bead/stop", %{})
+      assert json_response(conn, 404)
+    end
+  end
 end

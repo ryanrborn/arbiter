@@ -18,6 +18,8 @@ defmodule GtElixirCli.Main do
       bd2 where
       bd2 prime
       bd2 sling <bead-id>
+      bd2 polecat show <bead-id>
+      bd2 polecat stop <bead-id>
 
   Global flags:
       --json     Emit machine-readable JSON (default is human-readable text)
@@ -74,6 +76,7 @@ defmodule GtElixirCli.Main do
   defp dispatch_known("where", args), do: GtElixirCli.Cmd.Where.run(args)
   defp dispatch_known("sling", args), do: GtElixirCli.Cmd.Sling.run(args)
   defp dispatch_known("prime", args), do: GtElixirCli.Cmd.Prime.run(args)
+  defp dispatch_known("polecat", args), do: GtElixirCli.Cmd.Polecat.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do

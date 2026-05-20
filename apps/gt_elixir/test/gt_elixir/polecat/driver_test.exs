@@ -358,5 +358,40 @@ defmodule GtElixir.Polecat.DriverTest do
       assert File.dir?(wt_path)
       assert File.exists?(Path.join(wt_path, "scratch.txt"))
     end
+
+    test "skips cleanup when the worktree has commits ahead of base", %{ws: ws, wt_path: wt_path} do
+      # Commit a new file in the worktree, then have a clean working tree.
+      File.write!(Path.join(wt_path, "new.txt"), "claude wrote me\n")
+      {_, 0} = System.cmd("git", ["-C", wt_path, "add", "new.txt"])
+      {_, 0} = System.cmd("git", ["-C", wt_path, "commit", "-q", "-m", "claude contribution"])
+
+      # Confirm the precondition: clean worktree, 1 commit ahead.
+      {:ok, false} = GtElixir.Polecat.Worktree.has_uncommitted?(wt_path)
+      {:ok, true} = GtElixir.Polecat.Worktree.has_commits_ahead?(wt_path, "main")
+
+      {:ok, bead} = Ash.create(Issue, %{title: "ahead", workspace_id: ws.id})
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(bead, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          bead_id: bead.id,
+          polecat_pid: polecat_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 1,
+          worktree_path: wt_path,
+          cleanup_worktree: true
+        )
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      # Still there — committed-but-unpushed work is preserved.
+      assert File.dir?(wt_path)
+      assert File.exists?(Path.join(wt_path, "new.txt"))
+    end
   end
 end
