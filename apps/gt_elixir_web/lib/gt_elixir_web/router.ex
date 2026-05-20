@@ -46,6 +46,10 @@ defmodule GtElixirWeb.Router do
     get "/workspaces", WorkspaceController, :index
     post "/workspaces", WorkspaceController, :create
     get "/workspaces/:id", WorkspaceController, :show
+
+    # Polecats (workflow runner)
+    post "/polecats/sling", PolecatController, :sling
+    get "/polecats", PolecatController, :index
   end
 
   # Enable LiveDashboard in development
