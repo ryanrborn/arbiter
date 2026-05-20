@@ -167,10 +167,14 @@ defmodule GtElixir.Beads.Issue do
       primary_key? true
       allow_nil? false
       public? true
-      # Pattern allows uppercase to accommodate phase markers (gte-P1) and
-      # Verus-style mixed-case IDs from the Dolt import. Newly generated IDs
-      # are still lowercase (see Changes.GenerateId).
-      constraints match: ~r/^[a-z][a-zA-Z0-9]*-[a-zA-Z0-9]+$/
+      # Pattern allows uppercase to accommodate phase markers (gte-P1),
+      # Verus-style mixed-case IDs from the Dolt import, AND legacy IDs
+      # with underscores or multiple hyphens (e.g. `ac-access_control-refinery`,
+      # `vs-server-polecat-chrome`). Without that tolerance,
+      # AshPaperTrail's Version row creation rejects those IDs and any
+      # close/update on a legacy bead fails. Newly generated IDs are
+      # still tidy lowercase prefix-shortid (see Changes.GenerateId).
+      constraints match: ~r/^[a-z][a-zA-Z0-9]*-[a-zA-Z0-9_-]+$/
     end
 
     attribute :title, :string do
