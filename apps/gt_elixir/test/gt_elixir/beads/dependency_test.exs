@@ -4,6 +4,7 @@ defmodule GtElixir.Beads.DependencyTest do
   alias GtElixir.Beads.Dependency
   alias GtElixir.Beads.Issue
   alias GtElixir.Beads.Workspace
+  alias GtElixir.Repo
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "dep-ws", prefix: "dep"})
@@ -288,5 +289,79 @@ defmodule GtElixir.Beads.DependencyTest do
       {:ok, _} = Ash.update(c, %{}, action: :close)
       assert Issue.ready() |> Enum.any?(&(&1.id == a.id))
     end
+  end
+
+  describe "regression: Dependency.id requires a v7 UUID (hq-109)" do
+    # When the gte-007 importer was first written it used
+    # `Ecto.UUID.bingenerate/0` (v4) for the Dependency primary key.
+    # Inserts went through fine but `Ash.read/1` choked on the resulting
+    # rows because `Dependency.id` is typed as Ash.Type.UUIDv7. The
+    # symptom was a 500 on `GET /api/issues/ready` (which loads deps)
+    # and `Ash.Error.Unknown` from any direct read.
+    #
+    # Fix: commit b193ea9 switched the importer to
+    # `Ash.UUIDv7.bingenerate/0`. These tests pin both halves so a
+    # future regression — anyone bypassing Ash to bulk-insert deps —
+    # gets caught at test time, not at runtime.
+    test "v7-id row inserted via Repo.insert_all is readable via Ash.read",
+         %{a: a, b: b} do
+      now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+      a_id = a.id
+      b_id = b.id
+
+      {1, _} =
+        Repo.insert_all("dependencies", [
+          %{
+            id: Ash.UUIDv7.bingenerate(),
+            from_issue_id: a_id,
+            to_issue_id: b_id,
+            type: "blocks",
+            created_at: now,
+            updated_at: now
+          }
+        ])
+
+      assert [%Dependency{from_issue_id: ^a_id, to_issue_id: ^b_id}] =
+               filter_for_ab(a_id, b_id)
+    end
+
+    test "v4-id row inserted via Repo.insert_all is rejected by Ash on read",
+         %{a: a, b: b} do
+      now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+
+      {1, _} =
+        Repo.insert_all("dependencies", [
+          %{
+            id: Ecto.UUID.bingenerate(),
+            from_issue_id: a.id,
+            to_issue_id: b.id,
+            type: "blocks",
+            created_at: now,
+            updated_at: now
+          }
+        ])
+
+      # Ash chokes at read-time. Either it raises or it returns
+      # {:error, _}; accept both shapes — the point is "this surfaces
+      # loudly", not "this exact error wraps the failure".
+      result =
+        try do
+          {:ok, Ash.read(Dependency)}
+        rescue
+          e -> {:rescued, e}
+        end
+
+      case result do
+        {:ok, {:error, _}} -> :ok
+        {:rescued, _} -> :ok
+        {:ok, {:ok, _}} -> flunk("expected Ash.read to fail on a v4 UUID, but it succeeded")
+      end
+    end
+  end
+
+  defp filter_for_ab(from_id, to_id) do
+    Dependency
+    |> Ash.read!()
+    |> Enum.filter(&(&1.from_issue_id == from_id and &1.to_issue_id == to_id))
   end
 end
