@@ -19,7 +19,7 @@ defmodule GtElixirCli.AliasResolver do
   `:unknown` rather than silently dispatching to nothing.
   """
 
-  @known_verbs ~w(show create close list update dep ready doctor where help sling)
+  @known_verbs ~w(show create close list update dep ready doctor where help sling prime)
 
   @doc "The set of built-in verbs that bd2 dispatches to."
   @spec known_verbs() :: [String.t()]
