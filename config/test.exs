@@ -25,6 +25,9 @@ config :gt_elixir_web, GtElixirWeb.Endpoint,
 # Route GtElixir.GitHub HTTP calls through Req.Test stubs.
 config :gt_elixir, :github_http_stub, true
 
+# Route GtElixir.Trackers.Jira HTTP calls through Req.Test stubs.
+config :gt_elixir, :jira_http_stub, true
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

@@ -18,13 +18,14 @@ defmodule GtElixir.Trackers do
   """
 
   alias GtElixir.Beads.Issue
-  alias GtElixir.Trackers.{None, Tracker}
+  alias GtElixir.Trackers.{Jira, None, Tracker}
 
   @type adapter :: module()
 
   @adapters %{
-    none: None
-    # :jira, :linear, :github wired up in Phases 3/5
+    none: None,
+    jira: Jira
+    # :linear, :github wired up in Phase 5
   }
 
   @doc """
