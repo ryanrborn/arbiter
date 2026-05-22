@@ -5,12 +5,12 @@ Branch: `feature/gte-007-dolt-import`
 
 ## What
 
-Mix task `gt_elixir.import_from_dolt` that reads issues + dependencies from one
-or more existing gas-town Dolt DBs and inserts them into the gt-elixir Postgres
+Mix task `arbiter.import_from_dolt` that reads issues + dependencies from one
+or more existing gas-town Dolt DBs and inserts them into the arbiter Postgres
 store via `Ecto.Repo.insert_all`. Idempotent on re-run.
 
 ```bash
-mix gt_elixir.import_from_dolt \
+mix arbiter.import_from_dolt \
     --hq-path /home/rborn/dev/gt/.dolt-data/hq \
     --server-path /home/rborn/dev/gt/.dolt-data/server
 ```
@@ -28,14 +28,14 @@ Per source the task:
 
 ## Files
 
-- `apps/gt_elixir/lib/mix/tasks/gt_elixir.import_from_dolt.ex` — mix task,
+- `apps/arbiter/lib/mix/tasks/arbiter.import_from_dolt.ex` — mix task,
   Dolt I/O, workspace lookup, bulk inserts.
-- `apps/gt_elixir/lib/gt_elixir/beads/dolt_import/mapper.ex` — pure field
+- `apps/arbiter/lib/arbiter/beads/dolt_import/mapper.ex` — pure field
   mappers, kept separate so they can be unit-tested without a live Dolt DB.
   Functions: `map_status/1`, `map_issue_type/1`, `parse_priority/1`,
   `parse_external_ref/1`, `map_dep_type/1`, `parse_dt/1`, `compose_description/1`,
   `derive_prefix/1`, `nonempty/1`.
-- `apps/gt_elixir/test/gt_elixir/beads/dolt_import/mapper_test.exs` — 30 unit
+- `apps/arbiter/test/arbiter/beads/dolt_import/mapper_test.exs` — 30 unit
   tests covering every mapper function and its edge cases.
 
 ## Verified end-to-end
@@ -70,7 +70,7 @@ The fix (in `bulk_insert_dependencies/1`):
 
 ```elixir
 known_ids =
-  GtElixir.Repo.query!("SELECT id FROM issues", [])
+  Arbiter.Repo.query!("SELECT id FROM issues", [])
   |> Map.get(:rows)
   |> Enum.map(&hd/1)
   |> MapSet.new()
@@ -138,8 +138,8 @@ are not.
 ## Test results
 
 ```
-102 tests, 0 failures   # gt_elixir (72 pre-existing + 30 new Mapper tests)
-5 tests, 0 failures     # gt_elixir_web (unchanged)
+102 tests, 0 failures   # arbiter (72 pre-existing + 30 new Mapper tests)
+5 tests, 0 failures     # arbiter_web (unchanged)
 ```
 
 `mix compile --warnings-as-errors` clean. `mix format --check-formatted` clean.

@@ -5,7 +5,7 @@ Branch: `feature/gte-023-refinery`
 
 ## What
 
-`GtElixir.Workflows.Refinery` — per-workspace GenServer acting as a merge
+`Arbiter.Workflows.Refinery` — per-workspace GenServer acting as a merge
 queue. Picks up `{:polecat_done, bead_id}` PubSub events (and accepts
 synchronous `enqueue/2` for tests), opens PRs via `GitHub.pr_open/6`,
 monitors review + CI state via periodic `:tick`, and merges with the
@@ -14,9 +14,9 @@ successful merge.
 
 ## Files
 
-- `apps/gt_elixir/lib/gt_elixir/workflows/refinery.ex` — the GenServer
+- `apps/arbiter/lib/arbiter/workflows/refinery.ex` — the GenServer
   (~500 LOC).
-- `apps/gt_elixir/test/gt_elixir/workflows/refinery_test.exs` — 16 tests
+- `apps/arbiter/test/arbiter/workflows/refinery_test.exs` — 16 tests
   covering enqueue (per-strategy), CI/review polling, merge attempt,
   failure handling, mergeable=false guard, and PubSub subscription.
 
@@ -76,7 +76,7 @@ on the receiving side is a cheap Map.get on `state.workspace_id`.
 ### 4. Not in Application.children
 
 Refinery instances are started per-workspace on demand (e.g. by a
-future `GtElixir.Workflows.RefinerySupervisor` keyed on workspace id).
+future `Arbiter.Workflows.RefinerySupervisor` keyed on workspace id).
 Adding to Application.children unconditionally would require knowing all
 workspaces at boot, which we don't. Documented in the moduledoc.
 

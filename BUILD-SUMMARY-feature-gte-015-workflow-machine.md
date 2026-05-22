@@ -3,17 +3,17 @@
 **Branch:** `feature/gte-015-workflow-machine`
 **Base:** `main @ 7cf11b4`
 **Commits:** 2 (impl+tests, BUILD-SUMMARY)
-**Test delta:** +14 tests (apps/gt_elixir: 231 → 245), full umbrella green
+**Test delta:** +14 tests (apps/arbiter: 231 → 245), full umbrella green
 **Quality gates:** `mix compile --warnings-as-errors`, `mix format --check-formatted`, `mix test`
 
 ## What landed
 
 | Module                                       | Role                                                                                       |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `GtElixir.Workflows`                         | Ash domain (sibling of `GtElixir.Beads` — workflows are not beads).                        |
-| `GtElixir.Workflows.MachineState`            | Ash resource. One row per workflow instance. Stores status, current step, threaded state. |
-| `GtElixir.Workflows.Machine`                 | The driver. `GenStateMachine` (`:handle_event_function`).                                  |
-| `GtElixir.Workflows.MachineRegistry`         | Thin `Registry` wrapper. Keyed by MachineState id.                                         |
+| `Arbiter.Workflows`                         | Ash domain (sibling of `Arbiter.Beads` — workflows are not beads).                        |
+| `Arbiter.Workflows.MachineState`            | Ash resource. One row per workflow instance. Stores status, current step, threaded state. |
+| `Arbiter.Workflows.Machine`                 | The driver. `GenStateMachine` (`:handle_event_function`).                                  |
+| `Arbiter.Workflows.MachineRegistry`         | Thin `Registry` wrapper. Keyed by MachineState id.                                         |
 | Migration `20260520144412`                   | `workflow_machine_states` table + indexes on `bead_id`, `status`.                          |
 | Dep                                          | `{:gen_state_machine, "~> 3.0"}`                                                           |
 
@@ -53,16 +53,16 @@ Machine.stop(ref, reason)
 
 ### 1. `Module.safe_concat/1` allowlist
 
-`workflow_module` is persisted as a string (`"GtElixir.TestWorkflows.Three"`). On `start/1`, `load_workflow_module/1` does:
+`workflow_module` is persisted as a string (`"Arbiter.TestWorkflows.Three"`). On `start/1`, `load_workflow_module/1` does:
 
 ```elixir
 mod = Module.safe_concat([name])        # raises only on bad atom shape, never *creates*
-validate_workflow_module(mod)           # rejects unless GtElixir.Workflow ∈ behaviours
+validate_workflow_module(mod)           # rejects unless Arbiter.Workflow ∈ behaviours
 ```
 
-`safe_concat` will not load arbitrary code: the atom must already exist (which means the module must already be compiled into the BEAM). The behaviour check enforces the allowlist — any module compiled into the build that declares `@behaviour GtElixir.Workflow` is acceptable; everything else returns `{:error, :not_a_workflow}`. The attacker surface is "drop a module into the build that already declares the Workflow behaviour", which is the same surface as "drop code anywhere".
+`safe_concat` will not load arbitrary code: the atom must already exist (which means the module must already be compiled into the BEAM). The behaviour check enforces the allowlist — any module compiled into the build that declares `@behaviour Arbiter.Workflow` is acceptable; everything else returns `{:error, :not_a_workflow}`. The attacker surface is "drop a module into the build that already declares the Workflow behaviour", which is the same surface as "drop code anywhere".
 
-A test (`attach rejects a module that does not implement GtElixir.Workflow`) hits the negative path; another (`attach rejects a non-existent module`) hits the `:unknown_module` case.
+A test (`attach rejects a module that does not implement Arbiter.Workflow`) hits the negative path; another (`attach rejects a non-existent module`) hits the `:unknown_module` case.
 
 ### 2. Per-transition DB write
 
@@ -88,7 +88,7 @@ The single user-visible cost is two warnings in the `gen_state_machine` dep itse
 
 We also did not make `bead_id` an Ash relationship. The Workflows domain stays independent of Beads — a Machine that needs to read its bead does so at runtime via `Ash.get(Issue, bead_id)`. If the bead row is later deleted, the Machine row survives; reads will fail loudly. Acceptable since beads are append-only in practice.
 
-## Test coverage (14 tests, all DB-backed via `GtElixir.DataCase, async: false`)
+## Test coverage (14 tests, all DB-backed via `Arbiter.DataCase, async: false`)
 
 - attach: creates row in `:idle` w/ first step
 - attach: rejects non-workflow module

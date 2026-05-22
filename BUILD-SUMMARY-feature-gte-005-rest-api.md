@@ -7,25 +7,25 @@
 
 ## What I built
 
-A JSON-only Phoenix REST API in the `gt_elixir_web` app that exposes the bead-ledger resources (Workspace, Issue, Dependency, Convoy) over the existing `:api` pipeline. The bd2 CLI (gte-006) will speak to this over a localhost HTTP socket. No auth — that's a later bead.
+A JSON-only Phoenix REST API in the `arbiter_web` app that exposes the bead-ledger resources (Workspace, Issue, Dependency, Convoy) over the existing `:api` pipeline. The arb CLI (gte-006) will speak to this over a localhost HTTP socket. No auth — that's a later bead.
 
 ### Files added/changed
 
 ```
-apps/gt_elixir_web/lib/gt_elixir_web/router.ex                                  (M) adds /api scope with 16 routes
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/issue_controller.ex        (+) Issue CRUD + close/reopen/ready
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/dependency_controller.ex   (+) Dependency create/delete
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/convoy_controller.ex       (+) Convoy create/show/close
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/workspace_controller.ex    (+) Workspace create/show/list
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/issue_json.ex              (+) Issue render
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/dependency_json.ex         (+) Dependency render
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/convoy_json.ex             (+) Convoy render (member_ids + aggregates)
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/workspace_json.ex          (+) Workspace render
-apps/gt_elixir_web/lib/gt_elixir_web/controllers/api/fallback_controller.ex     (+) {:error,_} → JSON error
-apps/gt_elixir_web/test/gt_elixir_web/controllers/api/issue_controller_test.exs        (+) 15 tests
-apps/gt_elixir_web/test/gt_elixir_web/controllers/api/dependency_controller_test.exs   (+) 5 tests
-apps/gt_elixir_web/test/gt_elixir_web/controllers/api/convoy_controller_test.exs       (+) 4 tests
-apps/gt_elixir_web/test/gt_elixir_web/controllers/api/workspace_controller_test.exs    (+) 5 tests (uuid 404 + 4 happy/422)
+apps/arbiter_web/lib/arbiter_web/router.ex                                  (M) adds /api scope with 16 routes
+apps/arbiter_web/lib/arbiter_web/controllers/api/issue_controller.ex        (+) Issue CRUD + close/reopen/ready
+apps/arbiter_web/lib/arbiter_web/controllers/api/dependency_controller.ex   (+) Dependency create/delete
+apps/arbiter_web/lib/arbiter_web/controllers/api/convoy_controller.ex       (+) Convoy create/show/close
+apps/arbiter_web/lib/arbiter_web/controllers/api/workspace_controller.ex    (+) Workspace create/show/list
+apps/arbiter_web/lib/arbiter_web/controllers/api/issue_json.ex              (+) Issue render
+apps/arbiter_web/lib/arbiter_web/controllers/api/dependency_json.ex         (+) Dependency render
+apps/arbiter_web/lib/arbiter_web/controllers/api/convoy_json.ex             (+) Convoy render (member_ids + aggregates)
+apps/arbiter_web/lib/arbiter_web/controllers/api/workspace_json.ex          (+) Workspace render
+apps/arbiter_web/lib/arbiter_web/controllers/api/fallback_controller.ex     (+) {:error,_} → JSON error
+apps/arbiter_web/test/arbiter_web/controllers/api/issue_controller_test.exs        (+) 15 tests
+apps/arbiter_web/test/arbiter_web/controllers/api/dependency_controller_test.exs   (+) 5 tests
+apps/arbiter_web/test/arbiter_web/controllers/api/convoy_controller_test.exs       (+) 4 tests
+apps/arbiter_web/test/arbiter_web/controllers/api/workspace_controller_test.exs    (+) 5 tests (uuid 404 + 4 happy/422)
 ```
 
 No domain or Ash-resource changes — the web layer just consumes the existing `Ash.create / Ash.get / Ash.read / Ash.update` API.
@@ -69,7 +69,7 @@ Atoms always serialize as plain strings (`"open"`, not `":open"`). Timestamps as
 
 ## Design choices worth flagging
 
-- **Fallback controller** (`GtElixirWeb.Api.FallbackController`) is wired via `action_fallback` on every API controller. It pattern-matches on `Ash.Error.Invalid`, `Ash.Error.Query.NotFound`, `Ash.Error.Forbidden`, `Ash.Error.Unknown`, plus a `{:invalid_request, msg}` sentinel for our own param-validation errors. Crucially, **`Ash.get/2` returns `%Ash.Error.Invalid{}` wrapping a `%Ash.Error.Query.NotFound{}`** rather than the bare NotFound — the fallback unwraps that case and emits a 404 instead of a 422.
+- **Fallback controller** (`ArbiterWeb.Api.FallbackController`) is wired via `action_fallback` on every API controller. It pattern-matches on `Ash.Error.Invalid`, `Ash.Error.Query.NotFound`, `Ash.Error.Forbidden`, `Ash.Error.Unknown`, plus a `{:invalid_request, msg}` sentinel for our own param-validation errors. Crucially, **`Ash.get/2` returns `%Ash.Error.Invalid{}` wrapping a `%Ash.Error.Query.NotFound{}`** rather than the bare NotFound — the fallback unwraps that case and emits a 404 instead of a 422.
 - **Atom coercion uses `String.to_existing_atom/1`** for `status`, `issue_type`, `tracker_type`, `lifecycle`, and dependency `type`. Bare `String.to_atom` would leak memory under hostile load. Unknown values fall through to Ash, which rejects them as a validation error — or, on the index filter path, we short-circuit with a 400 `invalid_request` so the user sees a clear "invalid status: zzz" message.
 - **Filtering `GET /api/issues`** uses `Ash.Query.do_filter/2` with a keyword list (Ash 3.x supports `[status: :open, workspace_id: "..."]` as a filter shorthand for top-level attribute equality). Multi-value query strings (`?status=open&status=in_progress`) are NOT specially handled — Plug parses the last value. If the CLI needs OR filtering, that's a future tweak.
 - **`PATCH /api/issues/:id`** explicitly drops `workspace_id` from params before passing them to `Ash.update`. The `:update` action doesn't accept `workspace_id` anyway, but I'd rather silently ignore than 422 — the field is conceptually immutable.
@@ -92,9 +92,9 @@ None of consequence. Two minor additions:
 
 ```
 $ mix test
-1 doctest, 1 test (gt_elixir_cli)         — 0 failures
-72 tests          (gt_elixir)             — 0 failures
-36 tests          (gt_elixir_web)         — 0 failures
+1 doctest, 1 test (arbiter_cli)         — 0 failures
+72 tests          (arbiter)             — 0 failures
+36 tests          (arbiter_web)         — 0 failures
                                             ⤷ includes 31 new API tests in 4 files
 
 Total: 110 tests (gte-001..004 baseline + 31 new), 0 failures
@@ -108,7 +108,7 @@ Test breakdown for this bead:
 
 ## What I punted on (with reasons)
 
-1. **Pagination** — call it gte-005a if the CLI hits a wall. Not blocking for the bd2 demo.
+1. **Pagination** — call it gte-005a if the CLI hits a wall. Not blocking for the arb demo.
 2. **Bulk endpoints** (`POST /api/issues:bulk_create`, `POST /api/convoy/:id/issues` for batch membership) — not in spec, easy to add later.
 3. **GET /api/dependencies** (list/filter edges) — not in spec; the CLI doesn't need it for gte-006.
 4. **GET /api/convoys** (list convoys) — not in spec; only show was required.
@@ -120,12 +120,12 @@ Test breakdown for this bead:
 - **The `Ash.Error.Invalid` → 404 detection** in the fallback iterates `err.errors` looking for a `NotFound`. If a single Ash response ever contains BOTH a NotFound and a validation error, the current logic would 404, hiding the validation. In practice this doesn't happen (NotFound short-circuits the action) but the assumption is fragile. A cleaner fix is to have controllers branch on `Ash.get` themselves and only let true validation errors flow into the fallback. I went with the centralized approach because it's less boilerplate; happy to refactor if you'd rather.
 - **No request logging tag.** When the CLI is debugging "why did the API say 422?" we have no correlation ID in the response. Could add a `details: %{request_id: conn.assigns.request_id}` to error responses cheaply.
 - **`Ash.read(Issue)`'s lack of stable ordering** — `GET /api/issues` returns in insertion order today (Postgres default), which is fine for now. If the CLI starts asserting on order, add `Ash.Query.sort(query, created_at: :desc)` to the index action.
-- **`coerce_filter_value/2` lives inline in `IssueController`.** If we add more resource controllers with filtering, this helper should move to a shared module (`GtElixirWeb.Api.ParamCoercion` or similar).
+- **`coerce_filter_value/2` lives inline in `IssueController`.** If we add more resource controllers with filtering, this helper should move to a shared module (`ArbiterWeb.Api.ParamCoercion` or similar).
 
 ## How to verify
 
 ```sh
-cd ~/dev/gt-elixir-wt-005
+cd ~/dev/arbiter-wt-005
 mix compile --warnings-as-errors  # clean
 mix format --check-formatted      # clean
 mix test                          # 110 tests, 0 failures
@@ -151,4 +151,4 @@ curl -s localhost:4000/api/issues/ready | jq
 
 ## Verdict requested
 
-Ready for merge. After merge, unblocked: **gte-006 (bd2 CLI)** can start consuming this API immediately.
+Ready for merge. After merge, unblocked: **gte-006 (arb CLI)** can start consuming this API immediately.

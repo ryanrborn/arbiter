@@ -8,7 +8,7 @@
 This **replaces** v1 (commits 792d022 + 3041b00 from 2026-05-18 overnight) which was reset because:
 - It missed the asset pipeline (Tailwind v4 + DaisyUI + heroicons + esbuild) that `mix phx.new` ships by default
 - It used `ash_sqlite` (still 0.x, missing Aggregates); switched to `ash_postgres` per decision 1
-- It used hand-rolled umbrella naming (gt_core/gt_web/gt_cli); switched to Phoenix convention (gt_elixir/gt_elixir_web/gt_elixir_cli) per locked naming decision
+- It used hand-rolled umbrella naming (gt_core/gt_web/gt_cli); switched to Phoenix convention (arbiter/arbiter_web/arbiter_cli) per locked naming decision
 
 ## How it was generated
 
@@ -20,38 +20,38 @@ The intended path was `mix igniter.new --with=phx.new --install ash,...`, but Ig
 Actual command sequence:
 
 ```sh
-mix phx.new gt_elixir --umbrella --no-mailer
-cd gt_elixir_umbrella/apps/gt_elixir
+mix phx.new arbiter --umbrella --no-mailer
+cd arbiter_umbrella/apps/arbiter
 mix igniter.install ash ash_postgres ash_paper_trail ash_phoenix --yes
 cd ../
-mix new gt_elixir_cli --module GtElixirCli --app gt_elixir_cli
-# Move umbrella contents to ~/dev/gt-elixir/
+mix new arbiter_cli --module ArbiterCli --app arbiter_cli
+# Move umbrella contents to ~/dev/arbiter/
 # Configure Postgres credentials in config/dev.exs + config/test.exs
-# Add quantum + req deps to apps/gt_elixir/mix.exs
+# Add quantum + req deps to apps/arbiter/mix.exs
 ```
 
 ## What's in the repo
 
 ```
-gt-elixir/
+arbiter/
 ├── apps/
-│   ├── gt_elixir/             # Ash domain (Repo, Ash + ash_postgres + ash_paper_trail wired)
-│   │   ├── lib/gt_elixir/
+│   ├── arbiter/             # Ash domain (Repo, Ash + ash_postgres + ash_paper_trail wired)
+│   │   ├── lib/arbiter/
 │   │   │   ├── application.ex
 │   │   │   └── repo.ex
 │   │   └── priv/repo/migrations/20260519183245_initialize_extensions_1.exs
-│   ├── gt_elixir_web/         # Phoenix + LiveView + Tailwind v4 + DaisyUI 5 + heroicons + esbuild
+│   ├── arbiter_web/         # Phoenix + LiveView + Tailwind v4 + DaisyUI 5 + heroicons + esbuild
 │   │   ├── assets/
 │   │   │   ├── css/app.css    # tailwind 4 + daisyui (light + dark themes)
 │   │   │   ├── js/app.js
 │   │   │   └── vendor/        # daisyui.js, daisyui-theme.js, heroicons.js
-│   │   ├── lib/gt_elixir_web/
+│   │   ├── lib/arbiter_web/
 │   │   │   ├── components/    # CoreComponents, layouts (root.html.heex, app.html.heex)
 │   │   │   ├── controllers/   # PageController scaffold
 │   │   │   ├── endpoint.ex, router.ex, telemetry.ex
 │   │   ├── priv/static/       # favicon, images/logo.svg, robots.txt
 │   │   └── test/
-│   └── gt_elixir_cli/         # escript scaffold (commands land in gte-006)
+│   └── arbiter_cli/         # escript scaffold (commands land in gte-006)
 ├── compose.yml                # Postgres 17-alpine, healthcheck, named volume
 ├── config/
 │   ├── config.exs, dev.exs, test.exs, prod.exs, runtime.exs
@@ -68,7 +68,7 @@ gt-elixir/
 
 - [x] `docker compose up -d` starts Postgres healthy. Verified: `pg_isready` returns "accepting connections", `SELECT version()` returns "PostgreSQL 17.10".
 - [x] `mix compile` clean. All 3 apps compile without errors.
-- [x] `mix test` green. Counts: 1 doctest + 1 test for gt_elixir_cli; 0 tests for gt_elixir (no resources yet — that's gte-002); 5 tests for gt_elixir_web (Phoenix-generated defaults).
+- [x] `mix test` green. Counts: 1 doctest + 1 test for arbiter_cli; 0 tests for arbiter (no resources yet — that's gte-002); 5 tests for arbiter_web (Phoenix-generated defaults).
 - [x] `mix phx.server` starts; `GET /` returns HTTP 200 with the Phoenix landing page rendered. DaisyUI classes (`toast`, `alert`, `alert-error`) and heroicons (`hero-exclamation-circle`, `hero-arrow-path`) confirmed in the rendered HTML.
 - [x] Repo connects to Postgres in dev. Verified by `mix ecto.create` succeeding and the extension migration running.
 - [x] Ash domain registered in supervision tree (Repo + Ash deps loaded; no `Ash.Domain` yet but the infrastructure is in place for gte-002).
@@ -76,9 +76,9 @@ gt-elixir/
 
 ## What I punted on (with reasons)
 
-1. **No Ash domain module yet.** `Ash.Domain` registration with resources is gte-002's scope (Issue resource). The `config :gt_elixir, ash_domains: []` line in config.exs is the placeholder.
+1. **No Ash domain module yet.** `Ash.Domain` registration with resources is gte-002's scope (Issue resource). The `config :arbiter, ash_domains: []` line in config.exs is the placeholder.
 2. **No Quantum config.** Added to deps but no scheduler configured. First scheduled job lands in gte-022 (PR patrol watcher).
-3. **No CLI commands.** `gt_elixir_cli` is a vanilla `mix new` scaffold. Commands (`bd2 show / create / close / etc.`) land in gte-006.
+3. **No CLI commands.** `arbiter_cli` is a vanilla `mix new` scaffold. Commands (`arb show / create / close / etc.`) land in gte-006.
 4. **No DNS cluster config.** Phoenix-generated app includes `dns_cluster` dep but unconfigured. Fine for local-only dev.
 5. **Watchman not installed.** Phoenix's file watcher logs `sh: watchman: command not found` on startup. Non-fatal — Phoenix falls back to polling. Install watchman later if dev reload feels sluggish.
 
@@ -92,7 +92,7 @@ gt-elixir/
 ## How to verify
 
 ```sh
-cd ~/dev/gt-elixir
+cd ~/dev/arbiter
 git checkout feature/gte-001-umbrella-scaffold
 docker compose up -d                              # Postgres
 mix deps.get                                      # ~30s, lots of Ash deps

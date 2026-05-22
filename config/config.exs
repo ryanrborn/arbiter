@@ -49,44 +49,44 @@ config :spark,
   ]
 
 # Configure Mix tasks and generators
-config :gt_elixir,
-  ecto_repos: [GtElixir.Repo],
-  ash_domains: [GtElixir.Beads, GtElixir.Workflows]
+config :arbiter,
+  ecto_repos: [Arbiter.Repo],
+  ash_domains: [Arbiter.Beads, Arbiter.Workflows]
 
-config :gt_elixir_web,
-  ecto_repos: [GtElixir.Repo],
-  generators: [context_app: :gt_elixir]
+config :arbiter_web,
+  ecto_repos: [Arbiter.Repo],
+  generators: [context_app: :arbiter]
 
 # Configures the endpoint
-config :gt_elixir_web, GtElixirWeb.Endpoint,
+config :arbiter_web, ArbiterWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   render_errors: [
-    formats: [html: GtElixirWeb.ErrorHTML, json: GtElixirWeb.ErrorJSON],
+    formats: [html: ArbiterWeb.ErrorHTML, json: ArbiterWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: GtElixir.PubSub,
+  pubsub_server: Arbiter.PubSub,
   live_view: [signing_salt: "0ekr3cZr"]
 
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
-  gt_elixir_web: [
+  arbiter_web: [
     args:
       ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
-    cd: Path.expand("../apps/gt_elixir_web/assets", __DIR__),
+    cd: Path.expand("../apps/arbiter_web/assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
 
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.1.12",
-  gt_elixir_web: [
+  arbiter_web: [
     args: ~w(
       --input=assets/css/app.css
       --output=priv/static/assets/css/app.css
     ),
-    cd: Path.expand("../apps/gt_elixir_web", __DIR__)
+    cd: Path.expand("../apps/arbiter_web", __DIR__)
   ]
 
 # Configure Elixir's Logger

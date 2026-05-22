@@ -7,32 +7,32 @@
 
 ## What I built
 
-`GtElixir.GitHub` — a Req-backed HTTP wrapper around the GitHub REST API
+`Arbiter.GitHub` — a Req-backed HTTP wrapper around the GitHub REST API
 (plus one GraphQL mutation for `resolveReviewThread`) covering the seven
 operations the future polecat-orchestrator needs.
 
 ### Public API
 
 ```elixir
-GtElixir.GitHub.pr_open(repo, branch, target, title, body, opts \\ [])
-GtElixir.GitHub.pr_get(repo, pr_number, opts \\ [])
-GtElixir.GitHub.pr_list_reviews(repo, pr_number, opts \\ [])
-GtElixir.GitHub.pr_comment(repo, pr_number, body, opts \\ [])
-GtElixir.GitHub.pr_inline_comment(repo, pr_number, path, line, body, opts \\ [])
-GtElixir.GitHub.pr_resolve_thread(repo, thread_id, opts \\ [])
-GtElixir.GitHub.pr_merge(repo, pr_number, strategy, opts \\ [])
-GtElixir.GitHub.rate_limit()
+Arbiter.GitHub.pr_open(repo, branch, target, title, body, opts \\ [])
+Arbiter.GitHub.pr_get(repo, pr_number, opts \\ [])
+Arbiter.GitHub.pr_list_reviews(repo, pr_number, opts \\ [])
+Arbiter.GitHub.pr_comment(repo, pr_number, body, opts \\ [])
+Arbiter.GitHub.pr_inline_comment(repo, pr_number, path, line, body, opts \\ [])
+Arbiter.GitHub.pr_resolve_thread(repo, thread_id, opts \\ [])
+Arbiter.GitHub.pr_merge(repo, pr_number, strategy, opts \\ [])
+Arbiter.GitHub.rate_limit()
 ```
 
-Every public function returns `{:ok, value}` or `{:error, %GtElixir.GitHub.Error{}}`.
+Every public function returns `{:ok, value}` or `{:error, %Arbiter.GitHub.Error{}}`.
 
 ### Files added
 
 ```
-apps/gt_elixir/lib/gt_elixir/github.ex             (+) ~330 LOC
-apps/gt_elixir/lib/gt_elixir/github/error.ex       (+)  ~40 LOC
-apps/gt_elixir/test/gt_elixir/github_test.exs      (+) 19 tests
-apps/gt_elixir/test/test_helper.exs                (M) ensure :req started
+apps/arbiter/lib/arbiter/github.ex             (+) ~330 LOC
+apps/arbiter/lib/arbiter/github/error.ex       (+)  ~40 LOC
+apps/arbiter/test/arbiter/github_test.exs      (+) 19 tests
+apps/arbiter/test/test_helper.exs                (M) ensure :req started
 config/test.exs                                    (M) :github_http_stub flag
 ```
 
@@ -44,7 +44,7 @@ config/test.exs                                    (M) :github_http_stub flag
 | Token from env | `System.get_env("GITHUB_TOKEN")` lazy, opts[:token] override |
 | Rate-limit aware (uses GH headers) | every response (success + error) updates `:persistent_term` cache; `rate_limit/0` reads it |
 | Tested against a real repo (could be a fixture personal repo) | **deferred** — bead Phase 2 is module surface only. Tests use `Req.Test` stubs; a real-repo smoke test belongs with gte-020/021/022 when there's actual orchestration to exercise. Flagging for reviewer to confirm. |
-| Errors are structured tagged tuples | `{:error, %GtElixir.GitHub.Error{kind, status, message, raw}}` |
+| Errors are structured tagged tuples | `{:error, %Arbiter.GitHub.Error{kind, status, message, raw}}` |
 
 ## Design choices worth flagging
 
@@ -93,10 +93,10 @@ config/test.exs                                    (M) :github_http_stub flag
    both branches.
 
 6. **Test stubbing via app-env flag + per-call `:plug` opt.** Setting
-   `config :gt_elixir, :github_http_stub, true` in `config/test.exs`
-   makes the module inject `plug: {Req.Test, GtElixir.GitHub.HTTP}`
+   `config :arbiter, :github_http_stub, true` in `config/test.exs`
+   makes the module inject `plug: {Req.Test, Arbiter.GitHub.HTTP}`
    into every Req call. Tests register stubs via
-   `Req.Test.stub(GtElixir.GitHub.HTTP, fn conn -> ... end)`. The hook
+   `Req.Test.stub(Arbiter.GitHub.HTTP, fn conn -> ... end)`. The hook
    also accepts an explicit `opts[:plug]` for callers who want to
    override at the call site without changing app env (useful later
    for integration tests).
@@ -132,18 +132,18 @@ config/test.exs                                    (M) :github_http_stub flag
 ## How to verify
 
 ```sh
-cd ~/dev/gt-elixir-wt-018
+cd ~/dev/arbiter-wt-018
 
 mix compile --warnings-as-errors    # clean
-mix format --check-formatted apps/gt_elixir/lib/gt_elixir/github.ex \
-  apps/gt_elixir/lib/gt_elixir/github/error.ex \
-  apps/gt_elixir/test/gt_elixir/github_test.exs
+mix format --check-formatted apps/arbiter/lib/arbiter/github.ex \
+  apps/arbiter/lib/arbiter/github/error.ex \
+  apps/arbiter/test/arbiter/github_test.exs
 
-mix test apps/gt_elixir/test/gt_elixir/github_test.exs
+mix test apps/arbiter/test/arbiter/github_test.exs
 # Expect: 19 tests, 0 failures
 
 mix test
-# Expect: 48 (cli) + 170 (gt_elixir, +19) + 36 (web) = 254 tests, 0 failures
+# Expect: 48 (cli) + 170 (arbiter, +19) + 36 (web) = 254 tests, 0 failures
 ```
 
 ## Verdict requested

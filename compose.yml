@@ -1,24 +1,24 @@
-name: gt-elixir-dev
+name: arbiter-dev
 
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: gt-elixir-postgres
+    container_name: arbiter-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: gt_elixir
-      POSTGRES_PASSWORD: gt_elixir_dev_password
-      POSTGRES_DB: gt_elixir_dev
+      POSTGRES_USER: arbiter
+      POSTGRES_PASSWORD: arbiter_dev_password
+      POSTGRES_DB: arbiter_dev
     ports:
       - "127.0.0.1:5432:5432"  # bind to localhost only
     volumes:
-      - gt_elixir_pgdata:/var/lib/postgresql/data
+      - arbiter_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gt_elixir -d gt_elixir_dev"]
+      test: ["CMD-SHELL", "pg_isready -U arbiter -d arbiter_dev"]
       interval: 5s
       timeout: 3s
       retries: 10
 
 volumes:
-  gt_elixir_pgdata:
-    name: gt-elixir-pgdata
+  arbiter_pgdata:
+    name: arbiter-pgdata
