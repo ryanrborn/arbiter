@@ -19,7 +19,7 @@ defmodule ArbiterCli.AliasResolver do
   `:unknown` rather than silently dispatching to nothing.
   """
 
-  @known_verbs ~w(show create close list update dep ready doctor where help sling prime polecat)
+  @known_verbs ~w(init show create close list update dep ready doctor where help sling prime polecat)
 
   @doc "The set of built-in verbs that arb dispatches to."
   @spec known_verbs() :: [String.t()]
@@ -56,13 +56,15 @@ defmodule ArbiterCli.AliasResolver do
   end
 
   defp aliases_for_active_workspace do
-    case ArbiterCli.Workspace.resolve() do
-      {:ok, ws} ->
-        aliases = get_in(ws, ["config", "vernacular", "aliases"]) || %{}
+    case ArbiterCli.Client.get("/api/settings") do
+      {:ok, %{"data" => %{"vernacular" => %{"aliases" => aliases}}}} when is_map(aliases) ->
         {:ok, aliases}
 
-      err ->
-        err
+      {:ok, _} ->
+        {:ok, %{}}
+
+      {:error, %ArbiterCli.Client.Error{} = err} ->
+        {:error, err.message}
     end
   end
 

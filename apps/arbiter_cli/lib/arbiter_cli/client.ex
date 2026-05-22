@@ -6,7 +6,7 @@ defmodule ArbiterCli.Client do
 
   Configuration:
 
-    * `ARB_HOST` env var overrides the base URL (default `http://127.0.0.1:4000`)
+    * `ARB_HOST` env var overrides the base URL (default `http://127.0.0.1:4848`)
 
   Tests can override the Req adapter via `:req_options` in the process dict:
 
@@ -35,7 +35,7 @@ defmodule ArbiterCli.Client do
           }
   end
 
-  @default_base "http://127.0.0.1:4000"
+  @default_base "http://127.0.0.1:4848"
 
   @spec base_url() :: String.t()
   def base_url do
