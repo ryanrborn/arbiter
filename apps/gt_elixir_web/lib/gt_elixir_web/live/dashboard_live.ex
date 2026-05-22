@@ -48,6 +48,12 @@ defmodule GtElixirWeb.DashboardLive do
      |> assign(:now, DateTime.utc_now())
      |> assign(:live, live?)
      |> assign(:worker_label, Vernacular.label(:worker))
+     |> assign(:rig_label, Vernacular.label(:rig))
+     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:workspace_label, Vernacular.label(:workspace))
+     |> assign(:pr_label, Vernacular.label(:pr))
+     |> assign(:merge_queue_label, Vernacular.label(:merge_queue))
+     |> assign(:escalation_label, Vernacular.label(:escalation))
      |> refresh_workspaces()
      |> refresh_rigs()
      |> refresh_polecats()
@@ -280,9 +286,10 @@ defmodule GtElixirWeb.DashboardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="p-6 max-w-7xl mx-auto">
-      <div class="flex items-center justify-between mb-6">
-        <h1 class="text-2xl font-bold">Dashboard</h1>
+    <Layouts.app flash={@flash} current_path={@current_path}>
+      <div class="p-6 max-w-7xl mx-auto">
+        <div class="flex items-center justify-between mb-6">
+          <h1 class="text-2xl font-bold">Dashboard</h1>
         <span
           id="live-indicator"
           class={[
@@ -305,7 +312,7 @@ defmodule GtElixirWeb.DashboardLive do
 
       <section class="card bg-base-200 p-4 mb-6">
         <h2 class="text-lg font-semibold mb-3">
-          Workspaces ({length(@workspaces)})
+          {String.capitalize(@workspace_label)}s ({length(@workspaces)})
         </h2>
         <%= if @workspaces == [] do %>
           <p class="text-base-content/60 italic">No workspaces.</p>
@@ -341,11 +348,11 @@ defmodule GtElixirWeb.DashboardLive do
 
       <section class="card bg-base-200 p-4 mb-6">
         <h2 class="text-lg font-semibold mb-3">
-          Rigs ({length(@rigs)})
+          {String.capitalize(@rig_label)}s ({length(@rigs)})
         </h2>
         <%= if @rigs == [] do %>
           <p class="text-base-content/60 italic">
-            No rigs configured. Add entries to <code>:gt_elixir, :rig_paths</code>
+            No {@rig_label}s configured. Add entries to <code>:gt_elixir, :rig_paths</code>
             in config or to a workspace's <code>config["rig_paths"]</code>.
           </p>
         <% else %>
@@ -385,7 +392,7 @@ defmodule GtElixirWeb.DashboardLive do
             <table class="table table-sm" id="active-polecats">
               <thead>
                 <tr>
-                  <th>Bead</th>
+                  <th>{String.capitalize(@issue_label)}</th>
                   <th>Workspace</th>
                   <th>Step</th>
                   <th>Status</th>
@@ -420,7 +427,7 @@ defmodule GtElixirWeb.DashboardLive do
 
         <section class="card bg-base-200 p-4">
           <h2 class="text-lg font-semibold mb-3">
-            Recent beads ({length(@recent_beads)})
+            Recent {String.capitalize(@issue_label)}s ({length(@recent_beads)})
           </h2>
           <table class="table table-sm" id="recent-beads">
             <thead>
@@ -451,21 +458,22 @@ defmodule GtElixirWeb.DashboardLive do
         </section>
 
         <section class="card bg-base-200 p-4">
-          <h2 class="text-lg font-semibold mb-3">PRs in flight</h2>
+          <h2 class="text-lg font-semibold mb-3">{String.capitalize(@pr_label)}s in flight</h2>
           <p class="text-base-content/60 italic" id="prs-empty">
-            No refineries running. (Phase 4 will register Refinery instances
-            per workspace and surface their queues here.)
+            No {@merge_queue_label}s running. (Phase 4 will register {@merge_queue_label} instances
+            per {@workspace_label} and surface their queues here.)
           </p>
         </section>
 
         <section class="card bg-base-200 p-4">
-          <h2 class="text-lg font-semibold mb-3">Escalations</h2>
+          <h2 class="text-lg font-semibold mb-3">{String.capitalize(@escalation_label)}s</h2>
           <p class="text-base-content/60 italic" id="escalations-empty">
-            No escalations. (Escalation resource is a Phase 5 follow-up.)
+            No {@escalation_label}s. ({String.capitalize(@escalation_label)} resource is a Phase 5 follow-up.)
           </p>
         </section>
       </div>
     </div>
+    </Layouts.app>
     """
   end
 end
