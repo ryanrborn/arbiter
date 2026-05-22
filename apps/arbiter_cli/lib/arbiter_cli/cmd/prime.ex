@@ -55,10 +55,11 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp gather do
     workspace = gather_workspace()
+    vernacular = gather_vernacular()
 
     %{
       workspace: workspace,
-      vernacular: gather_vernacular(),
+      vernacular: vernacular,
       polecats: gather_polecats(),
       ready: gather_ready(workspace)
     }
@@ -106,17 +107,27 @@ defmodule ArbiterCli.Cmd.Prime do
   # ---- render ------------------------------------------------------------
 
   defp emit_text(sections) do
-    emit_workspace_section(sections.workspace)
+    {worker, issue, workspace} =
+      case sections.vernacular do
+        {:ok, v} ->
+          {Map.get(v, "worker", "polecat"), Map.get(v, "issue", "bead"),
+           Map.get(v, "workspace", "workspace")}
+
+        _ ->
+          {"polecat", "bead", "workspace"}
+      end
+
+    emit_workspace_section(sections.workspace, workspace)
     IO.puts("")
     emit_vernacular_section(sections.vernacular)
     IO.puts("")
-    emit_polecats_section(sections.polecats)
+    emit_polecats_section(sections.polecats, worker)
     IO.puts("")
-    emit_ready_section(sections.ready)
+    emit_ready_section(sections.ready, issue)
   end
 
-  defp emit_workspace_section({:ok, ws}) do
-    IO.puts("== Active workspace ==")
+  defp emit_workspace_section({:ok, ws}, workspace) do
+    IO.puts("== Active #{workspace} ==")
     IO.puts("  name:    #{ws["name"]}")
     IO.puts("  prefix:  #{ws["prefix"]}")
     IO.puts("  id:      #{ws["id"]}")
@@ -125,8 +136,8 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("  tracker: #{tracker_type}")
   end
 
-  defp emit_workspace_section({:error, msg}) do
-    IO.puts("== Active workspace ==")
+  defp emit_workspace_section({:error, msg}, workspace) do
+    IO.puts("== Active #{workspace} ==")
     IO.puts("  (could not resolve: #{msg})")
   end
 
@@ -134,7 +145,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Vernacular ==")
 
     if vernacular == %{} do
-      IO.puts("  (default gas-town — coordinator=mayor, worker=polecat, etc.)")
+      IO.puts("  (defaults)")
     else
       vernacular
       |> Enum.sort_by(&elem(&1, 0))
@@ -147,13 +158,13 @@ defmodule ArbiterCli.Cmd.Prime do
   defp format_vernacular_value(v) when is_map(v), do: inspect(v)
   defp format_vernacular_value(v), do: to_string(v)
 
-  defp emit_polecats_section({:ok, []}) do
-    IO.puts("== Active polecats ==")
+  defp emit_polecats_section({:ok, []}, worker) do
+    IO.puts("== Active #{worker}s ==")
     IO.puts("  (none)")
   end
 
-  defp emit_polecats_section({:ok, list}) do
-    IO.puts("== Active polecats (#{length(list)}) ==")
+  defp emit_polecats_section({:ok, list}, worker) do
+    IO.puts("== Active #{worker}s (#{length(list)}) ==")
 
     Enum.each(list, fn p ->
       IO.puts(
@@ -162,28 +173,26 @@ defmodule ArbiterCli.Cmd.Prime do
     end)
   end
 
-  defp emit_polecats_section({:error, msg}) do
-    IO.puts("== Active polecats ==")
+  defp emit_polecats_section({:error, msg}, worker) do
+    IO.puts("== Active #{worker}s ==")
     IO.puts("  (error: #{msg})")
   end
 
-  defp emit_ready_section({:ok, []}) do
-    IO.puts("== Ready beads ==")
+  defp emit_ready_section({:ok, []}, issue) do
+    IO.puts("== Ready #{issue}s ==")
     IO.puts("  (none)")
   end
 
-  defp emit_ready_section({:ok, list}) do
-    IO.puts("== Ready beads (#{length(list)}) ==")
+  defp emit_ready_section({:ok, list}, issue) do
+    IO.puts("== Ready #{issue}s (#{length(list)}) ==")
 
-    Enum.each(list, fn issue ->
-      IO.puts(
-        "  #{issue["id"]}  P#{issue["priority"]}  #{issue["issue_type"]}  #{truncate(issue["title"], 80)}"
-      )
+    Enum.each(list, fn i ->
+      IO.puts("  #{i["id"]}  P#{i["priority"]}  #{i["issue_type"]}  #{truncate(i["title"], 80)}")
     end)
   end
 
-  defp emit_ready_section({:error, msg}) do
-    IO.puts("== Ready beads ==")
+  defp emit_ready_section({:error, msg}, issue) do
+    IO.puts("== Ready #{issue}s ==")
     IO.puts("  (error: #{msg})")
   end
 
