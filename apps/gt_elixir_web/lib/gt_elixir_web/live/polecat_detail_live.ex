@@ -155,6 +155,7 @@ defmodule GtElixirWeb.PolecatDetailLive do
   @impl true
   def render(assigns) do
     ~H"""
+    <Layouts.app flash={@flash} current_path={@current_path}>
     <div class="p-6 max-w-7xl mx-auto">
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-2xl font-bold">
@@ -285,6 +286,7 @@ defmodule GtElixirWeb.PolecatDetailLive do
         <.link navigate={~p"/"} class="link link-hover">← Back to dashboard</.link>
       </div>
     </div>
+    </Layouts.app>
     """
   end
 

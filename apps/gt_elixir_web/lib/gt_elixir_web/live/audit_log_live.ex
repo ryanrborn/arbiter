@@ -176,6 +176,7 @@ defmodule GtElixirWeb.AuditLogLive do
   @impl true
   def render(assigns) do
     ~H"""
+    <Layouts.app flash={@flash} current_path={@current_path}>
     <div class="p-6 max-w-7xl mx-auto" id="audit-log" phx-hook="DownloadOnEvent">
       <h1 class="text-2xl font-bold mb-4">Audit log</h1>
       <p class="text-sm text-base-content/70 mb-6">
@@ -272,6 +273,7 @@ defmodule GtElixirWeb.AuditLogLive do
         </tbody>
       </table>
     </div>
+    </Layouts.app>
     """
   end
 
