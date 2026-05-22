@@ -9,7 +9,7 @@
 
 ## What I built
 
-`GtElixir.Polecat.ClaudeSession` — the polecat's I/O surface. Wraps an
+`Arbiter.Polecat.ClaudeSession` — the polecat's I/O surface. Wraps an
 Erlang `Port` around a child process (Claude Code CLI later, an echo
 fixture for now), streams its stdout into the owning `Polecat` GenServer,
 broadcasts each line over `Phoenix.PubSub`, and detects a `gt done`
@@ -22,15 +22,15 @@ argv.
 ### Files added
 
 ```
-apps/gt_elixir/lib/gt_elixir/polecat/claude_session.ex   (+) ~210 LOC
-apps/gt_elixir/test/fixtures/echo_with_done.sh           (+) shell fixture
-apps/gt_elixir/test/gt_elixir/polecat/claude_session_test.exs   (+) 14 tests
+apps/arbiter/lib/arbiter/polecat/claude_session.ex   (+) ~210 LOC
+apps/arbiter/test/fixtures/echo_with_done.sh           (+) shell fixture
+apps/arbiter/test/arbiter/polecat/claude_session_test.exs   (+) 14 tests
 ```
 
 ### Files modified
 
 ```
-apps/gt_elixir/lib/gt_elixir/polecat.ex
+apps/arbiter/lib/arbiter/polecat.ex
   + State struct now carries `claude_sessions: %{}` (port -> session map)
   + handle_call({:__claude_session_open__, port_args, session_config}, ...)
   + handle_info({port, {:data, {:eol, line}}}, ...)
@@ -41,12 +41,12 @@ apps/gt_elixir/lib/gt_elixir/polecat.ex
 ```
 
 **Polecat's public API is unchanged.** Existing tests (245 in
-`gt_elixir`, plus the rest of the umbrella) stay green untouched.
+`arbiter`, plus the rest of the umbrella) stay green untouched.
 
 ## Public API (new)
 
 ```elixir
-GtElixir.Polecat.ClaudeSession.start(opts) :: {:ok, port()} | {:error, term()}
+Arbiter.Polecat.ClaudeSession.start(opts) :: {:ok, port()} | {:error, term()}
 
 # opts:
 #   owner:         pid()              REQUIRED — the polecat GenServer
@@ -135,9 +135,9 @@ in memory.
 
 ### 3. PubSub topic default: `"polecat:<bead_id>"`
 
-`Phoenix.PubSub` instance is `GtElixir.PubSub` (verified in
-`apps/gt_elixir/lib/gt_elixir/application.ex`; the bead's hint of
-`GtElixirWeb.PubSub` was wrong — the actual PubSub lives in the core
+`Phoenix.PubSub` instance is `Arbiter.PubSub` (verified in
+`apps/arbiter/lib/arbiter/application.ex`; the bead's hint of
+`ArbiterWeb.PubSub` was wrong — the actual PubSub lives in the core
 app, not the web app).
 
 Subscribers discover the topic the same way they discover the polecat:
@@ -184,7 +184,7 @@ edge cases like a binary that disappears between `find_executable` and
 
 ## Test coverage
 
-14 tests in `apps/gt_elixir/test/gt_elixir/polecat/claude_session_test.exs`:
+14 tests in `apps/arbiter/test/arbiter/polecat/claude_session_test.exs`:
 
 | Block | Count | Covers |
 |---|---|---|
@@ -204,9 +204,9 @@ cleans them up.
 ```
 mix compile --warnings-as-errors                                    # clean
 mix format --check-formatted <my 3 files>                           # clean
-mix test apps/gt_elixir/test/gt_elixir/polecat/claude_session_test.exs   # 14 / 0
+mix test apps/arbiter/test/arbiter/polecat/claude_session_test.exs   # 14 / 0
 mix test                                                            # umbrella: 329 / 0
-                                                                    # (gt_elixir 245, gt_elixir_cli 48, gt_elixir_web 36)
+                                                                    # (arbiter 245, arbiter_cli 48, arbiter_web 36)
 ```
 
 `mix format --check-formatted` on the umbrella flags four files that

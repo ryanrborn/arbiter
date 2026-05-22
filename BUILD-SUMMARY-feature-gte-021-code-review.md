@@ -6,8 +6,8 @@
 
 ## What shipped
 
-A new `GtElixir.Workflows.CodeReview` workflow driven by
-`GtElixir.Workflow.run/2` (and dispatchable through the gte-015
+A new `Arbiter.Workflows.CodeReview` workflow driven by
+`Arbiter.Workflow.run/2` (and dispatchable through the gte-015
 WorkflowMachine). Five steps:
 
 | Step              | Needs           | Effect                                                 |
@@ -22,22 +22,22 @@ Two modes, selected by `state.mode`:
 
   * `:local`  — writes `<worktree>/reviews/<sanitized-branch>.md`
   * `:github` — posts inline comments + a summary comment + a top-level
-    review verdict via the typed `GtElixir.GitHub` HTTP client. No
+    review verdict via the typed `Arbiter.GitHub` HTTP client. No
     `gh` shell-out.
 
 ## Files
 
-  * `apps/gt_elixir/lib/gt_elixir/workflows/code_review.ex` — workflow
+  * `apps/arbiter/lib/arbiter/workflows/code_review.ex` — workflow
     module, step dispatch, verdict computation.
-  * `apps/gt_elixir/lib/gt_elixir/workflows/code_review/checks.ex` —
+  * `apps/arbiter/lib/arbiter/workflows/code_review/checks.ex` —
     default check runner (Phase 2: returns `{:ok, []}`).
-  * `apps/gt_elixir/lib/gt_elixir/workflows/code_review/local_mode.ex` —
+  * `apps/arbiter/lib/arbiter/workflows/code_review/local_mode.ex` —
     review-file rendering & verdict-line rewrite.
-  * `apps/gt_elixir/lib/gt_elixir/workflows/code_review/github_mode.ex` —
+  * `apps/arbiter/lib/arbiter/workflows/code_review/github_mode.ex` —
     inline-comment loop, summary comment, review verdict.
-  * `apps/gt_elixir/lib/gt_elixir/github.ex` — adds
-    `GtElixir.GitHub.pr_review/5` (`POST /repos/:o/:r/pulls/:n/reviews`).
-  * `apps/gt_elixir/test/gt_elixir/workflows/code_review_test.exs` —
+  * `apps/arbiter/lib/arbiter/github.ex` — adds
+    `Arbiter.GitHub.pr_review/5` (`POST /repos/:o/:r/pulls/:n/reviews`).
+  * `apps/arbiter/test/arbiter/workflows/code_review_test.exs` —
     23 tests.
 
 ## New GitHub function: `pr_review/5`
@@ -102,7 +102,7 @@ mocking modules.
 
 The reviewer polecat MUST NOT push code or merge PRs. Enforcement is
 **static** — the workflow source simply does not call
-`GtElixir.Polecat.Worktree.push/2` or `GtElixir.GitHub.pr_merge/4`.
+`Arbiter.Polecat.Worktree.push/2` or `Arbiter.GitHub.pr_merge/4`.
 A regression test (`module does not call GitHub.pr_merge or
 Polecat.Worktree.push`) reads the source, strips the moduledoc, and
 asserts neither symbol appears in the remaining code. Cheap, deterministic,
@@ -124,7 +124,7 @@ the workflow itself just produces a verdict).
   * `:file_findings` local file contents + github stub round-trip — 2 tests
   * `:verdict` no-findings → :approve, error → :request_changes,
     warnings-only → :approve, github stub round-trip — 4 tests
-  * End-to-end via `GtElixir.Workflow.run(CodeReview, ...)` in local mode — 1
+  * End-to-end via `Arbiter.Workflow.run(CodeReview, ...)` in local mode — 1
   * `GitHub.pr_review/5` (approve, request_changes) — 2 tests
   * `Checks.run/2` Phase-2 no-op — 1 test
 
@@ -153,4 +153,4 @@ Full umbrella: 67 + 335 + 36 = **438 tests, 0 failures**.
   * No merge, no push from the worktree.
   * Two commits (impl + this BUILD-SUMMARY), conventional prefix.
   * No `--no-verify`.
-  * No edits in the main repo at `/home/rborn/dev/gt-elixir/`.
+  * No edits in the main repo at `/home/rborn/dev/arbiter/`.

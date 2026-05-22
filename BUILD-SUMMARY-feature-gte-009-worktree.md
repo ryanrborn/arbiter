@@ -9,7 +9,7 @@ Foundational Phase 2 piece for the future "polecat orchestrator" (Phase 4): a
 thin, well-tested wrapper around `git worktree`, invoked via `System.cmd/3`.
 No supervisors, no GenServer, just pure functions returning tagged tuples.
 
-Five public functions on `GtElixir.Polecat.Worktree`:
+Five public functions on `Arbiter.Polecat.Worktree`:
 
 - `create/3` — `git worktree add <path> -b <branch> <base>`; idempotent when
   the target dir already exists on the requested branch.
@@ -23,25 +23,25 @@ Five public functions on `GtElixir.Polecat.Worktree`:
 
 ## Files
 
-- `apps/gt_elixir/lib/gt_elixir/polecat/worktree.ex` — new module (~170 LOC).
-- `apps/gt_elixir/test/gt_elixir/polecat/worktree_test.exs` — new test module,
+- `apps/arbiter/lib/arbiter/polecat/worktree.ex` — new module (~170 LOC).
+- `apps/arbiter/test/arbiter/polecat/worktree_test.exs` — new test module,
   11 tests, `async: false` (mutates `Application` env).
 
-The `GtElixir.Polecat` namespace is brand-new. No other modules in it yet —
+The `Arbiter.Polecat` namespace is brand-new. No other modules in it yet —
 this is the seed.
 
 ## Design notes
 
 ### Worktree root is configurable
 
-Default is `/home/rborn/dev/gt-elixir-worktrees` (per spec). Override via:
+Default is `/home/rborn/dev/arbiter-worktrees` (per spec). Override via:
 
 ```elixir
-Application.put_env(:gt_elixir, :worktree_root, "/some/other/dir")
+Application.put_env(:arbiter, :worktree_root, "/some/other/dir")
 ```
 
 Tests rely on this to point at a per-test temp dir. The spec said
-"creates a worktree at `/home/rborn/dev/gt-elixir-worktrees/<branch_name>/`"
+"creates a worktree at `/home/rborn/dev/arbiter-worktrees/<branch_name>/`"
 but pinning that path into the module would have made the tests unwieldy
 and would have hard-coded one developer's home directory into production
 code. Configurability is cheap and keeps the spec's default behavior.
@@ -92,7 +92,7 @@ Coverage:
 - push to an unknown remote returns `{:error, {:git_failed, _}}`
 
 ```
-$ mix test apps/gt_elixir/test/gt_elixir/polecat/worktree_test.exs
+$ mix test apps/arbiter/test/arbiter/polecat/worktree_test.exs
 11 tests, 0 failures
 ```
 
@@ -102,11 +102,11 @@ $ mix test apps/gt_elixir/test/gt_elixir/polecat/worktree_test.exs
 $ mix compile --warnings-as-errors
 (clean)
 
-$ mix format --check-formatted apps/gt_elixir/lib/gt_elixir/polecat/worktree.ex \
-                                apps/gt_elixir/test/gt_elixir/polecat/worktree_test.exs
+$ mix format --check-formatted apps/arbiter/lib/arbiter/polecat/worktree.ex \
+                                apps/arbiter/test/arbiter/polecat/worktree_test.exs
 (clean)
 
-$ mix test apps/gt_elixir/test/gt_elixir/polecat/worktree_test.exs
+$ mix test apps/arbiter/test/arbiter/polecat/worktree_test.exs
 11 tests, 0 failures
 ```
 

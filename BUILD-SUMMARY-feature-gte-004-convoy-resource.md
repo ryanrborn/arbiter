@@ -7,20 +7,20 @@
 
 ## What I built
 
-A `GtElixir.Beads.Convoy` resource for batches of related Issues, plus the `ConvoyMembership` join, plus a minimal hook on `Issue.close` so system-managed convoys auto-close when their last member is closed.
+A `Arbiter.Beads.Convoy` resource for batches of related Issues, plus the `ConvoyMembership` join, plus a minimal hook on `Issue.close` so system-managed convoys auto-close when their last member is closed.
 
 ### Files added/changed
 
 ```
-apps/gt_elixir/lib/gt_elixir/beads/convoy.ex                        (+) main resource (~180 LOC)
-apps/gt_elixir/lib/gt_elixir/beads/convoy_membership.ex             (+) join resource
-apps/gt_elixir/lib/gt_elixir/beads/convoy/changes/generate_id.ex    (+) "{prefix}-cv-{short_id}" PK
-apps/gt_elixir/lib/gt_elixir/beads/convoy/changes/set_closed_reason.ex (+) :close action arg → attr
-apps/gt_elixir/lib/gt_elixir/beads/issue.ex                         (M) added has_many :convoys + after_action on :close
-apps/gt_elixir/lib/gt_elixir/beads.ex                               (M) registered Convoy + ConvoyMembership
-apps/gt_elixir/priv/repo/migrations/20260519195621_add_convoy_resources.exs (+) creates both tables + unique index
-apps/gt_elixir/priv/resource_snapshots/...                          (+) snapshots
-apps/gt_elixir/test/gt_elixir/beads/convoy_test.exs                 (+) 16 tests
+apps/arbiter/lib/arbiter/beads/convoy.ex                        (+) main resource (~180 LOC)
+apps/arbiter/lib/arbiter/beads/convoy_membership.ex             (+) join resource
+apps/arbiter/lib/arbiter/beads/convoy/changes/generate_id.ex    (+) "{prefix}-cv-{short_id}" PK
+apps/arbiter/lib/arbiter/beads/convoy/changes/set_closed_reason.ex (+) :close action arg → attr
+apps/arbiter/lib/arbiter/beads/issue.ex                         (M) added has_many :convoys + after_action on :close
+apps/arbiter/lib/arbiter/beads.ex                               (M) registered Convoy + ConvoyMembership
+apps/arbiter/priv/repo/migrations/20260519195621_add_convoy_resources.exs (+) creates both tables + unique index
+apps/arbiter/priv/resource_snapshots/...                          (+) snapshots
+apps/arbiter/test/arbiter/beads/convoy_test.exs                 (+) 16 tests
 ```
 
 ## Acceptance check (from bead gte-004)
@@ -62,7 +62,7 @@ apps/gt_elixir/test/gt_elixir/beads/convoy_test.exs                 (+) 16 tests
 ## How to verify
 
 ```sh
-cd ~/dev/gt-elixir
+cd ~/dev/arbiter
 git checkout feature/gte-004-convoy-resource
 
 docker compose up -d
@@ -72,15 +72,15 @@ MIX_ENV=test mix ecto.migrate
 mix compile --warnings-as-errors           # clean
 mix format --check-formatted               # clean
 
-mix test apps/gt_elixir/test/gt_elixir/beads/convoy_test.exs
+mix test apps/arbiter/test/arbiter/beads/convoy_test.exs
 # Expect: 16 tests, 0 failures
 
 mix test
-# Expect: 52 gt_elixir + 5 gt_elixir_web + 1+1 gt_elixir_cli = 59 total, 0 failures
+# Expect: 52 arbiter + 5 arbiter_web + 1+1 arbiter_cli = 59 total, 0 failures
 
 # Acceptance smoke from iex
 iex -S mix
-> alias GtElixir.Beads.{Workspace, Issue, Convoy, ConvoyMembership}
+> alias Arbiter.Beads.{Workspace, Issue, Convoy, ConvoyMembership}
 > {:ok, ws} = Ash.create(Workspace, %{name: "smoke", prefix: "smk"})
 > {:ok, c} = Ash.create(Convoy, %{title: "batch", workspace_id: ws.id})
 > {:ok, i1} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
@@ -97,7 +97,7 @@ iex -S mix
 
 Ready to merge. Merge order with gte-003 (in flight via parallel Agent) is:
 - Either order works since both branched from main at the same commit (5a5c62e)
-- Both touch `apps/gt_elixir/lib/gt_elixir/beads.ex` (domain `resources` block) and `apps/gt_elixir/lib/gt_elixir/beads/issue.ex` (relationships block + actions) — **conflicts likely on these two files at merge**
+- Both touch `apps/arbiter/lib/arbiter/beads.ex` (domain `resources` block) and `apps/arbiter/lib/arbiter/beads/issue.ex` (relationships block + actions) — **conflicts likely on these two files at merge**
 - I'll handle the conflicts at merge time; trivially mergeable since the additions are non-overlapping (gte-003 adds Dependency resource + Issue.ready/0, gte-004 adds Convoy resources + Issue.convoys + Issue.close hook)
 
 After merge, unblocked: **gte-005 (REST API for CLI)**.

@@ -7,7 +7,7 @@ import Config
 # any compile-time configuration in here, as it won't be applied.
 # The block below contains prod specific runtime configuration.
 
-config :gt_elixir_web, GtElixirWeb.Endpoint,
+config :arbiter_web, ArbiterWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
@@ -20,7 +20,7 @@ if config_env() == :prod do
 
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
-  config :gt_elixir, GtElixir.Repo,
+  config :arbiter, Arbiter.Repo,
     # ssl: true,
     url: database_url,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
@@ -40,7 +40,7 @@ if config_env() == :prod do
       You can generate one by calling: mix phx.gen.secret
       """
 
-  config :gt_elixir_web, GtElixirWeb.Endpoint,
+  config :arbiter_web, ArbiterWeb.Endpoint,
     http: [
       # Enable IPv6 and bind on all interfaces.
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
@@ -53,7 +53,7 @@ if config_env() == :prod do
   # If you are doing OTP releases, you need to instruct Phoenix
   # to start each relevant endpoint:
   #
-  #     config :gt_elixir_web, GtElixirWeb.Endpoint, server: true
+  #     config :arbiter_web, ArbiterWeb.Endpoint, server: true
   #
   # Then you can assemble a release by calling `mix release`.
   # See `mix help release` for more information.
@@ -63,7 +63,7 @@ if config_env() == :prod do
   # To get SSL working, you will need to add the `https` key
   # to your endpoint configuration:
   #
-  #     config :gt_elixir_web, GtElixirWeb.Endpoint,
+  #     config :arbiter_web, ArbiterWeb.Endpoint,
   #       https: [
   #         ...,
   #         port: 443,
@@ -85,10 +85,10 @@ if config_env() == :prod do
   # We also recommend setting `force_ssl` in your config/prod.exs,
   # ensuring no data is ever sent via http, always redirecting to https:
   #
-  #     config :gt_elixir_web, GtElixirWeb.Endpoint,
+  #     config :arbiter_web, ArbiterWeb.Endpoint,
   #       force_ssl: [hsts: true]
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.
 
-  config :gt_elixir, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
+  config :arbiter, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 end

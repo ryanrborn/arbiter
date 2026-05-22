@@ -19,12 +19,12 @@
 **Quick verify:**
 
 ```sh
-cd ~/dev/gt-elixir
+cd ~/dev/arbiter
 git checkout feature/gte-001-umbrella-scaffold
 mix compile --warnings-as-errors  # should be clean
 mix test                          # 4 tests, 0 failures
 mix phx.server &
-curl -s http://127.0.0.1:4000/ | grep gt-elixir
+curl -s http://127.0.0.1:4000/ | grep arbiter
 kill %1
 ```
 
@@ -34,13 +34,13 @@ If you want a reviewer polecat to look first per the formal process, dispatch on
 
 ## Beads filed for the port (32 total)
 
-All persisted to canonical Dolt and verified. View them: `bd list --labels gt-elixir-port`. The full graph with dependencies is in `docs/decision-doc.md`.
+All persisted to canonical Dolt and verified. View them: `bd list --labels arbiter-port`. The full graph with dependencies is in `docs/decision-doc.md`.
 
 Phase split:
 
 | Phase | Beads | Description |
 |---|---|---|
-| 1 | gte-001 → gte-008 | Bead ledger + CLI shim (`bd2`). gte-001 done. |
+| 1 | gte-001 → gte-008 | Bead ledger + CLI shim (`arb`). gte-001 done. |
 | 2 | gte-009 → gte-017 | Polecat lifecycle + workflow engine + 6 ported formulas |
 | 3 | gte-018 → gte-023 | PR + Jira watchers + peer review |
 | 3.5 | gte-P1 → gte-P4 | DB-stored vernacular system (user-defined, no hardcoded personas) |
@@ -88,6 +88,6 @@ Per the agreed scope limits:
 - gt daemon: running clean (PID 3613754)
 - Open PRs: none from us
 - Inbox: 0 unread
-- ~/dev/gt-elixir: scaffold ready on feature branch, main is doc-only
+- ~/dev/arbiter: scaffold ready on feature branch, main is doc-only
 
 When you're ready: read `BUILD-SUMMARY-feature-gte-001-umbrella-scaffold.md`, run the verify commands, decide on merge + answer the 3 open questions above. I'll be here.

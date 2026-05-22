@@ -7,14 +7,14 @@
 
 ## What I built
 
-A pure-logic module `GtElixir.Polecat.BranchNamer` that derives a git branch
-name from a `GtElixir.Beads.Issue`, following the Verus repo naming
+A pure-logic module `Arbiter.Polecat.BranchNamer` that derives a git branch
+name from a `Arbiter.Beads.Issue`, following the Verus repo naming
 convention.
 
 ### Public API
 
 ```elixir
-GtElixir.Polecat.BranchNamer.derive(%GtElixir.Beads.Issue{}) :: String.t()
+Arbiter.Polecat.BranchNamer.derive(%Arbiter.Beads.Issue{}) :: String.t()
 ```
 
 Returns strings like:
@@ -29,8 +29,8 @@ chore/gte-010-branch-namer-module
 ### Files added
 
 ```
-apps/gt_elixir/lib/gt_elixir/polecat/branch_namer.ex            (+) 99 LOC
-apps/gt_elixir/test/gt_elixir/polecat/branch_namer_test.exs     (+) 18 tests
+apps/arbiter/lib/arbiter/polecat/branch_namer.ex            (+) 99 LOC
+apps/arbiter/test/arbiter/polecat/branch_namer_test.exs     (+) 18 tests
 ```
 
 The `polecat/` namespace did not exist before this bead; it now hosts this
@@ -103,14 +103,14 @@ module. gte-009 (parallel) will add `Polecat.Worktree` alongside.
 ## How to verify
 
 ```sh
-cd ~/dev/gt-elixir-wt-010
+cd ~/dev/arbiter-wt-010
 
 mix compile --warnings-as-errors    # clean
-mix test apps/gt_elixir/test/gt_elixir/polecat/branch_namer_test.exs
+mix test apps/arbiter/test/arbiter/polecat/branch_namer_test.exs
 # Expect: 18 tests, 0 failures
 
 mix test
-# Expect: 48 (cli) + 124 (gt_elixir, +18) + 36 (web) = 208 tests, 0 failures
+# Expect: 48 (cli) + 124 (arbiter, +18) + 36 (web) = 208 tests, 0 failures
 ```
 
 `mix format --check-formatted` on the repo as a whole is **not** clean — but

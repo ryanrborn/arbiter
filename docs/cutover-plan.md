@@ -1,11 +1,11 @@
-# GT → gt-elixir cutover plan
+# GT → arbiter cutover plan
 
 **Status:** Draft, awaiting parallel-run period (gte-027).
 **Author:** Mayor
 **Last updated:** 2026-05-20
 
 This is the playbook for switching from the Go GT (in `~/dev/gt/`) to the
-Elixir gt-elixir port as the source of truth for bead tracking, polecat
+Elixir arbiter port as the source of truth for bead tracking, polecat
 orchestration, and merge queuing.
 
 ## Pre-flight checklist
@@ -13,19 +13,19 @@ orchestration, and merge queuing.
 Run through this before starting the cutover window.
 
 - [ ] `mix test` is clean on `main` (latest commit).
-- [ ] `mix gt_elixir.import_from_dolt --hq-path ... --server-path ... --sync-status`
+- [ ] `mix arbiter.import_from_dolt --hq-path ... --server-path ... --sync-status`
       has been run within the last hour and reports `0 errors`.
 - [ ] All gte-* beads in Postgres match Dolt status (cross-check via SQL):
       ```bash
       gt dolt sql -d hq "SELECT id, status FROM issues WHERE id LIKE 'gte-%' ORDER BY id"
       # vs
-      cd ~/dev/gt-elixir/apps/gt_elixir
-      mix run -e 'import Ecto.Query; q = from(i in "issues", where: like(i.id, "gte-%"), select: {i.id, i.status}, order_by: i.id); GtElixir.Repo.all(q) |> Enum.each(&IO.inspect/1)'
+      cd ~/dev/arbiter/apps/arbiter
+      mix run -e 'import Ecto.Query; q = from(i in "issues", where: like(i.id, "gte-%"), select: {i.id, i.status}, order_by: i.id); Arbiter.Repo.all(q) |> Enum.each(&IO.inspect/1)'
       ```
-- [ ] `bd2 doctor` is green (Phoenix up, workspaces reachable, active workspace
+- [ ] `arb doctor` is green (Phoenix up, workspaces reachable, active workspace
       resolves).
 - [ ] Phoenix is supervised by something (systemd, foreman, dev-server) — if
-      this is dev-only, accept that bd2 silently dies when the dev shell
+      this is dev-only, accept that arb silently dies when the dev shell
       closes. (Phase 5 supervisor work covers production.)
 - [ ] At least 3 days of parallel run completed (gte-027 closed).
 - [ ] Ryan has signed off on the cutover (gte-027 acceptance).
@@ -66,8 +66,8 @@ returns nothing.
 This catches any beads created in GT after the most recent sync.
 
 ```bash
-cd ~/dev/gt-elixir
-mix gt_elixir.import_from_dolt \
+cd ~/dev/arbiter
+mix arbiter.import_from_dolt \
     --hq-path /home/rborn/dev/gt/.dolt-data/hq \
     --server-path /home/rborn/dev/gt/.dolt-data/server \
     --sync-status
@@ -81,8 +81,8 @@ gt dolt sql -d hq "SELECT COUNT(*) FROM issues"
 gt dolt sql -d server "SELECT COUNT(*) FROM issues"
 
 # Postgres
-cd ~/dev/gt-elixir/apps/gt_elixir
-mix run -e 'IO.inspect(GtElixir.Repo.aggregate({"issues", GtElixir.Beads.Issue}, :count, :id))'
+cd ~/dev/arbiter/apps/arbiter
+mix run -e 'IO.inspect(Arbiter.Repo.aggregate({"issues", Arbiter.Beads.Issue}, :count, :id))'
 ```
 
 The Postgres count must equal `hq + server` Dolt counts (minus any cross-rig
@@ -99,10 +99,10 @@ Edit `~/.zshrc`:
 #   alias gt='~/dev/gt/bin/gt'
 
 # NEW (add):
-alias bd='~/dev/gt-elixir/apps/gt_elixir_cli/bd2'
-alias bd2='~/dev/gt-elixir/apps/gt_elixir_cli/bd2'
-# Phoenix must be running for bd2 to work; consider a per-shell autostart:
-# alias gts='cd ~/dev/gt-elixir && mix phx.server'
+alias bd='~/dev/arbiter/apps/arbiter_cli/arb'
+alias arb='~/dev/arbiter/apps/arbiter_cli/arb'
+# Phoenix must be running for arb to work; consider a per-shell autostart:
+# alias gts='cd ~/dev/arbiter && mix phx.server'
 ```
 
 Then:
@@ -134,22 +134,22 @@ mv ~/dev/gt/.dolt-data ~/archive/gt-cutover-$(date +%Y%m%d)/
 ```
 
 **Important**: archive, don't delete. Keep for at least 90 days in case
-gt-elixir surfaces a data-loss bug and we need to re-import.
+arbiter surfaces a data-loss bug and we need to re-import.
 
 ### 6. Update CLAUDE.md files
 
-Anywhere a CLAUDE.md mentions `gt`, `bd`, `~/dev/gt/`, swap to the gt-elixir
+Anywhere a CLAUDE.md mentions `gt`, `bd`, `~/dev/gt/`, swap to the arbiter
 equivalent:
 
 - `~/dev/gt/CLAUDE.md` → either delete or replace with a pointer note:
   "This workspace was archived 2026-MM-DD. Active work moved to
-  ~/dev/gt-elixir/."
+  ~/dev/arbiter/."
 - `~/.claude/CLAUDE.md` — global notes referencing GT operational details
   should be updated.
 
 ### 7. Write the post-mortem
 
-In `~/dev/gt-elixir/docs/postmortem-cutover.md`. Cover:
+In `~/dev/arbiter/docs/postmortem-cutover.md`. Cover:
 
 - Total elapsed time from Phase 0 to cutover.
 - Beads completed vs Phase 0 estimate (28-42 days).
@@ -181,8 +181,8 @@ forensics. Re-cutover will re-sync from Dolt via `--sync-status`.
 The cutover is complete when:
 
 - [ ] `pgrep -f 'gt mayor'` returns nothing for 24 hours.
-- [ ] `bd2 list` is the only working CLI; the old `bd` alias no longer exists.
-- [ ] At least one polecat has been slung via `bd2 sling` and reached `:done`.
+- [ ] `arb list` is the only working CLI; the old `bd` alias no longer exists.
+- [ ] At least one polecat has been slung via `arb sling` and reached `:done`.
 - [ ] At least one PR has been opened + merged via the Refinery merge queue.
 - [ ] No bead has been edited in the archived Dolt for 24 hours.
 - [ ] gte-028 (Decommission GT) is closed.
@@ -199,7 +199,7 @@ The cutover is complete when:
 
 - Should we keep GT's bd writes flowing to Dolt during the parallel-run period
   for an extra safety net? Current plan: yes, until gte-028 fires.
-- Do we need a "dual-write" mode where bd2 commands also append to Dolt?
+- Do we need a "dual-write" mode where arb commands also append to Dolt?
   Current plan: no, the importer's `--sync-status` is enough.
 - What happens to in-flight polecat work at cutover-start? Current plan: stop
-  the world (`gt stop`); restart polecats in gt-elixir after cutover.
+  the world (`gt stop`); restart polecats in arbiter after cutover.

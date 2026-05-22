@@ -1,4 +1,4 @@
-# gt-elixir — Phase 0 decision doc
+# arbiter — Phase 0 decision doc
 
 **Status:** draft for review
 **Date:** 2026-05-18
@@ -7,17 +7,17 @@
 
 ## Dogfood switchover — 2026-05-19
 
-**Phase 1 complete.** As of gte-008 (this bead), gt-elixir port progress is tracked in **bd2** (the Phoenix/Postgres-backed CLI in this repo), not in the legacy bd/Dolt tooling. All 33 gte- beads (gte-001..028, gte-P1..P4, gte-029) were imported into `apps/gt_elixir`'s Postgres via `mix gt_elixir.import_from_dolt --hq-path ... --sync-status`; statuses match the Dolt source at switchover time.
+**Phase 1 complete.** As of gte-008 (this bead), arbiter port progress is tracked in **arb** (the Phoenix/Postgres-backed CLI in this repo), not in the legacy bd/Dolt tooling. All 33 gte- beads (gte-001..028, gte-P1..P4, gte-029) were imported into `apps/arbiter`'s Postgres via `mix arbiter.import_from_dolt --hq-path ... --sync-status`; statuses match the Dolt source at switchover time.
 
-The mayor's runtime (GT, in `~/dev/gt`) still uses bd for ALL non-gte work (cross-rig coordination, polecat work, etc.); the switchover is scoped strictly to the gt-elixir port itself. Once Phase 4 ships, the broader bd-to-bd2 migration will be considered.
+The mayor's runtime (GT, in `~/dev/gt`) still uses bd for ALL non-gte work (cross-rig coordination, polecat work, etc.); the switchover is scoped strictly to the arbiter port itself. Once Phase 4 ships, the broader bd-to-arb migration will be considered.
 
 **Verification at switchover:**
 
 ```
-$ BD2_WORKSPACE=hq apps/gt_elixir_cli/bd2 list --json | jq '[.data[] | select(.id|startswith("gte-"))] | length'
+$ ARB_WORKSPACE=hq apps/arbiter_cli/arb list --json | jq '[.data[] | select(.id|startswith("gte-"))] | length'
 33
 
-$ apps/gt_elixir_cli/bd2 ready --json | jq '.data | length'
+$ apps/arbiter_cli/arb ready --json | jq '.data | length'
 68
 ```
 
@@ -66,7 +66,7 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
        "rig": "Ship",                 // internal: rig
        "epic": "Campaign",            // internal: mountain
        "aliases": {
-         "deploy": "sling",           // CLI: bd2 deploy → sling
+         "deploy": "sling",           // CLI: arb deploy → sling
          "report": "done",
          "muster": "ready"
        },
@@ -79,9 +79,9 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
 
    `Vernacular.label(:worker)` reads current workspace's `vernacular["worker"]`, falls back to "polecat". `Vernacular.alias(:deploy)` returns `:sling`. Everything is data, not code.
 
-8. **NEW (2026-05-19): External tracker abstraction.** gt-elixir must support multiple external trackers (Jira for work, Linear / GitHub Issues / Notion for personal projects, or NO external tracker for local-only). Tracker behaviour with pluggable adapters. Original plan was Jira-centric; this corrects it.
+8. **NEW (2026-05-19): External tracker abstraction.** arbiter must support multiple external trackers (Jira for work, Linear / GitHub Issues / Notion for personal projects, or NO external tracker for local-only). Tracker behaviour with pluggable adapters. Original plan was Jira-centric; this corrects it.
 
-   **Behaviour** (`gt_elixir/lib/gt_elixir/trackers/tracker.ex`):
+   **Behaviour** (`arbiter/lib/arbiter/trackers/tracker.ex`):
    - `fetch(ref) :: {:ok, map} | {:error, term}`
    - `transition(ref, to) :: :ok | {:error, term}`
    - `update_fields(ref, fields) :: :ok | {:error, term}`
@@ -127,7 +127,7 @@ These are the features Ryan used today and that the system would be useless with
 | GT feature | Elixir target | Notes |
 |---|---|---|
 | **Bead ledger** | `Beads` context, Ash resource `Issue` with audit + deps + status FSM | Ash gives policies, audit, derived state. Postgres-backed. |
-| **CLI shim** | Escript `bd2` that calls Phoenix REST/socket | Replaces bd entirely. Reuse familiar surface (show/create/close/list/update). |
+| **CLI shim** | Escript `arb` that calls Phoenix REST/socket | Replaces bd entirely. Reuse familiar surface (show/create/close/list/update). |
 | **Polecat lifecycle** | `Polecat.Supervisor` (DynamicSupervisor), `Polecat.GenServer`, `Worktree` module | Spawn Claude in worktree, monitor, emit events. |
 | **Mayor coordinator** | LiveView dashboard | Realtime view of active polecats, beads in flight, PRs. |
 | **GitHub PR integration** | `GitHub` module using Req + GH REST/GraphQL | Open PR, poll, merge, comment, resolve threads. |
@@ -184,24 +184,24 @@ These don't justify their cost in the Elixir version:
 ## Architecture sketch
 
 ```
-gt-elixir/                       # repo root
+arbiter/                       # repo root
 ├── apps/
-│   ├── gt_elixir/                # Ash domain + workflow engine (business logic)
-│   │   ├── lib/gt_elixir/
+│   ├── arbiter/                # Ash domain + workflow engine (business logic)
+│   │   ├── lib/arbiter/
 │   │   │   ├── beads/            # Ash resources: Issue, Convoy, Dependency, AuditEvent, Workspace
 │   │   │   ├── trackers/         # Tracker behaviour + None / Jira adapters
 │   │   │   ├── workflows/        # Workflow behaviour + WorkflowMachine
 │   │   │   ├── polecats/         # Polecat lifecycle (added Phase 2)
 │   │   │   ├── integrations/     # GitHub + Jira clients (added Phase 3)
 │   │   │   └── application.ex
-│   ├── gt_elixir_web/            # Phoenix + LiveView dashboard + REST API for CLI
-│   │   ├── lib/gt_elixir_web/
+│   ├── arbiter_web/            # Phoenix + LiveView dashboard + REST API for CLI
+│   │   ├── lib/arbiter_web/
 │   │   │   ├── live/dashboard_live.ex
 │   │   │   ├── controllers/api_controller.ex  # REST for CLI shim
 │   │   │   └── ...
 │   │   └── assets/               # Tailwind v4 + DaisyUI + heroicons (phx.new default)
-│   └── gt_elixir_cli/            # Escript bd2 (CLI talks to gt_elixir_web's REST API)
-│       └── lib/gt_elixir_cli/
+│   └── arbiter_cli/            # Escript arb (CLI talks to arbiter_web's REST API)
+│       └── lib/arbiter_cli/
 ├── compose.yml                   # Postgres for local dev
 ├── config/
 │   ├── config.exs
@@ -216,22 +216,22 @@ Single umbrella app. Postgres for everything. No Dolt. No daemon. Supervisors al
 
 ## Bead graph (Phase 1 dispatch plan)
 
-I'll file these as `hq-` beads in the existing GT system once you approve this doc. Each is ~2-4hrs scope, peer-reviewed by a second polecat in a markdown review file under `~/dev/gt-elixir/reviews/`, then merged by Mayor.
+I'll file these as `hq-` beads in the existing GT system once you approve this doc. Each is ~2-4hrs scope, peer-reviewed by a second polecat in a markdown review file under `~/dev/arbiter/reviews/`, then merged by Mayor.
 
 Format: `[bead-id] [title] [needs: dep1, dep2]`
 
 ### Phase 1: bead ledger + CLI shim (4-6 days)
 
-1. **gte-001 Phoenix umbrella scaffold via Igniter** — `mix igniter.new gt_elixir --with=phx.new --with-args="--umbrella --no-mailer" --install ash,ash_postgres,ash_paper_trail,ash_phoenix`. Adds `gt_elixir_cli` as a fourth umbrella app via `cd apps && mix new gt_elixir_cli`. Postgres started via `docker compose up -d`. Acceptance: `mix test` passes empty suite, `mix phx.server` starts and serves a DaisyUI-styled landing page, Repo connects to Postgres, Ash domain registered in supervision tree.
+1. **gte-001 Phoenix umbrella scaffold via Igniter** — `mix igniter.new arbiter --with=phx.new --with-args="--umbrella --no-mailer" --install ash,ash_postgres,ash_paper_trail,ash_phoenix`. Adds `arbiter_cli` as a fourth umbrella app via `cd apps && mix new arbiter_cli`. Postgres started via `docker compose up -d`. Acceptance: `mix test` passes empty suite, `mix phx.server` starts and serves a DaisyUI-styled landing page, Repo connects to Postgres, Ash domain registered in supervision tree.
 2. **gte-002 Ash Issue resource** — fields, actions (create/read/update/close), `status` FSM (open/in_progress/closed), `priority` (P0-P4), `issue_type` enum, audit via `ash_paper_trail`. **External tracker:** `tracker_type` (enum :none/:jira/:linear/:github, default :none) + `tracker_ref` (string nullable). Rich-content fields (description, acceptance, notes, qa_notes, deployment_notes) stored as **Markdown** (adapters convert on write). Acceptance: unit tests cover create/close/status-transition, tracker_type defaults to :none and can be overridden. [needs: gte-001]
 3. **gte-003 Ash Dependency resource** — bead-to-bead edges (blocks/depends-on/relates-to). Acceptance: query `Issue.ready/0` returns beads with no open deps. [needs: gte-002]
 4. **gte-004 Ash Convoy resource** — batch of beads with status, progress derived from members. Acceptance: convoy closes when all member beads close. [needs: gte-002]
 5. **gte-005 REST API for CLI** — `POST /api/issues`, `GET /api/issues/:id`, `PATCH /api/issues/:id/status`, etc. JSON over local socket. Acceptance: curl-able. [needs: gte-002, gte-003, gte-004]
-6. **gte-006 CLI escript (bd2)** — `bd2 show/create/close/list/update/deps`. Acceptance: parity with `bd` subcommand surface used in today's session. [needs: gte-005]
+6. **gte-006 CLI escript (arb)** — `arb show/create/close/list/update/deps`. Acceptance: parity with `bd` subcommand surface used in today's session. [needs: gte-005]
 7. **gte-007 Dolt-to-Postgres migration script** — import existing hq + server Dolt DBs into the new system. Acceptance: bead count matches, no data loss. [needs: gte-002, gte-003]
 8. **gte-008 Phase 1 integration tests** — end-to-end: create bead, add dep, close dep, query ready, close bead. Acceptance: green. [needs: gte-006]
 
-**Phase 1 milestone:** switch from `bd` to `bd2` for the rest of the port. Eat our own dogfood.
+**Phase 1 milestone:** switch from `bd` to `arb` for the rest of the port. Eat our own dogfood.
 
 ### Phase 2: polecat lifecycle (6-9 days)
 
@@ -243,7 +243,7 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 14. **gte-014 Workflow behaviour + macro DSL** — `use Workflow, steps: [:load, :design, :implement, :verify, :submit]`, step deps, vars. [needs: gte-001]
 15. **gte-015 WorkflowMachine GenStateMachine** — execute a workflow instance. Persist state to bead. [needs: gte-014, gte-002]
 16. **gte-016 Workflows.Work module** — implement `mol-polecat-work` semantics as `use Workflow`. **Submit step is tracker-polymorphic:** calls `Tracker.transition(bead, :done)` via the bead's adapter. Works for `:none`-tracked beads (no-op) and Jira-tracked beads (transitions to Code Complete). [needs: gte-015, gte-019]
-17. **gte-017 sling command** — `bd2 sling <bead> <rig>` → spawn polecat, attach workflow. Acceptance: end-to-end works on a no-op task. [needs: gte-012, gte-016]
+17. **gte-017 sling command** — `arb sling <bead> <rig>` → spawn polecat, attach workflow. Acceptance: end-to-end works on a no-op task. [needs: gte-012, gte-016]
 
 **Phase 2 milestone:** use Elixir-side polecats to build Phase 3 + 4. Two-stage dogfooding.
 
@@ -266,7 +266,7 @@ Format: `[bead-id] [title] [needs: dep1, dep2]`
 
 P-1. **gte-P1 Ash `Workspace` resource with JSON config (vernacular + tracker)** — user creates a workspace, optionally sets vernacular and tracker config at creation. Default = `gas-town` vernacular + `:none` tracker (baked-in fallbacks). Single JSON `config` column holds both vernacular and tracker sub-objects. [needs: gte-001, gte-002]
 P-2. **gte-P2 `Vernacular` module** — `Vernacular.label(:worker)` reads current workspace's JSON, falls back to defaults. Process-dictionary cache per request/CLI invocation. [needs: gte-P1]
-P-3. **gte-P3 CLI alias resolution** — `bd2 deploy` looks up "deploy" in workspace.vernacular.aliases, resolves to `sling`, dispatches. Unknown aliases error with helpful "did you mean" output. [needs: gte-006, gte-P2]
+P-3. **gte-P3 CLI alias resolution** — `arb deploy` looks up "deploy" in workspace.vernacular.aliases, resolves to `sling`, dispatches. Unknown aliases error with helpful "did you mean" output. [needs: gte-006, gte-P2]
 P-4. **gte-P4 LiveView vernacular integration + setup wizard** — dashboard reads `Vernacular.label/1` for all strings. Settings page exposes JSON editor for vernacular (with live preview). [needs: gte-024, gte-P2]
 
 ### Phase 4: LiveView + migration cutover (3-5 days)

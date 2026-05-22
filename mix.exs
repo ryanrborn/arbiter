@@ -1,4 +1,4 @@
-defmodule GtElixir.Umbrella.MixProject do
+defmodule Arbiter.Umbrella.MixProject do
   use Mix.Project
 
   def project do

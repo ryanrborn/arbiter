@@ -1,21 +1,21 @@
 import Config
 config :ash, policies: [show_policy_breakdowns?: true]
 
-# Rig → git-repo path mapping consumed by `GtElixir.Polecat.Sling` when it
+# Rig → git-repo path mapping consumed by `Arbiter.Polecat.Sling` when it
 # provisions a worktree for a freshly-slung polecat. Beads slung with a rig
 # string not in this map skip worktree provisioning entirely (which is
 # tolerated by the current placeholder workflow).
-config :gt_elixir, :rig_paths, %{
-  "gt-elixir" => Path.expand("~/dev/gt-elixir")
+config :arbiter, :rig_paths, %{
+  "arbiter" => Path.expand("~/dev/arbiter")
 }
 
 # Configure your database — matches compose.yml's Postgres container
-config :gt_elixir, GtElixir.Repo,
-  username: "gt_elixir",
-  password: "gt_elixir_dev_password",
+config :arbiter, Arbiter.Repo,
+  username: "arbiter",
+  password: "arbiter_dev_password",
   hostname: "127.0.0.1",
   port: 5432,
-  database: "gt_elixir_dev",
+  database: "arbiter_dev",
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10
@@ -26,7 +26,7 @@ config :gt_elixir, GtElixir.Repo,
 # The watchers configuration can be used to run external
 # watchers to your application. For example, we can use it
 # to bundle .js and .css sources.
-config :gt_elixir_web, GtElixirWeb.Endpoint,
+config :arbiter_web, ArbiterWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {127, 0, 0, 1}],
@@ -35,8 +35,8 @@ config :gt_elixir_web, GtElixirWeb.Endpoint,
   debug_errors: true,
   secret_key_base: "XvJKppBs7YSPbCLNRLar7xEeyzz6ucrVo3IkbSUtfmsyD5JpzUqpoGB5UjIgW2c2",
   watchers: [
-    esbuild: {Esbuild, :install_and_run, [:gt_elixir_web, ~w(--sourcemap=inline --watch)]},
-    tailwind: {Tailwind, :install_and_run, [:gt_elixir_web, ~w(--watch)]}
+    esbuild: {Esbuild, :install_and_run, [:arbiter_web, ~w(--sourcemap=inline --watch)]},
+    tailwind: {Tailwind, :install_and_run, [:arbiter_web, ~w(--watch)]}
   ]
 
 # ## SSL Support
@@ -63,7 +63,7 @@ config :gt_elixir_web, GtElixirWeb.Endpoint,
 # different ports.
 
 # Reload browser tabs when matching files change.
-config :gt_elixir_web, GtElixirWeb.Endpoint,
+config :arbiter_web, ArbiterWeb.Endpoint,
   live_reload: [
     web_console_logger: true,
     patterns: [
@@ -72,13 +72,13 @@ config :gt_elixir_web, GtElixirWeb.Endpoint,
       # Gettext translations
       ~r"priv/gettext/.*\.po$"E,
       # Router, Controllers, LiveViews and LiveComponents
-      ~r"lib/gt_elixir_web/router\.ex$"E,
-      ~r"lib/gt_elixir_web/(controllers|live|components)/.*\.(ex|heex)$"E
+      ~r"lib/arbiter_web/router\.ex$"E,
+      ~r"lib/arbiter_web/(controllers|live|components)/.*\.(ex|heex)$"E
     ]
   ]
 
 # Enable dev routes for dashboard and mailbox
-config :gt_elixir_web, dev_routes: true
+config :arbiter_web, dev_routes: true
 
 # Do not include metadata nor timestamps in development logs
 config :logger, :default_formatter, format: "[$level] $message\n"
