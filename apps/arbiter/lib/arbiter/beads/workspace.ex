@@ -57,6 +57,7 @@ defmodule Arbiter.Beads.Workspace do
       primary? true
       accept [:name, :description, :prefix, :config]
       change {Arbiter.Beads.Workspace.Changes.ValidateConfig, []}
+      change {Arbiter.Beads.Workspace.Changes.StartRefinery, []}
     end
 
     update :update do

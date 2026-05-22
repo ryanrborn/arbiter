@@ -151,6 +151,38 @@ defmodule Arbiter.PolecatTest do
       assert snap.meta[:result] == %{pr: "https://example.com/pr/1"}
     end
 
+    test "complete/2 broadcasts {:polecat_done, bead_id} on the workspace topic" do
+      ws_id = "ws-broadcast-#{System.unique_integer([:positive])}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:done:" <> ws_id)
+
+      {pid, bead_id} = start_polecat(workspace_id: ws_id)
+      :ok = Polecat.advance(pid, :submit)
+      :ok = Polecat.complete(pid)
+
+      assert_receive {:polecat_done, ^bead_id}, 500
+    end
+
+    test "complete/2 without a workspace_id does not broadcast (no topic)" do
+      {pid, _bead_id} = start_polecat()
+      :ok = Polecat.advance(pid, :submit)
+      # Just assert this doesn't crash; with no workspace_id there's no
+      # well-defined topic and the broadcast is skipped.
+      assert :ok = Polecat.complete(pid)
+    end
+
+    test "claude-session 'gt done' marker also broadcasts polecat_done" do
+      ws_id = "ws-claude-#{System.unique_integer([:positive])}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:done:" <> ws_id)
+
+      {pid, bead_id} = start_polecat(workspace_id: ws_id)
+      :ok = Polecat.advance(pid, :run_claude)
+
+      send(pid, {:__claude_session_done__, "gt done"})
+
+      assert_receive {:polecat_done, ^bead_id}, 500
+      assert Polecat.state(pid).status == :completed
+    end
+
     test "advance/2 after complete/2 is rejected" do
       {pid, _} = start_polecat()
       :ok = Polecat.advance(pid, :submit)
