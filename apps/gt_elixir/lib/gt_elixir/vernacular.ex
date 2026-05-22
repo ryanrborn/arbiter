@@ -63,7 +63,10 @@ defmodule GtElixir.Vernacular do
     issue: "bead",
     batch: "convoy",
     rig: "rig",
-    epic: "mountain"
+    epic: "mountain",
+    workspace: "workspace",
+    escalation: "escalation",
+    pr: "pull request"
   }
 
   @valid_keys Map.keys(@defaults)
@@ -88,6 +91,21 @@ defmodule GtElixir.Vernacular do
   def put_active(%{} = config) do
     Process.put(@pdict_key, config)
     :ok
+  end
+
+  @doc """
+  Load the global vernacular from `GtElixir.Settings` into the process dict.
+
+  Call once at the start of a request (LiveView on_mount, Plug, etc.) so
+  that subsequent `label/1`, `alias_resolve/1`, and `emoji/1` calls reflect
+  the installation-wide vocabulary rather than gas-town defaults.
+  """
+  @spec put_global() :: :ok
+  def put_global do
+    case GtElixir.Settings.get() do
+      {:ok, %{vernacular: v}} when is_map(v) -> put_active(%{"vernacular" => v})
+      _ -> :ok
+    end
   end
 
   @doc "Clear the per-process active vernacular."
