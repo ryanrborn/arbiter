@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.Sling do
     --json         emit JSON instead of human-readable text
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{Client, Output, Vernacular}
 
   @switches [json: :boolean, with_claude: :boolean]
 
@@ -51,19 +51,20 @@ defmodule ArbiterCli.Cmd.Sling do
   defp emit(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit(payload, :text) do
+    v = Vernacular.fetch()
     bead = payload["bead"] || %{}
     polecat = payload["polecat"] || %{}
     machine = payload["machine"] || %{}
 
-    IO.puts("Slung:")
-    IO.puts("  Bead:     #{bead["id"]} — #{bead["title"]}")
+    IO.puts("#{Vernacular.cap(v, "sling")}:")
+    IO.puts("  #{Vernacular.cap(v, "issue")}:     #{bead["id"]} — #{bead["title"]}")
     IO.puts("  Status:   #{bead["status"]}")
-    IO.puts("  Polecat:  #{polecat["pid"]}")
+    IO.puts("  #{Vernacular.cap(v, "worker")}:  #{polecat["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
     case payload["worktree_path"] do
       nil -> :ok
-      path -> IO.puts("  Worktree: #{path}")
+      path -> IO.puts("  #{Vernacular.cap(v, "worktree")}: #{path}")
     end
 
     case payload["claude_started"] do
