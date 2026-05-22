@@ -9,7 +9,7 @@ defmodule GtElixirWeb.Layouts do
   # The default root.html.heex file contains the HTML
   # skeleton of your application, namely HTML headers
   # and other static content.
-  embed_templates "layouts/*"
+  embed_templates("layouts/*")
 
   @doc """
   Renders your app layout.
@@ -25,52 +25,74 @@ defmodule GtElixirWeb.Layouts do
       </Layouts.app>
 
   """
-  attr :flash, :map, required: true, doc: "the map of flash messages"
+  attr(:flash, :map, required: true, doc: "the map of flash messages")
 
-  attr :current_scope, :map,
+  attr(:current_path, :string,
     default: nil,
-    doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
+    doc: "request path of the current page, used to highlight the active nav link"
+  )
 
-  slot :inner_block, required: true
+  slot(:inner_block, required: true)
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
+    <header class="navbar bg-base-200 border-b border-base-300 px-4 sm:px-6 lg:px-8 min-h-12 py-1">
       <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
+        <.link navigate={~p"/"} class="flex items-center gap-2 text-base font-semibold">
+          <img src={~p"/images/logo.svg"} width="24" /> gt-elixir
+        </.link>
       </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
+      <nav class="flex-none">
+        <ul class="menu menu-horizontal gap-1 text-sm p-0">
           <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
+            <.link navigate={~p"/"} class={nav_class(@current_path, "/")}>
+              Dashboard
+            </.link>
           </li>
           <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
+            <.link navigate={~p"/audit"} class={nav_class(@current_path, "/audit")}>
+              Audit log
+            </.link>
           </li>
           <li>
-            <.theme_toggle />
+            <.link navigate={~p"/settings/vernacular"} class={nav_class(@current_path, "/settings")}>
+              Vernacular
+            </.link>
           </li>
           <li>
-            <a href="https://hexdocs.pm/phoenix/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
+            <.link href={~p"/about"} class={nav_class(@current_path, "/about")}>
+              About
+            </.link>
           </li>
         </ul>
+      </nav>
+      <div class="flex-none ml-2">
+        <.theme_toggle />
       </div>
     </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
-        {render_slot(@inner_block)}
-      </div>
+    <main>
+      {render_slot(@inner_block)}
     </main>
 
     <.flash_group flash={@flash} />
     """
   end
+
+  # Matches the current path against a nav target. The dashboard ("/") only
+  # matches exactly so it doesn't claim every page; other entries match the
+  # path prefix so sub-pages (e.g. /workspace/:id/settings/...) still light up
+  # the relevant top-level entry if we add one later.
+  defp nav_class(current, "/"), do: nav_class_for(current == "/")
+
+  defp nav_class(nil, _target), do: nav_class_for(false)
+
+  defp nav_class(current, target) do
+    nav_class_for(current == target or String.starts_with?(current, target <> "/"))
+  end
+
+  defp nav_class_for(true), do: "menu-active font-semibold"
+  defp nav_class_for(false), do: ""
 
   @doc """
   Shows the flash group with standard titles and content.
@@ -79,8 +101,8 @@ defmodule GtElixirWeb.Layouts do
 
       <.flash_group flash={@flash} />
   """
-  attr :flash, :map, required: true, doc: "the map of flash messages"
-  attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
+  attr(:flash, :map, required: true, doc: "the map of flash messages")
+  attr(:id, :string, default: "flash-group", doc: "the optional id of flash container")
 
   def flash_group(assigns) do
     ~H"""

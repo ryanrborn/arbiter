@@ -126,6 +126,7 @@ defmodule GtElixirWeb.WorkspaceVernacularLive do
   @impl true
   def render(assigns) do
     ~H"""
+    <Layouts.app flash={@flash} current_path={@current_path}>
     <div class="p-6 max-w-6xl mx-auto">
       <h1 class="text-2xl font-bold mb-4">Vernacular settings</h1>
       <p class="text-sm text-base-content/70 mb-6">
@@ -207,6 +208,7 @@ defmodule GtElixirWeb.WorkspaceVernacularLive do
         </div>
       </div>
     </div>
+    </Layouts.app>
     """
   end
 end
