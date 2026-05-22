@@ -5,7 +5,7 @@ Branch: `feature/gte-P2-vernacular`
 
 ## What
 
-`GtElixir.Vernacular` — the read-through layer for workspace-configurable
+`Arbiter.Vernacular` — the read-through layer for workspace-configurable
 vocabulary. Internal Elixir module names (`Polecat`, `Refinery`, etc.) stay
 stable; user-facing CLI output, dashboards, and templates call this module
 to get the right label for the active workspace.
@@ -15,10 +15,10 @@ Falls back to the canonical gas-town defaults when a key is unset.
 
 ## Files
 
-- `apps/gt_elixir/lib/gt_elixir/vernacular.ex` — module with `label/1`,
+- `apps/arbiter/lib/arbiter/vernacular.ex` — module with `label/1`,
   `alias_resolve/1`, `emoji/1`, `put_active/1`, `clear/0`, `defaults/0`,
   `keys/0`.
-- `apps/gt_elixir/test/gt_elixir/vernacular_test.exs` — 19 tests.
+- `apps/arbiter/test/arbiter/vernacular_test.exs` — 19 tests.
 
 ## Defaults
 
@@ -44,7 +44,7 @@ These keys are the entire valid set. `label/1` on an unknown key raises
 ### 1. Process dictionary for the active workspace
 
 `put_active(workspace_or_config)` stores the config in `Process.dictionary`
-under `:gt_elixir_active_vernacular`. Subsequent `label/1` calls in the same
+under `:arbiter_active_vernacular`. Subsequent `label/1` calls in the same
 process read from there — no DB roundtrip per lookup.
 
 **Why process dictionary, not ETS / GenServer:** every request handler and
@@ -101,7 +101,7 @@ back to.
 
 ```
 vernacular_test    19 tests, 0 failures
-gt_elixir         170 tests, 0 failures (151 prior + 19 new)
+arbiter         170 tests, 0 failures (151 prior + 19 new)
 total             254 tests, 0 failures across umbrella
 ```
 
@@ -113,7 +113,7 @@ total             254 tests, 0 failures across umbrella
 - A Plug that calls `put_active/1` from `conn.assigns[:workspace]` (or
   similar) at the start of each Phoenix request. Trivial; deferred to
   whoever wires up the multi-workspace web UI.
-- Same for the bd2 CLI bootstrap — `apps/gt_elixir_cli` already resolves
+- Same for the arb CLI bootstrap — `apps/arbiter_cli` already resolves
   the active workspace; it should call `Vernacular.put_active/1` right
   after. Filing as a quick gte-P2.5 follow-up bead if desired.
 - Aliases currently affect only one direction (verb → alias). If we want

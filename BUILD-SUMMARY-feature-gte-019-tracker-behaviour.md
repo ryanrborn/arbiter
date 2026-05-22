@@ -5,11 +5,11 @@ Branch: `feature/gte-019-tracker-behaviour`
 
 ## What
 
-Defines the `GtElixir.Trackers.Tracker` behaviour (the contract every external
+Defines the `Arbiter.Trackers.Tracker` behaviour (the contract every external
 issue-tracker adapter implements) and ships the trivial `Tracker.None` adapter
 for workspaces with no external tracker.
 
-`GtElixir.Trackers` is the entry point: it reads `issue.tracker_type`,
+`Arbiter.Trackers` is the entry point: it reads `issue.tracker_type`,
 resolves the adapter, and delegates. Callers don't manually pick adapters.
 
 This unblocks gte-020+ (Jira adapter in Phase 3) and the Linear/GitHub
@@ -17,21 +17,21 @@ adapters in Phase 5.
 
 ## Files
 
-- `apps/gt_elixir/lib/gt_elixir/trackers/tracker.ex` — the `@behaviour`
+- `apps/arbiter/lib/arbiter/trackers/tracker.ex` — the `@behaviour`
   module with six callbacks: `fetch`, `transition`, `update_fields`,
   `link_for`, `parse_ref`, `list_transitions`. Doc-comments describe the
   contract for each.
-- `apps/gt_elixir/lib/gt_elixir/trackers/none.ex` — `Tracker.None` adapter.
+- `apps/arbiter/lib/arbiter/trackers/none.ex` — `Tracker.None` adapter.
   All callbacks succeed as no-ops. `fetch/1` returns `{:ok, %{}}`,
   `link_for/1` returns `""`, `parse_ref/1` always returns `:error` (None
   never owns a ref), `list_transitions/1` returns the full bead-status set.
-- `apps/gt_elixir/lib/gt_elixir/trackers.ex` — registry + delegating
+- `apps/arbiter/lib/arbiter/trackers.ex` — registry + delegating
   wrappers: `for_bead/1`, `for_type/1`, `adapters/0`, plus `fetch/1`,
   `transition/2`, `update_fields/2`, `link_for/1`, `list_transitions/1` that
   take an `Issue` and dispatch through `for_bead/1`.
-- `apps/gt_elixir/test/gt_elixir/trackers_test.exs` — 9 tests for resolution
+- `apps/arbiter/test/arbiter/trackers_test.exs` — 9 tests for resolution
   + delegation.
-- `apps/gt_elixir/test/gt_elixir/trackers/none_test.exs` — 7 tests for the
+- `apps/arbiter/test/arbiter/trackers/none_test.exs` — 7 tests for the
   None adapter's callback semantics (including a check that the module
   declares the behaviour attribute).
 
@@ -51,9 +51,9 @@ message ("no tracker adapter registered for :jira (registered: [:none])").
 That's deliberate — bead create-time already validates `tracker_type` is in
 the enum, so this code path is only hit when someone tries to *use* the
 tracker on a bead whose adapter doesn't exist yet. Loud failure is better
-than silently no-op'ing on bd2 close or PR-link generation.
+than silently no-op'ing on arb close or PR-link generation.
 
-The Phase 3 work that wires up Jira just needs to add `jira: GtElixir.Trackers.Jira`
+The Phase 3 work that wires up Jira just needs to add `jira: Arbiter.Trackers.Jira`
 to the map (plus the adapter module).
 
 ### 2. `Tracker.None.list_transitions/1` returns the full status set
@@ -80,7 +80,7 @@ need to bypass resolution can use `for_type/1` directly.
 
 `Tracker.None` is pure (no state), so it isn't supervised. Future adapters
 (`Tracker.Jira`) that need a connection pool or rate-limiter GenServer
-should add a supervisor child in `GtElixir.Application.start/2` at that
+should add a supervisor child in `Arbiter.Application.start/2` at that
 time, not now. Avoids speculative supervision.
 
 ## Test results
@@ -88,9 +88,9 @@ time, not now. Avoids speculative supervision.
 ```
 trackers_test           9 tests, 0 failures
 trackers/none_test      7 tests, 0 failures
-gt_elixir              122 tests, 0 failures (106 prior + 16 new)
-gt_elixir_web           36 tests, 0 failures (unchanged)
-gt_elixir_cli           48 tests, 0 failures (unchanged)
+arbiter              122 tests, 0 failures (106 prior + 16 new)
+arbiter_web           36 tests, 0 failures (unchanged)
+arbiter_cli           48 tests, 0 failures (unchanged)
 total                  206 tests, 0 failures
 ```
 

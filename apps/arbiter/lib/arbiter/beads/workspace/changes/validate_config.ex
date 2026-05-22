@@ -1,0 +1,113 @@
+defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
+  @moduledoc """
+  Validates the shape of a `Workspace.config` JSON map on create/update.
+
+  Rules (loose — most keys are optional):
+
+    * Top-level must be a map (or `nil` / missing — treated as `%{}`).
+    * If `"tracker"` is present, it must be a map.
+    * If `"tracker.type"` is present, it must be one of the values in
+      `Arbiter.Beads.Workspace.valid_tracker_types/0` (`"none"`, `"jira"`,
+      `"linear"`, `"github"`).
+    * If `"tracker.config"` is present, it must be a map.
+    * If `"vernacular"` is present, it must be a map.
+    * If `"vernacular.aliases"` is present, it must be a map of string → string.
+    * If `"vernacular.emoji"` is present, it must be a map of string → string.
+
+  Unknown keys are allowed (forward-compat). Deeper validation of vernacular keys
+  (coordinator, worker, etc.) is deferred to `Arbiter.Vernacular` in gte-P2 —
+  there it falls back to defaults rather than rejecting.
+  """
+
+  use Ash.Resource.Change
+
+  alias Ash.Changeset
+
+  @impl true
+  def change(changeset, _opts, _context) do
+    case Changeset.get_attribute(changeset, :config) do
+      nil -> changeset
+      config when is_map(config) -> validate(changeset, config)
+      _other -> Changeset.add_error(changeset, field: :config, message: "must be a map")
+    end
+  end
+
+  defp validate(changeset, config) do
+    changeset
+    |> validate_tracker(Map.get(config, "tracker"))
+    |> validate_vernacular(Map.get(config, "vernacular"))
+  end
+
+  defp validate_tracker(changeset, nil), do: changeset
+
+  defp validate_tracker(changeset, tracker) when is_map(tracker) do
+    valid_types = Arbiter.Beads.Workspace.valid_tracker_types()
+
+    changeset
+    |> then(fn cs ->
+      case Map.get(tracker, "type") do
+        nil ->
+          cs
+
+        type when type in unquote(~w(none jira linear github)) ->
+          cs
+
+        other ->
+          Changeset.add_error(cs,
+            field: :config,
+            message:
+              "tracker.type must be one of #{Enum.join(valid_types, ", ")}; got: #{inspect(other)}"
+          )
+      end
+    end)
+    |> then(fn cs ->
+      case Map.get(tracker, "config") do
+        nil -> cs
+        c when is_map(c) -> cs
+        _ -> Changeset.add_error(cs, field: :config, message: "tracker.config must be a map")
+      end
+    end)
+  end
+
+  defp validate_tracker(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "tracker must be a map")
+  end
+
+  defp validate_vernacular(changeset, nil), do: changeset
+
+  defp validate_vernacular(changeset, vernacular) when is_map(vernacular) do
+    changeset
+    |> validate_string_map(Map.get(vernacular, "aliases"), "vernacular.aliases")
+    |> validate_string_map(Map.get(vernacular, "emoji"), "vernacular.emoji")
+  end
+
+  defp validate_vernacular(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "vernacular must be a map")
+  end
+
+  defp validate_string_map(changeset, nil, _label), do: changeset
+
+  defp validate_string_map(changeset, map, label) when is_map(map) do
+    invalid =
+      Enum.find(map, fn
+        {k, v} when is_binary(k) and is_binary(v) -> false
+        _ -> true
+      end)
+
+    case invalid do
+      nil ->
+        changeset
+
+      {k, v} ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "#{label} must be a map of string → string; got: #{inspect(k)} => #{inspect(v)}"
+        )
+    end
+  end
+
+  defp validate_string_map(changeset, _, label) do
+    Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
+  end
+end

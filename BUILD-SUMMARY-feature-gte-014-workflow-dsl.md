@@ -5,26 +5,26 @@ Branch: `feature/gte-014-workflow-dsl`
 
 ## What
 
-Defines the `GtElixir.Workflow` behaviour and the macro DSL that lets
+Defines the `Arbiter.Workflow` behaviour and the macro DSL that lets
 "formulas" (the Elixir port of the Go GT YAML workflow templates like
 `mol-polecat-work` and `mol-polecat-code-review`) be declared as plain Elixir
 modules:
 
 ```elixir
 defmodule Examples.Boring do
-  use GtElixir.Workflow,
+  use Arbiter.Workflow,
     steps: [:greet, :wave]
 
   step :greet, description: "Say hi", needs: [], vars: [:name]
   step :wave, description: "Wave goodbye", needs: [:greet], vars: []
 
-  @impl GtElixir.Workflow
+  @impl Arbiter.Workflow
   def run_step(:greet, %{name: name} = state), do: {:ok, ...}
   def run_step(:wave, state), do: {:ok, ...}
 end
 ```
 
-Also exposes a runner, `GtElixir.Workflow.run(workflow_module, initial_state)`,
+Also exposes a runner, `Arbiter.Workflow.run(workflow_module, initial_state)`,
 that drives the steps in declared order, threads state, populates
 `:completed_steps`, and validates `needs:` at runtime before invoking
 `run_step/2`.
@@ -35,14 +35,14 @@ strings.
 
 ## Files
 
-- `apps/gt_elixir/lib/gt_elixir/workflow.ex` — behaviour callbacks
+- `apps/arbiter/lib/arbiter/workflow.ex` — behaviour callbacks
   (`steps/0`, `step_definition/1`, `vars/0`, `run_step/2`), `__using__/1`
   macro, `step/2` macro, `__before_compile__/1` for validation + clause
   generation, and the runner `run/2`.
-- `apps/gt_elixir/lib/gt_elixir/workflow/example.ex` — `GreetThenWave`, a
+- `apps/arbiter/lib/arbiter/workflow/example.ex` — `GreetThenWave`, a
   trivial 2-step example that exercises the macro at top-level umbrella
   compile time (not just in tests).
-- `apps/gt_elixir/test/gt_elixir/workflow_test.exs` — 16 tests across four
+- `apps/arbiter/test/arbiter/workflow_test.exs` — 16 tests across four
   groups: behaviour callbacks, Phase 5 placeholder shape, the runner, and
   compile-time validation (the latter via `Code.compile_string/1` on
   intentionally-bad module strings).
@@ -95,7 +95,7 @@ All three compile-time failures raise `CompileError` with a single
 Example:
 
 ```
-GtElixir.Workflow GtElixir.WorkflowTest.UnknownNeed: step :b declares
+Arbiter.Workflow Arbiter.WorkflowTest.UnknownNeed: step :b declares
 needs: [:phantom] but [:phantom] are not in `steps:`
 ```
 
@@ -103,10 +103,10 @@ Tested with `Code.compile_string/1` on bad-shaped modules.
 
 ### 4. Phase 5 placeholder shape
 
-`use GtElixir.Workflow` accepts three options today that aren't processed:
+`use Arbiter.Workflow` accepts three options today that aren't processed:
 
 ```elixir
-use GtElixir.Workflow,
+use Arbiter.Workflow,
   steps: [...],
   extends: SomeOtherWorkflow,           # a module
   expansions: [tdd_cycle: :implement],  # keyword: aspect_name => target_step
@@ -134,9 +134,9 @@ whatever the step returned for that key, then appends the step name).
 
 ```
 workflow_test          16 tests, 0 failures (new)
-gt_elixir             167 tests, 0 failures (151 prior + 16 new)
-gt_elixir_web          36 tests, 0 failures (unchanged)
-gt_elixir_cli          48 tests, 0 failures (unchanged)
+arbiter             167 tests, 0 failures (151 prior + 16 new)
+arbiter_web          36 tests, 0 failures (unchanged)
+arbiter_cli          48 tests, 0 failures (unchanged)
 total                 251 tests, 0 failures
 ```
 

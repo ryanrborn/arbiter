@@ -7,7 +7,7 @@
 
 ## What I built
 
-`GtElixir.Polecat` — a per-bead supervised `GenServer` skeleton with a
+`Arbiter.Polecat` — a per-bead supervised `GenServer` skeleton with a
 status FSM, registry lookup by bead_id, and a clean transition API. This is
 the Phase 2 lifecycle plumbing; the workflow driver that actually walks
 steps ships separately (gte-014 / later phase).
@@ -15,34 +15,34 @@ steps ships separately (gte-014 / later phase).
 ### Files added
 
 ```
-apps/gt_elixir/lib/gt_elixir/polecat.ex            (+) ~315 LOC
-apps/gt_elixir/lib/gt_elixir/polecat/registry.ex   (+) ~30 LOC
-apps/gt_elixir/test/gt_elixir/polecat_test.exs     (+) 24 tests
+apps/arbiter/lib/arbiter/polecat.ex            (+) ~315 LOC
+apps/arbiter/lib/arbiter/polecat/registry.ex   (+) ~30 LOC
+apps/arbiter/test/arbiter/polecat_test.exs     (+) 24 tests
 ```
 
 ### Files modified
 
 ```
-apps/gt_elixir/lib/gt_elixir/application.ex
-  + {Registry, keys: :unique, name: GtElixir.Polecat.Registry}
+apps/arbiter/lib/arbiter/application.ex
+  + {Registry, keys: :unique, name: Arbiter.Polecat.Registry}
   + {DynamicSupervisor, strategy: :one_for_one,
-                        name: GtElixir.Polecat.Supervisor}
+                        name: Arbiter.Polecat.Supervisor}
 ```
 
 ### Public API
 
 ```elixir
-GtElixir.Polecat.start(opts)                       # spawn under DynamicSupervisor
-GtElixir.Polecat.start_link(opts)                  # raw entry point
-GtElixir.Polecat.whereis(bead_id)                  # pid | nil
-GtElixir.Polecat.state(ref)                        # snapshot map | nil
-GtElixir.Polecat.advance(ref, step)                # change current workflow step
-GtElixir.Polecat.await(ref, reason \\ nil)         # park (waiting on external event)
-GtElixir.Polecat.resume(ref)                       # un-park
-GtElixir.Polecat.complete(ref, result \\ nil)      # terminal: success
-GtElixir.Polecat.fail(ref, reason \\ nil)          # terminal: failure
-GtElixir.Polecat.report(ref, key, value)           # write to :meta
-GtElixir.Polecat.stop(ref, reason \\ :normal)
+Arbiter.Polecat.start(opts)                       # spawn under DynamicSupervisor
+Arbiter.Polecat.start_link(opts)                  # raw entry point
+Arbiter.Polecat.whereis(bead_id)                  # pid | nil
+Arbiter.Polecat.state(ref)                        # snapshot map | nil
+Arbiter.Polecat.advance(ref, step)                # change current workflow step
+Arbiter.Polecat.await(ref, reason \\ nil)         # park (waiting on external event)
+Arbiter.Polecat.resume(ref)                       # un-park
+Arbiter.Polecat.complete(ref, result \\ nil)      # terminal: success
+Arbiter.Polecat.fail(ref, reason \\ nil)          # terminal: failure
+Arbiter.Polecat.report(ref, key, value)           # write to :meta
+Arbiter.Polecat.stop(ref, reason \\ :normal)
 ```
 
 `ref` is either a pid or a bead_id string. String lookups go through the
@@ -113,7 +113,7 @@ than a new pid.
 ### 3. `state/1` returns a snapshot map, not the internal `%State{}`
 
 The spec was explicit: "NOT the GenServer state struct verbatim; a stable
-shape." `GtElixir.Polecat.State` is `defmodule …, do: @moduledoc false`
+shape." `Arbiter.Polecat.State` is `defmodule …, do: @moduledoc false`
 and not exported. Callers see a flat `%{bead_id, workspace_id, rig,
 current_step, status, started_at, step_started_at, meta}` map. We can
 evolve the internal struct without breaking consumers.
@@ -137,7 +137,7 @@ the orchestrator owns its own key conventions.
 ### 6. `mix format` flagged pre-existing files
 
 `mix format --check-formatted` against the whole repo flags two migration
-files in `apps/gt_elixir/priv/repo/migrations/` that pre-date this branch.
+files in `apps/arbiter/priv/repo/migrations/` that pre-date this branch.
 My added files all pass `mix format --check-formatted`. I deliberately did
 not reformat the migrations — not part of this bead, and migrations are
 sensitive (they're database history).
@@ -165,9 +165,9 @@ processes.
 
 ```
 mix compile --warnings-as-errors    # clean
-mix test apps/gt_elixir/test/gt_elixir/polecat_test.exs   # 24 / 0 failures
+mix test apps/arbiter/test/arbiter/polecat_test.exs   # 24 / 0 failures
 mix test                            # umbrella: 259 tests, 0 failures
-                                    # (gt_elixir 175, gt_elixir_cli 48, gt_elixir_web 36)
+                                    # (arbiter 175, arbiter_cli 48, arbiter_web 36)
 ```
 
 ## What's NOT in this bead

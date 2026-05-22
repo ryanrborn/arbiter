@@ -1,4 +1,4 @@
-# Peer-review process for gt-elixir
+# Peer-review process for arbiter
 
 This repo is local-only (no GitHub). Peer review happens via markdown files in `reviews/`. This doc defines the convention.
 
@@ -12,7 +12,7 @@ This repo is local-only (no GitHub). Peer review happens via markdown files in `
 
 ```
 1. Mayor slings a bead to builder polecat
-   → builder works in worktree at ~/dev/gt-elixir-worktrees/<branch-name>/
+   → builder works in worktree at ~/dev/arbiter-worktrees/<branch-name>/
    → builder commits + pushes branch (still local)
    → builder writes BUILD-SUMMARY-<branch>.md and commits to the branch
 

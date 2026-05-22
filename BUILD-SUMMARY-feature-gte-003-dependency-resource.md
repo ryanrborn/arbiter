@@ -13,25 +13,25 @@ The `Dependency` resource — a directed edge between two `Issue` rows represent
 ### Files added/changed
 
 ```
-apps/gt_elixir/lib/gt_elixir/beads.ex                                                    (M) register Dependency
-apps/gt_elixir/lib/gt_elixir/beads/issue.ex                                               (M) Issue.ready/0 + helper constants
-apps/gt_elixir/lib/gt_elixir/beads/dependency.ex                                          (+) resource
-apps/gt_elixir/lib/gt_elixir/beads/dependency/changes/reject_self_reference.ex            (+) from==to guard
-apps/gt_elixir/priv/repo/migrations/20260519195520_add_dependency_resource.exs            (+) dependencies table + unique index + FKs
-apps/gt_elixir/priv/resource_snapshots/repo/dependencies/20260519195521.json              (+) Ash snapshot
-apps/gt_elixir/test/gt_elixir/beads/dependency_test.exs                                   (+) 20 tests
+apps/arbiter/lib/arbiter/beads.ex                                                    (M) register Dependency
+apps/arbiter/lib/arbiter/beads/issue.ex                                               (M) Issue.ready/0 + helper constants
+apps/arbiter/lib/arbiter/beads/dependency.ex                                          (+) resource
+apps/arbiter/lib/arbiter/beads/dependency/changes/reject_self_reference.ex            (+) from==to guard
+apps/arbiter/priv/repo/migrations/20260519195520_add_dependency_resource.exs            (+) dependencies table + unique index + FKs
+apps/arbiter/priv/resource_snapshots/repo/dependencies/20260519195521.json              (+) Ash snapshot
+apps/arbiter/test/arbiter/beads/dependency_test.exs                                   (+) 20 tests
 ```
 
 ## Acceptance check (from bead gte-003)
 
 | Criterion | Status |
 |---|---|
-| `from_issue_id` / `to_issue_id` string FKs to `Issue.id` | done — `belongs_to :from_issue, GtElixir.Beads.Issue, attribute_type: :string` (same for to_issue); migration emits `references(:issues, type: :text, on_delete: :restrict)` |
+| `from_issue_id` / `to_issue_id` string FKs to `Issue.id` | done — `belongs_to :from_issue, Arbiter.Beads.Issue, attribute_type: :string` (same for to_issue); migration emits `references(:issues, type: :text, on_delete: :restrict)` |
 | `type` enum: `:blocks`, `:depends_on`, `:relates_to`, `:discovered_from`, `:parent_of` | done — `constraints one_of: @types`; helper `Dependency.types/0` exposes the list |
 | `created_at`, `created_by` (optional), `notes` (Markdown, optional) | done — `create_timestamp :created_at`; `created_by` string (max 255); `notes` string with `default ""` |
 | Uniqueness on `(from_issue_id, to_issue_id, type)` | done — Ash `identity :unique_edge, [...]` produces a Postgres `UNIQUE` index (`dependencies_unique_edge_index`) |
 | Cannot self-reference (`from == to`) | done — `RejectSelfReference` change adds a changeset error before insert. Tested explicitly. |
-| `Issue.ready/0` returns open issues with no unclosed `:blocks` / `:depends_on` deps | done — public function on `GtElixir.Beads.Issue`. 8 tests cover: no deps, gating dep open, gating dep closed, blocks-side gating, relates_to non-gating, discovered_from/parent_of non-gating, closed/in_progress excluded, multi-dep AND semantics |
+| `Issue.ready/0` returns open issues with no unclosed `:blocks` / `:depends_on` deps | done — public function on `Arbiter.Beads.Issue`. 8 tests cover: no deps, gating dep open, gating dep closed, blocks-side gating, relates_to non-gating, discovered_from/parent_of non-gating, closed/in_progress excluded, multi-dep AND semantics |
 
 ## Design choices worth flagging
 
@@ -71,7 +71,7 @@ apps/gt_elixir/test/gt_elixir/beads/dependency_test.exs                         
 ## How to verify
 
 ```sh
-cd /home/rborn/dev/gt-elixir-wt-003
+cd /home/rborn/dev/arbiter-wt-003
 git checkout feature/gte-003-dependency-resource
 
 docker compose up -d                              # if Postgres isn't running
@@ -82,16 +82,16 @@ mix compile --warnings-as-errors                  # clean
 mix format --check-formatted                      # clean
 
 # Dependency tests specifically
-mix test apps/gt_elixir/test/gt_elixir/beads/dependency_test.exs
+mix test apps/arbiter/test/arbiter/beads/dependency_test.exs
 # Expect: 20 tests, 0 failures
 
 # Full suite
 mix test
-# Expect: 56 gt_elixir + 5 gt_elixir_web + 1 doctest + 1 gt_elixir_cli = 63 tests, 0 failures
+# Expect: 56 arbiter + 5 arbiter_web + 1 doctest + 1 arbiter_cli = 63 tests, 0 failures
 
 # Spot check from iex
 iex -S mix
-> alias GtElixir.Beads.{Workspace, Issue, Dependency}
+> alias Arbiter.Beads.{Workspace, Issue, Dependency}
 > {:ok, ws} = Ash.create(Workspace, %{name: "demo", prefix: "demo"})
 > {:ok, a} = Ash.create(Issue, %{title: "A", workspace_id: ws.id})
 > {:ok, b} = Ash.create(Issue, %{title: "B", workspace_id: ws.id})
