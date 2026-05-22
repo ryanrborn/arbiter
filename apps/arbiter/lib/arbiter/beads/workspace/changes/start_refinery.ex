@@ -25,6 +25,12 @@ defmodule Arbiter.Beads.Workspace.Changes.StartRefinery do
           {:error, {:already_started, _pid}} ->
             :ok
 
+          # `DynamicSupervisor.on_start_child/0` admits `:ignore`. Today
+          # `Refinery.init/1` doesn't return it, but a no-op match keeps the
+          # spec exhaustive.
+          :ignore ->
+            :ok
+
           {:error, reason} ->
             Logger.warning(
               "StartRefinery: failed to start refinery for workspace #{workspace.id}: " <>

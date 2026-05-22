@@ -47,6 +47,8 @@ defmodule Arbiter.Polecat do
 
   use GenServer
 
+  require Logger
+
   alias Arbiter.Polecat.Registry, as: PRegistry
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
@@ -263,7 +265,11 @@ defmodule Arbiter.Polecat do
 
     :ok
   rescue
-    _ -> :ok
+    # Silent-on-failure (PubSub registry may be down in tests), but leave
+    # breadcrumbs so a programming error in the payload isn't invisible.
+    e ->
+      Logger.debug("Polecat.broadcast_lifecycle/2 swallowed: #{Exception.message(e)}")
+      :ok
   end
 
   # Broadcast {:polecat_done, bead_id} to "polecat:done:<workspace_id>" so the
@@ -281,7 +287,11 @@ defmodule Arbiter.Polecat do
 
     :ok
   rescue
-    _ -> :ok
+    # Same contract as broadcast_lifecycle/2: don't fail the caller on a
+    # PubSub hiccup, but log so a payload-construction bug isn't silent.
+    e ->
+      Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
+      :ok
   end
 
   @impl true

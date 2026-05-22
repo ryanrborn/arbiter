@@ -16,6 +16,12 @@ defmodule Arbiter.Workflows.RefinerySupervisor do
   config flag — disabled in `test` (so the refinery test can drive the
   GenServer with its own stubs and `auto_tick: false`), enabled everywhere
   else.
+
+  Boot enumeration runs once, from the `Arbiter.Application` boot Task. If
+  this supervisor crashes and the app supervisor restarts it, the new
+  instance starts empty — workspaces stay refinery-less until either a new
+  workspace is created (the `StartRefinery` after_action covers that) or the
+  OS process restarts.
   """
 
   require Logger
@@ -42,10 +48,12 @@ defmodule Arbiter.Workflows.RefinerySupervisor do
   """
   @spec start_refinery(String.t(), keyword()) :: DynamicSupervisor.on_start_child()
   def start_refinery(workspace_id, opts \\ []) when is_binary(workspace_id) do
+    # `:name` is always the via tuple — `Keyword.put` (not `put_new`) so a
+    # caller cannot silently bypass the Registry-based idempotency.
     opts =
       opts
       |> Keyword.put(:workspace_id, workspace_id)
-      |> Keyword.put_new(:name, via(workspace_id))
+      |> Keyword.put(:name, via(workspace_id))
 
     DynamicSupervisor.start_child(__MODULE__, {Refinery, opts})
   end
@@ -94,6 +102,14 @@ defmodule Arbiter.Workflows.RefinerySupervisor do
 
         :ok
     end
+  rescue
+    # Ash.read/1 can raise (e.g. domain not yet registered, Repo refusing
+    # connections, migration mid-flight at boot). Without this rescue the
+    # boot Task crashes silently — surface the cause as a warning instead.
+    e ->
+      Logger.warning("RefinerySupervisor: enumeration crashed at boot: #{Exception.message(e)}")
+
+      :ok
   end
 
   @doc """
