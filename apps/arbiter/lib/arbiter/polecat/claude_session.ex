@@ -109,7 +109,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
   def start(opts) when is_list(opts) do
     with {:ok, owner} <- fetch_owner(opts),
          {:ok, worktree_path} <- fetch_worktree(opts),
-         {:ok, argv} <- resolve_argv(opts),
+         {:ok, argv, env} <- resolve_argv(opts),
          {:ok, exec} <- resolve_executable(argv) do
       bead_id = bead_id_for(owner)
       topic = Keyword.get(opts, :topic) || default_topic(bead_id)
@@ -124,7 +124,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
       port_args = %{
         exec: exec,
         argv: argv,
-        cd: worktree_path
+        cd: worktree_path,
+        env: env
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -155,14 +156,21 @@ defmodule Arbiter.Polecat.ClaudeSession do
       nil ->
         case Keyword.fetch(opts, :prompt) do
           {:ok, prompt} when is_binary(prompt) ->
-            {:ok, ["claude", "--print", prompt]}
+            # Wrap claude in `sh -c` with stdin redirected from /dev/null so the
+            # CLI doesn't spend its first 3s waiting for stdin input (printing a
+            # "Warning: no stdin data received" line). `exec` replaces the shell
+            # so no extra process sits between the port and claude. Prompt
+            # arrives via env to dodge shell-escaping a long, quote-laden value.
+            argv = ["sh", "-c", ~S(exec claude --print "$_ARB_PROMPT" </dev/null)]
+            env = [{~c"_ARB_PROMPT", String.to_charlist(prompt)}]
+            {:ok, argv, env}
 
           _ ->
             {:error, :missing_prompt}
         end
 
       [exec | _rest] = argv when is_binary(exec) ->
-        {:ok, argv}
+        {:ok, argv, []}
 
       _ ->
         {:error, :invalid_command}
@@ -239,17 +247,22 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
   @doc false
   @spec open_port(map()) :: port()
-  def open_port(%{exec: exec, argv: [_ | rest], cd: cd}) do
-    Port.open(
-      {:spawn_executable, exec},
-      [
-        {:args, rest},
-        {:cd, cd},
-        {:line, 65_536},
-        :binary,
-        :exit_status,
-        :stderr_to_stdout
-      ]
-    )
+  def open_port(%{exec: exec, argv: [_ | rest], cd: cd} = args) do
+    env = Map.get(args, :env, [])
+
+    port_opts = [
+      {:args, rest},
+      {:cd, cd},
+      {:line, 65_536},
+      :binary,
+      :exit_status,
+      :stderr_to_stdout
+    ]
+
+    # Only set :env when non-empty — Port.open's :env *replaces* the child's
+    # environment with exactly the given list, so [] would wipe PATH and friends.
+    port_opts = if env == [], do: port_opts, else: port_opts ++ [{:env, env}]
+
+    Port.open({:spawn_executable, exec}, port_opts)
   end
 end
