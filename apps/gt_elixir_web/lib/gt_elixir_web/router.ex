@@ -2,62 +2,72 @@ defmodule GtElixirWeb.Router do
   use GtElixirWeb, :router
 
   pipeline :browser do
-    plug :accepts, ["html"]
-    plug :fetch_session
-    plug :fetch_live_flash
-    plug :put_root_layout, html: {GtElixirWeb.Layouts, :root}
-    plug :protect_from_forgery
-    plug :put_secure_browser_headers
+    plug(:accepts, ["html"])
+    plug(:fetch_session)
+    plug(:fetch_live_flash)
+    plug(:put_root_layout, html: {GtElixirWeb.Layouts, :root})
+    plug(:protect_from_forgery)
+    plug(:put_secure_browser_headers)
   end
 
   pipeline :api do
-    plug :accepts, ["json"]
+    plug(:accepts, ["json"])
   end
 
   scope "/", GtElixirWeb do
-    pipe_through :browser
+    pipe_through(:browser)
 
-    live "/", DashboardLive
-    get "/about", PageController, :home
+    get("/about", PageController, :home)
 
-    live "/workspace/:id/settings/vernacular", WorkspaceVernacularLive
-    live "/audit", AuditLogLive
-    live "/polecats/:bead_id", PolecatDetailLive
-    live "/beads/:id", BeadDetailLive
+    live_session :default,
+      on_mount: [
+        {GtElixirWeb.LiveHooks, :vernacular},
+        {GtElixirWeb.LiveHooks, :current_path}
+      ] do
+      live("/", DashboardLive)
+      live("/settings/vernacular", GlobalVernacularLive)
+      live("/audit", AuditLogLive)
+      live("/polecats/:bead_id", PolecatDetailLive)
+      live("/beads/:id", BeadDetailLive)
+    end
   end
 
   scope "/api", GtElixirWeb.Api do
-    pipe_through :api
+    pipe_through(:api)
 
     # Issues
-    get "/issues/ready", IssueController, :ready
-    get "/issues", IssueController, :index
-    post "/issues", IssueController, :create
-    get "/issues/:id", IssueController, :show
-    patch "/issues/:id", IssueController, :update
-    put "/issues/:id", IssueController, :update
-    post "/issues/:id/close", IssueController, :close
-    post "/issues/:id/reopen", IssueController, :reopen
+    get("/issues/ready", IssueController, :ready)
+    get("/issues", IssueController, :index)
+    post("/issues", IssueController, :create)
+    get("/issues/:id", IssueController, :show)
+    patch("/issues/:id", IssueController, :update)
+    put("/issues/:id", IssueController, :update)
+    post("/issues/:id/close", IssueController, :close)
+    post("/issues/:id/reopen", IssueController, :reopen)
 
     # Dependencies
-    post "/dependencies", DependencyController, :create
-    delete "/dependencies/:from/:to", DependencyController, :delete
+    post("/dependencies", DependencyController, :create)
+    delete("/dependencies/:from/:to", DependencyController, :delete)
 
     # Convoys
-    post "/convoys", ConvoyController, :create
-    get "/convoys/:id", ConvoyController, :show
-    post "/convoys/:id/close", ConvoyController, :close
+    post("/convoys", ConvoyController, :create)
+    get("/convoys/:id", ConvoyController, :show)
+    post("/convoys/:id/close", ConvoyController, :close)
 
     # Workspaces
-    get "/workspaces", WorkspaceController, :index
-    post "/workspaces", WorkspaceController, :create
-    get "/workspaces/:id", WorkspaceController, :show
+    get("/workspaces", WorkspaceController, :index)
+    post("/workspaces", WorkspaceController, :create)
+    get("/workspaces/:id", WorkspaceController, :show)
+
+    # Global settings
+    get("/settings", SettingsController, :show)
+    put("/settings/vernacular", SettingsController, :update_vernacular)
 
     # Polecats (workflow runner)
-    post "/polecats/sling", PolecatController, :sling
-    get "/polecats", PolecatController, :index
-    get "/polecats/:bead_id", PolecatController, :show
-    post "/polecats/:bead_id/stop", PolecatController, :stop
+    post("/polecats/sling", PolecatController, :sling)
+    get("/polecats", PolecatController, :index)
+    get("/polecats/:bead_id", PolecatController, :show)
+    post("/polecats/:bead_id/stop", PolecatController, :stop)
   end
 
   # Enable LiveDashboard in development
@@ -70,9 +80,9 @@ defmodule GtElixirWeb.Router do
     import Phoenix.LiveDashboard.Router
 
     scope "/dev" do
-      pipe_through :browser
+      pipe_through(:browser)
 
-      live_dashboard "/dashboard", metrics: GtElixirWeb.Telemetry
+      live_dashboard("/dashboard", metrics: GtElixirWeb.Telemetry)
     end
   end
 end
