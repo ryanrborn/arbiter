@@ -4,7 +4,7 @@ defmodule ArbiterCli.Cmd.Where do
   Phoenix host it's talking to and which workspace it resolves to.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{Client, Output, Vernacular, Workspace}
 
   def run(argv) do
     mode = Output.mode(argv)
@@ -28,15 +28,17 @@ defmodule ArbiterCli.Cmd.Where do
         )
 
       :text ->
+        v = Vernacular.fetch()
+        ws_label = Vernacular.label(v, "workspace")
         IO.puts("api host:        #{base}")
         IO.puts("ARB_WORKSPACE:   #{bd2_ws_env || "(unset, defaulting to \"default\")"}")
 
         case resolved do
           nil ->
-            IO.puts("workspace:       (not resolved — run `arb doctor`)")
+            IO.puts("#{ws_label}:       (not resolved — run `arb doctor`)")
 
           ws ->
-            IO.puts("workspace:")
+            IO.puts("#{ws_label}:")
             Output.emit_workspace(ws, :text)
         end
     end

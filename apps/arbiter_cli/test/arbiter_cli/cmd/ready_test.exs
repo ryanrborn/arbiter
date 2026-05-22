@@ -22,7 +22,7 @@ defmodule ArbiterCli.Cmd.ReadyTest do
   test "empty list prints placeholder" do
     stub_two([])
     {out, _err, _} = capture(fn -> Ready.run([]) end)
-    assert out =~ "(no issues)"
+    assert out =~ "(no beads)"
   end
 
   test "--all skips the workspace filter" do

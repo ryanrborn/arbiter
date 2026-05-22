@@ -58,11 +58,19 @@ defmodule ArbiterWeb.PolecatDetailLive do
       :ok ->
         {:noreply,
          socket
-         |> put_flash(:info, "Stopped #{Vernacular.label(:worker)} for #{Vernacular.label(:issue)} #{socket.assigns.bead_id}.")
+         |> put_flash(
+           :info,
+           "Stopped #{Vernacular.label(:worker)} for #{Vernacular.label(:issue)} #{socket.assigns.bead_id}."
+         )
          |> push_navigate(to: ~p"/")}
 
       {:error, :not_found} ->
-        {:noreply, put_flash(socket, :error, "#{String.capitalize(Vernacular.label(:worker))} not registered (already gone?).")}
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "#{String.capitalize(Vernacular.label(:worker))} not registered (already gone?)."
+         )}
     end
   end
 
@@ -221,7 +229,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
             <div class="flex flex-col gap-2">
               <.link navigate={~p"/beads/#{@bead_id}"} class="btn btn-sm btn-ghost">
-                ↗ Bead detail
+                ↗ {String.capitalize(@issue_label)} detail
               </.link>
               <%= if @snapshot.status in [:idle, :running, :awaiting] do %>
                 <button

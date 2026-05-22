@@ -3,7 +3,7 @@
     <header>
       <h1 class="text-3xl font-bold mb-2">Arbiter</h1>
       <p class="text-base-content/70">
-        An Ash + Phoenix umbrella for directive tracking, acolyte orchestration,
+        An Ash + Phoenix umbrella for {@issue_label} tracking, {@worker_label} orchestration,
         and operational dashboards. Vocabulary is configurable via vernacular settings.
       </p>
     </header>
@@ -11,29 +11,29 @@
     <section class="card bg-base-200 p-4">
       <h2 class="text-lg font-semibold mb-2">What lives here</h2>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-        <dt class="font-semibold">Directives</dt>
+        <dt class="font-semibold">{String.capitalize(@issue_label)}s</dt>
         <dd>
-          Issues, dependencies, and vanguards modelled as Ash resources backed by
+          Issues, dependencies, and {@batch_label}s modelled as Ash resources backed by
           Postgres. Audit history is captured via <code>ash_paper_trail</code>.
         </dd>
 
-        <dt class="font-semibold">Acolytes</dt>
+        <dt class="font-semibold">{String.capitalize(@worker_label)}s</dt>
         <dd>
-          Workflow runners — long-lived processes that walk a directive through its
+          Workflow runners — long-lived processes that walk a {@issue_label} through its
           steps (crucible, code review, deployment, etc.) and broadcast
           lifecycle events.
         </dd>
 
-        <dt class="font-semibold">Domains</dt>
+        <dt class="font-semibold">{String.capitalize(@workspace_label)}s</dt>
         <dd>
-          Per-team scoping: directive prefix, tracker integration (GitHub / Jira /
-          none), warship paths, and the vernacular vocabulary used in the UI.
+          Per-team scoping: {@issue_label} prefix, tracker integration (GitHub / Jira /
+          none), {@rig_label} paths, and the vernacular vocabulary used in the UI.
         </dd>
 
         <dt class="font-semibold">REST API</dt>
         <dd>
-          JSON endpoints under <code>/api</code> for directives, dependencies,
-          vanguards, domains, and acolyte dispatches. Used by the CLI and external
+          JSON endpoints under <code>/api</code> for {@issue_label}s, dependencies,
+          {@batch_label}s, {@workspace_label}s, and {@worker_label} dispatches. Used by the CLI and external
           integrations.
         </dd>
 
@@ -50,11 +50,11 @@
       <ul class="list-disc list-inside text-sm space-y-1">
         <li>
           <.link navigate={~p"/"} class="link link-hover">Dashboard</.link>
-          — live view of domains, warships, active acolytes, and recent directives.
+          — live view of {@workspace_label}s, {@rig_label}s, active {@worker_label}s, and recent {@issue_label}s.
         </li>
         <li>
           <.link navigate={~p"/audit"} class="link link-hover">Audit log</.link>
-          — the 500 most recent directive changes with filtering and CSV export.
+          — the 500 most recent {@issue_label} changes with filtering and CSV export.
         </li>
         <li>
           <.link navigate={~p"/settings/vernacular"} class="link link-hover">Vernacular</.link>

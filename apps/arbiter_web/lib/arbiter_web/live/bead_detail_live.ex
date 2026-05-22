@@ -13,6 +13,7 @@ defmodule ArbiterWeb.BeadDetailLive do
   alias Arbiter.Beads.Issue.Version
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
+  alias Arbiter.Vernacular
   require Ash.Query
 
   @beads_topic "beads"
@@ -29,6 +30,9 @@ defmodule ArbiterWeb.BeadDetailLive do
      socket
      |> assign(:bead_id, bead_id)
      |> assign(:live, connected?(socket))
+     |> assign(:worker_label, Vernacular.label(:worker))
+     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:workspace_label, Vernacular.label(:workspace))
      |> refresh_all()}
   end
 
@@ -43,7 +47,10 @@ defmodule ArbiterWeb.BeadDetailLive do
     {:noreply, refresh_deps(socket)}
   end
 
-  def handle_info({:polecat_lifecycle, _event, %{bead_id: id}}, %{assigns: %{bead_id: id}} = socket) do
+  def handle_info(
+        {:polecat_lifecycle, _event, %{bead_id: id}},
+        %{assigns: %{bead_id: id}} = socket
+      ) do
     {:noreply, refresh_polecat(socket)}
   end
 
@@ -168,7 +175,7 @@ defmodule ArbiterWeb.BeadDetailLive do
     <div class="p-6 max-w-7xl mx-auto">
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-2xl font-bold">
-          Bead <code>{@bead_id}</code>
+          {String.capitalize(@issue_label)} <code>{@bead_id}</code>
         </h1>
         <span class={[
           "badge badge-sm",
@@ -196,7 +203,7 @@ defmodule ArbiterWeb.BeadDetailLive do
             <dd>{@bead.issue_type}</dd>
             <dt class="font-semibold">Priority:</dt>
             <dd>P{@bead.priority}</dd>
-            <dt class="font-semibold">Workspace:</dt>
+            <dt class="font-semibold">{String.capitalize(@workspace_label)}:</dt>
             <dd>
               <%= if @workspace do %>
                 {@workspace.name}
@@ -230,7 +237,7 @@ defmodule ArbiterWeb.BeadDetailLive do
 
         <section class="card bg-base-200 p-4 mb-4">
           <div class="flex items-center justify-between mb-2">
-            <h2 class="text-lg font-semibold">Polecat</h2>
+            <h2 class="text-lg font-semibold">{String.capitalize(@worker_label)}</h2>
             <%= if @polecat do %>
               <.link
                 navigate={~p"/polecats/#{@bead_id}"}
@@ -255,7 +262,7 @@ defmodule ArbiterWeb.BeadDetailLive do
             </dl>
           <% else %>
             <p class="text-base-content/60 italic">
-              No polecat running for this bead. Use
+              No {@worker_label} running for this {@issue_label}. Use
               <code>arb sling {@bead_id}</code> to spawn one.
             </p>
           <% end %>
@@ -293,7 +300,7 @@ defmodule ArbiterWeb.BeadDetailLive do
               Blocks ({length(@inbound_deps)})
             </h2>
             <%= if @inbound_deps == [] do %>
-              <p class="text-base-content/60 italic text-sm">Nothing depends on this bead.</p>
+              <p class="text-base-content/60 italic text-sm">Nothing depends on this {@issue_label}.</p>
             <% else %>
               <ul class="text-sm space-y-1">
                 <%= for d <- @inbound_deps do %>
@@ -339,7 +346,7 @@ defmodule ArbiterWeb.BeadDetailLive do
         </section>
       <% else %>
         <p class="text-base-content/60">
-          Bead <code>{@bead_id}</code> not found.
+          {String.capitalize(@issue_label)} <code>{@bead_id}</code> not found.
         </p>
       <% end %>
 

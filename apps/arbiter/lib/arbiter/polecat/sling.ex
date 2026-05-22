@@ -56,6 +56,7 @@ defmodule Arbiter.Polecat.Sling do
   alias Arbiter.Polecat.ClaudeSession
   alias Arbiter.Polecat.Driver
   alias Arbiter.Polecat.Worktree
+  alias Arbiter.Vernacular
   alias Arbiter.Workflows.Machine
   alias Arbiter.Workflows.Work
 
@@ -221,6 +222,7 @@ defmodule Arbiter.Polecat.Sling do
 
   defp application_path(rig) do
     rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
+
     case Map.get(rig_paths, rig) do
       path when is_binary(path) and path != "" -> path
       _ -> nil
@@ -269,9 +271,17 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   @doc false
+  # The `gt done` marker is a gas-town relic: it predates the vernacular
+  # system and is hard-wired into `ClaudeSession`'s completion detection
+  # (see `@done_regex` there). We deliberately do NOT route it through
+  # Vernacular — the regex is the wire contract with the spawned Claude
+  # subprocess, and changing it per-workspace would break detection.
   def prompt_for(%Issue{} = bead) do
+    worker = Vernacular.label(:worker)
+    issue = Vernacular.label(:issue)
+
     """
-    You are a polecat working autonomously on bead #{bead.id}.
+    You are a #{worker} working autonomously on #{issue} #{bead.id}.
 
     Title: #{bead.title}
 
@@ -281,20 +291,27 @@ defmodule Arbiter.Polecat.Sling do
     Acceptance:
     #{bead.acceptance || "(none)"}
 
-    Your current directory is a fresh git worktree on a per-bead branch.
-    Work the bead to completion: load context, design, implement, test,
+    Your current directory is a fresh git worktree on a per-#{issue} branch.
+    Work the #{issue} to completion: load context, design, implement, test,
     commit on this branch, then push and open a PR if appropriate.
 
     When you are completely done, print the line:
 
         gt done
 
-    on a line by itself, exactly. The polecat watches your stdout and
-    will mark the bead complete when it sees that marker.
+    on a line by itself, exactly. The #{worker} watches your stdout and
+    will mark the #{issue} complete when it sees that marker.
     """
   end
 
-  defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, worktree_path, opts) do
+  defp maybe_start_driver(
+         %Issue{id: id},
+         polecat_pid,
+         machine_id,
+         machine_pid,
+         worktree_path,
+         opts
+       ) do
     case Keyword.get(opts, :start_driver, true) do
       false ->
         {:ok, nil}

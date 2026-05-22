@@ -23,7 +23,7 @@ defmodule ArbiterCli.Cmd.ListTest do
     stub_get("/api/issues", %{"data" => []})
     {out, _err, exit_code} = capture(fn -> List.run([]) end)
     assert exit_code == 0
-    assert out =~ "(no issues)"
+    assert out =~ "(no beads)"
   end
 
   test "--json emits {\"data\": [...]}" do

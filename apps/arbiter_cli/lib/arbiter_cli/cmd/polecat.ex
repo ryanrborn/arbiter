@@ -54,10 +54,11 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
 
   defp emit_show(snap, :text) do
-    IO.puts("Bead:       #{snap["bead_id"]}")
+    v = Vernacular.fetch()
+    IO.puts("#{Vernacular.cap(v, "issue")}:       #{snap["bead_id"]}")
     IO.puts("Status:     #{snap["status"]}")
     IO.puts("Step:       #{snap["current_step"]}")
-    IO.puts("Rig:        #{snap["rig"]}")
+    IO.puts("#{Vernacular.cap(v, "rig")}:        #{snap["rig"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
     if snap["result"], do: IO.puts("Result:     #{snap["result"]}")

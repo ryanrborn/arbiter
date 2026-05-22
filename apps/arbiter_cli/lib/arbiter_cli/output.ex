@@ -12,7 +12,7 @@ defmodule ArbiterCli.Output do
   halt the VM with a non-zero status.
   """
 
-  alias ArbiterCli.Client
+  alias ArbiterCli.{Client, Vernacular}
 
   # ----- mode resolution -----
 
@@ -61,7 +61,8 @@ defmodule ArbiterCli.Output do
   def emit_issue_list(issues, :text) do
     case issues do
       [] ->
-        IO.puts("(no issues)")
+        v = Vernacular.fetch()
+        IO.puts("(no #{Vernacular.label(v, "issue")}s)")
 
       list ->
         Enum.each(list, fn issue -> IO.puts(format_issue_line(issue)) end)
@@ -73,7 +74,8 @@ defmodule ArbiterCli.Output do
   def emit_workspace(ws, :json), do: IO.puts(Jason.encode!(ws))
 
   def emit_workspace(ws, :text) do
-    IO.puts("workspace: #{ws["name"]}")
+    v = Vernacular.fetch()
+    IO.puts("#{Vernacular.label(v, "workspace")}: #{ws["name"]}")
     IO.puts("  id:          #{ws["id"]}")
     IO.puts("  prefix:      #{ws["prefix"]}")
 
@@ -135,6 +137,8 @@ defmodule ArbiterCli.Output do
   """
   @spec format_issue_detail(map()) :: String.t()
   def format_issue_detail(issue) do
+    v = Vernacular.fetch()
+
     header =
       [
         {"ID", issue["id"]},
@@ -143,7 +147,7 @@ defmodule ArbiterCli.Output do
         {"Priority", issue["priority"]},
         {"Type", issue["issue_type"]},
         {"Assignee", issue["assignee"]},
-        {"Workspace", issue["workspace_id"]},
+        {Vernacular.cap(v, "workspace"), issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
         {"Created", issue["created_at"]},
         {"Updated", issue["updated_at"]},

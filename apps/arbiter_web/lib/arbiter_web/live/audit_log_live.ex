@@ -38,6 +38,7 @@ defmodule ArbiterWeb.AuditLogLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Beads.Issue.Version
+  alias Arbiter.Vernacular
   require Ash.Query
 
   @impl true
@@ -45,6 +46,7 @@ defmodule ArbiterWeb.AuditLogLive do
     {:ok,
      socket
      |> assign(:filters, default_filters())
+     |> assign(:issue_label, Vernacular.label(:issue))
      |> load_versions()}
   end
 
@@ -180,7 +182,7 @@ defmodule ArbiterWeb.AuditLogLive do
     <div class="p-6 max-w-7xl mx-auto" id="audit-log" phx-hook="DownloadOnEvent">
       <h1 class="text-2xl font-bold mb-4">Audit log</h1>
       <p class="text-sm text-base-content/70 mb-6">
-        Showing the {length(@versions)} most recent bead changes (max 500). Sourced
+        Showing the {length(@versions)} most recent {@issue_label} changes (max 500). Sourced
         from <code>ash_paper_trail</code> versions on
         <code>Arbiter.Beads.Issue</code>.
       </p>
@@ -206,7 +208,7 @@ defmodule ArbiterWeb.AuditLogLive do
             />
           </label>
           <label class="form-control">
-            <span class="label-text">Bead id contains</span>
+            <span class="label-text">{String.capitalize(@issue_label)} id contains</span>
             <input
               type="text"
               name="filters[entity_id]"
@@ -239,7 +241,7 @@ defmodule ArbiterWeb.AuditLogLive do
         <thead>
           <tr>
             <th>When</th>
-            <th>Bead</th>
+            <th>{String.capitalize(@issue_label)}</th>
             <th>Action</th>
             <th>Changes</th>
           </tr>
