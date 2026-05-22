@@ -66,7 +66,9 @@ defmodule Arbiter.Vernacular do
     epic: "mountain",
     workspace: "workspace",
     escalation: "escalation",
-    pr: "pull request"
+    pr: "pull request",
+    sling: "sling",
+    worktree: "worktree"
   }
 
   @valid_keys Map.keys(@defaults)
