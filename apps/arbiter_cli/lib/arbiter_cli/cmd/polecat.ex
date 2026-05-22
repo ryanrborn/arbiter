@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Polecat do
   Use `arb sling` to start a polecat in the first place.
   """
 
-  alias ArbiterCli.{Client, Output}
+  alias ArbiterCli.{Client, Output, Vernacular}
 
   def run(argv) do
     mode = Output.mode(argv)
@@ -76,15 +76,23 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_stop(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit_stop(payload, :text) do
-    IO.puts("Stopped polecat for bead #{payload["bead_id"]}.")
+    v = Vernacular.fetch()
+
+    IO.puts(
+      "Stopped #{Vernacular.label(v, "worker")} for #{Vernacular.label(v, "issue")} #{payload["bead_id"]}."
+    )
   end
 
   defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
 
-  defp emit_list([], :text), do: IO.puts("(no active polecats)")
+  defp emit_list([], :text) do
+    v = Vernacular.fetch()
+    IO.puts("(no active #{Vernacular.label(v, "worker")}s)")
+  end
 
   defp emit_list(list, :text) do
-    IO.puts("Active polecats (#{length(list)}):")
+    v = Vernacular.fetch()
+    IO.puts("Active #{Vernacular.label(v, "worker")}s (#{length(list)}):")
 
     Enum.each(list, fn p ->
       IO.puts(

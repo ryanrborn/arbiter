@@ -1,45 +1,45 @@
 <Layouts.app flash={@flash} current_path={@conn.request_path}>
   <div class="p-6 max-w-3xl mx-auto space-y-6">
     <header>
-      <h1 class="text-3xl font-bold mb-2">gt-elixir</h1>
+      <h1 class="text-3xl font-bold mb-2">Arbiter</h1>
       <p class="text-base-content/70">
-        An Ash + Phoenix umbrella that runs gas-town's bead tracker, workflow
-        engine, and operational dashboards.
+        An Ash + Phoenix umbrella for directive tracking, acolyte orchestration,
+        and operational dashboards. Vocabulary is configurable via vernacular settings.
       </p>
     </header>
 
     <section class="card bg-base-200 p-4">
       <h2 class="text-lg font-semibold mb-2">What lives here</h2>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-        <dt class="font-semibold">Beads</dt>
+        <dt class="font-semibold">Directives</dt>
         <dd>
-          Issues, dependencies, and convoys modelled as Ash resources backed by
+          Issues, dependencies, and vanguards modelled as Ash resources backed by
           Postgres. Audit history is captured via <code>ash_paper_trail</code>.
         </dd>
 
-        <dt class="font-semibold">Polecats</dt>
+        <dt class="font-semibold">Acolytes</dt>
         <dd>
-          Workflow runners — long-lived processes that walk a bead through its
-          steps (refinery, code review, deployment, etc.) and broadcast
+          Workflow runners — long-lived processes that walk a directive through its
+          steps (crucible, code review, deployment, etc.) and broadcast
           lifecycle events.
         </dd>
 
-        <dt class="font-semibold">Workspaces</dt>
+        <dt class="font-semibold">Domains</dt>
         <dd>
-          Per-team scoping: bead prefix, tracker integration (GitHub / Jira /
-          none), rig paths, and the vernacular vocabulary used in the UI.
+          Per-team scoping: directive prefix, tracker integration (GitHub / Jira /
+          none), warship paths, and the vernacular vocabulary used in the UI.
         </dd>
 
         <dt class="font-semibold">REST API</dt>
         <dd>
-          JSON endpoints under <code>/api</code> for issues, dependencies,
-          convoys, workspaces, and polecat slings. Used by the CLI and external
+          JSON endpoints under <code>/api</code> for directives, dependencies,
+          vanguards, domains, and acolyte dispatches. Used by the CLI and external
           integrations.
         </dd>
 
         <dt class="font-semibold">CLI</dt>
         <dd>
-          The <code>gt_elixir_cli</code> escript exposes the same actions from
+          The <code>arb</code> escript exposes the same actions from
           the terminal for scripting and ops work.
         </dd>
       </dl>
@@ -50,15 +50,15 @@
       <ul class="list-disc list-inside text-sm space-y-1">
         <li>
           <.link navigate={~p"/"} class="link link-hover">Dashboard</.link>
-          — live view of workspaces, rigs, active polecats, and recent beads.
+          — live view of domains, warships, active acolytes, and recent directives.
         </li>
         <li>
           <.link navigate={~p"/audit"} class="link link-hover">Audit log</.link>
-          — the 500 most recent bead changes with filtering and CSV export.
+          — the 500 most recent directive changes with filtering and CSV export.
         </li>
         <li>
-          Workspace settings are reachable from the Settings link on each row
-          of the dashboard's Workspaces table.
+          <.link navigate={~p"/settings/vernacular"} class="link link-hover">Vernacular</.link>
+          — configure the vocabulary used throughout the UI and CLI.
         </li>
       </ul>
     </section>
