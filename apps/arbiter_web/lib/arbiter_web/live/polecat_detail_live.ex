@@ -15,6 +15,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
+  alias Arbiter.Vernacular
   alias Arbiter.Workflows.MachineState
   require Ash.Query
   require Logger
@@ -33,6 +34,10 @@ defmodule ArbiterWeb.PolecatDetailLive do
      |> assign(:bead_id, bead_id)
      |> assign(:live, connected?(socket))
      |> assign(:flash_message, nil)
+     |> assign(:worker_label, Vernacular.label(:worker))
+     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:rig_label, Vernacular.label(:rig))
+     |> assign(:workspace_label, Vernacular.label(:workspace))
      |> refresh_all()}
   end
 
@@ -53,11 +58,11 @@ defmodule ArbiterWeb.PolecatDetailLive do
       :ok ->
         {:noreply,
          socket
-         |> put_flash(:info, "Stopped polecat for bead #{socket.assigns.bead_id}.")
+         |> put_flash(:info, "Stopped #{Vernacular.label(:worker)} for #{Vernacular.label(:issue)} #{socket.assigns.bead_id}.")
          |> push_navigate(to: ~p"/")}
 
       {:error, :not_found} ->
-        {:noreply, put_flash(socket, :error, "Polecat not registered (already gone?).")}
+        {:noreply, put_flash(socket, :error, "#{String.capitalize(Vernacular.label(:worker))} not registered (already gone?).")}
     end
   end
 
@@ -159,7 +164,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
     <div class="p-6 max-w-7xl mx-auto">
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-2xl font-bold">
-          Polecat <code>{@bead_id}</code>
+          {String.capitalize(@worker_label)} <code>{@bead_id}</code>
         </h1>
         <span class={[
           "badge badge-sm",
@@ -185,9 +190,9 @@ defmodule ArbiterWeb.PolecatDetailLive do
               </dd>
               <dt class="font-semibold">Current step:</dt>
               <dd>{@snapshot.current_step}</dd>
-              <dt class="font-semibold">Rig:</dt>
+              <dt class="font-semibold">{String.capitalize(@rig_label)}:</dt>
               <dd>{@snapshot.rig}</dd>
-              <dt class="font-semibold">Workspace:</dt>
+              <dt class="font-semibold">{String.capitalize(@workspace_label)}:</dt>
               <dd>
                 <%= if @workspace do %>
                   {@workspace.name}
@@ -221,10 +226,10 @@ defmodule ArbiterWeb.PolecatDetailLive do
               <%= if @snapshot.status in [:idle, :running, :awaiting] do %>
                 <button
                   phx-click="stop"
-                  data-confirm={"Stop polecat for #{@bead_id}? Any active Claude subprocess will be terminated."}
+                  data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
                   class="btn btn-sm btn-error"
                 >
-                  Stop polecat
+                  Stop {@worker_label}
                 </button>
               <% end %>
             </div>
@@ -277,7 +282,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
         </section>
       <% else %>
         <p class="text-base-content/60">
-          No polecat registered for bead <code>{@bead_id}</code>. It may have
+          No {@worker_label} registered for {@issue_label} <code>{@bead_id}</code>. It may have
           stopped, or the Phoenix node was restarted since it ran.
         </p>
       <% end %>

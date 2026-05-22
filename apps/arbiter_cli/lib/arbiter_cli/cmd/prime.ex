@@ -42,6 +42,7 @@ defmodule ArbiterCli.Cmd.Prime do
   defp to_json(sections) do
     %{
       workspace: unwrap(sections.workspace),
+      vernacular: unwrap(sections.vernacular),
       polecats: unwrap(sections.polecats),
       ready: unwrap(sections.ready)
     }
@@ -57,6 +58,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
     %{
       workspace: workspace,
+      vernacular: gather_vernacular(),
       polecats: gather_polecats(),
       ready: gather_ready(workspace)
     }
@@ -66,6 +68,14 @@ defmodule ArbiterCli.Cmd.Prime do
     case Workspace.resolve() do
       {:ok, ws} -> {:ok, ws}
       {:error, msg} -> {:error, msg}
+    end
+  end
+
+  defp gather_vernacular do
+    case Client.get("/api/settings") do
+      {:ok, %{"data" => %{"vernacular" => v}}} -> {:ok, v}
+      {:ok, _} -> {:ok, %{}}
+      {:error, %Client.Error{} = err} -> {:error, err.message}
     end
   end
 
@@ -98,7 +108,7 @@ defmodule ArbiterCli.Cmd.Prime do
   defp emit_text(sections) do
     emit_workspace_section(sections.workspace)
     IO.puts("")
-    emit_vernacular_section(sections.workspace)
+    emit_vernacular_section(sections.vernacular)
     IO.puts("")
     emit_polecats_section(sections.polecats)
     IO.puts("")
@@ -120,15 +130,15 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("  (could not resolve: #{msg})")
   end
 
-  defp emit_vernacular_section({:ok, ws}) do
-    vernacular = get_in(ws, ["config", "vernacular"]) || %{}
-
+  defp emit_vernacular_section({:ok, vernacular}) do
     IO.puts("== Vernacular ==")
 
     if vernacular == %{} do
       IO.puts("  (default gas-town — coordinator=mayor, worker=polecat, etc.)")
     else
-      Enum.each(vernacular, fn {k, v} -> IO.puts("  #{k}: #{format_vernacular_value(v)}") end)
+      vernacular
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.each(fn {k, v} -> IO.puts("  #{k}: #{format_vernacular_value(v)}") end)
     end
   end
 

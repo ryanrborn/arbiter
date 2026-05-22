@@ -13,7 +13,8 @@ defmodule ArbiterCli.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      escript: escript()
+      escript: escript(),
+      aliases: aliases()
     ]
   end
 
@@ -37,6 +38,10 @@ defmodule ArbiterCli.MixProject do
       name: "arb",
       app: nil
     ]
+  end
+
+  defp aliases do
+    [setup: ["deps.get", "escript.build"]]
   end
 
   defp deps do
