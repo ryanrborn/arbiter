@@ -47,6 +47,8 @@ defmodule Arbiter.Polecat do
 
   use GenServer
 
+  require Logger
+
   alias Arbiter.Polecat.Registry, as: PRegistry
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
@@ -263,7 +265,33 @@ defmodule Arbiter.Polecat do
 
     :ok
   rescue
-    _ -> :ok
+    # Silent-on-failure (PubSub registry may be down in tests), but leave
+    # breadcrumbs so a programming error in the payload isn't invisible.
+    e ->
+      Logger.debug("Polecat.broadcast_lifecycle/2 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Broadcast {:polecat_done, bead_id} to "polecat:done:<workspace_id>" so the
+  # workspace's Refinery (Crucible) can pick the bead up and drive it through
+  # the merge queue. A polecat without a workspace_id (e.g. ad-hoc local runs)
+  # has no Refinery listening and so the broadcast is skipped.
+  defp broadcast_done(%State{workspace_id: nil}), do: :ok
+
+  defp broadcast_done(%State{workspace_id: ws_id, bead_id: bead_id}) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      "polecat:done:" <> ws_id,
+      {:polecat_done, bead_id}
+    )
+
+    :ok
+  rescue
+    # Same contract as broadcast_lifecycle/2: don't fail the caller on a
+    # PubSub hiccup, but log so a payload-construction bug isn't silent.
+    e ->
+      Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
+      :ok
   end
 
   @impl true
@@ -318,7 +346,9 @@ defmodule Arbiter.Polecat do
         r -> Map.put(state.meta, :result, r)
       end
 
-    {:reply, :ok, %State{state | status: :completed, meta: meta}}
+    new_state = %State{state | status: :completed, meta: meta}
+    broadcast_done(new_state)
+    {:reply, :ok, new_state}
   end
 
   def handle_call({:complete, _result}, _from, %State{status: status} = state) do
@@ -397,7 +427,9 @@ defmodule Arbiter.Polecat do
     # "gt done" was detected in child output — auto-complete the polecat.
     # Mirrors the :running → :completed transition from handle_call({:complete, _}).
     meta = Map.put(state.meta, :result, :claude_done)
-    {:noreply, %State{state | status: :completed, meta: meta}}
+    new_state = %State{state | status: :completed, meta: meta}
+    broadcast_done(new_state)
+    {:noreply, new_state}
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{} = state) do
