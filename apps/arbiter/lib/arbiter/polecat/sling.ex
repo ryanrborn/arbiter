@@ -221,6 +221,7 @@ defmodule Arbiter.Polecat.Sling do
 
   defp application_path(rig) do
     rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
+
     case Map.get(rig_paths, rig) do
       path when is_binary(path) and path != "" -> path
       _ -> nil
@@ -285,6 +286,14 @@ defmodule Arbiter.Polecat.Sling do
     Work the bead to completion: load context, design, implement, test,
     commit on this branch, then push and open a PR if appropriate.
 
+    Coordination: at the start of each step, check your mailbox by running
+
+        arb inbox #{bead.id}
+
+    This shows any direction from the Admiral or flags from sibling acolytes
+    (e.g. an upstream API shape changed) and marks them read. To leave a flag
+    for another acolyte, use `arb message <their-bead-id> <text>`.
+
     When you are completely done, print the line:
 
         gt done
@@ -294,7 +303,14 @@ defmodule Arbiter.Polecat.Sling do
     """
   end
 
-  defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, worktree_path, opts) do
+  defp maybe_start_driver(
+         %Issue{id: id},
+         polecat_pid,
+         machine_id,
+         machine_pid,
+         worktree_path,
+         opts
+       ) do
     case Keyword.get(opts, :start_driver, true) do
       false ->
         {:ok, nil}

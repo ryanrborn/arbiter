@@ -285,12 +285,36 @@ defmodule Arbiter.Polecat do
       {:polecat_done, bead_id}
     )
 
+    # The message queue is the single source of truth for the notification
+    # feed: record a durable :notification alongside the transient broadcast.
+    # This in turn broadcasts {:new_message, _} on "messages:<ws>" via the
+    # resource's after_action hook, which the dashboard feed subscribes to.
+    record_done_notification(ws_id, bead_id)
+
     :ok
   rescue
     # Same contract as broadcast_lifecycle/2: don't fail the caller on a
     # PubSub hiccup, but log so a payload-construction bug isn't silent.
     e ->
       Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Best-effort: write a completion notification. Swallows its own failures so
+  # a polecat running outside a DB-connected context (e.g. unit tests with no
+  # sandbox checkout) still completes cleanly.
+  defp record_done_notification(ws_id, bead_id) do
+    Arbiter.Messages.Message.notify(%{
+      workspace_id: ws_id,
+      from_ref: bead_id,
+      subject: "#{bead_id} complete",
+      body: "#{bead_id} finished its workflow."
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("Polecat.record_done_notification/2 swallowed: #{Exception.message(e)}")
       :ok
   end
 
