@@ -106,7 +106,7 @@ defmodule Arbiter.Beads.WorkspaceTest do
     end
 
     test "fails when merge.strategy is not in the enum" do
-      config = %{"merge" => %{"strategy" => "gitlab"}}
+      config = %{"merge" => %{"strategy" => "bogus"}}
 
       assert {:error, %Ash.Error.Invalid{} = err} =
                Ash.create(Workspace, %{name: "bad-merge", config: config})
@@ -153,8 +153,8 @@ defmodule Arbiter.Beads.WorkspaceTest do
   end
 
   describe "valid_merger_strategies/0" do
-    test "starts as just direct" do
-      assert Workspace.valid_merger_strategies() == ~w(direct)
+    test "includes direct and gitlab" do
+      assert Workspace.valid_merger_strategies() == ~w(direct gitlab)
     end
   end
 
