@@ -10,6 +10,9 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
       `Arbiter.Beads.Workspace.valid_tracker_types/0` (`"none"`, `"jira"`,
       `"linear"`, `"github"`).
     * If `"tracker.config"` is present, it must be a map.
+    * If `"merge"` is present, it must be a map.
+    * If `"merge.strategy"` is present, it must be one of the values in
+      `Arbiter.Beads.Workspace.valid_merger_strategies/0` (`"direct"`).
     * If `"vernacular"` is present, it must be a map.
     * If `"vernacular.aliases"` is present, it must be a map of string → string.
     * If `"vernacular.emoji"` is present, it must be a map of string → string.
@@ -35,6 +38,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
   defp validate(changeset, config) do
     changeset
     |> validate_tracker(Map.get(config, "tracker"))
+    |> validate_merge(Map.get(config, "merge"))
     |> validate_vernacular(Map.get(config, "vernacular"))
   end
 
@@ -72,6 +76,32 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
 
   defp validate_tracker(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "tracker must be a map")
+  end
+
+  defp validate_merge(changeset, nil), do: changeset
+
+  defp validate_merge(changeset, merge) when is_map(merge) do
+    valid_strategies = Arbiter.Beads.Workspace.valid_merger_strategies()
+
+    case Map.get(merge, "strategy") do
+      nil ->
+        changeset
+
+      strategy ->
+        if strategy in valid_strategies do
+          changeset
+        else
+          Changeset.add_error(changeset,
+            field: :config,
+            message:
+              "merge.strategy must be one of #{Enum.join(valid_strategies, ", ")}; got: #{inspect(strategy)}"
+          )
+        end
+    end
+  end
+
+  defp validate_merge(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "merge must be a map")
   end
 
   defp validate_vernacular(changeset, nil), do: changeset
