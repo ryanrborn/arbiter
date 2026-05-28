@@ -31,11 +31,15 @@ defmodule Arbiter.Beads.Workspace do
             "project_key" => "VR",
             "credentials_ref" => "env:JIRA_TOKEN"
           }
+        },
+        "merge" => %{
+          "strategy" => "direct"               # one of: "direct" (gitlab/github added later)
         }
       }
 
   Vernacular helpers (`Vernacular.label/1`) land in gte-P2.
   Tracker helpers (`Tracker.for_bead/1`) land in gte-019.
+  Merger resolution (`Arbiter.Mergers.for_workspace/1`) reads `merge.strategy`.
   """
 
   use Ash.Resource,
@@ -44,6 +48,7 @@ defmodule Arbiter.Beads.Workspace do
     data_layer: AshPostgres.DataLayer
 
   @valid_tracker_types ~w(none jira shortcut linear github)
+  @valid_merger_strategies ~w(direct)
 
   postgres do
     table("workspaces")
@@ -112,4 +117,26 @@ defmodule Arbiter.Beads.Workspace do
   Returns the list of valid tracker type strings.
   """
   def valid_tracker_types, do: @valid_tracker_types
+
+  @doc """
+  Returns the list of valid merger strategy strings.
+
+  Starts as `~w(direct)`; `"gitlab"` / `"github"` are added in later directives.
+  """
+  def valid_merger_strategies, do: @valid_merger_strategies
+
+  @doc """
+  Resolves the merger strategy for a workspace from
+  `config["merge"]["strategy"]`, as an atom.
+
+  Falls back to `:direct` when unset, malformed, or not a recognized strategy.
+  Mirrors how `Arbiter.Trackers` resolves a tracker type.
+  """
+  @spec merger_strategy(t()) :: atom()
+  def merger_strategy(workspace) do
+    case get_in(workspace.config || %{}, ["merge", "strategy"]) do
+      strategy when strategy in @valid_merger_strategies -> String.to_atom(strategy)
+      _ -> :direct
+    end
+  end
 end
