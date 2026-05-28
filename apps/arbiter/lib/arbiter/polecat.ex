@@ -83,12 +83,21 @@ defmodule Arbiter.Polecat do
       :started_at,
       :step_started_at,
       :meta,
+      # uuid of the persisted Arbiter.Polecats.Run row, or nil if the create
+      # write failed (best-effort — see record_run_started/1). Subsequent
+      # status updates skip the DB write when this is nil.
+      :run_id,
       # Map of port -> session config + accumulator. Internal — never exposed
       # via snapshot/1; relevant fields (output_lines, exit_status) are
       # mirrored into meta for snapshot consumers.
       claude_sessions: %{}
     ]
   end
+
+  # Captured stdout is mirrored verbatim into the persisted Run.output_lines
+  # column on terminal transitions. Cap at 500 lines so a runaway subprocess
+  # doesn't bloat the row to many MB.
+  @max_output_lines 500
 
   # ---- public API ---------------------------------------------------------
 
@@ -247,8 +256,11 @@ defmodule Arbiter.Polecat do
       status: :idle,
       started_at: now,
       step_started_at: nil,
-      meta: Keyword.get(opts, :meta, %{})
+      meta: Keyword.get(opts, :meta, %{}),
+      run_id: nil
     }
+
+    state = record_run_started(state)
 
     broadcast_lifecycle(:started, state)
 
@@ -298,6 +310,92 @@ defmodule Arbiter.Polecat do
     e ->
       Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
       :ok
+  end
+
+  # ---- Run history (Arbiter.Polecats.Run) -------------------------------
+
+  # Best-effort: create the persistent Run row for this polecat. Returns the
+  # state, with :run_id populated on success. On failure (DB down, validation
+  # error, no sandbox checkout in a test) we log a warning and leave run_id
+  # nil — subsequent terminal updates will no-op cleanly.
+  defp record_run_started(%State{} = state) do
+    attrs = %{
+      bead_id: state.bead_id,
+      bead_title: lookup_bead_title(state.bead_id),
+      rig: state.rig,
+      workspace_id: state.workspace_id,
+      status: :running,
+      started_at: state.started_at,
+      output_lines: []
+    }
+
+    case Ash.create(Arbiter.Polecats.Run, attrs) do
+      {:ok, run} ->
+        %State{state | run_id: run.id}
+
+      {:error, reason} ->
+        log_run_warning("create", state.bead_id, reason)
+        state
+    end
+  rescue
+    e ->
+      log_run_warning("create", state.bead_id, e)
+      state
+  end
+
+  # Best-effort: stamp the terminal status / output / exit fields onto the
+  # Run row created at init. No-op (with a debug breadcrumb) when run_id is
+  # nil — the original create failed, so there's nothing to update and the
+  # warning was already logged at that time.
+  defp record_run_finished(%State{run_id: nil} = state) do
+    Logger.debug("Polecat.record_run_finished/1 skipped (no run_id) for bead=#{state.bead_id}")
+
+    :ok
+  end
+
+  defp record_run_finished(%State{run_id: run_id} = state) do
+    attrs = %{
+      status: state.status,
+      completed_at: DateTime.utc_now(),
+      exit_code: Map.get(state.meta || %{}, :exit_status),
+      output_lines: capture_output_lines(state),
+      failure_reason: stringify_failure(Map.get(state.meta || %{}, :failure_reason))
+    }
+
+    with {:ok, run} <- Ash.get(Arbiter.Polecats.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("update", state.bead_id, reason)
+    end
+  rescue
+    e -> log_run_warning("update", state.bead_id, e)
+  end
+
+  defp capture_output_lines(%State{} = state) do
+    state.meta
+    |> Kernel.||(%{})
+    |> Map.get(:output_lines, [])
+    |> Enum.take(-@max_output_lines)
+  end
+
+  defp stringify_failure(nil), do: nil
+  defp stringify_failure(s) when is_binary(s), do: s
+  defp stringify_failure(other), do: inspect(other)
+
+  defp lookup_bead_title(bead_id) do
+    case Ash.get(Arbiter.Beads.Issue, bead_id) do
+      {:ok, %{title: title}} -> title
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp log_run_warning(op, bead_id, reason) do
+    Logger.warning("Polecat.record_run_#{op}/1 swallowed for bead=#{bead_id}: #{inspect(reason)}")
+
+    :error
   end
 
   # Best-effort: write a completion notification. Swallows its own failures so
@@ -371,6 +469,7 @@ defmodule Arbiter.Polecat do
       end
 
     new_state = %State{state | status: :completed, meta: meta}
+    record_run_finished(new_state)
     broadcast_done(new_state)
     {:reply, :ok, new_state}
   end
@@ -387,7 +486,9 @@ defmodule Arbiter.Polecat do
         r -> Map.put(state.meta, :failure_reason, r)
       end
 
-    {:reply, :ok, %State{state | status: :failed, meta: meta}}
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    {:reply, :ok, new_state}
   end
 
   def handle_call({:fail, _reason}, _from, %State{status: status} = state) do
@@ -456,6 +557,7 @@ defmodule Arbiter.Polecat do
     # and critical for this signal to fire in that mode.
     meta = Map.put(state.meta, :result, :claude_done)
     new_state = %State{state | status: :completed, meta: meta}
+    record_run_finished(new_state)
     broadcast_done(new_state)
     {:noreply, new_state}
   end
