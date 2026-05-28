@@ -331,7 +331,7 @@ defmodule Arbiter.Polecat.Sling do
             machine_id: machine_id,
             machine_pid: machine_pid,
             worktree_path: worktree_path,
-            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false),
+            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, true),
             claude_driven: claude_driven
           ]
           |> maybe_put_opt(opts, :interval_ms)
