@@ -130,6 +130,12 @@ defmodule Arbiter.Beads.Issue do
       change set_attribute(:status, :closed)
       change set_attribute(:closed_at, &DateTime.utc_now/0)
 
+      # Best-effort teardown: stop the bead's polecat (if any) and remove
+      # its worktree (if clean). Failures never fail the :close itself.
+      # Runs for every :close path — CLI, Driver, Refinery.
+      change {Arbiter.Beads.Issue.Changes.StopPolecat, []}
+      change {Arbiter.Beads.Issue.Changes.CleanupWorktree, []}
+
       # After closing, check whether any system-managed convoy this issue belongs
       # to should auto-close. Safe no-op when issue isn't a member of any convoy.
       change after_action(fn _changeset, issue, _context ->

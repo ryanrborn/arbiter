@@ -131,9 +131,7 @@ defmodule Arbiter.Polecat.Driver do
 
   @impl true
   def handle_info(:tick, %{ticks: t, max_ticks: m} = state) when t >= m do
-    Logger.warning(
-      "Polecat.Driver hit max_ticks=#{m} for bead=#{state.bead_id}; stopping"
-    )
+    Logger.warning("Polecat.Driver hit max_ticks=#{m} for bead=#{state.bead_id}; stopping")
 
     safe(fn -> Polecat.fail(state.polecat_pid, {:driver_timeout, m}) end)
     {:stop, :normal, state}
@@ -243,9 +241,7 @@ defmodule Arbiter.Polecat.Driver do
       :ok
     else
       err ->
-        Logger.warning(
-          "Polecat.Driver: failed to close bead #{bead_id}: #{inspect(err)}"
-        )
+        Logger.warning("Polecat.Driver: failed to close bead #{bead_id}: #{inspect(err)}")
 
         :error
     end
@@ -266,6 +262,13 @@ defmodule Arbiter.Polecat.Driver do
 
   defp maybe_cleanup_worktree(%{worktree_path: path, bead_id: bead_id}) do
     cond do
+      # The bead's :close after_action already removed the worktree (see
+      # Arbiter.Beads.Issue.Changes.CleanupWorktree) — nothing left to do.
+      # Returning :ok silently keeps the legacy Driver-side path from
+      # logging a warning about a path that is already gone.
+      not File.dir?(path) ->
+        :ok
+
       worktree_dirty?(path, bead_id) ->
         Logger.info(
           "Polecat.Driver: worktree has uncommitted changes for bead=#{bead_id}; skipping cleanup"

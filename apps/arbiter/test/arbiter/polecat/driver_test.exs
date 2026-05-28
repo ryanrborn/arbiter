@@ -39,8 +39,10 @@ defmodule Arbiter.Polecat.DriverTest do
 
       assert Machine.status(machine_pid) == :completed
 
-      polecat_snap = Polecat.state(polecat_pid)
-      assert polecat_snap.status == :completed
+      # The :close action's after_action hook tears the polecat down; once
+      # the bead is closed it should no longer be registered or alive.
+      assert Polecat.whereis(bead.id) == nil
+      refute Process.alive?(polecat_pid)
 
       {:ok, reloaded} = Ash.get(Issue, bead.id)
       assert reloaded.status == :closed
@@ -280,7 +282,10 @@ defmodule Arbiter.Polecat.DriverTest do
       %{wt_path: wt_path}
     end
 
-    test "removes the worktree on successful completion when opted in", %{ws: ws, wt_path: wt_path} do
+    test "removes the worktree on successful completion when opted in", %{
+      ws: ws,
+      wt_path: wt_path
+    } do
       {:ok, bead} = Ash.create(Issue, %{title: "cw", workspace_id: ws.id})
 
       {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")

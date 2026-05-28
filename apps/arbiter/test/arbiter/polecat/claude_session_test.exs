@@ -209,23 +209,26 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
       assert Polecat.state(pid).meta.result == :claude_done
     end
 
-    test "completion signal is ignored when polecat status is :idle" do
+    test "completion signal completes the polecat even when status is :idle" do
       {pid, _bead_id} = start_polecat()
       cwd = tmp_dir!("cs-idle-done")
 
       {:ok, _port} =
         ClaudeSession.start(owner: pid, worktree_path: cwd, command: [@fixture])
 
-      # Wait for exit so output processing is definitely complete.
-      eventually(fn ->
-        case Polecat.state(pid).meta do
-          %{exit_status: status} when not is_nil(status) -> status
-          _ -> nil
-        end
-      end)
+      # claude_driven mode keeps the polecat at :idle (the Machine is not
+      # ticked, so advance/2 is never called). The "gt done" signal must
+      # still complete the polecat from :idle.
+      status =
+        eventually(fn ->
+          case Polecat.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
 
-      # Still :idle — auto-complete must NOT have fired (illegal transition).
-      assert Polecat.state(pid).status == :idle
+      assert status == :completed
+      assert Polecat.state(pid).meta.result == :claude_done
     end
   end
 
