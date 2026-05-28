@@ -263,8 +263,16 @@ defmodule Arbiter.Polecat.Sling do
             end
 
         case ClaudeSession.start(session_opts) do
-          {:ok, port} -> {:ok, port}
-          {:error, reason} -> {:error, {:claude_start_failed, reason}}
+          {:ok, port} ->
+            # Move the polecat out of :idle so UI/CLI report a meaningful
+            # status while Claude works. In claude_driven mode the Driver
+            # never ticks the Machine, so without this nudge the polecat
+            # would remain :idle until "gt done" flipped it to :completed.
+            _ = Polecat.advance(polecat_pid, :claude)
+            {:ok, port}
+
+          {:error, reason} ->
+            {:error, {:claude_start_failed, reason}}
         end
     end
   end
