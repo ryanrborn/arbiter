@@ -30,6 +30,21 @@ defmodule Arbiter.Workflows.Work do
 
   Each step appends `:<step>_done` to the state for downstream steps to
   inspect; `:submit_result` carries the Trackers.transition return.
+
+  ## Mailbox convention
+
+  Acolytes coordinate through the inter-agent message queue
+  (`Arbiter.Messages.Message`), not tmux prompt injection. By **convention**
+  (not enforced by the Driver), an acolyte checks its mailbox at the start of
+  each workflow step by running:
+
+      arb inbox <bead-id>
+
+  This surfaces any unread direction from the Admiral (`arb message <bead-id>
+  <text>`) or flags from sibling acolytes, and marks them read. The Driver
+  does not poll the mailbox — it is the acolyte's responsibility via the CLI.
+  See `Arbiter.Polecat.Sling.prompt_for/1` for where this is wired into the
+  Claude prompt template.
   """
 
   use Arbiter.Workflow,
@@ -38,30 +53,35 @@ defmodule Arbiter.Workflows.Work do
   alias Arbiter.Beads.Issue
   alias Arbiter.Trackers
 
-  step :load_context,
+  step(:load_context,
     description: "Load the bead + acceptance criteria into state",
     needs: [],
     vars: [:bead_id, :worktree_path, :rig]
+  )
 
-  step :design,
+  step(:design,
     description: "Sketch the implementation plan",
     needs: [:load_context],
     vars: []
+  )
 
-  step :implement,
+  step(:implement,
     description: "Write code + tests",
     needs: [:design],
     vars: []
+  )
 
-  step :pre_verify,
+  step(:pre_verify,
     description: "Run tests + linters in the worktree",
     needs: [:implement],
     vars: []
+  )
 
-  step :submit,
+  step(:submit,
     description: "Transition the bead via its tracker adapter",
     needs: [:pre_verify],
     vars: []
+  )
 
   @impl true
   def run_step(:load_context, state) do
