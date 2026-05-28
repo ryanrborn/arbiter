@@ -1,0 +1,359 @@
+defmodule Arbiter.Trackers.Shortcut do
+  @moduledoc """
+  Shortcut adapter implementing `Arbiter.Trackers.Tracker`.
+
+  Wraps Shortcut's REST API v3 (`api.app.shortcut.com/api/v3`) for story
+  fetch/update/transition flows. Used by the Emricare domains (Varek/tonic,
+  Soren/tonic_device) to sync beads with their Shortcut board.
+
+  ## Active-workspace contract
+
+  Like the Jira adapter, the `Tracker` callbacks take only a `ref` (a story id)
+  with no workspace context. Shortcut needs an API token and a bead-status →
+  workflow-state mapping, both workspace-scoped. We resolve those through
+  `Arbiter.Trackers.Shortcut.Config`:
+
+    1. Callers (request middleware, CLI command, scheduler job) call
+       `Config.put_active(workspace)` to populate the per-process config.
+    2. `Application.get_env(:arbiter, :shortcut_default_config)` is the fallback
+       for tools that run without a workspace context.
+    3. With neither, callbacks return `{:error, %Error{kind: :config_missing}}`.
+
+  ## Auth
+
+  Shortcut authenticates with a `Shortcut-Token: <token>` header (NOT Basic
+  auth like Jira, NOT Bearer). The token comes from the workspace's
+  `credentials_ref` (`"env:NAME"` or a bare literal).
+
+  ## Status mapping
+
+  Bead-vocabulary atoms (`:open | :in_progress | :closed`) map to Shortcut
+  workflow *state names*. Shortcut moves a story between states by PUT-ing its
+  `workflow_state_id`, so we resolve the mapped state name to a concrete state
+  id via `GET /workflows`. Defaults are conservative ("Unstarted", "In
+  Progress", "Done"); each workspace can override via `tracker.config.status_map`.
+
+  An optional `workflow_id` narrows the state search (and `list_transitions/1`)
+  to a single workflow — useful when a workspace has multiple workflows that
+  share state names.
+
+  ## Tests
+
+  Wired up to `Req.Test`: when
+  `Application.get_env(:arbiter, :shortcut_http_stub, false)` is true, every
+  request injects `plug: {Req.Test, #{inspect(Arbiter.Trackers.Shortcut.HTTP)}}`.
+  This adapter **never** hits a real Shortcut endpoint from tests.
+  """
+
+  @behaviour Arbiter.Trackers.Tracker
+
+  alias Arbiter.Trackers.Shortcut.{Config, Error}
+
+  @base_url "https://api.app.shortcut.com/api/v3"
+  @stub_name Arbiter.Trackers.Shortcut.HTTP
+
+  # ---- Tracker behaviour ---------------------------------------------------
+
+  @impl true
+  def fetch(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      request(cfg, :get, "/stories/#{ref}", [])
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def transition(ref, status) when is_binary(ref) and is_atom(status) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_name} <- map_status(cfg, status),
+         {:ok, workflows} <- list_workflows(cfg),
+         {:ok, state_id} <- find_state_id(cfg, workflows, target_name) do
+      payload = %{"workflow_state_id" => state_id}
+
+      case request(cfg, :put, "/stories/#{ref}", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def update_fields(ref, fields_map) when is_binary(ref) and is_map(fields_map) do
+    with {:ok, cfg} <- Config.resolve() do
+      payload = translate_fields(fields_map)
+
+      case request(cfg, :put, "/stories/#{ref}", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def link_for(ref) when is_binary(ref), do: "https://app.shortcut.com/story/#{ref}"
+
+  @impl true
+  def parse_ref(s) when is_binary(s) do
+    cond do
+      String.starts_with?(s, "shortcut:") ->
+        s |> String.replace_prefix("shortcut:", "") |> integer_ref()
+
+      String.starts_with?(s, "sc-") ->
+        s |> String.replace_prefix("sc-", "") |> integer_ref()
+
+      String.starts_with?(s, "http://") or String.starts_with?(s, "https://") ->
+        case Regex.run(~r{/story/(\d+)}, s) do
+          [_, id] -> {:ok, id}
+          _ -> :error
+        end
+
+      true ->
+        integer_ref(s)
+    end
+  end
+
+  def parse_ref(_), do: :error
+
+  @impl true
+  def list_transitions(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, workflows} <- list_workflows(cfg) do
+      # Reverse-map Shortcut state names to bead-status atoms via the
+      # workspace's status_map (which maps atom -> state name).
+      reverse = Enum.into(cfg.status_map, %{}, fn {k, v} -> {v, k} end)
+
+      atoms =
+        cfg
+        |> states_for(workflows)
+        |> Enum.map(fn %{"name" => name} -> Map.get(reverse, name) end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      {:ok, atoms}
+    end
+  end
+
+  # ---- Public helpers ------------------------------------------------------
+
+  @doc """
+  Convenience: set the active workspace for the current process and run `fun`,
+  clearing the config when `fun` returns. Useful in tests and one-shot scripts.
+  """
+  @spec with_workspace(map() | Arbiter.Beads.Workspace.t(), (-> result)) :: result
+        when result: any()
+  def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
+    prev = Process.get({Config, :active_workspace_config})
+    Config.put_active(workspace_or_config)
+
+    try do
+      fun.()
+    after
+      if prev, do: Config.put_active(prev), else: Config.clear()
+    end
+  end
+
+  # ---- Internals: workflows / states --------------------------------------
+
+  defp list_workflows(cfg) do
+    case request(cfg, :get, "/workflows", []) do
+      {:ok, %Req.Response{status: status_code, body: list}}
+      when status_code in 200..299 and is_list(list) ->
+        {:ok, list}
+
+      {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status_code,
+           message: "workflows response was not a list",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # All workflow states, narrowed to the configured workflow_id when set.
+  defp states_for(%{workflow_id: workflow_id}, workflows) do
+    workflows
+    |> Enum.filter(fn wf ->
+      is_nil(workflow_id) or Map.get(wf, "id") == workflow_id
+    end)
+    |> Enum.flat_map(fn wf -> Map.get(wf, "states") || [] end)
+  end
+
+  defp map_status(%{status_map: map}, status) do
+    case Map.fetch(map, status) do
+      {:ok, name} when is_binary(name) and name != "" ->
+        {:ok, name}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :transition_not_found,
+           status: nil,
+           message: "no Shortcut state name mapped for bead status #{inspect(status)}",
+           raw: nil
+         }}
+    end
+  end
+
+  defp find_state_id(cfg, workflows, target_name) do
+    states = states_for(cfg, workflows)
+
+    case Enum.find(states, fn %{"name" => n} -> n == target_name end) do
+      %{"id" => id} when is_integer(id) ->
+        {:ok, id}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :transition_not_found,
+           status: nil,
+           message:
+             "Shortcut state #{inspect(target_name)} not found; " <>
+               "available: #{inspect(Enum.map(states, & &1["name"]))}",
+           raw: workflows
+         }}
+    end
+  end
+
+  # ---- Internals: field translation ---------------------------------------
+
+  # Bead-domain field keys -> Shortcut story attributes.
+  @field_map %{
+    title: "name",
+    description: "description"
+  }
+
+  defp translate_fields(fields_map) do
+    Enum.reduce(fields_map, %{}, fn {key, value}, acc ->
+      atom_key = if is_atom(key), do: key, else: safe_atom(key)
+
+      case Map.fetch(@field_map, atom_key) do
+        {:ok, sc_key} -> Map.put(acc, sc_key, value)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp safe_atom(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> :__unknown__
+  end
+
+  # ---- Internals: ref parsing ---------------------------------------------
+
+  defp integer_ref(s) do
+    case Integer.parse(s) do
+      {n, ""} when n > 0 -> {:ok, Integer.to_string(n)}
+      _ -> :error
+    end
+  end
+
+  # ---- Internals: HTTP ----------------------------------------------------
+
+  defp request(cfg, method, path, req_opts) do
+    full_opts =
+      [
+        method: method,
+        url: @base_url <> path,
+        headers: headers(cfg),
+        receive_timeout: 15_000,
+        retry: false
+      ]
+      |> Keyword.merge(req_opts)
+      |> Keyword.merge(stub_opts())
+
+    Req.request(full_opts)
+  end
+
+  defp handle_json({:ok, %Req.Response{status: status_code, body: body}})
+       when status_code in 200..299,
+       do: {:ok, body}
+
+  defp handle_json({:ok, %Req.Response{status: status_code, body: body}}),
+    do: {:error, http_error(status_code, body)}
+
+  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+
+  defp headers(%{token: token}) do
+    [
+      {"shortcut-token", token},
+      {"accept", "application/json"},
+      {"content-type", "application/json"},
+      {"user-agent", "arbiter"}
+    ]
+  end
+
+  defp http_error(status_code, body) do
+    %Error{
+      kind: kind_for_status(status_code),
+      status: status_code,
+      message: error_message(body, status_code),
+      raw: body
+    }
+  end
+
+  defp kind_for_status(400), do: :validation_failed
+  defp kind_for_status(401), do: :unauthenticated
+  defp kind_for_status(403), do: :forbidden
+  defp kind_for_status(404), do: :not_found
+  defp kind_for_status(422), do: :validation_failed
+  defp kind_for_status(s) when s >= 500 and s < 600, do: :server_error
+  defp kind_for_status(_), do: :http
+
+  defp error_message(%{"message" => msg}, _) when is_binary(msg), do: msg
+
+  defp error_message(%{"errors" => errors}, status_code),
+    do: "HTTP #{status_code}: #{inspect(errors)}"
+
+  defp error_message(_, status_code), do: "HTTP #{status_code}"
+
+  defp transport_error(%{reason: reason} = exception) do
+    %Error{
+      kind: :network,
+      status: nil,
+      message:
+        case exception do
+          %{__exception__: true} -> Exception.message(exception)
+          _ -> inspect(reason)
+        end,
+      raw: exception
+    }
+  end
+
+  defp transport_error(other) do
+    %Error{
+      kind: :network,
+      status: nil,
+      message: inspect(other),
+      raw: other
+    }
+  end
+
+  defp stub_opts do
+    if Application.get_env(:arbiter, :shortcut_http_stub, false) do
+      [plug: {Req.Test, @stub_name}]
+    else
+      []
+    end
+  end
+end
