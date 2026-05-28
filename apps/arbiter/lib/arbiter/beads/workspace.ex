@@ -43,69 +43,69 @@ defmodule Arbiter.Beads.Workspace do
     domain: Arbiter.Beads,
     data_layer: AshPostgres.DataLayer
 
-  @valid_tracker_types ~w(none jira linear github)
+  @valid_tracker_types ~w(none jira shortcut linear github)
 
   postgres do
-    table "workspaces"
-    repo Arbiter.Repo
+    table("workspaces")
+    repo(Arbiter.Repo)
   end
 
   actions do
-    defaults [:read, :destroy]
+    defaults([:read, :destroy])
 
     create :create do
-      primary? true
-      accept [:name, :description, :prefix, :config]
-      change {Arbiter.Beads.Workspace.Changes.ValidateConfig, []}
-      change {Arbiter.Beads.Workspace.Changes.StartRefinery, []}
+      primary?(true)
+      accept([:name, :description, :prefix, :config])
+      change({Arbiter.Beads.Workspace.Changes.ValidateConfig, []})
+      change({Arbiter.Beads.Workspace.Changes.StartRefinery, []})
     end
 
     update :update do
-      primary? true
-      accept [:name, :description, :prefix, :config]
-      require_atomic? false
-      change {Arbiter.Beads.Workspace.Changes.ValidateConfig, []}
+      primary?(true)
+      accept([:name, :description, :prefix, :config])
+      require_atomic?(false)
+      change({Arbiter.Beads.Workspace.Changes.ValidateConfig, []})
     end
   end
 
   attributes do
-    uuid_v7_primary_key :id
+    uuid_v7_primary_key(:id)
 
     attribute :name, :string do
-      allow_nil? false
-      public? true
-      constraints min_length: 1, max_length: 100, trim?: true
+      allow_nil?(false)
+      public?(true)
+      constraints(min_length: 1, max_length: 100, trim?: true)
     end
 
     attribute :description, :string do
-      public? true
-      constraints max_length: 500, trim?: true
+      public?(true)
+      constraints(max_length: 500, trim?: true)
     end
 
     attribute :prefix, :string do
-      allow_nil? false
-      public? true
-      default "bd"
-      constraints min_length: 1, max_length: 16, trim?: true, match: ~r/^[a-z][a-z0-9]*$/
+      allow_nil?(false)
+      public?(true)
+      default("bd")
+      constraints(min_length: 1, max_length: 16, trim?: true, match: ~r/^[a-z][a-z0-9]*$/)
 
-      description """
+      description("""
       Short identifier prepended to every Issue ID in this workspace (e.g. "bd-3o8",
       "verus-VR-17575"). Lowercase letters + digits only, max 16 chars.
-      """
+      """)
     end
 
     attribute :config, :map do
-      public? true
-      default %{}
+      public?(true)
+      default(%{})
 
-      description """
+      description("""
       Workspace configuration: vernacular + tracker. See module doc for shape.
       Missing keys fall back to gas-town vernacular + :none tracker.
-      """
+      """)
     end
 
-    create_timestamp :created_at
-    update_timestamp :updated_at
+    create_timestamp(:created_at)
+    update_timestamp(:updated_at)
   end
 
   @doc """
