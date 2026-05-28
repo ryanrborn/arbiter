@@ -18,13 +18,14 @@ defmodule Arbiter.Trackers do
   """
 
   alias Arbiter.Beads.Issue
-  alias Arbiter.Trackers.{Jira, None, Tracker}
+  alias Arbiter.Trackers.{Jira, None, Shortcut, Tracker}
 
   @type adapter :: module()
 
   @adapters %{
     none: None,
-    jira: Jira
+    jira: Jira,
+    shortcut: Shortcut
     # :linear, :github wired up in Phase 5
   }
 
