@@ -221,6 +221,7 @@ defmodule Arbiter.Polecat.Sling do
 
   defp application_path(rig) do
     rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
+
     case Map.get(rig_paths, rig) do
       path when is_binary(path) and path != "" -> path
       _ -> nil
@@ -294,7 +295,14 @@ defmodule Arbiter.Polecat.Sling do
     """
   end
 
-  defp maybe_start_driver(%Issue{id: id}, polecat_pid, machine_id, machine_pid, worktree_path, opts) do
+  defp maybe_start_driver(
+         %Issue{id: id},
+         polecat_pid,
+         machine_id,
+         machine_pid,
+         worktree_path,
+         opts
+       ) do
     case Keyword.get(opts, :start_driver, true) do
       false ->
         {:ok, nil}
@@ -315,7 +323,7 @@ defmodule Arbiter.Polecat.Sling do
             machine_id: machine_id,
             machine_pid: machine_pid,
             worktree_path: worktree_path,
-            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, false),
+            cleanup_worktree: Keyword.get(opts, :cleanup_worktree, true),
             claude_driven: claude_driven
           ]
           |> maybe_put_opt(opts, :interval_ms)
