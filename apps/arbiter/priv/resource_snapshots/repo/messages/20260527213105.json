@@ -1,0 +1,173 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"gen_random_uuid()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "kind",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "from_ref",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "to_ref",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "workspace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "subject",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "body",
+      "type": "text"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "read_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "inserted_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"(now() AT TIME ZONE 'utc')\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "updated_at",
+      "type": "utc_datetime_usec"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "workspace_id",
+        "to_ref",
+        "read_at"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "workspace_id"
+        },
+        {
+          "type": "atom",
+          "value": "to_ref"
+        },
+        {
+          "type": "atom",
+          "value": "read_at"
+        }
+      ],
+      "include": null,
+      "message": null,
+      "name": null,
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": false,
+      "using": null,
+      "where": null
+    }
+  ],
+  "custom_statements": [],
+  "has_create_action": true,
+  "hash": "E5326BE35DE957BB64119B28EC1544E0B2A0A379D7449A83FB1441DE318DE412",
+  "identities": [],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.Arbiter.Repo",
+  "schema": null,
+  "table": "messages"
+}

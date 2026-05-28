@@ -63,6 +63,11 @@ defmodule ArbiterWeb.Router do
     get("/settings", SettingsController, :show)
     put("/settings/vernacular", SettingsController, :update_vernacular)
 
+    # Messages (inter-agent queue: notifications + mailboxes)
+    get("/messages", MessageController, :index)
+    post("/messages", MessageController, :create)
+    post("/messages/:id/read", MessageController, :read)
+
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)
     get("/polecats", PolecatController, :index)

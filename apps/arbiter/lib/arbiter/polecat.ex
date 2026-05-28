@@ -285,12 +285,36 @@ defmodule Arbiter.Polecat do
       {:polecat_done, bead_id}
     )
 
+    # The message queue is the single source of truth for the notification
+    # feed: record a durable :notification alongside the transient broadcast.
+    # This in turn broadcasts {:new_message, _} on "messages:<ws>" via the
+    # resource's after_action hook, which the dashboard feed subscribes to.
+    record_done_notification(ws_id, bead_id)
+
     :ok
   rescue
     # Same contract as broadcast_lifecycle/2: don't fail the caller on a
     # PubSub hiccup, but log so a payload-construction bug isn't silent.
     e ->
       Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Best-effort: write a completion notification. Swallows its own failures so
+  # a polecat running outside a DB-connected context (e.g. unit tests with no
+  # sandbox checkout) still completes cleanly.
+  defp record_done_notification(ws_id, bead_id) do
+    Arbiter.Messages.Message.notify(%{
+      workspace_id: ws_id,
+      from_ref: bead_id,
+      subject: "#{bead_id} complete",
+      body: "#{bead_id} finished its workflow."
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("Polecat.record_done_notification/2 swallowed: #{Exception.message(e)}")
       :ok
   end
 
@@ -423,9 +447,13 @@ defmodule Arbiter.Polecat do
     end
   end
 
-  def handle_info({:__claude_session_done__, _line}, %State{status: :running} = state) do
-    # "gt done" was detected in child output — auto-complete the polecat.
-    # Mirrors the :running → :completed transition from handle_call({:complete, _}).
+  def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
+      when status not in [:completed, :failed] do
+    # "gt done" detected — complete the polecat regardless of current step.
+    # The guard accepts any non-terminal status (:idle, :running, :awaiting).
+    # In claude_driven mode the polecat stays :idle (the Machine is not ticked,
+    # so Polecat.advance is never called). Accepting :idle here is intentional
+    # and critical for this signal to fire in that mode.
     meta = Map.put(state.meta, :result, :claude_done)
     new_state = %State{state | status: :completed, meta: meta}
     broadcast_done(new_state)
@@ -433,9 +461,7 @@ defmodule Arbiter.Polecat do
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{} = state) do
-    # Status not :running (e.g. :idle or already completed). Ignore the
-    # signal — the polecat hasn't entered a workflow step yet, or has
-    # already terminated, so completion would be an invalid transition.
+    # Already :completed or :failed — ignore duplicate signal.
     {:noreply, state}
   end
 
