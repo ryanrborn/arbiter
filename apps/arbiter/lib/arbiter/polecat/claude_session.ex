@@ -155,6 +155,15 @@ defmodule Arbiter.Polecat.ClaudeSession do
       nil ->
         case Keyword.fetch(opts, :prompt) do
           {:ok, prompt} when is_binary(prompt) ->
+            # NOTE: `claude --print` is reported to buffer stdout until the
+            # session terminates (no per-line streaming to the parent port).
+            # The PubSub plumbing here is already line-oriented, so when we
+            # have a streaming-friendly invocation (e.g. `--output-format
+            # stream-json` or an interactive mode) wired in, real-time tail
+            # on the acolyte detail page will activate without further
+            # LiveView changes. Until then live updates work for any spike
+            # / non-Claude command, but real `claude` runs will flush at
+            # exit. Follow-up: pick a streaming invocation mode.
             {:ok, ["claude", "--print", prompt]}
 
           _ ->
@@ -204,7 +213,12 @@ defmodule Arbiter.Polecat.ClaudeSession do
   @doc false
   @spec handle_data(map(), binary()) :: map()
   def handle_data(%{} = session, line) when is_binary(line) do
-    broadcast(session, {:polecat_output, session.bead_id, line})
+    # Blank/whitespace-only lines still accumulate in :output_lines (so snapshot
+    # rendering preserves spacing) but we skip the PubSub hop — live followers
+    # only care about lines with content.
+    unless blank?(line) do
+      broadcast(session, {:polecat_output, session.bead_id, line})
+    end
 
     if Regex.match?(session.done_regex, line) do
       send(self(), {:__claude_session_done__, line})
@@ -212,6 +226,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
     %{session | output_lines: prepend_capped(session.output_lines, line, session.line_cap)}
   end
+
+  defp blank?(line), do: String.trim(line) == ""
 
   @doc false
   @spec handle_exit(map(), integer()) :: map()
