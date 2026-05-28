@@ -5,6 +5,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Polecat
+  alias Arbiter.Polecats.Run
 
   setup do
     # Polecats are supervised at the VM level — prior tests in the umbrella
@@ -234,6 +235,45 @@ defmodule ArbiterWeb.DashboardLiveTest do
       html = render(view)
       assert html =~ "Active Polecats (0)"
       assert html =~ "No active polecats"
+    end
+  end
+
+  describe "completed acolytes section" do
+    test "renders an empty-state row when no runs exist", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "Completed"
+      assert html =~ "completed-runs-empty"
+    end
+
+    test "lists completed and failed runs with a link to the detail page", %{conn: conn} do
+      {:ok, completed} =
+        Ash.create(Run, %{
+          bead_id: "bd-done",
+          bead_title: "the-completed-title",
+          rig: "arbiter",
+          workspace_id: "ws-1",
+          status: :completed,
+          started_at: DateTime.add(DateTime.utc_now(), -120, :second),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, _failed} =
+        Ash.create(Run, %{
+          bead_id: "bd-bust",
+          bead_title: "the-failed-title",
+          rig: "arbiter",
+          workspace_id: "ws-1",
+          status: :failed,
+          started_at: DateTime.add(DateTime.utc_now(), -240, :second),
+          completed_at: DateTime.utc_now(),
+          failure_reason: "boom"
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "the-completed-title"
+      assert html =~ "the-failed-title"
+      assert html =~ "/polecats/history/#{completed.id}"
     end
   end
 
