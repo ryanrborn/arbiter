@@ -49,7 +49,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
         nil ->
           cs
 
-        type when type in unquote(~w(none jira linear github)) ->
+        type when is_binary(type) and type in valid_types ->
           cs
 
         other ->
