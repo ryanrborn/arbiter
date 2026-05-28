@@ -17,6 +17,7 @@ config :arbiter_web, ArbiterWeb.Endpoint,
 
 config :arbiter, :github_http_stub, true
 config :arbiter, :jira_http_stub, true
+config :arbiter, :shortcut_http_stub, true
 config :arbiter, :auto_start_refineries, false
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
