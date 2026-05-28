@@ -24,6 +24,11 @@ defmodule ArbiterWeb.PolecatDetailLive do
   require Logger
 
   @polecats_topic "polecats"
+  # Live tail buffer cap. Keeps memory bounded on chatty children — older
+  # lines roll off the head of the assign as new ones arrive. The polecat
+  # itself caps at a higher number (Arbiter.Polecat.ClaudeSession.line_cap/0)
+  # so a full reload after a refresh still shows reasonable history.
+  @output_cap 200
 
   @impl true
   def mount(%{"bead_id" => bead_id}, _session, socket) do
@@ -38,6 +43,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
       |> assign(:rig_label, Vernacular.label(:rig))
       |> assign(:workspace_label, Vernacular.label(:workspace))
       |> refresh_all()
+      |> seed_output_lines()
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @polecats_topic)
@@ -57,8 +63,8 @@ defmodule ArbiterWeb.PolecatDetailLive do
     {:noreply, refresh_all(socket)}
   end
 
-  def handle_info({:polecat_output, _bead_id, _line}, socket) do
-    {:noreply, refresh_all(socket)}
+  def handle_info({:polecat_output, _bead_id, line}, socket) do
+    {:noreply, append_output_line(socket, line)}
   end
 
   def handle_info({:new_message, _message}, socket) do
@@ -242,6 +248,30 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
   defp output_topic(bead_id), do: "polecat:" <> bead_id
 
+  # Seed the live output buffer from the polecat's snapshot. Called on mount
+  # (and whenever we deliberately want to resync from the source of truth);
+  # routine `{:polecat_output, _, line}` events append to this buffer rather
+  # than re-reading the snapshot, so the page updates with no GenServer hop.
+  defp seed_output_lines(socket) do
+    lines =
+      case socket.assigns[:snapshot] do
+        %{meta: meta} when is_map(meta) -> Map.get(meta, :output_lines, []) || []
+        _ -> []
+      end
+      |> Enum.take(-@output_cap)
+
+    assign(socket, :output_lines, lines)
+  end
+
+  defp append_output_line(socket, line) do
+    lines =
+      (socket.assigns[:output_lines] || [])
+      |> Kernel.++([line])
+      |> Enum.take(-@output_cap)
+
+    assign(socket, :output_lines, lines)
+  end
+
   # ---- render ----
 
   @impl true
@@ -344,17 +374,16 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
           <section class="card bg-base-200 p-4">
             <h2 class="text-lg font-semibold mb-3">
-              Output ({length(output_lines(@snapshot))} lines)
+              Output ({length(@output_lines)} lines)
             </h2>
-            <%= if output_lines(@snapshot) == [] do %>
+            <%= if @output_lines == [] do %>
               <p class="text-base-content/60 italic">(no output yet)</p>
             <% else %>
               <pre
                 id="polecat-output"
                 phx-hook="ScrollToBottom"
-                phx-update="ignore"
                 class="bg-neutral text-neutral-content font-mono p-3 rounded text-xs overflow-x-auto max-h-[28rem] overflow-y-auto"
-              >{Enum.join(output_lines(@snapshot), "\n")}</pre>
+              >{Enum.join(@output_lines, "\n")}</pre>
               <script
                 :type={Phoenix.LiveView.ColocatedHook}
                 name=".ScrollToBottom"
@@ -433,8 +462,6 @@ defmodule ArbiterWeb.PolecatDetailLive do
     </Layouts.app>
     """
   end
-
-  defp output_lines(snap), do: Map.get(snap.meta || %{}, :output_lines, [])
 
   defp status_class(:idle), do: "badge-ghost"
   defp status_class(:running), do: "badge-info"
