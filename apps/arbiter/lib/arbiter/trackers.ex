@@ -9,7 +9,7 @@ defmodule Arbiter.Trackers do
 
   ## Resolution rule
 
-  `issue.tracker_type` is an atom in `[:none, :jira, :linear, :github]`. It is
+  `issue.tracker_type` is an atom in `[:none, :jira, :shortcut, :linear, :github]`. It is
   populated by `Arbiter.Beads.Issue.Changes.InheritTrackerType` from the
   workspace's `config["tracker"]["type"]` at create-time, unless explicitly
   overridden by the caller.
