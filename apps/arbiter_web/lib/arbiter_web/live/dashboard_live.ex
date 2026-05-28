@@ -33,6 +33,7 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Worktree
+  alias Arbiter.Polecats.Run
   alias Arbiter.Vernacular
   require Ash.Query
 
@@ -64,6 +65,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_notifications()
      |> refresh_rigs()
      |> refresh_polecats()
+     |> refresh_completed_runs()
      |> refresh_recent_beads()}
   end
 
@@ -79,6 +81,7 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply,
      socket
      |> refresh_polecats()
+     |> refresh_completed_runs()
      |> refresh_workspaces()
      |> refresh_rigs()}
   end
@@ -106,6 +109,21 @@ defmodule ArbiterWeb.DashboardLive do
       end)
 
     assign(socket, :polecats, polecats)
+  end
+
+  defp refresh_completed_runs(socket) do
+    runs =
+      try do
+        Run
+        |> Ash.Query.filter(status in [:completed, :failed])
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(10)
+        |> Ash.read!()
+      rescue
+        _ -> []
+      end
+
+    assign(socket, :completed_runs, runs)
   end
 
   defp refresh_recent_beads(socket) do
@@ -336,6 +354,17 @@ defmodule ArbiterWeb.DashboardLive do
 
   defp polecat_status_label(other), do: to_string(other)
 
+  defp run_status_class(:completed), do: "badge-success"
+  defp run_status_class(:failed), do: "badge-error"
+  defp run_status_class(:running), do: "badge-info"
+  defp run_status_class(_), do: "badge-ghost"
+
+  defp humanize_duration(%DateTime{} = started_at, %DateTime{} = ended_at) do
+    started_at |> DateTime.diff(ended_at, :second) |> abs() |> humanize_seconds()
+  end
+
+  defp humanize_duration(_, _), do: "—"
+
   defp kind_badge_class(:notification), do: "badge-info"
   defp kind_badge_class(:direction), do: "badge-warning"
   defp kind_badge_class(:flag), do: "badge-accent"
@@ -555,6 +584,52 @@ defmodule ArbiterWeb.DashboardLive do
                 <% end %>
               </tbody>
             </table>
+          </section>
+
+          <section class="card bg-base-200 p-4 col-span-2">
+            <h2 class="text-lg font-semibold mb-3">
+              Completed {String.capitalize(@worker_label)}s ({length(@completed_runs)})
+            </h2>
+            <%= if @completed_runs == [] do %>
+              <p class="text-base-content/60 italic" id="completed-runs-empty">
+                No completed {@worker_label}s yet. Past runs appear here after the
+                {@worker_label} finishes or fails.
+              </p>
+            <% else %>
+              <table class="table table-sm" id="completed-runs">
+                <thead>
+                  <tr>
+                    <th>{String.capitalize(@issue_label)}</th>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <%= for r <- @completed_runs do %>
+                    <tr>
+                      <td>
+                        <.link
+                          navigate={~p"/polecats/history/#{r.id}"}
+                          class="link link-hover"
+                        >
+                          <code class="text-xs">{r.bead_id}</code>
+                        </.link>
+                      </td>
+                      <td class="text-xs">{r.bead_title || "—"}</td>
+                      <td>
+                        <span class={["badge badge-sm", run_status_class(r.status)]}>
+                          {r.status}
+                        </span>
+                      </td>
+                      <td class="text-xs">{format_ts(r.started_at)}</td>
+                      <td class="text-xs">{humanize_duration(r.started_at, r.completed_at)}</td>
+                    </tr>
+                  <% end %>
+                </tbody>
+              </table>
+            <% end %>
           </section>
 
           <section class="card bg-base-200 p-4">

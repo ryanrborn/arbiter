@@ -27,6 +27,7 @@ defmodule ArbiterWeb.Router do
       live("/", DashboardLive)
       live("/settings/vernacular", GlobalVernacularLive)
       live("/audit", AuditLogLive)
+      live("/polecats/history/:id", RunDetailLive)
       live("/polecats/:bead_id", PolecatDetailLive)
       live("/beads/:id", BeadDetailLive)
     end
@@ -70,6 +71,8 @@ defmodule ArbiterWeb.Router do
 
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)
+    get("/polecats/history", RunController, :index)
+    get("/polecats/history/:id", RunController, :show)
     get("/polecats", PolecatController, :index)
     get("/polecats/:bead_id", PolecatController, :show)
     post("/polecats/:bead_id/stop", PolecatController, :stop)
