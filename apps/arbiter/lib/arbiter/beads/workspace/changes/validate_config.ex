@@ -49,15 +49,16 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
         nil ->
           cs
 
-        type when is_binary(type) and type in valid_types ->
-          cs
-
-        other ->
-          Changeset.add_error(cs,
-            field: :config,
-            message:
-              "tracker.type must be one of #{Enum.join(valid_types, ", ")}; got: #{inspect(other)}"
-          )
+        type ->
+          if type in valid_types do
+            cs
+          else
+            Changeset.add_error(cs,
+              field: :config,
+              message:
+                "tracker.type must be one of #{Enum.join(valid_types, ", ")}; got: #{inspect(type)}"
+            )
+          end
       end
     end)
     |> then(fn cs ->
