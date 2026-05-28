@@ -3,7 +3,7 @@ defmodule Arbiter.TrackersTest do
 
   alias Arbiter.Beads.Issue
   alias Arbiter.Trackers
-  alias Arbiter.Trackers.{Jira, None}
+  alias Arbiter.Trackers.{Jira, None, Shortcut}
 
   describe "for_bead/1 and for_type/1" do
     test "returns Tracker.None for :none-typed issues" do
@@ -19,6 +19,10 @@ defmodule Arbiter.TrackersTest do
       assert Trackers.for_type(:jira) == Jira
     end
 
+    test "for_type/1 returns Tracker.Shortcut for :shortcut" do
+      assert Trackers.for_type(:shortcut) == Shortcut
+    end
+
     test "for_type/1 raises ArgumentError for unregistered types (e.g. :linear pre-Phase-5)" do
       assert_raise ArgumentError, ~r/no tracker adapter registered for :linear/, fn ->
         Trackers.for_type(:linear)
@@ -26,7 +30,7 @@ defmodule Arbiter.TrackersTest do
     end
 
     test "adapters/0 exposes the registered map" do
-      assert Trackers.adapters() == %{none: None, jira: Jira}
+      assert Trackers.adapters() == %{none: None, jira: Jira, shortcut: Shortcut}
     end
   end
 
