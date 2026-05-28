@@ -272,7 +272,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
                 <dt class="font-semibold">Status:</dt>
                 <dd>
                   <span class={["badge", status_class(@snapshot.status)]}>
-                    {@snapshot.status}
+                    {status_label(@snapshot.status)}
                   </span>
                 </dd>
                 <dt class="font-semibold">Current step:</dt>
@@ -436,11 +436,23 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
   defp output_lines(snap), do: Map.get(snap.meta || %{}, :output_lines, [])
 
+  defp status_class(:idle), do: "badge-ghost"
   defp status_class(:running), do: "badge-info"
   defp status_class(:awaiting), do: "badge-warning"
   defp status_class(:completed), do: "badge-success"
   defp status_class(:failed), do: "badge-error"
   defp status_class(_), do: ""
+
+  defp status_label(:idle), do: "Idle"
+  defp status_label(:running), do: "Running"
+  defp status_label(:awaiting), do: "Awaiting"
+  defp status_label(:completed), do: "Completed"
+  defp status_label(:failed), do: "Failed"
+
+  defp status_label(other) when is_atom(other),
+    do: other |> Atom.to_string() |> String.capitalize()
+
+  defp status_label(other), do: to_string(other)
 
   # Color a workflow step based on whether it's done, current, or upcoming.
   defp step_class(step, %MachineState{completed_steps: completed, current_step: current}) do

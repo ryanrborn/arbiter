@@ -183,6 +183,14 @@ defmodule Arbiter.Polecat.SlingTest do
 
       assert is_pid(result.driver_pid)
 
+      # Sling must have nudged the polecat out of :idle so the UI/CLI
+      # report a meaningful status while Claude works. In claude_driven
+      # mode the Driver never ticks the Machine, so without this nudge
+      # the polecat would stay :idle until "gt done" fires.
+      snap = Polecat.state(result.polecat_pid)
+      assert snap.status == :running
+      assert snap.current_step == :claude
+
       # If the Driver were in workflow mode, the no-op steps would close
       # the bead in ~500ms. Wait that long and verify the bead is still
       # :in_progress — the Driver is waiting on the polecat instead.
@@ -192,7 +200,6 @@ defmodule Arbiter.Polecat.SlingTest do
       assert reloaded.status == :in_progress
 
       # Now simulate Claude completion and let the Driver react.
-      :ok = Polecat.advance(result.polecat_pid, :running)
       :ok = Polecat.complete(result.polecat_pid, :claude_done)
 
       ref = Process.monitor(result.driver_pid)

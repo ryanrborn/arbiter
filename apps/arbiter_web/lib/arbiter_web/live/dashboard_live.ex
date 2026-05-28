@@ -318,6 +318,24 @@ defmodule ArbiterWeb.DashboardLive do
   defp status_badge_class(:closed), do: "badge badge-ghost"
   defp status_badge_class(_), do: "badge"
 
+  defp polecat_status_class(:idle), do: "badge-ghost"
+  defp polecat_status_class(:running), do: "badge-info"
+  defp polecat_status_class(:awaiting), do: "badge-warning"
+  defp polecat_status_class(:completed), do: "badge-success"
+  defp polecat_status_class(:failed), do: "badge-error"
+  defp polecat_status_class(_), do: ""
+
+  defp polecat_status_label(:idle), do: "Idle"
+  defp polecat_status_label(:running), do: "Running"
+  defp polecat_status_label(:awaiting), do: "Awaiting"
+  defp polecat_status_label(:completed), do: "Completed"
+  defp polecat_status_label(:failed), do: "Failed"
+
+  defp polecat_status_label(other) when is_atom(other),
+    do: other |> Atom.to_string() |> String.capitalize()
+
+  defp polecat_status_label(other), do: to_string(other)
+
   defp kind_badge_class(:notification), do: "badge-info"
   defp kind_badge_class(:direction), do: "badge-warning"
   defp kind_badge_class(:flag), do: "badge-accent"
@@ -493,7 +511,9 @@ defmodule ArbiterWeb.DashboardLive do
                       <td class="text-xs">{Map.get(p, :workspace_name) || "(none)"}</td>
                       <td>{p.current_step}</td>
                       <td>
-                        <span class="badge badge-sm">{p.status}</span>
+                        <span class={["badge badge-sm", polecat_status_class(p.status)]}>
+                          {polecat_status_label(p.status)}
+                        </span>
                       </td>
                       <td class="text-xs">
                         {humanize_seconds(runtime_seconds(p.started_at, @now))}
