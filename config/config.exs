@@ -51,7 +51,7 @@ config :spark,
 # Configure Mix tasks and generators
 config :arbiter,
   ecto_repos: [Arbiter.Repo],
-  ash_domains: [Arbiter.Beads, Arbiter.Messages, Arbiter.Workflows]
+  ash_domains: [Arbiter.Beads, Arbiter.Messages, Arbiter.Polecats, Arbiter.Workflows]
 
 config :arbiter_web,
   ecto_repos: [Arbiter.Repo],

@@ -18,6 +18,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
+  alias Arbiter.Polecats.Run
   alias Arbiter.Vernacular
   alias Arbiter.Workflows.MachineState
   require Ash.Query
@@ -149,6 +150,26 @@ defmodule ArbiterWeb.PolecatDetailLive do
     |> refresh_workspace()
     |> refresh_machine_state()
     |> refresh_mailbox()
+    |> refresh_latest_run()
+  end
+
+  # Most-recent Run row for this bead, if any. Used to surface a link from
+  # the live polecat view to the historical post-mortem of a previous run on
+  # the same bead.
+  defp refresh_latest_run(socket) do
+    run =
+      try do
+        Run
+        |> Ash.Query.filter(bead_id == ^socket.assigns.bead_id)
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(1)
+        |> Ash.read!()
+        |> List.first()
+      rescue
+        _ -> nil
+      end
+
+    assign(socket, :latest_run, run)
   end
 
   # Unread mailbox-family messages (mailbox / direction / flag) addressed to
@@ -340,6 +361,14 @@ defmodule ArbiterWeb.PolecatDetailLive do
                 <.link navigate={~p"/beads/#{@bead_id}"} class="btn btn-sm btn-ghost">
                   ↗ Bead detail
                 </.link>
+                <%= if @latest_run do %>
+                  <.link
+                    navigate={~p"/polecats/history/#{@latest_run.id}"}
+                    class="btn btn-sm btn-ghost"
+                  >
+                    ↗ Run history
+                  </.link>
+                <% end %>
                 <%= if @snapshot.status in [:idle, :running, :awaiting] do %>
                   <button
                     phx-click="stop"
