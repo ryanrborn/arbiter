@@ -98,6 +98,30 @@ defmodule Arbiter.Beads.WorkspaceTest do
       assert {:ok, ws} = Ash.create(Workspace, %{name: "fwd-compat", config: config})
       assert ws.config["future_feature"] == %{"x" => 1}
     end
+
+    test "succeeds with a valid merge.strategy" do
+      config = %{"merge" => %{"strategy" => "direct"}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "direct-merge", config: config})
+      assert ws.config["merge"]["strategy"] == "direct"
+    end
+
+    test "fails when merge.strategy is not in the enum" do
+      config = %{"merge" => %{"strategy" => "gitlab"}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "bad-merge", config: config})
+
+      assert err |> Exception.message() |> String.contains?("merge.strategy must be one of")
+    end
+
+    test "fails when merge is not a map" do
+      config = %{"merge" => "direct"}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "non-map-merge", config: config})
+
+      assert err |> Exception.message() |> String.contains?("merge must be a map")
+    end
   end
 
   describe "update/2" do
@@ -123,8 +147,31 @@ defmodule Arbiter.Beads.WorkspaceTest do
   end
 
   describe "valid_tracker_types/0" do
-    test "returns the canonical four" do
-      assert Workspace.valid_tracker_types() == ~w(none jira linear github)
+    test "returns the canonical set" do
+      assert Workspace.valid_tracker_types() == ~w(none jira shortcut linear github)
+    end
+  end
+
+  describe "valid_merger_strategies/0" do
+    test "starts as just direct" do
+      assert Workspace.valid_merger_strategies() == ~w(direct)
+    end
+  end
+
+  describe "merger_strategy/1" do
+    test "reads config[merge][strategy] as an atom" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ms-direct",
+          config: %{"merge" => %{"strategy" => "direct"}}
+        })
+
+      assert Workspace.merger_strategy(ws) == :direct
+    end
+
+    test "defaults to :direct when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "ms-default"})
+      assert Workspace.merger_strategy(ws) == :direct
     end
   end
 end
