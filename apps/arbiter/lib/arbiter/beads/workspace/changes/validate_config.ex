@@ -12,7 +12,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"tracker.config"` is present, it must be a map.
     * If `"merge"` is present, it must be a map.
     * If `"merge.strategy"` is present, it must be one of the values in
-      `Arbiter.Beads.Workspace.valid_merger_strategies/0` (`"direct"`).
+      `Arbiter.Beads.Workspace.valid_merger_strategies/0` (`"direct"`, `"github"`).
     * If `"vernacular"` is present, it must be a map.
     * If `"vernacular.aliases"` is present, it must be a map of string → string.
     * If `"vernacular.emoji"` is present, it must be a map of string → string.
