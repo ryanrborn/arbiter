@@ -23,6 +23,7 @@ defmodule ArbiterWeb.Api.MessageJSON do
       to_ref: m.to_ref,
       workspace_id: m.workspace_id,
       subject: m.subject,
+      directive_ref: m.directive_ref,
       body: m.body,
       read_at: iso(m.read_at),
       inserted_at: iso(m.inserted_at),

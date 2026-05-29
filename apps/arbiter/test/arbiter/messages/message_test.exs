@@ -79,6 +79,50 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  describe "admiral mailbox kinds" do
+    test "completion/failure/escalation/info are valid and mailbox-family" do
+      for kind <- ~w(completion failure escalation info)a do
+        assert kind in Message.kinds()
+        assert kind in Message.mailbox_kinds()
+      end
+    end
+
+    test "an acolyte's completion addressed to the admiral shows in the admiral inbox" do
+      {:ok, _} =
+        Ash.create(Message, %{
+          kind: :completion,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          directive_ref: "bd-soren",
+          subject: "GitLab adapter complete",
+          body: "All 19 tests green.",
+          workspace_id: @ws
+        })
+
+      [msg] = Message.inbox("admiral", workspace_id: @ws)
+      assert msg.kind == :completion
+      assert msg.directive_ref == "bd-soren"
+      assert msg.subject == "GitLab adapter complete"
+    end
+
+    test "directive_ref persists and defaults to nil" do
+      {:ok, with_ref} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "x",
+          directive_ref: "bd-1",
+          workspace_id: @ws
+        })
+
+      {:ok, without_ref} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "y", workspace_id: @ws})
+
+      assert with_ref.directive_ref == "bd-1"
+      assert without_ref.directive_ref == nil
+    end
+  end
+
   describe "recent_notifications/2" do
     test "returns newest notifications first, scoped to workspace" do
       {:ok, _} = Message.notify(%{workspace_id: @ws, body: "first"})

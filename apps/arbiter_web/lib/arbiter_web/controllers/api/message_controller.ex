@@ -7,10 +7,13 @@ defmodule ArbiterWeb.Api.MessageController do
     * `GET  /api/messages`           — :index (filters: kind, to_ref, from_ref,
                                        unread=true, limit [default 50])
     * `POST /api/messages`           — :create (body: kind, from_ref, to_ref,
-                                       subject, body, workspace_id)
+                                       subject, body, directive_ref, workspace_id)
     * `POST /api/messages/:id/read`  — :read (stamp read_at = now)
+    * `DELETE /api/messages`         — :clear (destroy READ messages addressed
+                                       to `to_ref`; requires `to_ref`)
 
-  Newest first. `arb inbox` / `arb notify` / `arb message` drive these.
+  Newest first. `arb inbox` / `arb notify` / `arb msg` / `arb message` drive
+  these.
   """
 
   use ArbiterWeb, :controller
@@ -40,7 +43,10 @@ defmodule ArbiterWeb.Api.MessageController do
   end
 
   def create(conn, params) do
-    attrs = coerce_kind(Map.take(params, ~w(kind from_ref to_ref subject body workspace_id)))
+    attrs =
+      coerce_kind(
+        Map.take(params, ~w(kind from_ref to_ref subject body directive_ref workspace_id))
+      )
 
     case Ash.create(Message, attrs) do
       {:ok, message} ->
@@ -59,6 +65,21 @@ defmodule ArbiterWeb.Api.MessageController do
       render(conn, :show, message: updated)
     end
   end
+
+  # Drain the read tail of a mailbox: destroy every *already-read* message
+  # addressed to `to_ref`. Unread mail is left untouched — you read it first,
+  # then clear. `to_ref` is required so a stray call can't wipe the table.
+  def clear(conn, %{"to_ref" => to_ref}) when is_binary(to_ref) and to_ref != "" do
+    read_messages =
+      Message
+      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at))
+      |> Ash.read!()
+
+    Enum.each(read_messages, &Ash.destroy!/1)
+    json(conn, %{data: %{deleted: length(read_messages)}})
+  end
+
+  def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}
 
   # ---- query helpers ----
 

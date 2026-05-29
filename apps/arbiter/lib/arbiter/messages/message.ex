@@ -2,7 +2,7 @@ defmodule Arbiter.Messages.Message do
   @moduledoc """
   A single entry in the inter-agent message queue.
 
-  One table holds four kinds, distinguished by `:kind`:
+  One table holds several kinds, distinguished by `:kind`:
 
     * `:notification` — broadcast event, no specific recipient (`to_ref` nil).
       Acolyte completion, progress milestones, system events. Feeds the
@@ -14,9 +14,20 @@ defmodule Arbiter.Messages.Message do
     * `:flag` — acolyte-to-acolyte signal (e.g. Varek telling Soren the API
       shape changed). A subtype of mailbox.
 
-  `:mailbox`, `:direction`, and `:flag` together are the "mailbox family":
-  addressed messages that show up in `arb inbox <bead-id>` and are marked
-  read on fetch. See `mailbox_kinds/0`.
+  The remaining kinds are the **Admiral mailbox family** — addressed reports
+  an acolyte (or the system) sends *up* to the Admiral (`to_ref "admiral"`),
+  surfaced by `arb inbox` and the prime briefing:
+
+    * `:completion` — a directive finished successfully.
+    * `:failure` — a directive failed (crash, non-zero exit, aborted run).
+    * `:escalation` — needs the Admiral's attention/decision.
+    * `:info` — a neutral FYI; the default for `arb msg`.
+
+  `:mailbox`, `:direction`, `:flag`, `:completion`, `:failure`,
+  `:escalation`, and `:info` together are the "mailbox family": addressed
+  messages that show up in an inbox and are read-acknowledged. The
+  `:directive_ref` they may carry links the message to the bead it concerns
+  (shown in brackets in `arb inbox`). See `mailbox_kinds/0`.
 
   ## PubSub
 
@@ -32,8 +43,8 @@ defmodule Arbiter.Messages.Message do
 
   require Ash.Query
 
-  @kinds ~w(notification mailbox direction flag)a
-  @mailbox_kinds ~w(mailbox direction flag)a
+  @kinds ~w(notification mailbox direction flag completion failure escalation info)a
+  @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)a
 
   postgres do
     table "messages"
@@ -50,7 +61,7 @@ defmodule Arbiter.Messages.Message do
 
     create :create do
       primary? true
-      accept [:kind, :from_ref, :to_ref, :workspace_id, :subject, :body]
+      accept [:kind, :from_ref, :to_ref, :workspace_id, :subject, :body, :directive_ref]
 
       change after_action(fn _changeset, message, _context ->
                Arbiter.Messages.Message.broadcast_new(message)
@@ -99,6 +110,13 @@ defmodule Arbiter.Messages.Message do
       public? true
       constraints max_length: 500, trim?: true
       description ~s(Short label, e.g. "bd-7wyihw complete".)
+    end
+
+    attribute :directive_ref, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The directive bead_id this message concerns. Shown in brackets by arb inbox. nil = not about a specific directive."
     end
 
     attribute :body, :string do

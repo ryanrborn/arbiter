@@ -68,6 +68,7 @@ defmodule ArbiterWeb.Router do
     get("/messages", MessageController, :index)
     post("/messages", MessageController, :create)
     post("/messages/:id/read", MessageController, :read)
+    delete("/messages", MessageController, :clear)
 
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)
