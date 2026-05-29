@@ -1,8 +1,131 @@
 defmodule ArbiterCli.Cmd.InboxTest do
   use ArbiterCli.CliCase, async: false
 
-  describe "arb inbox <bead-id>" do
-    test "lists unread mail and marks each read" do
+  alias ArbiterCli.Cmd.Inbox
+
+  defp admiral_msg(attrs) do
+    Map.merge(
+      %{
+        "id" => "0b9d1f2a-1111-2222-3333-444455556666",
+        "kind" => "completion",
+        "from_ref" => "acolyte-019e",
+        "to_ref" => "admiral",
+        "directive_ref" => "bd-1qx1nt",
+        "subject" => "GitLab adapter complete",
+        "body" => "All tests green.",
+        "inserted_at" => "2026-05-28T12:00:00.000000Z"
+      },
+      attrs
+    )
+  end
+
+  describe "arb inbox (admiral, unread)" do
+    test "lists unread admiral mail in the directive/kind/from format" do
+      stub_get("/api/messages", %{"data" => [admiral_msg(%{})]}, 200)
+
+      {out, _err, code} = capture(fn -> Inbox.run([]) end)
+      assert code == 0
+      assert out =~ "Admiral inbox — 1 unread"
+      assert out =~ "[bd-1qx1nt]"
+      assert out =~ "completion"
+      assert out =~ "from acolyte-019e"
+      assert out =~ "GitLab adapter complete"
+      # The leading token is the short message id handle.
+      assert out =~ "0b9d1f2a"
+    end
+
+    test "does NOT mark messages read (triage is deliberate)" do
+      # Only the GET is stubbed. If the command tried to POST a read,
+      # the stub would 500 and the body assertion below would fail.
+      stub_get("/api/messages", %{"data" => [admiral_msg(%{})]}, 200)
+      {out, _err, code} = capture(fn -> Inbox.run([]) end)
+      assert code == 0
+      assert out =~ "GitLab adapter complete"
+    end
+
+    test "prints a friendly message when empty" do
+      stub_get("/api/messages", %{"data" => []}, 200)
+      {out, _err, code} = capture(fn -> Inbox.run([]) end)
+      assert code == 0
+      assert out =~ "admiral inbox empty"
+    end
+
+    test "--json emits the raw message array" do
+      stub_get("/api/messages", %{"data" => [admiral_msg(%{})]}, 200)
+      {out, _err, code} = capture(fn -> Inbox.run(["--json"]) end)
+      assert code == 0
+      assert {:ok, %{"data" => [%{"to_ref" => "admiral"}]}} = Jason.decode(out)
+    end
+  end
+
+  describe "arb inbox --all" do
+    test "lists recent read + unread" do
+      stub_get(
+        "/api/messages",
+        %{"data" => [admiral_msg(%{"read_at" => "2026-05-28T12:30:00.000000Z"})]},
+        200
+      )
+
+      {out, _err, code} = capture(fn -> Inbox.run(["--all"]) end)
+      assert code == 0
+      assert out =~ "Admiral inbox — 1 recent"
+    end
+  end
+
+  describe "arb inbox read <id>" do
+    test "marks one read by full id and shows the full body" do
+      id = "11111111-2222-3333-4444-555566667777"
+
+      stub_routes([
+        {{"post", "/api/messages/#{id}/read"},
+         {admiral_msg(%{"id" => id, "body" => "Full body text here."}), 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["read", id]) end)
+      assert code == 0
+      assert out =~ "Full body text here."
+      assert out =~ "Directive: bd-1qx1nt"
+    end
+
+    test "resolves a short id prefix against admiral mail, then reads it" do
+      full = "0b9d1f2a-1111-2222-3333-444455556666"
+
+      stub_routes([
+        {{"get", "/api/messages"}, {%{"data" => [admiral_msg(%{"id" => full})]}, 200}},
+        {{"post", "/api/messages/#{full}/read"},
+         {admiral_msg(%{"id" => full, "body" => "Resolved by prefix."}), 200}}
+      ])
+
+      {out, _err, code} = capture(fn -> Inbox.run(["read", "0b9d1f2a"]) end)
+      assert code == 0
+      assert out =~ "Resolved by prefix."
+    end
+
+    test "errors with no id" do
+      {_out, err, code} = capture(fn -> Inbox.run(["read"]) end)
+      assert code != 0
+      assert err =~ "requires a message id"
+    end
+  end
+
+  describe "arb inbox clear" do
+    test "reports how many read messages were destroyed" do
+      stub_delete("/api/messages", %{"data" => %{"deleted" => 3}}, 200)
+      {out, _err, code} = capture(fn -> Inbox.run(["clear"]) end)
+      assert code == 0
+      assert out =~ "Cleared 3 read messages."
+    end
+
+    test "says nothing to clear when zero" do
+      stub_delete("/api/messages", %{"data" => %{"deleted" => 0}}, 200)
+      {out, _err, code} = capture(fn -> Inbox.run(["clear"]) end)
+      assert code == 0
+      assert out =~ "Nothing to clear"
+    end
+  end
+
+  describe "arb inbox <bead-id> (acolyte path)" do
+    test "lists a bead's unread mail and marks each read" do
       stub_routes([
         {{"get", "/api/messages"},
          {%{
@@ -12,7 +135,6 @@ defmodule ArbiterCli.Cmd.InboxTest do
                 "kind" => "direction",
                 "from_ref" => "admiral",
                 "to_ref" => "bd-1",
-                "subject" => "heads up",
                 "body" => "check the API contract"
               }
             ]
@@ -20,21 +142,13 @@ defmodule ArbiterCli.Cmd.InboxTest do
         {{"post", "/api/messages/m-1/read"}, {%{"id" => "m-1"}, 200}}
       ])
 
-      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Inbox.run(["bd-1"]) end)
+      {out, _err, code} = capture(fn -> Inbox.run(["bd-1"]) end)
       assert code == 0
-      assert out =~ "Unread mail (1)"
-      assert out =~ "[direction] from admiral"
+      assert out =~ "Unread mail for bd-1 (1)"
       assert out =~ "check the API contract"
     end
 
-    test "prints a friendly message when empty" do
-      stub_get("/api/messages", %{"data" => []}, 200)
-      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Inbox.run(["bd-1"]) end)
-      assert code == 0
-      assert out =~ "(no unread mail)"
-    end
-
-    test "filters out notifications (they are never mail)" do
+    test "filters out notifications (never mail)" do
       stub_routes([
         {{"get", "/api/messages"},
          {%{
@@ -46,23 +160,10 @@ defmodule ArbiterCli.Cmd.InboxTest do
         {{"post", "/api/messages/m-1/read"}, {%{"id" => "m-1"}, 200}}
       ])
 
-      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Inbox.run([]) end)
+      {out, _err, code} = capture(fn -> Inbox.run(["bd-1"]) end)
       assert code == 0
-      assert out =~ "Unread mail (1)"
       assert out =~ "real mail"
       refute out =~ "noise"
-    end
-
-    test "--json emits JSON" do
-      stub_routes([
-        {{"get", "/api/messages"},
-         {%{"data" => [%{"id" => "m-1", "kind" => "flag", "body" => "x"}]}, 200}},
-        {{"post", "/api/messages/m-1/read"}, {%{"id" => "m-1"}, 200}}
-      ])
-
-      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Inbox.run(["--json"]) end)
-      assert code == 0
-      assert {:ok, %{"data" => [%{"id" => "m-1"}]}} = Jason.decode(out)
     end
   end
 end
