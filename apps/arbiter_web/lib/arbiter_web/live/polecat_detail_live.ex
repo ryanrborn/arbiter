@@ -37,18 +37,23 @@ defmodule ArbiterWeb.PolecatDetailLive do
       socket
       |> assign(:bead_id, bead_id)
       |> assign(:live, connected?(socket))
+      |> assign(:now, DateTime.utc_now())
       |> assign(:flash_message, nil)
       |> assign(:compose_body, "")
       |> assign(:worker_label, Vernacular.label(:worker))
       |> assign(:issue_label, Vernacular.label(:issue))
       |> assign(:rig_label, Vernacular.label(:rig))
       |> assign(:workspace_label, Vernacular.label(:workspace))
+      |> assign(:pr_label, Vernacular.label(:pr))
       |> refresh_all()
       |> seed_output_lines()
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @polecats_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, output_topic(bead_id))
+      # Drives the live elapsed-time counter in the header. Only reassigns
+      # :now — no DB reads or GenServer hops in the tick handler.
+      :timer.send_interval(1000, self(), :tick)
 
       case workspace_id(socket) do
         ws when is_binary(ws) -> Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws))
@@ -70,6 +75,12 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
   def handle_info({:new_message, _message}, socket) do
     {:noreply, refresh_mailbox(socket)}
+  end
+
+  # Lightweight 1s tick: only advances the clock so the header's elapsed-time
+  # counter stays live. No data reads here.
+  def handle_info(:tick, socket) do
+    {:noreply, assign(socket, :now, DateTime.utc_now())}
   end
 
   def handle_info(_, socket), do: {:noreply, socket}
@@ -299,193 +310,374 @@ defmodule ArbiterWeb.PolecatDetailLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path}>
-      <div class="p-6 max-w-7xl mx-auto">
-        <div class="flex items-center justify-between mb-6">
-          <h1 class="text-2xl font-bold">
-            {String.capitalize(@worker_label)} <code>{@bead_id}</code>
-          </h1>
-          <span class={[
-            "badge badge-sm",
-            if(@live, do: "badge-success", else: "badge-warning")
-          ]}>
-            <%= if @live do %>
-              ● live
-            <% else %>
-              ⚠ stale (refresh)
-            <% end %>
-          </span>
+      <div class="p-6 max-w-7xl mx-auto space-y-6">
+        <%!-- ── Header ───────────────────────────────────────────────── --%>
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 text-xs text-base-content/50">
+              <.link navigate={~p"/"} class="link link-hover">Dashboard</.link>
+              <.icon name="hero-chevron-right" class="size-3" />
+              <span>{String.capitalize(@worker_label)} detail</span>
+            </div>
+            <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2 mt-0.5">
+              {String.capitalize(@worker_label)}
+              <code class="text-base font-mono text-base-content/80">{@bead_id}</code>
+            </h1>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <span
+              :if={@snapshot}
+              class="badge badge-lg gap-1.5 font-mono tabular-nums bg-base-300 border-base-300"
+              title="Elapsed since started"
+            >
+              <.icon name="hero-clock" class="size-4 text-base-content/60" />
+              {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+            </span>
+            <span
+              id="live-indicator"
+              class={[
+                "badge badge-sm gap-1.5 transition-colors duration-200",
+                if(@live, do: "badge-success", else: "badge-warning")
+              ]}
+              title={
+                if @live,
+                  do: "WebSocket connected — output streams in real time",
+                  else: "Static render — refresh the page to reconnect"
+              }
+            >
+              <%= if @live do %>
+                <span class="relative flex h-2 w-2">
+                  <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-content opacity-75">
+                  </span>
+                  <span class="relative inline-flex h-2 w-2 rounded-full bg-success-content"></span>
+                </span>
+                live
+              <% else %>
+                <.icon name="hero-exclamation-triangle" class="size-3" /> stale (refresh)
+              <% end %>
+            </span>
+          </div>
         </div>
 
         <%= if @snapshot do %>
-          <section class="card bg-base-200 p-4 mb-4">
-            <div class="flex justify-between items-start">
-              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-                <dt class="font-semibold">Status:</dt>
-                <dd>
-                  <span class={["badge", status_class(@snapshot.status)]}>
-                    {status_label(@snapshot.status)}
-                  </span>
-                </dd>
-                <dt class="font-semibold">Current step:</dt>
-                <dd>{@snapshot.current_step}</dd>
-                <dt class="font-semibold">{String.capitalize(@rig_label)}:</dt>
-                <dd>{@snapshot.rig}</dd>
-                <dt class="font-semibold">{String.capitalize(@workspace_label)}:</dt>
-                <dd>
-                  <%= if @workspace do %>
-                    {@workspace.name}
-                    <span class="text-base-content/60">
-                      (<code>{@workspace.prefix}</code>)
-                    </span>
-                  <% else %>
-                    <span class="text-base-content/60">(none)</span>
-                  <% end %>
-                </dd>
-                <dt class="font-semibold">Started:</dt>
-                <dd>{@snapshot.started_at}</dd>
-                <%= if exit_status = Map.get(@snapshot.meta || %{}, :exit_status) do %>
-                  <dt class="font-semibold">Exit status:</dt>
-                  <dd>{exit_status}</dd>
-                <% end %>
-                <%= if result = Map.get(@snapshot.meta || %{}, :result) do %>
-                  <dt class="font-semibold">Result:</dt>
-                  <dd>{inspect(result)}</dd>
-                <% end %>
-                <%= if reason = Map.get(@snapshot.meta || %{}, :failure_reason) do %>
-                  <dt class="font-semibold">Failure:</dt>
-                  <dd class="text-error">{inspect(reason)}</dd>
-                <% end %>
-              </dl>
+          <%!-- ── Step progress stepper ──────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-4 gap-3">
+              <div class="flex items-center justify-between gap-2">
+                <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                  <.icon name="hero-flag" class="size-4" /> Lifecycle
+                </h2>
+                <span class={["badge badge-sm", status_class(@snapshot.status)]}>
+                  {status_label(@snapshot.status)}
+                </span>
+              </div>
 
-              <div class="flex flex-col gap-2">
-                <.link navigate={~p"/beads/#{@bead_id}"} class="btn btn-sm btn-ghost">
-                  ↗ Bead detail
-                </.link>
-                <%= if @latest_run do %>
-                  <.link
-                    navigate={~p"/polecats/history/#{@latest_run.id}"}
-                    class="btn btn-sm btn-ghost"
+              <%= if @snapshot.status == :failed do %>
+                <div class="rounded-box bg-error/10 border border-error/30 p-3 flex items-center gap-2 text-sm text-error">
+                  <.icon name="hero-x-circle" class="size-5 shrink-0" />
+                  <span class="font-medium">
+                    {String.capitalize(@worker_label)} failed — left the happy path before completion.
+                  </span>
+                </div>
+              <% else %>
+                <ul class="steps steps-vertical sm:steps-horizontal w-full">
+                  <li
+                    :for={step <- polecat_flow()}
+                    class={["step", flow_step_class(flow_state(step, @snapshot.status))]}
+                    data-content={flow_step_marker(flow_state(step, @snapshot.status))}
                   >
-                    ↗ Run history
+                    <span class="text-xs sm:text-sm">{flow_step_label(step)}</span>
+                  </li>
+                </ul>
+              <% end %>
+            </div>
+          </section>
+
+          <%!-- ── Awaiting review panel ──────────────────────────────── --%>
+          <section
+            :if={@snapshot.status == :awaiting}
+            class="card bg-warning/10 border border-warning/40 shadow-sm"
+          >
+            <div class="card-body p-4 gap-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-eye" class="size-5 text-warning" /> Awaiting your review
+                </h2>
+                <span class="badge badge-warning gap-1.5">
+                  <.icon name="hero-clock" class="size-3.5" /> Awaiting review
+                </span>
+              </div>
+              <p class="text-sm text-base-content/70">
+                This {@worker_label} has paused and is waiting for a human decision before it can proceed.
+              </p>
+              <%= if ref = mr_ref(@snapshot) do %>
+                <a
+                  href={ref}
+                  target="_blank"
+                  rel="noopener"
+                  class="btn btn-sm btn-warning gap-1.5 w-fit transition-all duration-200 active:scale-95"
+                >
+                  <.icon name="hero-arrow-top-right-on-square" class="size-4" /> Open {@pr_label}
+                  <code class="font-mono text-xs opacity-80">{ref}</code>
+                </a>
+              <% else %>
+                <p class="text-sm text-base-content/50 italic flex items-center gap-1.5">
+                  <.icon name="hero-link-slash" class="size-4" /> No {@pr_label} ref recorded yet.
+                </p>
+              <% end %>
+            </div>
+          </section>
+
+          <%!-- ── Snapshot detail ────────────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-4 gap-4">
+              <div class="flex flex-wrap justify-between items-start gap-4">
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+                  <dt class="font-medium text-base-content/60">Status:</dt>
+                  <dd>
+                    <span class={["badge badge-sm", status_class(@snapshot.status)]}>
+                      {status_label(@snapshot.status)}
+                    </span>
+                  </dd>
+                  <dt class="font-medium text-base-content/60">Current step:</dt>
+                  <dd>
+                    <code class="badge badge-ghost badge-sm font-mono">{@snapshot.current_step}</code>
+                  </dd>
+                  <dt class="font-medium text-base-content/60">{String.capitalize(@rig_label)}:</dt>
+                  <dd><code class="font-mono text-xs">{@snapshot.rig}</code></dd>
+                  <dt class="font-medium text-base-content/60">
+                    {String.capitalize(@workspace_label)}:
+                  </dt>
+                  <dd>
+                    <%= if @workspace do %>
+                      {@workspace.name}
+                      <span class="text-base-content/50">
+                        (<code class="font-mono text-xs">{@workspace.prefix}</code>)
+                      </span>
+                    <% else %>
+                      <span class="text-base-content/50">(none)</span>
+                    <% end %>
+                  </dd>
+                  <dt class="font-medium text-base-content/60">Started:</dt>
+                  <dd class="font-mono text-xs tabular-nums">{format_ts(@snapshot.started_at)}</dd>
+                  <dt class="font-medium text-base-content/60">Elapsed:</dt>
+                  <dd class="font-mono text-xs tabular-nums">
+                    {humanize_seconds(runtime_seconds(@snapshot.started_at, @now))}
+                  </dd>
+                  <%= if exit_status = Map.get(@snapshot.meta || %{}, :exit_status) do %>
+                    <dt class="font-medium text-base-content/60">Exit status:</dt>
+                    <dd class="font-mono text-xs">{exit_status}</dd>
+                  <% end %>
+                  <%= if result = Map.get(@snapshot.meta || %{}, :result) do %>
+                    <dt class="font-medium text-base-content/60">Result:</dt>
+                    <dd class="font-mono text-xs">{inspect(result)}</dd>
+                  <% end %>
+                  <%= if reason = Map.get(@snapshot.meta || %{}, :failure_reason) do %>
+                    <dt class="font-medium text-base-content/60">Failure:</dt>
+                    <dd class="text-error font-mono text-xs">{inspect(reason)}</dd>
+                  <% end %>
+                </dl>
+
+                <div class="flex flex-col gap-2 shrink-0">
+                  <.link navigate={~p"/beads/#{@bead_id}"} class="btn btn-sm btn-ghost gap-1.5">
+                    <.icon name="hero-arrow-top-right-on-square" class="size-4" />
+                    {String.capitalize(@issue_label)} detail
                   </.link>
-                <% end %>
-                <%= if @snapshot.status in [:idle, :running, :awaiting] do %>
-                  <button
-                    phx-click="stop"
-                    data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
-                    class="btn btn-sm btn-error"
-                  >
-                    Stop {@worker_label}
-                  </button>
-                <% end %>
+                  <%= if @latest_run do %>
+                    <.link
+                      navigate={~p"/polecats/history/#{@latest_run.id}"}
+                      class="btn btn-sm btn-ghost gap-1.5"
+                    >
+                      <.icon name="hero-archive-box" class="size-4" /> Run history
+                    </.link>
+                  <% end %>
+                  <%= if @snapshot.status in [:idle, :running, :awaiting] do %>
+                    <button
+                      phx-click="stop"
+                      data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
+                      class="btn btn-sm btn-error gap-1.5 transition-all duration-200 active:scale-95"
+                    >
+                      <.icon name="hero-stop-circle" class="size-4" /> Stop {@worker_label}
+                    </button>
+                  <% end %>
+                </div>
               </div>
             </div>
           </section>
 
           <%= if @machine_state do %>
-            <section class="card bg-base-200 p-4 mb-4">
-              <h2 class="text-lg font-semibold mb-2">
-                Workflow: <code class="text-sm">{short_module(@machine_state.workflow_module)}</code>
-              </h2>
-              <div class="flex flex-wrap gap-1">
-                <%= for step <- @workflow_steps do %>
-                  <span class={["badge", step_class(step, @machine_state)]}>
+            <section class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-4 gap-3">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-cog-6-tooth" class="size-5 text-base-content/70" /> Workflow:
+                  <code class="text-sm font-mono">
+                    {short_module(@machine_state.workflow_module)}
+                  </code>
+                </h2>
+                <div class="flex flex-wrap gap-1.5">
+                  <span
+                    :for={step <- @workflow_steps}
+                    class={["badge", step_class(step, @machine_state)]}
+                  >
                     {step}
                   </span>
-                <% end %>
+                </div>
+                <p class="text-xs text-base-content/60">
+                  Machine status: <strong>{@machine_state.status}</strong>
+                  · current step: <code class="font-mono">{@machine_state.current_step}</code>
+                </p>
               </div>
-              <p class="text-xs text-base-content/60 mt-2">
-                Machine status: <strong>{@machine_state.status}</strong>
-                · current step: <code>{@machine_state.current_step}</code>
-              </p>
             </section>
           <% end %>
 
-          <section class="card bg-base-200 p-4">
-            <h2 class="text-lg font-semibold mb-3">
-              Output ({length(@output_lines)} lines)
-            </h2>
-            <%= if @output_lines == [] do %>
-              <p class="text-base-content/60 italic">(no output yet)</p>
-            <% else %>
-              <pre
-                id="polecat-output"
-                phx-hook="ScrollToBottom"
-                class="bg-neutral text-neutral-content font-mono p-3 rounded text-xs overflow-x-auto max-h-[28rem] overflow-y-auto"
-              >{Enum.join(@output_lines, "\n")}</pre>
-              <script
-                :type={Phoenix.LiveView.ColocatedHook}
-                name=".ScrollToBottom"
-              >
-                export default {
-                  mounted() { this.el.scrollTop = this.el.scrollHeight; },
-                  updated() { this.el.scrollTop = this.el.scrollHeight; }
-                }
-              </script>
-            <% end %>
+          <%!-- ── Live output terminal ───────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm overflow-hidden">
+            <div class="card-body p-0 gap-0">
+              <div class="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-base-300">
+                <h2 class="text-sm font-medium flex items-center gap-2">
+                  <.icon name="hero-command-line" class="size-4 text-base-content/70" /> Output
+                  <span class="badge badge-ghost badge-sm font-mono tabular-nums">
+                    {length(@output_lines)} lines
+                  </span>
+                </h2>
+                <div
+                  :if={@snapshot.status == :running}
+                  class="flex items-center gap-1.5 text-xs text-info"
+                >
+                  <span class="relative flex h-2 w-2">
+                    <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-75">
+                    </span>
+                    <span class="relative inline-flex h-2 w-2 rounded-full bg-info"></span>
+                  </span>
+                  streaming
+                </div>
+              </div>
+
+              <%= if @output_lines == [] do %>
+                <div class="bg-neutral text-neutral-content/50 font-mono text-xs p-6 text-center italic">
+                  (no output yet)
+                </div>
+              <% else %>
+                <div
+                  id="polecat-output"
+                  phx-hook="ScrollToBottom"
+                  class="bg-neutral text-neutral-content font-mono text-xs overflow-x-auto max-h-[28rem] overflow-y-auto"
+                >
+                  <div
+                    :for={{line, idx} <- Enum.with_index(@output_lines, 1)}
+                    class="flex hover:bg-neutral-content/5 transition-colors"
+                  >
+                    <span class="select-none shrink-0 w-12 text-right pr-3 py-0.5 text-neutral-content/30 tabular-nums border-r border-neutral-content/10">
+                      {idx}
+                    </span>
+                    <code class="flex-1 whitespace-pre-wrap break-all px-3 py-0.5">{line}</code>
+                  </div>
+                </div>
+                <script :type={Phoenix.LiveView.ColocatedHook} name=".ScrollToBottom">
+                  export default {
+                    mounted() { this.el.scrollTop = this.el.scrollHeight; },
+                    updated() { this.el.scrollTop = this.el.scrollHeight; }
+                  }
+                </script>
+              <% end %>
+            </div>
           </section>
         <% else %>
-          <p class="text-base-content/60">
-            No {@worker_label} registered for {@issue_label} <code>{@bead_id}</code>. It may have
-            stopped, or the Phoenix node was restarted since it ran.
-          </p>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-8 items-center text-center gap-2">
+              <.icon name="hero-signal-slash" class="size-10 text-base-content/30" />
+              <p class="text-sm text-base-content/70">
+                No {@worker_label} registered for {@issue_label} <code class="font-mono">{@bead_id}</code>.
+              </p>
+              <p class="text-xs text-base-content/50">
+                It may have stopped, or the Phoenix node was restarted since it ran.
+              </p>
+            </div>
+          </section>
         <% end %>
 
-        <section class="card bg-base-200 p-4 mt-4" id="mailbox">
-          <h2 class="text-lg font-semibold mb-3">
-            Mailbox ({length(@mailbox)} unread)
-          </h2>
+        <%!-- ── Mailbox + compose ──────────────────────────────────── --%>
+        <section class="card bg-base-200 border border-base-300 shadow-sm" id="mailbox">
+          <div class="card-body p-4 gap-4">
+            <h2 class="text-lg font-semibold flex items-center gap-2">
+              <.icon name="hero-inbox-arrow-down" class="size-5 text-base-content/70" /> Mailbox
+              <span class="badge badge-ghost badge-sm">{length(@mailbox)} unread</span>
+            </h2>
 
-          <%= if @mailbox == [] do %>
-            <p class="text-base-content/60 italic" id="mailbox-empty">No unread mail.</p>
-          <% else %>
-            <ul class="flex flex-col gap-2 mb-4" id="mailbox-list">
-              <%= for m <- @mailbox do %>
-                <li class="border border-base-300 rounded p-2">
+            <%= if @mailbox == [] do %>
+              <div
+                id="mailbox-empty"
+                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
+              >
+                <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
+                <p class="mt-2 text-sm text-base-content/60">No unread mail.</p>
+              </div>
+            <% else %>
+              <ul class="flex flex-col gap-2" id="mailbox-list">
+                <li
+                  :for={m <- @mailbox}
+                  class={[
+                    "rounded-box bg-base-100 border-l-4 border border-base-300 p-3",
+                    kind_border_class(m.kind)
+                  ]}
+                >
                   <div class="flex items-baseline justify-between gap-2">
-                    <div class="flex items-baseline gap-2">
-                      <span class="badge badge-sm">{m.kind}</span>
-                      <span class="text-xs text-base-content/60">
-                        from <code>{m.from_ref || "?"}</code>
+                    <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                      <span class={["badge badge-sm shrink-0", kind_badge_class(m.kind)]}>
+                        {m.kind}
                       </span>
-                      <%= if m.subject do %>
-                        <span class="text-sm font-medium">{m.subject}</span>
-                      <% end %>
+                      <span class="text-xs text-base-content/60">
+                        from <code class="font-mono">{m.from_ref || "?"}</code>
+                      </span>
+                      <span :if={m.subject} class="text-sm font-medium truncate">{m.subject}</span>
                     </div>
                     <button
                       phx-click="mark_read"
                       phx-value-id={m.id}
-                      class="btn btn-xs btn-ghost"
+                      class="btn btn-xs btn-ghost shrink-0"
                     >
                       Mark read
                     </button>
                   </div>
-                  <p class="text-sm mt-1 whitespace-pre-wrap">{m.body}</p>
+                  <p class="text-sm mt-1.5 whitespace-pre-wrap text-base-content/80">{m.body}</p>
                 </li>
-              <% end %>
-            </ul>
-          <% end %>
+              </ul>
+            <% end %>
 
-          <form phx-submit="send_direction" phx-change="compose_change" class="flex flex-col gap-2">
-            <label class="text-sm font-semibold">
-              Send direction to <code>{@bead_id}</code> (from admiral)
-            </label>
-            <textarea
-              name="body"
-              rows="3"
-              placeholder="e.g. check the API contract before refactoring"
-              class="textarea textarea-bordered w-full text-sm"
-            >{@compose_body}</textarea>
-            <div>
-              <button type="submit" class="btn btn-sm btn-primary" disabled={is_nil(@workspace)}>
-                Send direction
-              </button>
-            </div>
-          </form>
+            <form
+              phx-submit="send_direction"
+              phx-change="compose_change"
+              class="flex flex-col gap-2 pt-2 border-t border-base-300"
+            >
+              <label class="text-sm font-medium flex items-center gap-1.5">
+                <.icon name="hero-paper-airplane" class="size-4 text-base-content/60" />
+                Send direction to <code class="font-mono">{@bead_id}</code>
+                (from admiral)
+              </label>
+              <textarea
+                name="body"
+                rows="3"
+                placeholder="e.g. check the API contract before refactoring"
+                class="textarea textarea-bordered w-full text-sm"
+              >{@compose_body}</textarea>
+              <div>
+                <button
+                  type="submit"
+                  class="btn btn-sm btn-primary gap-1.5 transition-all duration-200 active:scale-95"
+                  disabled={is_nil(@workspace)}
+                >
+                  <.icon name="hero-paper-airplane" class="size-4" /> Send direction
+                </button>
+              </div>
+            </form>
+          </div>
         </section>
 
-        <div class="mt-6">
-          <.link navigate={~p"/"} class="link link-hover">← Back to dashboard</.link>
+        <div>
+          <.link navigate={~p"/"} class="link link-hover text-sm flex items-center gap-1 w-fit">
+            <.icon name="hero-arrow-left" class="size-4" /> Back to dashboard
+          </.link>
         </div>
       </div>
     </Layouts.app>
@@ -529,4 +721,74 @@ defmodule ArbiterWeb.PolecatDetailLive do
   end
 
   defp short_module(_), do: ""
+
+  # ---- shared visual helpers (mirrors DashboardLive for an identical look) ----
+
+  defp runtime_seconds(%DateTime{} = started_at, %DateTime{} = now) do
+    DateTime.diff(now, started_at, :second) |> max(0)
+  end
+
+  defp runtime_seconds(_, _), do: 0
+
+  defp humanize_seconds(s) when s < 60, do: "#{s}s"
+  defp humanize_seconds(s) when s < 3600, do: "#{div(s, 60)}m"
+  defp humanize_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
+
+  defp format_ts(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S UTC")
+  defp format_ts(_), do: ""
+
+  # An MR/PR ref is not currently persisted on the polecat snapshot, so this
+  # degrades to nil. When the dispatch flow starts stashing it in meta (under
+  # :mr_ref or "mr_ref"), the awaiting-review link lights up automatically.
+  defp mr_ref(%{meta: meta}) when is_map(meta) do
+    Map.get(meta, :mr_ref) || Map.get(meta, "mr_ref")
+  end
+
+  defp mr_ref(_), do: nil
+
+  # Ordered worker lifecycle for the step progress stepper. :failed is handled
+  # separately in the template (it doesn't belong on the happy-path track).
+  @polecat_flow [:idle, :running, :awaiting, :completed]
+
+  defp polecat_flow, do: @polecat_flow
+
+  # Returns :done | :current | :todo for a step relative to the worker's
+  # current status, so the template can mark the stepper.
+  defp flow_state(step, status) do
+    step_idx = Enum.find_index(@polecat_flow, &(&1 == step))
+    status_idx = Enum.find_index(@polecat_flow, &(&1 == status))
+
+    cond do
+      is_nil(step_idx) or is_nil(status_idx) -> :todo
+      step_idx < status_idx -> :done
+      step_idx == status_idx -> :current
+      true -> :todo
+    end
+  end
+
+  # DaisyUI `step` modifier per flow state. Done/current light up primary;
+  # todo stays neutral.
+  defp flow_step_class(:done), do: "step-primary"
+  defp flow_step_class(:current), do: "step-primary"
+  defp flow_step_class(:todo), do: ""
+
+  # Step marker glyph: a check for completed steps, otherwise the default index.
+  defp flow_step_marker(:done), do: "✓"
+  defp flow_step_marker(_), do: nil
+
+  defp flow_step_label(:idle), do: "Idle"
+  defp flow_step_label(:running), do: "Running"
+  defp flow_step_label(:awaiting), do: "Awaiting review"
+  defp flow_step_label(:completed), do: "Completed"
+
+  # Notification-kind palette, matching the dashboard's mappings.
+  defp kind_badge_class(:notification), do: "badge-info"
+  defp kind_badge_class(:direction), do: "badge-warning"
+  defp kind_badge_class(:flag), do: "badge-accent"
+  defp kind_badge_class(_), do: "badge-ghost"
+
+  defp kind_border_class(:notification), do: "border-l-info"
+  defp kind_border_class(:direction), do: "border-l-warning"
+  defp kind_border_class(:flag), do: "border-l-accent"
+  defp kind_border_class(_), do: "border-l-base-300"
 end
