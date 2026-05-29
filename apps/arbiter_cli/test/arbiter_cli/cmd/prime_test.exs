@@ -3,11 +3,12 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
   alias ArbiterCli.Cmd.Prime
 
-  defp stub_all(workspaces, polecats, ready) do
+  defp stub_all(workspaces, polecats, ready, admiral \\ []) do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => workspaces}, 200}},
       {{"get", "/api/polecats"}, {%{"data" => polecats}, 200}},
-      {{"get", "/api/issues/ready"}, {%{"data" => ready}, 200}}
+      {{"get", "/api/issues/ready"}, {%{"data" => ready}, 200}},
+      {{"get", "/api/messages"}, {%{"data" => admiral}, 200}}
     ])
   end
 
@@ -72,6 +73,52 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "== Ready beads =="
     end
 
+    test "renders the Admiral Inbox section when there is unread mail" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [],
+        [
+          %{
+            "id" => "m-1",
+            "kind" => "failure",
+            "directive_ref" => "bd-9bn4n9",
+            "subject" => "Acolyte exited with code 1",
+            "body" => "stderr tail...",
+            "inserted_at" => "2026-05-28T11:55:00.000000Z"
+          },
+          %{
+            "id" => "m-2",
+            "kind" => "completion",
+            "directive_ref" => "bd-6c6w82",
+            "subject" => "GitHub adapter complete",
+            "body" => "done",
+            "inserted_at" => "2026-05-28T11:48:00.000000Z"
+          }
+        ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      assert out =~ "== Admiral Inbox (2 unread) =="
+      assert out =~ "[bd-9bn4n9] failure"
+      assert out =~ "Acolyte exited with code 1"
+      assert out =~ "[bd-6c6w82] completion"
+    end
+
+    test "omits the Admiral Inbox section entirely when there is no unread mail" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      refute out =~ "Admiral Inbox"
+    end
+
     test "empty vernacular reports 'default gas-town'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
@@ -100,6 +147,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert Map.has_key?(decoded, "workspace")
       assert Map.has_key?(decoded, "polecats")
       assert Map.has_key?(decoded, "ready")
+      assert Map.has_key?(decoded, "admiral_inbox")
     end
   end
 end

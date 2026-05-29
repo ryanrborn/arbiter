@@ -8,8 +8,10 @@ defmodule ArbiterCli.Cmd.Prime do
     1. **Active workspace** — name, prefix, tracker config.
     2. **Vernacular** — the workspace's custom labels and aliases (only
        printed if non-empty; otherwise "(default gas-town)" is shown).
-    3. **Active polecats** — bead_id, status, current_step, runtime.
-    4. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
+    3. **Admiral Inbox** — up to 5 most recent unread messages addressed to
+       the Admiral. Omitted entirely when there are none.
+    4. **Active polecats** — bead_id, status, current_step, runtime.
+    5. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
 
   ## What's intentionally NOT in v1
 
@@ -43,6 +45,7 @@ defmodule ArbiterCli.Cmd.Prime do
     %{
       workspace: unwrap(sections.workspace),
       vernacular: unwrap(sections.vernacular),
+      admiral_inbox: unwrap(sections.admiral_inbox),
       polecats: unwrap(sections.polecats),
       ready: unwrap(sections.ready)
     }
@@ -60,9 +63,20 @@ defmodule ArbiterCli.Cmd.Prime do
     %{
       workspace: workspace,
       vernacular: vernacular,
+      admiral_inbox: gather_admiral_inbox(),
       polecats: gather_polecats(),
       ready: gather_ready(workspace)
     }
+  end
+
+  # Up to 5 most recent unread messages addressed to the Admiral. The REST
+  # index already sorts newest-first, so a take/2 gives "most recent".
+  defp gather_admiral_inbox do
+    case Client.get("/api/messages", to_ref: "admiral", unread: "true") do
+      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, _} -> {:ok, []}
+      {:error, %Client.Error{} = err} -> {:error, err.message}
+    end
   end
 
   defp gather_workspace do
@@ -121,10 +135,50 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
     emit_vernacular_section(sections.vernacular)
     IO.puts("")
+    maybe_emit_admiral_inbox(sections.admiral_inbox)
     emit_polecats_section(sections.polecats, worker)
     IO.puts("")
     emit_ready_section(sections.ready, issue)
   end
+
+  # Omitted entirely when there's no unread Admiral mail (or the lookup
+  # failed) — a clean briefing shows nothing rather than "(none)" noise.
+  defp maybe_emit_admiral_inbox({:ok, []}), do: :ok
+
+  defp maybe_emit_admiral_inbox({:ok, list}) do
+    IO.puts("== Admiral Inbox (#{length(list)} unread) ==")
+
+    list
+    |> Enum.take(5)
+    |> Enum.each(fn m -> IO.puts("  " <> inbox_line(m)) end)
+
+    IO.puts("")
+  end
+
+  defp maybe_emit_admiral_inbox(_), do: :ok
+
+  # `[bd-9bn4n9] failure    — Acolyte exited with code 1 (5m ago)`
+  defp inbox_line(m) do
+    directive = m["directive_ref"] || "-"
+    kind = m["kind"] |> to_string() |> String.pad_trailing(10)
+    gist = m["subject"] || m["body"] || ""
+    gist = gist |> to_string() |> String.split("\n") |> List.first() |> truncate(60)
+    "[#{directive}] #{kind} — #{gist}#{age_suffix(m["inserted_at"])}"
+  end
+
+  defp age_suffix(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _} -> " (#{humanize(DateTime.diff(DateTime.utc_now(), dt, :second))})"
+      _ -> ""
+    end
+  end
+
+  defp age_suffix(_), do: ""
+
+  defp humanize(s) when s < 60, do: "#{max(s, 0)}s ago"
+  defp humanize(s) when s < 3600, do: "#{div(s, 60)}m ago"
+  defp humanize(s) when s < 86_400, do: "#{div(s, 3600)}h ago"
+  defp humanize(s), do: "#{div(s, 86_400)}d ago"
 
   defp emit_workspace_section({:ok, ws}, workspace) do
     IO.puts("== Active #{workspace} ==")
