@@ -359,7 +359,7 @@ defmodule Arbiter.Polecat do
   # has no Refinery listening and so the broadcast is skipped.
   defp broadcast_done(%State{workspace_id: nil}), do: :ok
 
-  defp broadcast_done(%State{workspace_id: ws_id, bead_id: bead_id}) do
+  defp broadcast_done(%State{workspace_id: ws_id, bead_id: bead_id} = state) do
     Phoenix.PubSub.broadcast(
       Arbiter.PubSub,
       "polecat:done:" <> ws_id,
@@ -370,7 +370,7 @@ defmodule Arbiter.Polecat do
     # feed: record a durable :notification alongside the transient broadcast.
     # This in turn broadcasts {:new_message, _} on "messages:<ws>" via the
     # resource's after_action hook, which the dashboard feed subscribes to.
-    record_done_notification(ws_id, bead_id)
+    Arbiter.Messages.AdmiralNotifier.completed(snapshot(state))
 
     :ok
   rescue
@@ -467,24 +467,6 @@ defmodule Arbiter.Polecat do
     :error
   end
 
-  # Best-effort: write a completion notification. Swallows its own failures so
-  # a polecat running outside a DB-connected context (e.g. unit tests with no
-  # sandbox checkout) still completes cleanly.
-  defp record_done_notification(ws_id, bead_id) do
-    Arbiter.Messages.Message.notify(%{
-      workspace_id: ws_id,
-      from_ref: bead_id,
-      subject: "#{bead_id} complete",
-      body: "#{bead_id} finished its workflow."
-    })
-
-    :ok
-  rescue
-    e ->
-      Logger.debug("Polecat.record_done_notification/2 swallowed: #{Exception.message(e)}")
-      :ok
-  end
-
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
 
@@ -515,7 +497,9 @@ defmodule Arbiter.Polecat do
         r -> Map.put(state.meta, :await_reason, r)
       end
 
-    {:reply, :ok, %State{state | status: :awaiting, meta: meta}}
+    new_state = %State{state | status: :awaiting, meta: meta}
+    Arbiter.Messages.AdmiralNotifier.awaiting_review(snapshot(new_state))
+    {:reply, :ok, new_state}
   end
 
   def handle_call({:await, _reason}, _from, %State{status: status} = state) do
@@ -618,6 +602,7 @@ defmodule Arbiter.Polecat do
 
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
+    Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
     {:reply, :ok, new_state}
   end
 
