@@ -33,7 +33,7 @@ defmodule Arbiter.Beads.Workspace do
           }
         },
         "merge" => %{
-          "strategy" => "direct"               # one of: "direct" (gitlab/github added later)
+          "strategy" => "direct"               # one of: "direct", "gitlab" (github added later)
         }
       }
 
@@ -48,7 +48,7 @@ defmodule Arbiter.Beads.Workspace do
     data_layer: AshPostgres.DataLayer
 
   @valid_tracker_types ~w(none jira shortcut linear github)
-  @valid_merger_strategies ~w(direct)
+  @valid_merger_strategies ~w(direct gitlab)
 
   postgres do
     table("workspaces")
@@ -121,7 +121,7 @@ defmodule Arbiter.Beads.Workspace do
   @doc """
   Returns the list of valid merger strategy strings.
 
-  Starts as `~w(direct)`; `"gitlab"` / `"github"` are added in later directives.
+  `~w(direct gitlab)`; `"github"` is added in a later directive.
   """
   def valid_merger_strategies, do: @valid_merger_strategies
 
