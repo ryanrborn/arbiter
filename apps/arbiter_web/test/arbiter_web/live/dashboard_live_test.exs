@@ -3,7 +3,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Beads.{Dependency, Issue, Workspace}
   alias Arbiter.Polecat
   alias Arbiter.Polecats.Run
 
@@ -27,11 +27,13 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "renders all section headers", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
+      # Section titles derive from the (default) vernacular and are
+      # title-cased + correctly pluralized ("pull request" → "Pull requests").
       assert html =~ "Dashboard"
       assert html =~ "Workspaces"
       assert html =~ "Active "
-      assert html =~ "Recent beads"
-      assert html =~ "PRs in flight"
+      assert html =~ "Recent Beads"
+      assert html =~ "Pull requests in flight"
       assert html =~ "Escalations"
     end
 
@@ -71,7 +73,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "workspaces-table"
+      # Workspaces render as compact cards now (was a raw table).
+      assert html =~ "workspaces-section"
       assert html =~ ws.name
       assert html =~ ws.prefix
       # 2 open, 1 closed in this workspace.
@@ -107,7 +110,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
     test "lists rigs configured via Application env", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ "rigs-table"
+      # Rigs render as compact cards now (was a raw table).
+      assert html =~ "rigs-section"
       assert html =~ "dashboard-test-rig"
       assert html =~ "/tmp/dash-rig"
       assert html =~ "(app)"
@@ -282,6 +286,87 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "No refineries running"
       assert html =~ "No escalations"
+    end
+  end
+
+  describe "stats bar" do
+    test "renders the at-a-glance stat row", %{conn: conn, ws: ws} do
+      {:ok, _b} = Ash.create(Issue, %{title: "stat-open", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, "/")
+
+      # DaisyUI stats component with the three live stats + the reserved
+      # (disabled) Admiral-inbox slot.
+      assert html =~ "stats"
+      assert html =~ "Open Beads"
+      assert html =~ "Active Polecats"
+      assert html =~ "Admiral Inbox"
+      assert html =~ "coming soon"
+    end
+  end
+
+  describe "directive queue priority + blocking" do
+    test "P1 beads get the error-tinted treatment, P2 stays neutral", %{conn: conn, ws: ws} do
+      {:ok, _p1} = Ash.create(Issue, %{title: "urgent-p1", workspace_id: ws.id, priority: 1})
+      {:ok, _p2} = Ash.create(Issue, %{title: "normal-p2", workspace_id: ws.id, priority: 2})
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "urgent-p1"
+      assert html =~ "normal-p2"
+      # P1 row carries the semantic error tint (left border + badge), never a
+      # hardcoded red-* utility.
+      assert html =~ "border-error"
+      assert html =~ "badge-error"
+      refute html =~ "red-500"
+    end
+
+    test "shows a blocked badge when a depends_on edge has an open target", %{conn: conn, ws: ws} do
+      {:ok, blocked} = Ash.create(Issue, %{title: "is-blocked", workspace_id: ws.id})
+      {:ok, blocker} = Ash.create(Issue, %{title: "the-blocker", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Dependency, %{
+          from_issue_id: blocked.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "is-blocked"
+      assert html =~ "blocked"
+    end
+
+    test "no blocked badge once the gating target is closed", %{conn: conn, ws: ws} do
+      {:ok, dependent} = Ash.create(Issue, %{title: "freed-up", workspace_id: ws.id})
+      {:ok, blocker} = Ash.create(Issue, %{title: "soon-closed", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Dependency, %{
+          from_issue_id: dependent.id,
+          to_issue_id: blocker.id,
+          type: :depends_on
+        })
+
+      {:ok, _closed} = Ash.update(blocker, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "freed-up"
+      refute html =~ "blocked"
+    end
+  end
+
+  describe "live clock tick" do
+    test "the :tick message refreshes :now without crashing the view", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      # The 1s interval that drives live elapsed counters / relative
+      # timestamps. Delivering it manually must keep the view rendering.
+      send(view.pid, :tick)
+
+      assert render(view) =~ "Dashboard"
     end
   end
 end
