@@ -37,6 +37,23 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       conn = post(conn, ~p"/api/messages", %{kind: "bogus", body: "x", workspace_id: @ws})
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
+
+    test "accepts an admiral-bound completion with a directive_ref", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/messages", %{
+          kind: "completion",
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          directive_ref: "bd-soren",
+          body: "GitLab adapter complete",
+          workspace_id: @ws
+        })
+
+      body = json_response(conn, 201)
+      assert body["kind"] == "completion"
+      assert body["to_ref"] == "admiral"
+      assert body["directive_ref"] == "bd-soren"
+    end
   end
 
   describe "GET /api/messages" do
@@ -83,6 +100,42 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
     test "returns 404 for unknown id", %{conn: conn} do
       conn = post(conn, ~p"/api/messages/00000000-0000-0000-0000-000000000000/read", %{})
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
+
+  describe "DELETE /api/messages (clear)" do
+    test "destroys only the read messages addressed to to_ref", %{conn: conn} do
+      {:ok, unread} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "keep me"})
+
+      {:ok, read} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "drain me"})
+
+      {:ok, _} = Message.mark_read(read)
+
+      {:ok, other} =
+        Message.send_mail(%{
+          workspace_id: @ws,
+          to_ref: "bd-other",
+          kind: :info,
+          body: "not admiral's"
+        })
+
+      {:ok, _} = Message.mark_read(other)
+
+      conn = delete(conn, ~p"/api/messages", %{to_ref: "admiral"})
+      assert %{"data" => %{"deleted" => 1}} = json_response(conn, 200)
+
+      # The unread admiral message and the other bead's read message survive.
+      remaining = Ash.read!(Message) |> Enum.map(& &1.id) |> MapSet.new()
+      assert MapSet.member?(remaining, unread.id)
+      assert MapSet.member?(remaining, other.id)
+      refute MapSet.member?(remaining, read.id)
+    end
+
+    test "requires to_ref so it can't wipe the table", %{conn: conn} do
+      conn = delete(conn, ~p"/api/messages", %{})
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end
 end
