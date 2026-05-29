@@ -7,8 +7,7 @@ defmodule Arbiter.Mergers do
   rather than referencing a specific adapter directly — keeps adapter
   resolution centralized so workspace defaults behave consistently.
 
-  Mirrors `Arbiter.Trackers`. The `Direct` and `GitLab` adapters ship now;
-  `:github` is added in a later directive.
+  Mirrors `Arbiter.Trackers`. The `Direct`, `GitLab`, and `GitHub` adapters all ship now.
 
   ## Resolution rule
 
@@ -18,14 +17,14 @@ defmodule Arbiter.Mergers do
   """
 
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Mergers.{Direct, Gitlab}
+  alias Arbiter.Mergers.{Direct, Github, Gitlab}
 
   @type adapter :: module()
 
   @adapters %{
     direct: Direct,
-    gitlab: Gitlab
-    # :github wired up in a later directive
+    gitlab: Gitlab,
+    github: Github
   }
 
   @doc """

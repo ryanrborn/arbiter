@@ -105,6 +105,22 @@ defmodule Arbiter.Beads.WorkspaceTest do
       assert ws.config["merge"]["strategy"] == "direct"
     end
 
+    test "succeeds with the github merge.strategy and its config block" do
+      config = %{
+        "merge" => %{
+          "strategy" => "github",
+          "config" => %{
+            "owner" => "octo",
+            "repo" => "widget",
+            "credentials_ref" => "env:GITHUB_TOKEN"
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "github-merge", config: config})
+      assert ws.config["merge"]["strategy"] == "github"
+    end
+
     test "fails when merge.strategy is not in the enum" do
       config = %{"merge" => %{"strategy" => "bogus"}}
 
@@ -153,8 +169,8 @@ defmodule Arbiter.Beads.WorkspaceTest do
   end
 
   describe "valid_merger_strategies/0" do
-    test "includes direct and gitlab" do
-      assert Workspace.valid_merger_strategies() == ~w(direct gitlab)
+    test "includes direct, gitlab, and github" do
+      assert Workspace.valid_merger_strategies() == ~w(direct gitlab github)
     end
   end
 
@@ -167,6 +183,16 @@ defmodule Arbiter.Beads.WorkspaceTest do
         })
 
       assert Workspace.merger_strategy(ws) == :direct
+    end
+
+    test "resolves :github" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ms-github",
+          config: %{"merge" => %{"strategy" => "github"}}
+        })
+
+      assert Workspace.merger_strategy(ws) == :github
     end
 
     test "defaults to :direct when unset" do
