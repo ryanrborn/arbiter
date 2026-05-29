@@ -174,4 +174,39 @@ defmodule Arbiter.Beads.WorkspaceTest do
       assert Workspace.merger_strategy(ws) == :direct
     end
   end
+
+  describe "auto_merge?/1" do
+    test "true when config[merge][auto_merge] is boolean true" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "am-true",
+          config: %{"merge" => %{"strategy" => "gitlab", "auto_merge" => true}}
+        })
+
+      assert Workspace.auto_merge?(ws) == true
+    end
+
+    test "true when stored as the string \"true\" (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "am-str",
+          config: %{"merge" => %{"auto_merge" => "true"}}
+        })
+
+      assert Workspace.auto_merge?(ws) == true
+    end
+
+    test "defaults to false when unset or falsey" do
+      {:ok, unset} = Ash.create(Workspace, %{name: "am-unset"})
+      assert Workspace.auto_merge?(unset) == false
+
+      {:ok, off} =
+        Ash.create(Workspace, %{
+          name: "am-off",
+          config: %{"merge" => %{"auto_merge" => false}}
+        })
+
+      assert Workspace.auto_merge?(off) == false
+    end
+  end
 end
