@@ -339,6 +339,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp polecat_status_class(:idle), do: "badge-ghost"
   defp polecat_status_class(:running), do: "badge-info"
   defp polecat_status_class(:awaiting), do: "badge-warning"
+  defp polecat_status_class(:awaiting_review), do: "badge-warning"
   defp polecat_status_class(:completed), do: "badge-success"
   defp polecat_status_class(:failed), do: "badge-error"
   defp polecat_status_class(_), do: ""
@@ -346,6 +347,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp polecat_status_label(:idle), do: "Idle"
   defp polecat_status_label(:running), do: "Running"
   defp polecat_status_label(:awaiting), do: "Awaiting"
+  defp polecat_status_label(:awaiting_review), do: "Awaiting review"
   defp polecat_status_label(:completed), do: "Completed"
   defp polecat_status_label(:failed), do: "Failed"
 
@@ -543,6 +545,20 @@ defmodule ArbiterWeb.DashboardLive do
                         <span class={["badge badge-sm", polecat_status_class(p.status)]}>
                           {polecat_status_label(p.status)}
                         </span>
+                        <%= if mr = Map.get(p, :mr_ref) do %>
+                          <%= if url = Map.get(p, :merger_url) do %>
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noopener"
+                              class="link link-primary text-xs ml-1"
+                            >
+                              {mr}
+                            </a>
+                          <% else %>
+                            <code class="text-xs ml-1">{mr}</code>
+                          <% end %>
+                        <% end %>
                       </td>
                       <td class="text-xs">
                         {humanize_seconds(runtime_seconds(p.started_at, @now))}
@@ -592,8 +608,7 @@ defmodule ArbiterWeb.DashboardLive do
             </h2>
             <%= if @completed_runs == [] do %>
               <p class="text-base-content/60 italic" id="completed-runs-empty">
-                No completed {@worker_label}s yet. Past runs appear here after the
-                {@worker_label} finishes or fails.
+                No completed {@worker_label}s yet. Past runs appear here after the {@worker_label} finishes or fails.
               </p>
             <% else %>
               <table class="table table-sm" id="completed-runs">

@@ -58,4 +58,30 @@ defmodule Arbiter.Mergers do
   @doc "Returns the map of strategy → adapter module."
   @spec adapters() :: %{atom() => adapter}
   def adapters, do: @adapters
+
+  @doc """
+  Prepare the current process to make adapter calls for `workspace`.
+
+  Some adapters resolve their backend config from the process dictionary
+  (the `GitLab` adapter reads host/project/token via
+  `Arbiter.Mergers.Gitlab.Config`, exactly as `Arbiter.Trackers.Jira` does).
+  A long-lived poller such as `Arbiter.Polecat.Warden` runs in its own
+  process, so it must seed that config before calling `get/1` or `merge/1`.
+
+  This keeps the adapter-specific coupling in one place: callers
+  (`Arbiter.Polecat`, `Arbiter.Polecat.Warden`) just call `prepare/1` and stay
+  adapter-agnostic. A no-op for adapters that carry no per-process config
+  (e.g. `Direct`) and for a `nil` workspace.
+  """
+  @spec prepare(Workspace.t() | nil) :: :ok
+  def prepare(nil), do: :ok
+
+  def prepare(%Workspace{} = workspace) do
+    case Workspace.merger_strategy(workspace) do
+      :gitlab -> Arbiter.Mergers.Gitlab.Config.put_active(workspace)
+      _ -> :ok
+    end
+
+    :ok
+  end
 end

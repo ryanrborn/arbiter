@@ -1,0 +1,148 @@
+defmodule Arbiter.PolecatAwaitingReviewTest do
+  # async: false — shares the singleton Polecat registry/supervisor + the
+  # named StubMerger Agent.
+  use ExUnit.Case, async: false
+
+  alias Arbiter.Polecat
+  alias Arbiter.Test.StubMerger
+
+  setup do
+    StubMerger.reset()
+    :ok
+  end
+
+  defp new_bead_id, do: "ar-test-#{System.unique_integer([:positive])}"
+
+  defp running_polecat(opts \\ []) do
+    bead_id = Keyword.get(opts, :bead_id, new_bead_id())
+    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter")
+    :ok = Polecat.advance(pid, :implement)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    {pid, bead_id}
+  end
+
+  # Park well into the future so the auto-started Warden doesn't poll while we
+  # assert on the transition itself.
+  @parked [interval_ms: 1_000_000, initial_delay_ms: 1_000_000]
+
+  defp open_opts(extra), do: Map.merge(%{adapter: StubMerger, workspace: nil}, Map.new(extra))
+
+  defp wait_until(fun, timeout \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(10)
+        do_wait(fun, deadline)
+    end
+  end
+
+  describe "open_mr/5" do
+    test "transitions :running -> :awaiting_review and stores mr_ref + merger_url" do
+      {pid, _bead_id} = running_polecat()
+      StubMerger.next_open_ref("!42")
+
+      assert {:ok, "!42"} =
+               Polecat.open_mr(pid, "feature/x", "Add x", "desc", open_opts(@parked))
+
+      snap = Polecat.state(pid)
+      assert snap.status == :awaiting_review
+      assert snap.mr_ref == "!42"
+      assert snap.merger_url == "https://stub.example/mr/!42"
+      assert snap.meta.mr_ref == "!42"
+    end
+
+    test "forwards branch/title/description and opts to the adapter" do
+      {pid, _bead_id} = running_polecat()
+
+      assert {:ok, _} =
+               Polecat.open_mr(
+                 pid,
+                 "feature/y",
+                 "Title Y",
+                 "Body Y",
+                 open_opts(Keyword.merge(@parked, target_branch: "develop", labels: ["wip"]))
+               )
+
+      open = StubMerger.last_open()
+      assert open.branch == "feature/y"
+      assert open.title == "Title Y"
+      assert open.description == "Body Y"
+      assert open.opts.target_branch == "develop"
+      assert open.opts.labels == ["wip"]
+    end
+
+    test "is rejected from :idle" do
+      bead_id = new_bead_id()
+      {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter")
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      assert {:error, {:invalid_transition, :idle, :awaiting_review}} =
+               Polecat.open_mr(pid, "feature/z", "Z", "", open_opts(@parked))
+
+      assert Polecat.state(pid).status == :idle
+    end
+
+    test "an adapter open error leaves the polecat :running" do
+      {pid, _bead_id} = running_polecat()
+
+      assert {:error, :no_workspace} =
+               Polecat.open_mr(pid, "feature/q", "Q", "", %{})
+
+      assert Polecat.state(pid).status == :running
+    end
+
+    test "end-to-end: a merged MR drives the polecat to :completed via the warden" do
+      {pid, _bead_id} = running_polecat()
+      StubMerger.next_open_ref("!7")
+      StubMerger.queue_get("!7", [%{status: :merged}])
+
+      assert {:ok, "!7"} =
+               Polecat.open_mr(
+                 pid,
+                 "feature/done",
+                 "Done",
+                 "",
+                 open_opts(interval_ms: 20, initial_delay_ms: 0)
+               )
+
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      assert Polecat.state(pid).meta.result == :merged
+    end
+  end
+
+  describe "gt-done guard while awaiting review" do
+    test "a late 'gt done' does NOT complete a polecat parked for review" do
+      {pid, _bead_id} = running_polecat()
+      assert {:ok, _} = Polecat.open_mr(pid, "feature/g", "G", "", open_opts(@parked))
+      assert Polecat.state(pid).status == :awaiting_review
+
+      # Simulate the ClaudeSession completion marker arriving after the MR
+      # was opened. The review gate, not stdout, owns completion now.
+      send(pid, {:__claude_session_done__, "gt done"})
+      Process.sleep(30)
+
+      assert Polecat.state(pid).status == :awaiting_review
+    end
+  end
+
+  describe "record_merger_status/2" do
+    test "stores the result and a checked-at timestamp in meta" do
+      {pid, _bead_id} = running_polecat()
+      :ok = Polecat.record_merger_status(pid, %{status: :open, approved: true})
+
+      meta = Polecat.state(pid).meta
+      assert meta.last_merger_status == %{status: :open, approved: true}
+      assert %DateTime{} = meta.last_checked_at
+    end
+  end
+end
