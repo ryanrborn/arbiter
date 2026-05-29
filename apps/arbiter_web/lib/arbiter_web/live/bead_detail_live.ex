@@ -13,6 +13,7 @@ defmodule ArbiterWeb.BeadDetailLive do
   alias Arbiter.Beads.Issue.Version
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
+  alias Arbiter.Vernacular
   require Ash.Query
 
   @beads_topic "beads"
@@ -29,6 +30,10 @@ defmodule ArbiterWeb.BeadDetailLive do
      socket
      |> assign(:bead_id, bead_id)
      |> assign(:live, connected?(socket))
+     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:worker_label, Vernacular.label(:worker))
+     |> assign(:workspace_label, Vernacular.label(:workspace))
+     |> assign(:rig_label, Vernacular.label(:rig))
      |> refresh_all()}
   end
 
@@ -43,7 +48,10 @@ defmodule ArbiterWeb.BeadDetailLive do
     {:noreply, refresh_deps(socket)}
   end
 
-  def handle_info({:polecat_lifecycle, _event, %{bead_id: id}}, %{assigns: %{bead_id: id}} = socket) do
+  def handle_info(
+        {:polecat_lifecycle, _event, %{bead_id: id}},
+        %{assigns: %{bead_id: id}} = socket
+      ) do
     {:noreply, refresh_polecat(socket)}
   end
 
@@ -165,200 +173,422 @@ defmodule ArbiterWeb.BeadDetailLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path}>
-    <div class="p-6 max-w-7xl mx-auto">
-      <div class="flex items-center justify-between mb-6">
-        <h1 class="text-2xl font-bold">
-          Bead <code>{@bead_id}</code>
-        </h1>
-        <span class={[
-          "badge badge-sm",
-          if(@live, do: "badge-success", else: "badge-warning")
-        ]}>
-          <%= if @live do %>
-            ● live
-          <% else %>
-            ⚠ stale (refresh)
-          <% end %>
-        </span>
-      </div>
-
-      <%= if @bead do %>
-        <section class="card bg-base-200 p-4 mb-4">
-          <h2 class="text-lg font-semibold mb-2">{@bead.title}</h2>
-          <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
-            <dt class="font-semibold">Status:</dt>
-            <dd>
+      <div class="p-6 max-w-7xl mx-auto space-y-6">
+        <%!-- ── Header ───────────────────────────────────────────────── --%>
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 text-sm text-base-content/60">
+              <.icon name="hero-clipboard-document-list" class="size-4" />
+              <span>{String.capitalize(@issue_label)}</span>
+              <code class="text-base-content/80">{@bead_id}</code>
+            </div>
+            <h1 :if={@bead} class="text-2xl font-bold tracking-tight mt-1">
+              <span class="min-w-0 truncate" title={@bead.title}>{@bead.title}</span>
+            </h1>
+            <h1 :if={!@bead} class="text-2xl font-bold tracking-tight mt-1">
+              {String.capitalize(@issue_label)} not found
+            </h1>
+            <div :if={@bead} class="flex flex-wrap items-center gap-2 mt-2">
               <span class={["badge", status_badge_class(@bead.status)]}>
                 {@bead.status}
               </span>
-            </dd>
-            <dt class="font-semibold">Type:</dt>
-            <dd>{@bead.issue_type}</dd>
-            <dt class="font-semibold">Priority:</dt>
-            <dd>P{@bead.priority}</dd>
-            <dt class="font-semibold">Workspace:</dt>
-            <dd>
-              <%= if @workspace do %>
-                {@workspace.name}
-                <span class="text-base-content/60">
-                  (<code>{@workspace.prefix}</code>)
-                </span>
-              <% else %>
-                <span class="text-base-content/60">(none)</span>
-              <% end %>
-            </dd>
-            <%= if @bead.tracker_type != :none do %>
-              <dt class="font-semibold">Tracker:</dt>
-              <dd>{@bead.tracker_type} {@bead.tracker_ref}</dd>
-            <% end %>
-            <%= if @bead.assignee do %>
-              <dt class="font-semibold">Assignee:</dt>
-              <dd>{@bead.assignee}</dd>
-            <% end %>
-          </dl>
-
-          <%= if @bead.description do %>
-            <h3 class="text-sm font-semibold mt-4 mb-1">Description</h3>
-            <pre class="whitespace-pre-wrap text-xs bg-base-300 p-3 rounded">{@bead.description}</pre>
-          <% end %>
-
-          <%= if @bead.acceptance do %>
-            <h3 class="text-sm font-semibold mt-4 mb-1">Acceptance</h3>
-            <pre class="whitespace-pre-wrap text-xs bg-base-300 p-3 rounded">{@bead.acceptance}</pre>
-          <% end %>
-        </section>
-
-        <section class="card bg-base-200 p-4 mb-4">
-          <div class="flex items-center justify-between mb-2">
-            <h2 class="text-lg font-semibold">Polecat</h2>
-            <%= if @polecat do %>
-              <.link
-                navigate={~p"/polecats/#{@bead_id}"}
-                class="link link-hover text-sm"
+              <span
+                class={[
+                  "badge font-mono gap-1",
+                  if(@bead.priority == 1, do: "badge-error", else: "badge-ghost")
+                ]}
+                title={"Priority #{@bead.priority}"}
               >
-                view full output →
-              </.link>
-            <% end %>
+                <.icon :if={@bead.priority == 1} name="hero-exclamation-triangle" class="size-3" />
+                P{@bead.priority}
+              </span>
+              <span class="badge badge-ghost gap-1">
+                <.icon name="hero-tag" class="size-3" />{@bead.issue_type}
+              </span>
+            </div>
           </div>
-          <%= if @polecat do %>
-            <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
-              <dt class="font-semibold">Status:</dt>
-              <dd>
-                <span class={["badge badge-sm", polecat_status_class(@polecat.status)]}>
-                  {@polecat.status}
+
+          <span
+            id="live-indicator"
+            class={[
+              "badge badge-sm gap-1.5 transition-colors duration-200 shrink-0",
+              if(@live, do: "badge-success", else: "badge-warning")
+            ]}
+            title={
+              if @live,
+                do: "WebSocket connected — updates arrive in real time",
+                else: "Static render — refresh the page to reconnect"
+            }
+          >
+            <%= if @live do %>
+              <span class="relative flex h-2 w-2">
+                <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-content opacity-75">
                 </span>
-              </dd>
-              <dt class="font-semibold">Step:</dt>
-              <dd>{@polecat.current_step}</dd>
-              <dt class="font-semibold">Started:</dt>
-              <dd>{@polecat.started_at}</dd>
-            </dl>
-          <% else %>
-            <p class="text-base-content/60 italic">
-              No polecat running for this bead. Use
-              <code>arb sling {@bead_id}</code> to spawn one.
-            </p>
-          <% end %>
-        </section>
-
-        <div class="grid grid-cols-2 gap-4 mb-4">
-          <section class="card bg-base-200 p-4">
-            <h2 class="text-lg font-semibold mb-2">
-              Blocked by ({length(@outbound_deps)})
-            </h2>
-            <%= if @outbound_deps == [] do %>
-              <p class="text-base-content/60 italic text-sm">No outgoing dependencies.</p>
+                <span class="relative inline-flex h-2 w-2 rounded-full bg-success-content"></span>
+              </span>
+              live
             <% else %>
-              <ul class="text-sm space-y-1">
-                <%= for d <- @outbound_deps do %>
-                  <li>
-                    <span class="badge badge-sm">{d.type}</span>
-                    <.link navigate={~p"/beads/#{d.to_issue_id}"} class="link link-hover">
-                      <code class="text-xs">{d.to_issue_id}</code>
-                    </.link>
-                    <%= if d.other_issue do %>
-                      — <span class={["badge badge-xs", status_badge_class(d.other_issue.status)]}>
-                        {d.other_issue.status}
-                      </span>
-                      <span class="text-base-content/70">{d.other_issue.title}</span>
-                    <% end %>
-                  </li>
-                <% end %>
-              </ul>
+              <.icon name="hero-exclamation-triangle" class="size-3" /> stale (refresh)
             <% end %>
-          </section>
-
-          <section class="card bg-base-200 p-4">
-            <h2 class="text-lg font-semibold mb-2">
-              Blocks ({length(@inbound_deps)})
-            </h2>
-            <%= if @inbound_deps == [] do %>
-              <p class="text-base-content/60 italic text-sm">Nothing depends on this bead.</p>
-            <% else %>
-              <ul class="text-sm space-y-1">
-                <%= for d <- @inbound_deps do %>
-                  <li>
-                    <span class="badge badge-sm">{d.type}</span>
-                    <.link navigate={~p"/beads/#{d.from_issue_id}"} class="link link-hover">
-                      <code class="text-xs">{d.from_issue_id}</code>
-                    </.link>
-                    <%= if d.other_issue do %>
-                      — <span class={["badge badge-xs", status_badge_class(d.other_issue.status)]}>
-                        {d.other_issue.status}
-                      </span>
-                      <span class="text-base-content/70">{d.other_issue.title}</span>
-                    <% end %>
-                  </li>
-                <% end %>
-              </ul>
-            <% end %>
-          </section>
+          </span>
         </div>
 
-        <section class="card bg-base-200 p-4">
-          <h2 class="text-lg font-semibold mb-2">
-            History ({length(@versions)})
-          </h2>
-          <%= if @versions == [] do %>
-            <p class="text-base-content/60 italic text-sm">No history recorded.</p>
-          <% else %>
-            <ul class="text-sm space-y-1">
-              <%= for v <- @versions do %>
-                <li class="flex gap-3">
-                  <span class="text-xs text-base-content/60 w-44 shrink-0">
-                    {v.version_inserted_at}
-                  </span>
-                  <span class="badge badge-sm">{v.version_action_name}</span>
-                  <span class="text-xs text-base-content/70 truncate">
-                    {inspect(v.changes)}
-                  </span>
-                </li>
-              <% end %>
-            </ul>
-          <% end %>
-        </section>
-      <% else %>
-        <p class="text-base-content/60">
-          Bead <code>{@bead_id}</code> not found.
-        </p>
-      <% end %>
+        <%= if @bead do %>
+          <%!-- ── A. Record + Polecat ─────────────────────────────────── --%>
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <%!-- Record --%>
+            <section class="card bg-base-200 border border-base-300 shadow-sm lg:col-span-2">
+              <div class="card-body p-4 gap-4">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-document-text" class="size-5 text-base-content/70" />
+                  {String.capitalize(@issue_label)} record
+                </h2>
 
-      <div class="mt-6">
-        <.link navigate={~p"/"} class="link link-hover">← Back to dashboard</.link>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+                  <dt class="font-medium text-base-content/60">Status</dt>
+                  <dd>
+                    <span class={["badge badge-sm", status_badge_class(@bead.status)]}>
+                      {@bead.status}
+                    </span>
+                  </dd>
+
+                  <dt class="font-medium text-base-content/60">Priority</dt>
+                  <dd>
+                    <span class={[
+                      "badge badge-sm font-mono",
+                      if(@bead.priority == 1, do: "badge-error", else: "badge-ghost")
+                    ]}>
+                      P{@bead.priority}
+                    </span>
+                  </dd>
+
+                  <dt class="font-medium text-base-content/60">Type</dt>
+                  <dd>{@bead.issue_type}</dd>
+
+                  <dt class="font-medium text-base-content/60">
+                    {String.capitalize(@workspace_label)}
+                  </dt>
+                  <dd>
+                    <%= if @workspace do %>
+                      {@workspace.name}
+                      <code class="badge badge-ghost badge-sm font-mono ml-1">
+                        {@workspace.prefix}
+                      </code>
+                    <% else %>
+                      <span class="text-base-content/50 italic">(none)</span>
+                    <% end %>
+                  </dd>
+
+                  <%= if @bead.tracker_type != :none do %>
+                    <dt class="font-medium text-base-content/60">Tracker</dt>
+                    <dd>
+                      <span class="badge badge-ghost badge-sm">{@bead.tracker_type}</span>
+                      <code class="text-xs text-base-content/70 ml-1">{@bead.tracker_ref}</code>
+                    </dd>
+                  <% end %>
+
+                  <%= if @bead.assignee do %>
+                    <dt class="font-medium text-base-content/60">Assignee</dt>
+                    <dd class="flex items-center gap-1.5">
+                      <.icon name="hero-user-circle" class="size-4 text-base-content/50" />
+                      {@bead.assignee}
+                    </dd>
+                  <% end %>
+                </dl>
+
+                <div :if={@bead.description} class="space-y-1">
+                  <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
+                    <.icon name="hero-bars-3-bottom-left" class="size-4" /> Description
+                  </h3>
+                  <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80">{@bead.description}</pre>
+                </div>
+
+                <div :if={@bead.acceptance} class="space-y-1">
+                  <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
+                    <.icon name="hero-check-badge" class="size-4" /> Acceptance
+                  </h3>
+                  <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80">{@bead.acceptance}</pre>
+                </div>
+              </div>
+            </section>
+
+            <%!-- Polecat (linked acolyte) --%>
+            <section class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-4 gap-4">
+                <div class="flex items-center justify-between gap-2">
+                  <h2 class="text-lg font-semibold flex items-center gap-2">
+                    <.icon name="hero-cpu-chip" class="size-5 text-info" />
+                    {String.capitalize(@worker_label)}
+                  </h2>
+                  <.link
+                    :if={@polecat}
+                    navigate={~p"/polecats/#{@bead_id}"}
+                    class="link link-hover text-sm text-info flex items-center gap-1"
+                  >
+                    view full output <.icon name="hero-arrow-right" class="size-3" />
+                  </.link>
+                </div>
+
+                <%= if @polecat do %>
+                  <div class="rounded-box bg-base-100 border border-base-300 p-3 flex flex-col gap-3">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="flex items-center gap-2">
+                        <span class="relative flex h-2.5 w-2.5 shrink-0">
+                          <span
+                            :if={@polecat.status == :running}
+                            class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-75"
+                          >
+                          </span>
+                          <span class={[
+                            "relative inline-flex h-2.5 w-2.5 rounded-full",
+                            status_dot_class(@polecat.status)
+                          ]}>
+                          </span>
+                        </span>
+                        <span class={["badge badge-sm", polecat_status_class(@polecat.status)]}>
+                          {@polecat.status}
+                        </span>
+                      </span>
+                      <span class="badge badge-ghost badge-sm font-mono">
+                        {@polecat.current_step}
+                      </span>
+                    </div>
+                    <div class="flex items-center gap-1.5 text-xs text-base-content/60">
+                      <.icon name="hero-clock" class="size-3.5" />
+                      <span>started {format_started(@polecat.started_at)}</span>
+                    </div>
+                  </div>
+                <% else %>
+                  <div class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center">
+                    <.icon name="hero-moon" class="size-8 mx-auto text-base-content/30" />
+                    <p class="mt-2 text-sm font-medium text-base-content/70">
+                      No {@worker_label} running for this {@issue_label}.
+                    </p>
+                    <p class="mt-1 text-xs text-base-content/50">
+                      Spawn one with <code class="text-xs bg-base-300 px-1.5 py-0.5 rounded">
+                        arb sling {@bead_id}
+                      </code>.
+                    </p>
+                  </div>
+                <% end %>
+              </div>
+            </section>
+          </div>
+
+          <%!-- ── B. Dependency graph ─────────────────────────────────── --%>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <%!-- Blocked by (outbound :depends_on) --%>
+            <section class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-4 gap-4">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-lock-closed" class="size-5 text-warning" />
+                  Blocked by ({length(@outbound_deps)})
+                </h2>
+
+                <p
+                  :if={@outbound_deps == []}
+                  class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-4 text-sm text-center text-base-content/50"
+                >
+                  No outgoing dependencies.
+                </p>
+
+                <ul :if={@outbound_deps != []} class="flex flex-col gap-2">
+                  <li
+                    :for={d <- @outbound_deps}
+                    class="rounded-box bg-base-100 border border-base-300 p-2.5 transition-colors duration-150 hover:border-warning/50"
+                  >
+                    <.dep_edge dep={d} other_id={d.to_issue_id} direction={:upstream} />
+                  </li>
+                </ul>
+              </div>
+            </section>
+
+            <%!-- Blocks (inbound) --%>
+            <section class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-4 gap-4">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-arrow-trending-up" class="size-5 text-base-content/70" />
+                  Blocks ({length(@inbound_deps)})
+                </h2>
+
+                <p
+                  :if={@inbound_deps == []}
+                  class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-4 text-sm text-center text-base-content/50"
+                >
+                  Nothing depends on this {@issue_label}.
+                </p>
+
+                <ul :if={@inbound_deps != []} class="flex flex-col gap-2">
+                  <li
+                    :for={d <- @inbound_deps}
+                    class="rounded-box bg-base-100 border border-base-300 p-2.5 transition-colors duration-150 hover:border-primary/40"
+                  >
+                    <.dep_edge dep={d} other_id={d.from_issue_id} direction={:downstream} />
+                  </li>
+                </ul>
+              </div>
+            </section>
+          </div>
+
+          <%!-- ── C. Audit trail timeline ─────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-4 gap-4">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-clock" class="size-5 text-base-content/70" />
+                History ({length(@versions)})
+              </h2>
+
+              <p
+                :if={@versions == []}
+                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-sm text-center text-base-content/50"
+              >
+                No history recorded yet. State transitions for this {@issue_label} appear here.
+              </p>
+
+              <ol :if={@versions != []} class="relative flex flex-col">
+                <li :for={v <- @versions} class="relative flex gap-3 pb-4 last:pb-0 pl-1">
+                  <%!-- timeline rail + node --%>
+                  <div class="relative flex flex-col items-center shrink-0">
+                    <span class={[
+                      "z-10 flex items-center justify-center size-7 rounded-full ring-4 ring-base-200",
+                      action_dot_class(v.version_action_name)
+                    ]}>
+                      <.icon name={action_icon(v.version_action_name)} class="size-4" />
+                    </span>
+                    <span class="absolute top-7 bottom-0 w-px bg-base-300"></span>
+                  </div>
+
+                  <div class="min-w-0 flex-1 -mt-0.5">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class={action_badge_class(v.version_action_name)}>
+                        {v.version_action_name}
+                      </span>
+                      <span class="text-xs text-base-content/50 font-mono tabular-nums">
+                        {format_audit_ts(v.version_inserted_at)}
+                      </span>
+                    </div>
+                    <p
+                      :if={format_changes(v.changes) != ""}
+                      class="mt-1 text-xs text-base-content/70 font-mono break-words"
+                    >
+                      {format_changes(v.changes)}
+                    </p>
+                  </div>
+                </li>
+              </ol>
+            </div>
+          </section>
+        <% else %>
+          <%!-- ── Not found ───────────────────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-8 items-center text-center gap-2">
+              <.icon name="hero-question-mark-circle" class="size-12 text-base-content/30" />
+              <p class="text-base-content/70">
+                Bead <code class="text-sm">{@bead_id}</code> not found.
+              </p>
+            </div>
+          </section>
+        <% end %>
+
+        <div>
+          <.link navigate={~p"/"} class="link link-hover text-sm flex items-center gap-1 w-fit">
+            <.icon name="hero-arrow-left" class="size-4" /> Back to dashboard
+          </.link>
+        </div>
       </div>
-    </div>
     </Layouts.app>
     """
   end
 
-  defp status_badge_class(:open), do: "badge-info"
-  defp status_badge_class(:in_progress), do: "badge-warning"
-  defp status_badge_class(:closed), do: "badge-success"
+  # ---- render helpers ----
+
+  attr(:dep, :map, required: true)
+  attr(:other_id, :string, required: true)
+  attr(:direction, :atom, required: true)
+
+  defp dep_edge(assigns) do
+    ~H"""
+    <div class="flex items-center gap-2">
+      <.icon
+        name={if @direction == :upstream, do: "hero-arrow-up-right", else: "hero-arrow-down-left"}
+        class="size-4 text-base-content/40 shrink-0"
+      />
+      <span class="badge badge-ghost badge-sm font-mono shrink-0">{@dep.type}</span>
+      <.link navigate={~p"/beads/#{@other_id}"} class="min-w-0 flex-1 group">
+        <div class="flex items-center gap-2">
+          <code class="text-xs text-base-content/60 shrink-0 group-hover:text-primary transition-colors">
+            {@other_id}
+          </code>
+          <span
+            :if={@dep.other_issue}
+            class="truncate text-sm group-hover:text-primary transition-colors"
+            title={@dep.other_issue.title}
+          >
+            {@dep.other_issue.title}
+          </span>
+        </div>
+      </.link>
+      <span
+        :if={@dep.other_issue}
+        class={["badge badge-xs shrink-0", status_badge_class(@dep.other_issue.status)]}
+      >
+        {@dep.other_issue.status}
+      </span>
+    </div>
+    """
+  end
+
+  # ---- view helpers (status visuals + formatting) ----
+
+  # Canonical directive-status mapping (matches dashboard + doctrine).
+  defp status_badge_class(:open), do: "badge-success"
+  defp status_badge_class(:in_progress), do: "badge-info"
+  defp status_badge_class(:closed), do: "badge-ghost"
   defp status_badge_class(_), do: ""
 
+  defp polecat_status_class(:idle), do: "badge-ghost"
   defp polecat_status_class(:running), do: "badge-info"
   defp polecat_status_class(:awaiting), do: "badge-warning"
   defp polecat_status_class(:completed), do: "badge-success"
   defp polecat_status_class(:failed), do: "badge-error"
   defp polecat_status_class(_), do: ""
+
+  # Solid status dot color for the linked-acolyte panel (mirrors the badge palette).
+  defp status_dot_class(:running), do: "bg-info"
+  defp status_dot_class(:awaiting), do: "bg-warning"
+  defp status_dot_class(:completed), do: "bg-success"
+  defp status_dot_class(:failed), do: "bg-error"
+  defp status_dot_class(_), do: "bg-base-content/30"
+
+  # Canonical audit-action mapping (matches AuditLogLive + doctrine).
+  defp action_badge_class(:create), do: "badge badge-success"
+  defp action_badge_class(:close), do: "badge badge-neutral"
+  defp action_badge_class(:reopen), do: "badge badge-warning"
+  defp action_badge_class(_), do: "badge badge-info"
+
+  # Filled timeline-node color per audit action (mirrors action_badge_class/1).
+  defp action_dot_class(:create), do: "bg-success text-success-content"
+  defp action_dot_class(:close), do: "bg-neutral text-neutral-content"
+  defp action_dot_class(:reopen), do: "bg-warning text-warning-content"
+  defp action_dot_class(_), do: "bg-info text-info-content"
+
+  defp action_icon(:create), do: "hero-plus-circle"
+  defp action_icon(:close), do: "hero-lock-closed"
+  defp action_icon(:reopen), do: "hero-arrow-path"
+  defp action_icon(_), do: "hero-pencil-square"
+
+  # Compact changeset summary for the timeline. Mirrors AuditLogLive.
+  defp format_changes(changes) when is_map(changes) do
+    changes
+    |> Map.take(["status", "title", "priority", "tracker_type", "assignee"])
+    |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
+  end
+
+  defp format_changes(_), do: ""
+
+  defp format_audit_ts(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+  defp format_audit_ts(other), do: to_string(other)
+
+  defp format_started(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+  defp format_started(other), do: to_string(other)
 end
