@@ -20,9 +20,10 @@ defmodule ArbiterCli.Main do
       arb sling <bead-id>
       arb polecat show <bead-id>
       arb polecat stop <bead-id>
-      arb inbox [<bead-id>]
+      arb inbox [--all | read <id> | clear | <bead-id>]
       arb notify [--limit N]
       arb message <bead-id> <text>
+      arb msg <recipient> <body> [--subject ...] [--directive bd-x] [--kind ...]
 
   Global flags:
       --json     Emit machine-readable JSON (default is human-readable text)
@@ -83,6 +84,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("inbox", args), do: ArbiterCli.Cmd.Inbox.run(args)
   defp dispatch_known("notify", args), do: ArbiterCli.Cmd.Notify.run(args)
   defp dispatch_known("message", args), do: ArbiterCli.Cmd.Message.run(args)
+  defp dispatch_known("msg", args), do: ArbiterCli.Cmd.Msg.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do
