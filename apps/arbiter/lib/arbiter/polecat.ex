@@ -11,16 +11,30 @@ defmodule Arbiter.Polecat do
 
   ## Status FSM
 
-      :idle      → :running     (advance/2 from :idle)
-      :idle      → :failed      (fail/2 — "stillborn" polecat, e.g. machine
-                                  died before any step ran)
-      :running   → :awaiting    (await/2  — parked waiting on external event)
-      :awaiting  → :running     (resume/1)
-      :running   → :completed   (complete/2 — normal exit)
-      :running   → :failed      (fail/2)
-      :awaiting  → :failed      (fail/2)
+      :idle             → :running          (advance/2 from :idle)
+      :idle             → :failed           (fail/2 — "stillborn" polecat, e.g.
+                                             machine died before any step ran)
+      :running          → :awaiting         (await/2 — parked, generic external wait)
+      :awaiting         → :running          (resume/1)
+      :running          → :awaiting_review  (open_mr/5 — MR opened, parked for review)
+      :awaiting_review  → :completed        (complete/2 — MR merged)
+      :awaiting_review  → :failed           (fail/2 — MR closed/rejected)
+      :running          → :completed        (complete/2 — normal exit)
+      :running          → :failed           (fail/2)
+      :awaiting         → :failed           (fail/2)
 
   Illegal transitions return `{:error, {:invalid_transition, from, to}}`.
+
+  ## Merge-request review (`:awaiting_review`)
+
+  When an acolyte finishes its work it can open a merge request via
+  `open_mr/5` instead of completing immediately. That call resolves the
+  workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
+  MR, stores the `mr_ref` + clickable `merger_url` on the polecat, transitions
+  to `:awaiting_review`, and spawns an `Arbiter.Polecat.Warden` to poll for
+  approval. The Warden — not the acolyte's `gt done` — owns the terminal
+  transition: it completes the polecat when the MR merges, or fails it when the
+  MR is closed. See `Arbiter.Polecat.Warden`.
 
   ## API choice: explicit `await/2` etc. vs sentinel atoms
 
@@ -52,7 +66,7 @@ defmodule Arbiter.Polecat do
   alias Arbiter.Polecat.Registry, as: PRegistry
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
-  @type status :: :idle | :running | :awaiting | :completed | :failed
+  @type status :: :idle | :running | :awaiting | :awaiting_review | :completed | :failed
 
   @typedoc "Current workflow step. Free-form atom; `:idle` until first advance."
   @type step :: atom()
@@ -69,6 +83,8 @@ defmodule Arbiter.Polecat do
           status: status(),
           started_at: DateTime.t(),
           step_started_at: DateTime.t() | nil,
+          mr_ref: String.t() | nil,
+          merger_url: String.t() | nil,
           meta: map()
         }
 
@@ -83,6 +99,17 @@ defmodule Arbiter.Polecat do
       :started_at,
       :step_started_at,
       :meta,
+      # Opaque merge-request ref minted by the merger adapter on open_mr/5
+      # (e.g. "!42" for GitLab, "direct:<branch>" for Direct). nil until an MR
+      # is opened.
+      :mr_ref,
+      # Human-clickable URL for mr_ref, computed once at open_mr time via the
+      # adapter's link_for/1 (some adapters resolve the URL from per-process
+      # config we only have at open time). nil when there's no MR or no web UI.
+      :merger_url,
+      # The resolved merger adapter module (Arbiter.Mergers.Direct / .Gitlab),
+      # captured at open_mr time. Internal — used to mint the Warden.
+      :merger_adapter,
       # uuid of the persisted Arbiter.Polecats.Run row, or nil if the create
       # write failed (best-effort — see record_run_started/1). Subsequent
       # status updates skip the DB write when this is nil.
@@ -207,6 +234,48 @@ defmodule Arbiter.Polecat do
   """
   @spec resume(ref()) :: :ok | {:error, term()}
   def resume(ref), do: call(ref, :resume)
+
+  @doc """
+  Open a merge request for `branch` and park the polecat at
+  `:awaiting_review`.
+
+  Resolves the workspace's merger adapter, calls `open/4`, stores the resulting
+  `mr_ref` + clickable `merger_url`, transitions `:running -> :awaiting_review`,
+  and spawns an `Arbiter.Polecat.Warden` to poll for approval. Only valid from
+  `:running`.
+
+  `opts` is a map forwarded to the adapter's `open/4` (`:target_branch`,
+  `:reviewer_ids`, `:labels`, and — for `Direct` — `:repo_path`, which defaults
+  to the polecat's `meta[:worktree_path]`). It may also carry overrides
+  primarily for testing and advanced callers:
+
+    * `:adapter` — a merger module to use directly, bypassing workspace
+      resolution.
+    * `:workspace` — the `Workspace` struct (used to seed adapter config and
+      read the auto-merge flag) when `:adapter` is supplied.
+    * `:auto_merge`, `:interval_ms`, `:initial_delay_ms` — Warden overrides.
+
+  Returns `{:ok, mr_ref}` on success, or `{:error, reason}` (the polecat stays
+  `:running`) if the adapter can't be resolved or `open/4` fails.
+  """
+  @spec open_mr(ref(), String.t(), String.t(), String.t(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def open_mr(ref, branch, title, description \\ "", opts \\ %{})
+      when is_binary(branch) and is_binary(title) and is_binary(description) and is_map(opts) do
+    call(ref, {:open_mr, branch, title, description, opts})
+  end
+
+  @doc """
+  Record the latest `Arbiter.Mergers.get/1` result on the polecat's `:meta`
+  (as `:last_merger_status`) along with a `:last_checked_at` timestamp.
+
+  Called by the `Arbiter.Polecat.Warden` on every poll so the dashboard and
+  detail view can surface approval status and freshness without holding the
+  Warden's state.
+  """
+  @spec record_merger_status(ref(), map()) :: :ok | {:error, term()}
+  def record_merger_status(ref, status) when is_map(status),
+    do: call(ref, {:record_merger_status, status})
 
   @doc """
   Mark the workflow completed. Only valid from `:running`. The polecat keeps
@@ -461,7 +530,68 @@ defmodule Arbiter.Polecat do
     {:reply, {:error, {:invalid_transition, status, :running}}, state}
   end
 
-  def handle_call({:complete, result}, _from, %State{status: :running} = state) do
+  def handle_call(
+        {:open_mr, branch, title, description, opts},
+        _from,
+        %State{status: :running} = state
+      ) do
+    case resolve_merger(state, opts) do
+      {:ok, adapter, workspace} ->
+        Arbiter.Mergers.prepare(workspace)
+        open_opts = build_open_opts(state, opts)
+
+        case safe_open(adapter, branch, title, description, open_opts) do
+          {:ok, mr_ref} ->
+            merger_url = safe_link_for(adapter, mr_ref)
+
+            new_state = %State{
+              state
+              | status: :awaiting_review,
+                mr_ref: mr_ref,
+                merger_url: merger_url,
+                merger_adapter: adapter,
+                step_started_at: DateTime.utc_now(),
+                meta:
+                  state.meta
+                  |> Map.put(:mr_ref, mr_ref)
+                  |> Map.put(:merger_url, merger_url)
+            }
+
+            start_warden(new_state, workspace, opts)
+            {:reply, {:ok, mr_ref}, new_state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Polecat.open_mr: adapter open failed for bead=#{state.bead_id}: #{inspect(reason)}"
+            )
+
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:open_mr, _branch, _title, _description, _opts},
+        _from,
+        %State{status: status} = state
+      ) do
+    {:reply, {:error, {:invalid_transition, status, :awaiting_review}}, state}
+  end
+
+  def handle_call({:record_merger_status, status_map}, _from, %State{} = state) do
+    meta =
+      state.meta
+      |> Map.put(:last_merger_status, status_map)
+      |> Map.put(:last_checked_at, DateTime.utc_now())
+
+    {:reply, :ok, %State{state | meta: meta}}
+  end
+
+  def handle_call({:complete, result}, _from, %State{status: status} = state)
+      when status in [:running, :awaiting_review] do
     meta =
       case result do
         nil -> state.meta
@@ -479,7 +609,7 @@ defmodule Arbiter.Polecat do
   end
 
   def handle_call({:fail, reason}, _from, %State{status: status} = state)
-      when status in [:idle, :running, :awaiting] do
+      when status in [:idle, :running, :awaiting, :awaiting_review] do
     meta =
       case reason do
         nil -> state.meta
@@ -549,12 +679,17 @@ defmodule Arbiter.Polecat do
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
-      when status not in [:completed, :failed] do
+      when status not in [:completed, :failed, :awaiting_review] do
     # "gt done" detected — complete the polecat regardless of current step.
-    # The guard accepts any non-terminal status (:idle, :running, :awaiting).
+    # The guard accepts most non-terminal statuses (:idle, :running, :awaiting).
     # In claude_driven mode the polecat stays :idle (the Machine is not ticked,
     # so Polecat.advance is never called). Accepting :idle here is intentional
     # and critical for this signal to fire in that mode.
+    #
+    # :awaiting_review is deliberately excluded: once an MR is open the review
+    # gate, not the acolyte's stdout, decides completion. The Warden completes
+    # the polecat when the MR merges. A late "gt done" is ignored (handled by
+    # the catch-all clause below).
     meta = Map.put(state.meta, :result, :claude_done)
     new_state = %State{state | status: :completed, meta: meta}
     record_run_finished(new_state)
@@ -649,7 +784,105 @@ defmodule Arbiter.Polecat do
       status: s.status,
       started_at: s.started_at,
       step_started_at: s.step_started_at,
+      mr_ref: s.mr_ref,
+      merger_url: s.merger_url,
       meta: s.meta
     }
   end
+
+  # ---- merge-request review internals ------------------------------------
+
+  # Resolve {adapter, workspace} for an open_mr/5 call. An explicit `:adapter`
+  # in opts wins (test/advanced override); otherwise resolve from the polecat's
+  # workspace via Arbiter.Mergers.for_workspace/1.
+  defp resolve_merger(%State{} = state, opts) do
+    cond do
+      adapter = Map.get(opts, :adapter) ->
+        {:ok, adapter, Map.get(opts, :workspace)}
+
+      is_binary(state.workspace_id) ->
+        case Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
+          {:ok, ws} -> {:ok, Arbiter.Mergers.for_workspace(ws), ws}
+          _ -> {:error, :workspace_not_found}
+        end
+
+      true ->
+        {:error, :no_workspace}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  # Build the opts map handed to the adapter's open/4. Carries the bead-domain
+  # keys and defaults :repo_path (needed by the Direct adapter) from the
+  # polecat's worktree when the caller didn't supply one.
+  defp build_open_opts(%State{meta: meta}, opts) do
+    opts
+    |> Map.take([:target_branch, :reviewer_ids, :labels, :repo_path])
+    |> Map.put_new_lazy(:repo_path, fn -> Map.get(meta || %{}, :worktree_path) end)
+  end
+
+  defp safe_open(adapter, branch, title, description, open_opts) do
+    adapter.open(branch, title, description, open_opts)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # link_for/1 is best-effort: some adapters resolve the URL from per-process
+  # config (already seeded via Mergers.prepare/1 above). A failure or empty
+  # string just means "no clickable link" — store nil rather than "".
+  defp safe_link_for(adapter, mr_ref) do
+    case adapter.link_for(mr_ref) do
+      url when is_binary(url) and url != "" -> url
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # Spawn the Warden that polls for approval. auto_merge + poll interval come
+  # from the workspace config (opts may override, primarily for tests).
+  defp start_warden(%State{} = state, workspace, opts) do
+    auto_merge =
+      case Map.fetch(opts, :auto_merge) do
+        {:ok, v} -> v
+        :error -> workspace_auto_merge?(workspace)
+      end
+
+    warden_opts =
+      [
+        bead_id: state.bead_id,
+        polecat: self(),
+        mr_ref: state.mr_ref,
+        adapter: state.merger_adapter,
+        workspace: workspace,
+        auto_merge: auto_merge
+      ]
+      |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
+      |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
+
+    case Arbiter.Polecat.Warden.start(warden_opts) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat.open_mr: failed to start Warden for bead=#{state.bead_id}: #{inspect(reason)}"
+        )
+
+        :error
+    end
+  end
+
+  defp workspace_auto_merge?(%Arbiter.Beads.Workspace{} = ws),
+    do: Arbiter.Beads.Workspace.auto_merge?(ws)
+
+  defp workspace_auto_merge?(_), do: false
+
+  defp maybe_opt(opts, _key, nil), do: opts
+  defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)
 end

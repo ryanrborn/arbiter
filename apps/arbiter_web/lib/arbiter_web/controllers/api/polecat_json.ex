@@ -28,6 +28,8 @@ defmodule ArbiterWeb.Api.PolecatJSON do
             current_step: snap.current_step,
             status: snap.status,
             started_at: snap.started_at,
+            mr_ref: Map.get(snap, :mr_ref),
+            merger_url: Map.get(snap, :merger_url),
             pid: inspect(snap.pid)
           }
         end)
@@ -45,6 +47,10 @@ defmodule ArbiterWeb.Api.PolecatJSON do
       status: snap.status,
       started_at: snap.started_at,
       step_started_at: Map.get(snap, :step_started_at),
+      mr_ref: Map.get(snap, :mr_ref),
+      merger_url: Map.get(snap, :merger_url),
+      last_merger_status: Map.get(meta, :last_merger_status),
+      last_checked_at: Map.get(meta, :last_checked_at),
       pid: inspect(snap.pid),
       output_lines: Map.get(meta, :output_lines, []),
       exit_status: Map.get(meta, :exit_status),
