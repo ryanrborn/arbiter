@@ -18,6 +18,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
+  alias Arbiter.Polecat.Warden
   alias Arbiter.Polecats.Run
   alias Arbiter.Vernacular
   alias Arbiter.Workflows.MachineState
@@ -369,7 +370,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
                     ↗ Run history
                   </.link>
                 <% end %>
-                <%= if @snapshot.status in [:idle, :running, :awaiting] do %>
+                <%= if @snapshot.status in [:idle, :running, :awaiting, :awaiting_review] do %>
                   <button
                     phx-click="stop"
                     data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
@@ -381,6 +382,55 @@ defmodule ArbiterWeb.PolecatDetailLive do
               </div>
             </div>
           </section>
+
+          <%= if @snapshot.mr_ref do %>
+            <section class="card bg-base-200 p-4 mb-4" id="merge-review">
+              <h2 class="text-lg font-semibold mb-2">Merge request</h2>
+              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
+                <dt class="font-semibold">MR:</dt>
+                <dd>
+                  <%= if @snapshot.merger_url do %>
+                    <a
+                      href={@snapshot.merger_url}
+                      target="_blank"
+                      rel="noopener"
+                      class="link link-primary"
+                    >
+                      {@snapshot.mr_ref} ↗
+                    </a>
+                  <% else %>
+                    <code>{@snapshot.mr_ref}</code>
+                  <% end %>
+                </dd>
+
+                <% merger_status = Map.get(@snapshot.meta || %{}, :last_merger_status) %>
+                <%= if merger_status do %>
+                  <dt class="font-semibold">Approval:</dt>
+                  <dd>
+                    <span class={["badge badge-sm", approval_class(merger_status)]}>
+                      {approval_label(merger_status)}
+                    </span>
+                  </dd>
+                <% else %>
+                  <dt class="font-semibold">Approval:</dt>
+                  <dd class="text-base-content/60">awaiting first poll…</dd>
+                <% end %>
+
+                <dt class="font-semibold">Poll interval:</dt>
+                <dd>{div(Warden.default_interval_ms(), 1000)}s</dd>
+
+                <dt class="font-semibold">Last checked:</dt>
+                <dd>
+                  <%= case Map.get(@snapshot.meta || %{}, :last_checked_at) do %>
+                    <% %DateTime{} = ts -> %>
+                      {Calendar.strftime(ts, "%Y-%m-%d %H:%M:%S UTC")}
+                    <% _ -> %>
+                      <span class="text-base-content/60">never</span>
+                  <% end %>
+                </dd>
+              </dl>
+            </section>
+          <% end %>
 
           <%= if @machine_state do %>
             <section class="card bg-base-200 p-4 mb-4">
@@ -495,6 +545,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   defp status_class(:idle), do: "badge-ghost"
   defp status_class(:running), do: "badge-info"
   defp status_class(:awaiting), do: "badge-warning"
+  defp status_class(:awaiting_review), do: "badge-warning"
   defp status_class(:completed), do: "badge-success"
   defp status_class(:failed), do: "badge-error"
   defp status_class(_), do: ""
@@ -502,6 +553,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   defp status_label(:idle), do: "Idle"
   defp status_label(:running), do: "Running"
   defp status_label(:awaiting), do: "Awaiting"
+  defp status_label(:awaiting_review), do: "Awaiting review"
   defp status_label(:completed), do: "Completed"
   defp status_label(:failed), do: "Failed"
 
@@ -509,6 +561,22 @@ defmodule ArbiterWeb.PolecatDetailLive do
     do: other |> Atom.to_string() |> String.capitalize()
 
   defp status_label(other), do: to_string(other)
+
+  # Badge color + text for the last Mergers.get/1 result the Warden recorded.
+  defp approval_class(%{status: :merged}), do: "badge-success"
+  defp approval_class(%{status: :closed}), do: "badge-error"
+  defp approval_class(%{approved: true}), do: "badge-success"
+  defp approval_class(_), do: "badge-warning"
+
+  defp approval_label(%{status: :merged}), do: "Merged"
+  defp approval_label(%{status: :closed}), do: "Closed"
+  defp approval_label(%{approved: true}), do: "Approved"
+  defp approval_label(%{status: :open}), do: "Open · awaiting approval"
+
+  defp approval_label(%{status: status}) when is_atom(status),
+    do: status |> Atom.to_string() |> String.capitalize()
+
+  defp approval_label(_), do: "Pending"
 
   # Color a workflow step based on whether it's done, current, or upcoming.
   defp step_class(step, %MachineState{completed_steps: completed, current_step: current}) do
