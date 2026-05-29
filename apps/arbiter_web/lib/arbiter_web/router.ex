@@ -26,6 +26,7 @@ defmodule ArbiterWeb.Router do
       ] do
       live("/", DashboardLive)
       live("/settings/vernacular", GlobalVernacularLive)
+      live("/workspace/:id/settings/vernacular", WorkspaceVernacularLive)
       live("/audit", AuditLogLive)
       live("/polecats/history/:id", RunDetailLive)
       live("/polecats/:bead_id", PolecatDetailLive)
