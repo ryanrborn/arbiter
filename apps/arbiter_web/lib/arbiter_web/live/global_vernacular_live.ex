@@ -99,86 +99,136 @@ defmodule ArbiterWeb.GlobalVernacularLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path}>
-    <div class="p-6 max-w-6xl mx-auto">
-      <h1 class="text-2xl font-bold mb-1">Vernacular settings</h1>
-      <p class="text-sm text-base-content/70 mb-6">
-        Global — applies across all workspaces.
-      </p>
-
-      <div class="grid grid-cols-2 gap-6">
-        <div>
-          <h2 class="text-lg font-semibold mb-2">JSON editor</h2>
-          <form phx-change="update_json" phx-submit="save">
-            <textarea
-              name="vernacular[json]"
-              rows="20"
-              class="textarea textarea-bordered w-full font-mono text-sm"
-              phx-debounce="200"
-            >{@json_input}</textarea>
-
-            <%= if @json_error do %>
-              <div class="alert alert-error mt-2 text-sm">{@json_error}</div>
-            <% end %>
-
-            <div class="flex gap-2 mt-3">
-              <button type="submit" class="btn btn-primary" disabled={not is_nil(@json_error)}>
-                Save
-              </button>
-              <button type="button" phx-click="reset" class="btn btn-ghost">
-                Reset to defaults
-              </button>
-              <%= if @saved_at do %>
-                <span class="text-xs text-success self-center">
-                  saved {Calendar.strftime(@saved_at, "%H:%M:%S UTC")}
-                </span>
-              <% end %>
-            </div>
-          </form>
+      <div class="p-6 max-w-7xl mx-auto space-y-6">
+        <%!-- ── Header ───────────────────────────────────────────────── --%>
+        <div class="flex items-center gap-3">
+          <.icon name="hero-language" class="size-7 text-primary" />
+          <div>
+            <h1 class="text-2xl font-bold tracking-tight">Vernacular settings</h1>
+            <p class="text-sm text-base-content/60">
+              Global — applies across all workspaces.
+            </p>
+          </div>
         </div>
 
-        <div>
-          <h2 class="text-lg font-semibold mb-2">Preview</h2>
-          <table class="table table-sm">
-            <thead>
-              <tr>
-                <th>Internal</th>
-                <th>Your label</th>
-              </tr>
-            </thead>
-            <tbody>
-              <%= for key <- Vernacular.keys() do %>
-                <tr>
-                  <td><code class="text-xs">{Atom.to_string(key)}</code></td>
-                  <td>
-                    {Map.get(@preview, Atom.to_string(key), Vernacular.defaults()[key])}
-                  </td>
-                </tr>
-              <% end %>
-            </tbody>
-          </table>
+        <%!-- ── Editor / Preview ─────────────────────────────────────── --%>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <%!-- JSON editor --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-6 gap-4">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-code-bracket" class="size-5 text-primary" /> JSON editor
+              </h2>
 
-          <%= if (Map.get(@preview, "aliases") || %{}) != %{} do %>
-            <h3 class="text-sm font-semibold mt-4">Aliases</h3>
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th>Alias</th>
-                  <th>Canonical</th>
-                </tr>
-              </thead>
-              <tbody>
-                <%= for {alias_, canonical} <- Map.get(@preview, "aliases", %{}) do %>
-                  <tr>
-                    <td><code class="text-xs">{alias_}</code></td>
-                    <td><code class="text-xs">{canonical}</code></td>
-                  </tr>
-                <% end %>
-              </tbody>
-            </table>
-          <% end %>
+              <form phx-change="update_json" phx-submit="save" class="flex flex-col gap-4">
+                <textarea
+                  name="vernacular[json]"
+                  rows="20"
+                  class={[
+                    "textarea textarea-bordered w-full font-mono text-sm leading-relaxed bg-base-100",
+                    "focus-visible:ring-2 focus-visible:ring-primary transition-colors duration-150",
+                    @json_error && "textarea-error"
+                  ]}
+                  phx-debounce="200"
+                >{@json_input}</textarea>
+
+                <div :if={@json_error} class="alert alert-error text-sm py-2">
+                  <.icon name="hero-exclamation-triangle" class="size-4 shrink-0" />
+                  <span>{@json_error}</span>
+                </div>
+
+                <div class="flex flex-wrap items-center gap-3">
+                  <.button
+                    type="submit"
+                    class="btn-primary active:scale-95 transition-transform duration-150"
+                    disabled={not is_nil(@json_error)}
+                  >
+                    <.icon name="hero-check" class="size-4" /> Save
+                  </.button>
+                  <.button
+                    type="button"
+                    phx-click="reset"
+                    class="btn-ghost active:scale-95 transition-transform duration-150"
+                  >
+                    <.icon name="hero-arrow-path" class="size-4" /> Reset to defaults
+                  </.button>
+
+                  <span
+                    :if={@saved_at}
+                    class="ml-auto inline-flex items-center gap-1.5 text-sm font-medium text-success"
+                  >
+                    <.icon name="hero-check-circle" class="size-5" />
+                    saved {Calendar.strftime(@saved_at, "%H:%M:%S UTC")}
+                  </span>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <%!-- Preview --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-6 gap-4">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-eye" class="size-5 text-info" /> Preview
+              </h2>
+
+              <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+                <table class="table table-sm">
+                  <thead>
+                    <tr>
+                      <th>Internal</th>
+                      <th>Your label</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr :for={key <- Vernacular.keys()} class="hover:bg-base-200/50">
+                      <td>
+                        <code class="text-xs px-1.5 py-0.5 rounded bg-base-200 text-base-content/70">
+                          {Atom.to_string(key)}
+                        </code>
+                      </td>
+                      <td class="font-medium">
+                        {Map.get(@preview, Atom.to_string(key), Vernacular.defaults()[key])}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div :if={(Map.get(@preview, "aliases") || %{}) != %{}} class="flex flex-col gap-2">
+                <h3 class="text-sm font-medium text-base-content/70">Aliases</h3>
+                <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+                  <table class="table table-sm">
+                    <thead>
+                      <tr>
+                        <th>Alias</th>
+                        <th>Canonical</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        :for={{alias_, canonical} <- Map.get(@preview, "aliases", %{})}
+                        class="hover:bg-base-200/50"
+                      >
+                        <td>
+                          <code class="text-xs px-1.5 py-0.5 rounded bg-base-200 text-base-content/70">
+                            {alias_}
+                          </code>
+                        </td>
+                        <td>
+                          <code class="text-xs px-1.5 py-0.5 rounded bg-base-200 text-base-content/70">
+                            {canonical}
+                          </code>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
-    </div>
     </Layouts.app>
     """
   end

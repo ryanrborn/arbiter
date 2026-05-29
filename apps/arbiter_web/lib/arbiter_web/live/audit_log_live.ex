@@ -177,102 +177,148 @@ defmodule ArbiterWeb.AuditLogLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path}>
-    <div class="p-6 max-w-7xl mx-auto" id="audit-log" phx-hook="DownloadOnEvent">
-      <h1 class="text-2xl font-bold mb-4">Audit log</h1>
-      <p class="text-sm text-base-content/70 mb-6">
-        Showing the {length(@versions)} most recent bead changes (max 500). Sourced
-        from <code>ash_paper_trail</code> versions on
-        <code>Arbiter.Beads.Issue</code>.
-      </p>
-
-      <form phx-change="filter" phx-submit="filter" class="card bg-base-200 p-4 mb-6">
-        <div class="grid grid-cols-4 gap-4">
-          <label class="form-control">
-            <span class="label-text">Since</span>
-            <input
-              type="date"
-              name="filters[since]"
-              value={iso_or_blank(@filters.since)}
-              class="input input-bordered input-sm"
-            />
-          </label>
-          <label class="form-control">
-            <span class="label-text">Until</span>
-            <input
-              type="date"
-              name="filters[until]"
-              value={iso_or_blank(@filters.until)}
-              class="input input-bordered input-sm"
-            />
-          </label>
-          <label class="form-control">
-            <span class="label-text">Bead id contains</span>
-            <input
-              type="text"
-              name="filters[entity_id]"
-              value={@filters.entity_id}
-              placeholder="gte- · hq- · …"
-              class="input input-bordered input-sm"
-            />
-          </label>
-          <label class="form-control">
-            <span class="label-text">Action</span>
-            <select name="filters[action]" class="select select-bordered select-sm">
-              <%= for opt <- ~w(all create update close reopen) do %>
-                <option value={opt} selected={@filters.action == opt}>{opt}</option>
-              <% end %>
-            </select>
-          </label>
+      <div class="p-6 max-w-7xl mx-auto space-y-6" id="audit-log" phx-hook="DownloadOnEvent">
+        <%!-- ── Header ───────────────────────────────────────────────── --%>
+        <div>
+          <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2">
+            <.icon name="hero-clock" class="size-6 text-base-content/70" /> Audit log
+          </h1>
+          <p class="text-sm text-base-content/60 mt-1">
+            {length(@versions)} most recent directive changes (max 500), sourced from
+            <code class="text-xs">ash_paper_trail</code>
+            versions on <code class="text-xs">Arbiter.Beads.Issue</code>.
+          </p>
         </div>
 
-        <div class="flex gap-2 mt-3">
-          <button type="button" phx-click="reset" class="btn btn-sm btn-ghost">
-            Reset
-          </button>
-          <button type="button" phx-click="export" class="btn btn-sm btn-primary">
-            Export as JSON
-          </button>
-        </div>
-      </form>
-
-      <table class="table table-zebra table-sm">
-        <thead>
-          <tr>
-            <th>When</th>
-            <th>Bead</th>
-            <th>Action</th>
-            <th>Changes</th>
-          </tr>
-        </thead>
-        <tbody>
-          <%= for v <- @versions do %>
-            <tr>
-              <td class="text-xs whitespace-nowrap">
-                {Calendar.strftime(v.version_inserted_at, "%Y-%m-%d %H:%M:%S")}
-              </td>
-              <td>
-                <code class="text-xs">{v.version_source_id}</code>
-              </td>
-              <td>
-                <span class={action_badge_class(v.version_action_name)}>
-                  {v.version_action_name}
+        <%!-- ── Filter bar ───────────────────────────────────────────── --%>
+        <form
+          phx-change="filter"
+          phx-submit="filter"
+          class="card bg-base-200 border border-base-300 shadow-sm"
+        >
+          <div class="card-body p-4 gap-4">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <label class="form-control">
+                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
+                  <.icon name="hero-calendar-days" class="size-3.5" /> Since
                 </span>
-              </td>
-              <td class="text-xs">
-                {format_changes(v.changes)}
-              </td>
-            </tr>
-          <% end %>
-          <%= if @versions == [] do %>
-            <tr>
-              <td colspan="4" class="text-center text-base-content/50 italic py-6">
-                No matching audit events.
-              </td>
-            </tr>
-          <% end %>
-        </tbody>
-      </table>
-    </div>
+                <input
+                  type="date"
+                  name="filters[since]"
+                  value={iso_or_blank(@filters.since)}
+                  class="input input-bordered input-sm w-full"
+                />
+              </label>
+              <label class="form-control">
+                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
+                  <.icon name="hero-calendar-days" class="size-3.5" /> Until
+                </span>
+                <input
+                  type="date"
+                  name="filters[until]"
+                  value={iso_or_blank(@filters.until)}
+                  class="input input-bordered input-sm w-full"
+                />
+              </label>
+              <label class="form-control">
+                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
+                  <.icon name="hero-hashtag" class="size-3.5" /> Bead id contains
+                </span>
+                <input
+                  type="text"
+                  name="filters[entity_id]"
+                  value={@filters.entity_id}
+                  placeholder="gte- · hq- · …"
+                  class="input input-bordered input-sm w-full"
+                />
+              </label>
+              <label class="form-control">
+                <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
+                  <.icon name="hero-funnel" class="size-3.5" /> Action
+                </span>
+                <select name="filters[action]" class="select select-bordered select-sm w-full">
+                  <option
+                    :for={opt <- ~w(all create update close reopen)}
+                    value={opt}
+                    selected={@filters.action == opt}
+                  >
+                    {opt}
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-base-300 mt-1">
+              <button
+                type="button"
+                phx-click="reset"
+                class="btn btn-sm btn-ghost gap-1.5 active:scale-95 transition-transform"
+              >
+                <.icon name="hero-arrow-path" class="size-4" /> Reset
+              </button>
+              <div class="flex-1"></div>
+              <button
+                type="button"
+                phx-click="export"
+                class="btn btn-sm btn-primary gap-1.5 active:scale-95 transition-transform"
+              >
+                <.icon name="hero-arrow-down-tray" class="size-4" /> Export as JSON
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <%!-- ── Event stream ─────────────────────────────────────────── --%>
+        <section class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <div
+              :if={@versions == []}
+              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-8 text-center"
+            >
+              <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
+              <p class="mt-2 text-sm text-base-content/60">No matching audit events.</p>
+            </div>
+
+            <ol :if={@versions != []} id="audit-stream" class="relative flex flex-col">
+              <li
+                :for={v <- @versions}
+                class="group relative flex gap-3 pb-4 last:pb-0 pl-1 transition-colors duration-150"
+              >
+                <%!-- timeline rail + node --%>
+                <div class="relative flex flex-col items-center shrink-0">
+                  <span class={[
+                    "z-10 flex items-center justify-center size-8 rounded-full ring-4 ring-base-200",
+                    action_dot_class(v.version_action_name)
+                  ]}>
+                    <.icon name={action_icon(v.version_action_name)} class="size-4" />
+                  </span>
+                  <span class="absolute top-8 bottom-0 w-px bg-base-300"></span>
+                </div>
+
+                <%!-- event body --%>
+                <div class="min-w-0 flex-1 -mt-0.5 rounded-box bg-base-100 border border-base-300 px-3 py-2 transition-colors duration-150 group-hover:border-base-content/20">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class={action_badge_class(v.version_action_name)}>
+                      {v.version_action_name}
+                    </span>
+                    <code class="text-xs text-base-content/70">{v.version_source_id}</code>
+                    <span class="flex-1"></span>
+                    <span class="text-xs text-base-content/50 font-mono tabular-nums whitespace-nowrap">
+                      {Calendar.strftime(v.version_inserted_at, "%Y-%m-%d %H:%M:%S")}
+                    </span>
+                  </div>
+                  <p
+                    :if={format_changes(v.changes) != ""}
+                    class="mt-1 text-xs text-base-content/70 font-mono break-words"
+                  >
+                    {format_changes(v.changes)}
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
+        </section>
+      </div>
     </Layouts.app>
     """
   end
@@ -284,6 +330,17 @@ defmodule ArbiterWeb.AuditLogLive do
   defp action_badge_class(:close), do: "badge badge-neutral"
   defp action_badge_class(:reopen), do: "badge badge-warning"
   defp action_badge_class(_), do: "badge badge-info"
+
+  # Filled timeline-node color per audit action (mirrors action_badge_class/1).
+  defp action_dot_class(:create), do: "bg-success text-success-content"
+  defp action_dot_class(:close), do: "bg-neutral text-neutral-content"
+  defp action_dot_class(:reopen), do: "bg-warning text-warning-content"
+  defp action_dot_class(_), do: "bg-info text-info-content"
+
+  defp action_icon(:create), do: "hero-plus-circle"
+  defp action_icon(:close), do: "hero-lock-closed"
+  defp action_icon(:reopen), do: "hero-arrow-path"
+  defp action_icon(_), do: "hero-pencil-square"
 
   defp format_changes(changes) when is_map(changes) do
     changes
