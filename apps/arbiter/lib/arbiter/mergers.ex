@@ -1,0 +1,61 @@
+defmodule Arbiter.Mergers do
+  @moduledoc """
+  Entry point for merge-strategy calls.
+
+  Reads a workspace's `config["merge"]["strategy"]`, resolves the adapter, and
+  hands back the module. Callers should generally resolve through this module
+  rather than referencing a specific adapter directly — keeps adapter
+  resolution centralized so workspace defaults behave consistently.
+
+  Mirrors `Arbiter.Trackers`. The `Direct` adapter ships now; `:gitlab` and
+  `:github` are added in later directives.
+
+  ## Resolution rule
+
+  The strategy is an atom resolved from the workspace via
+  `Arbiter.Beads.Workspace.merger_strategy/1` (which reads
+  `config["merge"]["strategy"]`, falling back to `:direct`).
+  """
+
+  alias Arbiter.Beads.Workspace
+  alias Arbiter.Mergers.Direct
+
+  @type adapter :: module()
+
+  @adapters %{
+    direct: Direct
+    # :gitlab, :github wired up in later directives
+  }
+
+  @doc """
+  Returns the adapter module for the given workspace.
+
+  Resolves `Workspace.merger_strategy/1` and looks it up in `adapters/0`.
+  """
+  @spec for_workspace(Workspace.t()) :: adapter
+  def for_workspace(%Workspace{} = workspace),
+    do: for_strategy(Workspace.merger_strategy(workspace))
+
+  @doc """
+  Returns the adapter module for a merger strategy atom.
+
+  Raises if the strategy has no adapter registered (i.e. a strategy the
+  codebase knows about but hasn't shipped yet).
+  """
+  @spec for_strategy(atom()) :: adapter
+  def for_strategy(strategy) when is_atom(strategy) do
+    case Map.fetch(@adapters, strategy) do
+      {:ok, mod} ->
+        mod
+
+      :error ->
+        raise ArgumentError,
+              "no merger adapter registered for #{inspect(strategy)} " <>
+                "(registered: #{inspect(Map.keys(@adapters))})"
+    end
+  end
+
+  @doc "Returns the map of strategy → adapter module."
+  @spec adapters() :: %{atom() => adapter}
+  def adapters, do: @adapters
+end
