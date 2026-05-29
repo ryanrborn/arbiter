@@ -14,57 +14,37 @@ defmodule ArbiterCli.AliasResolverTest do
 
   describe "resolve/1 — alias lookup" do
     test "aliased verb resolves to its canonical when canonical is built-in" do
-      stub_get("/api/workspaces", %{
-        "data" => [
-          %{
-            "id" => "ws-1",
-            "name" => "default",
-            "config" => %{
-              "vernacular" => %{"aliases" => %{"deploy" => "close"}}
-            }
-          }
-        ]
+      stub_get("/api/settings", %{
+        "data" => %{
+          "vernacular" => %{"aliases" => %{"deploy" => "close"}}
+        }
       })
 
       assert {:ok, "close"} = AliasResolver.resolve("deploy")
     end
 
     test "alias mapping to a non-built-in canonical is treated as unknown" do
-      stub_get("/api/workspaces", %{
-        "data" => [
-          %{
-            "id" => "ws-1",
-            "name" => "default",
-            "config" => %{
-              "vernacular" => %{"aliases" => %{"deploy" => "fly"}}
-            }
-          }
-        ]
+      stub_get("/api/settings", %{
+        "data" => %{
+          "vernacular" => %{"aliases" => %{"deploy" => "fly"}}
+        }
       })
 
       assert {:unknown, _} = AliasResolver.resolve("deploy")
     end
 
     test "unknown verb with no aliases returns built-in suggestions" do
-      stub_get("/api/workspaces", %{
-        "data" => [%{"id" => "ws-1", "name" => "default", "config" => %{}}]
-      })
+      stub_get("/api/settings", %{"data" => %{"vernacular" => %{}}})
 
       assert {:unknown, suggestions} = AliasResolver.resolve("clse")
       assert "close" in suggestions
     end
 
     test "unknown verb with aliases returns built-ins + alias keys as candidates" do
-      stub_get("/api/workspaces", %{
-        "data" => [
-          %{
-            "id" => "ws-1",
-            "name" => "default",
-            "config" => %{
-              "vernacular" => %{"aliases" => %{"deploy" => "close", "muster" => "ready"}}
-            }
-          }
-        ]
+      stub_get("/api/settings", %{
+        "data" => %{
+          "vernacular" => %{"aliases" => %{"deploy" => "close", "muster" => "ready"}}
+        }
       })
 
       assert {:unknown, suggestions} = AliasResolver.resolve("deplo")
@@ -72,7 +52,7 @@ defmodule ArbiterCli.AliasResolverTest do
     end
 
     test "workspace lookup failure: falls back to built-in suggestions" do
-      stub_get("/api/workspaces", %{"error" => "boom"}, 500)
+      stub_get("/api/settings", %{"error" => "boom"}, 500)
 
       assert {:unknown, suggestions} = AliasResolver.resolve("clse")
       assert "close" in suggestions

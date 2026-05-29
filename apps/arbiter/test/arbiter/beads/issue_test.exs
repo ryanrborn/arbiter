@@ -218,7 +218,7 @@ defmodule Arbiter.Beads.IssueTest do
     end
 
     test "tracker_types/0" do
-      assert Issue.tracker_types() == ~w(none jira linear github)a
+      assert Issue.tracker_types() == ~w(none jira shortcut linear github)a
     end
   end
 
