@@ -16,6 +16,7 @@ defmodule Arbiter.Application do
         {Phoenix.PubSub, name: Arbiter.PubSub},
         {Registry, keys: :unique, name: Arbiter.Polecat.Registry},
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Polecat.Supervisor},
+        {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Polecat.WardenSupervisor},
         {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
         {Registry, keys: :unique, name: Arbiter.Workflows.RefineryRegistry},
