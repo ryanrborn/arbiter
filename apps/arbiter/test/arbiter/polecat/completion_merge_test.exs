@@ -92,7 +92,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
       if Process.alive?(result.polecat_pid), do: GenServer.stop(result.polecat_pid, :normal)
     end)
 
-    # The acolyte commits on the branch, prints "gt done"; the polecat opens the
+    # The acolyte commits on the branch, prints "arb done"; the polecat opens the
     # MR (Direct merges synchronously) and the Warden completes it.
     wait_until(fn ->
       match?(%{status: :completed}, Polecat.state(result.polecat_pid))
@@ -136,7 +136,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Polecat.advance(pid, :claude)
 
-    send(pid, {:__claude_session_done__, "gt done"})
+    send(pid, {:__claude_session_done__, "arb done"})
 
     wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
 

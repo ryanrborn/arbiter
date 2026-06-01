@@ -13,7 +13,9 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
 
     Process.sleep(50)
 
-    {:ok, ws} = Ash.create(Workspace, %{name: "pd-ws-#{System.unique_integer([:positive])}", prefix: "pd"})
+    {:ok, ws} =
+      Ash.create(Workspace, %{name: "pd-ws-#{System.unique_integer([:positive])}", prefix: "pd"})
+
     {:ok, ws: ws}
   end
 
@@ -21,14 +23,14 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
     test "renders the snapshot for a running polecat", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-test", workspace_id: ws.id})
       {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
-      :ok = Polecat.report(pid, :output_lines, ["hello", "world", "gt done"])
+      :ok = Polecat.report(pid, :output_lines, ["hello", "world", "arb done"])
 
       {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
 
       assert html =~ bead.id
       assert html =~ "test/rig"
       assert html =~ "hello"
-      assert html =~ "gt done"
+      assert html =~ "arb done"
     end
 
     test "tells the user when no polecat is registered", %{conn: conn} do
