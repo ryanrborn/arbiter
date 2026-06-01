@@ -143,10 +143,10 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
 
       assert "starting fake claude session" in lines
       assert "doing important work" in lines
-      assert "gt done" in lines
+      assert "arb done" in lines
       # Order is preserved (oldest first).
       assert Enum.find_index(lines, &(&1 == "starting fake claude session")) <
-               Enum.find_index(lines, &(&1 == "gt done"))
+               Enum.find_index(lines, &(&1 == "arb done"))
     end
 
     test "broadcasts :polecat_output on the configured topic" do
@@ -166,7 +166,7 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
 
       assert_receive {:polecat_output, ^bead_id, "starting fake claude session"}, 2_000
       assert_receive {:polecat_output, ^bead_id, "doing important work"}, 2_000
-      assert_receive {:polecat_output, ^bead_id, "gt done"}, 2_000
+      assert_receive {:polecat_output, ^bead_id, "arb done"}, 2_000
     end
 
     test "default topic is polecat:<bead_id> when :topic not provided" do
@@ -187,7 +187,7 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
   end
 
   describe "completion detection" do
-    test "a line matching ~r/\\bgt done\\b/ triggers Polecat.complete/2" do
+    test "a line matching ~r/\\barb done\\b/ triggers Polecat.complete/2" do
       {pid, _bead_id} = start_polecat()
       cwd = tmp_dir!("cs-done")
 
@@ -217,7 +217,7 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
         ClaudeSession.start(owner: pid, worktree_path: cwd, command: [@fixture])
 
       # claude_driven mode keeps the polecat at :idle (the Machine is not
-      # ticked, so advance/2 is never called). The "gt done" signal must
+      # ticked, so advance/2 is never called). The "arb done" signal must
       # still complete the polecat from :idle.
       status =
         eventually(fn ->
@@ -229,6 +229,36 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
 
       assert status == :completed
       assert Polecat.state(pid).meta.result == :claude_done
+    end
+
+    test "a prose line that only mentions the marker as a substring does not trip" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-no-trip")
+
+      :ok = Polecat.advance(pid, :implement)
+
+      # "arb doneness" embeds "arb done" but a word char follows "done", so the
+      # word-bounded regex must NOT match. The child exits 0 without ever
+      # printing the bare marker.
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "echo 'discussing arb doneness in the abstract'; exit 0"]
+        )
+
+      # Wait until the child has exited — by then all output is processed.
+      eventually(fn ->
+        case Polecat.state(pid).meta do
+          %{exit_status: s} when not is_nil(s) -> s
+          _ -> nil
+        end
+      end)
+
+      # The prose line is buffered, but it never flipped the polecat to
+      # :completed (it stayed in the :running state from the advance above).
+      refute Polecat.state(pid).status == :completed
+      assert "discussing arb doneness in the abstract" in Polecat.state(pid).meta.output_lines
     end
   end
 

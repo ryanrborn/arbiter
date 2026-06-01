@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
         "current_step" => "implement",
         "rig" => "test/rig",
         "started_at" => "2026-05-20T19:00:00Z",
-        "output_lines" => ["hello", "world", "gt done"]
+        "output_lines" => ["hello", "world", "arb done"]
       })
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["show", "bd-001"]) end)
@@ -19,7 +19,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
       assert out =~ "bd-001"
       assert out =~ "running"
       assert out =~ "hello"
-      assert out =~ "gt done"
+      assert out =~ "arb done"
     end
 
     test "missing bead_id returns a friendly error" do

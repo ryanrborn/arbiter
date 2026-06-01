@@ -144,7 +144,7 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Seed the polecat's :meta with everything its completion path needs to
-  # integrate the branch when the acolyte finishes (see the gt-done handler in
+  # integrate the branch when the acolyte finishes (see the arb-done handler in
   # `Arbiter.Polecat`).
   #
   # When a worktree was provisioned we know the per-bead branch and the rig
@@ -299,7 +299,7 @@ defmodule Arbiter.Polecat.Sling do
             # Move the polecat out of :idle so UI/CLI report a meaningful
             # status while Claude works. In claude_driven mode the Driver
             # never ticks the Machine, so without this nudge the polecat
-            # would remain :idle until "gt done" flipped it to :completed.
+            # would remain :idle until "arb done" flipped it to :completed.
             _ = Polecat.advance(polecat_pid, :claude)
             {:ok, port}
 
@@ -336,7 +336,7 @@ defmodule Arbiter.Polecat.Sling do
 
     When you are completely done, print the line:
 
-        gt done
+        arb done
 
     on a line by itself, exactly. The polecat watches your stdout and
     will mark the bead complete when it sees that marker.

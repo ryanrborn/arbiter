@@ -8,7 +8,7 @@ defmodule ArbiterWeb.Api.PolecatController do
 
     * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `with_claude`).
       Without `with_claude` the bead parks in `:in_progress` (no Driver); with
-      it, a Claude subprocess works the bead and the Driver closes it on `gt done`.
+      it, a Claude subprocess works the bead and the Driver closes it on `arb done`.
     * `GET  /api/polecats`                 — :index (list active polecats)
     * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output)
     * `POST /api/polecats/:bead_id/stop`   — :stop (terminate polecat cleanly)
