@@ -23,7 +23,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
 
       # Simulate Claude output flowing through the polecat.
-      :ok = Polecat.report(polecat_pid, :output_lines, ["hello", "world", "gt done"])
+      :ok = Polecat.report(polecat_pid, :output_lines, ["hello", "world", "arb done"])
 
       conn = get(conn, ~p"/api/polecats/#{bead.id}")
       body = json_response(conn, 200)
@@ -31,7 +31,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       assert body["bead_id"] == bead.id
       assert body["rig"] == "test/rig"
       assert body["status"] in ["idle", "running", "awaiting", "completed", "failed"]
-      assert body["output_lines"] == ["hello", "world", "gt done"]
+      assert body["output_lines"] == ["hello", "world", "arb done"]
     end
 
     test "returns 404 for an unknown bead_id", %{conn: conn} do
