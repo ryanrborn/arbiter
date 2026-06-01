@@ -84,7 +84,7 @@ defmodule Arbiter.Polecat.Sling do
          :ok <- ensure_not_closed(bead),
          {:ok, bead} <- transition_to_in_progress(bead),
          {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
-         {:ok, polecat_pid} <- start_polecat(bead, opts),
+         {:ok, polecat_pid} <- start_polecat(bead, worktree_path, opts),
          {:ok, claude_port} <-
            maybe_start_claude(bead, polecat_pid, worktree_path, opts),
          {:ok, machine_id, machine_pid} <-
@@ -125,10 +125,11 @@ defmodule Arbiter.Polecat.Sling do
     end
   end
 
-  defp start_polecat(%Issue{id: id, workspace_id: ws_id} = _bead, opts) do
+  defp start_polecat(%Issue{id: id, workspace_id: ws_id} = bead, worktree_path, opts) do
     rig = Keyword.get(opts, :rig) || "unknown"
+    meta = build_polecat_meta(bead, worktree_path, opts)
 
-    case Polecat.start(bead_id: id, rig: rig, workspace_id: ws_id) do
+    case Polecat.start(bead_id: id, rig: rig, workspace_id: ws_id, meta: meta) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -141,6 +142,37 @@ defmodule Arbiter.Polecat.Sling do
         {:error, {:polecat_start_failed, reason}}
     end
   end
+
+  # Seed the polecat's :meta with everything its completion path needs to
+  # integrate the branch when the acolyte finishes (see the gt-done handler in
+  # `Arbiter.Polecat`).
+  #
+  # When a worktree was provisioned we know the per-bead branch and the rig
+  # path (the local checkout where the target branch lives — the `repo_path`
+  # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
+  # (rig unconfigured, or `provision_worktree: false`) there is nothing to
+  # merge, so `:branch` stays absent and completion is a plain bead close.
+  defp build_polecat_meta(%Issue{} = bead, worktree_path, opts) do
+    base = %{worktree_path: worktree_path}
+
+    case worktree_path && resolve_rig_path(bead, Keyword.get(opts, :rig)) do
+      repo_path when is_binary(repo_path) ->
+        Map.merge(base, %{
+          branch: BranchNamer.derive(bead),
+          repo_path: repo_path,
+          target_branch: Keyword.get(opts, :base_branch, "main"),
+          merge_title: merge_title(bead)
+        })
+
+      _ ->
+        base
+    end
+  end
+
+  defp merge_title(%Issue{id: id, title: title}) when is_binary(title) and title != "",
+    do: "Merge #{id}: #{title}"
+
+  defp merge_title(%Issue{id: id}), do: "Merge #{id}"
 
   defp attach_and_start_machine(%Issue{id: id}, worktree_path, opts) do
     workflow = Keyword.get(opts, :workflow_module, Work)

@@ -33,7 +33,9 @@ defmodule Arbiter.Polecat.Driver do
   - On each check: reads polecat status:
     - `:completed` → close the bead, optionally cleanup worktree, stop.
     - `:failed` → log, stop (bead remains `:in_progress` for inspection).
-    - `:idle | :running | :awaiting` → schedule next check.
+    - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
+      (`:awaiting_review` is the brief window after the acolyte's `gt done`
+      opens an MR; the Warden, not the Driver, drives it to terminal).
 
   ## Shared lifecycle
 
@@ -159,7 +161,11 @@ defmodule Arbiter.Polecat.Driver do
 
         {:stop, :normal, state}
 
-      %{status: status} when status in [:idle, :running, :awaiting] ->
+      %{status: status} when status in [:idle, :running, :awaiting, :awaiting_review] ->
+        # :awaiting_review means the acolyte finished and the merger opened an
+        # MR (Direct merges immediately and parks here until its Warden's first
+        # poll). The Warden owns the terminal transition, so we keep waiting —
+        # the next status will be :completed or :failed.
         Process.send_after(self(), :check_polecat, state.interval_ms)
         {:noreply, %{state | ticks: state.ticks + 1}}
 
