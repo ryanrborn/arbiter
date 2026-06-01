@@ -170,14 +170,14 @@ defmodule Arbiter.PolecatTest do
       assert :ok = Polecat.complete(pid)
     end
 
-    test "claude-session 'gt done' marker also broadcasts polecat_done" do
+    test "claude-session 'arb done' marker also broadcasts polecat_done" do
       ws_id = "ws-claude-#{System.unique_integer([:positive])}"
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:done:" <> ws_id)
 
       {pid, bead_id} = start_polecat(workspace_id: ws_id)
       :ok = Polecat.advance(pid, :run_claude)
 
-      send(pid, {:__claude_session_done__, "gt done"})
+      send(pid, {:__claude_session_done__, "arb done"})
 
       assert_receive {:polecat_done, ^bead_id}, 500
       assert Polecat.state(pid).status == :completed
