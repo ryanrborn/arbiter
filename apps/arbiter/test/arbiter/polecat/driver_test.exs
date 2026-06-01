@@ -182,7 +182,7 @@ defmodule Arbiter.Polecat.DriverTest do
       Process.sleep(50)
       assert Machine.status(machine_pid) == :idle
 
-      # Simulate Claude printing "gt done": advance polecat then complete it.
+      # Simulate Claude printing "arb done": advance polecat then complete it.
       :ok = Polecat.advance(polecat_pid, :running)
       :ok = Polecat.complete(polecat_pid, :claude_done)
 

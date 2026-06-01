@@ -186,7 +186,7 @@ defmodule Arbiter.Polecat.SlingTest do
       # Sling must have nudged the polecat out of :idle so the UI/CLI
       # report a meaningful status while Claude works. In claude_driven
       # mode the Driver never ticks the Machine, so without this nudge
-      # the polecat would stay :idle until "gt done" fires.
+      # the polecat would stay :idle until "arb done" fires.
       snap = Polecat.state(result.polecat_pid)
       assert snap.status == :running
       assert snap.current_step == :claude

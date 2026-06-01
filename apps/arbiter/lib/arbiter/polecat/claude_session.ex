@@ -22,7 +22,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
       polecat handle_info({port, ...})
         │   • append line to meta[:output_lines]   (cap @line_cap)
         │   • Phoenix.PubSub.broadcast {:polecat_output, bead_id, line}
-        │   • on "gt done" → Polecat.complete(self())
+        │   • on "arb done" → Polecat.complete(self())
         │   • on {:exit_status, n} → meta[:exit_status], broadcast :polecat_exited
         ▼
 
@@ -35,10 +35,10 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
   ## Completion detection
 
-  Any output line matching `~r/\\bgt done\\b/` triggers `Polecat.complete/2`.
-  The regex is intentionally word-bounded so the substring "gt doneness" or a
-  prose mention "running gt done-style flows" doesn't trip it — but a literal
-  marker line like `gt done` (or `>> gt done <<`) does. Reviewers: this is the
+  Any output line matching `~r/\\barb done\\b/` triggers `Polecat.complete/2`.
+  The regex is intentionally word-bounded so the substring "arb doneness"
+  doesn't trip it — but a literal marker line like `arb done` (or
+  `>> arb done <<`) does. Reviewers: this is the
   detection surface for false positives in real Claude output; tighten if
   needed (e.g. anchor to start-of-line) once we see real transcripts.
 
@@ -60,7 +60,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
   alias Arbiter.Polecat
 
   @line_cap 1000
-  @done_regex ~r/\bgt done\b/
+  @done_regex ~r/\barb done\b/
 
   @typedoc "Accepted options for `start/1`."
   @type opt ::

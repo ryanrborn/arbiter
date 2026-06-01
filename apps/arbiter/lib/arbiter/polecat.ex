@@ -32,17 +32,17 @@ defmodule Arbiter.Polecat do
   workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
   MR, stores the `mr_ref` + clickable `merger_url` on the polecat, transitions
   to `:awaiting_review`, and spawns an `Arbiter.Polecat.Warden` to poll for
-  approval. The Warden — not the acolyte's `gt done` — owns the terminal
+  approval. The Warden — not the acolyte's `arb done` — owns the terminal
   transition: it completes the polecat when the MR merges, or fails it when the
   MR is closed. See `Arbiter.Polecat.Warden`.
 
-  This is also the path the `gt done` marker takes in claude-driven mode: when
+  This is also the path the `arb done` marker takes in claude-driven mode: when
   the polecat knows its branch (a worktree was provisioned at sling time) the
   marker triggers the same `open_mr` flow rather than closing the bead
   directly. For the default `Direct` strategy the merge (`git merge --no-ff`)
   runs immediately, so the branch reaches the target line before the bead
   closes. A merge failure fails the polecat instead of silently completing it.
-  Only an ad-hoc run with no branch completes straight from `gt done`.
+  Only an ad-hoc run with no branch completes straight from `arb done`.
 
   ## API choice: explicit `await/2` etc. vs sentinel atoms
 
@@ -623,14 +623,14 @@ defmodule Arbiter.Polecat do
 
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
       when status not in [:completed, :failed, :awaiting_review] do
-    # "gt done" detected. The guard accepts most non-terminal statuses
+    # "arb done" detected. The guard accepts most non-terminal statuses
     # (:idle, :running, :awaiting). In claude_driven mode the polecat may sit at
     # :idle (the Machine is not ticked, so Polecat.advance is never called), so
     # accepting :idle here is intentional and critical for this signal to fire.
     #
     # :awaiting_review is deliberately excluded: once an MR is open the review
     # gate, not the acolyte's stdout, decides completion. The Warden completes
-    # the polecat when the MR merges. A late "gt done" is ignored (handled by
+    # the polecat when the MR merges. A late "arb done" is ignored (handled by
     # the catch-all clause below).
     {:noreply, on_claude_done(state)}
   end
@@ -683,7 +683,7 @@ defmodule Arbiter.Polecat do
   #
   # complete_now/2 and fail_now/2 hold the terminal side effects (DB write +
   # broadcast/notify) in one place, shared by the public complete/2 + fail/2
-  # calls and the acolyte-completion (gt-done) path.
+  # calls and the acolyte-completion (arb-done) path.
 
   defp complete_now(%State{} = state, result) do
     meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
@@ -701,7 +701,7 @@ defmodule Arbiter.Polecat do
     new_state
   end
 
-  # Handle the acolyte's "gt done" marker. Before bd-7qq81g this closed the bead
+  # Handle the acolyte's "arb done" marker. Before bd-7qq81g this closed the bead
   # directly, bypassing the merger entirely — branches never reached the target
   # line. Completion now routes through the configured merger:
   #
@@ -791,7 +791,7 @@ defmodule Arbiter.Polecat do
   # `{:error, reason, unchanged_state}` on failure.
   #
   # Shared by the explicit open_mr/5 API (handle_call) and the acolyte
-  # completion path (the gt-done handler) so the branch is always integrated
+  # completion path (the arb-done handler) so the branch is always integrated
   # through the same code, regardless of how completion was triggered. For the
   # default Direct strategy this performs the local `git merge --no-ff`
   # synchronously; the Warden then completes the polecat on its first poll.

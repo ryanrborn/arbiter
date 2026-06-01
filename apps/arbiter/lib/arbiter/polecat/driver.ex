@@ -13,7 +13,7 @@ defmodule Arbiter.Polecat.Driver do
   A Claude subprocess is doing the real work; the Driver does NOT tick the
   Machine. Instead it polls the polecat's status and closes the bead when
   the polecat reaches `:completed` (typically triggered by Claude printing
-  `gt done` on stdout — see `Polecat.ClaudeSession`).
+  `arb done` on stdout — see `Polecat.ClaudeSession`).
 
   This mode resolves the Driver/Claude race that `arb sling --with-claude`
   exposed: the bookkeeping workflow used to finish in ~500ms and close the
@@ -34,7 +34,7 @@ defmodule Arbiter.Polecat.Driver do
     - `:completed` → close the bead, optionally cleanup worktree, stop.
     - `:failed` → log, stop (bead remains `:in_progress` for inspection).
     - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
-      (`:awaiting_review` is the brief window after the acolyte's `gt done`
+      (`:awaiting_review` is the brief window after the acolyte's `arb done`
       opens an MR; the Warden, not the Driver, drives it to terminal).
 
   ## Shared lifecycle
