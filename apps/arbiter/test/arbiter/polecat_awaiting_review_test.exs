@@ -120,15 +120,15 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
     end
   end
 
-  describe "gt-done guard while awaiting review" do
-    test "a late 'gt done' does NOT complete a polecat parked for review" do
+  describe "arb-done guard while awaiting review" do
+    test "a late 'arb done' does NOT complete a polecat parked for review" do
       {pid, _bead_id} = running_polecat()
       assert {:ok, _} = Polecat.open_mr(pid, "feature/g", "G", "", open_opts(@parked))
       assert Polecat.state(pid).status == :awaiting_review
 
       # Simulate the ClaudeSession completion marker arriving after the MR
       # was opened. The review gate, not stdout, owns completion now.
-      send(pid, {:__claude_session_done__, "gt done"})
+      send(pid, {:__claude_session_done__, "arb done"})
       Process.sleep(30)
 
       assert Polecat.state(pid).status == :awaiting_review

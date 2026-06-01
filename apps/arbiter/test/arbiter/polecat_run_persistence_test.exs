@@ -59,7 +59,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     :ok = Polecat.advance(pid, :run_claude)
-    send(pid, {:__claude_session_done__, "gt done"})
+    send(pid, {:__claude_session_done__, "arb done"})
 
     # Wait briefly for the cast-like handle_info to land + write.
     :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(bead_id)) end)

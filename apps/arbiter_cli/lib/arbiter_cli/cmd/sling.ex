@@ -16,7 +16,7 @@ defmodule ArbiterCli.Cmd.Sling do
 
   Flags:
     --with-claude  spawn a real Claude subprocess in the worktree, which
-                   works the bead and closes it on completion (`gt done`).
+                   works the bead and closes it on completion (`arb done`).
                    Requires a worktree (rig must be in
                    `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
                    **This consumes Anthropic API credits.** Off by default.
