@@ -54,6 +54,41 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     end
   end
 
+  describe "POST /api/polecats/sling" do
+    # Regression: a dry sling (no `with_claude`) used to start a Driver in
+    # workflow mode, which raced the no-op `Work` workflow to completion and
+    # closed the bead in ~500ms without any work being done. A bare sling must
+    # now park the bead in `:in_progress` for a hand to attach.
+    test "dry sling (no with_claude) parks the bead and does NOT close it",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "dry-sling-me", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/polecats/sling", %{"bead_id" => bead.id, "rig" => "test/rig"})
+      body = json_response(conn, 201)
+
+      assert body["bead"]["id"] == bead.id
+      assert body["bead"]["status"] == "in_progress"
+
+      # Wait well past the old ~500ms Driver-close race window. Under the old
+      # behaviour the bead would be `:closed` by now; it must remain parked.
+      Process.sleep(900)
+
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :in_progress
+      refute reloaded.status == :closed
+    end
+
+    test "returns 404 for an unknown bead_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/polecats/sling", %{"bead_id" => "no-such-bead"})
+      assert json_response(conn, 404)
+    end
+
+    test "requires a bead_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/polecats/sling", %{})
+      assert json_response(conn, 400)
+    end
+  end
+
   describe "POST /api/polecats/:bead_id/stop" do
     test "terminates a running polecat", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})

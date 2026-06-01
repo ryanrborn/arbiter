@@ -6,7 +6,9 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   Routes:
 
-    * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `with_claude`)
+    * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `with_claude`).
+      Without `with_claude` the bead parks in `:in_progress` (no Driver); with
+      it, a Claude subprocess works the bead and the Driver closes it on `gt done`.
     * `GET  /api/polecats`                 — :index (list active polecats)
     * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output)
     * `POST /api/polecats/:bead_id/stop`   — :stop (terminate polecat cleanly)
@@ -17,7 +19,7 @@ defmodule ArbiterWeb.Api.PolecatController do
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Sling
 
-  action_fallback ArbiterWeb.Api.FallbackController
+  action_fallback(ArbiterWeb.Api.FallbackController)
 
   def sling(conn, params) do
     case params do
@@ -82,8 +84,26 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   def stop(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
 
+  # Map request params onto `Sling.sling/2` opts.
+  #
+  # Driver wiring is the important bit: the bookkeeping `Work` workflow is a
+  # handful of no-op placeholder steps, so a Driver in workflow mode walks it
+  # to completion in ~500ms and *closes the bead*. That's only ever correct
+  # when a real worker is doing the work and will signal completion itself.
+  #
+  #   * `with_claude` → a Claude subprocess does the work; start the Driver in
+  #     claude-driven mode (`start_claude: true` ⇒ it waits on the polecat
+  #     rather than ticking the workflow to closure).
+  #   * bare/dry sling → no worker. Park the bead in `:in_progress`
+  #     (`start_driver: false`) for a hand to attach, instead of racing the
+  #     no-op workflow to a bogus `:closed`.
   defp sling_opts(params) do
-    [rig: params["rig"], start_claude: truthy(params["with_claude"])]
+    base = [rig: params["rig"]]
+
+    case truthy(params["with_claude"]) do
+      true -> base ++ [start_claude: true]
+      _ -> base ++ [start_driver: false]
+    end
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 

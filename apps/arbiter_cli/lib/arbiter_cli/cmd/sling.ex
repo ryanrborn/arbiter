@@ -9,8 +9,14 @@ defmodule ArbiterCli.Cmd.Sling do
   the WorkflowMachine, and (with `--with-claude`) spawns a Claude
   subprocess in the polecat's worktree.
 
+  Without `--with-claude` there is no worker, so the bead simply **parks**
+  in `:in_progress` for a hand to attach — it is NOT auto-closed. (The
+  bookkeeping `Work` workflow is no-op placeholder steps; auto-closing a
+  bead nobody worked is never what you want.)
+
   Flags:
-    --with-claude  spawn a real Claude subprocess in the worktree.
+    --with-claude  spawn a real Claude subprocess in the worktree, which
+                   works the bead and closes it on completion (`gt done`).
                    Requires a worktree (rig must be in
                    `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
                    **This consumes Anthropic API credits.** Off by default.
