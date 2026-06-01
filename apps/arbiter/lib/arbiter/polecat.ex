@@ -27,7 +27,7 @@ defmodule Arbiter.Polecat do
 
   ## Merge-request review (`:awaiting_review`)
 
-  When an acolyte finishes its work it can open a merge request via
+  When an acolyte finishes its work the polecat opens a merge request via
   `open_mr/5` instead of completing immediately. That call resolves the
   workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
   MR, stores the `mr_ref` + clickable `merger_url` on the polecat, transitions
@@ -35,6 +35,14 @@ defmodule Arbiter.Polecat do
   approval. The Warden — not the acolyte's `gt done` — owns the terminal
   transition: it completes the polecat when the MR merges, or fails it when the
   MR is closed. See `Arbiter.Polecat.Warden`.
+
+  This is also the path the `gt done` marker takes in claude-driven mode: when
+  the polecat knows its branch (a worktree was provisioned at sling time) the
+  marker triggers the same `open_mr` flow rather than closing the bead
+  directly. For the default `Direct` strategy the merge (`git merge --no-ff`)
+  runs immediately, so the branch reaches the target line before the bead
+  closes. A merge failure fails the polecat instead of silently completing it.
+  Only an ad-hoc run with no branch completes straight from `gt done`.
 
   ## API choice: explicit `await/2` etc. vs sentinel atoms
 
@@ -519,41 +527,9 @@ defmodule Arbiter.Polecat do
         _from,
         %State{status: :running} = state
       ) do
-    case resolve_merger(state, opts) do
-      {:ok, adapter, workspace} ->
-        Arbiter.Mergers.prepare(workspace)
-        open_opts = build_open_opts(state, opts)
-
-        case safe_open(adapter, branch, title, description, open_opts) do
-          {:ok, mr_ref} ->
-            merger_url = safe_link_for(adapter, mr_ref)
-
-            new_state = %State{
-              state
-              | status: :awaiting_review,
-                mr_ref: mr_ref,
-                merger_url: merger_url,
-                merger_adapter: adapter,
-                step_started_at: DateTime.utc_now(),
-                meta:
-                  state.meta
-                  |> Map.put(:mr_ref, mr_ref)
-                  |> Map.put(:merger_url, merger_url)
-            }
-
-            start_warden(new_state, workspace, opts)
-            {:reply, {:ok, mr_ref}, new_state}
-
-          {:error, reason} ->
-            Logger.warning(
-              "Polecat.open_mr: adapter open failed for bead=#{state.bead_id}: #{inspect(reason)}"
-            )
-
-            {:reply, {:error, reason}, state}
-        end
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    case do_open_mr(state, branch, title, description, opts) do
+      {:ok, mr_ref, new_state} -> {:reply, {:ok, mr_ref}, new_state}
+      {:error, reason, kept_state} -> {:reply, {:error, reason}, kept_state}
     end
   end
 
@@ -576,16 +552,7 @@ defmodule Arbiter.Polecat do
 
   def handle_call({:complete, result}, _from, %State{status: status} = state)
       when status in [:running, :awaiting_review] do
-    meta =
-      case result do
-        nil -> state.meta
-        r -> Map.put(state.meta, :result, r)
-      end
-
-    new_state = %State{state | status: :completed, meta: meta}
-    record_run_finished(new_state)
-    broadcast_done(new_state)
-    {:reply, :ok, new_state}
+    {:reply, :ok, complete_now(state, result)}
   end
 
   def handle_call({:complete, _result}, _from, %State{status: status} = state) do
@@ -594,16 +561,7 @@ defmodule Arbiter.Polecat do
 
   def handle_call({:fail, reason}, _from, %State{status: status} = state)
       when status in [:idle, :running, :awaiting, :awaiting_review] do
-    meta =
-      case reason do
-        nil -> state.meta
-        r -> Map.put(state.meta, :failure_reason, r)
-      end
-
-    new_state = %State{state | status: :failed, meta: meta}
-    record_run_finished(new_state)
-    Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
-    {:reply, :ok, new_state}
+    {:reply, :ok, fail_now(state, reason)}
   end
 
   def handle_call({:fail, _reason}, _from, %State{status: status} = state) do
@@ -665,21 +623,16 @@ defmodule Arbiter.Polecat do
 
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
       when status not in [:completed, :failed, :awaiting_review] do
-    # "gt done" detected — complete the polecat regardless of current step.
-    # The guard accepts most non-terminal statuses (:idle, :running, :awaiting).
-    # In claude_driven mode the polecat stays :idle (the Machine is not ticked,
-    # so Polecat.advance is never called). Accepting :idle here is intentional
-    # and critical for this signal to fire in that mode.
+    # "gt done" detected. The guard accepts most non-terminal statuses
+    # (:idle, :running, :awaiting). In claude_driven mode the polecat may sit at
+    # :idle (the Machine is not ticked, so Polecat.advance is never called), so
+    # accepting :idle here is intentional and critical for this signal to fire.
     #
     # :awaiting_review is deliberately excluded: once an MR is open the review
     # gate, not the acolyte's stdout, decides completion. The Warden completes
     # the polecat when the MR merges. A late "gt done" is ignored (handled by
     # the catch-all clause below).
-    meta = Map.put(state.meta, :result, :claude_done)
-    new_state = %State{state | status: :completed, meta: meta}
-    record_run_finished(new_state)
-    broadcast_done(new_state)
-    {:noreply, new_state}
+    {:noreply, on_claude_done(state)}
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{} = state) do
@@ -725,6 +678,62 @@ defmodule Arbiter.Polecat do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---- terminal transitions ----------------------------------------------
+  #
+  # complete_now/2 and fail_now/2 hold the terminal side effects (DB write +
+  # broadcast/notify) in one place, shared by the public complete/2 + fail/2
+  # calls and the acolyte-completion (gt-done) path.
+
+  defp complete_now(%State{} = state, result) do
+    meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
+    new_state = %State{state | status: :completed, meta: meta}
+    record_run_finished(new_state)
+    broadcast_done(new_state)
+    new_state
+  end
+
+  defp fail_now(%State{} = state, reason) do
+    meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
+    new_state
+  end
+
+  # Handle the acolyte's "gt done" marker. Before bd-7qq81g this closed the bead
+  # directly, bypassing the merger entirely — branches never reached the target
+  # line. Completion now routes through the configured merger:
+  #
+  #   * When the polecat knows its branch (a worktree was provisioned) we open
+  #     the MR / run the merge via the same path open_mr/5 uses. For the default
+  #     Direct strategy this merges --no-ff into the target branch synchronously,
+  #     parks at :awaiting_review, and the Warden completes the polecat on its
+  #     first poll. A merge failure surfaces as a :failure_reason rather than
+  #     silently closing the bead as done.
+  #   * With no branch (ad-hoc runs / unconfigured rig / no worktree) there is
+  #     nothing to integrate, so we complete directly as before.
+  defp on_claude_done(%State{meta: meta} = state) do
+    case mergeable_branch(meta) do
+      nil ->
+        complete_now(state, :claude_done)
+
+      branch ->
+        title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
+
+        case do_open_mr(state, branch, title, "", %{}) do
+          {:ok, _mr_ref, new_state} -> new_state
+          {:error, reason, _state} -> fail_now(state, {:merge_failed, reason})
+        end
+    end
+  end
+
+  defp mergeable_branch(meta) do
+    case meta && Map.get(meta, :branch) do
+      branch when is_binary(branch) and branch != "" -> branch
+      _ -> nil
+    end
+  end
 
   @impl true
   def terminate(_reason, %State{bead_id: bead_id} = state) do
@@ -777,6 +786,54 @@ defmodule Arbiter.Polecat do
 
   # ---- merge-request review internals ------------------------------------
 
+  # Resolve the merger, open the MR / run the merge, park at :awaiting_review,
+  # and spawn the Warden. Returns `{:ok, mr_ref, new_state}` on success or
+  # `{:error, reason, unchanged_state}` on failure.
+  #
+  # Shared by the explicit open_mr/5 API (handle_call) and the acolyte
+  # completion path (the gt-done handler) so the branch is always integrated
+  # through the same code, regardless of how completion was triggered. For the
+  # default Direct strategy this performs the local `git merge --no-ff`
+  # synchronously; the Warden then completes the polecat on its first poll.
+  defp do_open_mr(%State{} = state, branch, title, description, opts) do
+    case resolve_merger(state, opts) do
+      {:ok, adapter, workspace} ->
+        Arbiter.Mergers.prepare(workspace)
+        open_opts = build_open_opts(state, opts)
+
+        case safe_open(adapter, branch, title, description, open_opts) do
+          {:ok, mr_ref} ->
+            merger_url = safe_link_for(adapter, mr_ref)
+
+            new_state = %State{
+              state
+              | status: :awaiting_review,
+                mr_ref: mr_ref,
+                merger_url: merger_url,
+                merger_adapter: adapter,
+                step_started_at: DateTime.utc_now(),
+                meta:
+                  state.meta
+                  |> Map.put(:mr_ref, mr_ref)
+                  |> Map.put(:merger_url, merger_url)
+            }
+
+            start_warden(new_state, workspace, opts)
+            {:ok, mr_ref, new_state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Polecat.open_mr: adapter open failed for bead=#{state.bead_id}: #{inspect(reason)}"
+            )
+
+            {:error, reason, state}
+        end
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
   # Resolve {adapter, workspace} for an open_mr/5 call. An explicit `:adapter`
   # in opts wins (test/advanced override); otherwise resolve from the polecat's
   # workspace via Arbiter.Mergers.for_workspace/1.
@@ -799,13 +856,24 @@ defmodule Arbiter.Polecat do
   end
 
   # Build the opts map handed to the adapter's open/4. Carries the bead-domain
-  # keys and defaults :repo_path (needed by the Direct adapter) from the
-  # polecat's worktree when the caller didn't supply one.
+  # keys and, when the caller didn't supply them, defaults from the polecat's
+  # meta:
+  #
+  #   * :repo_path — the rig path (local checkout where the target branch
+  #     lives) the Direct adapter runs `git merge --no-ff` inside. Seeded into
+  #     meta at sling time; falls back to the worktree path for older callers.
+  #   * :target_branch — the base branch the worktree was cut from.
   defp build_open_opts(%State{meta: meta}, opts) do
+    meta = meta || %{}
+
     opts
     |> Map.take([:target_branch, :reviewer_ids, :labels, :repo_path])
-    |> Map.put_new_lazy(:repo_path, fn -> Map.get(meta || %{}, :worktree_path) end)
+    |> maybe_default(:repo_path, Map.get(meta, :repo_path) || Map.get(meta, :worktree_path))
+    |> maybe_default(:target_branch, Map.get(meta, :target_branch))
   end
+
+  defp maybe_default(map, _key, nil), do: map
+  defp maybe_default(map, key, value), do: Map.put_new(map, key, value)
 
   defp safe_open(adapter, branch, title, description, open_opts) do
     adapter.open(branch, title, description, open_opts)
