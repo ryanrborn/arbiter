@@ -3,6 +3,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
 
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Polecat
+  alias Arbiter.Polecat.OutputLog
   alias Arbiter.Polecats.Run
 
   setup %{conn: conn} do
@@ -181,6 +182,82 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
 
     test "returns 404 for an unknown bead_id", %{conn: conn} do
       conn = post(conn, ~p"/api/polecats/no-such-bead/stop", %{})
+      assert json_response(conn, 404)
+    end
+  end
+
+  describe "GET /api/polecats/:bead_id/log" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pol-log-ctrl-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:arbiter, :output_log_root)
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    test "returns the full, uncapped durable transcript for the most recent run",
+         %{conn: conn, ws: ws} do
+      bead_id = "bd-log-#{System.unique_integer([:positive])}"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          bead_id: bead_id,
+          rig: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(run.id)
+      Enum.each(1..1500, fn i -> OutputLog.append(handle, "line-#{i}") end)
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/polecats/#{bead_id}/log")
+      data = json_response(conn, 200)["data"]
+
+      assert data["bead_id"] == bead_id
+      assert data["run_id"] == run.id
+      assert data["path"] == OutputLog.path_for(run.id)
+      assert data["exists"] == true
+      # Every line is retained — well past the 1000-line in-memory cap.
+      assert data["line_count"] == 1500
+      assert List.first(data["lines"]) == "line-1"
+      assert List.last(data["lines"]) == "line-1500"
+    end
+
+    test "exists=false with empty lines when the run has no transcript on disk",
+         %{conn: conn, ws: ws} do
+      bead_id = "bd-nolog-#{System.unique_integer([:positive])}"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          bead_id: bead_id,
+          rig: "arbiter",
+          workspace_id: ws.id,
+          status: :running,
+          started_at: DateTime.utc_now()
+        })
+
+      conn = get(conn, ~p"/api/polecats/#{bead_id}/log")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == run.id
+      assert data["exists"] == false
+      assert data["lines"] == []
+      assert data["line_count"] == 0
+    end
+
+    test "returns 404 when no run was ever recorded for the bead", %{conn: conn} do
+      conn = get(conn, ~p"/api/polecats/bd-never-#{System.unique_integer([:positive])}/log")
       assert json_response(conn, 404)
     end
   end

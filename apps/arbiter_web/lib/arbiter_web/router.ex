@@ -79,6 +79,7 @@ defmodule ArbiterWeb.Router do
     get("/polecats/history/:id", RunController, :show)
     get("/polecats", PolecatController, :index)
     get("/polecats/:bead_id", PolecatController, :show)
+    get("/polecats/:bead_id/log", PolecatController, :log)
     post("/polecats/:bead_id/stop", PolecatController, :stop)
   end
 
