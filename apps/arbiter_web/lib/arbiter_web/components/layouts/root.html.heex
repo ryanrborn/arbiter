@@ -1,13 +1,13 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" style={brand_accent_style()}>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
-    <.live_title default="Arbiter" suffix=" · Phoenix Framework">
+    <.live_title default={Arbiter.Branding.get(:name)} suffix={" · " <> Arbiter.Branding.get(:name)}>
       {assigns[:page_title]}
     </.live_title>
-    <link rel="icon" href={~p"/favicon.ico"} sizes="any" />
+    <link rel="icon" href={Arbiter.Branding.get(:favicon)} sizes="any" />
     <link rel="icon" type="image/png" sizes="32x32" href={~p"/images/favicon-32.png"} />
     <link rel="icon" type="image/png" sizes="16x16" href={~p"/images/favicon-16.png"} />
     <link rel="apple-touch-icon" href={~p"/images/apple-touch-icon.png"} />
