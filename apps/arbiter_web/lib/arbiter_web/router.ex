@@ -63,6 +63,11 @@ defmodule ArbiterWeb.Router do
     patch("/workspaces/:id", WorkspaceController, :update)
     put("/workspaces/:id", WorkspaceController, :update)
 
+    # Tracker bridge (assignment-as-claim for GitHub Issues)
+    post("/workspaces/:workspace_id/claim", ClaimController, :claim)
+    get("/workspaces/:workspace_id/sync/plan", ClaimController, :plan)
+    post("/workspaces/:workspace_id/sync", ClaimController, :sync)
+
     # Global settings
     get("/settings", SettingsController, :show)
     put("/settings/vernacular", SettingsController, :update_vernacular)
