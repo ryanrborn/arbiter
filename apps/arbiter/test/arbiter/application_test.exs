@@ -46,11 +46,25 @@ defmodule Arbiter.ApplicationTest do
       assert :refinery_boot_task in ids
     end
 
+    test "the single-instance guard precedes the reconcile task when auto_start? is true" do
+      # The reconcile Task reads Arbiter.SingleInstance.primary?/0, so the guard
+      # must be started (and have acquired/declined the lock in its init) first.
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      assert Arbiter.SingleInstance in ids
+
+      guard_ix = Enum.find_index(ids, &(&1 == Arbiter.SingleInstance))
+      reconcile_ix = Enum.find_index(ids, &(&1 == :reconcile_boot_task))
+
+      assert guard_ix < reconcile_ix
+    end
+
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 
       refute :reconcile_boot_task in ids
       refute :refinery_boot_task in ids
+      refute Arbiter.SingleInstance in ids
     end
   end
 end

@@ -47,13 +47,18 @@ defmodule Arbiter.Application do
     ] ++ boot_tasks(auto_start?)
   end
 
-  # The gated boot Tasks. Both are `Task` children, so each MUST carry a
-  # distinct explicit `:id` — without one they both collapse to the default
-  # `:Task` id and the whole app fails to boot ("more than one child
-  # specification has the id: Task").
+  # The gated boot children. The two `Task` children each MUST carry a distinct
+  # explicit `:id` — without one they both collapse to the default `:Task` id
+  # and the whole app fails to boot ("more than one child specification has the
+  # id: Task").
   #
+  #   * SingleInstance: hold a session advisory lock that identifies the one
+  #     canonical instance per DB. Started FIRST (and synchronously, via its
+  #     init) so the reconcile Task below can read its verdict. See bd-9rouwh.
   #   * reconcile: sweep orphaned :running polecat_runs left behind by a node
-  #     that died mid-run. Runs once after Repo + Polecat.Registry are online.
+  #     that died mid-run. Runs once after Repo + Polecat.Registry are online —
+  #     but ONLY on the primary instance, so a transient/duplicate boot can't
+  #     fail the live instance's running runs.
   #   * refinery: eagerly start one Refinery per existing workspace once the
   #     tree is up, so a cold boot misses no `:polecat_done` events.
   #
@@ -66,8 +71,14 @@ defmodule Arbiter.Application do
 
   defp boot_tasks(true) do
     [
+      Arbiter.SingleInstance,
       Supervisor.child_spec(
-        {Task, fn -> Arbiter.Polecats.Reconciler.reconcile_orphaned_runs() end},
+        {Task,
+         fn ->
+           Arbiter.Polecats.Reconciler.reconcile_orphaned_runs(
+             primary?: Arbiter.SingleInstance.primary?()
+           )
+         end},
         id: :reconcile_boot_task,
         restart: :temporary
       ),
