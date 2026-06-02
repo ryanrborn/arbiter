@@ -63,10 +63,11 @@ defmodule Arbiter.Mergers do
   Prepare the current process to make adapter calls for `workspace`.
 
   Some adapters resolve their backend config from the process dictionary
-  (the `GitLab` adapter reads host/project/token via
-  `Arbiter.Mergers.Gitlab.Config`, exactly as `Arbiter.Trackers.Jira` does).
-  A long-lived poller such as `Arbiter.Polecat.Warden` runs in its own
-  process, so it must seed that config before calling `get/1` or `merge/1`.
+  (the `GitLab` and `GitHub` adapters read host/owner/repo/token via
+  `Arbiter.Mergers.Gitlab.Config` / `Arbiter.Mergers.Github.Config`, exactly
+  as `Arbiter.Trackers.Jira` does). A long-lived poller such as
+  `Arbiter.Polecat.Warden` runs in its own process, so it must seed that
+  config before calling `get/1` or `merge/1`.
 
   This keeps the adapter-specific coupling in one place: callers
   (`Arbiter.Polecat`, `Arbiter.Polecat.Warden`) just call `prepare/1` and stay
@@ -79,6 +80,7 @@ defmodule Arbiter.Mergers do
   def prepare(%Workspace{} = workspace) do
     case Workspace.merger_strategy(workspace) do
       :gitlab -> Arbiter.Mergers.Gitlab.Config.put_active(workspace)
+      :github -> Arbiter.Mergers.Github.Config.put_active(workspace)
       _ -> :ok
     end
 
