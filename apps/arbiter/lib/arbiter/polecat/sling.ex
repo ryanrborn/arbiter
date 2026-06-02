@@ -61,6 +61,7 @@ defmodule Arbiter.Polecat.Sling do
 
   @type sling_opts :: [
           rig: String.t() | nil,
+          base_branch: String.t() | nil,
           workflow_module: module(),
           start_driver: boolean(),
           start_claude: boolean(),
@@ -160,7 +161,7 @@ defmodule Arbiter.Polecat.Sling do
         Map.merge(base, %{
           branch: BranchNamer.derive(bead),
           repo_path: repo_path,
-          target_branch: Keyword.get(opts, :base_branch, "main"),
+          target_branch: resolve_base_branch(bead, opts),
           merge_title: merge_title(bead)
         })
 
@@ -218,7 +219,7 @@ defmodule Arbiter.Polecat.Sling do
 
           repo_path when is_binary(repo_path) ->
             branch = BranchNamer.derive(bead)
-            base_branch = Keyword.get(opts, :base_branch, "main")
+            base_branch = resolve_base_branch(bead, opts)
 
             case Worktree.create(repo_path, branch, base_branch) do
               {:ok, path} -> {:ok, path}
@@ -232,6 +233,38 @@ defmodule Arbiter.Polecat.Sling do
 
   defp resolve_rig_path(%Issue{workspace_id: ws_id}, rig) when is_binary(rig) do
     workspace_path(ws_id, rig) || application_path(rig)
+  end
+
+  # Resolve the integration branch — the branch the worktree is cut from and
+  # the one the completed branch merges back into. Both must agree, or a
+  # worktree cut from `develop` would try to merge into `main`.
+  #
+  # Resolution order:
+  #   1. Explicit `:base_branch` opt — kept as an escape hatch for callers
+  #      (and tests) that know better than the workspace config.
+  #   2. Workspace merge config (`workspace.config["merge"]["base"]`) — the
+  #      same key the `Refinery` reads when opening PRs, so the worktree base
+  #      and the eventual PR base stay in lockstep.
+  #   3. `"main"` — the default integration branch.
+  defp resolve_base_branch(%Issue{} = bead, opts) do
+    Keyword.get(opts, :base_branch) || workspace_base_branch(bead) || "main"
+  end
+
+  defp workspace_base_branch(%Issue{workspace_id: nil}), do: nil
+
+  defp workspace_base_branch(%Issue{workspace_id: ws_id}) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{config: %{} = config}} ->
+        case get_in(config, ["merge", "base"]) do
+          base when is_binary(base) and base != "" -> base
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp workspace_path(nil, _rig), do: nil
