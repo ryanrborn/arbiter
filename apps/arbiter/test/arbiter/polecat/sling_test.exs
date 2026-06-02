@@ -295,6 +295,43 @@ defmodule Arbiter.Polecat.SlingTest do
       assert File.dir?(result.worktree_path)
     end
 
+    test "cuts the worktree from (and targets) the workspace's configured base branch",
+         %{repo: repo} do
+      # The source repo's default branch is `main`. Create a `develop` branch
+      # that diverges from it, then configure a workspace whose merge config
+      # points the integration branch at `develop`.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "develop"])
+      File.write!(Path.join(repo, "DEVELOP_ONLY.md"), "only on develop\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "DEVELOP_ONLY.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "develop-only file"])
+      # Leave the repo's HEAD on `main` so a hardcoded "main" base would NOT
+      # see the develop-only file — the assertion below proves we cut from
+      # `develop`, not from whatever HEAD happens to be.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      {:ok, ws_local} =
+        Ash.create(Workspace, %{
+          name: "base-branch-ws-#{System.unique_integer([:positive])}",
+          prefix: "bb",
+          config: %{
+            "rig_paths" => %{"bb/rig" => repo},
+            "merge" => %{"base" => "develop"}
+          }
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id})
+
+      {:ok, result} = Sling.sling(bead.id, rig: "bb/rig", start_driver: false)
+
+      # Worktree was cut from `develop`: the develop-only file is present.
+      assert is_binary(result.worktree_path)
+      assert File.exists?(Path.join(result.worktree_path, "DEVELOP_ONLY.md"))
+
+      # Merge target_branch threaded into the polecat's meta matches the base,
+      # so the completed branch merges back into `develop`, not `main`.
+      assert %{target_branch: "develop"} = Polecat.state(result.polecat_pid).meta
+    end
+
     test "skips worktree when provision_worktree: false", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
 
