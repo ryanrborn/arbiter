@@ -44,25 +44,6 @@ defmodule Arbiter.Polecat do
   closes. A merge failure fails the polecat instead of silently completing it.
   Only an ad-hoc run with no branch completes straight from `arb done`.
 
-  ## Run-row finalisation (`Arbiter.Polecats.Run`)
-
-  The persistent `Run` row is created `:running` at init and stamped terminal
-  on the lifecycle transitions that own completion: `complete/2` (→ `:completed`)
-  and `fail/2` (→ `:failed`), both via `record_run_finished/1`. Those cover the
-  no-branch `arb done` path and the Warden-driven `:awaiting_review → :completed`
-  path.
-
-  There is one gap those two don't close: a polecat parked at `:awaiting_review`
-  (acolyte finished, MR handed off) whose process stops *before* the Warden
-  completes it — a clean node shutdown, an operator stop, the Warden never
-  observing the merge. Its lifecycle never reaches `:completed`, so without a
-  backstop the `Run` row lingers `:running` until the next boot, where the
-  reconciler (bd-6k8519) belatedly marks it `:failed`. `terminate/2` closes that
-  gap: a polecat shutting down from `:awaiting_review` finalises its own row
-  `:completed` (the acolyte's work is done; the merge is downstream). The boot
-  reconciler is left to do what it is actually for — recovering rows orphaned by
-  a *hard* crash, where `terminate/2` never ran.
-
   ## API choice: explicit `await/2` etc. vs sentinel atoms
 
   The spec gave us a choice between an `advance(pid, :__awaiting__)` sentinel
@@ -761,31 +742,9 @@ defmodule Arbiter.Polecat do
     # monitor-based cleanup runs asynchronously and was the source of a flaky
     # test where `whereis/1` returned the dead pid briefly after stop.
     PRegistry.unregister(bead_id)
-    finalize_run_on_terminate(state)
     broadcast_lifecycle(:stopped, state)
     :ok
   end
-
-  # Backstop for the run-row finalisation gap described in the moduledoc. The
-  # lifecycle-terminal transitions (`complete/2` / `fail/2`) already stamp the
-  # row via `record_run_finished/1`, so by the time those fire the row is
-  # `:completed` / `:failed` and there's nothing to do here.
-  #
-  # The case this catches is a polecat stopping from `:awaiting_review`: the
-  # acolyte finished and the MR was opened/merged, but the Warden hadn't yet
-  # driven the polecat to `:completed` when the process went away. From the
-  # run's point of view the acolyte's work is done, so we stamp `:completed`
-  # rather than leaving a finished acolyte's row stuck `:running`.
-  #
-  # Genuinely non-terminal states (`:idle` / `:running` / `:awaiting`) are left
-  # untouched: a process dying there was interrupted mid-work, which is exactly
-  # what the boot reconciler (bd-6k8519) exists to sweep. A hard crash skips
-  # `terminate/2` entirely, so the reconciler remains the safety net regardless.
-  defp finalize_run_on_terminate(%State{status: :awaiting_review} = state) do
-    record_run_finished(%State{state | status: :completed})
-  end
-
-  defp finalize_run_on_terminate(%State{}), do: :ok
 
   # ---- child_spec --------------------------------------------------------
 
