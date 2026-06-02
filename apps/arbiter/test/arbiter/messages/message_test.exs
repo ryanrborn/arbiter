@@ -123,6 +123,37 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  describe "clear_read/2" do
+    test "destroys only already-read mail addressed to to_ref, keeping unread" do
+      {:ok, read} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "read", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(read)
+
+      {:ok, unread} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "unread", workspace_id: @ws})
+
+      assert Message.clear_read("admiral") == 1
+
+      assert {:error, _} = Ash.get(Message, read.id)
+      assert {:ok, _} = Ash.get(Message, unread.id)
+    end
+
+    test "leaves other recipients' read mail untouched" do
+      {:ok, mine} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "a", workspace_id: @ws})
+
+      {:ok, theirs} =
+        Ash.create(Message, %{kind: :info, to_ref: "bd-9", body: "b", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(mine)
+      {:ok, _} = Message.mark_read(theirs)
+
+      assert Message.clear_read("admiral") == 1
+      assert {:ok, _} = Ash.get(Message, theirs.id)
+    end
+  end
+
   describe "recent_notifications/2" do
     test "returns newest notifications first, scoped to workspace" do
       {:ok, _} = Message.notify(%{workspace_id: @ws, body: "first"})

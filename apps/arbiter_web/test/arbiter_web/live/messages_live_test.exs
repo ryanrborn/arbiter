@@ -103,4 +103,116 @@ defmodule ArbiterWeb.MessagesLiveTest do
       refute render(view) =~ "ack me"
     end
   end
+
+  describe "admiral mailbox panel" do
+    test "renders unread mailbox-family mail addressed to the admiral", %{conn: conn, ws: ws} do
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          subject: "needs a decision",
+          body: "the device API contract is ambiguous",
+          directive_ref: "bd-soren"
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "Admiral Mailbox"
+      assert html =~ "needs a decision"
+      assert html =~ "the device API contract is ambiguous"
+      assert html =~ "bd-soren"
+      assert html =~ "escalation"
+      # The stat-card count reflects the one unread item.
+      assert html =~ "1 unread"
+    end
+
+    test "a plain :notification does NOT land in the admiral mailbox", %{conn: conn, ws: ws} do
+      # Notifications are broadcast events, not addressed mail — they feed the
+      # notifications panel, never the Admiral's actionable inbox.
+      {:ok, _} =
+        Message.notify(%{workspace_id: ws.id, subject: "just-an-fyi", body: "background hum"})
+
+      {:ok, _view, html} = live(conn, "/")
+
+      # Notification reaches the feed, but the Admiral mailbox stays empty.
+      assert html =~ "just-an-fyi"
+      assert html =~ "admiral-mailbox-empty"
+      assert html =~ "0 unread"
+      assert Message.inbox("admiral") == []
+    end
+
+    test "updates live when admiral mail is broadcast", %{conn: conn, ws: ws} do
+      {:ok, view, html} = live(conn, "/")
+      refute html =~ "freshly-escalated"
+
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          subject: "freshly-escalated",
+          body: "live arrival"
+        })
+
+      assert render(view) =~ "freshly-escalated"
+    end
+
+    test "marking a message read removes it from the unread list", %{conn: conn, ws: ws} do
+      {:ok, msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "ack-this-up"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      assert render(view) =~ "ack-this-up"
+
+      view
+      |> element(~s(#admiral-mailbox button[phx-click="mark_read"][phx-value-id="#{msg.id}"]))
+      |> render_click()
+
+      refute render(view) =~ "ack-this-up"
+      # It's stamped read, not destroyed — still in the table, just not unread.
+      assert {:ok, %Message{read_at: read_at}} = Ash.get(Message, msg.id)
+      assert read_at
+    end
+
+    test "clear read drains the read tail but keeps unread mail", %{conn: conn, ws: ws} do
+      {:ok, read_msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "old-read"
+        })
+
+      {:ok, _} = Message.mark_read(read_msg)
+
+      {:ok, unread_msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :escalation,
+          to_ref: "admiral",
+          body: "still-unread"
+        })
+
+      {:ok, view, html} = live(conn, "/")
+      # The read one is not in the unread view; the unread one is.
+      refute html =~ "old-read"
+      assert html =~ "still-unread"
+
+      view
+      |> element(~s(button[phx-click="clear_admiral"]))
+      |> render_click()
+
+      # Read message destroyed; unread message untouched.
+      assert {:error, _} = Ash.get(Message, read_msg.id)
+      assert {:ok, %Message{}} = Ash.get(Message, unread_msg.id)
+      assert render(view) =~ "still-unread"
+    end
+  end
 end
