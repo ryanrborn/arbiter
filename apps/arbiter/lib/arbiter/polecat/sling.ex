@@ -271,8 +271,8 @@ defmodule Arbiter.Polecat.Sling do
   # silently launching Claude with `cd: nil`.
   #
   # The `:claude_command` opt is the test escape hatch: when set, it
-  # overrides the default `["claude", "--print", prompt]` argv so tests
-  # can spawn `echo` or a script instead of the real Claude CLI.
+  # overrides the default streaming `claude` argv so tests can spawn `echo`
+  # or a script instead of the real Claude CLI.
   defp maybe_start_claude(_bead, _polecat_pid, _worktree_path, opts)
        when not is_list(opts) do
     {:ok, nil}

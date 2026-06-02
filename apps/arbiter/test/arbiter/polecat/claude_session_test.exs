@@ -30,6 +30,26 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
     dir
   end
 
+  # Write a list of stream-json events (maps) as JSONL and return a `cat`
+  # command that replays them — one event per line, exactly like the real
+  # `claude --output-format stream-json` port stream. Using a file + cat
+  # avoids any shell-quoting of the JSON.
+  defp stream_json_command(dir, events) do
+    path = Path.join(dir, "events-#{System.unique_integer([:positive])}.jsonl")
+    body = events |> Enum.map_join("\n", &Jason.encode!/1)
+    File.write!(path, body <> "\n")
+    ["cat", path]
+  end
+
+  defp wait_for_exit(pid) do
+    eventually(fn ->
+      case Polecat.state(pid).meta do
+        %{exit_status: s} when not is_nil(s) -> s
+        _ -> nil
+      end
+    end)
+  end
+
   # Wait until `fun.()` is truthy or we've slept past `timeout_ms`. Returns
   # the truthy value or fails the test.
   defp eventually(fun, timeout_ms \\ 2_000, step_ms \\ 20) do
@@ -346,6 +366,182 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
       # The cap drops the OLDEST entries (we keep the most recent `cap`).
       assert List.last(lines) == "line-#{to_emit}"
       refute "line-1" in lines
+    end
+  end
+
+  describe "stream-json parsing" do
+    test "assistant text is split into display lines (system/result events summarized)" do
+      {pid, bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-sj-text")
+      topic = "polecat:#{bead_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{"type" => "system", "subtype" => "init", "model" => "claude-opus-4-8"},
+        %{
+          "type" => "assistant",
+          "message" => %{"content" => [%{"type" => "text", "text" => "line one\nline two"}]}
+        },
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "duration_ms" => 1500,
+          "total_cost_usd" => 0.12,
+          "result" => "line one\nline two"
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          topic: topic
+        )
+
+      wait_for_exit(pid)
+      lines = Polecat.state(pid).meta.output_lines
+
+      # Assistant text appears as individual display lines, not a JSON blob.
+      assert "line one" in lines
+      assert "line two" in lines
+      refute Enum.any?(lines, &String.contains?(&1, ~s("type":"assistant")))
+
+      # System/result events are summarized, not dumped.
+      assert Enum.any?(lines, &String.contains?(&1, "claude session started"))
+      assert Enum.any?(lines, &String.contains?(&1, "claude session success"))
+
+      # The result event's duplicated text is NOT re-emitted (only the
+      # assistant turn carries it), so "line one" appears exactly once.
+      assert Enum.count(lines, &(&1 == "line one")) == 1
+
+      assert_receive {:polecat_output, ^bead_id, "line one"}, 2_000
+    end
+
+    test "tool_use renders as a compact call line" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-sj-tool")
+
+      events = [
+        %{
+          "type" => "assistant",
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_use", "name" => "Bash", "input" => %{"command" => "mix test"}}
+            ]
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      wait_for_exit(pid)
+      lines = Polecat.state(pid).meta.output_lines
+      assert "⏵ Bash(mix test)" in lines
+    end
+
+    test "arb done in assistant text completes the polecat" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-sj-done")
+
+      events = [
+        %{
+          "type" => "assistant",
+          "message" => %{
+            "content" => [%{"type" => "text", "text" => "all finished here\narb done"}]
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      status =
+        eventually(fn ->
+          case Polecat.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+      assert Polecat.state(pid).meta.result == :claude_done
+    end
+
+    test "arb done inside a tool result is displayed but does NOT complete" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-sj-toolresult")
+
+      # Must be :running so :completed would be a legal transition — proving the
+      # guard isn't what's keeping us out of :completed.
+      :ok = Polecat.advance(pid, :implement)
+
+      events = [
+        %{
+          "type" => "user",
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_result", "content" => "grep hit: 'arb done' in claude_session.ex"}
+            ]
+          }
+        },
+        %{"type" => "result", "subtype" => "success", "is_error" => false, "result" => "ok"}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      wait_for_exit(pid)
+
+      refute Polecat.state(pid).status == :completed
+      lines = Polecat.state(pid).meta.output_lines
+      assert Enum.any?(lines, &String.contains?(&1, "grep hit:"))
+    end
+
+    test "a stream-json line larger than the port line limit is reassembled and parsed" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-sj-big")
+
+      # Force the port's {:line, 65_536} framing to split this event across
+      # noeol/eol fragments; if reassembly fails, JSON.decode fails and the raw
+      # braces leak instead of the clean marker line.
+      big = String.duplicate("x", 100_000)
+
+      events = [
+        %{
+          "type" => "assistant",
+          "message" => %{
+            "content" => [%{"type" => "text", "text" => big <> "\nUNIQUE-TAIL-MARKER"}]
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      wait_for_exit(pid)
+      lines = Polecat.state(pid).meta.output_lines
+
+      assert "UNIQUE-TAIL-MARKER" in lines
+      refute Enum.any?(lines, &String.contains?(&1, ~s("type":"assistant")))
     end
   end
 
