@@ -31,7 +31,7 @@ defmodule ArbiterCli.Main do
       -h, --help Show usage
 
   Env:
-      ARB_HOST       Phoenix base URL (default http://127.0.0.1:4000)
+      ARB_HOST       Phoenix base URL (default http://127.0.0.1:4848)
       ARB_WORKSPACE  Workspace name to use (default "default")
   """
 
