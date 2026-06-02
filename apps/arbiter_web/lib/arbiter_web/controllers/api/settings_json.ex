@@ -8,6 +8,7 @@ defmodule ArbiterWeb.Api.SettingsJSON do
     %{
       id: settings.id,
       vernacular: settings.vernacular,
+      branding: settings.branding,
       inserted_at: settings.inserted_at,
       updated_at: settings.updated_at
     }
