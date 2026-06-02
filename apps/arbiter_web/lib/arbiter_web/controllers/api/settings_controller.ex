@@ -6,6 +6,7 @@ defmodule ArbiterWeb.Api.SettingsController do
 
     * `GET /api/settings`                  — :show
     * `PUT /api/settings/vernacular`        — :update_vernacular
+    * `PUT /api/settings/branding`          — :update_branding
   """
 
   use ArbiterWeb, :controller
@@ -24,6 +25,13 @@ defmodule ArbiterWeb.Api.SettingsController do
   def update_vernacular(conn, %{"vernacular" => vernacular}) when is_map(vernacular) do
     with {:ok, settings} <- Settings.get(),
          {:ok, updated} <- Settings.update_vernacular(settings, vernacular) do
+      render(conn, :show, settings: updated)
+    end
+  end
+
+  def update_branding(conn, %{"branding" => branding}) when is_map(branding) do
+    with {:ok, settings} <- Settings.get(),
+         {:ok, updated} <- Settings.update_branding(settings, branding) do
       render(conn, :show, settings: updated)
     end
   end

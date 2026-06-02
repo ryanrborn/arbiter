@@ -8,6 +8,13 @@ defmodule ArbiterWeb.LiveHooks do
   `:current_path`, kept in sync across `live_navigate`/`live_patch` via a
   `handle_params` hook. The `Layouts.app` nav reads it to highlight the
   active link.
+
+  ## `:vernacular` / `:branding`
+
+  Load the installation-wide vernacular / branding into the process dict so
+  `Layouts.app` and the templates render the configured vocabulary and marks
+  during live re-renders. The dead render is covered by a matching plug in the
+  `:browser` pipeline.
   """
 
   import Phoenix.Component, only: [assign: 3]
@@ -15,6 +22,11 @@ defmodule ArbiterWeb.LiveHooks do
 
   def on_mount(:vernacular, _params, _session, socket) do
     Arbiter.Vernacular.put_global()
+    {:cont, socket}
+  end
+
+  def on_mount(:branding, _params, _session, socket) do
+    Arbiter.Branding.put_global()
     {:cont, socket}
   end
 
