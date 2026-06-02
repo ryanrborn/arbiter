@@ -7,6 +7,11 @@ defmodule ArbiterCli.Cmd.Polecat do
       arb polecat stop <bead-id>   — terminate a running polecat cleanly
 
   Use `arb sling` to start a polecat in the first place.
+
+  `show` reports a live polecat's full snapshot when one is running. When no
+  live polecat exists for the bead it falls back to the most recent historical
+  run (status, started/completed times, failure reason, and any retained
+  output), so finished or exited runs stay inspectable.
   """
 
   alias ArbiterCli.{Client, Output, Vernacular}
@@ -54,11 +59,16 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
 
   defp emit_show(snap, :text) do
+    if snap["source"] == "history" do
+      IO.puts("(no live polecat — showing most recent historical run)")
+    end
+
     IO.puts("Bead:       #{snap["bead_id"]}")
     IO.puts("Status:     #{snap["status"]}")
     IO.puts("Step:       #{snap["current_step"]}")
     IO.puts("Rig:        #{snap["rig"]}")
     IO.puts("Started:    #{snap["started_at"]}")
+    if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
     if snap["result"], do: IO.puts("Result:     #{snap["result"]}")
     if snap["failure_reason"], do: IO.puts("Failure:    #{snap["failure_reason"]}")

@@ -10,7 +10,9 @@ defmodule ArbiterWeb.Api.PolecatController do
       Without `with_claude` the bead parks in `:in_progress` (no Driver); with
       it, a Claude subprocess works the bead and the Driver closes it on `arb done`.
     * `GET  /api/polecats`                 — :index (list active polecats)
-    * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output)
+    * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output).
+      When no live polecat exists for the bead, falls back to the most recent
+      `Arbiter.Polecats.Run` row so finished/exited runs stay inspectable.
     * `POST /api/polecats/:bead_id/stop`   — :stop (terminate polecat cleanly)
   """
 
@@ -18,6 +20,8 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecats.Run
+  require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -55,7 +59,7 @@ defmodule ArbiterWeb.Api.PolecatController do
   def show(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
     case Polecat.whereis(bead_id) do
       nil ->
-        {:error, :not_found}
+        show_historical(conn, bead_id)
 
       pid ->
         case Polecat.state(pid) do
@@ -63,12 +67,33 @@ defmodule ArbiterWeb.Api.PolecatController do
             render(conn, :show, snapshot: Map.put(snap, :pid, pid))
 
           _ ->
-            {:error, :not_found}
+            show_historical(conn, bead_id)
         end
     end
   end
 
   def show(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+
+  # No live polecat for this bead — fall back to the most recent durable
+  # `Run` row so a finished/exited run is still inspectable. 404 only when no
+  # run was ever recorded.
+  defp show_historical(conn, bead_id) do
+    case latest_run(bead_id) do
+      %Run{} = run -> render(conn, :show, run: run)
+      nil -> {:error, :not_found}
+    end
+  end
+
+  defp latest_run(bead_id) do
+    Run
+    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
+  end
 
   def stop(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
     case Polecat.stop(bead_id, :normal) do
