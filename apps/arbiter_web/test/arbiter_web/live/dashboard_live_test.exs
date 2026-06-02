@@ -415,13 +415,13 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      # DaisyUI stats component with the three live stats + the reserved
-      # (disabled) Admiral-inbox slot.
+      # DaisyUI stats component with the live stats, including the live
+      # Admiral-inbox unread count (empty here => "all clear").
       assert html =~ "stats"
       assert html =~ "Open Beads"
       assert html =~ "Active Polecats"
       assert html =~ "Admiral Inbox"
-      assert html =~ "coming soon"
+      assert html =~ "all clear"
     end
   end
 
