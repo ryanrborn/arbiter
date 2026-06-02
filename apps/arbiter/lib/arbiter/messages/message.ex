@@ -225,6 +225,31 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
+  Drain the read tail of a mailbox: destroy every *already-read* message
+  addressed to `to_ref`. Unread mail is left untouched — you read it first,
+  then clear. Returns the number of messages destroyed. Pass `workspace_id:`
+  to scope to one workspace.
+
+  Mirrors the `DELETE /api/messages` (`:clear`) contract; the REST layer and
+  the dashboard's Admiral mailbox both route through here.
+  """
+  def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
+    query =
+      __MODULE__
+      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at))
+
+    query =
+      case Keyword.get(opts, :workspace_id) do
+        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
+        _ -> query
+      end
+
+    read = Ash.read!(query)
+    Enum.each(read, &Ash.destroy!/1)
+    length(read)
+  end
+
+  @doc """
   The `limit` most recent `:notification` messages, newest first. Pass
   `workspace_id:` to scope to one workspace.
   """
