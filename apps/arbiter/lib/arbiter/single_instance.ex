@@ -162,7 +162,11 @@ defmodule Arbiter.SingleInstance do
       :socket,
       :ssl,
       :ssl_opts,
-      :parameters
+      :parameters,
+      # :socket_options carries [:inet6] on IPv6-only hosts (Fly.io et al.);
+      # dropping it would make the lock connection try IPv4, fail, and silently
+      # disable crash recovery on the real primary. (Tribunal finding, bd-9rouwh.)
+      :socket_options
     ])
     |> Keyword.put(:pool_size, 1)
   end
