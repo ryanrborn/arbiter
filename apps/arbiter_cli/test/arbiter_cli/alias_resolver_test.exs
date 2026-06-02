@@ -59,6 +59,82 @@ defmodule ArbiterCli.AliasResolverTest do
     end
   end
 
+  describe "resolve/1 — vernacular label aliases" do
+    test "a vernacular label whose key is a verb aliases the command verb" do
+      stub_get("/api/settings", %{
+        "data" => %{"vernacular" => %{"sling" => "Dispatch"}}
+      })
+
+      assert {:ok, "sling"} = AliasResolver.resolve("dispatch")
+    end
+
+    test "label alias matching is case-insensitive on the typed verb" do
+      stub_get("/api/settings", %{
+        "data" => %{"vernacular" => %{"sling" => "Dispatch"}}
+      })
+
+      assert {:ok, "sling"} = AliasResolver.resolve("Dispatch")
+      assert {:ok, "sling"} = AliasResolver.resolve("DISPATCH")
+    end
+
+    test "the canonical verb keeps working alongside its vernacular alias" do
+      # Known verbs short-circuit before any HTTP, so no stub is needed.
+      assert {:ok, "sling"} = AliasResolver.resolve("sling")
+    end
+
+    test "a vernacular entry whose key is not a verb is not aliased" do
+      stub_get("/api/settings", %{
+        "data" => %{"vernacular" => %{"worker" => "polecat"}}
+      })
+
+      # "polecat" the *label* of a non-verb key must not resolve to anything;
+      # (the built-in `polecat` verb is unrelated and handled by the fast path).
+      assert {:unknown, _} = AliasResolver.resolve("polecat-label-miss")
+    end
+
+    test "a label equal to its verb (default) creates no self-alias" do
+      stub_get("/api/settings", %{
+        "data" => %{"vernacular" => %{"sling" => "sling"}}
+      })
+
+      assert {:unknown, _} = AliasResolver.resolve("dispatch")
+    end
+
+    test "explicit aliases win over derived label aliases on conflict" do
+      stub_get("/api/settings", %{
+        "data" => %{
+          "vernacular" => %{
+            "sling" => "Dispatch",
+            "aliases" => %{"dispatch" => "close"}
+          }
+        }
+      })
+
+      assert {:ok, "close"} = AliasResolver.resolve("dispatch")
+    end
+  end
+
+  describe "verb_aliases/0" do
+    test "combines explicit aliases with derived label aliases" do
+      stub_get("/api/settings", %{
+        "data" => %{
+          "vernacular" => %{
+            "sling" => "Dispatch",
+            "aliases" => %{"deploy" => "close"}
+          }
+        }
+      })
+
+      assert %{"dispatch" => "sling", "deploy" => "close"} = AliasResolver.verb_aliases()
+    end
+
+    test "returns an empty map when the workspace can't be reached" do
+      stub_get("/api/settings", %{"error" => "boom"}, 500)
+
+      assert %{} == AliasResolver.verb_aliases()
+    end
+  end
+
   describe "suggest/2 — distance-ranked suggestions" do
     test "returns the closest matches first, capped at 3" do
       candidates = ~w(show create close list update dep ready doctor where)
