@@ -441,10 +441,26 @@ defmodule ArbiterWeb.PolecatDetailLive do
                       {status_label(@snapshot.status)}
                     </span>
                   </dd>
-                  <dt class="font-medium text-base-content/60">Current step:</dt>
-                  <dd>
-                    <code class="badge badge-ghost badge-sm font-mono">{@snapshot.current_step}</code>
-                  </dd>
+                  <%= if claude_session?(@snapshot) do %>
+                    <dt class="font-medium text-base-content/60">Activity:</dt>
+                    <dd>
+                      <span class="badge badge-info badge-sm gap-1.5">
+                        <span
+                          :if={@snapshot.status == :running}
+                          class="loading loading-ring loading-xs"
+                        >
+                        </span>
+                        {live_activity(@snapshot)}
+                      </span>
+                    </dd>
+                  <% else %>
+                    <dt class="font-medium text-base-content/60">Current step:</dt>
+                    <dd>
+                      <code class="badge badge-ghost badge-sm font-mono">
+                        {@snapshot.current_step}
+                      </code>
+                    </dd>
+                  <% end %>
                   <dt class="font-medium text-base-content/60">{String.capitalize(@rig_label)}:</dt>
                   <dd><code class="font-mono text-xs">{@snapshot.rig}</code></dd>
                   <dt class="font-medium text-base-content/60">
@@ -556,7 +572,35 @@ defmodule ArbiterWeb.PolecatDetailLive do
             </section>
           <% end %>
 
-          <%= if @machine_state do %>
+          <%!-- ── Live activity (claude-driven) ──────────────────────── --%>
+          <%!-- A claude-driven acolyte does the real work in a streaming --%>
+          <%!-- subprocess; its Driver never ticks the workflow Machine, so --%>
+          <%!-- the fixed load_context→submit steps would sit frozen. Show --%>
+          <%!-- the live activity derived from the stream instead (bd-c919xj). --%>
+          <section
+            :if={claude_session?(@snapshot)}
+            class="card bg-base-200 border border-base-300 shadow-sm"
+          >
+            <div class="card-body p-4 gap-2">
+              <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                <.icon name="hero-bolt" class="size-4" /> Live activity
+              </h2>
+              <div class="flex items-center gap-2">
+                <span
+                  :if={@snapshot.status == :running}
+                  class="loading loading-ring loading-sm text-info"
+                >
+                </span>
+                <span class="text-base font-medium">{live_activity(@snapshot)}</span>
+              </div>
+              <p class="text-xs text-base-content/50">
+                Driven by a live Claude session — progress streams in the output below rather than
+                advancing fixed workflow steps.
+              </p>
+            </div>
+          </section>
+
+          <%= if @machine_state && not claude_session?(@snapshot) do %>
             <section class="card bg-base-200 border border-base-300 shadow-sm">
               <div class="card-body p-4 gap-3">
                 <h2 class="text-lg font-semibold flex items-center gap-2">
@@ -771,6 +815,20 @@ defmodule ArbiterWeb.PolecatDetailLive do
     do: status |> Atom.to_string() |> String.capitalize()
 
   defp approval_label(_), do: "Pending"
+
+  # A claude-driven polecat (a streaming Claude subprocess does the real work).
+  # Flagged on meta at session-open. Such a polecat's workflow Machine is never
+  # ticked, so the fixed steps are meaningless — show live activity instead.
+  defp claude_session?(%{meta: meta}) when is_map(meta),
+    do: Map.get(meta, :claude_session) == true
+
+  defp claude_session?(_), do: false
+
+  # The coarse live-activity phrase derived from the stream-json events
+  # ("thinking", "editing run.ex", "running tests", …). Falls back to "working"
+  # before the first event lands.
+  defp live_activity(%{meta: meta}) when is_map(meta), do: Map.get(meta, :activity) || "working"
+  defp live_activity(_), do: "working"
 
   # Color a workflow step based on whether it's done, current, or upcoming.
   defp step_class(step, %MachineState{completed_steps: completed, current_step: current}) do

@@ -270,9 +270,12 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Active #{worker}s (#{length(list)}) ==")
 
     Enum.each(list, fn p ->
-      IO.puts(
-        "  #{p["bead_id"]}  status=#{p["status"]}  step=#{p["current_step"]}  rig=#{p["rig"]}"
-      )
+      step =
+        if p["claude_session"],
+          do: "activity=#{p["activity"] || "working"}",
+          else: "step=#{p["current_step"]}"
+
+      IO.puts("  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}")
     end)
   end
 

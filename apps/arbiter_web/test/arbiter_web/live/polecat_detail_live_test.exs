@@ -119,5 +119,33 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
       assert html =~ "load_context"
       assert html =~ "submit"
     end
+
+    test "a claude-driven polecat shows live activity, not frozen workflow steps",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "pd-claude", workspace_id: ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+
+      # Even with a MachineState attached (slung polecats always have one), a
+      # claude-driven run must NOT show the never-advancing fixed steps — it
+      # shows the live activity derived from the stream instead. See bd-c919xj.
+      {:ok, _machine_id} =
+        Arbiter.Workflows.Machine.attach(Arbiter.Workflows.Work, bead.id, %{
+          bead_id: bead.id,
+          worktree_path: nil,
+          rig: "r"
+        })
+
+      :ok = Polecat.advance(pid, :claude)
+      :ok = Polecat.report(pid, :claude_session, true)
+      :ok = Polecat.report(pid, :activity, "running tests")
+
+      {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
+
+      assert html =~ "Live activity"
+      assert html =~ "running tests"
+      # The misleading frozen workflow card + fixed steps are suppressed.
+      refute html =~ "Workflow:"
+      refute html =~ "load_context"
+    end
   end
 end

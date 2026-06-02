@@ -446,6 +446,39 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
       assert "⏵ Bash(mix test)" in lines
     end
 
+    test "decoded events refresh the session's live activity (mirrored into meta)" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("cs-sj-activity")
+
+      events = [
+        %{"type" => "system", "subtype" => "init", "model" => "claude-opus-4-8"},
+        %{
+          "type" => "assistant",
+          "message" => %{
+            "content" => [
+              %{"type" => "tool_use", "name" => "Edit", "input" => %{"file_path" => "lib/run.ex"}}
+            ]
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      wait_for_exit(pid)
+      meta = Polecat.state(pid).meta
+
+      # The polecat is flagged claude-driven and the last activity reflects the
+      # most recent action (editing the file), not a frozen workflow step.
+      assert meta.claude_session == true
+      assert meta.activity == "editing run.ex"
+      assert %DateTime{} = meta.activity_at
+    end
+
     test "arb done in assistant text completes the polecat" do
       {pid, _bead_id} = start_polecat()
       cwd = tmp_dir!("cs-sj-done")
@@ -663,6 +696,80 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
 
       session = ClaudeSession.handle_data(session, "solo line", true)
       assert session.output_lines == ["solo line"]
+    end
+  end
+
+  describe "activity_for_event/1" do
+    test "system/init reports starting; result reports wrapping up" do
+      assert ClaudeSession.activity_for_event(%{"type" => "system", "subtype" => "init"}) ==
+               "starting"
+
+      assert ClaudeSession.activity_for_event(%{"type" => "result", "subtype" => "success"}) ==
+               "wrapping up"
+    end
+
+    test "thinking and plain text map to coarse phrases" do
+      assert assistant([%{"type" => "thinking", "thinking" => "hmm"}]) == "thinking"
+      assert assistant([%{"type" => "text", "text" => "Here is the plan"}]) == "responding"
+      # Whitespace-only text carries no activity.
+      assert assistant([%{"type" => "text", "text" => "  \n "}]) == nil
+    end
+
+    test "file tools name the file by basename" do
+      assert tool("Edit", %{"file_path" => "apps/arbiter/lib/run.ex"}) == "editing run.ex"
+      assert tool("Write", %{"file_path" => "/tmp/new.ex"}) == "writing new.ex"
+      assert tool("Read", %{"file_path" => "mix.exs"}) == "reading mix.exs"
+      # No path → a graceful placeholder, never a crash.
+      assert tool("Edit", %{}) == "editing a file"
+    end
+
+    test "Bash distinguishes tests from other commands and truncates" do
+      assert tool("Bash", %{"command" => "mix test apps/arbiter"}) == "running tests"
+      assert tool("Bash", %{"command" => "git status"}) == "running: git status"
+
+      long = String.duplicate("x", 200)
+      activity = tool("Bash", %{"command" => long})
+      assert String.starts_with?(activity, "running: ")
+      assert String.ends_with?(activity, "…")
+    end
+
+    test "search, delegation, research, and unknown tools" do
+      assert tool("Grep", %{"pattern" => "foo"}) == "searching"
+      assert tool("Glob", %{}) == "searching"
+      assert tool("Task", %{"description" => "audit deps"}) == "delegating (audit deps)"
+      assert tool("WebSearch", %{}) == "researching"
+      # An unrecognised tool surfaces by its own name, still a live signal.
+      assert tool("mcp__shortcut__stories-get-by-id", %{}) == "mcp__shortcut__stories-get-by-id"
+    end
+
+    test "a turn ending in a tool call reports the tool, not the preceding prose" do
+      blocks = [
+        %{"type" => "text", "text" => "Let me edit the file"},
+        %{"type" => "tool_use", "name" => "Edit", "input" => %{"file_path" => "run.ex"}}
+      ]
+
+      assert assistant(blocks) == "editing run.ex"
+    end
+
+    test "events with no salient activity return nil (caller keeps prior activity)" do
+      assert ClaudeSession.activity_for_event(%{
+               "type" => "user",
+               "message" => %{"content" => []}
+             }) ==
+               nil
+
+      assert ClaudeSession.activity_for_event(%{"type" => "stream_event"}) == nil
+    end
+
+    defp assistant(content) do
+      ClaudeSession.activity_for_event(%{
+        "type" => "assistant",
+        "message" => %{"content" => content}
+      })
+    end
+
+    defp tool(name, input) do
+      assistant([%{"type" => "tool_use", "name" => name, "input" => input}])
     end
   end
 end
