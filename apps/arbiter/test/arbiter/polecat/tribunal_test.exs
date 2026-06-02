@@ -382,4 +382,111 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
     end
   end
+
+  describe "review-gate hardening (bd-2y0gd5)" do
+    test "snapshotting the supervisor's children never crashes the Tribunal",
+         %{repo: repo, ws: ws} do
+      pid = start_live_gate(repo, ws)
+      tribunal = wait_until_tribunal()
+
+      # The crash trigger: enumerate + :snapshot every supervisor child.
+      children = Polecat.list_children()
+
+      # The Tribunal is NOT a polecat, so it must be filtered OUT of the list...
+      refute Enum.any?(children, &(&1.pid == tribunal))
+      # ...and the probe must not have killed it.
+      assert Process.alive?(tribunal)
+      # A direct :snapshot also answers gracefully instead of crashing.
+      assert %{role: :tribunal, status: :reviewing} = GenServer.call(tribunal, :snapshot)
+      # Gate intact: the author is still parked, nothing merged.
+      assert %{status: :awaiting_tribunal} = Polecat.state(pid)
+      assert merge_commit_count(repo) == 0
+    end
+
+    test "a Tribunal that dies before a verdict escalates the author (no strand, no merge)",
+         %{repo: repo, ws: ws} do
+      pid = start_live_gate(repo, ws)
+      tribunal = wait_until_tribunal()
+
+      # Kill the gate before it can deliver a verdict.
+      Process.exit(tribunal, :kill)
+
+      # The author must escalate to :failed (no_verdict) — NOT hang at
+      # :awaiting_tribunal — and must NOT merge.
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 4_000)
+      assert merge_commit_count(repo) == 0
+    end
+  end
+
+  # Start an author through the gate with a *lingering* reviewer (so the Tribunal
+  # stays alive while a test probes or kills it). Cleanup cascades: stopping the
+  # author trips the Tribunal's author-monitor, which stops the reviewer.
+  defp start_live_gate(repo, ws) do
+    bead = new_bead(ws)
+    branch = "feature/rev"
+    :ok = seed_feature_branch(repo, branch)
+    sleep = System.find_executable("sleep") || "/bin/sleep"
+
+    {:ok, pid} =
+      Polecat.start(
+        bead_id: bead.id,
+        rig: "trib/rig",
+        workspace_id: ws.id,
+        meta: %{
+          branch: branch,
+          repo_path: repo,
+          target_branch: "main",
+          merge_title: "Merge #{bead.id}",
+          review_required: true,
+          worktree_path: repo,
+          review_command: [sleep, "10"],
+          review_timeout_ms: 30_000
+        }
+      )
+
+    on_exit(fn ->
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      if rp = Polecat.whereis(review_id), do: safe_stop(rp)
+      if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    end)
+
+    :ok = Polecat.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
+    wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end, 4_000)
+    pid
+  end
+
+  defp safe_stop(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Poll for the live Tribunal child of the polecat supervisor; return its pid.
+  defp wait_until_tribunal(timeout \\ 4_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_tribunal(deadline)
+  end
+
+  defp do_wait_tribunal(deadline) do
+    pid =
+      Arbiter.Polecat.Supervisor
+      |> DynamicSupervisor.which_children()
+      |> Enum.find_value(fn
+        {_, p, _, [Arbiter.Polecat.Tribunal]} when is_pid(p) -> p
+        _ -> nil
+      end)
+
+    cond do
+      is_pid(pid) ->
+        pid
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("Tribunal child did not appear within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait_tribunal(deadline)
+    end
+  end
 end
