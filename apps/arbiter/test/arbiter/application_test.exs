@@ -12,18 +12,18 @@ defmodule Arbiter.ApplicationTest do
 
   describe "children/1 boot wiring" do
     # Regression guard for bd-6k8519, which shipped the SAME boot-breaking
-    # duplicate-`:Task`-id collision TWICE. The two boot Tasks
-    # (reconcile_boot_task, refinery_boot_task) are gated behind
+    # duplicate-`:Task`-id collision TWICE. The gated boot children
+    # (Arbiter.Polecats.ReconcileGuard, refinery_boot_task) are gated behind
     # `RefinerySupervisor.auto_start?()`, which is false in `test`. So in the
-    # test env the colliding children are never appended to the child list and
-    # every test — including any supervision-tree test — passes green. Only a
-    # real dev/prod boot crashes with "more than one child specification has
-    # the id: Task". It took a manual dev boot to catch the bug both times.
+    # test env the children are never appended to the child list and every test
+    # — including any supervision-tree test — passes green. Only a real
+    # dev/prod boot crashes with "more than one child specification has the id:
+    # Task". It took a manual dev boot to catch the bug both times.
     #
-    # Passing `auto_start?: true` forces the gated boot Tasks INTO the resolved
-    # child list regardless of env, so a future id collision (or a third bare
-    # `{Task, fn}` that defaults to the `:Task` id) is caught here by the green
-    # suite instead of by a production outage.
+    # Passing `auto_start?: true` forces the gated boot children INTO the
+    # resolved child list regardless of env, so a future id collision (e.g. a
+    # second bare `{Task, fn}` that defaults to the `:Task` id) is caught here
+    # by the green suite instead of by a production outage.
     test "every child id is unique with the gated boot tasks included" do
       children = Application.children(auto_start?: true)
       ids = Enum.map(children, &child_id/1)
@@ -42,14 +42,14 @@ defmodule Arbiter.ApplicationTest do
     test "the gated boot tasks are present when auto_start? is true" do
       ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
 
-      assert :reconcile_boot_task in ids
+      assert Arbiter.Polecats.ReconcileGuard in ids
       assert :refinery_boot_task in ids
     end
 
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 
-      refute :reconcile_boot_task in ids
+      refute Arbiter.Polecats.ReconcileGuard in ids
       refute :refinery_boot_task in ids
     end
   end

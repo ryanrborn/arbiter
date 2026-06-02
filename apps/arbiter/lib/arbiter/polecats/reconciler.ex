@@ -11,8 +11,15 @@ defmodule Arbiter.Polecats.Reconciler do
 
   This module sweeps those orphans. A `:running` row whose `bead_id` has no live
   polecat registered under `Arbiter.Polecat.Registry` is marked `:failed` with a
-  `failure_reason` of `"server restarted"`. Run on application start (see
-  `Arbiter.Application`) after the Repo and the Polecat Registry are online.
+  `failure_reason` of `"server restarted"`.
+
+  The sweep keys off the LOCAL process registry, so it must run on exactly one
+  instance: a second app booting against the same DB (an acolyte running
+  `iex -S mix` while the real server is up) cannot see the primary's live
+  polecats and would mistake its running rows for orphans. `reconcile_orphaned_runs/0`
+  is therefore not wired directly into boot — `Arbiter.Polecats.ReconcileGuard`
+  gates it behind a single-instance advisory lock and invokes it only on the
+  canonical node (bd-9rouwh).
 
   The sweep is best-effort: a DB hiccup logs a warning and returns `{:error, _}`
   rather than crashing the supervision tree at boot.
