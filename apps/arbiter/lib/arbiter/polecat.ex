@@ -584,6 +584,7 @@ defmodule Arbiter.Polecat do
         session_config
         |> Map.put(:port, port)
         |> Map.put(:output_lines, [])
+        |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
         |> Map.put(:exited_at, nil)
 
@@ -601,11 +602,11 @@ defmodule Arbiter.Polecat do
 
   @impl true
   def handle_info({port, {:data, {:eol, line}}}, %State{} = state) when is_port(port) do
-    {:noreply, on_port_data(state, port, line)}
+    {:noreply, on_port_data(state, port, line, true)}
   end
 
   def handle_info({port, {:data, {:noeol, partial}}}, %State{} = state) when is_port(port) do
-    {:noreply, on_port_data(state, port, partial)}
+    {:noreply, on_port_data(state, port, partial, false)}
   end
 
   def handle_info({port, {:exit_status, status}}, %State{} = state) when is_port(port) do
@@ -642,10 +643,10 @@ defmodule Arbiter.Polecat do
 
   # ---- helpers -----------------------------------------------------------
 
-  defp on_port_data(%State{} = state, port, line) do
+  defp on_port_data(%State{} = state, port, fragment, eol?) do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
-        updated = Arbiter.Polecat.ClaudeSession.handle_data(session, line)
+        updated = Arbiter.Polecat.ClaudeSession.handle_data(session, fragment, eol?)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
         sync_session_meta(new_state, port)
