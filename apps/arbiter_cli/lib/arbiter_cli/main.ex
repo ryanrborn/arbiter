@@ -91,6 +91,27 @@ defmodule ArbiterCli.Main do
 
   defp usage_and_exit(code) do
     IO.puts(@moduledoc)
+    emit_vernacular_verbs()
     ArbiterCli.Output.halt(code)
+  end
+
+  # Surface the active workspace's vernacular command aliases so `arb help`
+  # reflects the verbs the user can actually type (e.g. `arb dispatch` when
+  # vernacular maps sling -> "Dispatch"). Silently omitted when the workspace
+  # can't be reached or has no aliases — help must still work offline.
+  defp emit_vernacular_verbs do
+    case ArbiterCli.AliasResolver.verb_aliases() do
+      aliases when map_size(aliases) == 0 ->
+        :ok
+
+      aliases ->
+        IO.puts("Vernacular verbs (active workspace):")
+
+        aliases
+        |> Enum.sort()
+        |> Enum.each(fn {alias, canonical} ->
+          IO.puts("    arb #{alias}  (alias for `arb #{canonical}`)")
+        end)
+    end
   end
 end
