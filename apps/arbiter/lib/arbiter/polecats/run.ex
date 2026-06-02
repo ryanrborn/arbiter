@@ -11,7 +11,12 @@ defmodule Arbiter.Polecats.Run do
   join against `issues` on every render.
 
   `output_lines` stores the captured Claude / subprocess stdout, capped at
-  `@max_output_lines` (see `Arbiter.Polecat`) to keep the row size sane.
+  `@max_output_lines` (see `Arbiter.Polecat`) to keep the row size sane. This
+  is the bounded *tail* for the UI — the **full, uncapped** transcript is
+  persisted append-only to an on-disk per-run file by
+  `Arbiter.Polecat.OutputLog` (path `<output_log_root>/<id>.log`) and is the
+  audit source of record. Retrieve it with `arb polecat log <bead-id>` or
+  `GET /api/polecats/:bead_id/log`.
   """
 
   use Ash.Resource,

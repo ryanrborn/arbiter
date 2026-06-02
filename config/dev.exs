@@ -9,6 +9,10 @@ config :ash, policies: [show_policy_breakdowns?: true]
 config :arbiter, :rig_paths, %{}
 config :arbiter, :worktree_root, Path.expand("~/dev/arbiter-worktrees")
 
+# Root for durable, append-only per-run acolyte transcripts
+# (Arbiter.Polecat.OutputLog). One file per run: <root>/<run_id>.log.
+config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-polecat-logs")
+
 config :arbiter, Arbiter.Repo,
   username: "arbiter",
   password: "arbiter_dev_password",
@@ -44,8 +48,10 @@ config :arbiter_web, ArbiterWeb.Endpoint,
 config :arbiter_web, dev_routes: true
 config :logger, :default_formatter, format: "[$level] $message\n"
 config :phoenix, :plug_init_mode, :runtime
+
 config :phoenix_live_view,
   debug_heex_annotations: true,
   debug_attributes: true,
   enable_expensive_runtime_checks: true
+
 config :phoenix, :stacktrace_depth, 20

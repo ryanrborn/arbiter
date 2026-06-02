@@ -597,4 +597,72 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
       refute_receive {:polecat_output, ^bead_b, "from-a-1"}, 100
     end
   end
+
+  describe "durable output log" do
+    # Drive the emit path directly (no port/DB) with an OutputLog handle wired
+    # into the session, exactly as the polecat does at session-open. This is
+    # the acceptance test: a run longer than the in-memory cap keeps every line
+    # in the durable store while the live buffer stays bounded.
+    test "a >cap-line run retains ALL lines in the durable store, buffer stays capped" do
+      run_id = "run-#{System.unique_integer([:positive])}"
+      root = Path.join(System.tmp_dir!(), "cs-durable-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:arbiter, :output_log_root)
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      {:ok, handle} = Arbiter.Polecat.OutputLog.open(run_id)
+
+      cap = ClaudeSession.line_cap()
+      total = cap + 500
+
+      session = %{
+        bead_id: "bd-durable",
+        topic: "polecat:durable-#{System.unique_integer([:positive])}",
+        line_cap: cap,
+        done_regex: ClaudeSession.done_regex(),
+        output_lines: [],
+        line_buf: "",
+        output_log: handle
+      }
+
+      session =
+        Enum.reduce(1..total, session, fn i, acc ->
+          ClaudeSession.handle_data(acc, "line-#{i}", true)
+        end)
+
+      # Live buffer: bounded to the cap, holding the most recent lines.
+      assert length(session.output_lines) == cap
+      newest_first = session.output_lines
+      assert List.first(newest_first) == "line-#{total}"
+      refute "line-1" in newest_first
+
+      # Durable store: every single line, append-only, oldest first.
+      Arbiter.Polecat.OutputLog.close(session.output_log)
+      assert {:ok, durable} = Arbiter.Polecat.OutputLog.read_lines(run_id)
+      assert length(durable) == total
+      assert List.first(durable) == "line-1"
+      assert List.last(durable) == "line-#{total}"
+    end
+
+    test "a session without an :output_log handle behaves as before (no durable write)" do
+      session = %{
+        bead_id: "bd-nolog",
+        topic: "polecat:nolog-#{System.unique_integer([:positive])}",
+        line_cap: ClaudeSession.line_cap(),
+        done_regex: ClaudeSession.done_regex(),
+        output_lines: [],
+        line_buf: ""
+      }
+
+      session = ClaudeSession.handle_data(session, "solo line", true)
+      assert session.output_lines == ["solo line"]
+    end
+  end
 end

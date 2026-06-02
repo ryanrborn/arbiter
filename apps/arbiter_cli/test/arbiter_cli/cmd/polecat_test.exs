@@ -144,6 +144,52 @@ defmodule ArbiterCli.Cmd.PolecatTest do
     end
   end
 
+  describe "polecat log" do
+    test "prints the run metadata and the full durable transcript, oldest first" do
+      stub_get("/api/polecats/bd-005/log", %{
+        "data" => %{
+          "bead_id" => "bd-005",
+          "run_id" => "run-abc",
+          "path" => "/var/arbiter/polecat-logs/run-abc.log",
+          "exists" => true,
+          "line_count" => 3,
+          "lines" => ["first", "second", "third"]
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["log", "bd-005"]) end)
+      assert exit_code == 0
+      assert out =~ "bd-005"
+      assert out =~ "run-abc"
+      assert out =~ "/var/arbiter/polecat-logs/run-abc.log"
+      assert out =~ "Full transcript (3 lines"
+      assert out =~ "first"
+      assert out =~ "third"
+    end
+
+    test "reports when no durable transcript exists on disk" do
+      stub_get("/api/polecats/bd-006/log", %{
+        "data" => %{
+          "bead_id" => "bd-006",
+          "run_id" => "run-xyz",
+          "path" => "/var/arbiter/polecat-logs/run-xyz.log",
+          "exists" => false,
+          "line_count" => 0,
+          "lines" => []
+        }
+      })
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["log", "bd-006"]) end)
+      assert exit_code == 0
+      assert out =~ "no durable transcript"
+    end
+
+    test "missing bead_id returns a friendly error" do
+      {_out, _err, exit_code} = capture(fn -> Polecat.run(["log"]) end)
+      assert exit_code != 0
+    end
+  end
+
   describe "unknown subcommand" do
     test "halts with a useful message" do
       {_out, _err, exit_code} = capture(fn -> Polecat.run(["wat"]) end)
