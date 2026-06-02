@@ -40,6 +40,9 @@ defmodule ArbiterWeb.DashboardLive do
   @beads_topic "beads"
   @polecats_topic "polecats"
 
+  # Number of directives shown in the "recent directives" list.
+  @recent_beads_limit 20
+
   @impl true
   def mount(_params, _session, socket) do
     live? = connected?(socket)
@@ -135,12 +138,27 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :completed_runs, runs)
   end
 
+  # Non-closed directives surface ahead of closed ones; each group is ordered
+  # by updated_at desc. We read each group bounded by the display limit, then
+  # concat and take the limit — so active directives are never pushed off the
+  # list by more-recently-updated closed ones (the limit applies AFTER the
+  # grouped sort, not before).
   defp refresh_recent_beads(socket) do
-    beads =
+    active =
       Issue
+      |> Ash.Query.filter(status != :closed)
       |> Ash.Query.sort(updated_at: :desc)
-      |> Ash.Query.limit(20)
+      |> Ash.Query.limit(@recent_beads_limit)
       |> Ash.read!()
+
+    closed =
+      Issue
+      |> Ash.Query.filter(status == :closed)
+      |> Ash.Query.sort(updated_at: :desc)
+      |> Ash.Query.limit(@recent_beads_limit)
+      |> Ash.read!()
+
+    beads = Enum.take(active ++ closed, @recent_beads_limit)
 
     blocked_counts = blocked_counts_for(Enum.map(beads, & &1.id))
 
