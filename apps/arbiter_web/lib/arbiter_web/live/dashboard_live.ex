@@ -4,8 +4,9 @@ defmodule ArbiterWeb.DashboardLive do
 
     * Active polecats (name, current step, bead, runtime)
     * Recent beads (last 20 by `updated_at` desc)
-    * PRs in flight (placeholder — Phase 4 supervisor will register
-      Refinery instances per workspace and expose their state)
+    * Merge queue / Crucibles — branches integrating via `Arbiter.Mergers`
+      (Direct/GitLab/GitHub): the polecats parked at `:awaiting_review`, each
+      with its open MR, approval status, and Warden poll activity. Live.
     * Escalations (placeholder — no Escalation resource yet)
 
   ## PubSub topics
@@ -32,6 +33,7 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
+  alias Arbiter.Polecat.Warden
   alias Arbiter.Polecat.Worktree
   alias Arbiter.Polecats.Run
   alias Arbiter.Vernacular
@@ -72,6 +74,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_notifications()
      |> refresh_rigs()
      |> refresh_polecats()
+     |> refresh_merge_queue()
      |> refresh_completed_runs()
      |> refresh_recent_beads()}
   end
@@ -88,6 +91,7 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply,
      socket
      |> refresh_polecats()
+     |> refresh_merge_queue()
      |> refresh_completed_runs()
      |> refresh_workspaces()
      |> refresh_rigs()}
@@ -122,6 +126,59 @@ defmodule ArbiterWeb.DashboardLive do
       end)
 
     assign(socket, :polecats, polecats)
+  end
+
+  # The merge queue (Crucibles): branches integrating via Arbiter.Mergers.
+  # Sourced live from polecats parked at :awaiting_review — each has an open MR
+  # (mr_ref + clickable merger_url), the last Mergers.get/1 result the Warden
+  # recorded (:last_merger_status), and when it was last polled. Ordered
+  # longest-waiting first so a stalled merge surfaces at the top of the queue.
+  #
+  # The merger *type* (Direct/GitLab/GitHub) is resolved from the polecat's
+  # workspace config rather than the snapshot — the resolved adapter module is
+  # internal to the polecat and not exposed on the snapshot.
+  defp refresh_merge_queue(socket) do
+    workspaces_by_id =
+      socket.assigns[:workspaces_by_id] || index_workspaces(load_workspaces())
+
+    merges =
+      try do
+        Polecat.list_children()
+      rescue
+        _ -> []
+      end
+      |> Enum.filter(&(&1.status == :awaiting_review))
+      |> Enum.map(fn p ->
+        meta = p.meta || %{}
+
+        %{
+          bead_id: p.bead_id,
+          workspace_name: workspace_label(workspaces_by_id, p.workspace_id),
+          merger_type: merger_type(workspaces_by_id, p.workspace_id),
+          mr_ref: p.mr_ref,
+          merger_url: p.merger_url,
+          merger_status: Map.get(meta, :last_merger_status),
+          last_checked_at: Map.get(meta, :last_checked_at),
+          since: p.step_started_at || p.started_at
+        }
+      end)
+      |> Enum.sort_by(& &1.since, {:asc, DateTime})
+
+    assign(socket, :merge_queue, merges)
+  end
+
+  # Resolve the merger strategy atom (:direct | :gitlab | :github) for a
+  # polecat's workspace. Falls back to :direct (the Workspace default) when the
+  # workspace is unknown or unset.
+  defp merger_type(_workspaces_by_id, nil), do: :direct
+
+  defp merger_type(workspaces_by_id, ws_id) do
+    case Map.fetch(workspaces_by_id, ws_id) do
+      {:ok, ws} -> Workspace.merger_strategy(ws)
+      :error -> :direct
+    end
+  rescue
+    _ -> :direct
   end
 
   defp refresh_completed_runs(socket) do
@@ -439,6 +496,44 @@ defmodule ArbiterWeb.DashboardLive do
   defp run_status_class(:failed), do: "badge-error"
   defp run_status_class(:running), do: "badge-info"
   defp run_status_class(_), do: "badge-ghost"
+
+  # Human label for the resolved merger strategy atom.
+  defp merger_type_label(:direct), do: "Direct"
+  defp merger_type_label(:gitlab), do: "GitLab"
+  defp merger_type_label(:github), do: "GitHub"
+  defp merger_type_label(other), do: other |> to_string() |> String.capitalize()
+
+  # Approval/merge state of an in-flight merge, derived from the last
+  # Mergers.get/1 result the Warden recorded. Routes through Warden.classify/1
+  # — the single approval-detection decision surface — so the dashboard label
+  # can never drift from the Warden's own merge/fail logic. `nil` means the
+  # Warden hasn't completed its first poll yet.
+  defp merge_status_label(nil), do: "Awaiting first poll"
+
+  defp merge_status_label(status) when is_map(status) do
+    case Warden.classify(status) do
+      :merged -> "Merged"
+      :approved -> "Approved"
+      :closed -> "Closed / rejected"
+      :pending -> "In review"
+    end
+  end
+
+  defp merge_status_class(nil), do: "badge-ghost"
+
+  defp merge_status_class(status) when is_map(status) do
+    case Warden.classify(status) do
+      :merged -> "badge-success"
+      :approved -> "badge-success"
+      :closed -> "badge-error"
+      :pending -> "badge-info"
+    end
+  end
+
+  # Warden poll cadence, in seconds, for the merge-queue freshness line. The
+  # per-workspace override isn't exposed on the snapshot, so we show the
+  # default — the same value the polecat detail view reports.
+  defp poll_interval_seconds, do: div(Warden.default_interval_ms(), 1000)
 
   defp humanize_duration(%DateTime{} = started_at, %DateTime{} = ended_at) do
     started_at |> DateTime.diff(ended_at, :second) |> abs() |> humanize_seconds()
@@ -942,34 +1037,110 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── F. Coming-soon placeholders ──────────────────────────── --%>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <section class="card bg-base-200/60 border border-dashed border-base-300">
-            <div class="card-body p-4 gap-2">
-              <h2 class="text-lg font-semibold flex items-center gap-2 text-base-content/70">
-                <.icon name="hero-paper-airplane" class="size-5" />
-                {cap_plural(@pr_label)} in flight <span class="badge badge-ghost badge-sm">soon</span>
-              </h2>
-              <p class="text-sm text-base-content/50" id="prs-empty">
-                No {plural(@merge_queue_label)} running. (Phase 4 will register {@merge_queue_label} instances
-                per {@workspace_label} and surface their queues here.)
-              </p>
-            </div>
-          </section>
+        <%!-- ── F. Merge queue (Crucibles) ───────────────────────────── --%>
+        <section id="merge-queue-section" class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <h2 class="text-lg font-semibold flex items-center gap-2">
+              <.icon name="hero-arrow-path-rounded-square" class="size-5 text-primary" />
+              {cap_plural(@merge_queue_label)} ({length(@merge_queue)})
+              <span class="text-sm font-normal text-base-content/50">
+                — {plural(@pr_label)} integrating now
+              </span>
+            </h2>
 
-          <section class="card bg-base-200/60 border border-dashed border-base-300">
-            <div class="card-body p-4 gap-2">
-              <h2 class="text-lg font-semibold flex items-center gap-2 text-base-content/70">
-                <.icon name="hero-exclamation-triangle" class="size-5" />
-                {cap_plural(@escalation_label)}
-                <span class="badge badge-ghost badge-sm">soon</span>
-              </h2>
-              <p class="text-sm text-base-content/50" id="escalations-empty">
-                No {plural(@escalation_label)}. ({String.capitalize(@escalation_label)} resource is a Phase 5 follow-up.)
+            <div
+              :if={@merge_queue == []}
+              id="merge-queue-empty"
+              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
+            >
+              <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
+              <p class="mt-2 text-sm text-base-content/60">
+                No {plural(@pr_label)} integrating right now.
+              </p>
+              <p class="text-xs text-base-content/50">
+                Branches awaiting review via {@merge_queue_label} (Direct, GitLab, GitHub)
+                appear here with their approval status and Warden poll activity.
               </p>
             </div>
-          </section>
-        </div>
+
+            <ul :if={@merge_queue != []} id="merge-queue" class="flex flex-col gap-3">
+              <li
+                :for={m <- @merge_queue}
+                class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-primary/50"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <.link
+                    navigate={~p"/polecats/#{m.bead_id}"}
+                    class="flex items-center gap-2 min-w-0 group"
+                  >
+                    <span class="relative flex h-2.5 w-2.5 shrink-0">
+                      <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-75">
+                      </span>
+                      <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>
+                    </span>
+                    <code class="text-xs font-semibold group-hover:text-primary transition-colors truncate">
+                      {m.bead_id}
+                    </code>
+                  </.link>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <span class="badge badge-sm badge-ghost font-mono">
+                      {merger_type_label(m.merger_type)}
+                    </span>
+                    <span class={["badge badge-sm", merge_status_class(m.merger_status)]}>
+                      {merge_status_label(m.merger_status)}
+                    </span>
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-between gap-2 mt-1.5 text-xs text-base-content/60">
+                  <span class="truncate">{m.workspace_name}</span>
+                  <span class="font-mono tabular-nums shrink-0" title="Time in queue">
+                    {humanize_seconds(runtime_seconds(m.since, @now))} in queue
+                  </span>
+                </div>
+
+                <div :if={m.mr_ref} class="flex items-center gap-1 mt-1.5 text-xs min-w-0">
+                  <.icon name="hero-arrow-top-right-on-square" class="size-3 text-primary shrink-0" />
+                  <a
+                    :if={m.merger_url}
+                    href={m.merger_url}
+                    target="_blank"
+                    rel="noopener"
+                    class="link link-primary truncate"
+                  >
+                    {m.mr_ref}
+                  </a>
+                  <code :if={!m.merger_url} class="truncate text-base-content/70">{m.mr_ref}</code>
+                </div>
+
+                <%!-- Warden activity: poll cadence + freshness of the last check. --%>
+                <div class="flex items-center gap-1.5 mt-2 pt-2 border-t border-base-300 text-xs text-base-content/50">
+                  <.icon name="hero-eye" class="size-3 shrink-0" />
+                  <span :if={m.last_checked_at}>
+                    Warden checked {relative_time(m.last_checked_at, @now)} · every {poll_interval_seconds()}s
+                  </span>
+                  <span :if={!m.last_checked_at}>
+                    Warden polling every {poll_interval_seconds()}s
+                  </span>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <%!-- ── H. Coming-soon placeholder ───────────────────────────── --%>
+        <section class="card bg-base-200/60 border border-dashed border-base-300">
+          <div class="card-body p-4 gap-2">
+            <h2 class="text-lg font-semibold flex items-center gap-2 text-base-content/70">
+              <.icon name="hero-exclamation-triangle" class="size-5" />
+              {cap_plural(@escalation_label)}
+              <span class="badge badge-ghost badge-sm">soon</span>
+            </h2>
+            <p class="text-sm text-base-content/50" id="escalations-empty">
+              No {plural(@escalation_label)}. ({String.capitalize(@escalation_label)} resource is a Phase 5 follow-up.)
+            </p>
+          </div>
+        </section>
       </div>
     </Layouts.app>
     """

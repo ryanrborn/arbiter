@@ -390,8 +390,20 @@ defmodule Arbiter.Polecat do
     {:ok, state}
   end
 
-  @doc false
-  def broadcast_lifecycle(event, %State{} = state) when event in [:started, :stopped] do
+  @doc """
+  Broadcast a `{:polecat_lifecycle, event, snapshot}` message on the `"polecats"`
+  topic. `event` is one of:
+
+    * `:started` — the polecat just booted (`init/1`).
+    * `:stopped` — the polecat is terminating (`terminate/2`).
+    * `:updated` — a mid-life state change worth pushing to live views, namely
+      parking at `:awaiting_review` (MR opened) and each Warden poll that
+      records a fresh merger status. Lets the dashboard's merge-queue view
+      track in-flight merges without polling.
+
+  Best-effort: a PubSub failure is logged at debug and swallowed.
+  """
+  def broadcast_lifecycle(event, %State{} = state) when event in [:started, :stopped, :updated] do
     Phoenix.PubSub.broadcast(
       Arbiter.PubSub,
       "polecats",
@@ -574,8 +586,16 @@ defmodule Arbiter.Polecat do
         %State{status: :running} = state
       ) do
     case do_open_mr(state, branch, title, description, opts) do
-      {:ok, mr_ref, new_state} -> {:reply, {:ok, mr_ref}, new_state}
-      {:error, reason, kept_state} -> {:reply, {:error, reason}, kept_state}
+      {:ok, mr_ref, new_state} ->
+        # The polecat just parked at :awaiting_review with an MR open and a
+        # Warden watching. Push an :updated lifecycle event so the dashboard's
+        # merge-queue view picks the in-flight merge up live (the topic
+        # otherwise only fires on :started/:stopped).
+        broadcast_lifecycle(:updated, new_state)
+        {:reply, {:ok, mr_ref}, new_state}
+
+      {:error, reason, kept_state} ->
+        {:reply, {:error, reason}, kept_state}
     end
   end
 
@@ -593,7 +613,13 @@ defmodule Arbiter.Polecat do
       |> Map.put(:last_merger_status, status_map)
       |> Map.put(:last_checked_at, DateTime.utc_now())
 
-    {:reply, :ok, %State{state | meta: meta}}
+    new_state = %State{state | meta: meta}
+
+    # Each Warden poll lands here. Push an :updated lifecycle event so the
+    # merge-queue view's approval status + last-checked freshness stay live.
+    broadcast_lifecycle(:updated, new_state)
+
+    {:reply, :ok, new_state}
   end
 
   def handle_call({:complete, result}, _from, %State{status: status} = state)
