@@ -514,6 +514,24 @@ defmodule Arbiter.Polecat do
     |> Enum.take(-@max_output_lines)
   end
 
+  # Open the durable, uncapped per-run transcript for this session. Keyed on
+  # run_id: a polecat whose Run row never persisted (run_id nil) gets no
+  # durable log, since there's no row to anchor audit retrieval to. A disk
+  # error logs a warning and degrades to nil — the live capped path (PubSub +
+  # bounded output_lines) is unaffected either way. See Arbiter.Polecat.OutputLog.
+  defp open_output_log(%State{run_id: nil}), do: nil
+
+  defp open_output_log(%State{run_id: run_id} = state) do
+    case Arbiter.Polecat.OutputLog.open(run_id) do
+      {:ok, handle} ->
+        handle
+
+      {:error, reason} ->
+        log_run_warning("output_log_open", state.bead_id, reason)
+        nil
+    end
+  end
+
   defp stringify_failure(nil), do: nil
   defp stringify_failure(s) when is_binary(s), do: s
   defp stringify_failure(other), do: inspect(other)
@@ -667,6 +685,7 @@ defmodule Arbiter.Polecat do
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
         |> Map.put(:exited_at, nil)
+        |> Map.put(:output_log, open_output_log(state))
 
       sessions = Map.put(state.claude_sessions, port, session)
       new_state = %State{state | claude_sessions: sessions}
