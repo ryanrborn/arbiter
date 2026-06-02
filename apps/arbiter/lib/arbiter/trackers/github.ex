@@ -164,6 +164,89 @@ defmodule Arbiter.Trackers.GitHub do
     end
   end
 
+  @doc """
+  Returns the authenticated user's login (the "viewer") associated with the
+  active workspace's token. Used by `arb claim` and `arb sync` to enforce
+  assignment-as-claim: a bead is only created for an issue assigned to *this*
+  workspace's GitHub user.
+  """
+  @spec viewer_login() :: {:ok, String.t()} | {:error, Error.t()}
+  def viewer_login do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{"login" => login}} when is_binary(login) <-
+           request(cfg, :get, "/user", []) |> handle_json() do
+      {:ok, login}
+    else
+      {:ok, _other} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "GET /user returned no login",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @doc """
+  Lists open issues in the workspace's repo assigned to the given login.
+
+  Pull requests are filtered out — GitHub's `/repos/:owner/:repo/issues`
+  endpoint returns both, distinguished by a `"pull_request"` key.
+  """
+  @spec list_assigned_open_issues(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
+  def list_assigned_open_issues(login) when is_binary(login) do
+    with {:ok, cfg} <- Config.resolve() do
+      path = "/repos/#{cfg.owner}/#{cfg.repo}/issues"
+      params = [assignee: login, state: "open", per_page: 100]
+
+      request(cfg, :get, path, params: params)
+      |> handle_json()
+      |> case do
+        {:ok, list} when is_list(list) ->
+          {:ok, Enum.reject(list, &Map.has_key?(&1, "pull_request"))}
+
+        {:ok, _} ->
+          {:ok, []}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  @doc """
+  Extracts assignee logins from a fetched issue map. Tolerant of GitHub's two
+  shapes: `"assignees"` (a list of user maps) and the legacy `"assignee"`
+  (a single user map).
+  """
+  @spec assignee_logins(map()) :: [String.t()]
+  def assignee_logins(%{"assignees" => list}) when is_list(list) do
+    list
+    |> Enum.flat_map(fn
+      %{"login" => login} when is_binary(login) -> [login]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  def assignee_logins(%{"assignee" => %{"login" => login}}) when is_binary(login), do: [login]
+  def assignee_logins(_), do: []
+
+  @doc """
+  Returns the issue's bead-vocabulary status from its raw GitHub payload.
+
+  GitHub Issues only have `"open"` / `"closed"` natively; this is sufficient
+  for `arb sync`'s reconcile logic (which only cares whether to close a bead
+  whose issue went to `"closed"`).
+  """
+  @spec issue_status(map()) :: :open | :closed
+  def issue_status(%{"state" => "closed"}), do: :closed
+  def issue_status(_), do: :open
+
   # ---- Internals: status / labels -----------------------------------------
 
   defp map_status(%{status_map: map}, status) do
