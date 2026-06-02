@@ -7,6 +7,11 @@ defmodule ArbiterWeb.DashboardLive do
     * Merge queue / Crucibles — branches integrating via `Arbiter.Mergers`
       (Direct/GitLab/GitHub): the polecats parked at `:awaiting_review`, each
       with its open MR, approval status, and Warden poll activity. Live.
+    * Admiral mailbox — unread mailbox-family messages addressed to the
+      coordinator (`to_ref "admiral"`): completions, failures, escalations,
+      flags, info. Read-acknowledge per message; clear drains the read tail.
+      The dashboard counterpart of `arb inbox` / `arb msg`. Live.
+    * Notifications feed — recent `:notification` broadcasts (read-only).
     * Escalations (placeholder — no Escalation resource yet)
 
   ## PubSub topics
@@ -19,7 +24,7 @@ defmodule ArbiterWeb.DashboardLive do
     * `"messages:<workspace_id>"` — `{:new_message, message}` from
                       `Arbiter.Messages.Message.broadcast_new/1`, one
                       subscription per workspace known at mount. Drives the
-                      live notifications feed.
+                      live notifications feed and the Admiral mailbox.
 
   Both topics fire on every relevant write. The LiveView refreshes the
   affected section by re-reading the data (deliberately naive — Phase 5
@@ -41,6 +46,11 @@ defmodule ArbiterWeb.DashboardLive do
 
   @beads_topic "beads"
   @polecats_topic "polecats"
+
+  # The coordinator's mailbox recipient — the `to_ref` acolytes address reports
+  # *up* to (completions/failures/escalations/info). Matches `arb inbox` and
+  # the `arb prime` Admiral Inbox section.
+  @admiral_ref "admiral"
 
   # Number of directives shown in the "recent directives" list.
   @recent_beads_limit 20
@@ -72,6 +82,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_workspaces()
      |> subscribe_messages(live?)
      |> refresh_notifications()
+     |> refresh_admiral_inbox()
      |> refresh_rigs()
      |> refresh_polecats()
      |> refresh_merge_queue()
@@ -98,13 +109,31 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   def handle_info({:new_message, _message}, socket) do
-    {:noreply, refresh_notifications(socket)}
+    {:noreply,
+     socket
+     |> refresh_notifications()
+     |> refresh_admiral_inbox()}
   end
 
   # Lightweight 1s tick: only advances the clock so elapsed counters and
   # relative timestamps stay live. No data reads here.
   def handle_info(:tick, socket) do
     {:noreply, assign(socket, :now, DateTime.utc_now())}
+  end
+
+  @impl true
+  # Acknowledge one Admiral-mailbox message: stamp read_at, drop it from the
+  # unread list. Mirrors `arb inbox read <id>` and the per-acolyte mailbox.
+  def handle_event("mark_read", %{"id" => id}, socket) do
+    _ = Message.mark_read(id)
+    {:noreply, refresh_admiral_inbox(socket)}
+  end
+
+  # Drain the read tail of the Admiral mailbox. Mirrors `arb inbox clear` /
+  # `DELETE /api/messages?to_ref=admiral` — unread mail is left untouched.
+  def handle_event("clear_admiral", _params, socket) do
+    _ = Message.clear_read(@admiral_ref)
+    {:noreply, refresh_admiral_inbox(socket)}
   end
 
   # ---- data ----
@@ -294,6 +323,22 @@ defmodule ArbiterWeb.DashboardLive do
       end
 
     assign(socket, :notifications, notifications)
+  end
+
+  # ---- admiral mailbox ----
+
+  # Unread mailbox-family messages addressed to the Admiral, fleet-wide
+  # (every workspace), oldest first — so the longest-waiting escalation sits
+  # at the top of the queue. Mirrors `arb inbox` (the Admiral's unread view).
+  defp refresh_admiral_inbox(socket) do
+    inbox =
+      try do
+        Message.inbox(@admiral_ref)
+      rescue
+        _ -> []
+      end
+
+    assign(socket, :admiral_inbox, inbox)
   end
 
   # ---- workspaces ----
@@ -544,6 +589,10 @@ defmodule ArbiterWeb.DashboardLive do
   defp kind_badge_class(:notification), do: "badge-info"
   defp kind_badge_class(:direction), do: "badge-warning"
   defp kind_badge_class(:flag), do: "badge-accent"
+  defp kind_badge_class(:escalation), do: "badge-error"
+  defp kind_badge_class(:failure), do: "badge-error"
+  defp kind_badge_class(:completion), do: "badge-success"
+  defp kind_badge_class(:info), do: "badge-info"
   defp kind_badge_class(_), do: "badge-ghost"
 
   defp format_ts(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
@@ -669,16 +718,25 @@ defmodule ArbiterWeb.DashboardLive do
             <div class="stat-desc">configured</div>
           </div>
 
-          <%!-- Placeholder slot. Activates when the Admiral inbox campaign lands
-               and exposes an unread-count backing source. --%>
-          <div class="stat opacity-50">
-            <div class="stat-figure text-base-content/40">
+          <%!-- Admiral Inbox: unread mailbox-family mail addressed to the
+               coordinator (completions/failures/escalations/info). Links to
+               the mailbox panel below. Live via the messages PubSub topic. --%>
+          <a href="#admiral-mailbox" class="stat hover:bg-base-300/40 transition-colors">
+            <div class={[
+              "stat-figure",
+              if(@admiral_inbox == [], do: "text-base-content/40", else: "text-warning")
+            ]}>
               <.icon name="hero-envelope" class="size-7" />
             </div>
             <div class="stat-title">Admiral Inbox</div>
-            <div class="stat-value text-base-content/40">—</div>
-            <div class="stat-desc">coming soon</div>
-          </div>
+            <div class={[
+              "stat-value",
+              if(@admiral_inbox == [], do: "text-base-content/40", else: "text-warning")
+            ]}>
+              {length(@admiral_inbox)}
+            </div>
+            <div class="stat-desc">{if @admiral_inbox == [], do: "all clear", else: "unread"}</div>
+          </a>
         </div>
 
         <%!-- ── B + C. Active workers / Directive queue ──────────────── --%>
@@ -845,7 +903,103 @@ defmodule ArbiterWeb.DashboardLive do
           </section>
         </div>
 
-        <%!-- ── D. Notifications feed ────────────────────────────────── --%>
+        <%!-- ── D. Admiral mailbox ───────────────────────────────────── --%>
+        <%!-- Unread mailbox-family mail addressed to the coordinator
+             ("admiral"): completions, failures, escalations, flags, info.
+             Read-acknowledge per message; clear drains the read tail. The
+             upward channel of `arb inbox` / `arb msg`, surfaced live. --%>
+        <section id="admiral-mailbox" class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <div class="flex items-center justify-between gap-2">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-envelope" class="size-5 text-base-content/70" />
+                Admiral Mailbox
+                <span class={[
+                  "badge badge-sm",
+                  if(@admiral_inbox == [], do: "badge-ghost", else: "badge-warning")
+                ]}>
+                  {length(@admiral_inbox)} unread
+                </span>
+              </h2>
+              <button
+                phx-click="clear_admiral"
+                class="btn btn-xs btn-ghost gap-1"
+                data-confirm="Clear all already-read Admiral mail? (unread is kept)"
+                title="Drain the read tail — already-read mail is destroyed, unread is kept"
+              >
+                <.icon name="hero-trash" class="size-3.5" /> Clear read
+              </button>
+            </div>
+
+            <div
+              :if={@admiral_inbox == []}
+              id="admiral-mailbox-empty"
+              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
+            >
+              <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
+              <p class="mt-2 text-sm text-base-content/60">
+                Inbox clear. Acolyte completions, failures, and escalations addressed
+                to the Admiral land here in real time.
+              </p>
+            </div>
+
+            <ul
+              :if={@admiral_inbox != []}
+              id="admiral-mailbox-list"
+              class="flex flex-col gap-2 max-h-80 overflow-y-auto pr-1"
+            >
+              <li
+                :for={m <- @admiral_inbox}
+                class={[
+                  "rounded-box bg-base-100 border border-base-300 border-l-4 px-3 py-2",
+                  kind_border_class(m.kind)
+                ]}
+              >
+                <div class="flex items-baseline justify-between gap-2">
+                  <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                    <span class={["badge badge-sm shrink-0", kind_badge_class(m.kind)]}>
+                      {m.kind}
+                    </span>
+                    <span class="text-xs text-base-content/60">
+                      from <code class="font-mono">{m.from_ref || "?"}</code>
+                    </span>
+                    <.link
+                      :if={m.directive_ref}
+                      navigate={~p"/beads/#{m.directive_ref}"}
+                      class="text-xs link link-hover text-base-content/50"
+                    >
+                      [<code class="font-mono">{m.directive_ref}</code>]
+                    </.link>
+                    <span :if={m.subject} class="text-sm font-medium truncate">{m.subject}</span>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <span
+                      class="text-xs text-base-content/50 whitespace-nowrap"
+                      title={format_ts(m.inserted_at)}
+                    >
+                      {relative_time(m.inserted_at, @now)}
+                    </span>
+                    <button
+                      phx-click="mark_read"
+                      phx-value-id={m.id}
+                      class="btn btn-xs btn-ghost"
+                    >
+                      Mark read
+                    </button>
+                  </div>
+                </div>
+                <p
+                  :if={m.body not in [nil, ""]}
+                  class="text-sm mt-1.5 whitespace-pre-wrap text-base-content/80"
+                >
+                  {m.body}
+                </p>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <%!-- ── E. Notifications feed ────────────────────────────────── --%>
         <section class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <h2 class="text-lg font-semibold flex items-center gap-2">
@@ -901,7 +1055,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── E. Workspaces / Warships as compact cards ────────────── --%>
+        <%!-- ── F. Workspaces / Warships as compact cards ────────────── --%>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <section id="workspaces-section" class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
@@ -1037,7 +1191,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── F. Merge queue (Crucibles) ───────────────────────────── --%>
+        <%!-- ── H. Merge queue (Crucibles) ───────────────────────────── --%>
         <section id="merge-queue-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <h2 class="text-lg font-semibold flex items-center gap-2">
@@ -1128,7 +1282,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── H. Coming-soon placeholder ───────────────────────────── --%>
+        <%!-- ── I. Coming-soon placeholder ───────────────────────────── --%>
         <section class="card bg-base-200/60 border border-dashed border-base-300">
           <div class="card-body p-4 gap-2">
             <h2 class="text-lg font-semibold flex items-center gap-2 text-base-content/70">
@@ -1186,5 +1340,9 @@ defmodule ArbiterWeb.DashboardLive do
   defp kind_border_class(:notification), do: "border-info"
   defp kind_border_class(:direction), do: "border-warning"
   defp kind_border_class(:flag), do: "border-accent"
+  defp kind_border_class(:escalation), do: "border-error"
+  defp kind_border_class(:failure), do: "border-error"
+  defp kind_border_class(:completion), do: "border-success"
+  defp kind_border_class(:info), do: "border-info"
   defp kind_border_class(_), do: "border-base-300"
 end
