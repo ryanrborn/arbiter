@@ -46,9 +46,9 @@ defmodule ArbiterCli.ClientTest do
   end
 
   describe "base_url/0" do
-    test "defaults to localhost:4000" do
+    test "defaults to localhost:4848" do
       System.delete_env("ARB_HOST")
-      assert Client.base_url() == "http://127.0.0.1:4000"
+      assert Client.base_url() == "http://127.0.0.1:4848"
     end
 
     test "honors ARB_HOST" do
