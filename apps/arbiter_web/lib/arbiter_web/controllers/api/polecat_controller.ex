@@ -14,11 +14,14 @@ defmodule ArbiterWeb.Api.PolecatController do
       When no live polecat exists for the bead, falls back to the most recent
       `Arbiter.Polecats.Run` row so finished/exited runs stay inspectable.
     * `POST /api/polecats/:bead_id/stop`   — :stop (terminate polecat cleanly)
+    * `GET  /api/polecats/:bead_id/log`    — :log (full, uncapped durable
+      transcript of the bead's most recent run; the audit source of record).
   """
 
   use ArbiterWeb, :controller
 
   alias Arbiter.Polecat
+  alias Arbiter.Polecat.OutputLog
   alias Arbiter.Polecat.Sling
   alias Arbiter.Polecats.Run
   require Ash.Query
@@ -108,6 +111,37 @@ defmodule ArbiterWeb.Api.PolecatController do
   end
 
   def stop(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+
+  # Full, uncapped durable transcript for the bead's most recent run. Resolves
+  # the latest `Run` row, then reads its on-disk transcript via `OutputLog`.
+  # `exists` distinguishes "no file yet / never captured" (false, lines [])
+  # from "captured but empty" (true, lines []). 404 only when no run exists.
+  def log(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
+    case latest_run(bead_id) do
+      %Run{} = run ->
+        {exists, lines} =
+          case OutputLog.read_lines(run.id) do
+            {:ok, lines} -> {true, lines}
+            {:error, _} -> {false, []}
+          end
+
+        json(conn, %{
+          data: %{
+            bead_id: run.bead_id,
+            run_id: run.id,
+            path: OutputLog.path_for(run.id),
+            exists: exists,
+            line_count: length(lines),
+            lines: lines
+          }
+        })
+
+      nil ->
+        {:error, :not_found}
+    end
+  end
+
+  def log(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
 
   # Map request params onto `Sling.sling/2` opts.
   #

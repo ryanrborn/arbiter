@@ -20,6 +20,11 @@ config :arbiter, :jira_http_stub, true
 config :arbiter, :shortcut_http_stub, true
 config :arbiter, :gitlab_http_stub, true
 config :arbiter, :auto_start_refineries, false
+
+# Durable per-run transcript root, isolated under tmp so the suite never
+# writes into a real data dir. Tests that assert on transcripts override this
+# per-test with a unique tmp dir.
+config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-polecat-logs-test")
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 config :phoenix_live_view, enable_expensive_runtime_checks: true
