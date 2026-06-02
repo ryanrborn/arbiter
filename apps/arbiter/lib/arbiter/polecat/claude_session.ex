@@ -70,6 +70,15 @@ defmodule Arbiter.Polecat.ClaudeSession do
   arbitrary; reviewers should weigh it against expected Claude session length.
   No back-pressure to the child — we never block on slow consumers.
 
+  ## Durable transcript
+
+  The capped buffer above is for *liveness* — it bounds memory and feeds the
+  UI tail. For audit, every emitted line is *also* appended, uncapped, to a
+  per-run on-disk transcript via `Arbiter.Polecat.OutputLog`, when the session
+  was opened with an `:output_log` handle (the polecat opens one keyed on the
+  run id). This durable capture sits alongside the live path and never gates
+  it: a session opened without a handle behaves exactly as before.
+
   ## PubSub topic
 
   Default topic is `"polecat:" <> bead_id`. Subscribers (LiveView, CLI
@@ -78,6 +87,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
   """
 
   alias Arbiter.Polecat
+  alias Arbiter.Polecat.OutputLog
 
   @line_cap 1000
   @done_regex ~r/\barb done\b/
@@ -299,7 +309,20 @@ defmodule Arbiter.Polecat.ClaudeSession do
       send(self(), {:__claude_session_done__, line})
     end
 
+    append_durable(session, line)
+
     %{session | output_lines: prepend_capped(session.output_lines, line, session.line_cap)}
+  end
+
+  # Append the line to the durable, uncapped per-run transcript when the
+  # session carries an :output_log handle. Best-effort and never blocks the
+  # live path: a session without a handle (tests, run_id-less polecats) is a
+  # no-op.
+  defp append_durable(session, line) do
+    case Map.get(session, :output_log) do
+      nil -> :ok
+      handle -> OutputLog.append(handle, line)
+    end
   end
 
   defp blank?(line), do: String.trim(line) == ""
@@ -443,7 +466,18 @@ defmodule Arbiter.Polecat.ClaudeSession do
       end
 
     broadcast(session, {:polecat_exited, session.bead_id, status})
+    close_durable(session)
     %{session | exit_status: status, exited_at: DateTime.utc_now()}
+  end
+
+  # Close the durable transcript handle (if any) once the child has exited.
+  # The handle is also linked to the polecat, so an unclean death still flushes
+  # and closes; this is the clean-exit path.
+  defp close_durable(session) do
+    case Map.get(session, :output_log) do
+      nil -> :ok
+      handle -> OutputLog.close(handle)
+    end
   end
 
   defp broadcast(%{topic: topic}, msg) when is_binary(topic) do
