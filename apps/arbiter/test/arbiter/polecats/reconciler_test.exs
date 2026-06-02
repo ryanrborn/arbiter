@@ -52,6 +52,34 @@ defmodule Arbiter.Polecats.ReconcilerTest do
     assert run.status == :running
   end
 
+  test "a non-primary (second) instance does not sweep live runs" do
+    # The bug: a transient/duplicate app boot against the shared DB has an
+    # empty local Polecat.Registry, so every :running row looks orphaned — it
+    # would fail the PRIMARY instance's live runs. The boot path gates the
+    # sweep on Arbiter.SingleInstance.primary?/0; a non-primary boot passes
+    # primary?: false and must touch nothing.
+    live = "bd-primary-live-#{System.unique_integer([:positive])}"
+    create_run(live, :running)
+
+    assert {:ok, :skipped} = Reconciler.reconcile_orphaned_runs(primary?: false)
+
+    run = reload(live)
+    assert run.status == :running
+    assert run.failure_reason == nil
+    assert run.completed_at == nil
+  end
+
+  test "the primary instance still performs the crash-recovery sweep" do
+    # The legitimate single-server-restart path: primary?: true reconciles as
+    # before, so genuine orphans are still swept.
+    bead_id = "bd-orphan-primary-#{System.unique_integer([:positive])}"
+    create_run(bead_id, :running)
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs(primary?: true)
+
+    assert reload(bead_id).status == :failed
+  end
+
   test "leaves already-terminal runs untouched" do
     bead_id = "bd-done-#{System.unique_integer([:positive])}"
     create_run(bead_id, :completed)
