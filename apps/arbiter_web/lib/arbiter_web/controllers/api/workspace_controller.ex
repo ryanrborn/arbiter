@@ -4,9 +4,10 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
   Routes:
 
-    * `POST /api/workspaces`     — :create
-    * `GET  /api/workspaces`     — :index
-    * `GET  /api/workspaces/:id` — :show
+    * `POST  /api/workspaces`     — :create
+    * `GET   /api/workspaces`     — :index
+    * `GET   /api/workspaces/:id` — :show
+    * `PATCH /api/workspaces/:id` — :update (also `PUT`)
   """
 
   use ArbiterWeb, :controller
@@ -40,6 +41,15 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  def update(conn, %{"id" => id} = params) do
+    attrs = Map.take(params, ["name", "description", "prefix", "config"])
+
+    with {:ok, ws} <- Ash.get(Workspace, id),
+         {:ok, updated} <- Ash.update(ws, attrs) do
+      render(conn, :show, workspace: updated)
     end
   end
 end
