@@ -165,4 +165,51 @@ defmodule Arbiter.Beads.Workspace do
       _ -> false
     end
   end
+
+  @doc """
+  Whether a Tribunal (second-acolyte code review) gates merges for this
+  workspace, from `config["review"]["required"]`.
+
+  When `true`, the polecat parks at `:awaiting_tribunal` after the acolyte's
+  `arb done` and spawns a distinct reviewer acolyte; the branch merges only on
+  an APPROVE verdict. When `false` (the **default**), completion routes straight
+  to the merger as before — so enabling reviews never surprises an install that
+  hasn't opted in (mirrors the opt-in stance of vernacular).
+
+  Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
+  through JSON workspace config. Anything else is treated as `false`.
+  """
+  @spec review_required?(t()) :: boolean()
+  def review_required?(workspace) do
+    case get_in(workspace.config || %{}, ["review", "required"]) do
+      true -> true
+      "true" -> true
+      _ -> false
+    end
+  end
+
+  @doc """
+  The maximum number of revise-and-re-review rounds the Tribunal runs before
+  escalating, from `config["review"]["rounds"]`. Defaults to `2`.
+
+  Reserved for the Stage 2 revise loop (bd-4g1rg1 ships only the Stage 1 gate);
+  Stage 1 runs a single review pass regardless of this value. Accepts an integer
+  or the stringified integer that round-trips through JSON config.
+  """
+  @spec review_rounds(t()) :: pos_integer()
+  def review_rounds(workspace) do
+    case get_in(workspace.config || %{}, ["review", "rounds"]) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 -> n
+          _ -> 2
+        end
+
+      _ ->
+        2
+    end
+  end
 end

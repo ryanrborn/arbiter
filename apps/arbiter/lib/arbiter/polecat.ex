@@ -11,19 +11,34 @@ defmodule Arbiter.Polecat do
 
   ## Status FSM
 
-      :idle             → :running          (advance/2 from :idle)
-      :idle             → :failed           (fail/2 — "stillborn" polecat, e.g.
-                                             machine died before any step ran)
-      :running          → :awaiting         (await/2 — parked, generic external wait)
-      :awaiting         → :running          (resume/1)
-      :running          → :awaiting_review  (open_mr/5 — MR opened, parked for review)
-      :awaiting_review  → :completed        (complete/2 — MR merged)
-      :awaiting_review  → :failed           (fail/2 — MR closed/rejected)
-      :running          → :completed        (complete/2 — normal exit)
-      :running          → :failed           (fail/2)
-      :awaiting         → :failed           (fail/2)
+      :idle              → :running           (advance/2 from :idle)
+      :idle              → :failed            (fail/2 — "stillborn" polecat, e.g.
+                                              machine died before any step ran)
+      :running           → :awaiting          (await/2 — parked, generic external wait)
+      :awaiting          → :running           (resume/1)
+      :running           → :awaiting_tribunal (arb-done when review is required)
+      :awaiting_tribunal → :awaiting_review   (tribunal_verdict/2 :approve → merge)
+      :awaiting_tribunal → :failed            (tribunal_verdict/2 reject → parked)
+      :running           → :awaiting_review   (open_mr/5 — MR opened, parked for review)
+      :awaiting_review   → :completed         (complete/2 — MR merged)
+      :awaiting_review   → :failed            (fail/2 — MR closed/rejected)
+      :running           → :completed         (complete/2 — normal exit)
+      :running           → :failed            (fail/2)
+      :awaiting          → :failed            (fail/2)
 
   Illegal transitions return `{:error, {:invalid_transition, from, to}}`.
+
+  ## Review gate (`:awaiting_tribunal`)
+
+  A standing order: an acolyte must not merge its own work. When the acolyte's
+  `arb done` fires and the workspace requires review
+  (`Workspace.review_required?/1`), the polecat parks at `:awaiting_tribunal` and
+  spawns an `Arbiter.Polecat.Tribunal` — which runs a **distinct** reviewer
+  acolyte over the diff — *instead of* calling the merger. The Tribunal reports a
+  verdict back via `tribunal_verdict/2`: APPROVE proceeds to `do_open_mr` (the
+  same merge path), REQUEST_CHANGES (or an inconclusive review) parks the bead
+  with the findings and escalates to the Admiral without merging. When review is
+  not required (the default) completion routes straight to the merger as before.
 
   ## Merge-request review (`:awaiting_review`)
 
@@ -74,7 +89,14 @@ defmodule Arbiter.Polecat do
   alias Arbiter.Polecat.Registry, as: PRegistry
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
-  @type status :: :idle | :running | :awaiting | :awaiting_review | :completed | :failed
+  @type status ::
+          :idle
+          | :running
+          | :awaiting
+          | :awaiting_tribunal
+          | :awaiting_review
+          | :completed
+          | :failed
 
   @typedoc "Current workflow step. Free-form atom; `:idle` until first advance."
   @type step :: atom()
@@ -298,6 +320,26 @@ defmodule Arbiter.Polecat do
   """
   @spec fail(ref(), term()) :: :ok | {:error, term()}
   def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
+
+  @doc """
+  Deliver a Tribunal (review-gate) verdict. Only valid from `:awaiting_tribunal`
+  — the state the polecat parks at after the acolyte's `arb done` when review is
+  required. Called by `Arbiter.Polecat.Tribunal` once the reviewer acolyte
+  reaches its verdict.
+
+    * `{:approve, findings}` → records the approval and proceeds to the merger
+      (`do_open_mr`); the polecat transitions to `:awaiting_review`.
+    * `{:request_changes, findings}` → records the findings, escalates to the
+      Admiral, and parks the polecat at `:failed` **without** merging. The bead
+      stays `:in_progress` (the Driver leaves a `:failed` polecat's bead open for
+      inspection / re-dispatch).
+    * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
+      (escalate, do not merge) since the safe default is never to merge unreviewed
+      work.
+  """
+  @spec tribunal_verdict(ref(), Arbiter.Polecat.Tribunal.verdict() | {:no_verdict, String.t()}) ::
+          :ok | {:error, term()}
+  def tribunal_verdict(ref, verdict), do: call(ref, {:tribunal_verdict, verdict})
 
   @doc """
   Record an arbitrary key/value pair in the polecat's `:meta` map.
@@ -568,6 +610,14 @@ defmodule Arbiter.Polecat do
     {:reply, {:error, {:invalid_transition, status, :failed}}, state}
   end
 
+  def handle_call({:tribunal_verdict, verdict}, _from, %State{status: :awaiting_tribunal} = state) do
+    {:reply, :ok, apply_tribunal_verdict(state, verdict)}
+  end
+
+  def handle_call({:tribunal_verdict, _verdict}, _from, %State{status: status} = state) do
+    {:reply, {:error, {:invalid_transition, status, :tribunal_verdict}}, state}
+  end
+
   def handle_call({:report, key, value}, _from, %State{} = state) do
     {:reply, :ok, %State{state | meta: Map.put(state.meta, key, value)}}
   end
@@ -623,16 +673,16 @@ defmodule Arbiter.Polecat do
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
-      when status not in [:completed, :failed, :awaiting_review] do
+      when status not in [:completed, :failed, :awaiting_tribunal, :awaiting_review] do
     # "arb done" detected. The guard accepts most non-terminal statuses
     # (:idle, :running, :awaiting). In claude_driven mode the polecat may sit at
     # :idle (the Machine is not ticked, so Polecat.advance is never called), so
     # accepting :idle here is intentional and critical for this signal to fire.
     #
-    # :awaiting_review is deliberately excluded: once an MR is open the review
-    # gate, not the acolyte's stdout, decides completion. The Warden completes
-    # the polecat when the MR merges. A late "arb done" is ignored (handled by
-    # the catch-all clause below).
+    # :awaiting_tribunal and :awaiting_review are deliberately excluded: once the
+    # acolyte has signalled done, the review gate (Tribunal) and then the merger
+    # / Warden decide completion — not a repeated "arb done" on the author's
+    # stdout. A late marker is ignored (handled by the catch-all clause below).
     {:noreply, on_claude_done(state)}
   end
 
@@ -720,12 +770,25 @@ defmodule Arbiter.Polecat do
         complete_now(state, :claude_done)
 
       branch ->
-        title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
-
-        case do_open_mr(state, branch, title, "", %{}) do
-          {:ok, _mr_ref, new_state} -> new_state
-          {:error, reason, _state} -> fail_now(state, {:merge_failed, reason})
+        if review_required?(state) do
+          # Standing order: don't merge unreviewed work. Park at :awaiting_tribunal
+          # and let a distinct reviewer acolyte judge the diff first. The merge
+          # fires only on tribunal_verdict/2 :approve.
+          enter_tribunal(state, branch)
+        else
+          merge_branch(state, branch)
         end
+    end
+  end
+
+  # The shared "integrate this branch" path: open the MR / run the merge, or fail
+  # the polecat (not silently complete it) if the adapter rejects.
+  defp merge_branch(%State{meta: meta} = state, branch) do
+    title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
+
+    case do_open_mr(state, branch, title, "", %{}) do
+      {:ok, _mr_ref, new_state} -> new_state
+      {:error, reason, _state} -> fail_now(state, {:merge_failed, reason})
     end
   end
 
@@ -734,6 +797,190 @@ defmodule Arbiter.Polecat do
       branch when is_binary(branch) and branch != "" -> branch
       _ -> nil
     end
+  end
+
+  # ---- review gate (Tribunal) --------------------------------------------
+
+  # Resolve whether this polecat's workspace requires a review gate. An explicit
+  # meta override (`:review_required`) wins — used by tests and advanced callers;
+  # otherwise read the workspace config (default false). A polecat with no
+  # workspace can't resolve config, so it never gates.
+  defp review_required?(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :review_required) do
+      flag when is_boolean(flag) ->
+        flag
+
+      _ ->
+        case state.workspace_id && Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
+          {:ok, ws} -> Arbiter.Beads.Workspace.review_required?(ws)
+          _ -> false
+        end
+    end
+  rescue
+    _ -> false
+  end
+
+  # Park at :awaiting_tribunal and spawn the reviewer. The branch + merge title
+  # are stashed in meta so tribunal_verdict/2 can fire the same merge path on
+  # approval without re-deriving them.
+  defp enter_tribunal(%State{} = state, branch) do
+    meta = Map.put(state.meta || %{}, :tribunal_branch, branch)
+
+    new_state = %State{
+      state
+      | status: :awaiting_tribunal,
+        step_started_at: DateTime.utc_now(),
+        meta: meta
+    }
+
+    maybe_spawn_reviewer(new_state, branch)
+    new_state
+  end
+
+  # Spawn the Tribunal (which runs the distinct reviewer acolyte). The
+  # `:review_spawn` meta flag (default true) lets tests park the polecat at
+  # :awaiting_tribunal and drive tribunal_verdict/2 directly, in isolation from a
+  # live reviewer subprocess. `:review_command` is the reviewer argv test escape
+  # hatch (forwarded to the Tribunal → ClaudeSession), mirroring sling's
+  # `:claude_command`.
+  defp maybe_spawn_reviewer(%State{meta: meta} = state, branch) do
+    if Map.get(meta, :review_spawn, true) do
+      opts =
+        [
+          author: self(),
+          bead_id: state.bead_id,
+          workspace_id: state.workspace_id,
+          rig: state.rig,
+          worktree_path: Map.get(meta, :worktree_path),
+          branch: branch,
+          target_branch: Map.get(meta, :target_branch, "main")
+        ]
+        |> maybe_opt(:command, Map.get(meta, :review_command))
+        |> maybe_opt(:timeout_ms, Map.get(meta, :review_timeout_ms))
+
+      case Arbiter.Polecat.Tribunal.start(opts) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "Polecat: failed to start Tribunal for bead=#{state.bead_id}: #{inspect(reason)}"
+          )
+
+          :error
+      end
+    else
+      :ok
+    end
+  end
+
+  # Apply a Tribunal verdict from :awaiting_tribunal.
+  defp apply_tribunal_verdict(%State{} = state, {:approve, findings}) do
+    record_tribunal_outcome(state, :approve, findings)
+    branch = Map.get(state.meta, :tribunal_branch) || mergeable_branch(state.meta)
+    merge_branch(state, branch)
+  end
+
+  defp apply_tribunal_verdict(%State{} = state, {:request_changes, findings}) do
+    park_rejected(state, :request_changes, findings)
+  end
+
+  defp apply_tribunal_verdict(%State{} = state, {:no_verdict, findings}) do
+    park_rejected(state, :no_verdict, findings)
+  end
+
+  defp apply_tribunal_verdict(%State{} = state, :no_verdict) do
+    park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
+  end
+
+  # Reject path: record findings, escalate to the Admiral, and park the polecat
+  # at :failed WITHOUT merging. failure_reason stays a short atom; the full
+  # findings live in meta + bead notes + the escalation message (well under the
+  # Run.failure_reason length cap).
+  defp park_rejected(%State{} = state, verdict, findings) do
+    record_tribunal_outcome(state, verdict, findings)
+    escalate_tribunal(state, verdict, findings)
+
+    meta =
+      state.meta
+      |> Map.put(:tribunal_verdict, verdict)
+      |> Map.put(:tribunal_findings, findings)
+
+    fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
+  end
+
+  defp fail_reason_for(:no_verdict), do: :tribunal_inconclusive
+  defp fail_reason_for(_), do: :tribunal_rejected
+
+  # Append the verdict + findings to the bead's notes so it surfaces in
+  # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.
+  defp record_tribunal_outcome(%State{bead_id: bead_id}, verdict, findings) do
+    block = format_tribunal_note(verdict, findings)
+
+    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+      notes =
+        [bead.notes, block]
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      case Ash.update(bead, %{notes: notes}, action: :update) do
+        {:ok, _} -> :ok
+        {:error, reason} -> log_tribunal_warning(bead_id, reason)
+      end
+    end
+
+    :ok
+  rescue
+    e -> log_tribunal_warning(bead_id, e)
+  end
+
+  defp format_tribunal_note(verdict, findings) do
+    header =
+      case verdict do
+        :approve -> "Tribunal verdict: APPROVE"
+        :request_changes -> "Tribunal verdict: REQUEST_CHANGES"
+        :no_verdict -> "Tribunal verdict: INCONCLUSIVE (no verdict)"
+      end
+
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601()
+    "## #{header} (#{stamp})\n\n#{findings}"
+  end
+
+  # On a non-approve verdict, raise an escalation to the Admiral's mailbox with
+  # the reviewer's findings. Requires a workspace (messages are workspace-scoped).
+  defp escalate_tribunal(%State{workspace_id: ws_id, bead_id: bead_id}, verdict, findings)
+       when is_binary(ws_id) do
+    subject =
+      case verdict do
+        :no_verdict -> "Tribunal: review inconclusive for #{bead_id}"
+        _ -> "Tribunal: changes requested for #{bead_id}"
+      end
+
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: bead_id,
+      workspace_id: ws_id,
+      directive_ref: bead_id,
+      subject: subject,
+      body: findings
+    })
+
+    :ok
+  rescue
+    e -> log_tribunal_warning(bead_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_tribunal(_state, _verdict, _findings), do: :ok
+
+  defp log_tribunal_warning(bead_id, reason) do
+    Logger.warning(
+      "Polecat.record_tribunal_outcome swallowed for bead=#{bead_id}: #{inspect(reason)}"
+    )
+
+    :error
   end
 
   @impl true
