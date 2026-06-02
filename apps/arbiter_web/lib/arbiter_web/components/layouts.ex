@@ -35,11 +35,13 @@ defmodule ArbiterWeb.Layouts do
   slot(:inner_block, required: true)
 
   def app(assigns) do
+    assigns = assign(assigns, :branding, Arbiter.Branding.all())
+
     ~H"""
     <header class="navbar bg-base-200 border-b border-base-300 px-4 sm:px-6 lg:px-8 min-h-12 py-1">
       <div class="flex-1">
-        <.link navigate={~p"/"} class="flex items-center gap-2 text-base font-semibold">
-          <img src={~p"/images/logo.svg"} width="24" /> Arbiter
+        <.link navigate={~p"/"} class="flex items-center gap-2" aria-label={@branding.name}>
+          <img src={@branding.wordmark} alt={@branding.name} class="h-7 w-auto" />
         </.link>
       </div>
       <nav class="flex-none">
@@ -55,8 +57,19 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
-            <.link navigate={~p"/settings/vernacular"} class={nav_class(@current_path, "/settings")}>
+            <.link
+              navigate={~p"/settings/vernacular"}
+              class={nav_class(@current_path, "/settings/vernacular")}
+            >
               Vernacular
+            </.link>
+          </li>
+          <li>
+            <.link
+              navigate={~p"/settings/branding"}
+              class={nav_class(@current_path, "/settings/branding")}
+            >
+              Branding
             </.link>
           </li>
           <li>
@@ -93,6 +106,20 @@ defmodule ArbiterWeb.Layouts do
 
   defp nav_class_for(true), do: "menu-active font-semibold"
   defp nav_class_for(false), do: ""
+
+  @doc """
+  Inline `style` for the root `<html>` element that applies the branding
+  accent colour, or `nil` when no accent is configured (leaving the daisyUI
+  theme's own primary colour untouched). Set on `<html>` so it overrides the
+  theme variables and survives the light/dark toggle.
+  """
+  @spec brand_accent_style() :: String.t() | nil
+  def brand_accent_style do
+    case Arbiter.Branding.get(:accent) do
+      accent when is_binary(accent) and accent != "" -> "--color-primary: #{accent};"
+      _ -> nil
+    end
+  end
 
   @doc """
   Shows the flash group with standard titles and content.
