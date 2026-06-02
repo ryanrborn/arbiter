@@ -161,11 +161,15 @@ defmodule Arbiter.Polecat.Driver do
 
         {:stop, :normal, state}
 
-      %{status: status} when status in [:idle, :running, :awaiting, :awaiting_review] ->
-        # :awaiting_review means the acolyte finished and the merger opened an
-        # MR (Direct merges immediately and parks here until its Warden's first
-        # poll). The Warden owns the terminal transition, so we keep waiting —
-        # the next status will be :completed or :failed.
+      %{status: status}
+      when status in [:idle, :running, :awaiting, :awaiting_tribunal, :awaiting_review] ->
+        # :awaiting_tribunal means the acolyte finished and a review gate is
+        # running a distinct reviewer over the diff; the Tribunal will report a
+        # verdict that either merges (→ :awaiting_review) or parks (→ :failed).
+        # :awaiting_review means the merger opened an MR (Direct merges
+        # immediately and parks here until its Warden's first poll). In both the
+        # terminal transition is owned elsewhere, so we keep waiting — the next
+        # status will be :completed or :failed.
         Process.send_after(self(), :check_polecat, state.interval_ms)
         {:noreply, %{state | ticks: state.ticks + 1}}
 
