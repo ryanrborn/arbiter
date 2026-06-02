@@ -59,14 +59,16 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
 
   defp emit_show(snap, :text) do
+    v = Vernacular.fetch()
+
     if snap["source"] == "history" do
-      IO.puts("(no live polecat — showing most recent historical run)")
+      IO.puts("(no live #{Vernacular.label(v, "worker")} — showing most recent historical run)")
     end
 
-    IO.puts("Bead:       #{snap["bead_id"]}")
+    IO.puts("#{Vernacular.cap(v, "issue")}:       #{snap["bead_id"]}")
     IO.puts("Status:     #{snap["status"]}")
     IO.puts("Step:       #{snap["current_step"]}")
-    IO.puts("Rig:        #{snap["rig"]}")
+    IO.puts("#{Vernacular.cap(v, "rig")}:        #{snap["rig"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
