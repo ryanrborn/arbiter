@@ -84,7 +84,9 @@ defmodule ArbiterCli.Cmd.InboxTest do
       {out, _err, code} = capture(fn -> Inbox.run(["read", id]) end)
       assert code == 0
       assert out =~ "Full body text here."
-      assert out =~ "Directive: bd-1qx1nt"
+      # the directive label is routed through vernacular (default issue -> "Bead")
+      assert out =~ "Bead:"
+      assert out =~ "bd-1qx1nt"
     end
 
     test "resolves a short id prefix against admiral mail, then reads it" do

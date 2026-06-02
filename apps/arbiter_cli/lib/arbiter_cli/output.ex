@@ -135,6 +135,8 @@ defmodule ArbiterCli.Output do
   """
   @spec format_issue_detail(map()) :: String.t()
   def format_issue_detail(issue) do
+    vern = Vernacular.fetch()
+
     header =
       [
         {"ID", issue["id"]},
@@ -143,7 +145,7 @@ defmodule ArbiterCli.Output do
         {"Priority", issue["priority"]},
         {"Type", issue["issue_type"]},
         {"Assignee", issue["assignee"]},
-        {"Workspace", issue["workspace_id"]},
+        {Vernacular.cap(vern, "workspace"), issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
         {"Created", issue["created_at"]},
         {"Updated", issue["updated_at"]},

@@ -168,6 +168,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp emit_full(message, :json), do: IO.puts(Jason.encode!(message))
 
   defp emit_full(m, :text) do
+    vern = ArbiterCli.Vernacular.fetch()
     directive = m["directive_ref"]
 
     fields =
@@ -175,7 +176,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         {"From", m["from_ref"]},
         {"To", m["to_ref"]},
         {"Kind", m["kind"]},
-        {"Directive", directive},
+        {ArbiterCli.Vernacular.cap(vern, "issue"), directive},
         {"Subject", m["subject"]},
         {"Sent", m["inserted_at"]}
       ]
