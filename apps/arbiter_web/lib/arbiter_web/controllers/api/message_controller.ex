@@ -70,13 +70,7 @@ defmodule ArbiterWeb.Api.MessageController do
   # addressed to `to_ref`. Unread mail is left untouched — you read it first,
   # then clear. `to_ref` is required so a stray call can't wipe the table.
   def clear(conn, %{"to_ref" => to_ref}) when is_binary(to_ref) and to_ref != "" do
-    read_messages =
-      Message
-      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at))
-      |> Ash.read!()
-
-    Enum.each(read_messages, &Ash.destroy!/1)
-    json(conn, %{data: %{deleted: length(read_messages)}})
+    json(conn, %{data: %{deleted: Message.clear_read(to_ref)}})
   end
 
   def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}
