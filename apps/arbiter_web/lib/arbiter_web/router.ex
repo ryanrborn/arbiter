@@ -60,6 +60,8 @@ defmodule ArbiterWeb.Router do
     get("/workspaces", WorkspaceController, :index)
     post("/workspaces", WorkspaceController, :create)
     get("/workspaces/:id", WorkspaceController, :show)
+    patch("/workspaces/:id", WorkspaceController, :update)
+    put("/workspaces/:id", WorkspaceController, :update)
 
     # Global settings
     get("/settings", SettingsController, :show)
