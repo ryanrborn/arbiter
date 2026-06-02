@@ -9,6 +9,7 @@ defmodule ArbiterCli.Main do
       arb create <title> [--description ...] [--priority ...] [--type ...]
                          [--deps id1,id2] [--labels a,b]
       arb close <id> [--reason ...]
+      arb reopen <id>
       arb list [--status ...] [--type ...] [--priority ...] [--labels ...]
       arb update <id> [--priority ...] [--append-notes ...]
       arb dep add <from> <type> <to>
@@ -72,6 +73,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("show", args), do: ArbiterCli.Cmd.Show.run(args)
   defp dispatch_known("create", args), do: ArbiterCli.Cmd.Create.run(args)
   defp dispatch_known("close", args), do: ArbiterCli.Cmd.Close.run(args)
+  defp dispatch_known("reopen", args), do: ArbiterCli.Cmd.Reopen.run(args)
   defp dispatch_known("list", args), do: ArbiterCli.Cmd.List.run(args)
   defp dispatch_known("update", args), do: ArbiterCli.Cmd.Update.run(args)
   defp dispatch_known("dep", args), do: ArbiterCli.Cmd.Dep.run(args)
