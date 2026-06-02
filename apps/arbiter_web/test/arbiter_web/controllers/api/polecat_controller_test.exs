@@ -3,6 +3,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
 
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Polecat
+  alias Arbiter.Polecats.Run
 
   setup %{conn: conn} do
     # Clean slate — other tests in the umbrella may have left polecats running.
@@ -36,6 +37,79 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
 
     test "returns 404 for an unknown bead_id", %{conn: conn} do
       conn = get(conn, ~p"/api/polecats/no-such-bead")
+      assert json_response(conn, 404)
+    end
+
+    test "falls back to the most recent historical run when no live polecat exists",
+         %{conn: conn, ws: ws} do
+      bead_id = "bd-hist-#{System.unique_integer([:positive])}"
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, _old} =
+        Ash.create(Run, %{
+          bead_id: bead_id,
+          rig: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: older,
+          completed_at: older,
+          output_lines: ["stale"]
+        })
+
+      {:ok, _recent} =
+        Ash.create(Run, %{
+          bead_id: bead_id,
+          rig: "arbiter",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: newer,
+          completed_at: newer,
+          exit_code: 2,
+          failure_reason: "claude_crashed",
+          output_lines: ["a", "b", "boom"]
+        })
+
+      conn = get(conn, ~p"/api/polecats/#{bead_id}")
+      body = json_response(conn, 200)
+
+      assert body["source"] == "history"
+      assert body["bead_id"] == bead_id
+      # Most-recent run wins (failed, not the older completed one).
+      assert body["status"] == "failed"
+      assert body["exit_status"] == 2
+      assert body["failure_reason"] == "claude_crashed"
+      assert body["output_lines"] == ["a", "b", "boom"]
+      assert body["completed_at"]
+    end
+
+    test "live snapshot is marked source=live and wins over history",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "live-wins", workspace_id: ws.id})
+
+      {:ok, _run} =
+        Ash.create(Run, %{
+          bead_id: bead.id,
+          rig: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: DateTime.add(DateTime.utc_now(), -60, :second)
+        })
+
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      :ok = Polecat.report(polecat_pid, :output_lines, ["live-line"])
+
+      conn = get(conn, ~p"/api/polecats/#{bead.id}")
+      body = json_response(conn, 200)
+
+      assert body["source"] == "live"
+      assert body["rig"] == "test/rig"
+      assert body["output_lines"] == ["live-line"]
+    end
+
+    test "returns 404 when neither a live polecat nor a historical run exists",
+         %{conn: conn} do
+      conn = get(conn, ~p"/api/polecats/bd-never-ran-#{System.unique_integer([:positive])}")
       assert json_response(conn, 404)
     end
 
