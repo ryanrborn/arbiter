@@ -1,0 +1,385 @@
+defmodule Arbiter.Polecat.TribunalTest do
+  @moduledoc """
+  Stage 1 of bd-4g1rg1: the review (Tribunal) gate that sits between an
+  acolyte's `arb done` and the merger.
+
+  Covers the four required paths plus verdict parsing:
+
+    * gate parks at `:awaiting_tribunal` (and does NOT merge) when review is
+      required,
+    * APPROVE → the branch merges (a real `git merge --no-ff` on main),
+    * REQUEST_CHANGES → the branch is NOT merged, the bead is parked with the
+      findings, and the Admiral is escalated,
+    * review-off (default) → completion routes straight to the merger, no gate.
+
+  Plus a full end-to-end path where a **distinct** reviewer acolyte (a second
+  polecat + a fixture "claude" subprocess) emits the verdict.
+  """
+
+  use Arbiter.DataCase, async: false
+
+  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Messages.Message
+  alias Arbiter.Polecat
+  alias Arbiter.Polecat.Tribunal
+
+  @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
+
+  # ---- pure verdict parsing ------------------------------------------------
+
+  describe "parse_verdict/1" do
+    test "recognizes APPROVE" do
+      assert {:approve, findings} =
+               Tribunal.parse_verdict(["looks good", "VERDICT: APPROVE", "ship it"])
+
+      assert findings =~ "VERDICT: APPROVE"
+      assert findings =~ "ship it"
+    end
+
+    test "recognizes REQUEST_CHANGES and captures findings from the verdict line on" do
+      lines = [
+        "preamble noise",
+        "VERDICT: REQUEST_CHANGES",
+        "- [high] foo.ex:12 missing nil guard"
+      ]
+
+      assert {:request_changes, findings} = Tribunal.parse_verdict(lines)
+      refute findings =~ "preamble noise"
+      assert findings =~ "missing nil guard"
+    end
+
+    test "treats REJECT as a request-changes alias" do
+      assert {:request_changes, _} = Tribunal.parse_verdict(["VERDICT: REJECT now"])
+    end
+
+    test "is case-insensitive and tolerates leading whitespace" do
+      assert {:approve, _} = Tribunal.parse_verdict(["   verdict:  approve"])
+    end
+
+    test "returns :no_verdict when no sentinel is present" do
+      assert :no_verdict = Tribunal.parse_verdict(["just some output", "no decision here"])
+    end
+
+    test "the first verdict line wins (APPROVE before REQUEST_CHANGES)" do
+      assert {:approve, _} =
+               Tribunal.parse_verdict(["VERDICT: APPROVE", "VERDICT: REQUEST_CHANGES"])
+    end
+  end
+
+  # ---- git rig helpers (mirrors CompletionMergeTest) -----------------------
+
+  defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+
+  defp init_rig(dir) do
+    repo = Path.join(dir, "rig")
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    {_, 0} = git(["config", "user.email", "rig@example.com"], repo)
+    {_, 0} = git(["config", "user.name", "Rig"], repo)
+    {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
+    File.write!(Path.join(repo, "README.md"), "seed\n")
+    {_, 0} = git(["add", "README.md"], repo)
+    {_, 0} = git(["commit", "-q", "-m", "seed"], repo)
+    repo
+  end
+
+  # Create a feature branch with one commit ahead of main, then return to main.
+  defp seed_feature_branch(repo, branch) do
+    {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+    File.write!(Path.join(repo, "feature.txt"), "acolyte work\n")
+    {_, 0} = git(["add", "feature.txt"], repo)
+    {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
+    {_, 0} = git(["checkout", "-q", "main"], repo)
+    :ok
+  end
+
+  defp merge_commit_count(repo) do
+    {out, 0} = git(["rev-list", "--merges", "--count", "main"], repo)
+    out |> String.trim() |> String.to_integer()
+  end
+
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait(fun, deadline)
+    end
+  end
+
+  setup do
+    tmp = Path.join(System.tmp_dir!(), "tribunal-#{:erlang.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    repo = init_rig(tmp)
+
+    Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
+    Application.put_env(:arbiter, :rig_paths, %{"trib/rig" => repo})
+
+    on_exit(fn ->
+      Application.delete_env(:arbiter, :worktree_root)
+      Application.delete_env(:arbiter, :rig_paths)
+      File.rm_rf!(tmp)
+    end)
+
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "trib-ws-#{System.unique_integer([:positive])}",
+        prefix: "tb",
+        config: %{"review" => %{"required" => true}}
+      })
+
+    %{repo: repo, ws: ws, tmp: tmp}
+  end
+
+  # Start a polecat already seeded with branch/merge meta and parked-ready to
+  # accept a verdict, WITHOUT spawning a live reviewer (`review_spawn: false`),
+  # so the verdict transitions can be driven directly.
+  defp start_author(bead, repo, extra_meta) do
+    branch = "feature/rev"
+    :ok = seed_feature_branch(repo, branch)
+
+    meta =
+      Map.merge(
+        %{
+          branch: branch,
+          repo_path: repo,
+          target_branch: "main",
+          merge_title: "Merge #{bead.id}",
+          review_required: true,
+          review_spawn: false
+        },
+        extra_meta
+      )
+
+    {:ok, pid} =
+      Polecat.start(
+        bead_id: bead.id,
+        rig: "trib/rig",
+        workspace_id: bead.workspace_id,
+        meta: meta
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Polecat.advance(pid, :claude)
+    {pid, branch}
+  end
+
+  defp new_bead(ws, attrs \\ %{}) do
+    {:ok, bead} =
+      Ash.create(
+        Issue,
+        Map.merge(%{title: "tribunal bead", workspace_id: ws.id, issue_type: :feature}, attrs)
+      )
+
+    {:ok, bead} = Ash.update(bead, %{status: :in_progress})
+    bead
+  end
+
+  # ---- gate behaviour ------------------------------------------------------
+
+  describe "the gate" do
+    test "parks at :awaiting_tribunal and does NOT merge when review is required",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      {pid, _branch} = start_author(bead, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+
+      # The gate held: no merge happened.
+      assert merge_commit_count(repo) == 0
+    end
+
+    test "APPROVE proceeds to the merger — a real --no-ff merge lands on main",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      {pid, _branch} = start_author(bead, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+
+      :ok = Polecat.tribunal_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+
+      # Direct merges synchronously; the Warden then completes the polecat.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end)
+      assert merge_commit_count(repo) == 1
+
+      # The approval is recorded on the bead notes (visible via arb show).
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.notes =~ "Tribunal verdict: APPROVE"
+    end
+
+    test "REQUEST_CHANGES parks the bead with findings and does NOT merge",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      {pid, _branch} = start_author(bead, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+
+      findings = "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 needs a guard"
+      :ok = Polecat.tribunal_verdict(pid, {:request_changes, findings})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
+
+      # Not merged.
+      assert merge_commit_count(repo) == 0
+
+      snap = Polecat.state(pid)
+      assert snap.meta.failure_reason == :tribunal_rejected
+      assert snap.meta.tribunal_verdict == :request_changes
+      assert snap.meta.tribunal_findings =~ "needs a guard"
+
+      # Bead parked (still in_progress, not closed) with findings in its notes.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :in_progress
+      assert reloaded.notes =~ "Tribunal verdict: REQUEST_CHANGES"
+      assert reloaded.notes =~ "needs a guard"
+
+      # The Admiral was escalated.
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      assert Enum.any?(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
+    end
+
+    test "an inconclusive review (no verdict) escalates and does NOT merge",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      {pid, _branch} = start_author(bead, repo, %{})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+
+      :ok = Polecat.tribunal_verdict(pid, {:no_verdict, "reviewer crashed"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
+    end
+
+    test "review-off (default) bypasses the gate and merges immediately",
+         %{repo: repo, tmp: tmp} do
+      # A workspace with no review config → review_required? is false.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "noreview-#{System.unique_integer([:positive])}",
+          prefix: "nr"
+        })
+
+      _ = tmp
+      bead = new_bead(ws)
+      # No meta review override; review_spawn left default — the gate must never
+      # engage because the workspace doesn't require review.
+      {pid, _branch} =
+        start_author(bead, repo, %{review_required: false, review_spawn: true})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Straight to the merger — never parks at :awaiting_tribunal.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end)
+      assert merge_commit_count(repo) == 1
+      refute Polecat.state(pid).meta[:tribunal_verdict]
+    end
+
+    test "tribunal_verdict/2 is rejected outside :awaiting_tribunal", %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      {pid, _branch} = start_author(bead, repo, %{})
+
+      # Still :running — no verdict expected yet.
+      assert {:error, {:invalid_transition, :running, :tribunal_verdict}} =
+               Polecat.tribunal_verdict(pid, {:approve, "x"})
+    end
+  end
+
+  # ---- end-to-end: a distinct reviewer acolyte emits the verdict -----------
+
+  describe "full path with a live (fixture) reviewer" do
+    test "a reviewer approves → the branch merges, by a process distinct from the author",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        # Real reviewer spawn, but the "claude" subprocess is our fixture script.
+        worktree_path: repo,
+        review_command: [@reviewer, "APPROVE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws.id,
+          meta: meta
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Reviewer approves → merge fires → author completes.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 1
+
+      # The review was run by a DISTINCT acolyte (different mind, different
+      # process): it recorded its OWN run row under the #review-suffixed id,
+      # separate from the author's run. (Asserting on the persisted run avoids
+      # racing the short-lived reviewer process in the registry.)
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      runs = Ash.read!(Arbiter.Polecats.Run)
+      assert Enum.any?(runs, &(&1.bead_id == review_id)), "expected a distinct reviewer run row"
+      assert Enum.any?(runs, &(&1.bead_id == bead.id)), "expected the author's own run row"
+    end
+
+    test "a reviewer requests changes → no merge, bead parked + escalated",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reviewer, "REQUEST_CHANGES"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
+    end
+  end
+end
