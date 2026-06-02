@@ -21,9 +21,33 @@ defmodule Arbiter.Application do
         {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
         {Registry, keys: :unique, name: Arbiter.Workflows.RefineryRegistry},
         RefinerySupervisor
-      ] ++ refinery_boot_task()
+      ] ++ reconcile_boot_task() ++ refinery_boot_task()
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Arbiter.Supervisor)
+  end
+
+  # Reconcile orphaned :running polecat_runs left behind by a node that died
+  # mid-run. Runs once after the Repo + Polecat.Registry are online. Gated off
+  # in test (auto_start?/0 is false) so the boot sweep doesn't race the
+  # sandboxed connection; tests call the reconciler directly instead.
+  #
+  # NOTE: a UNIQUE :id is mandatory. Both this and refinery_boot_task/0 are
+  # `Task` children; without distinct ids they collide on the default `:Task`
+  # id and the whole app fails to boot ("more than one child specification has
+  # the id: Task"). This collision is invisible to the test suite because both
+  # tasks are gated off when auto_start? is false.
+  defp reconcile_boot_task do
+    if RefinerySupervisor.auto_start?() do
+      [
+        Supervisor.child_spec(
+          {Task, fn -> Arbiter.Polecats.Reconciler.reconcile_orphaned_runs() end},
+          id: :reconcile_boot_task,
+          restart: :temporary
+        )
+      ]
+    else
+      []
+    end
   end
 
   # Eagerly start one Refinery per existing workspace once the supervision
@@ -32,7 +56,13 @@ defmodule Arbiter.Application do
   # refineries explicitly with stubbed transport).
   defp refinery_boot_task do
     if RefinerySupervisor.auto_start?() do
-      [{Task, fn -> RefinerySupervisor.start_for_existing_workspaces() end}]
+      [
+        Supervisor.child_spec(
+          {Task, fn -> RefinerySupervisor.start_for_existing_workspaces() end},
+          id: :refinery_boot_task,
+          restart: :temporary
+        )
+      ]
     else
       []
     end
