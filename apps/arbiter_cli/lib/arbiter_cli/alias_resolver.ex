@@ -6,17 +6,32 @@ defmodule ArbiterCli.AliasResolver do
   Lookup order:
 
     1. If `verb` is in `known_verbs/0`, return it as-is. (Fast path; no HTTP.)
-    2. Otherwise, fetch the workspace via `ArbiterCli.Workspace.resolve/0`
-       and read `config["vernacular"]["aliases"]`. If `verb` is a key there,
-       return the canonical it maps to (provided that canonical is itself a
-       known verb).
+    2. Otherwise, fetch the active workspace's vernacular and build a
+       case-insensitive alias map (see `verb_aliases/0`). If `verb` matches
+       an alias, return the canonical it maps to (provided that canonical is
+       itself a known verb).
     3. If neither, return `{:unknown, suggestions}` — a list of close-by
        known/alias verbs ranked by string distance.
 
-  The "alias must resolve to a known verb" check (step 2 second condition)
-  prevents a misconfigured workspace from sending users into an infinite
-  loop or to a non-existent command. Misconfigured aliases surface as
-  `:unknown` rather than silently dispatching to nothing.
+  ## Alias sources
+
+  The alias map is built from two parts of the workspace vernacular, both
+  matched case-insensitively against the typed verb:
+
+    * **Explicit aliases** — `vernacular["aliases"]`, an
+      `alias_term => canonical_verb` map.
+    * **Derived label aliases** — any vernacular entry whose KEY is itself a
+      known verb is treated as a command alias from its label. So
+      `vernacular["sling"] == "Dispatch"` makes `arb dispatch` an alias for
+      `arb sling`. This is what lets the command verb honor the vernacular
+      without a second hardcoded branch.
+
+  Explicit aliases win over derived ones on conflict.
+
+  The "alias must resolve to a known verb" check (step 2) prevents a
+  misconfigured workspace from sending users to a non-existent command.
+  Misconfigured aliases surface as `:unknown` rather than silently
+  dispatching to nothing.
   """
 
   @known_verbs ~w(init show create close reopen list update dep ready doctor where help sling prime polecat inbox notify message msg)
@@ -35,8 +50,8 @@ defmodule ArbiterCli.AliasResolver do
         {:ok, verb}
 
       true ->
-        case aliases_for_active_workspace() do
-          {:ok, aliases} -> resolve_via_aliases(verb, aliases)
+        case vernacular_for_active_workspace() do
+          {:ok, vernacular} -> resolve_via_aliases(verb, alias_map(vernacular))
           # Workspace lookup failed — treat as no aliases configured. Suggest
           # against built-ins only.
           {:error, _} -> {:unknown, suggest(verb, @known_verbs)}
@@ -44,8 +59,23 @@ defmodule ArbiterCli.AliasResolver do
     end
   end
 
+  @doc """
+  The active workspace's command-verb aliases: a case-insensitive map of
+  `alias_term => canonical_verb` (keys lowercased). Combines explicit
+  `vernacular["aliases"]` config with aliases derived from vernacular labels
+  whose key is itself a known verb (e.g. `sling => "Dispatch"` yields
+  `"dispatch" => "sling"`). Returns `%{}` when the workspace can't be reached.
+  """
+  @spec verb_aliases() :: %{String.t() => String.t()}
+  def verb_aliases do
+    case vernacular_for_active_workspace() do
+      {:ok, vernacular} -> alias_map(vernacular)
+      {:error, _} -> %{}
+    end
+  end
+
   defp resolve_via_aliases(verb, aliases) do
-    case Map.fetch(aliases, verb) do
+    case Map.fetch(aliases, String.downcase(verb)) do
       {:ok, canonical} when is_binary(canonical) and canonical in @known_verbs ->
         {:ok, canonical}
 
@@ -55,10 +85,42 @@ defmodule ArbiterCli.AliasResolver do
     end
   end
 
-  defp aliases_for_active_workspace do
+  # Build the combined alias map from a workspace's vernacular. Derived label
+  # aliases come first so explicit `aliases` config wins on conflict.
+  defp alias_map(vernacular) when is_map(vernacular) do
+    Map.merge(derived_label_aliases(vernacular), explicit_aliases(vernacular))
+  end
+
+  defp alias_map(_), do: %{}
+
+  defp explicit_aliases(vernacular) do
+    case Map.get(vernacular, "aliases") do
+      m when is_map(m) ->
+        for {alias, canonical} <- m, is_binary(alias), is_binary(canonical), into: %{} do
+          {String.downcase(alias), canonical}
+        end
+
+      _ ->
+        %{}
+    end
+  end
+
+  # Any vernacular entry whose key is a known verb becomes an alias from its
+  # label, unless the label is just the verb itself (the default, no aliasing).
+  defp derived_label_aliases(vernacular) do
+    for {key, label} <- vernacular,
+        key in @known_verbs,
+        is_binary(label),
+        String.downcase(label) != key,
+        into: %{} do
+      {String.downcase(label), key}
+    end
+  end
+
+  defp vernacular_for_active_workspace do
     case ArbiterCli.Client.get("/api/settings") do
-      {:ok, %{"data" => %{"vernacular" => %{"aliases" => aliases}}}} when is_map(aliases) ->
-        {:ok, aliases}
+      {:ok, %{"data" => %{"vernacular" => vernacular}}} when is_map(vernacular) ->
+        {:ok, vernacular}
 
       {:ok, _} ->
         {:ok, %{}}
