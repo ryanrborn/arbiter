@@ -737,6 +737,15 @@ defmodule Arbiter.Polecat do
 
   @impl true
   def terminate(_reason, %State{bead_id: bead_id} = state) do
+    # Finalize the run row before we tear down. This is the normal-path
+    # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
+    # real acolyte-completion path is `arb done` -> bead closes -> the bead
+    # `:close` after-action StopPolecat calls `Polecat.stop` -> terminate/2
+    # from a NON-terminal state (:running/:idle/:awaiting/:awaiting_review).
+    # Nothing on that path ever marks the row terminal, so it stayed :running
+    # until the next server boot. See finalize_run_on_terminate/1.
+    finalize_run_on_terminate(state)
+
     # Explicitly unregister so callers that ask `whereis/1` immediately after
     # `GenServer.stop/1` see `nil` deterministically. Registry's own
     # monitor-based cleanup runs asynchronously and was the source of a flaky
@@ -744,6 +753,24 @@ defmodule Arbiter.Polecat do
     PRegistry.unregister(bead_id)
     broadcast_lifecycle(:stopped, state)
     :ok
+  end
+
+  # On termination, guarantee the polecat_runs row is closed out.
+  #
+  #   * :completed / :failed — the row was already stamped by complete_now/2 or
+  #     fail_now/2 (the explicit complete/fail paths). Don't double-write.
+  #   * any non-terminal status (:idle/:running/:awaiting/:awaiting_review) —
+  #     the polecat is being torn down without an explicit terminal transition
+  #     (the normal `arb done` -> bead :close -> StopPolecat teardown). Treat
+  #     the termination as completion and stamp the row :completed + completed_at
+  #     so `arb polecat show` reflects the finished run immediately, with no
+  #     manual reconcile.
+  defp finalize_run_on_terminate(%State{status: status}) when status in [:completed, :failed] do
+    :ok
+  end
+
+  defp finalize_run_on_terminate(%State{} = state) do
+    record_run_finished(%State{state | status: :completed})
   end
 
   # ---- child_spec --------------------------------------------------------
