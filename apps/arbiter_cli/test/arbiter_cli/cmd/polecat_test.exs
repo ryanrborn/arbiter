@@ -27,6 +27,29 @@ defmodule ArbiterCli.Cmd.PolecatTest do
       assert exit_code != 0
     end
 
+    test "flags a historical fallback run and shows completion time" do
+      stub_get("/api/polecats/bd-003", %{
+        "source" => "history",
+        "bead_id" => "bd-003",
+        "status" => "failed",
+        "current_step" => nil,
+        "rig" => "arbiter",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "completed_at" => "2026-05-20T19:05:00Z",
+        "exit_status" => 2,
+        "failure_reason" => "claude_crashed",
+        "output_lines" => ["boom"]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["show", "bd-003"]) end)
+      assert exit_code == 0
+      assert out =~ "no live polecat"
+      assert out =~ "historical run"
+      assert out =~ "Completed:  2026-05-20T19:05:00Z"
+      assert out =~ "claude_crashed"
+      assert out =~ "boom"
+    end
+
     test "--json forwards the full snapshot" do
       stub_get("/api/polecats/bd-002", %{
         "bead_id" => "bd-002",

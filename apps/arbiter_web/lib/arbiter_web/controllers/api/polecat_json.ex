@@ -1,4 +1,5 @@
 defmodule ArbiterWeb.Api.PolecatJSON do
+  alias Arbiter.Polecats.Run
   alias ArbiterWeb.Api.IssueJSON
 
   def sling(%{result: result}) do
@@ -40,6 +41,7 @@ defmodule ArbiterWeb.Api.PolecatJSON do
     meta = Map.get(snap, :meta, %{})
 
     %{
+      source: "live",
       bead_id: snap.bead_id,
       workspace_id: snap.workspace_id,
       rig: snap.rig,
@@ -60,7 +62,32 @@ defmodule ArbiterWeb.Api.PolecatJSON do
     }
   end
 
+  # Historical fallback: no live polecat, so we render the most recent durable
+  # `Run` row into the same shape the CLI's `polecat show` already knows how to
+  # display. `source: "history"` lets clients flag that this is a post-mortem
+  # rather than a live snapshot.
+  def show(%{run: %Run{} = run}) do
+    %{
+      source: "history",
+      bead_id: run.bead_id,
+      bead_title: run.bead_title,
+      workspace_id: run.workspace_id,
+      rig: run.rig,
+      current_step: nil,
+      status: to_string_atom(run.status),
+      started_at: run.started_at,
+      completed_at: run.completed_at,
+      exit_status: run.exit_code,
+      output_lines: run.output_lines || [],
+      failure_reason: run.failure_reason
+    }
+  end
+
   defp stringify(nil), do: nil
   defp stringify(v) when is_binary(v), do: v
   defp stringify(v), do: inspect(v)
+
+  defp to_string_atom(nil), do: nil
+  defp to_string_atom(a) when is_atom(a), do: Atom.to_string(a)
+  defp to_string_atom(s) when is_binary(s), do: s
 end
