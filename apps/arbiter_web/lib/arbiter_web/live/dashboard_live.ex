@@ -61,6 +61,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> assign(:live, live?)
      |> assign(:worker_label, Vernacular.label(:worker))
      |> assign(:rig_label, Vernacular.label(:rig))
+     |> assign(:worktree_label, Vernacular.label(:worktree))
      |> assign(:issue_label, Vernacular.label(:issue))
      |> assign(:workspace_label, Vernacular.label(:workspace))
      |> assign(:pr_label, Vernacular.label(:pr))
@@ -877,8 +878,8 @@ defmodule ArbiterWeb.DashboardLive do
                     <span class="badge badge-sm badge-info" title={"Active #{plural(@worker_label)}"}>
                       <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{rig.polecats}
                     </span>
-                    <span class="badge badge-sm badge-ghost" title="Worktrees">
-                      {rig.worktrees} worktrees
+                    <span class="badge badge-sm badge-ghost" title={cap_plural(@worktree_label)}>
+                      {rig.worktrees} {plural(@worktree_label)}
                     </span>
                   </div>
                 </div>
