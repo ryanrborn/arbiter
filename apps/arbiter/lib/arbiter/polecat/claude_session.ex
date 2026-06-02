@@ -33,14 +33,34 @@ defmodule Arbiter.Polecat.ClaudeSession do
   against early child output. The GenServer.call hop is synchronous from the
   caller's perspective and avoids that footgun.
 
+  ## Invocation & streaming
+
+  Real Claude runs use `claude --print <prompt> --output-format stream-json
+  --verbose`, wrapped in `sh -c 'exec "$@" < /dev/null'` so the child's stdin
+  is closed immediately (otherwise the CLI prints a "no stdin data received in
+  3s" warning that pollutes the transcript). The prompt is passed as a literal
+  positional parameter to `sh`, never interpolated into the command string, so
+  there is no shell-injection surface.
+
+  `--output-format stream-json` emits one JSON event per line (JSONL): a
+  `system`/`init` header, one `assistant` event per turn (text + tool calls),
+  `user` events carrying tool results, and a final `result` summary. We parse
+  each line and emit human-readable display lines so the UI tails the session
+  in near-real-time instead of waiting for the whole run to flush at exit.
+
+  Lines that don't parse as a stream-json event (test echo scripts, non-Claude
+  spikes, stray stderr) fall through unchanged to the raw-line path, so the
+  PubSub/line-cap plumbing behaves identically for them.
+
   ## Completion detection
 
-  Any output line matching `~r/\\barb done\\b/` triggers `Polecat.complete/2`.
+  A display line matching `~r/\\barb done\\b/` triggers `Polecat.complete/2`.
   The regex is intentionally word-bounded so the substring "arb doneness"
   doesn't trip it — but a literal marker line like `arb done` (or
-  `>> arb done <<`) does. Reviewers: this is the
-  detection surface for false positives in real Claude output; tighten if
-  needed (e.g. anchor to start-of-line) once we see real transcripts.
+  `>> arb done <<`) does. Under stream-json, detection is scoped to the
+  acolyte's **assistant text** (and the raw-line fallback): tool calls and tool
+  *results* are displayed but never trip completion, so an acolyte that greps
+  or cats "arb done" mid-task can't falsely complete itself.
 
   ## Output buffering
 
@@ -94,8 +114,9 @@ defmodule Arbiter.Polecat.ClaudeSession do
     * `:prompt` — passed to Claude as the prompt. Required when `:command`
       is `nil` (real Claude invocation).
     * `:command` — full argv list as `[exec, arg1, arg2, ...]`. When set,
-      overrides the default `["claude", "--print", prompt]`. Tests **must**
-      pass this so we don't shell out to real Claude.
+      overrides the default streaming `claude` invocation and is spawned
+      verbatim (no `sh`/stdin wrapping). Tests **must** pass this so we don't
+      shell out to real Claude.
     * `:topic` — PubSub topic to broadcast output on. Defaults to
       `"polecat:" <> bead_id`.
 
@@ -155,16 +176,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
       nil ->
         case Keyword.fetch(opts, :prompt) do
           {:ok, prompt} when is_binary(prompt) ->
-            # NOTE: `claude --print` is reported to buffer stdout until the
-            # session terminates (no per-line streaming to the parent port).
-            # The PubSub plumbing here is already line-oriented, so when we
-            # have a streaming-friendly invocation (e.g. `--output-format
-            # stream-json` or an interactive mode) wired in, real-time tail
-            # on the acolyte detail page will activate without further
-            # LiveView changes. Until then live updates work for any spike
-            # / non-Claude command, but real `claude` runs will flush at
-            # exit. Follow-up: pick a streaming invocation mode.
-            {:ok, ["claude", "--print", prompt]}
+            default_claude_argv(prompt)
 
           _ ->
             {:error, :missing_prompt}
@@ -175,6 +187,34 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
       _ ->
         {:error, :invalid_command}
+    end
+  end
+
+  # Real Claude invocation. We stream with `--output-format stream-json
+  # --verbose` (the CLI requires `--verbose` alongside stream-json under
+  # `--print`) so the parent port sees per-turn events instead of a single
+  # buffered blob at exit.
+  #
+  # The whole thing is wrapped in `sh -c 'exec "$@" < /dev/null'` so the
+  # child's stdin is closed immediately — without this the CLI waits ~3s for
+  # piped stdin and prints a warning that pollutes the transcript. The claude
+  # path and prompt are passed as positional params ("$@"), never spliced into
+  # the command string, so there is no shell-injection surface.
+  defp default_claude_argv(prompt) do
+    case resolve_claude() do
+      {:ok, claude} ->
+        inner = [claude, "--print", prompt, "--output-format", "stream-json", "--verbose"]
+        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp resolve_claude do
+    case System.find_executable("claude") do
+      nil -> {:error, {:executable_not_found, "claude"}}
+      path -> {:ok, path}
     end
   end
 
@@ -210,17 +250,52 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # routing logic stays colocated with the rest of the session module. The
   # polecat just shuttles messages to us.
 
-  @doc false
-  @spec handle_data(map(), binary()) :: map()
-  def handle_data(%{} = session, line) when is_binary(line) do
-    # Blank/whitespace-only lines still accumulate in :output_lines (so snapshot
-    # rendering preserves spacing) but we skip the PubSub hop — live followers
-    # only care about lines with content.
+  @doc """
+  Feed one port fragment into the session.
+
+  `eol?` reflects the port's `{:line, _}` framing: `true` for a complete
+  logical line (`{:eol, _}`), `false` for a mid-line chunk (`{:noeol, _}`) of a
+  line that exceeded the port line limit. We buffer `noeol` fragments and only
+  process once a full line has arrived, because a stream-json event split
+  across chunks is not valid JSON until reassembled.
+  """
+  @spec handle_data(map(), binary(), boolean()) :: map()
+  def handle_data(%{} = session, fragment, eol?) when is_binary(fragment) do
+    buf = Map.get(session, :line_buf, "")
+
+    if eol? do
+      process_line(%{session | line_buf: ""}, buf <> fragment)
+    else
+      %{session | line_buf: buf <> fragment}
+    end
+  end
+
+  # A complete logical line. If it parses as a stream-json event, expand it into
+  # display lines; otherwise treat the raw line as output (test echo scripts,
+  # non-Claude spikes, stray stderr). The raw fallback path detects "arb done"
+  # so non-stream-json children still signal completion.
+  defp process_line(%{} = session, line) do
+    case decode_event(line) do
+      {:ok, event} ->
+        event
+        |> format_event()
+        |> Enum.reduce(session, fn {text, detect?}, acc -> emit_line(acc, text, detect?) end)
+
+      :error ->
+        emit_line(session, line, true)
+    end
+  end
+
+  # Emit a single display line: broadcast it (unless blank), optionally run
+  # completion detection, and accumulate it (cap-bounded). Blank/whitespace-only
+  # lines still accumulate (so snapshot rendering preserves spacing) but skip
+  # the PubSub hop — live followers only care about lines with content.
+  defp emit_line(%{} = session, line, detect_done?) do
     unless blank?(line) do
       broadcast(session, {:polecat_output, session.bead_id, line})
     end
 
-    if Regex.match?(session.done_regex, line) do
+    if detect_done? and Regex.match?(session.done_regex, line) do
       send(self(), {:__claude_session_done__, line})
     end
 
@@ -229,9 +304,144 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
   defp blank?(line), do: String.trim(line) == ""
 
+  # Decode a line into a stream-json event map. We require it to look like a
+  # JSON object with a "type" key so plain-text lines (which may parse as bare
+  # JSON scalars, e.g. "42") fall through to the raw path.
+  defp decode_event(line) do
+    with "{" <> _ <- String.trim_leading(line),
+         {:ok, %{"type" => _} = event} <- Jason.decode(line) do
+      {:ok, event}
+    else
+      _ -> :error
+    end
+  end
+
+  # Expand a stream-json event into `{display_line, detect_done?}` tuples.
+  # Only assistant *text* opts into completion detection (see moduledoc).
+  defp format_event(%{"type" => "assistant", "message" => %{"content" => content}})
+       when is_list(content) do
+    Enum.flat_map(content, &assistant_block_lines/1)
+  end
+
+  defp format_event(%{"type" => "user", "message" => %{"content" => content}})
+       when is_list(content) do
+    Enum.flat_map(content, &tool_result_lines/1)
+  end
+
+  defp format_event(%{"type" => "result"} = event), do: [{result_summary(event), false}]
+
+  defp format_event(%{"type" => "system", "subtype" => "init"} = event),
+    do: [{init_summary(event), false}]
+
+  # rate_limit_event, partial-message deltas, unknown types: shown to no one.
+  defp format_event(_event), do: []
+
+  defp assistant_block_lines(%{"type" => "text", "text" => text}) when is_binary(text) do
+    Enum.map(text_lines(text), &{&1, true})
+  end
+
+  defp assistant_block_lines(%{"type" => "thinking", "thinking" => text})
+       when is_binary(text) do
+    Enum.map(text_lines(text), &{&1, false})
+  end
+
+  defp assistant_block_lines(%{"type" => "tool_use", "name" => name} = block) do
+    [{"⏵ #{name}(#{summarize_tool_input(Map.get(block, "input"))})", false}]
+  end
+
+  defp assistant_block_lines(_block), do: []
+
+  # Tool results are displayed (truncated) but never trip completion.
+  defp tool_result_lines(%{"type" => "tool_result"} = block) do
+    label = if block["is_error"], do: "⏴ tool error", else: "⏴ tool result"
+
+    lines =
+      block
+      |> Map.get("content")
+      |> tool_result_content_text()
+      |> text_lines()
+      |> Enum.reject(&(&1 == ""))
+      |> truncate_lines(40)
+
+    Enum.map([label | lines], &{&1, false})
+  end
+
+  defp tool_result_lines(_block), do: []
+
+  defp tool_result_content_text(text) when is_binary(text), do: text
+
+  defp tool_result_content_text(blocks) when is_list(blocks) do
+    blocks
+    |> Enum.map(fn
+      %{"type" => "text", "text" => t} when is_binary(t) -> t
+      _ -> ""
+    end)
+    |> Enum.join("\n")
+  end
+
+  defp tool_result_content_text(_), do: ""
+
+  defp summarize_tool_input(input) when is_map(input) do
+    cond do
+      is_binary(input["command"]) -> truncate(input["command"], 200)
+      is_binary(input["file_path"]) -> input["file_path"]
+      is_binary(input["path"]) -> input["path"]
+      is_binary(input["pattern"]) -> truncate(input["pattern"], 200)
+      is_binary(input["description"]) -> truncate(input["description"], 200)
+      true -> truncate(Jason.encode!(input), 200)
+    end
+  end
+
+  defp summarize_tool_input(_), do: ""
+
+  defp init_summary(event) do
+    model = event["model"] || "?"
+    "⚙ claude session started (model #{model})"
+  end
+
+  defp result_summary(event) do
+    status = if event["is_error"], do: "error", else: event["subtype"] || "done"
+    parts = ["⚙ claude session #{status}"]
+
+    parts =
+      case event["duration_ms"] do
+        ms when is_integer(ms) -> parts ++ ["#{Float.round(ms / 1000, 1)}s"]
+        _ -> parts
+      end
+
+    parts =
+      case event["total_cost_usd"] do
+        cost when is_number(cost) -> parts ++ ["$#{Float.round(cost / 1, 4)}"]
+        _ -> parts
+      end
+
+    Enum.join(parts, " · ")
+  end
+
+  defp text_lines(text) when is_binary(text), do: String.split(text, "\n")
+  defp text_lines(_), do: []
+
+  defp truncate_lines(lines, max) do
+    case Enum.split(lines, max) do
+      {kept, []} -> kept
+      {kept, dropped} -> kept ++ ["… (#{length(dropped)} more lines)"]
+    end
+  end
+
+  defp truncate(str, max) when is_binary(str) do
+    if String.length(str) > max, do: String.slice(str, 0, max) <> "…", else: str
+  end
+
   @doc false
   @spec handle_exit(map(), integer()) :: map()
   def handle_exit(%{} = session, status) when is_integer(status) do
+    # Flush any buffered partial line the child left without a trailing newline.
+    session =
+      case Map.get(session, :line_buf, "") do
+        "" -> session
+        buf -> process_line(%{session | line_buf: ""}, buf)
+      end
+
     broadcast(session, {:polecat_exited, session.bead_id, status})
     %{session | exit_status: status, exited_at: DateTime.utc_now()}
   end
