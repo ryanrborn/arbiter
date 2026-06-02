@@ -58,6 +58,35 @@ defmodule Arbiter.Trackers do
   @spec adapters() :: %{atom() => adapter}
   def adapters, do: @adapters
 
+  @doc """
+  Prepare the current process to make adapter calls for `issue` against
+  `workspace`.
+
+  The tracker adapters resolve their backend config (owner/repo/credentials for
+  GitHub, host/project for Jira, …) from the process dictionary via their
+  `Config.put_active/1`. A long-lived process — or an Ash action running outside
+  any request lifecycle, such as `:close` from the CLI — must seed that config
+  before calling `transition/2`. This keeps the adapter-specific coupling in one
+  place; callers stay tracker-agnostic.
+
+  Dispatch is on the *issue's* `tracker_type` (the adapter that will be used),
+  while the config payload comes from the *workspace*. A `nil` workspace clears
+  the per-process config, letting the adapter fall back to its
+  `Application.get_env/3` default. A no-op for `:none`. Mirrors
+  `Arbiter.Mergers.prepare/1`.
+  """
+  @spec prepare(Issue.t(), Arbiter.Beads.Workspace.t() | nil) :: :ok
+  def prepare(%Issue{tracker_type: type}, workspace) do
+    case type do
+      :github -> GitHub.Config.put_active(workspace)
+      :jira -> Jira.Config.put_active(workspace)
+      :shortcut -> Shortcut.Config.put_active(workspace)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
   # ---- Delegating wrappers ----
   # Thin pass-throughs so callers don't need to manually resolve+invoke.
 

@@ -116,6 +116,10 @@ defmodule Arbiter.Beads.Issue do
       # Allow open ⇄ in_progress, but block transitions involving :closed via :update
       change {Arbiter.Beads.Issue.Changes.GuardStatus, action: :update}
 
+      # Propagate an open ⇄ in_progress status change to the linked external
+      # tracker. Best-effort; no-op when status didn't change or no tracker.
+      change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
+
       change after_action(fn _, issue, _ ->
                Arbiter.Beads.Issue.broadcast_lifecycle(:updated, issue)
                {:ok, issue}
@@ -136,6 +140,10 @@ defmodule Arbiter.Beads.Issue do
       change {Arbiter.Beads.Issue.Changes.StopPolecat, []}
       change {Arbiter.Beads.Issue.Changes.CleanupWorktree, []}
 
+      # Propagate the close to the linked external tracker (closes the GitHub
+      # issue, etc.). Best-effort: a sync failure never fails the local close.
+      change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
+
       # After closing, check whether any system-managed convoy this issue belongs
       # to should auto-close. Safe no-op when issue isn't a member of any convoy.
       change after_action(fn _changeset, issue, _context ->
@@ -151,6 +159,10 @@ defmodule Arbiter.Beads.Issue do
       change {Arbiter.Beads.Issue.Changes.GuardStatus, action: :reopen}
       change set_attribute(:status, :open)
       change set_attribute(:closed_at, nil)
+
+      # Propagate the reopen to the linked external tracker (reopens the GitHub
+      # issue, etc.). Best-effort: a sync failure never fails the local reopen.
+      change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
       change after_action(fn _, issue, _ ->
                Arbiter.Beads.Issue.broadcast_lifecycle(:reopened, issue)
