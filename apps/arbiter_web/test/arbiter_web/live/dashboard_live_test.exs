@@ -1,7 +1,33 @@
+defmodule ArbiterWeb.DashboardLiveTest.QueueMerger do
+  @moduledoc """
+  Minimal `Arbiter.Mergers.Merger` stub for driving a polecat to
+  `:awaiting_review` in the dashboard's merge-queue tests. `get/1` returns a
+  still-open MR so the Warden (if it ever polls) keeps the polecat parked.
+  """
+  @behaviour Arbiter.Mergers.Merger
+
+  @impl true
+  def open(_branch, _title, _desc, _opts), do: {:ok, "!99"}
+  @impl true
+  def get(_ref), do: {:ok, %{status: :open, approved: false}}
+  @impl true
+  def merge(_ref), do: :ok
+  @impl true
+  def close(_ref), do: :ok
+  @impl true
+  def add_comment(_ref, _body), do: :ok
+  @impl true
+  def request_review(_ref, _reviewers), do: :ok
+  @impl true
+  def link_for(_ref), do: "https://example.test/mr/99"
+end
+
 defmodule ArbiterWeb.DashboardLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+
+  alias ArbiterWeb.DashboardLiveTest.QueueMerger
 
   alias Arbiter.Beads.{Dependency, Issue, Workspace}
   alias Arbiter.Polecat
@@ -33,7 +59,9 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Workspaces"
       assert html =~ "Active "
       assert html =~ "Recent Beads"
-      assert html =~ "Pull requests in flight"
+      # Merge queue (Crucibles) section header, from the (default) merge_queue
+      # vernacular ("refinery" → "Refineries").
+      assert html =~ "Refineries"
       assert html =~ "Escalations"
     end
 
@@ -303,12 +331,82 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "PRs in flight + escalations" do
-    test "empty placeholders render", %{conn: conn} do
+  describe "merge queue (Crucibles)" do
+    test "empty state + escalations placeholder render", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ "No refineries running"
+      assert html =~ ~s(id="merge-queue-empty")
+      assert html =~ "No pull requests integrating right now"
       assert html =~ "No escalations"
     end
+
+    test "an in-flight merge surfaces with MR link, merger type and Warden activity",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "merging-bead", workspace_id: ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      :ok = Polecat.advance(pid, :integrate)
+
+      {:ok, "!99"} =
+        Polecat.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="merge-queue")
+      assert html =~ bead.id
+      # MR ref + clickable link from the stub adapter.
+      assert html =~ "!99"
+      assert html =~ "https://example.test/mr/99"
+      # Default workspace has no merge.strategy config → Direct.
+      assert html =~ "Direct"
+      # Long initial poll delay means the Warden hasn't recorded a status yet.
+      assert html =~ "Awaiting first poll"
+      assert html =~ "Warden polling every"
+    end
+
+    test "a recorded approval drives the status badge label", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "approved-bead", workspace_id: ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      :ok = Polecat.advance(pid, :integrate)
+      {:ok, _} = Polecat.open_mr(pid, "feature/y", "Integrate y", "", merge_opts())
+
+      # Simulate the result of a Warden poll without waiting on its timer.
+      :ok = Polecat.record_merger_status(pid, %{status: :open, approved: true})
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "Approved"
+      assert html =~ "Warden checked"
+    end
+
+    test "the merger type reflects the workspace's gitlab strategy", %{conn: conn} do
+      {:ok, gl_ws} =
+        Ash.create(Workspace, %{
+          name: "gl-#{System.unique_integer([:positive])}",
+          prefix: "gl",
+          config: %{"merge" => %{"strategy" => "gitlab"}}
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "gl-bead", workspace_id: gl_ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: gl_ws.id)
+      :ok = Polecat.advance(pid, :integrate)
+      {:ok, _} = Polecat.open_mr(pid, "feature/z", "Integrate z", "", merge_opts())
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "GitLab"
+    end
+  end
+
+  # open_mr opts that pin a stub adapter and push the Warden's first poll far
+  # into the future, so the polecat parks at :awaiting_review deterministically
+  # without the poll loop racing the assertions.
+  defp merge_opts do
+    %{
+      adapter: QueueMerger,
+      workspace: nil,
+      auto_merge: false,
+      interval_ms: 600_000,
+      initial_delay_ms: 600_000
+    }
   end
 
   describe "stats bar" do
