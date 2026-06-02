@@ -212,6 +212,28 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "to-close-on-dashboard"
       assert html =~ "closed"
     end
+
+    test "non-closed directives sort before closed, even when closed is newer", %{
+      conn: conn,
+      ws: ws
+    } do
+      # Active bead created first → older updated_at.
+      {:ok, _active} = Ash.create(Issue, %{title: "zzz-active-directive", workspace_id: ws.id})
+
+      # Closed bead created and closed last → its close bumps updated_at to be
+      # the most recent of the two. A pure updated_at-desc sort would float it
+      # to the top; the grouped sort must keep it below the active directive.
+      {:ok, to_close} = Ash.create(Issue, %{title: "aaa-closed-directive", workspace_id: ws.id})
+      {:ok, _closed} = Ash.update(to_close, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      active_pos = bead_position(html, "zzz-active-directive")
+      closed_pos = bead_position(html, "aaa-closed-directive")
+
+      assert active_pos < closed_pos,
+             "expected the non-closed directive to render before the more-recently-updated closed one"
+    end
   end
 
   describe "active polecats section" do
@@ -367,6 +389,15 @@ defmodule ArbiterWeb.DashboardLiveTest do
       send(view.pid, :tick)
 
       assert render(view) =~ "Dashboard"
+    end
+  end
+
+  # Byte offset of the first occurrence of `needle` in the rendered HTML, for
+  # asserting relative render order of two beads in the recent-directives list.
+  defp bead_position(html, needle) do
+    case :binary.match(html, needle) do
+      {start, _len} -> start
+      :nomatch -> flunk("#{needle} not found in rendered HTML")
     end
   end
 end
