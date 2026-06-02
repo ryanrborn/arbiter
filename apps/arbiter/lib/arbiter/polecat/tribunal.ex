@@ -207,6 +207,15 @@ defmodule Arbiter.Polecat.Tribunal do
     end
   end
 
+  # A Tribunal is NOT a polecat, but it lives under Arbiter.Polecat.Supervisor —
+  # so a stray enumeration (dashboard / list_children) could probe it with the
+  # polecat `:snapshot` call. Answer gracefully instead of crashing the gate and
+  # stranding the author at :awaiting_tribunal. See bd-2y0gd5.
+  @impl true
+  def handle_call(:snapshot, _from, state) do
+    {:reply, snapshot(state), state}
+  end
+
   @impl true
   def handle_info({:polecat_output, _id, line}, state) do
     {:noreply, %{state | lines: [line | state.lines]}}
@@ -315,6 +324,21 @@ defmodule Arbiter.Polecat.Tribunal do
       {:ok, _port} -> :ok
       {:error, reason} -> {:error, {:reviewer_session_failed, reason}}
     end
+  end
+
+  # Minimal snapshot for a Tribunal probed as if it were a polecat. The Tribunal
+  # is a review gate, not an acolyte; this exists only so an accidental
+  # :snapshot call gets a sane reply rather than crashing it. See bd-2y0gd5.
+  defp snapshot(state) do
+    %{
+      bead_id: state.bead_id,
+      review_id: state.review_id,
+      status: :reviewing,
+      current_step: "tribunal",
+      rig: state.rig,
+      role: :tribunal,
+      reviewer_alive: is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid)
+    }
   end
 
   defp safe(fun) do

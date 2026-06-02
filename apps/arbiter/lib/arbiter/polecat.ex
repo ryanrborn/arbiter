@@ -213,7 +213,11 @@ defmodule Arbiter.Polecat do
     Arbiter.Polecat.Supervisor
     |> DynamicSupervisor.which_children()
     |> Enum.flat_map(fn
-      {_id, pid, :worker, _modules} when is_pid(pid) ->
+      # Only actual polecats answer :snapshot. Other children of this supervisor
+      # — notably an Arbiter.Polecat.Tribunal review gate — must NOT be probed:
+      # calling :snapshot on them crashes them and strands the author. Match
+      # strictly on the Polecat module. See bd-2y0gd5.
+      {_id, pid, :worker, [__MODULE__]} when is_pid(pid) ->
         case Process.alive?(pid) && safe_snapshot(pid) do
           %{} = snap -> [Map.put(snap, :pid, pid)]
           _ -> []
@@ -691,6 +695,29 @@ defmodule Arbiter.Polecat do
     {:noreply, state}
   end
 
+  # The Tribunal (review gate) exited before delivering a verdict. Do NOT strand
+  # the author at :awaiting_tribunal — treat it as an inconclusive review and
+  # escalate (no merge). Matched by the monitor ref stashed in meta. bd-2y0gd5.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %State{status: :awaiting_tribunal, meta: %{tribunal_ref: ref}} = state
+      ) do
+    Logger.warning(
+      "Polecat: Tribunal for bead=#{state.bead_id} exited before a verdict " <>
+        "(#{inspect(reason)}); escalating as no_verdict"
+    )
+
+    {:noreply,
+     apply_tribunal_verdict(
+       state,
+       {:no_verdict, "Tribunal process exited before delivering a verdict (#{inspect(reason)})."}
+     )}
+  end
+
+  # Any other monitor DOWN (the Tribunal's expected exit AFTER a verdict, or an
+  # unrelated monitor) — nothing to do.
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
   # ---- helpers -----------------------------------------------------------
 
   defp on_port_data(%State{} = state, port, fragment, eol?) do
@@ -826,15 +853,31 @@ defmodule Arbiter.Polecat do
   defp enter_tribunal(%State{} = state, branch) do
     meta = Map.put(state.meta || %{}, :tribunal_branch, branch)
 
-    new_state = %State{
+    parked = %State{
       state
       | status: :awaiting_tribunal,
         step_started_at: DateTime.utc_now(),
         meta: meta
     }
 
-    maybe_spawn_reviewer(new_state, branch)
-    new_state
+    case spawn_tribunal(parked, branch) do
+      # Stash the monitor ref so a Tribunal that dies before reporting can't
+      # silently strand us at :awaiting_tribunal (see the :DOWN handler).
+      {:ok, ref} ->
+        %State{parked | meta: Map.put(parked.meta, :tribunal_ref, ref)}
+
+      # Tests drive tribunal_verdict/2 directly (review_spawn: false).
+      :skip ->
+        parked
+
+      # The Tribunal couldn't start — don't park unreviewed work forever; treat
+      # it as an inconclusive review and escalate (no merge). bd-2y0gd5.
+      :error ->
+        apply_tribunal_verdict(
+          parked,
+          {:no_verdict, "Tribunal failed to start; merge blocked pending review."}
+        )
+    end
   end
 
   # Spawn the Tribunal (which runs the distinct reviewer acolyte). The
@@ -843,7 +886,10 @@ defmodule Arbiter.Polecat do
   # live reviewer subprocess. `:review_command` is the reviewer argv test escape
   # hatch (forwarded to the Tribunal → ClaudeSession), mirroring sling's
   # `:claude_command`.
-  defp maybe_spawn_reviewer(%State{meta: meta} = state, branch) do
+  # Spawn the Tribunal and MONITOR it. Returns {:ok, monitor_ref} so the author
+  # can detect a Tribunal that dies before reporting, :skip when review_spawn is
+  # off (tests drive tribunal_verdict/2 directly), or :error when it can't start.
+  defp spawn_tribunal(%State{meta: meta} = state, branch) do
     if Map.get(meta, :review_spawn, true) do
       opts =
         [
@@ -859,8 +905,8 @@ defmodule Arbiter.Polecat do
         |> maybe_opt(:timeout_ms, Map.get(meta, :review_timeout_ms))
 
       case Arbiter.Polecat.Tribunal.start(opts) do
-        {:ok, _pid} ->
-          :ok
+        {:ok, pid} ->
+          {:ok, Process.monitor(pid)}
 
         {:error, reason} ->
           Logger.warning(
@@ -870,7 +916,7 @@ defmodule Arbiter.Polecat do
           :error
       end
     else
-      :ok
+      :skip
     end
   end
 
