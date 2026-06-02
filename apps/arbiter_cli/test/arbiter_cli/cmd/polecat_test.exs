@@ -50,6 +50,33 @@ defmodule ArbiterCli.Cmd.PolecatTest do
       assert out =~ "boom"
     end
 
+    test "honors the workspace vernacular for the worker/issue/rig labels" do
+      stub_routes([
+        {{"get", "/api/polecats/bd-004"},
+         {%{
+            "source" => "history",
+            "bead_id" => "bd-004",
+            "status" => "failed",
+            "rig" => "arbiter",
+            "started_at" => "2026-05-20T19:00:00Z",
+            "output_lines" => []
+          }, 200}},
+        {{"get", "/api/settings"},
+         {%{
+            "data" => %{
+              "vernacular" => %{"worker" => "acolyte", "issue" => "directive", "rig" => "ship"}
+            }
+          }, 200}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Polecat.run(["show", "bd-004"]) end)
+      assert exit_code == 0
+      assert out =~ "no live acolyte"
+      assert out =~ "Directive:"
+      assert out =~ "Ship:"
+      refute out =~ "no live polecat"
+    end
+
     test "--json forwards the full snapshot" do
       stub_get("/api/polecats/bd-002", %{
         "bead_id" => "bd-002",
