@@ -759,10 +759,17 @@ defmodule Arbiter.Polecat do
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
         |> Map.put(:exited_at, nil)
+        |> Map.put(:activity, "starting")
+        |> Map.put(:activity_at, DateTime.utc_now())
         |> Map.put(:output_log, open_output_log(state))
 
       sessions = Map.put(state.claude_sessions, port, session)
-      new_state = %State{state | claude_sessions: sessions}
+
+      # Mark the polecat claude-driven so views can show the live activity
+      # signal (mirrored below) instead of a frozen workflow step — the
+      # claude-driven Driver never ticks the Machine. See bd-c919xj.
+      meta = Map.put(state.meta || %{}, :claude_session, true)
+      new_state = %State{state | claude_sessions: sessions, meta: meta}
       new_state = sync_session_meta(new_state, port)
 
       {:reply, {:ok, port}, new_state}
@@ -865,6 +872,8 @@ defmodule Arbiter.Polecat do
           meta
           |> Map.put(:output_lines, Enum.reverse(session.output_lines))
           |> Map.put(:exit_status, session.exit_status)
+          |> maybe_put(:activity, Map.get(session, :activity))
+          |> maybe_put(:activity_at, Map.get(session, :activity_at))
           |> maybe_put(:exited_at, session.exited_at)
 
         %State{state | meta: meta}
