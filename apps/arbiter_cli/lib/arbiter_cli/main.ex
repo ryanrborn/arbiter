@@ -11,6 +11,8 @@ defmodule ArbiterCli.Main do
       arb close <id> [--reason ...]
       arb reopen <id>
       arb list [--status ...] [--type ...] [--priority ...] [--labels ...]
+                [--tracker]    Also list open assigned issues from the workspace's
+                               external tracker (visually distinct, deduped by ref).
       arb update <id> [--priority ...] [--append-notes ...]
       arb dep add <from> <type> <to>
       arb dep rm <from> <to>
