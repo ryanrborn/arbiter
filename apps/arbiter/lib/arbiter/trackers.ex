@@ -127,6 +127,26 @@ defmodule Arbiter.Trackers do
     with_workspace(type, workspace, fn -> adapter.list_open(opts) end)
   end
 
+  @doc """
+  Create a new upstream issue in the workspace's configured tracker.
+
+  Used by the `Issue.create` after-transaction hook so `arb create` can mirror
+  a new bead into the workspace's tracker. Resolves the adapter from
+  `workspace.config["tracker"]["type"]`, seeds the adapter's per-process
+  config (same dance as `prepare/2`), and dispatches to `create/1`. Workspaces
+  without a tracker (`type == :none`) or whose tracker doesn't support
+  outbound create return `{:error, :not_supported}` and callers should treat
+  that as "skip — local-only bead".
+  """
+  @spec create_for_workspace(Arbiter.Beads.Workspace.t(), Tracker.create_attrs()) ::
+          {:ok, Tracker.ref()} | {:error, :not_supported} | {:error, term()}
+  def create_for_workspace(%Arbiter.Beads.Workspace{} = workspace, attrs) when is_map(attrs) do
+    type = workspace_tracker_type(workspace)
+    adapter = adapter_for_workspace_type(type)
+
+    with_workspace(type, workspace, fn -> adapter.create(attrs) end)
+  end
+
   defp workspace_tracker_type(%Arbiter.Beads.Workspace{config: config}) do
     case get_in(config || %{}, ["tracker", "type"]) do
       type when is_binary(type) ->

@@ -487,6 +487,109 @@ defmodule Arbiter.Trackers.GitHubTest do
     end
   end
 
+  describe "create/1" do
+    test "POSTs the body and returns the new issue number as a bare string ref" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/repos/#{@owner}/#{@repo}/issues"
+        assert ["Bearer test-github-token"] = Plug.Conn.get_req_header(conn, "authorization")
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "Wire the thing"
+        assert decoded["body"] == "Markdown description"
+        # No assignee / no initial-status-label by default for :open status.
+        refute Map.has_key?(decoded, "assignees")
+        refute Map.has_key?(decoded, "labels")
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "number" => 99,
+          "title" => "Wire the thing",
+          "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/99"
+        })
+      end)
+
+      assert {:ok, "99"} =
+               GitHub.create(%{title: "Wire the thing", description: "Markdown description"})
+    end
+
+    test "drops a blank description and propagates assignee + in_progress label" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "tagged"
+        refute Map.has_key?(decoded, "body")
+        assert decoded["assignees"] == ["alice"]
+        assert decoded["labels"] == ["in progress"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 100})
+      end)
+
+      assert {:ok, "100"} =
+               GitHub.create(%{
+                 title: "tagged",
+                 description: "",
+                 assignee: "alice",
+                 status: :in_progress
+               })
+    end
+
+    test "422 from GitHub surfaces validation_failed without writing back a ref" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422, message: "Validation Failed"}} =
+               GitHub.create(%{title: "boom"})
+    end
+
+    test "blank title is rejected before any HTTP call" do
+      stub(fn _conn ->
+        flunk("must not POST when title is blank")
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, message: msg}} =
+               GitHub.create(%{title: ""})
+
+      assert msg =~ "title"
+    end
+
+    test "missing config returns config_missing" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = GitHub.create(%{title: "anything"})
+    end
+
+    test "honours a workspace status_map override for the initial label" do
+      Config.put_active(%{
+        "owner" => @owner,
+        "repo" => @repo,
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{
+          "open" => %{"state" => "open", "label" => "todo"}
+        }
+      })
+
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["labels"] == ["todo"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 101})
+      end)
+
+      assert {:ok, "101"} = GitHub.create(%{title: "with-label", status: :open})
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()

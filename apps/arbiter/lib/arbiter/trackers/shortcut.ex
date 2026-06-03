@@ -135,6 +135,14 @@ defmodule Arbiter.Trackers.Shortcut do
   end
 
   @impl true
+  def create(_attrs) do
+    # Outbound create not yet implemented for Shortcut — `arb create` on a
+    # Shortcut-configured workspace currently only creates the local bead.
+    # Wire this up when the Shortcut create path is needed.
+    {:error, :not_supported}
+  end
+
+  @impl true
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, workflows} <- list_workflows(cfg) do

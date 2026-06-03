@@ -10,6 +10,9 @@ defmodule Arbiter.Trackers.None do
   has no externally-imposed restrictions. `list_open/1` returns
   `{:error, :not_supported}` because there is no upstream backlog to list —
   callers (e.g. `arb list --tracker`) treat that as "render local beads only".
+  `create/1` returns `{:error, :not_supported}` so the `arb create` upstream
+  hook short-circuits for untracked workspaces (callers should never reach
+  this — they skip outbound create when `tracker_type == :none`).
   """
 
   @behaviour Arbiter.Trackers.Tracker
@@ -34,4 +37,7 @@ defmodule Arbiter.Trackers.None do
 
   @impl true
   def list_open(_opts), do: {:error, :not_supported}
+
+  @impl true
+  def create(_attrs), do: {:error, :not_supported}
 end

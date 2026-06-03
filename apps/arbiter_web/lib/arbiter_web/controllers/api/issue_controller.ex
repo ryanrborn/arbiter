@@ -63,14 +63,51 @@ defmodule ArbiterWeb.Api.IssueController do
 
     case Ash.create(Issue, attrs) do
       {:ok, issue} ->
-        conn
-        |> put_status(:created)
-        |> render(:show, issue: issue)
+        case Arbiter.Beads.Issue.Changes.CreateUpstream.last_error() do
+          nil ->
+            conn
+            |> put_status(:created)
+            |> render(:show, issue: issue)
+
+          err ->
+            upstream_failure_response(conn, issue.id, err)
+        end
 
       {:error, _} = err ->
         err
     end
   end
+
+  # The bead was created locally but the upstream create (or write-back of
+  # the returned ref) failed. We return 502 Bad Gateway so the CLI exits
+  # non-zero, but we include the bead body in the response so the user can
+  # see what got persisted and re-link manually if needed.
+  defp upstream_failure_response(conn, bead_id, err) do
+    issue_body =
+      case Ash.get(Issue, bead_id) do
+        {:ok, issue} -> ArbiterWeb.Api.IssueJSON.data(issue)
+        _ -> %{id: bead_id}
+      end
+
+    conn
+    |> put_status(:bad_gateway)
+    |> json(%{
+      "issue" => issue_body,
+      "error" => %{
+        "type" => to_string(err.kind),
+        "message" => err.message,
+        "details" => %{
+          "bead_id" => bead_id,
+          "tracker_type" => err |> Map.get(:tracker_type) |> tracker_type_str(),
+          "tracker_ref" => Map.get(err, :tracker_ref)
+        }
+      }
+    })
+  end
+
+  defp tracker_type_str(nil), do: nil
+  defp tracker_type_str(t) when is_atom(t), do: to_string(t)
+  defp tracker_type_str(t), do: t
 
   def update(conn, %{"id" => id} = params) do
     attrs =

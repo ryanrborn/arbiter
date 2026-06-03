@@ -84,6 +84,11 @@ defmodule Arbiter.Beads.Issue do
         :workspace_id
       ]
 
+      # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
+      # CreateUpstream hook skips the outbound-create call even when the
+      # workspace has a tracker configured.
+      argument :skip_upstream_create, :boolean, default: false
+
       change {Arbiter.Beads.Issue.Changes.GenerateId, []}
       change {Arbiter.Beads.Issue.Changes.InheritTrackerType, []}
 
@@ -91,6 +96,12 @@ defmodule Arbiter.Beads.Issue do
                Arbiter.Beads.Issue.broadcast_lifecycle(:created, issue)
                {:ok, issue}
              end)
+
+      # Mirror the new bead into the workspace's configured tracker. Runs in
+      # after_transaction so the bead is committed first — an upstream
+      # failure surfaces as `{:error, %{kind: :upstream_create_failed, ...}}`
+      # to the caller but leaves the bead intact.
+      change {Arbiter.Beads.Issue.Changes.CreateUpstream, []}
     end
 
     update :update do
