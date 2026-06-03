@@ -1,9 +1,10 @@
 defmodule Arbiter.Polecat.TribunalTest do
   @moduledoc """
-  Stage 1 of bd-4g1rg1: the review (Tribunal) gate that sits between an
-  acolyte's `arb done` and the merger.
+  The review (Tribunal) gate that sits between an acolyte's `arb done` and the
+  merger — Stage 1 (bd-4g1rg1) plus the Stage 2 revise-and-rediscuss loop
+  (bd-3jm700).
 
-  Covers the four required paths plus verdict parsing:
+  Stage 1 covers the four required paths plus verdict parsing:
 
     * gate parks at `:awaiting_tribunal` (and does NOT merge) when review is
       required,
@@ -14,6 +15,12 @@ defmodule Arbiter.Polecat.TribunalTest do
 
   Plus a full end-to-end path where a **distinct** reviewer acolyte (a second
   polecat + a fixture "claude" subprocess) emits the verdict.
+
+  Stage 2 covers the revise-and-rediscuss loop (`describe "revise-and-rediscuss
+  loop"`): a REQUEST_CHANGES within the round cap spawns a fresh implementer to
+  address the findings on the same branch (the thread persisted to the mailbox),
+  then re-reviews — converging to a merge, or escalating to Darth Gnosis with the
+  full transcript once the `config["review"]["rounds"]` cap is hit.
   """
 
   use Arbiter.DataCase, async: false
@@ -25,6 +32,8 @@ defmodule Arbiter.Polecat.TribunalTest do
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
+  @rounds Path.expand("../../fixtures/review_rounds.sh", __DIR__)
+  @revise Path.expand("../../fixtures/revise.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
 
@@ -64,6 +73,35 @@ defmodule Arbiter.Polecat.TribunalTest do
     test "the first verdict line wins (APPROVE before REQUEST_CHANGES)" do
       assert {:approve, _} =
                Tribunal.parse_verdict(["VERDICT: APPROVE", "VERDICT: REQUEST_CHANGES"])
+    end
+  end
+
+  # ---- cap/2 truncation (escalation payload safety) ------------------------
+
+  describe "cap/2" do
+    test "returns the text unchanged when within the byte cap" do
+      assert Tribunal.cap("short", 50) == "short"
+    end
+
+    test "truncating mid-codepoint backs off to a valid UTF-8 boundary" do
+      # "€" is 3 bytes (0xE2 0x82 0xAC); cap at 10 lands one byte into it, so a
+      # naive binary_part/3 would yield an invalid-UTF-8 binary. The escalation
+      # payload then runs String.trim/1 (outside any rescue) and persists to a
+      # Postgres UTF8 column — both reject malformed bytes.
+      text = String.duplicate("a", 9) <> "€uro"
+      capped = Tribunal.cap(text, 10)
+
+      assert String.valid?(capped), "cap/2 must never emit invalid UTF-8"
+      assert capped == "aaaaaaaaa\n… (truncated)"
+      # The whole-codepoint guarantee is what lets the downstream String.trim/1
+      # in escalation_payload/1 run without raising on malformed bytes.
+      assert String.trim(capped) == "aaaaaaaaa\n… (truncated)"
+    end
+
+    test "an exact-byte boundary on a multibyte char is preserved" do
+      # cap == 12 lands exactly after the full "€" (bytes 10..12), nothing to shave.
+      text = String.duplicate("a", 9) <> "€uro"
+      assert Tribunal.cap(text, 12) == "aaaaaaaaa€\n… (truncated)"
     end
   end
 
@@ -397,6 +435,9 @@ defmodule Arbiter.Polecat.TribunalTest do
         target_branch: "main",
         merge_title: "Merge #{bead.id}",
         review_required: true,
+        # rounds: 1 — a single review pass, so a reject escalates immediately with
+        # no revise loop (the Stage 2 loop is exercised separately below).
+        review_rounds: 1,
         worktree_path: repo,
         review_command: [@reviewer, "REQUEST_CHANGES"],
         review_timeout_ms: 5_000
@@ -474,6 +515,9 @@ defmodule Arbiter.Polecat.TribunalTest do
         target_branch: "main",
         merge_title: "Merge #{bead.id}",
         review_required: true,
+        # rounds: 1 — the re-prompt yields a verdict in the same (only) round; a
+        # REQUEST_CHANGES there escalates immediately, no revise loop.
+        review_rounds: 1,
         worktree_path: repo,
         review_command: [@reprompt, "REQUEST_CHANGES"],
         review_timeout_ms: 5_000
@@ -530,6 +574,180 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
              "expected a re-prompt to have been attempted before escalating"
+    end
+  end
+
+  # ---- Stage 2: the revise-and-rediscuss loop (bd-3jm700) ------------------
+
+  describe "revise-and-rediscuss loop" do
+    # The reviewer rejects round 1; a fresh implementer revises; the reviewer
+    # approves round 2 → the branch merges. The @rounds fixture rejects on its
+    # first pass and approves on every later one; @revise stands in for the
+    # implementer between the two reviews.
+    test "reject → revise → approve converges and merges within the round cap",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{bead.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Round 1 rejects → implementer revises → round 2 approves → merge.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 1
+
+      # A distinct implementer acolyte ran between the rounds (its own run row
+      # under the round-1 #impl id), proving a fresh mind addressed the findings.
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      runs = Ash.read!(Arbiter.Polecats.Run)
+
+      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
+             "expected a distinct implementer run row for round 1"
+
+      # A distinct round-2 reviewer ran too.
+      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#r2")),
+             "expected a distinct round-2 reviewer run row"
+
+      # The implementer↔reviewer back-and-forth was persisted to the mailbox as a
+      # durable thread (reviewer findings + implementer response), oldest first.
+      thread = Message.thread(bead.id, workspace_id: ws.id)
+      flags = Enum.filter(thread, &(&1.kind == :flag))
+      assert length(flags) >= 2
+
+      assert Enum.any?(flags, &(&1.from_ref == review_id and &1.to_ref == bead.id)),
+             "expected a reviewer→implementer findings message"
+
+      assert Enum.any?(flags, &(&1.from_ref == bead.id and &1.to_ref == review_id)),
+             "expected an implementer→reviewer response message"
+    end
+
+    # The reviewer holds the line on BOTH rounds (the @rounds fixture rejects
+    # first, then emits REQUEST_CHANGES again). After the 2-round cap the Tribunal
+    # escalates to Darth Gnosis with the FULL transcript + diff — no merge.
+    test "not converged after the cap → escalate with the full transcript, no merge",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{bead.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "REQUEST_CHANGES"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+
+      # The escalation to the Admiral carries the FULL ordered transcript (both
+      # rounds of findings + the implementer's response) and the current diff —
+      # Darth Gnosis judges with the whole argument, not a summary.
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == bead.id))
+      assert escalation, "expected an escalation to the Admiral"
+      assert escalation.body =~ "transcript"
+      assert escalation.body =~ "Round 1"
+      assert escalation.body =~ "Round 2"
+      assert escalation.body =~ "Implementer → Reviewer"
+      assert escalation.body =~ "Current diff"
+
+      # The same transcript is on the bead notes (visible via arb show).
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.notes =~ "REQUEST_CHANGES"
+
+      # The full thread persisted as durable mailbox rows: r1 findings, r1
+      # response, r2 findings — three :flag entries, oldest first.
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      flags = bead.id |> Message.thread(workspace_id: ws.id) |> Enum.filter(&(&1.kind == :flag))
+      assert length(flags) == 3
+
+      assert Enum.count(flags, &(&1.from_ref == review_id)) == 2,
+             "expected two reviewer→implementer findings rows (round 1 and round 2)"
+
+      assert Enum.count(flags, &(&1.from_ref == bead.id)) == 1,
+             "expected one implementer→reviewer response row"
+    end
+
+    # The cap is a HARD limit: rounds: 1 means a single review pass. A reject
+    # escalates immediately — no implementer is ever spawned, no revise loop.
+    test "rounds: 1 escalates on the first reject with no revise loop",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{bead.id}",
+            review_required: true,
+            review_rounds: 1,
+            worktree_path: repo,
+            review_command: [@reviewer, "REQUEST_CHANGES"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+
+      # No implementer was ever spawned — the round cap was 1.
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      runs = Ash.read!(Arbiter.Polecats.Run)
+
+      refute Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
+             "rounds: 1 must not spawn an implementer"
     end
   end
 
