@@ -42,67 +42,67 @@ defmodule ArbiterCli.Cmd.InitTest do
       {out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
       assert exit_code == 0
 
-      assert File.exists?(Path.join(dir, "CLAUDE.md"))
-      assert File.exists?(Path.join(dir, "CLAUDE.local.md"))
+      assert File.exists?(Path.join(dir, "AGENTS.md"))
+      assert File.exists?(Path.join(dir, "AGENTS.local.md"))
       assert File.exists?(Path.join(dir, ".gitignore"))
       assert File.exists?(Path.join(dir, "memory/MEMORY.md"))
       assert File.exists?(Path.join(dir, "notes/README.md"))
 
       assert out =~ "created"
-      assert out =~ "CLAUDE.md"
+      assert out =~ "AGENTS.md"
     end
 
-    test "CLAUDE.md uses the active vernacular and the domain name/prefix" do
+    test "AGENTS.md uses the active vernacular and the domain name/prefix" do
       stub_install()
       dir = tmp_dir()
 
       capture(fn -> Init.run([dir]) end)
-      claude = File.read!(Path.join(dir, "CLAUDE.md"))
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
 
       # Coordinator term comes from vernacular, capitalised in the heading.
-      assert claude =~ "# Admiral — Arbiter command session"
-      assert claude =~ "acolytes"
-      assert claude =~ "directive"
+      assert agents =~ "# Admiral — Arbiter command session"
+      assert agents =~ "acolytes"
+      assert agents =~ "directive"
 
       # Domain name + prefix templated from Workspace.resolve/0.
-      assert claude =~ "**default** (prefix `emr`)"
-      assert claude =~ "emr-001"
-      assert claude =~ "emr-1 blocks emr-2"
+      assert agents =~ "**default** (prefix `emr`)"
+      assert agents =~ "emr-001"
+      assert agents =~ "emr-1 blocks emr-2"
 
       # Host templated from ARB_HOST default.
-      assert claude =~ "http://127.0.0.1:4848"
+      assert agents =~ "http://127.0.0.1:4848"
 
       # Tells the agent to read standing orders from `arb prime` (sibling bead).
-      assert claude =~ "arb prime"
-      assert claude =~ "standing orders"
+      assert agents =~ "arb prime"
+      assert agents =~ "standing orders"
     end
 
-    test "generated CLAUDE.md carries NO persona" do
+    test "generated AGENTS.md carries NO persona" do
       stub_install()
       dir = tmp_dir()
 
       capture(fn -> Init.run([dir]) end)
-      claude = File.read!(Path.join(dir, "CLAUDE.md"))
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
 
-      refute claude =~ "Darth"
-      refute claude =~ "Gnosis"
-      refute claude =~ "Sith"
-      refute claude =~ "Penumbral"
+      refute agents =~ "Darth"
+      refute agents =~ "Gnosis"
+      refute agents =~ "Sith"
+      refute agents =~ "Penumbral"
     end
 
-    test "CLAUDE.local.md is a stub overlay with no persona, and .gitignore hides it" do
+    test "AGENTS.local.md is a stub overlay with no persona, and .gitignore hides it" do
       stub_install()
       dir = tmp_dir()
 
       capture(fn -> Init.run([dir]) end)
 
-      local = File.read!(Path.join(dir, "CLAUDE.local.md"))
+      local = File.read!(Path.join(dir, "AGENTS.local.md"))
       assert local =~ "Personal overlay"
       assert local =~ "gitignored"
       refute local =~ "Darth"
 
       gitignore = File.read!(Path.join(dir, ".gitignore"))
-      assert gitignore =~ "CLAUDE.local.md"
+      assert gitignore =~ "AGENTS.local.md"
     end
 
     test "MEMORY.md is a clean skeleton index" do
@@ -126,7 +126,7 @@ defmodule ArbiterCli.Cmd.InitTest do
         assert exit_code == 0
       end)
 
-      assert File.exists?(Path.join(dir, "CLAUDE.md"))
+      assert File.exists?(Path.join(dir, "AGENTS.md"))
     end
   end
 
@@ -139,12 +139,12 @@ defmodule ArbiterCli.Cmd.InitTest do
 
       # Tamper with an existing file; a plain re-run must not clobber it.
       sentinel = "DO NOT OVERWRITE\n"
-      File.write!(Path.join(dir, "CLAUDE.md"), sentinel)
+      File.write!(Path.join(dir, "AGENTS.md"), sentinel)
 
       {out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
       assert exit_code == 0
       assert out =~ "skipped"
-      assert File.read!(Path.join(dir, "CLAUDE.md")) == sentinel
+      assert File.read!(Path.join(dir, "AGENTS.md")) == sentinel
     end
 
     test "--force overwrites existing files" do
@@ -152,12 +152,12 @@ defmodule ArbiterCli.Cmd.InitTest do
       dir = tmp_dir()
 
       capture(fn -> Init.run([dir]) end)
-      File.write!(Path.join(dir, "CLAUDE.md"), "stale\n")
+      File.write!(Path.join(dir, "AGENTS.md"), "stale\n")
 
       {out, _err, exit_code} = capture(fn -> Init.run([dir, "--force"]) end)
       assert exit_code == 0
       assert out =~ "overwritten"
-      assert File.read!(Path.join(dir, "CLAUDE.md")) =~ "Arbiter command session"
+      assert File.read!(Path.join(dir, "AGENTS.md")) =~ "Arbiter command session"
     end
   end
 
@@ -169,10 +169,10 @@ defmodule ArbiterCli.Cmd.InitTest do
       {_out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
       assert exit_code == 0
 
-      claude = File.read!(Path.join(dir, "CLAUDE.md"))
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
       # Falls back to the CLI default vernacular and domain.
-      assert claude =~ "polecat"
-      assert claude =~ "bd-001"
+      assert agents =~ "polecat"
+      assert agents =~ "bd-001"
     end
   end
 
@@ -189,7 +189,7 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert decoded["vernacular"]["coordinator"] == "Admiral"
       assert decoded["domain"]["prefix"] == "emr"
       assert is_list(decoded["files"])
-      assert Enum.any?(decoded["files"], fn f -> f["path"] == "CLAUDE.md" end)
+      assert Enum.any?(decoded["files"], fn f -> f["path"] == "AGENTS.md" end)
     end
   end
 end
