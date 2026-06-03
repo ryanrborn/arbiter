@@ -76,6 +76,35 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
   end
 
+  # ---- cap/2 truncation (escalation payload safety) ------------------------
+
+  describe "cap/2" do
+    test "returns the text unchanged when within the byte cap" do
+      assert Tribunal.cap("short", 50) == "short"
+    end
+
+    test "truncating mid-codepoint backs off to a valid UTF-8 boundary" do
+      # "€" is 3 bytes (0xE2 0x82 0xAC); cap at 10 lands one byte into it, so a
+      # naive binary_part/3 would yield an invalid-UTF-8 binary. The escalation
+      # payload then runs String.trim/1 (outside any rescue) and persists to a
+      # Postgres UTF8 column — both reject malformed bytes.
+      text = String.duplicate("a", 9) <> "€uro"
+      capped = Tribunal.cap(text, 10)
+
+      assert String.valid?(capped), "cap/2 must never emit invalid UTF-8"
+      assert capped == "aaaaaaaaa\n… (truncated)"
+      # The whole-codepoint guarantee is what lets the downstream String.trim/1
+      # in escalation_payload/1 run without raising on malformed bytes.
+      assert String.trim(capped) == "aaaaaaaaa\n… (truncated)"
+    end
+
+    test "an exact-byte boundary on a multibyte char is preserved" do
+      # cap == 12 lands exactly after the full "€" (bytes 10..12), nothing to shave.
+      text = String.duplicate("a", 9) <> "€uro"
+      assert Tribunal.cap(text, 12) == "aaaaaaaaa€\n… (truncated)"
+    end
+  end
+
   # ---- git rig helpers (mirrors CompletionMergeTest) -----------------------
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)

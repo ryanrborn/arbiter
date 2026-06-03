@@ -728,12 +728,26 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp round_subject(state, verdict), do: "Round #{state.round} findings (#{verdict})"
 
-  defp cap(text, max) when is_binary(text) do
+  # Public only so the UTF-8-boundary behaviour can be unit-tested directly
+  # (mirrors parse_verdict/1); not part of the documented API.
+  @doc false
+  def cap(text, max) when is_binary(text) do
     if byte_size(text) > max do
-      binary_part(text, 0, max) <> "\n… (truncated)"
+      valid_prefix(binary_part(text, 0, max)) <> "\n… (truncated)"
     else
       text
     end
+  end
+
+  # binary_part/3 slices on a raw byte offset, which can sever a multibyte UTF-8
+  # codepoint mid-sequence and yield an invalid-UTF-8 binary. Downstream String
+  # ops (String.trim/1 in escalation_payload/1) and the Postgres UTF8 column both
+  # choke on such bytes — and escalation diffs routinely carry em-dashes/arrows.
+  # Shave at most 3 trailing bytes back to a valid codepoint boundary.
+  defp valid_prefix(bin) when byte_size(bin) == 0, do: bin
+
+  defp valid_prefix(bin) do
+    if String.valid?(bin), do: bin, else: valid_prefix(binary_part(bin, 0, byte_size(bin) - 1))
   end
 
   # Minimal snapshot for a Tribunal probed as if it were a polecat. The Tribunal
