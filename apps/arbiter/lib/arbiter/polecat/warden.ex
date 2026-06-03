@@ -50,6 +50,12 @@ defmodule Arbiter.Polecat.Warden do
   alias Arbiter.Polecat
 
   @default_interval_ms 60_000
+  # Watchdog ceiling on consecutive :pending polls before we escalate and stop.
+  # 30 polls × default 60s interval = 30 minutes of nothing happening — well
+  # past any reasonable hosted-forge approval latency. After this many polls
+  # without a terminal outcome, the Warden notifies the Admiral and fails the
+  # polecat so the bead can't hang silently (bd-66ey1o).
+  @default_max_polls 30
 
   @type opt ::
           {:bead_id, String.t()}
@@ -58,8 +64,10 @@ defmodule Arbiter.Polecat.Warden do
           | {:adapter, module()}
           | {:workspace, Arbiter.Beads.Workspace.t() | nil}
           | {:auto_merge, boolean()}
+          | {:via_tribunal, boolean()}
           | {:interval_ms, non_neg_integer()}
           | {:initial_delay_ms, non_neg_integer()}
+          | {:max_polls, non_neg_integer()}
 
   @type opts :: [opt()]
 
@@ -69,9 +77,19 @@ defmodule Arbiter.Polecat.Warden do
   Start a Warden under `Arbiter.Polecat.WardenSupervisor`.
 
   Required opts: `:bead_id`, `:polecat` (pid or bead_id), `:mr_ref`,
-  `:adapter`. Optional: `:workspace`, `:auto_merge` (default `false`),
-  `:interval_ms` (default `#{@default_interval_ms}`), `:initial_delay_ms`
-  (default `0` — poll once promptly, then on the interval).
+  `:adapter`. Optional:
+
+    * `:workspace`
+    * `:auto_merge` (default `false`)
+    * `:via_tribunal` (default `false`) — when true, the Tribunal gate has
+      already approved this MR; the Warden treats every non-terminal poll as
+      `:approved` and forces auto-merge, so the merge fires on the first poll
+      without waiting for a hosted-forge approval the gate never posts.
+    * `:interval_ms` (default `#{@default_interval_ms}`)
+    * `:initial_delay_ms` (default `0` — poll once promptly, then on the interval)
+    * `:max_polls` (default `#{@default_max_polls}`) — consecutive `:pending`
+      polls before the Warden escalates to the Admiral and fails the polecat.
+      Pass `:infinity` to disable the watchdog.
   """
   @spec start(opts()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
@@ -96,6 +114,10 @@ defmodule Arbiter.Polecat.Warden do
   @doc "Default poll interval in milliseconds."
   @spec default_interval_ms() :: pos_integer()
   def default_interval_ms, do: @default_interval_ms
+
+  @doc "Default watchdog cap on consecutive `:pending` polls before escalation."
+  @spec default_max_polls() :: pos_integer()
+  def default_max_polls, do: @default_max_polls
 
   @doc """
   Classify a `Arbiter.Mergers.get/1` result map into an approval outcome.
@@ -133,14 +155,22 @@ defmodule Arbiter.Polecat.Warden do
         workspace = Keyword.get(opts, :workspace)
         Mergers.prepare(workspace)
 
+        via_tribunal = Keyword.get(opts, :via_tribunal, false)
+        # A Tribunal-approved MR has no pending hosted-forge approval to wait
+        # for, so auto_merge is implicit. Honor any explicit override (for
+        # tests) but default to true when the gate has approved.
+        auto_merge = Keyword.get(opts, :auto_merge, via_tribunal)
+
         state = %{
           bead_id: bead_id,
           polecat_pid: polecat_pid,
           mr_ref: mr_ref,
           adapter: adapter,
           workspace: workspace,
-          auto_merge: Keyword.get(opts, :auto_merge, false),
+          auto_merge: auto_merge,
+          via_tribunal: via_tribunal,
           interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
+          max_polls: Keyword.get(opts, :max_polls, @default_max_polls),
           poll_count: 0
         }
 
@@ -155,7 +185,7 @@ defmodule Arbiter.Polecat.Warden do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
-        apply_outcome(classify(result), result, state)
+        apply_outcome(effective_outcome(state, result), result, state)
 
       {:error, reason} ->
         Logger.debug(
@@ -172,6 +202,21 @@ defmodule Arbiter.Polecat.Warden do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  # The Tribunal gate approves in-process — hosted-forge adapters never see
+  # that approval on the PR/MR itself, so `classify/1` would forever return
+  # `:pending`. When the polecat told us the gate already approved, treat any
+  # non-terminal status as `:approved` so the auto-merge path fires on the
+  # first poll. `:merged` / `:closed` still win because they're terminal facts
+  # about the MR itself, not approval-state interpretation.
+  defp effective_outcome(%{via_tribunal: true} = _state, result) do
+    case classify(result) do
+      :pending -> :approved
+      other -> other
+    end
+  end
+
+  defp effective_outcome(_state, result), do: classify(result)
 
   # ---- outcome handling ---------------------------------------------------
   #
@@ -227,9 +272,46 @@ defmodule Arbiter.Polecat.Warden do
     end)
   end
 
+  # Watchdog: bd-66ey1o. After `:max_polls` consecutive non-terminal polls,
+  # escalate to the Admiral and fail the polecat instead of polling forever.
+  # A silent hang at :awaiting_review is worse than a loud failure — at least a
+  # failed polecat surfaces in the notification feed and unblocks the operator.
+  # Pass `max_polls: :infinity` to disable.
+  defp reschedule(%{max_polls: cap, poll_count: count} = state)
+       when is_integer(cap) and cap > 0 and count + 1 >= cap do
+    Logger.warning(
+      "Polecat.Warden: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
+        "#{cap} polls without a terminal outcome; escalating + failing"
+    )
+
+    escalate_watchdog(state)
+    safe(fn -> Polecat.fail(state.polecat_pid, {:awaiting_review_timeout, cap}) end)
+    {:stop, :normal, %{state | poll_count: count + 1}}
+  end
+
   defp reschedule(state) do
     schedule(self(), state.interval_ms)
     {:noreply, %{state | poll_count: state.poll_count + 1}}
+  end
+
+  defp escalate_watchdog(state) do
+    snap =
+      case safe_snapshot(state.polecat_pid) do
+        %{} = s -> s
+        _ -> %{bead_id: state.bead_id, workspace_id: nil}
+      end
+
+    safe(fn ->
+      Arbiter.Messages.AdmiralNotifier.awaiting_review_stuck(snap, state.mr_ref)
+    end)
+  end
+
+  defp safe_snapshot(pid) do
+    Polecat.state(pid)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp schedule(pid, ms) when is_integer(ms) and ms >= 0 do
