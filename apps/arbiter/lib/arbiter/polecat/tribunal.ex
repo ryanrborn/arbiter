@@ -9,30 +9,53 @@ defmodule Arbiter.Polecat.Tribunal do
   When an acolyte signals done (`arb done`), the author `Arbiter.Polecat` checks
   whether its workspace requires review (`Workspace.review_required?/1`). If so it
   parks at `:awaiting_tribunal` and spawns a Tribunal **instead of** calling the
-  merger. The Tribunal then:
+  merger. The Tribunal then runs the review — and, on a request-changes verdict,
+  the **revise-and-rediscuss loop** — and reports a single, terminal verdict back
+  to the author (`Arbiter.Polecat.tribunal_verdict/2`):
 
-    1. Spawns a **distinct** reviewer acolyte — a second `Arbiter.Polecat` with a
-       `#review`-suffixed bead id and its own `Arbiter.Polecat.ClaudeSession`,
-       running in the same worktree. A different process = a different Claude
-       invocation = a different mind (no self-grading).
-    2. Hands the reviewer the bead's acceptance criteria + description and asks it
-       to review the branch diff for correctness / regressions, **without booting
-       the app** (the second-instance hazard, bd-9rouwh — the reviewer only reads
-       the diff).
-    3. Captures the reviewer's stdout (via the polecat output PubSub topic) and
-       waits for it to finish.
-    4. Parses a structured verdict from the transcript — a sentinel line
-       `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` plus findings.
-    5. Reports the verdict back to the author polecat
-       (`Arbiter.Polecat.tribunal_verdict/2`):
-         * APPROVE → the author proceeds to the merger (`do_open_mr`).
-         * REQUEST_CHANGES (or an inconclusive / timed-out review) → the author
-           parks the bead with the findings and escalates to the Admiral; the
-           branch is **not** merged.
+    * APPROVE → the author proceeds to the merger (`do_open_mr`).
+    * REQUEST_CHANGES (after the loop is exhausted) / inconclusive / timed-out →
+      the author parks the bead with the findings and escalates to the Admiral;
+      the branch is **not** merged.
 
-  This is **Stage 1** (the gate MVP). The revise-and-re-review loop (Stage 2) and
-  same-mind continuity (Stage 3) are separate beads; here the Tribunal runs a
-  single review pass and a non-approve verdict escalates rather than looping.
+  ## The reviewer
+
+  Each review pass spawns a **distinct** reviewer acolyte — a second
+  `Arbiter.Polecat` with a `#review`-suffixed bead id and its own
+  `Arbiter.Polecat.ClaudeSession`, running in the same worktree. A different
+  process = a different Claude invocation = a different mind (no self-grading).
+  It is handed the bead's acceptance criteria + description and asked to review
+  the branch diff for correctness / regressions, **without booting the app** (the
+  second-instance hazard, bd-9rouwh — the reviewer only reads the diff). Its
+  stdout is captured (via the polecat output PubSub topic); from it the Tribunal
+  parses a structured verdict — a sentinel line `VERDICT: APPROVE` or
+  `VERDICT: REQUEST_CHANGES` plus findings.
+
+  ## Stage 2 — the revise-and-rediscuss loop (bd-3jm700)
+
+  Stage 1 ran a single review pass and escalated immediately on a non-approve
+  verdict. Stage 2 turns a REQUEST_CHANGES into a bounded conversation:
+
+    1. The reviewer's structured findings are posted to the implementer **via the
+       mailbox** (`Arbiter.Messages`, kind `:flag`, reviewer id → author bead id)
+       — a durable row, so the thread survives the acolytes that wrote it.
+    2. A **fresh implementer** acolyte (a new mind, same branch/worktree)
+       addresses each finding: fix it (and commit) or rebut it with
+       justification. Its transcript is captured and posted back over the mailbox
+       (author bead id → reviewer id).
+    3. The reviewer re-reviews the updated diff (its prompt carries the prior
+       thread so it can accept each rebuttal or hold the line).
+
+  The loop is **hard-capped** at `config["review"]["rounds"]` rounds (default 2;
+  one round = one reviewer pass). If it has not converged on APPROVE after the
+  cap, the Tribunal **escalates to Darth Gnosis** — reporting a REQUEST_CHANGES
+  whose findings are the FULL implementer↔reviewer transcript (every message,
+  both directions, all rounds, in order), the unresolved findings, and the
+  current diff. He judges with the complete argument in hand, not a summary.
+
+  The reviewer must be a DIFFERENT mind than the author at every round, and each
+  implementer revision is a fresh mind too. (TRUE same-session continuity — resume
+  the original implementer — rides on bd-igu12c and is Stage 3.)
 
   ## Verdict protocol
 
@@ -49,12 +72,13 @@ defmodule Arbiter.Polecat.Tribunal do
   A reviewer that produces a substantive review but simply *forgets* the sentinel
   line is a common, costly failure: the work is good but `:no_verdict` escalates
   it as inconclusive, wasting the whole pass. Before giving up, the Tribunal
-  **re-prompts for a verdict**: on a `:no_verdict` result it spawns one more
-  minimal follow-up pass (a fresh reviewer + session — there is no live Claude
-  session resume yet, so the follow-up re-supplies the diff context but demands
-  the sentinel). Only if that pass *also* yields no parseable verdict does the
-  Tribunal report `:no_verdict` and let the author escalate as inconclusive. The
-  number of re-prompts is capped (default 1) via the `:verdict_retries` opt.
+  **re-prompts for a verdict** within the same round: on a `:no_verdict` result
+  it spawns one more minimal follow-up pass (a fresh reviewer + session — there
+  is no live Claude session resume yet — that re-supplies the diff context but
+  demands the sentinel). Only if that pass *also* yields no parseable verdict
+  does the Tribunal report `:no_verdict` and let the author escalate as
+  inconclusive. The number of re-prompts is capped (default 1) via the
+  `:verdict_retries` opt and is a Tribunal-lifetime budget (shared across rounds).
 
   A timed-out or unspawnable reviewer is a different failure (a hung/crashed
   mind, not a forgotten sentinel) and still escalates directly without a
@@ -62,9 +86,10 @@ defmodule Arbiter.Polecat.Tribunal do
 
   ## Testing
 
-  `start/1` accepts a `:command` argv (forwarded to `ClaudeSession`) so tests can
-  spawn an echo script that prints a canned verdict instead of invoking real
-  Claude. `parse_verdict/1` is a pure function and is unit-tested directly.
+  `start/1` accepts a `:command` argv (the reviewer) and a `:revise_command` argv
+  (the implementer), forwarded to `ClaudeSession`, so tests can spawn echo
+  scripts that print canned verdicts / revisions instead of invoking real Claude.
+  `parse_verdict/1` is a pure function and is unit-tested directly.
   """
 
   use GenServer
@@ -74,13 +99,21 @@ defmodule Arbiter.Polecat.Tribunal do
   alias Arbiter.Polecat
   alias Arbiter.Polecat.ClaudeSession
 
-  # Default ceiling on how long we wait for the reviewer before escalating as a
-  # timed-out review. Real Claude reviews can take a while; tests override this.
+  # Default ceiling on how long we wait for a reviewer / implementer pass before
+  # escalating as timed out. Real Claude work can take a while; tests override.
   @default_timeout_ms 20 * 60 * 1000
 
-  # How many times we re-prompt for a verdict when the reviewer finishes without
+  # How many times we re-prompt for a verdict when a reviewer finishes without
   # one before escalating as inconclusive. Capped; default 1. See bd-8v8ays.
   @default_verdict_retries 1
+
+  # Hard cap on revise-and-rediscuss rounds (one round = one reviewer pass) when
+  # the workspace config doesn't say otherwise. See bd-3jm700.
+  @default_rounds 2
+
+  # Defensive cap on the escalation diff so a huge branch can't bloat the
+  # Admiral's mailbox row beyond reason.
+  @diff_cap_bytes 50_000
 
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
@@ -97,8 +130,10 @@ defmodule Arbiter.Polecat.Tribunal do
           | {:branch, String.t()}
           | {:target_branch, String.t()}
           | {:command, [String.t()] | nil}
+          | {:revise_command, [String.t()] | nil}
           | {:timeout_ms, non_neg_integer()}
           | {:verdict_retries, non_neg_integer()}
+          | {:rounds, pos_integer()}
 
   @doc """
   Start a Tribunal under `Arbiter.Polecat.Supervisor`.
@@ -106,7 +141,8 @@ defmodule Arbiter.Polecat.Tribunal do
   Required opts: `:author` (the author polecat pid to report back to),
   `:bead_id`, `:rig`, `:branch`. Optional: `:workspace_id`, `:worktree_path`,
   `:target_branch` (default `"main"`), `:command` (test override for the reviewer
-  argv), `:timeout_ms`.
+  argv), `:revise_command` (test override for the implementer argv), `:rounds`
+  (the revise-loop cap), `:timeout_ms`.
   """
   @spec start([opt()]) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
@@ -189,9 +225,22 @@ defmodule Arbiter.Polecat.Tribunal do
       branch: Keyword.fetch!(opts, :branch),
       target_branch: Keyword.get(opts, :target_branch, "main"),
       command: Keyword.get(opts, :command),
+      revise_command: Keyword.get(opts, :revise_command),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
       retries_left: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
+      max_rounds: max(Keyword.get(opts, :rounds, @default_rounds), 1),
+      # phase: :reviewing while a reviewer pass is in flight, :revising while an
+      # implementer addresses findings between rounds.
+      phase: :reviewing,
+      round: 1,
+      # The implementer<->reviewer thread, oldest-first. Each entry:
+      # %{round:, role: :reviewer | :implementer | :system, subject:, body:}.
+      # Mirrors the durable mailbox rows; the source for the escalation payload.
+      thread: [],
       attempt: 0,
+      # The id of the acolyte whose output/exit we are currently waiting on, so a
+      # stale message from a prior (stopped) reviewer/implementer is ignored.
+      current_id: nil,
       reviewer_pid: nil,
       lines: [],
       reported?: false
@@ -203,7 +252,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   @impl true
   def handle_continue(:spawn_reviewer, state) do
-    case launch_reviewer(state, state.review_id, review_prompt(state)) do
+    case launch_acolyte(state, state.review_id, :reviewer, review_prompt(state), state.command) do
       {:ok, state} ->
         {:noreply, state}
 
@@ -230,35 +279,54 @@ defmodule Arbiter.Polecat.Tribunal do
     {:reply, snapshot(state), state}
   end
 
+  # Capture output only from the acolyte we're currently waiting on; a late line
+  # from a prior (stopped) reviewer/implementer must not contaminate this pass.
   @impl true
-  def handle_info({:polecat_output, _id, line}, state) do
+  def handle_info({:polecat_output, id, line}, %{current_id: id} = state) do
     {:noreply, %{state | lines: [line | state.lines]}}
   end
 
-  # The reviewer's subprocess exited — its transcript is complete. Parse it; on a
-  # missing verdict, re-prompt once (capped) before escalating as inconclusive.
-  # (The reviewer polecat also self-completes on its own `arb done`; either way
+  def handle_info({:polecat_output, _other, _line}, state), do: {:noreply, state}
+
+  # The current acolyte's subprocess exited — its transcript is complete. Dispatch
+  # by phase: a finished reviewer yields a verdict (or a re-prompt / a revise); a
+  # finished implementer closes the round and triggers the next reviewer pass.
+  # (Each acolyte polecat also self-completes on its own `arb done`; either way
   # the exit is our reliable "transcript done" signal.)
-  def handle_info({:polecat_exited, _id, _status}, state) do
+  def handle_info({:polecat_exited, id, _status}, %{current_id: id, phase: :reviewing} = state) do
     case attempt_finish(state) do
       {:done, state} -> {:stop, :normal, state}
       {:reprompt, state} -> {:noreply, state}
+      {:revise, state} -> {:noreply, state}
     end
   end
 
+  def handle_info({:polecat_exited, id, _status}, %{current_id: id, phase: :revising} = state) do
+    case finish_revise(state) do
+      {:done, state} -> {:stop, :normal, state}
+      {:continue, state} -> {:noreply, state}
+    end
+  end
+
+  # A stale exit from an acolyte we've moved on from.
+  def handle_info({:polecat_exited, _other, _status}, state), do: {:noreply, state}
+
   # Timeouts are tagged with the attempt that scheduled them so a stale timer
-  # from a prior pass can't escalate a re-prompt that is still in flight.
+  # from a prior pass can't escalate a pass that has already advanced.
   def handle_info({:timeout, _attempt}, %{reported?: true} = state), do: {:noreply, state}
 
   def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
-    Logger.warning("Tribunal: reviewer timed out for bead=#{state.bead_id}")
-
-    report(
-      state,
-      {:request_changes,
-       "Tribunal review timed out after #{div(state.timeout_ms, 1000)}s with no verdict."}
+    Logger.warning(
+      "Tribunal: #{state.phase} pass timed out for bead=#{state.bead_id} (round #{state.round})"
     )
 
+    msg =
+      "Tribunal #{state.phase} pass timed out after #{div(state.timeout_ms, 1000)}s " <>
+        "with no verdict (round #{state.round})."
+
+    payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
+
+    report(state, {:request_changes, payload})
     {:stop, :normal, %{state | reported?: true}}
   end
 
@@ -273,7 +341,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   @impl true
   def terminate(_reason, state) do
-    # Stop the reviewer polecat if it's still alive (e.g. on timeout).
+    # Stop the current acolyte polecat if it's still alive (e.g. on timeout).
     if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
       safe(fn -> Polecat.stop(state.reviewer_pid, :normal) end)
     end
@@ -281,36 +349,140 @@ defmodule Arbiter.Polecat.Tribunal do
     :ok
   end
 
-  # ---- internals ----------------------------------------------------------
+  # ---- review pass outcome -----------------------------------------------
 
-  # Parse the captured transcript. On a real verdict, report it and stop. On a
-  # missing verdict, re-prompt for one (capped) before escalating as
-  # inconclusive. Returns `{:done, state}` to stop or `{:reprompt, state}` to
-  # keep waiting on a freshly-spawned follow-up pass.
+  # Parse the captured reviewer transcript. On APPROVE, report and stop. On
+  # REQUEST_CHANGES, enter the revise loop (rounds remaining) or escalate with the
+  # full transcript (exhausted). On a missing verdict, re-prompt (capped) before
+  # escalating as inconclusive. Returns `{:done, state}` to stop, `{:reprompt,
+  # state}` to wait on a verdict follow-up, or `{:revise, state}` to wait on an
+  # implementer.
   defp attempt_finish(%{reported?: true} = state), do: {:done, state}
 
   defp attempt_finish(state) do
     case parse_verdict(Enum.reverse(state.lines)) do
       :no_verdict -> maybe_reprompt(state)
-      verdict -> {:done, finish(state, verdict)}
+      {:approve, _} = verdict -> {:done, finish(state, verdict)}
+      {:request_changes, findings} -> handle_reject(state, findings)
     end
   end
+
+  # A REQUEST_CHANGES verdict with the round budget exhausted: record the final
+  # findings into the thread, then escalate to Darth Gnosis with the FULL
+  # transcript + unresolved findings + current diff.
+  defp handle_reject(%{round: round, max_rounds: max} = state, findings) when round >= max do
+    state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+    Logger.info(
+      "Tribunal: bead=#{state.bead_id} not converged after #{max} round(s); escalating with transcript"
+    )
+
+    {:done, finish(state, {:request_changes, escalation_payload(state)})}
+  end
+
+  # Rounds remain: post the findings to the implementer and spawn a fresh
+  # implementer mind to address them on the same branch.
+  defp handle_reject(state, findings), do: enter_revise(state, findings)
+
+  # Stage 2: post the reviewer's findings to the implementer over the mailbox,
+  # then spawn a fresh implementer acolyte (same branch/worktree) to fix or rebut
+  # each one. Returns `{:revise, state}` so the loop waits on the implementer, or
+  # `{:done, state}` (escalated) if the implementer couldn't be spawned.
+  defp enter_revise(state, findings) do
+    state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
+
+    # The reviewer's subprocess has exited; stop its polecat so it can't linger
+    # (it may not have self-completed if it never printed `arb done`).
+    stop_acolyte(state)
+
+    impl_id = implementer_bead_id(state.review_id, state.round)
+
+    case launch_acolyte(
+           %{state | phase: :revising},
+           impl_id,
+           :implementer,
+           revise_prompt(state, findings),
+           state.revise_command
+         ) do
+      {:ok, state} ->
+        Logger.info(
+          "Tribunal: bead=#{state.bead_id} round #{state.round} requested changes; revising"
+        )
+
+        {:revise, state}
+
+      {:error, reason} ->
+        state =
+          record_thread(
+            state,
+            :system,
+            "Round #{state.round} revise could not start",
+            "The implementer acolyte could not be spawned: #{inspect(reason)}"
+          )
+
+        {:done, finish(state, {:request_changes, escalation_payload(state)})}
+    end
+  end
+
+  # The implementer finished addressing the round's findings. Capture its
+  # transcript, post it back to the reviewer over the mailbox, and open the next
+  # reviewer round (its prompt carries the prior thread). Returns `{:continue,
+  # state}` to keep looping or `{:done, state}` (escalated) if the next reviewer
+  # couldn't be spawned.
+  defp finish_revise(%{reported?: true} = state), do: {:done, state}
+
+  defp finish_revise(state) do
+    response =
+      state.lines
+      |> Enum.reverse()
+      |> Enum.join("\n")
+      |> String.trim()
+
+    response = if response == "", do: "(implementer produced no output)", else: response
+
+    state = record_thread(state, :implementer, "Round #{state.round} response", response)
+
+    # The implementer's subprocess has exited; stop its polecat so it can't linger.
+    stop_acolyte(state)
+
+    next = %{state | round: state.round + 1, phase: :reviewing}
+    review_id = reviewer_round_id(next.review_id, next.round)
+
+    case launch_acolyte(next, review_id, :reviewer, rereview_prompt(next), next.command) do
+      {:ok, state} ->
+        {:continue, state}
+
+      {:error, reason} ->
+        next =
+          record_thread(
+            next,
+            :system,
+            "Round #{next.round} re-review could not start",
+            "The reviewer acolyte could not be spawned: #{inspect(reason)}"
+          )
+
+        {:done, finish(next, {:request_changes, escalation_payload(next)})}
+    end
+  end
+
+  # ---- verdict re-prompt (bd-8v8ays) -------------------------------------
 
   # A reviewer finished without a parseable VERDICT line. If we have a re-prompt
   # budget left, spawn one more minimal follow-up pass (a fresh reviewer mind —
   # there is no Claude session resume yet — that re-reads the diff but is told it
-  # MUST emit the sentinel). Otherwise escalate as inconclusive.
+  # MUST emit the sentinel). Otherwise escalate as inconclusive. This stays in the
+  # current round: a forgotten sentinel is not a revision.
   defp maybe_reprompt(%{retries_left: budget} = state) when budget > 0 do
-    # The prior reviewer's subprocess has exited; stop its polecat so it can't
-    # linger (it may not have self-completed if it never printed `arb done`).
-    stop_reviewer(state)
+    stop_acolyte(state)
 
     retry_id = reprompt_bead_id(state.review_id, state.attempt)
 
-    case launch_reviewer(
+    case launch_acolyte(
            %{state | retries_left: budget - 1},
            retry_id,
-           verdict_reprompt_prompt(state)
+           :reviewer,
+           verdict_reprompt_prompt(state),
+           state.command
          ) do
       {:ok, state} ->
         Logger.info(
@@ -341,6 +513,8 @@ defmodule Arbiter.Polecat.Tribunal do
      )}
   end
 
+  # ---- reporting ----------------------------------------------------------
+
   # Report the given verdict to the author exactly once and mark reported.
   defp finish(%{reported?: true} = state, _verdict), do: state
 
@@ -365,70 +539,171 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp normalize_verdict({:no_verdict, _findings} = v), do: v
 
-  # Subscribe to the reviewer's output topic, spawn it, arm a fresh (attempt-
-  # tagged) timeout, and reset the line buffer for this pass. Used for both the
-  # first review and each verdict re-prompt; returns the updated state on
-  # success. Subscribe BEFORE spawning so we can't miss the reviewer's first
-  # output lines or its exit signal (the subprocess may finish almost
-  # immediately — a fast reviewer or a test fixture). The topic is known from the
-  # review id alone, so subscribing ahead of the port open is safe.
-  defp launch_reviewer(state, review_id, prompt) do
-    Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:" <> review_id)
+  # ---- the persisted thread ----------------------------------------------
+
+  # Append an entry to the in-memory thread AND persist it as a durable mailbox
+  # row, so the implementer<->reviewer back-and-forth survives the acolytes that
+  # wrote it and the escalation can present the full, ordered argument.
+  defp record_thread(state, role, subject, body) do
+    persist_message(state, role, subject, body)
+    entry = %{round: state.round, role: role, subject: subject, body: body}
+    %{state | thread: state.thread ++ [entry]}
+  end
+
+  # Persist one thread entry as an inter-agent `:flag` message scoped to the
+  # bead's workspace. directive_ref = the author bead id, so `Messages.thread/2`
+  # reconstructs the ordered conversation for the bead. Best-effort: a workspace-
+  # less Tribunal (ad-hoc run) or a DB hiccup never breaks the loop.
+  defp persist_message(%{workspace_id: ws} = state, role, subject, body) when is_binary(ws) do
+    {from_ref, to_ref} = thread_refs(state, role)
+
+    safe(fn ->
+      Arbiter.Messages.Message.send_mail(%{
+        kind: :flag,
+        from_ref: from_ref,
+        to_ref: to_ref,
+        workspace_id: ws,
+        directive_ref: state.bead_id,
+        subject: cap(subject, 500),
+        body: body
+      })
+    end)
+
+    :ok
+  end
+
+  defp persist_message(_state, _role, _subject, _body), do: :ok
+
+  # reviewer findings travel review_id -> bead (the implementer); the
+  # implementer's response travels bead -> review_id; system notes are attributed
+  # to the Tribunal (review_id) and addressed at the bead.
+  defp thread_refs(state, :reviewer), do: {state.review_id, state.bead_id}
+  defp thread_refs(state, :implementer), do: {state.bead_id, state.review_id}
+  defp thread_refs(state, :system), do: {state.review_id, state.bead_id}
+
+  # Compose the escalation payload Darth Gnosis judges with: the FULL ordered
+  # transcript, plus the current diff of the branch under review.
+  defp escalation_payload(state) do
+    """
+    Tribunal escalation — not converged after #{state.round} round(s) of review
+    (cap #{state.max_rounds}). The implementer and reviewer did not reach
+    agreement; the full argument follows for your judgement.
+
+    ## Full implementer↔reviewer transcript
+
+    #{render_thread(state.thread)}
+
+    ## Current diff (#{state.branch} vs #{state.target_branch})
+
+    ```
+    #{current_diff(state)}
+    ```
+    """
+    |> String.trim()
+  end
+
+  defp render_thread([]), do: "(no messages were exchanged)"
+
+  defp render_thread(thread) do
+    thread
+    |> Enum.map(fn %{round: round, role: role, subject: subject, body: body} ->
+      "### Round #{round} — #{role_label(role)}: #{subject}\n\n#{String.trim(body)}"
+    end)
+    |> Enum.join("\n\n---\n\n")
+  end
+
+  defp role_label(:reviewer), do: "Reviewer → Implementer"
+  defp role_label(:implementer), do: "Implementer → Reviewer"
+  defp role_label(:system), do: "Tribunal"
+
+  # The current diff of the branch under review, capped. Best-effort: the
+  # escalation is still useful without it.
+  defp current_diff(%{worktree_path: wt, target_branch: tb}) when is_binary(wt) do
+    case System.cmd("git", ["-C", wt, "diff", "#{tb}...HEAD"], stderr_to_stdout: true) do
+      {out, 0} -> cap(out, @diff_cap_bytes)
+      {out, _} -> "(could not compute diff)\n" <> cap(out, 2_000)
+    end
+  rescue
+    _ -> "(diff unavailable)"
+  catch
+    :exit, _ -> "(diff unavailable)"
+  end
+
+  defp current_diff(_state), do: "(diff unavailable — no worktree)"
+
+  # ---- acolyte spawning ---------------------------------------------------
+
+  # Subscribe to the acolyte's output topic, spawn it, arm a fresh (attempt-
+  # tagged) timeout, and reset the line buffer for this pass. Used for every
+  # reviewer pass (first review, re-review, verdict re-prompt) and every
+  # implementer revision; returns the updated state on success. Subscribe BEFORE
+  # spawning so we can't miss the acolyte's first output lines or its exit signal
+  # (the subprocess may finish almost immediately — a fast acolyte or a test
+  # fixture). The topic is known from the id alone, so subscribing ahead of the
+  # port open is safe.
+  defp launch_acolyte(state, id, role, prompt, command) do
+    Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:" <> id)
     attempt = state.attempt + 1
 
-    case spawn_reviewer(state, review_id, prompt) do
-      {:ok, reviewer_pid} ->
+    case spawn_acolyte(state, id, role, prompt, command) do
+      {:ok, pid} ->
         Process.send_after(self(), {:timeout, attempt}, state.timeout_ms)
-        {:ok, %{state | reviewer_pid: reviewer_pid, attempt: attempt, lines: []}}
+        {:ok, %{state | reviewer_pid: pid, current_id: id, attempt: attempt, lines: []}}
 
       {:error, _reason} = err ->
         err
     end
   end
 
-  # Start a reviewer as a distinct polecat + claude session under `review_id`.
-  # The reviewer gets workspace_id: nil so its completion stays silent — no
-  # Admiral notification, no Refinery pickup for the synthetic `#review` bead —
-  # while still recording its own run row.
-  defp spawn_reviewer(state, review_id, prompt) do
-    with {:ok, reviewer_pid} <- start_reviewer_polecat(state, review_id),
-         :ok <- start_reviewer_session(state, reviewer_pid, prompt) do
-      _ = Polecat.advance(reviewer_pid, :reviewing)
-      {:ok, reviewer_pid}
+  # Start an acolyte as a distinct polecat + claude session under `id`. The
+  # acolyte gets workspace_id: nil so its completion stays silent — no Admiral
+  # notification, no Refinery pickup for the synthetic id — while still recording
+  # its own run row.
+  defp spawn_acolyte(state, id, role, prompt, command) do
+    with {:ok, pid} <- start_acolyte_polecat(state, id, role),
+         :ok <- start_acolyte_session(state, pid, prompt, command) do
+      _ = Polecat.advance(pid, step_for(role))
+      {:ok, pid}
     end
   end
 
-  defp start_reviewer_polecat(state, review_id) do
+  defp start_acolyte_polecat(state, id, role) do
     case Polecat.start(
-           bead_id: review_id,
+           bead_id: id,
            rig: state.rig,
            workspace_id: nil,
-           meta: %{role: :reviewer, reviews: state.bead_id}
+           meta: acolyte_meta(state, role)
          ) do
       {:ok, pid} -> {:ok, pid}
       {:error, {:already_started, pid}} -> {:ok, pid}
-      {:error, reason} -> {:error, {:reviewer_start_failed, reason}}
+      {:error, reason} -> {:error, {:acolyte_start_failed, reason}}
     end
   end
 
-  defp start_reviewer_session(state, reviewer_pid, prompt) do
+  defp acolyte_meta(state, :reviewer), do: %{role: :reviewer, reviews: state.bead_id}
+  defp acolyte_meta(state, :implementer), do: %{role: :implementer, revises: state.bead_id}
+
+  defp step_for(:reviewer), do: :reviewing
+  defp step_for(:implementer), do: :revising
+
+  defp start_acolyte_session(state, pid, prompt, command) do
     session_opts =
-      [owner: reviewer_pid, worktree_path: state.worktree_path] ++
-        case state.command do
+      [owner: pid, worktree_path: state.worktree_path] ++
+        case command do
           nil -> [prompt: prompt]
           cmd when is_list(cmd) -> [command: cmd]
         end
 
     case ClaudeSession.start(session_opts) do
       {:ok, _port} -> :ok
-      {:error, reason} -> {:error, {:reviewer_session_failed, reason}}
+      {:error, reason} -> {:error, {:acolyte_session_failed, reason}}
     end
   end
 
-  # Stop the current reviewer polecat if it's still alive. Best-effort — used
-  # before a re-prompt so a reviewer that finished without printing `arb done`
-  # (and so never self-completed) can't linger.
-  defp stop_reviewer(state) do
+  # Stop the current acolyte polecat if it's still alive. Best-effort — used
+  # before spawning the next acolyte so one that finished without printing `arb
+  # done` (and so never self-completed) can't linger.
+  defp stop_acolyte(state) do
     if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
       safe(fn -> Polecat.stop(state.reviewer_pid, :normal) end)
     end
@@ -436,10 +711,30 @@ defmodule Arbiter.Polecat.Tribunal do
     :ok
   end
 
+  # ---- synthetic acolyte ids ----------------------------------------------
+
   # The synthetic bead id for a re-prompt reviewer: a fresh, distinct id per
   # attempt so it registers as its own polecat / run row and never collides with
   # the original (possibly still-terminating) reviewer.
   defp reprompt_bead_id(review_id, attempt), do: review_id <> "#v#{attempt + 1}"
+
+  # The reviewer id for a later round (round >= 2): distinct per round.
+  defp reviewer_round_id(review_id, round), do: review_id <> "#r#{round}"
+
+  # The implementer id for a given round's revision: distinct per round.
+  defp implementer_bead_id(review_id, round), do: review_id <> "#impl#{round}"
+
+  # ---- misc ---------------------------------------------------------------
+
+  defp round_subject(state, verdict), do: "Round #{state.round} findings (#{verdict})"
+
+  defp cap(text, max) when is_binary(text) do
+    if byte_size(text) > max do
+      binary_part(text, 0, max) <> "\n… (truncated)"
+    else
+      text
+    end
+  end
 
   # Minimal snapshot for a Tribunal probed as if it were a polecat. The Tribunal
   # is a review gate, not an acolyte; this exists only so an accidental
@@ -452,6 +747,9 @@ defmodule Arbiter.Polecat.Tribunal do
       current_step: "tribunal",
       rig: state.rig,
       role: :tribunal,
+      phase: state.phase,
+      round: state.round,
+      max_rounds: state.max_rounds,
       reviewer_alive: is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid)
     }
   end
@@ -463,6 +761,8 @@ defmodule Arbiter.Polecat.Tribunal do
   catch
     :exit, _ -> :ok
   end
+
+  # ---- prompts ------------------------------------------------------------
 
   @doc """
   Build the reviewer's prompt: the bead's acceptance criteria + description, the
@@ -532,6 +832,80 @@ defmodule Arbiter.Polecat.Tribunal do
         VERDICT: REQUEST_CHANGES
 
     Do not skip the verdict line — without it your review cannot be honored.
+
+    """ <> review_prompt(state)
+  end
+
+  @doc """
+  Build the implementer's revise prompt for a round of the revise-and-rediscuss
+  loop: the reviewer's findings, and the instruction to address EACH one (fix or
+  rebut) on the same branch, committing any code changes so the next review can
+  see them. A fresh mind — there is no session resume yet — so it re-supplies the
+  bead context. Public for inspection in tests.
+  """
+  @spec revise_prompt(map(), String.t()) :: String.t()
+  def revise_prompt(state, findings) do
+    bead = load_bead(state.bead_id)
+
+    """
+    You are an IMPLEMENTER acolyte. A reviewer (a Tribunal) has reviewed the work
+    on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
+    finding so the work can pass review.
+
+    Bead: #{state.bead_id}
+    Title: #{bead.title}
+
+    Description:
+    #{bead.description}
+
+    Acceptance criteria:
+    #{bead.acceptance}
+
+    Reviewer findings (round #{state.round}):
+    #{findings}
+
+    For EACH finding, do ONE of:
+      * FIX it — edit the code on branch `#{state.branch}` and COMMIT the change
+        (`git add -A && git commit -m "..."`), so the reviewer can see it in the
+        diff on re-review; or
+      * REBUT it — if you believe the finding is mistaken, leave the code as-is
+        and explain, concretely, why it is not a problem.
+
+    State clearly, for each finding, whether you FIXED or REBUTTED it and why —
+    your reply here is forwarded back to the reviewer as your side of the record.
+
+    The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`:
+
+        git diff #{state.target_branch}...HEAD
+        git log --oneline #{state.target_branch}..HEAD
+
+    *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
+    no `mix run`. (Reading files, editing, and running `git` is fine.)
+
+    When you have addressed every finding, print, on a line by itself:
+
+        arb done
+    """
+  end
+
+  @doc """
+  Build the reviewer's re-review prompt for round >= 2: the base review prompt,
+  prefixed with the prior implementer↔reviewer thread so the reviewer can accept
+  each fix/rebuttal or hold the line on the UPDATED diff. Public for inspection.
+  """
+  @spec rereview_prompt(map()) :: String.t()
+  def rereview_prompt(state) do
+    """
+    This is review round #{state.round} of a revise-and-rediscuss loop. The
+    implementer has addressed your prior findings. Re-review the UPDATED diff. For
+    each prior finding, decide whether to ACCEPT the fix/rebuttal or HOLD THE
+    LINE, then issue a fresh verdict on the current state of the branch.
+
+    Prior discussion (oldest first):
+
+    #{render_thread(state.thread)}
+
+    ----------------------------------------------------------------------
 
     """ <> review_prompt(state)
   end
