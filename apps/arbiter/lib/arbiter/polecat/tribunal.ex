@@ -42,9 +42,23 @@ defmodule Arbiter.Polecat.Tribunal do
       VERDICT: REQUEST_CHANGES
 
   Case-insensitive; surrounding whitespace tolerated. Everything from the verdict
-  line onward is captured as the findings. If no recognizable verdict appears (a
-  crashed or silent reviewer), the verdict is `:no_verdict` and the author treats
-  it as inconclusive — the safe default is "do not merge".
+  line onward is captured as the findings.
+
+  ## Verdict re-prompt (bd-8v8ays)
+
+  A reviewer that produces a substantive review but simply *forgets* the sentinel
+  line is a common, costly failure: the work is good but `:no_verdict` escalates
+  it as inconclusive, wasting the whole pass. Before giving up, the Tribunal
+  **re-prompts for a verdict**: on a `:no_verdict` result it spawns one more
+  minimal follow-up pass (a fresh reviewer + session — there is no live Claude
+  session resume yet, so the follow-up re-supplies the diff context but demands
+  the sentinel). Only if that pass *also* yields no parseable verdict does the
+  Tribunal report `:no_verdict` and let the author escalate as inconclusive. The
+  number of re-prompts is capped (default 1) via the `:verdict_retries` opt.
+
+  A timed-out or unspawnable reviewer is a different failure (a hung/crashed
+  mind, not a forgotten sentinel) and still escalates directly without a
+  re-prompt.
 
   ## Testing
 
@@ -64,6 +78,10 @@ defmodule Arbiter.Polecat.Tribunal do
   # timed-out review. Real Claude reviews can take a while; tests override this.
   @default_timeout_ms 20 * 60 * 1000
 
+  # How many times we re-prompt for a verdict when the reviewer finishes without
+  # one before escalating as inconclusive. Capped; default 1. See bd-8v8ays.
+  @default_verdict_retries 1
+
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
 
@@ -80,6 +98,7 @@ defmodule Arbiter.Polecat.Tribunal do
           | {:target_branch, String.t()}
           | {:command, [String.t()] | nil}
           | {:timeout_ms, non_neg_integer()}
+          | {:verdict_retries, non_neg_integer()}
 
   @doc """
   Start a Tribunal under `Arbiter.Polecat.Supervisor`.
@@ -171,6 +190,8 @@ defmodule Arbiter.Polecat.Tribunal do
       target_branch: Keyword.get(opts, :target_branch, "main"),
       command: Keyword.get(opts, :command),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
+      retries_left: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
+      attempt: 0,
       reviewer_pid: nil,
       lines: [],
       reported?: false
@@ -182,16 +203,9 @@ defmodule Arbiter.Polecat.Tribunal do
 
   @impl true
   def handle_continue(:spawn_reviewer, state) do
-    # Subscribe BEFORE spawning so we can't miss the reviewer's first output
-    # lines or its exit signal (the subprocess may finish almost immediately —
-    # e.g. a fast reviewer or a test fixture). The topic is known from the
-    # review_id alone, so subscribing ahead of the port open is safe.
-    Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:" <> state.review_id)
-
-    case spawn_reviewer(state) do
-      {:ok, reviewer_pid} ->
-        Process.send_after(self(), :timeout, state.timeout_ms)
-        {:noreply, %{state | reviewer_pid: reviewer_pid}}
+    case launch_reviewer(state, state.review_id, review_prompt(state)) do
+      {:ok, state} ->
+        {:noreply, state}
 
       {:error, reason} ->
         Logger.warning(
@@ -221,16 +235,22 @@ defmodule Arbiter.Polecat.Tribunal do
     {:noreply, %{state | lines: [line | state.lines]}}
   end
 
-  # The reviewer's subprocess exited — its transcript is complete. Parse and
-  # report. (The reviewer polecat also self-completes on its own `arb done`;
-  # either way the exit is our reliable "transcript done" signal.)
+  # The reviewer's subprocess exited — its transcript is complete. Parse it; on a
+  # missing verdict, re-prompt once (capped) before escalating as inconclusive.
+  # (The reviewer polecat also self-completes on its own `arb done`; either way
+  # the exit is our reliable "transcript done" signal.)
   def handle_info({:polecat_exited, _id, _status}, state) do
-    {:stop, :normal, finish(state)}
+    case attempt_finish(state) do
+      {:done, state} -> {:stop, :normal, state}
+      {:reprompt, state} -> {:noreply, state}
+    end
   end
 
-  def handle_info(:timeout, %{reported?: true} = state), do: {:noreply, state}
+  # Timeouts are tagged with the attempt that scheduled them so a stale timer
+  # from a prior pass can't escalate a re-prompt that is still in flight.
+  def handle_info({:timeout, _attempt}, %{reported?: true} = state), do: {:noreply, state}
 
-  def handle_info(:timeout, state) do
+  def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
     Logger.warning("Tribunal: reviewer timed out for bead=#{state.bead_id}")
 
     report(
@@ -241,6 +261,8 @@ defmodule Arbiter.Polecat.Tribunal do
 
     {:stop, :normal, %{state | reported?: true}}
   end
+
+  def handle_info({:timeout, _stale}, state), do: {:noreply, state}
 
   # Author died before we could report — nothing to do.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{author: pid} = state) do
@@ -261,12 +283,68 @@ defmodule Arbiter.Polecat.Tribunal do
 
   # ---- internals ----------------------------------------------------------
 
-  # Parse the captured transcript and report the verdict to the author exactly
-  # once.
-  defp finish(%{reported?: true} = state), do: state
+  # Parse the captured transcript. On a real verdict, report it and stop. On a
+  # missing verdict, re-prompt for one (capped) before escalating as
+  # inconclusive. Returns `{:done, state}` to stop or `{:reprompt, state}` to
+  # keep waiting on a freshly-spawned follow-up pass.
+  defp attempt_finish(%{reported?: true} = state), do: {:done, state}
 
-  defp finish(state) do
-    verdict = parse_verdict(Enum.reverse(state.lines))
+  defp attempt_finish(state) do
+    case parse_verdict(Enum.reverse(state.lines)) do
+      :no_verdict -> maybe_reprompt(state)
+      verdict -> {:done, finish(state, verdict)}
+    end
+  end
+
+  # A reviewer finished without a parseable VERDICT line. If we have a re-prompt
+  # budget left, spawn one more minimal follow-up pass (a fresh reviewer mind —
+  # there is no Claude session resume yet — that re-reads the diff but is told it
+  # MUST emit the sentinel). Otherwise escalate as inconclusive.
+  defp maybe_reprompt(%{retries_left: budget} = state) when budget > 0 do
+    # The prior reviewer's subprocess has exited; stop its polecat so it can't
+    # linger (it may not have self-completed if it never printed `arb done`).
+    stop_reviewer(state)
+
+    retry_id = reprompt_bead_id(state.review_id, state.attempt)
+
+    case launch_reviewer(
+           %{state | retries_left: budget - 1},
+           retry_id,
+           verdict_reprompt_prompt(state)
+         ) do
+      {:ok, state} ->
+        Logger.info(
+          "Tribunal: reviewer for bead=#{state.bead_id} emitted no verdict; re-prompting (attempt #{state.attempt})"
+        )
+
+        {:reprompt, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Tribunal: verdict re-prompt failed to spawn for bead=#{state.bead_id}: #{inspect(reason)}"
+        )
+
+        {:done,
+         finish(
+           state,
+           {:no_verdict, "Reviewer produced no verdict; re-prompt could not be spawned."}
+         )}
+    end
+  end
+
+  defp maybe_reprompt(state) do
+    {:done,
+     finish(
+       state,
+       {:no_verdict,
+        "Reviewer produced no parseable VERDICT line, even after a verdict re-prompt."}
+     )}
+  end
+
+  # Report the given verdict to the author exactly once and mark reported.
+  defp finish(%{reported?: true} = state, _verdict), do: state
+
+  defp finish(state, verdict) do
     report(state, verdict)
     %{state | reported?: true}
   end
@@ -287,21 +365,42 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp normalize_verdict({:no_verdict, _findings} = v), do: v
 
-  # Start the reviewer as a distinct polecat + claude session. The reviewer gets
-  # workspace_id: nil so its completion stays silent — no Admiral notification,
-  # no Refinery pickup for the synthetic `#review` bead — while still recording
-  # its own run row.
-  defp spawn_reviewer(state) do
-    with {:ok, reviewer_pid} <- start_reviewer_polecat(state),
-         :ok <- start_reviewer_session(state, reviewer_pid) do
+  # Subscribe to the reviewer's output topic, spawn it, arm a fresh (attempt-
+  # tagged) timeout, and reset the line buffer for this pass. Used for both the
+  # first review and each verdict re-prompt; returns the updated state on
+  # success. Subscribe BEFORE spawning so we can't miss the reviewer's first
+  # output lines or its exit signal (the subprocess may finish almost
+  # immediately — a fast reviewer or a test fixture). The topic is known from the
+  # review id alone, so subscribing ahead of the port open is safe.
+  defp launch_reviewer(state, review_id, prompt) do
+    Phoenix.PubSub.subscribe(Arbiter.PubSub, "polecat:" <> review_id)
+    attempt = state.attempt + 1
+
+    case spawn_reviewer(state, review_id, prompt) do
+      {:ok, reviewer_pid} ->
+        Process.send_after(self(), {:timeout, attempt}, state.timeout_ms)
+        {:ok, %{state | reviewer_pid: reviewer_pid, attempt: attempt, lines: []}}
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  # Start a reviewer as a distinct polecat + claude session under `review_id`.
+  # The reviewer gets workspace_id: nil so its completion stays silent — no
+  # Admiral notification, no Refinery pickup for the synthetic `#review` bead —
+  # while still recording its own run row.
+  defp spawn_reviewer(state, review_id, prompt) do
+    with {:ok, reviewer_pid} <- start_reviewer_polecat(state, review_id),
+         :ok <- start_reviewer_session(state, reviewer_pid, prompt) do
       _ = Polecat.advance(reviewer_pid, :reviewing)
       {:ok, reviewer_pid}
     end
   end
 
-  defp start_reviewer_polecat(state) do
+  defp start_reviewer_polecat(state, review_id) do
     case Polecat.start(
-           bead_id: state.review_id,
+           bead_id: review_id,
            rig: state.rig,
            workspace_id: nil,
            meta: %{role: :reviewer, reviews: state.bead_id}
@@ -312,11 +411,11 @@ defmodule Arbiter.Polecat.Tribunal do
     end
   end
 
-  defp start_reviewer_session(state, reviewer_pid) do
+  defp start_reviewer_session(state, reviewer_pid, prompt) do
     session_opts =
       [owner: reviewer_pid, worktree_path: state.worktree_path] ++
         case state.command do
-          nil -> [prompt: review_prompt(state)]
+          nil -> [prompt: prompt]
           cmd when is_list(cmd) -> [command: cmd]
         end
 
@@ -325,6 +424,22 @@ defmodule Arbiter.Polecat.Tribunal do
       {:error, reason} -> {:error, {:reviewer_session_failed, reason}}
     end
   end
+
+  # Stop the current reviewer polecat if it's still alive. Best-effort — used
+  # before a re-prompt so a reviewer that finished without printing `arb done`
+  # (and so never self-completed) can't linger.
+  defp stop_reviewer(state) do
+    if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
+      safe(fn -> Polecat.stop(state.reviewer_pid, :normal) end)
+    end
+
+    :ok
+  end
+
+  # The synthetic bead id for a re-prompt reviewer: a fresh, distinct id per
+  # attempt so it registers as its own polecat / run row and never collides with
+  # the original (possibly still-terminating) reviewer.
+  defp reprompt_bead_id(review_id, attempt), do: review_id <> "#v#{attempt + 1}"
 
   # Minimal snapshot for a Tribunal probed as if it were a polecat. The Tribunal
   # is a review gate, not an acolyte; this exists only so an accidental
@@ -397,6 +512,28 @@ defmodule Arbiter.Polecat.Tribunal do
 
         arb done
     """
+  end
+
+  @doc """
+  Build the verdict re-prompt used when a prior pass finished WITHOUT the
+  required sentinel. Since there is no live Claude session resume yet, the
+  follow-up pass is a fresh reviewer mind with no memory of the prior pass — so
+  it re-supplies the full review context, prefixed with an instruction stressing
+  that the verdict line is mandatory this time. Public for inspection in tests.
+  """
+  @spec verdict_reprompt_prompt(map()) :: String.t()
+  def verdict_reprompt_prompt(state) do
+    """
+    A prior review pass of this diff finished WITHOUT emitting the required
+    verdict line, so its conclusion was lost. Review the diff again and this time
+    you MUST finish with EXACTLY one line, one of:
+
+        VERDICT: APPROVE
+        VERDICT: REQUEST_CHANGES
+
+    Do not skip the verdict line — without it your review cannot be honored.
+
+    """ <> review_prompt(state)
   end
 
   defp load_bead(bead_id) do
