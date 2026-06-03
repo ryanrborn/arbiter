@@ -959,8 +959,108 @@ defmodule Arbiter.Polecat do
 
     case do_open_mr(state, branch, title, "", opts) do
       {:ok, _mr_ref, new_state} -> new_state
-      {:error, reason, _state} -> fail_now(state, {:merge_failed, reason})
+      {:error, reason, _state} -> park_merge_failure(state, branch, reason)
     end
+  end
+
+  # A merge failed. The adapter has already restored the canonical tree (the
+  # Direct merger runs `git merge --abort` on conflict — see bd-1rhyla: a
+  # half-merged tree took the live server down), so main stays clean and
+  # compilable. Here we own the lifecycle side: fail the polecat WITHOUT closing
+  # the bead, and — for a genuine conflict — escalate to the Admiral inbox with
+  # the conflicting files so the bead can be rebased / re-resolved.
+  #
+  # failure_reason stays a short term (it shares the Run.failure_reason column);
+  # the full conflict detail lives in the escalation message + bead notes.
+  defp park_merge_failure(%State{} = state, branch, {:merge_conflict, detail}) do
+    record_merge_conflict_note(state, branch, detail)
+    escalate_merge_conflict(state, branch, detail)
+    fail_now(state, :merge_conflict)
+  end
+
+  defp park_merge_failure(%State{} = state, _branch, reason) do
+    fail_now(state, {:merge_failed, reason})
+  end
+
+  # Append the conflict + conflicting files to the bead's notes so `arb show`
+  # and the UI carry the rebase context. Best-effort: a DB hiccup is logged,
+  # never fatal (mirrors record_tribunal_outcome/3).
+  defp record_merge_conflict_note(%State{bead_id: bead_id}, branch, detail) do
+    block = format_merge_conflict_note(branch, detail)
+
+    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+      notes =
+        [bead.notes, block]
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      case Ash.update(bead, %{notes: notes}, action: :update) do
+        {:ok, _} -> :ok
+        {:error, reason} -> log_merge_conflict_warning(bead_id, reason)
+      end
+    end
+
+    :ok
+  rescue
+    e -> log_merge_conflict_warning(bead_id, e)
+  end
+
+  defp format_merge_conflict_note(branch, detail) do
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    "## Merge conflict — aborted, needs rebase (#{stamp})\n\n#{merge_conflict_body(branch, detail)}"
+  end
+
+  # Raise an escalation to the Admiral's mailbox naming the conflicting files.
+  # Requires a workspace (messages are workspace-scoped); mirrors
+  # escalate_tribunal/3.
+  defp escalate_merge_conflict(%State{workspace_id: ws_id, bead_id: bead_id}, branch, detail)
+       when is_binary(ws_id) do
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: bead_id,
+      workspace_id: ws_id,
+      directive_ref: bead_id,
+      subject: "Merge conflict: #{bead_id} aborted, needs rebase",
+      body: merge_conflict_body(branch, detail)
+    })
+
+    :ok
+  rescue
+    e -> log_merge_conflict_warning(bead_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_merge_conflict(_state, _branch, _detail), do: :ok
+
+  defp log_merge_conflict_warning(bead_id, reason) do
+    Logger.warning(
+      "Polecat merge-conflict escalation swallowed for bead=#{bead_id}: #{inspect(reason)}"
+    )
+
+    :error
+  end
+
+  defp merge_conflict_body(branch, detail) do
+    files = Map.get(detail, :files, [])
+
+    file_list =
+      case files do
+        [] -> "  (none reported)"
+        _ -> Enum.map_join(files, "\n", &("  - " <> &1))
+      end
+
+    """
+    Auto-merge of branch #{branch} into the target conflicted and was aborted.
+    The canonical working tree was restored (git merge --abort) — main is \
+    unchanged and compilable; the bead was NOT merged or closed. It is parked \
+    for rebase / re-resolution.
+
+    Conflicting files:
+    #{file_list}
+    """
   end
 
   defp mergeable_branch(meta) do
