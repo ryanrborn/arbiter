@@ -99,6 +99,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
           | {:command, [String.t()] | nil}
           | {:topic, String.t() | nil}
           | {:owner, pid()}
+          | {:env, [{String.t(), String.t() | false}]}
 
   @type opts :: [opt()]
 
@@ -155,7 +156,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
       port_args = %{
         exec: exec,
         argv: argv,
-        cd: worktree_path
+        cd: worktree_path,
+        env: env_pairs(opts)
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -682,17 +684,40 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
   @doc false
   @spec open_port(map()) :: port()
-  def open_port(%{exec: exec, argv: [_ | rest], cd: cd}) do
-    Port.open(
-      {:spawn_executable, exec},
-      [
-        {:args, rest},
-        {:cd, cd},
-        {:line, 65_536},
-        :binary,
-        :exit_status,
-        :stderr_to_stdout
-      ]
-    )
+  def open_port(%{exec: exec, argv: [_ | rest], cd: cd} = port_args) do
+    base_opts = [
+      {:args, rest},
+      {:cd, cd},
+      {:line, 65_536},
+      :binary,
+      :exit_status,
+      :stderr_to_stdout
+    ]
+
+    opts =
+      case Map.get(port_args, :env, []) do
+        [] -> base_opts
+        pairs -> base_opts ++ [{:env, env_charlists(pairs)}]
+      end
+
+    Port.open({:spawn_executable, exec}, opts)
+  end
+
+  # The Agent behaviour returns env as [{String.t(), String.t() | false}]
+  # for ergonomics; Port.open wants charlists. Normalize once at the
+  # boundary so adapters don't have to know about Erlang's I/O list shape.
+  defp env_charlists(pairs) do
+    Enum.map(pairs, fn
+      {name, false} -> {to_charlist(name), false}
+      {name, value} when is_binary(name) and is_binary(value) ->
+        {to_charlist(name), to_charlist(value)}
+    end)
+  end
+
+  defp env_pairs(opts) do
+    case Keyword.get(opts, :env) do
+      list when is_list(list) -> list
+      _ -> []
+    end
   end
 end
