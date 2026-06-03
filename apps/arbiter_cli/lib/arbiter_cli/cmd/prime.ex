@@ -6,12 +6,24 @@ defmodule ArbiterCli.Cmd.Prime do
   Output (in order):
 
     1. **Active workspace** — name, prefix, tracker config.
-    2. **Vernacular** — the workspace's custom labels and aliases (only
+    2. **Standing Orders** — the active domain's operating disciplines as a
+       checklist, sourced from `config.standing_orders`. Surfaced high so the
+       disciplines greet a fresh agent before the work list. Omitted entirely
+       when the domain carries no orders.
+    3. **Vernacular** — the workspace's custom labels and aliases (only
        printed if non-empty; otherwise "(default gas-town)" is shown).
-    3. **Admiral Inbox** — up to 5 most recent unread messages addressed to
+    4. **Admiral Inbox** — up to 5 most recent unread messages addressed to
        the Admiral. Omitted entirely when there are none.
-    4. **Active polecats** — bead_id, status, current_step, runtime.
-    5. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
+    5. **Active polecats** — bead_id, status, current_step, runtime.
+    6. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
+
+  ## Standing Orders are data, not code
+
+  The orders live in per-domain workspace config (`config.standing_orders`),
+  not hardcoded here — arbiter is a shared tool, so one fleet's doctrine must
+  not leak into every install. Each domain carries its own orders; setting or
+  clearing them is a config change, no rebuild required. Each entry is either a
+  short imperative string or a `{"title", "detail"}` object.
 
   ## What's intentionally NOT in v1
 
@@ -44,6 +56,7 @@ defmodule ArbiterCli.Cmd.Prime do
   defp to_json(sections) do
     %{
       workspace: unwrap(sections.workspace),
+      standing_orders: unwrap(sections.standing_orders),
       vernacular: unwrap(sections.vernacular),
       admiral_inbox: unwrap(sections.admiral_inbox),
       polecats: unwrap(sections.polecats),
@@ -62,12 +75,23 @@ defmodule ArbiterCli.Cmd.Prime do
 
     %{
       workspace: workspace,
+      standing_orders: gather_standing_orders(workspace),
       vernacular: vernacular,
       admiral_inbox: gather_admiral_inbox(),
       polecats: gather_polecats(),
       ready: gather_ready(workspace)
     }
   end
+
+  # Standing Orders are per-domain operating disciplines carried in workspace
+  # config (`config.standing_orders`). We already have the resolved workspace,
+  # so there's no extra API round-trip. Absent/empty/unresolved all collapse to
+  # `[]` so the section is cleanly omitted on installs without orders.
+  defp gather_standing_orders({:ok, %{"config" => %{"standing_orders" => orders}}})
+       when is_list(orders),
+       do: {:ok, orders}
+
+  defp gather_standing_orders(_), do: {:ok, []}
 
   # Up to 5 most recent unread messages addressed to the Admiral. The REST
   # index already sorts newest-first, so a take/2 gives "most recent".
@@ -133,6 +157,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
     emit_workspace_section(sections.workspace, workspace)
     IO.puts("")
+    maybe_emit_standing_orders_section(sections.standing_orders)
     emit_vernacular_section(sections.vernacular)
     IO.puts("")
     maybe_emit_admiral_inbox(sections.admiral_inbox)
@@ -140,6 +165,30 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
     emit_ready_section(sections.ready, issue)
   end
+
+  # Omitted entirely when the domain carries no orders — installs without
+  # doctrine see no noise (same contract as the Admiral Inbox section). When
+  # present, the orders greet the agent high in the briefing as a checklist.
+  defp maybe_emit_standing_orders_section({:ok, []}), do: :ok
+
+  defp maybe_emit_standing_orders_section({:ok, orders}) do
+    IO.puts("== Standing Orders ==")
+    Enum.each(orders, fn o -> IO.puts("  " <> standing_order_line(o)) end)
+    IO.puts("")
+  end
+
+  defp maybe_emit_standing_orders_section(_), do: :ok
+
+  # An order is either a short imperative string or a {title, detail} object.
+  defp standing_order_line(%{"title" => title} = order) do
+    case order["detail"] do
+      detail when is_binary(detail) and detail != "" -> "[ ] #{title} — #{detail}"
+      _ -> "[ ] #{title}"
+    end
+  end
+
+  defp standing_order_line(order) when is_binary(order), do: "[ ] #{order}"
+  defp standing_order_line(order), do: "[ ] #{inspect(order)}"
 
   # Omitted entirely when there's no unread Admiral mail (or the lookup
   # failed) — a clean briefing shows nothing rather than "(none)" noise.
