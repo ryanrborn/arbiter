@@ -5,6 +5,7 @@ defmodule ArbiterCli.Main do
 
   Subcommands:
 
+      arb init [path] [--force]
       arb show <id>
       arb create <title> [--description ...] [--priority ...] [--type ...]
                          [--deps id1,id2] [--labels a,b]
@@ -78,6 +79,7 @@ defmodule ArbiterCli.Main do
     end
   end
 
+  defp dispatch_known("init", args), do: ArbiterCli.Cmd.Init.run(args)
   defp dispatch_known("show", args), do: ArbiterCli.Cmd.Show.run(args)
   defp dispatch_known("create", args), do: ArbiterCli.Cmd.Create.run(args)
   defp dispatch_known("close", args), do: ArbiterCli.Cmd.Close.run(args)
