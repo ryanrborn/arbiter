@@ -32,6 +32,11 @@ defmodule Arbiter.Trackers.NoneTest do
       assert {:ok, statuses} = None.list_transitions("ref")
       assert Enum.sort(statuses) == [:closed, :in_progress, :open]
     end
+
+    test "list_open/1 returns {:error, :not_supported}" do
+      assert None.list_open([]) == {:error, :not_supported}
+      assert None.list_open(assignee: :viewer) == {:error, :not_supported}
+    end
   end
 
   test "module declares the Tracker behaviour" do

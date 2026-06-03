@@ -297,6 +297,12 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
+  describe "list_open/1" do
+    test "returns {:error, :not_supported} (search-by-currentUser not yet wired)" do
+      assert Jira.list_open([]) == {:error, :not_supported}
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()

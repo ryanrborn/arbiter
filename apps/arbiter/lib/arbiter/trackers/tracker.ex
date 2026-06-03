@@ -28,6 +28,31 @@ defmodule Arbiter.Trackers.Tracker do
       `:error` if the string is clearly not for this tracker.
     * `list_transitions/1` — return the set of legal next-states from the
       current state, as bead-vocabulary atoms.
+    * `list_open/1` — return open items in the tracker that look "claimable"
+      by the active workspace's user (assignment is the claim signal). Used
+      by `arb list --tracker` to surface upstream backlog alongside local
+      beads. Adapters that don't have a notion of a backlog return
+      `{:error, :not_supported}`.
+
+  ## `list_open` shape
+
+  Each adapter normalizes its native payload into the same summary map so the
+  CLI doesn't need to know which tracker produced the row:
+
+      %{
+        ref: "42",                           # canonical ref, as produced by parse_ref
+        title: "Wire the thing",
+        url: "https://github.com/o/r/issues/42",
+        status: :open | :in_progress | :closed,
+        assignees: ["alice", "bob"],
+        raw: %{...}                          # the original tracker payload, for debugging
+      }
+
+  Options are a keyword list. Currently recognized:
+
+    * `:assignee` — `:viewer` (default; means "the workspace's authenticated
+      user") or a tracker-specific login string. Adapters may ignore this if
+      they have no way to apply it.
   """
 
   @typedoc "Tracker-specific reference (Jira issue key, Linear node id, etc.)."
@@ -36,10 +61,22 @@ defmodule Arbiter.Trackers.Tracker do
   @typedoc "Bead-domain status atoms."
   @type status :: :open | :in_progress | :closed
 
+  @typedoc "Normalized open-item summary used by `list_open/1`."
+  @type summary :: %{
+          required(:ref) => ref,
+          required(:title) => String.t(),
+          required(:url) => String.t() | nil,
+          required(:status) => status,
+          required(:assignees) => [String.t()],
+          required(:raw) => map()
+        }
+
   @callback fetch(ref) :: {:ok, map()} | {:error, term()}
   @callback transition(ref, status) :: :ok | {:error, term()}
   @callback update_fields(ref, map()) :: :ok | {:error, term()}
   @callback link_for(ref) :: String.t()
   @callback parse_ref(String.t()) :: {:ok, ref} | :error
   @callback list_transitions(ref) :: {:ok, [status]} | {:error, term()}
+  @callback list_open(opts :: keyword()) ::
+              {:ok, [summary]} | {:error, :not_supported} | {:error, term()}
 end
