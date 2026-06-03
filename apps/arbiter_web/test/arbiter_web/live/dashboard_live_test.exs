@@ -62,6 +62,9 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # Merge queue (Crucibles) section header, from the (default) merge_queue
       # vernacular ("refinery" → "Refineries").
       assert html =~ "Refineries"
+      # Tribunal (review gate) section + its two subsections.
+      assert html =~ "Tribunal"
+      assert html =~ "In review"
       assert html =~ "Escalations"
     end
 
@@ -332,11 +335,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   describe "merge queue (Crucibles)" do
-    test "empty state + escalations placeholder render", %{conn: conn} do
+    test "empty state renders", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ ~s(id="merge-queue-empty")
       assert html =~ "No pull requests integrating right now"
-      assert html =~ "No escalations"
     end
 
     test "an in-flight merge surfaces with MR link, merger type and Warden activity",
@@ -393,6 +395,98 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "GitLab"
+    end
+  end
+
+  describe "tribunal (review gate)" do
+    alias Arbiter.Messages.Message
+
+    test "empty state renders both subsections", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ ~s(id="tribunal-section")
+      assert html =~ ~s(id="pending-reviews-empty")
+      assert html =~ ~s(id="escalations-empty")
+      assert html =~ "No reviews in flight"
+      assert html =~ "No escalations"
+    end
+
+    test "recent escalations render with verdict badge, bead link and findings",
+         %{conn: conn, ws: ws} do
+      {:ok, _changes} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          from_ref: "bd-rejected",
+          directive_ref: "bd-rejected",
+          workspace_id: ws.id,
+          subject: "Tribunal: changes requested for bd-rejected",
+          body: "VERDICT: REQUEST_CHANGES\nThe migration is missing a down/0."
+        })
+
+      {:ok, _inconclusive} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          from_ref: "bd-murky",
+          directive_ref: "bd-murky",
+          workspace_id: ws.id,
+          subject: "Tribunal: review inconclusive for bd-murky",
+          body: "Reviewer produced no parseable VERDICT line."
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="escalations")
+      # Derived verdict badges from the escalation subjects.
+      assert html =~ "Changes requested"
+      assert html =~ "Inconclusive"
+      # Linked back to the directive under review + the reviewer's findings.
+      assert html =~ "bd-rejected"
+      assert html =~ "The migration is missing a down/0."
+      assert html =~ "/beads/bd-murky"
+    end
+
+    test "a review in flight surfaces under 'in review'", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "under-review", workspace_id: ws.id})
+
+      # Drive an author polecat to :awaiting_tribunal without spawning a live
+      # reviewer (review_spawn: false) — the same seam the Tribunal tests use.
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "test/rig",
+          workspace_id: ws.id,
+          meta: %{
+            branch: "feature/under-review",
+            review_required: true,
+            review_spawn: false
+          }
+        )
+
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="pending-reviews")
+      assert html =~ bead.id
+      assert html =~ "in review"
+    end
+  end
+
+  # Poll until `fun` returns true or a short deadline elapses. Mirrors the
+  # tribunal suite's helper for waiting on an async polecat transition.
+  defp wait_until(fun, attempts \\ 100)
+  defp wait_until(_fun, 0), do: flunk("condition not met before deadline")
+
+  defp wait_until(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(20)
+      wait_until(fun, attempts - 1)
     end
   end
 
