@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.Sling do
   @moduledoc """
-  `arb sling <bead-id> [<rig>] [--with-claude]` — spawn a polecat to work
-  on a bead.
+  `arb sling <bead-id> [<rig>] [--with-claude] [--model <name>]` — spawn a
+  polecat to work on a bead.
 
   POSTs to `/api/polecats/sling`. The server transitions the bead to
   `:in_progress`, starts a polecat GenServer under
@@ -15,22 +15,27 @@ defmodule ArbiterCli.Cmd.Sling do
   bead nobody worked is never what you want.)
 
   Flags:
-    --with-claude  spawn a real Claude subprocess in the worktree, which
-                   works the bead and closes it on completion (`arb done`).
-                   Requires a worktree (rig must be in
-                   `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
-                   **This consumes Anthropic API credits.** Off by default.
-    --json         emit JSON instead of human-readable text
+    --with-claude    spawn a real Claude subprocess in the worktree, which
+                     works the bead and closes it on completion (`arb done`).
+                     Requires a worktree (rig must be in
+                     `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
+                     **This consumes Anthropic API credits.** Off by default.
+    --model <name>   one-shot override of the model the worker session runs
+                     on (`haiku|sonnet|opus`). Takes precedence over the
+                     workspace's `agent.config.model` and any routing rule
+                     for the bead. Only applied when `--with-claude` is set.
+    --json           emit JSON instead of human-readable text
   """
 
   alias ArbiterCli.{Client, Output, Vernacular}
 
-  @switches [json: :boolean, with_claude: :boolean]
+  @switches [json: :boolean, with_claude: :boolean, model: :string]
 
   def run(argv) do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     with_claude = opts[:with_claude] || false
+    model = opts[:model]
 
     {bead_id, rig} =
       case rest do
@@ -44,6 +49,7 @@ defmodule ArbiterCli.Cmd.Sling do
       %{"bead_id" => bead_id}
       |> maybe_put("rig", rig)
       |> maybe_put("with_claude", if(with_claude, do: true, else: nil))
+      |> maybe_put("model", model)
 
     case Client.post("/api/polecats/sling", body) do
       {:ok, payload} -> emit(payload, mode)

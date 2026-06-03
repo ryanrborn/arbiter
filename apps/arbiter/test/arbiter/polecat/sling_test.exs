@@ -89,6 +89,44 @@ defmodule Arbiter.Polecat.SlingTest do
       %{tmp: tmp}
     end
 
+    # Build a `claude`-named shim on PATH that writes its argv (one per line) to
+    # `argv_file` and exits 0. Used to verify the spawn argv assembled by the
+    # adapter path (Agents.Claude.default_argv) — `--model <name>` is the bit
+    # Phase A specifically wires up.
+    defp stub_claude_on_path(tmp, argv_file) do
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      :ok
+    end
+
+    defp seed_repo!(tmp, sub) do
+      repo = Path.join(tmp, sub)
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+      repo
+    end
+
     test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
 
@@ -207,6 +245,138 @@ defmodule Arbiter.Polecat.SlingTest do
 
       {:ok, reloaded} = Ash.get(Issue, bead.id)
       assert reloaded.status == :closed
+    end
+
+    test "passes the workspace `agent.config.model` as `--model` to claude",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "model-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "mwt"))
+      Application.put_env(:arbiter, :rig_paths, %{"m/rig" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :rig_paths)
+      end)
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}}
+          }
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "model bead", workspace_id: ws.id})
+
+      {:ok, _result} =
+        Sling.sling(bead.id,
+          rig: "m/rig",
+          start_driver: false,
+          start_claude: true
+        )
+
+      wait_until(fn -> File.exists?(argv_file) end)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "sonnet" in args
+    end
+
+    test "per-sling :model opt overrides the workspace's routed model",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "override-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
+      Application.put_env(:arbiter, :rig_paths, %{"o/rig" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :rig_paths)
+      end)
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}}
+          }
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "override", workspace_id: ws.id})
+
+      {:ok, _result} =
+        Sling.sling(bead.id,
+          rig: "o/rig",
+          start_driver: false,
+          start_claude: true,
+          model: "opus"
+        )
+
+      wait_until(fn -> File.exists?(argv_file) end)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "opus" in args
+      refute "sonnet" in args
+    end
+
+    test "ByPriority routing picks --model from `routing.rules[Pn]`",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "prio-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "pwt"))
+      Application.put_env(:arbiter, :rig_paths, %{"p/rig" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :rig_paths)
+      end)
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+            "routing" => %{
+              "policy" => "by_priority",
+              "rules" => %{"P4" => %{"model" => "haiku"}}
+            }
+          }
+        })
+
+      # priority 4 → routing rule fires → haiku.
+      {:ok, bead} =
+        Ash.create(Issue, %{title: "trivial", workspace_id: ws.id, priority: 4})
+
+      {:ok, _result} =
+        Sling.sling(bead.id, rig: "p/rig", start_driver: false, start_claude: true)
+
+      wait_until(fn -> File.exists?(argv_file) end)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "haiku" in args
+    end
+  end
+
+  # Spin until `fun.()` returns truthy or the deadline expires.
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait(fun, deadline)
     end
   end
 

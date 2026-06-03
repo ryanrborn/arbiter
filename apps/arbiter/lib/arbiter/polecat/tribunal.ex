@@ -95,7 +95,10 @@ defmodule Arbiter.Polecat.Tribunal do
   use GenServer
   require Logger
 
+  alias Arbiter.Agents
+  alias Arbiter.Agents.Routing
   alias Arbiter.Beads.Issue
+  alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.ClaudeSession
 
@@ -661,7 +664,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # its own run row.
   defp spawn_acolyte(state, id, role, prompt, command) do
     with {:ok, pid} <- start_acolyte_polecat(state, id, role),
-         :ok <- start_acolyte_session(state, pid, prompt, command) do
+         :ok <- start_acolyte_session(state, pid, role, prompt, command) do
       _ = Polecat.advance(pid, step_for(role))
       {:ok, pid}
     end
@@ -686,18 +689,107 @@ defmodule Arbiter.Polecat.Tribunal do
   defp step_for(:reviewer), do: :reviewing
   defp step_for(:implementer), do: :revising
 
-  defp start_acolyte_session(state, pid, prompt, command) do
-    session_opts =
-      [owner: pid, worktree_path: state.worktree_path] ++
-        case command do
-          nil -> [prompt: prompt]
-          cmd when is_list(cmd) -> [command: cmd]
+  defp start_acolyte_session(state, pid, role, prompt, command) do
+    case build_session_opts(state, pid, role, prompt, command) do
+      {:ok, session_opts} ->
+        case ClaudeSession.start(session_opts) do
+          {:ok, _port} -> :ok
+          {:error, reason} -> {:error, {:acolyte_session_failed, reason}}
         end
 
-    case ClaudeSession.start(session_opts) do
-      {:ok, _port} -> :ok
-      {:error, reason} -> {:error, {:acolyte_session_failed, reason}}
+      {:error, reason} ->
+        {:error, {:acolyte_session_failed, reason}}
     end
+  end
+
+  # Assemble `ClaudeSession.start/1` opts for an acolyte. The fixture-friendly
+  # `command:` escape hatch (test path) bypasses the adapter — when set we spawn
+  # the provided argv verbatim. Otherwise we route through `Arbiter.Agents` so
+  # the reviewer role honors `workspace.config["review_agent"]["config"]`
+  # (model + api keys), and the implementer role honors the worker `agent`
+  # block. A workspace-less Tribunal (ad-hoc run) falls back to today's
+  # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
+  defp build_session_opts(state, pid, _role, _prompt, command) when is_list(command) do
+    {:ok, [owner: pid, worktree_path: state.worktree_path, command: command]}
+  end
+
+  defp build_session_opts(state, pid, role, prompt, nil) do
+    base = [owner: pid, worktree_path: state.worktree_path]
+
+    case load_workspace(state.workspace_id) do
+      nil ->
+        {:ok, base ++ [prompt: prompt]}
+
+      %Workspace{} = ws ->
+        {adapter, role_atom} = adapter_for(ws, role)
+        :ok = Agents.prepare(ws, role_atom)
+
+        agent_opts = [model: model_for_role(ws, role_atom, state.bead_id)]
+
+        case adapter.default_argv(prompt, agent_opts) do
+          {:ok, argv} ->
+            env = safe_spawn_env(adapter, agent_opts)
+            {:ok, base ++ [command: argv, env: env]}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  defp adapter_for(%Workspace{} = ws, :reviewer),
+    do: {Agents.reviewer_for_workspace(ws), :review_agent}
+
+  defp adapter_for(%Workspace{} = ws, :implementer), do: {Agents.for_workspace(ws), :agent}
+
+  # The reviewer slot has its own config under `review_agent.config.model`
+  # (falls back to the worker `agent` block so a workspace that names only
+  # `agent` still spawns a reviewer).
+  defp model_for_role(%Workspace{config: config}, :review_agent, _bead_id) do
+    get_in(config || %{}, ["review_agent", "config", "model"]) ||
+      get_in(config || %{}, ["agent", "config", "model"])
+  end
+
+  # The implementer slot is a worker session on the same bead — route it
+  # through the configured policy (`:static` / `:by_priority` / ...) so a
+  # revise round picks the same model the initial dispatch would have, not
+  # a flat workspace default. Best-effort: a missing bead falls back to the
+  # workspace's `agent.config.model`.
+  defp model_for_role(%Workspace{} = ws, :agent, bead_id) do
+    case load_issue(bead_id) do
+      nil -> get_in(ws.config || %{}, ["agent", "config", "model"])
+      %Issue{} = bead -> bead |> Routing.choose(ws, %{}) |> get_in([:config, "model"])
+    end
+  end
+
+  defp load_issue(bead_id) when is_binary(bead_id) do
+    case Ash.get(Issue, bead_id) do
+      {:ok, %Issue{} = bead} -> bead
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp load_issue(_), do: nil
+
+  defp safe_spawn_env(adapter, agent_opts) do
+    if function_exported?(adapter, :spawn_env, 1) do
+      adapter.spawn_env(agent_opts)
+    else
+      []
+    end
+  end
+
+  defp load_workspace(nil), do: nil
+
+  defp load_workspace(ws_id) when is_binary(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{} = ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # Stop the current acolyte polecat if it's still alive. Best-effort — used

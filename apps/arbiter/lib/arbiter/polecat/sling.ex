@@ -68,7 +68,8 @@ defmodule Arbiter.Polecat.Sling do
           start_driver: boolean(),
           start_claude: boolean(),
           claude_command: [String.t()] | nil,
-          cleanup_worktree: boolean()
+          cleanup_worktree: boolean(),
+          model: String.t() | nil
         ]
 
   @type sling_result :: %{
@@ -322,7 +323,8 @@ defmodule Arbiter.Polecat.Sling do
         {:error, :missing_worktree}
 
       true ->
-        with {:ok, session_opts} <- build_agent_session_opts(bead, polecat_pid, worktree_path, opts),
+        with {:ok, session_opts} <-
+               build_agent_session_opts(bead, polecat_pid, worktree_path, opts),
              {:ok, port} <- ClaudeSession.start(session_opts) do
           # Move the polecat out of :idle so UI/CLI report a meaningful
           # status while Claude works. In claude_driven mode the Driver
@@ -356,7 +358,11 @@ defmodule Arbiter.Polecat.Sling do
         workspace = load_workspace(bead)
         :ok = Agents.prepare(workspace, :agent)
 
-        choice = Routing.choose(bead, workspace, %{})
+        choice =
+          bead
+          |> Routing.choose(workspace, %{})
+          |> apply_model_override(Keyword.get(opts, :model))
+
         adapter = Agents.for_type(choice.type)
 
         agent_opts = agent_opts_from_choice(choice)
@@ -383,6 +389,17 @@ defmodule Arbiter.Polecat.Sling do
       config: config
     ]
   end
+
+  # A `:model` opt on `Sling.sling/2` is a one-shot, per-dispatch override —
+  # the bead might be P2 (routing → sonnet) but the caller wants to try it
+  # on Opus once. We splat the override on top of the routed config so it
+  # wins over both the workspace default and any routing rule. A `nil` /
+  # empty override is a no-op (the routed choice stands).
+  defp apply_model_override(choice, override) when is_binary(override) and override != "" do
+    %{choice | config: Map.put(choice.config || %{}, "model", override)}
+  end
+
+  defp apply_model_override(choice, _), do: choice
 
   defp safe_spawn_env(adapter, agent_opts) do
     if function_exported?(adapter, :spawn_env, 1) do

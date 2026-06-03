@@ -458,6 +458,74 @@ defmodule Arbiter.Polecat.TribunalTest do
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
     end
+
+    test "review_agent.config.model is passed as `--model` when no command override is given",
+         %{repo: repo, tmp: tmp} do
+      # Build a `claude` shim on PATH that writes its argv to a file. Without
+      # `review_command` in meta the Tribunal walks the adapter path
+      # (Arbiter.Agents.Claude.default_argv) — we want to see `--model haiku`
+      # on the reviewer's spawn because the workspace sets review_agent to
+      # Haiku while the worker stays on Sonnet.
+      argv_file = Path.join(tmp, "reviewer-argv.txt")
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      # Exit without printing a verdict — we don't care about the outcome here.
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-model-ws-#{System.unique_integer([:positive])}",
+          prefix: "tm",
+          config: %{
+            "review" => %{"required" => true, "rounds" => 1},
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+            "review_agent" => %{"type" => "claude", "config" => %{"model" => "haiku"}}
+          }
+        })
+
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        # Re-prompt budget 0 + short timeout keeps the test snappy when the
+        # stub exits without a verdict.
+        review_verdict_retries: 0,
+        review_timeout_ms: 3_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # The reviewer subprocess fires and exits; argv lands on disk. Outcome
+      # (escalation as :no_verdict) is incidental — we assert on the spawn.
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "haiku" in args
+    end
   end
 
   # ---- verdict re-prompt (bd-8v8ays) ---------------------------------------

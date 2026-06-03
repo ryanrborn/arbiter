@@ -157,7 +157,9 @@ defmodule ArbiterWeb.Api.PolecatController do
   #     (`start_driver: false`) for a hand to attach, instead of racing the
   #     no-op workflow to a bogus `:closed`.
   defp sling_opts(params) do
-    base = [rig: params["rig"]]
+    base =
+      [rig: params["rig"]]
+      |> add_model_override(params["model"])
 
     case truthy(params["with_claude"]) do
       true -> base ++ [start_claude: true]
@@ -165,6 +167,15 @@ defmodule ArbiterWeb.Api.PolecatController do
     end
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
+
+  # `--model` from the CLI is forwarded into `Sling.sling/2` so the worker
+  # session runs on the named model regardless of workspace/routing config.
+  # Only honored when start_claude is true (no agent ⇒ no model to pick).
+  defp add_model_override(opts, model) when is_binary(model) and model != "" do
+    Keyword.put(opts, :model, model)
+  end
+
+  defp add_model_override(opts, _), do: opts
 
   defp truthy(nil), do: nil
   defp truthy(true), do: true
