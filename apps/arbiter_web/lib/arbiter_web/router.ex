@@ -91,6 +91,10 @@ defmodule ArbiterWeb.Router do
     post("/messages/:id/read", MessageController, :read)
     delete("/messages", MessageController, :clear)
 
+    # Usage ledger (per-session tokens / cost / duration; rollups)
+    get("/usage", UsageController, :summarize)
+    get("/usage/events", UsageController, :events)
+
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)
     get("/polecats/history", RunController, :index)
