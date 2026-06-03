@@ -119,6 +119,55 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       refute out =~ "Admiral Inbox"
     end
 
+    test "renders the Standing Orders section from config.standing_orders" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{
+              "standing_orders" => [
+                "Watch the Admiral inbox — stand a ~60s background poll.",
+                %{
+                  "title" => "Never boot a second Arbiter instance",
+                  "detail" => "it sweeps live runs"
+                },
+                %{"title" => "No merge to main without the Tribunal review gate"}
+              ]
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Standing Orders =="
+      assert out =~ "[ ] Watch the Admiral inbox — stand a ~60s background poll."
+      assert out =~ "[ ] Never boot a second Arbiter instance — it sweeps live runs"
+      assert out =~ "[ ] No merge to main without the Tribunal review gate"
+
+      # Surfaced high: before the work list (polecats / ready beads).
+      orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
+      ready_at = :binary.match(out, "== Ready beads ==") |> elem(0)
+      assert orders_at < ready_at
+    end
+
+    test "omits the Standing Orders section entirely when config has none" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      refute out =~ "Standing Orders"
+    end
+
     test "empty vernacular reports 'default gas-town'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
@@ -148,6 +197,28 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert Map.has_key?(decoded, "polecats")
       assert Map.has_key?(decoded, "ready")
       assert Map.has_key?(decoded, "admiral_inbox")
+      assert Map.has_key?(decoded, "standing_orders")
+    end
+
+    test "standing_orders carries the config list through --json" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{"standing_orders" => ["Watch the Admiral inbox"]}
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      assert decoded["standing_orders"] == ["Watch the Admiral inbox"]
     end
   end
 end
