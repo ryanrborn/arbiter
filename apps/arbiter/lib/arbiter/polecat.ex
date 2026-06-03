@@ -948,6 +948,7 @@ defmodule Arbiter.Polecat do
         ]
         |> maybe_opt(:command, Map.get(meta, :review_command))
         |> maybe_opt(:timeout_ms, Map.get(meta, :review_timeout_ms))
+        |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
 
       case Arbiter.Polecat.Tribunal.start(opts) do
         {:ok, pid} ->
