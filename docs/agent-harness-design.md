@@ -353,7 +353,7 @@ delta without running the experiment**.
 
 Each phase is independently shippable and reversible.
 
-### Phase A — model-tiering, no abstraction (1–2 days)
+### Phase A — model-tiering, no abstraction (1–2 days) — **shipped (bd-84ujc2)**
 
 - Add `:model` to the default Claude argv in `ClaudeSession`; read from
   `workspace.config["agent"]["model"]` (introduce the `"agent"` sub-object now
@@ -364,6 +364,16 @@ Each phase is independently shippable and reversible.
   CLI default" (no behavioral change for existing workspaces).
 - `Usage.Event.model` already records the actual model in use, so the A/B
   measurement falls out for free.
+
+In the end Phase A landed *on top of* the Phase B seam (which shipped first in
+bd-g4yekz / #92) rather than ahead of it — the adapter pipeline was already
+plumbed in `Sling` for the worker session, so closing Phase A reduced to
+routing the **Tribunal** reviewer through the same `Arbiter.Agents.reviewer_for_workspace`
++ `Agents.prepare(workspace, :review_agent)` path, with `Tribunal.build_reviewer_session_opts/3`
+producing argv from `review_agent.config.model`. Worker model selection is
+governed by the routing policy (`Arbiter.Agents.Routing.choose/3`, default
+`:static`, `:by_priority` available); the Tribunal model is a flat per-workspace
+knob (one reviewer per gate, not per priority).
 
 ### Phase B — `Agent` behaviour + Claude adapter (2–3 days)
 

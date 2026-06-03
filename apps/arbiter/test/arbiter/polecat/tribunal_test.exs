@@ -533,6 +533,156 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
   end
 
+  # ---- reviewer model-tiering (Phase A of docs/agent-harness-design.md) ----
+
+  describe "build_reviewer_session_opts/3 — model selection" do
+    # The Tribunal's reviewer is spawned through the `Arbiter.Agents` dispatcher
+    # against the workspace's `:review_agent` config — independent of the
+    # worker's `:agent` config. So a workspace can route work to Sonnet and
+    # reviews to Haiku (or to Opus), or omit `review_agent` and inherit
+    # whatever the CLI default model is.
+    #
+    # These tests stub a fake `claude` binary on $PATH so the adapter's argv
+    # resolution succeeds without invoking real Claude — same trick as
+    # `Arbiter.Agents.ClaudeTest`.
+
+    setup do
+      stub_dir =
+        Path.join(System.tmp_dir!(), "tribunal-claude-stub-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+      File.write!(stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(stub, 0o755)
+
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+
+      on_exit(fn ->
+        System.put_env("PATH", old_path)
+        File.rm_rf!(stub_dir)
+        Arbiter.Agents.Claude.Config.clear()
+      end)
+
+      {:ok, stub: stub}
+    end
+
+    defp build_state(workspace_id) do
+      %{workspace_id: workspace_id, command: nil, worktree_path: nil}
+    end
+
+    test "uses review_agent.config.model as --model when set" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rev-model-#{System.unique_integer([:positive])}",
+          prefix: "rm",
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+            "review_agent" => %{"type" => "claude", "config" => %{"model" => "haiku"}}
+          }
+        })
+
+      assert {:ok, opts} =
+               Arbiter.Polecat.Tribunal.build_reviewer_session_opts(
+                 build_state(ws.id),
+                 self(),
+                 "review prompt"
+               )
+
+      argv = Keyword.fetch!(opts, :command)
+      assert "--model" in argv
+      assert "haiku" in argv
+      # Sanity: the worker's "sonnet" must NOT be the reviewer's model.
+      refute "sonnet" in argv
+    end
+
+    test "omits --model when review_agent has no model configured" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rev-no-model-#{System.unique_integer([:positive])}",
+          prefix: "rnm",
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}}
+          }
+        })
+
+      assert {:ok, opts} =
+               Arbiter.Polecat.Tribunal.build_reviewer_session_opts(
+                 build_state(ws.id),
+                 self(),
+                 "review prompt"
+               )
+
+      argv = Keyword.fetch!(opts, :command)
+      refute "--model" in argv
+      # And the worker's model must NOT leak into the reviewer argv.
+      refute "sonnet" in argv
+    end
+
+    test "reviewer model is independent of the worker model" do
+      # Worker on Opus (heavy work), reviewer on Haiku (cheap diff review) —
+      # the asymmetric case Phase A explicitly enables.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rev-async-#{System.unique_integer([:positive])}",
+          prefix: "ra",
+          config: %{
+            "agent" => %{"type" => "claude", "config" => %{"model" => "opus"}},
+            "review_agent" => %{"type" => "claude", "config" => %{"model" => "haiku"}}
+          }
+        })
+
+      assert {:ok, opts} =
+               Arbiter.Polecat.Tribunal.build_reviewer_session_opts(
+                 build_state(ws.id),
+                 self(),
+                 "review prompt"
+               )
+
+      argv = Keyword.fetch!(opts, :command)
+      assert "haiku" in argv
+      refute "opus" in argv
+    end
+
+    test ":command override bypasses the adapter (test escape hatch)" do
+      # Even with a configured review_agent model, passing a raw :command
+      # uses it verbatim — matches Sling's :claude_command escape hatch and
+      # keeps the existing test fixtures working.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rev-cmd-#{System.unique_integer([:positive])}",
+          prefix: "rc",
+          config: %{
+            "review_agent" => %{"type" => "claude", "config" => %{"model" => "haiku"}}
+          }
+        })
+
+      state = %{build_state(ws.id) | command: ["echo", "VERDICT: APPROVE"]}
+
+      assert {:ok, opts} =
+               Arbiter.Polecat.Tribunal.build_reviewer_session_opts(
+                 state,
+                 self(),
+                 "ignored prompt"
+               )
+
+      assert Keyword.fetch!(opts, :command) == ["echo", "VERDICT: APPROVE"]
+      refute Keyword.has_key?(opts, :env)
+    end
+
+    test "nil workspace_id falls back to CLI default (no --model)" do
+      assert {:ok, opts} =
+               Arbiter.Polecat.Tribunal.build_reviewer_session_opts(
+                 build_state(nil),
+                 self(),
+                 "review prompt"
+               )
+
+      argv = Keyword.fetch!(opts, :command)
+      refute "--model" in argv
+    end
+  end
+
   describe "review-gate hardening (bd-2y0gd5)" do
     test "snapshotting the supervisor's children never crashes the Tribunal",
          %{repo: repo, ws: ws} do

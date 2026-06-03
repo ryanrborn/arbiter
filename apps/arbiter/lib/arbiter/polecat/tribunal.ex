@@ -60,6 +60,29 @@ defmodule Arbiter.Polecat.Tribunal do
   mind, not a forgotten sentinel) and still escalates directly without a
   re-prompt.
 
+  ## Reviewer model selection (Phase A of `docs/agent-harness-design.md`)
+
+  The reviewer session is spawned through the `Arbiter.Agents` dispatcher
+  using the workspace's `config["review_agent"]` block — independent of the
+  worker's `config["agent"]`. So a workspace can route P3 work to Sonnet and
+  keep Tribunal reviews on Opus (or run reviews on Haiku for a cost
+  experiment) without touching the worker model. Missing `review_agent` →
+  CLI default model, identical to today's behavior.
+
+  The dispatch path:
+
+      Tribunal init →
+        Agents.prepare(workspace, :review_agent) →
+        Agents.reviewer_for_workspace(workspace).default_argv(prompt, []) →
+        ClaudeSession.start(command: argv, env: ...)
+
+  `Claude.Config.put_active(workspace, :review_agent)` seeds the per-process
+  Claude config slot the adapter reads in `default_argv/2` (for `--model`)
+  and `spawn_env/1` (for `ANTHROPIC_API_KEY` rotation). The model the
+  reviewer actually used is captured in the `Usage.Event` row from the
+  stream-json `init` event, so cost-per-model attribution works for the
+  reviewer pass without any extra wiring.
+
   ## Testing
 
   `start/1` accepts a `:command` argv (forwarded to `ClaudeSession`) so tests can
@@ -70,7 +93,9 @@ defmodule Arbiter.Polecat.Tribunal do
   use GenServer
   require Logger
 
+  alias Arbiter.Agents
   alias Arbiter.Beads.Issue
+  alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.ClaudeSession
 
@@ -412,17 +437,72 @@ defmodule Arbiter.Polecat.Tribunal do
   end
 
   defp start_reviewer_session(state, reviewer_pid, prompt) do
-    session_opts =
-      [owner: reviewer_pid, worktree_path: state.worktree_path] ++
-        case state.command do
-          nil -> [prompt: prompt]
-          cmd when is_list(cmd) -> [command: cmd]
-        end
+    {:ok, session_opts} = build_reviewer_session_opts(state, reviewer_pid, prompt)
 
     case ClaudeSession.start(session_opts) do
       {:ok, _port} -> :ok
       {:error, reason} -> {:error, {:reviewer_session_failed, reason}}
     end
+  end
+
+  # Build the ClaudeSession opts for a reviewer spawn, routing through the
+  # `Arbiter.Agents` dispatcher with the workspace's `:review_agent` config
+  # so the Tribunal can run on a different model than the worker (Phase A of
+  # docs/agent-harness-design.md — Tribunal review sessions can run on a
+  # cheaper or stronger model than the work session).
+  #
+  # When `state.command` is a list (test override), we bypass the adapter and
+  # use the argv verbatim — same shape as Sling's `:claude_command` escape
+  # hatch. When the adapter is unhappy (e.g. claude CLI missing on $PATH) we
+  # fall back to the legacy `:prompt` path so an upstream CLI hiccup can't
+  # block the gate.
+  #
+  # Public (but `@doc false`) so the model-routing decision can be unit-
+  # tested without spinning up a real Tribunal GenServer + reviewer polecat.
+  @doc false
+  def build_reviewer_session_opts(state, reviewer_pid, prompt) do
+    base = [owner: reviewer_pid, worktree_path: state.worktree_path]
+
+    case state.command do
+      cmd when is_list(cmd) ->
+        {:ok, base ++ [command: cmd]}
+
+      _ ->
+        workspace = load_workspace(state.workspace_id)
+        :ok = Agents.prepare(workspace, :review_agent)
+        adapter = Agents.reviewer_for_workspace(workspace)
+
+        case adapter.default_argv(prompt, []) do
+          {:ok, argv} ->
+            env = safe_spawn_env(adapter, [])
+            {:ok, base ++ [command: argv, env: env]}
+
+          {:error, _reason} ->
+            # CLI not on $PATH (or adapter rejected the prompt). Fall back to
+            # the legacy `:prompt` path so ClaudeSession's own argv resolution
+            # produces a friendlier error than the gate failing here.
+            {:ok, base ++ [prompt: prompt]}
+        end
+    end
+  end
+
+  defp safe_spawn_env(adapter, opts) do
+    if function_exported?(adapter, :spawn_env, 1) do
+      adapter.spawn_env(opts)
+    else
+      []
+    end
+  end
+
+  defp load_workspace(nil), do: nil
+
+  defp load_workspace(ws_id) when is_binary(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # Stop the current reviewer polecat if it's still alive. Best-effort — used
