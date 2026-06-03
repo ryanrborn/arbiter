@@ -59,6 +59,33 @@ defmodule ArbiterCli.Cmd.SlingTest do
       assert decoded["bead"]["id"] == "gte-017"
     end
 
+    # Stubs POST /api/polecats/sling, captures the request body, and forwards
+    # any other request (e.g. Vernacular.fetch's GET /api/settings) as 500/JSON
+    # so the CLI's vernacular path silently falls back to @defaults.
+    defp stub_sling_capture do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/api/polecats/sling"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(parent, {:body, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{
+              "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+              "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
+              "machine" => %{"id" => "m", "pid" => "y"}
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{error: "unmatched"})
+        end
+      end)
+    end
+
     test "404 propagates as die" do
       stub_post(
         "/api/polecats/sling",
@@ -69,6 +96,31 @@ defmodule ArbiterCli.Cmd.SlingTest do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Sling.run(["nope-1"]) end)
       assert code != 0
       assert err =~ "not found" || err =~ "404"
+    end
+
+    test "--model forwards as `model` in the POST body" do
+      stub_sling_capture()
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Sling.run(["gte-017", "--with-claude", "--model", "haiku"])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["bead_id"] == "gte-017"
+      assert body["with_claude"] == true
+      assert body["model"] == "haiku"
+    end
+
+    test "without --model the request body omits the model key" do
+      stub_sling_capture()
+
+      {_out, _err, code} = capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      refute Map.has_key?(body, "model")
     end
   end
 end

@@ -353,17 +353,23 @@ delta without running the experiment**.
 
 Each phase is independently shippable and reversible.
 
-### Phase A — model-tiering, no abstraction (1–2 days)
+### Phase A — model-tiering, no abstraction (1–2 days) — **shipped (#84)**
 
 - Add `:model` to the default Claude argv in `ClaudeSession`; read from
   `workspace.config["agent"]["model"]` (introduce the `"agent"` sub-object now
   even though there's no adapter machinery yet — same shape stays valid in
-  Phase B).
-- `arb sling --model <name>` as the one-shot override.
+  Phase B). **Landed alongside Phase B's `Agents.Claude.default_argv/2`.**
+- `arb sling --model <name>` as the one-shot override. **Threaded through
+  CLI → `/api/polecats/sling` → `Sling.sling/2` → `apply_model_override/2`,
+  wins over both the workspace default and any routing rule.**
 - Tribunal reads `review_agent.model` similarly. Default unset means "use the
-  CLI default" (no behavioral change for existing workspaces).
+  CLI default" (no behavioral change for existing workspaces). **Implemented
+  via `Tribunal.build_session_opts/5`: reviewer spawns route through
+  `Agents.reviewer_for_workspace/1` + `Agents.prepare(ws, :review_agent)`;
+  implementer (revise) spawns route through `Routing.choose/3` so a revise
+  round honors the same policy the initial dispatch did.**
 - `Usage.Event.model` already records the actual model in use, so the A/B
-  measurement falls out for free.
+  measurement falls out for free — query via `arb usage --by model`.
 
 ### Phase B — `Agent` behaviour + Claude adapter (2–3 days)
 
