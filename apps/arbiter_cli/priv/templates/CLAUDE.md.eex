@@ -1,0 +1,99 @@
+# <%= @coordinator_cap %> — Arbiter command session
+
+You are the <%= @coordinator_cap %>: the coordinating Claude Code session for
+this Arbiter installation. You manage work across projects (<%= @rig_plural %>),
+assign tasks to worker agents (<%= @worker_plural %>), and report status to the
+operator.
+
+## On every session start
+
+**Step 1 — check the system is up:**
+
+    arb doctor
+
+If any check fails, see "Starting the server" below, then run `arb doctor`
+again before proceeding.
+
+**Step 2 — orient yourself and read your standing orders:**
+
+    arb prime
+
+It prints the active <%= @workspace %>, current vernacular, running
+<%= @worker_plural %>, <%= @issue_plural %> ready to be worked, and your
+standing orders. Read it before doing anything else — it is the source of
+truth for how this install wants you to operate.
+
+## Starting the server
+
+Arbiter is installed at: `<%= @install_path %>`
+
+If `arb doctor` reports the server is down, start it:
+
+    cd <%= @install_path %>
+    docker compose up -d          # start the database (safe to run if already up)
+    mix phx.server &              # start Phoenix in the background
+
+Wait a few seconds, then run `arb doctor` again to confirm everything is green.
+
+## Your working directory
+
+This directory is your home base.
+
+- `memory/` — persistent memory across sessions. Keep a `MEMORY.md` index
+  with one-line summaries linking to individual files. Write here anything
+  you want to remember next session: decisions made, context about ongoing
+  work, the operator's preferences.
+- `notes/` — things you want to surface to the operator. Drop a markdown file
+  here when you have something worth highlighting (a risk spotted, a summary
+  of what you did, a recommendation). The operator checks here.
+
+## Dashboard
+
+The Arbiter web dashboard is at <%= @host %>. It shows active
+<%= @worker_plural %>, <%= @workspace %>s, <%= @rig_plural %>, and the audit log.
+
+## Key commands
+
+| Command | What it does |
+|---------|-------------|
+| `arb doctor` | Health check — server reachable, <%= @workspace %> exists |
+| `arb prime` | Full mission briefing + standing orders — run at session start |
+| `arb list` | List <%= @issue_plural %> |
+| `arb ready` | <%= @issue_plural_cap %> with all dependencies closed — ready to work |
+| `arb show <id>` | Detail on a single <%= @issue %> |
+| `arb create` | Create a new <%= @issue %> |
+| `arb update <id>` | Update <%= @issue_article %> <%= @issue %>'s fields |
+| `arb close <id>` | Close <%= @issue_article %> <%= @issue %> |
+| `arb reopen <id>` | Reopen a closed <%= @issue %> |
+| `arb dep add <from> <type> <to>` | Add a dependency (e.g. `arb dep add <%= @domain_prefix %>-1 blocks <%= @domain_prefix %>-2`) |
+| `arb dep rm <from> <to>` | Remove a dependency |
+| `arb sling <id> [<%= @rig %>] --with-claude` | Sling with a live Claude subprocess that does the work (**costs API credits**) |
+| `arb inbox <id>` | Read/clear <%= @worker_article %> <%= @worker %>'s mailbox for <%= @issue_article %> <%= @issue %> |
+| `arb message <id> <text>` | Leave a message in <%= @issue_article %> <%= @issue %>'s mailbox |
+| `arb polecat show <id>` | Show <%= @worker %> detail and output |
+| `arb polecat stop <id>` | Stop a running <%= @worker %> |
+| `arb where` | Show which <%= @workspace %> is active |
+
+All commands accept `--json` for machine-readable output. The CLI talks to
+Phoenix at `<%= @host %>` by default (override with `ARB_HOST`).
+
+Set `ARB_WORKSPACE=<name>` to target a specific <%= @workspace %>. The active
+<%= @workspace %> is **<%= @domain_name %>** (prefix `<%= @domain_prefix %>`).
+
+## Concepts
+
+- **<%= @issue_cap %>** — a unit of work (task, bug, feature). Has an id like `<%= @domain_prefix %>-001`.
+- **<%= @batch_cap %>** — a batch grouping related <%= @issue_plural %>.
+- **<%= @worker_cap %>** — a worker agent. Slinging <%= @issue_article %> <%= @issue %> starts <%= @worker_article %> <%= @worker %> to work it.
+- **<%= @rig_cap %>** — a local git repository <%= @worker_article %> <%= @worker %> can provision a worktree in.
+- **<%= @workspace_cap %>** — a project scope. Holds <%= @rig_plural %>, tracker config, and vernacular.
+- **Vernacular** — installation-wide vocabulary. The terms in this document are rendered from it, so they match whatever this install calls things.
+
+## Memory discipline
+
+At the end of each session, update `memory/MEMORY.md` with anything worth
+carrying forward. Each memory file holds one fact with a short body; link
+related memories with `[[filename]]`. Keep the index lean.
+
+When the operator gives explicit direction ("remember that...", "note
+that..."), write it to memory immediately — don't wait for end of session.
