@@ -114,6 +114,30 @@ defmodule ArbiterCli.AliasResolverTest do
     end
   end
 
+  describe "resolve/1 — noun aliases (batch -> convoy)" do
+    test "the renamed 'batch' noun aliases the convoy verb (vanguard -> convoy)" do
+      stub_get("/api/settings", %{
+        "data" => %{"vernacular" => %{"batch" => "Vanguard"}}
+      })
+
+      assert {:ok, "convoy"} = AliasResolver.resolve("vanguard")
+      assert {:ok, "convoy"} = AliasResolver.resolve("VANGUARD")
+    end
+
+    test "the canonical convoy verb keeps working with no stub" do
+      assert {:ok, "convoy"} = AliasResolver.resolve("convoy")
+    end
+
+    test "the default 'batch' label (convoy) creates no self-alias loop" do
+      stub_get("/api/settings", %{
+        "data" => %{"vernacular" => %{"batch" => "convoy"}}
+      })
+
+      # "convoy" is a known verb (fast path); "batch" the literal noun is not.
+      assert {:unknown, _} = AliasResolver.resolve("batch")
+    end
+  end
+
   describe "verb_aliases/0" do
     test "combines explicit aliases with derived label aliases" do
       stub_get("/api/settings", %{

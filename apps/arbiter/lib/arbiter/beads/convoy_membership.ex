@@ -28,6 +28,15 @@ defmodule Arbiter.Beads.ConvoyMembership do
       primary? true
       accept [:convoy_id, :issue_id]
     end
+
+    # Idempotent attach: re-running with the same (convoy_id, issue_id) upserts
+    # against the unique identity instead of raising. Lets the membership REST
+    # endpoint be safely retried.
+    create :add do
+      accept [:convoy_id, :issue_id]
+      upsert? true
+      upsert_identity :convoy_issue_unique
+    end
   end
 
   attributes do

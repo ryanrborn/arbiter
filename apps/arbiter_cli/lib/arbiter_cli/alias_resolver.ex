@@ -34,7 +34,12 @@ defmodule ArbiterCli.AliasResolver do
   dispatching to nothing.
   """
 
-  @known_verbs ~w(init show create close reopen list update dep ready doctor start where help sling prime polecat inbox notify message msg claim sync usage)
+  @known_verbs ~w(init show create close reopen list update dep ready doctor start where help sling prime polecat inbox notify message msg claim sync usage convoy)
+
+  # Noun-vernacular keys that also name a command verb. Lets a renamed noun
+  # double as a verb alias — e.g. when `vernacular["batch"] == "Vanguard"`,
+  # `arb vanguard` resolves to `arb convoy`. Keyed: noun key => canonical verb.
+  @noun_verb_aliases %{"batch" => "convoy"}
 
   @doc "The set of built-in verbs that arb dispatches to."
   @spec known_verbs() :: [String.t()]
@@ -85,10 +90,12 @@ defmodule ArbiterCli.AliasResolver do
     end
   end
 
-  # Build the combined alias map from a workspace's vernacular. Derived label
-  # aliases come first so explicit `aliases` config wins on conflict.
+  # Build the combined alias map from a workspace's vernacular. Derived aliases
+  # come first so explicit `aliases` config wins on conflict.
   defp alias_map(vernacular) when is_map(vernacular) do
-    Map.merge(derived_label_aliases(vernacular), explicit_aliases(vernacular))
+    derived_label_aliases(vernacular)
+    |> Map.merge(derived_noun_aliases(vernacular))
+    |> Map.merge(explicit_aliases(vernacular))
   end
 
   defp alias_map(_), do: %{}
@@ -114,6 +121,18 @@ defmodule ArbiterCli.AliasResolver do
         String.downcase(label) != key,
         into: %{} do
       {String.downcase(label), key}
+    end
+  end
+
+  # A renamed noun (e.g. "batch" -> "Vanguard") aliases the verb that operates
+  # on it (`convoy`). See `@noun_verb_aliases`.
+  defp derived_noun_aliases(vernacular) do
+    for {noun_key, verb} <- @noun_verb_aliases,
+        label = Map.get(vernacular, noun_key),
+        is_binary(label),
+        String.downcase(label) != verb,
+        into: %{} do
+      {String.downcase(label), verb}
     end
   end
 

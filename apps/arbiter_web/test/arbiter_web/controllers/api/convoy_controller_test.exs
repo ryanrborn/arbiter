@@ -63,4 +63,73 @@ defmodule ArbiterWeb.Api.ConvoyControllerTest do
       refute is_nil(body["closed_at"])
     end
   end
+
+  describe "POST /api/convoys/:id/members" do
+    test "adds a member and returns the convoy with updated aggregates", %{conn: conn, ws: ws} do
+      {:ok, c} = Ash.create(Convoy, %{title: "c", workspace_id: ws.id})
+      {:ok, i} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/convoys/#{c.id}/members", %{issue_id: i.id})
+
+      body = json_response(conn, 200)
+      assert body["member_ids"] == [i.id]
+      assert body["total_issues"] == 1
+      assert body["closed_issues"] == 0
+    end
+
+    test "is idempotent on the (convoy_id, issue_id) unique index", %{conn: conn, ws: ws} do
+      {:ok, c} = Ash.create(Convoy, %{title: "c", workspace_id: ws.id})
+      {:ok, i} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      _ = post(conn, ~p"/api/convoys/#{c.id}/members", %{issue_id: i.id})
+      conn = post(conn, ~p"/api/convoys/#{c.id}/members", %{issue_id: i.id})
+
+      body = json_response(conn, 200)
+      assert body["member_ids"] == [i.id]
+      assert body["total_issues"] == 1
+    end
+
+    test "returns 404 for a missing convoy", %{conn: conn, ws: ws} do
+      {:ok, i} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/convoys/cvt-cv-nope/members", %{issue_id: i.id})
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+
+    test "returns 400 when issue_id is missing", %{conn: conn, ws: ws} do
+      {:ok, c} = Ash.create(Convoy, %{title: "c", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/convoys/#{c.id}/members", %{})
+      assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+  end
+
+  describe "DELETE /api/convoys/:id/members/:issue_id" do
+    test "removes a member and returns the convoy", %{conn: conn, ws: ws} do
+      {:ok, c} = Ash.create(Convoy, %{title: "c", workspace_id: ws.id})
+      {:ok, i} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+      {:ok, _} = Ash.create(ConvoyMembership, %{convoy_id: c.id, issue_id: i.id})
+
+      conn = delete(conn, ~p"/api/convoys/#{c.id}/members/#{i.id}")
+
+      body = json_response(conn, 200)
+      assert body["member_ids"] == []
+      assert body["total_issues"] == 0
+    end
+
+    test "is idempotent when the member is absent", %{conn: conn, ws: ws} do
+      {:ok, c} = Ash.create(Convoy, %{title: "c", workspace_id: ws.id})
+      {:ok, i} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
+
+      conn = delete(conn, ~p"/api/convoys/#{c.id}/members/#{i.id}")
+
+      body = json_response(conn, 200)
+      assert body["member_ids"] == []
+    end
+
+    test "returns 404 for a missing convoy", %{conn: conn} do
+      conn = delete(conn, ~p"/api/convoys/cvt-cv-nope/members/cvt-001")
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
 end
