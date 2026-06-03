@@ -284,9 +284,15 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # display lines; otherwise treat the raw line as output (test echo scripts,
   # non-Claude spikes, stray stderr). The raw fallback path detects "arb done"
   # so non-stream-json children still signal completion.
+  #
+  # The `init` and `result` events also carry structured usage (model, tokens,
+  # cost, duration) — we accumulate that on the session under `:usage` so the
+  # polecat can mint an `Arbiter.Usage.Event` row on session exit.
   defp process_line(%{} = session, line) do
     case decode_event(line) do
       {:ok, event} ->
+        session = absorb_usage(session, event)
+
         event
         |> format_event()
         |> Enum.reduce(session, fn {text, detect?}, acc -> emit_line(acc, text, detect?) end)
@@ -295,6 +301,65 @@ defmodule Arbiter.Polecat.ClaudeSession do
         emit_line(session, line, true)
     end
   end
+
+  # Capture structured usage off the two events that carry it. The `init` event
+  # tells us the model and session_id up front; the terminal `result` event
+  # carries tokens + cost + duration. Both update an in-session `:usage` map
+  # that the polecat reads on exit. Best-effort — missing keys leave their slot
+  # nil and the row is still persisted (graceful degradation).
+  defp absorb_usage(session, %{"type" => "system", "subtype" => "init"} = event) do
+    update_usage(session, %{
+      model: event["model"],
+      session_id: event["session_id"]
+    })
+  end
+
+  defp absorb_usage(session, %{"type" => "result"} = event) do
+    usage = event["usage"] || %{}
+
+    update_usage(session, %{
+      tokens_in: number(usage["input_tokens"]),
+      tokens_out: number(usage["output_tokens"]),
+      cache_creation_tokens: number(usage["cache_creation_input_tokens"]),
+      cache_read_tokens: number(usage["cache_read_input_tokens"]),
+      cost_usd: number(event["total_cost_usd"]),
+      duration_ms: number(event["duration_ms"]),
+      result_subtype: event["subtype"],
+      is_error: event["is_error"],
+      raw: event
+    })
+  end
+
+  defp absorb_usage(session, _event), do: session
+
+  defp update_usage(%{} = session, fields) do
+    existing = Map.get(session, :usage, %{}) || %{}
+
+    merged =
+      Enum.reduce(fields, existing, fn {k, v}, acc ->
+        case v do
+          nil -> acc
+          val -> Map.put(acc, k, val)
+        end
+      end)
+
+    Map.put(session, :usage, merged)
+  end
+
+  defp number(n) when is_integer(n), do: n
+  defp number(n) when is_float(n), do: n
+  defp number(_), do: nil
+
+  @doc """
+  Read the accumulated structured usage off a session map.
+
+  Returns an empty map when the session never produced an `init`/`result`
+  event (test echo scripts, non-Claude spikes, premature crashes). Callers
+  treat that as "graceful degradation" — they may still write a usage row
+  with whatever fields they do have.
+  """
+  @spec usage_summary(map()) :: map()
+  def usage_summary(%{} = session), do: Map.get(session, :usage, %{}) || %{}
 
   # Emit a single display line: broadcast it (unless blank), optionally run
   # completion detection, and accumulate it (cap-bounded). Blank/whitespace-only

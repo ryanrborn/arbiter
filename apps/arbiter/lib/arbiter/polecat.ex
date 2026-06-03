@@ -551,6 +551,80 @@ defmodule Arbiter.Polecat do
     :error
   end
 
+  # ---- Usage ledger (Arbiter.Usage.Event) -------------------------------
+
+  # Best-effort: persist a row in the structured usage ledger when a Claude
+  # session exits. The session carries everything we need (model, tokens,
+  # cost, duration) in its `:usage` map; we shovel it into `Arbiter.Usage.Event`
+  # alongside the polecat's identifying fields. A reviewer polecat (spawned by
+  # the Tribunal, meta.role == :reviewer) writes a `:review` step row;
+  # everything else writes `:work`. Missing fields are fine — we record what
+  # we have rather than dropping the row.
+  defp record_usage_event(%State{} = state, %{} = session, exit_status) do
+    usage = Arbiter.Polecat.ClaudeSession.usage_summary(session)
+    role = Map.get(state.meta || %{}, :role)
+
+    step =
+      cond do
+        role == :reviewer -> :review
+        true -> :work
+      end
+
+    attrs = %{
+      bead_id: state.bead_id,
+      workspace_id: state.workspace_id,
+      rig: state.rig,
+      step: step,
+      model: Map.get(usage, :model),
+      provider: provider_for(Map.get(usage, :model)),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out),
+      cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
+      cache_read_tokens: Map.get(usage, :cache_read_tokens),
+      cost_usd: Map.get(usage, :cost_usd),
+      duration_ms: Map.get(usage, :duration_ms),
+      exit_status: exit_status,
+      polecat_run_id: state.run_id,
+      session_id: Map.get(usage, :session_id),
+      occurred_at: DateTime.utc_now(),
+      raw: Map.get(usage, :raw)
+    }
+
+    case Ash.create(Arbiter.Usage.Event, attrs) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat.record_usage_event/3 swallowed for bead=#{state.bead_id}: #{inspect(reason)}"
+        )
+
+        :error
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Polecat.record_usage_event/3 raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+      )
+
+      :error
+  end
+
+  # Map a model name to a provider key. Currently every model we see is
+  # Claude — but the column is here for the day we route to other agents and
+  # the ledger needs to roll up cross-provider.
+  defp provider_for(nil), do: nil
+
+  defp provider_for(model) when is_binary(model) do
+    cond do
+      String.starts_with?(model, "claude") -> "claude"
+      String.contains?(model, "gpt") -> "openai"
+      true -> "other"
+    end
+  end
+
+  defp provider_for(_), do: nil
+
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
 
@@ -714,6 +788,7 @@ defmodule Arbiter.Polecat do
         updated = Arbiter.Polecat.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
+        record_usage_event(new_state, updated, status)
         {:noreply, sync_session_meta(new_state, port)}
 
       :error ->
