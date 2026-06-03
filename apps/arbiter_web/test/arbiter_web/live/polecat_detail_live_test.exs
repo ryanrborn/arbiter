@@ -147,5 +147,80 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
       refute html =~ "Workflow:"
       refute html =~ "load_context"
     end
+
+    test "live activity badge advances after mount with no manual lifecycle event",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-c919xj: meta[:activity] updates on every stream line,
+      # but that path must also *broadcast* so a mounted view refreshes. Mount
+      # first, then have the live session emit a second event that changes the
+      # activity label, and assert the badge advances — driven solely by the
+      # polecat's own activity-change broadcast, not an injected lifecycle event.
+      {:ok, bead} = Ash.create(Issue, %{title: "pd-advance", workspace_id: ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+
+      cwd = Path.join(System.tmp_dir!(), "pd-advance-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(cwd)
+      on_exit(fn -> File.rm_rf(cwd) end)
+
+      e1 = Path.join(cwd, "e1.jsonl")
+      e2 = Path.join(cwd, "e2.jsonl")
+
+      File.write!(e1, tool_use_event("Edit", %{"file_path" => "/r/widget.ex"}) <> "\n")
+      File.write!(e2, tool_use_event("Bash", %{"command" => "mix test"}) <> "\n")
+
+      # Emit the first event, pause, then emit the second. The pause leaves a
+      # window to mount the view between the two activities.
+      {:ok, _port} =
+        Arbiter.Polecat.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "cat #{e1}; sleep 0.4; cat #{e2}"]
+        )
+
+      # First activity distilled → mount → badge shows it.
+      wait_until(fn ->
+        match?(%{label: "editing widget.ex"}, Map.get(Polecat.state(bead.id).meta, :activity))
+      end)
+
+      {:ok, view, html} = live(conn, ~p"/polecats/#{bead.id}")
+      assert html =~ "editing widget.ex"
+      refute html =~ "running tests"
+
+      # Second activity arrives on the live session. When the polecat's state
+      # reflects it, its activity-change broadcast has already been delivered to
+      # the (subscribed) view's mailbox, so the next render processes it first.
+      wait_until(fn ->
+        match?(%{label: "running tests"}, Map.get(Polecat.state(bead.id).meta, :activity))
+      end)
+
+      assert render(view) =~ "running tests"
+    end
+  end
+
+  defp tool_use_event(name, input) do
+    Jason.encode!(%{
+      "type" => "assistant",
+      "message" => %{
+        "content" => [%{"type" => "tool_use", "name" => name, "input" => input}]
+      }
+    })
+  end
+
+  defp wait_until(fun, timeout_ms \\ 2_000, step_ms \\ 20) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_until(fun, deadline, step_ms)
+  end
+
+  defp do_wait_until(fun, deadline, step_ms) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        flunk("wait_until/3 timed out")
+      else
+        Process.sleep(step_ms)
+        do_wait_until(fun, deadline, step_ms)
+      end
+    end
   end
 end

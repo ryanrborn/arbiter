@@ -824,10 +824,15 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
   defp claude_session?(_), do: false
 
-  # The coarse live-activity phrase derived from the stream-json events
-  # ("thinking", "editing run.ex", "running tests", …). Falls back to "working"
-  # before the first event lands.
-  defp live_activity(%{meta: meta}) when is_map(meta), do: Map.get(meta, :activity) || "working"
+  defp live_activity(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :activity) do
+      %{"label" => label} when is_binary(label) -> label
+      %{label: label} when is_binary(label) -> label
+      label when is_binary(label) -> label
+      _ -> "working"
+    end
+  end
+
   defp live_activity(_), do: "working"
 
   # Color a workflow step based on whether it's done, current, or upcoming.

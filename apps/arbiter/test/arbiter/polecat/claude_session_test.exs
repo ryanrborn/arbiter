@@ -475,7 +475,7 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
       # The polecat is flagged claude-driven and the last activity reflects the
       # most recent action (editing the file), not a frozen workflow step.
       assert meta.claude_session == true
-      assert meta.activity == "editing run.ex"
+      assert meta.activity.label == "editing run.ex"
       assert %DateTime{} = meta.activity_at
     end
 
