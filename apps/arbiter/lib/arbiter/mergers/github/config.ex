@@ -29,6 +29,12 @@ defmodule Arbiter.Mergers.Github.Config do
         "merge_method" => "squash"
       }
 
+  `owner` is required. `repo` is optional: a single-repo workspace pins it
+  here, but a multi-rig workspace whose rigs live in different repos (e.g.
+  the `leotech` workspace's four `leo-technologies-llc/*` rigs) omits it and
+  the adapter derives the target repo per-rig from the rig's `origin` remote
+  via `Arbiter.Mergers.Github.RepoResolver`.
+
   `credentials_ref` is a small DSL: `"env:NAME"` looks up `System.get_env/1`.
   A bare string (no prefix) is treated as a literal token, but this should be
   avoided outside of tests.
@@ -50,7 +56,7 @@ defmodule Arbiter.Mergers.Github.Config do
   @type config :: %{
           base_url: String.t(),
           owner: String.t(),
-          repo: String.t(),
+          repo: String.t() | nil,
           token: String.t(),
           default_target_branch: String.t(),
           default_reviewers: [String.t()],
@@ -101,13 +107,12 @@ defmodule Arbiter.Mergers.Github.Config do
         %{}
 
     with {:ok, owner} <- fetch_string(raw, "owner"),
-         {:ok, repo} <- fetch_string(raw, "repo"),
          {:ok, token} <- fetch_token(raw) do
       {:ok,
        %{
          base_url: stringy(Map.get(raw, "base_url")) || @default_base_url,
          owner: owner,
-         repo: repo,
+         repo: optional_string(raw, "repo"),
          token: token,
          default_target_branch:
            stringy(Map.get(raw, "default_target_branch")) || @default_target_branch,
@@ -144,6 +149,13 @@ defmodule Arbiter.Mergers.Github.Config do
   end
 
   # ---- Internals ----------------------------------------------------------
+
+  defp optional_string(map, key) do
+    case Map.get(map, key) do
+      v when is_binary(v) and v != "" -> v
+      _ -> nil
+    end
+  end
 
   defp fetch_string(map, key) do
     case Map.get(map, key) do
