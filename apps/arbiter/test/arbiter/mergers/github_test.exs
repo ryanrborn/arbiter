@@ -116,8 +116,12 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, "#99"} = Github.open("feature/z", "T", "B", %{})
     end
 
-    test "422 maps to {:error, %Error{kind: :validation_failed}}" do
+    test "422 (non-duplicate) maps to {:error, %Error{kind: :validation_failed}}" do
       stub(fn conn ->
+        # The POST attempt fails; on a non-"already exists" 422 we should NOT
+        # fall through to the duplicate-lookup path.
+        assert {conn.method, conn.request_path} == {"POST", "/repos/octo/widget/pulls"}
+
         conn
         |> Plug.Conn.put_status(422)
         |> Req.Test.json(%{"message" => "Validation Failed"})
@@ -125,6 +129,63 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:error, %Error{kind: :validation_failed, status: 422, message: "Validation Failed"}} =
                Github.open("x", "T", "B", %{})
+    end
+
+    test "422 'already exists' resolves the existing open PR and returns its ref" do
+      branch = "feature/x"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/repos/octo/widget/pulls"} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "Validation Failed",
+              "errors" => [
+                %{
+                  "code" => "custom",
+                  "message" => "A pull request already exists for octo:#{branch}."
+                }
+              ]
+            })
+
+          {"GET", "/repos/octo/widget/pulls"} ->
+            # Pre-existing PR lookup: must be scoped to head=owner:branch and
+            # state=open so we resolve the right one.
+            assert conn.query_string =~ "head=octo%3A#{URI.encode_www_form(branch)}"
+            assert conn.query_string =~ "state=open"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"number" => 68, "state" => "open", "head" => %{"ref" => branch}}
+            ])
+        end
+      end)
+
+      assert {:ok, "#68"} = Github.open(branch, "Add thing", "does the thing", %{})
+    end
+
+    test "422 'already exists' but lookup returns no PRs falls back to 422 error" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/repos/octo/widget/pulls"} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "Validation Failed",
+              "errors" => [
+                %{"code" => "custom", "message" => "A pull request already exists for x."}
+              ]
+            })
+
+          {"GET", "/repos/octo/widget/pulls"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               Github.open("ghost-branch", "T", "B", %{})
     end
 
     test "missing config returns {:error, %Error{kind: :config_missing}}" do
