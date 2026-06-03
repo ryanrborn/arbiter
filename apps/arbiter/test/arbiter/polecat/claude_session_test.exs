@@ -137,6 +137,71 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
     end
   end
 
+  describe "default_claude_argv/2 — model flag" do
+    # The argv builder is the Phase-A model-tiering seam. We exercise it
+    # directly so the assertions don't depend on `claude` actually running.
+    # When `claude` is missing from PATH (CI without the CLI), the function
+    # returns {:error, _} and we skip — there's nothing to assert about argv
+    # shape when the CLI couldn't be resolved.
+
+    test "omits --model when none is supplied (no behavioral change for existing workspaces)" do
+      case ClaudeSession.default_claude_argv("hello") do
+        {:ok, argv} ->
+          refute Enum.any?(argv, &(&1 == "--model"))
+
+        {:error, {:executable_not_found, "claude"}} ->
+          # Acceptable in environments without the claude CLI on PATH.
+          :ok
+      end
+    end
+
+    test "injects --model <alias> when set" do
+      case ClaudeSession.default_claude_argv("hello", "haiku") do
+        {:ok, argv} ->
+          # The argv is wrapped: ["sh", "-c", "...", "sh", claude, "--print",
+          # prompt, "--output-format", "stream-json", "--verbose",
+          # "--model", "haiku"]. Just assert the flag and value appear in
+          # the right order, regardless of position.
+          model_idx = Enum.find_index(argv, &(&1 == "--model"))
+          assert is_integer(model_idx)
+          assert Enum.at(argv, model_idx + 1) == "haiku"
+
+        {:error, {:executable_not_found, "claude"}} ->
+          :ok
+      end
+    end
+
+    test "blank model string is treated as no model (no flag emitted)" do
+      case ClaudeSession.default_claude_argv("hello", "   ") do
+        {:ok, argv} ->
+          refute Enum.any?(argv, &(&1 == "--model"))
+
+        {:error, {:executable_not_found, "claude"}} ->
+          :ok
+      end
+    end
+
+    test "prompt remains a positional argv entry, never spliced into a shell string" do
+      # Phase A must not break the shell-injection guarantee from the
+      # original argv builder. The prompt is passed as positional `$@`
+      # arguments to `sh -c 'exec "$@" < /dev/null'`, so it must appear
+      # verbatim in the argv list — not embedded in the -c string.
+      prompt = "an `evil`; rm -rf / prompt"
+
+      case ClaudeSession.default_claude_argv(prompt, "sonnet") do
+        {:ok, argv} ->
+          assert prompt in argv
+          # The -c sentinel is the literal `exec "$@" < /dev/null` — the
+          # prompt must not be interpolated into it.
+          assert Enum.any?(argv, &(&1 == ~s(exec "$@" < /dev/null)))
+          refute Enum.any?(argv, &(is_binary(&1) and String.contains?(&1, "rm -rf /") and &1 != prompt))
+
+        {:error, {:executable_not_found, "claude"}} ->
+          :ok
+      end
+    end
+  end
+
   describe "output streaming" do
     test "fixture lines land in meta[:output_lines] in order" do
       {pid, bead_id} = start_polecat()

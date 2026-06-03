@@ -39,6 +39,22 @@ defmodule Arbiter.Beads.Workspace do
             "repo" => "myrepo",
             "credentials_ref" => "env:GITHUB_TOKEN"
           }
+        },
+        "agent" => %{                          # Phase A model-tiering knobs.
+          "config" => %{"model" => "sonnet"},  # default worker model
+          "review_agent" => %{                 # Tribunal reviewer (asymmetric — usually stronger).
+            "config" => %{"model" => "opus"}
+          },
+          "routing" => %{                      # optional priority-based routing.
+            "policy" => "by_priority",
+            "rules" => %{
+              "P0" => "opus",
+              "P1" => "opus",
+              "P2" => "sonnet",
+              "P3" => "sonnet",
+              "P4" => "haiku"
+            }
+          }
         }
       }
 

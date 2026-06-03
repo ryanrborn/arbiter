@@ -49,6 +49,7 @@ defmodule Arbiter.Polecat.Sling do
   NOT attempted because the user may want to inspect what happened).
   """
 
+  alias Arbiter.Agents.Routing
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
@@ -66,7 +67,9 @@ defmodule Arbiter.Polecat.Sling do
           start_driver: boolean(),
           start_claude: boolean(),
           claude_command: [String.t()] | nil,
-          cleanup_worktree: boolean()
+          cleanup_worktree: boolean(),
+          model: String.t() | nil,
+          review_model: String.t() | nil
         ]
 
   @type sling_result :: %{
@@ -153,8 +156,15 @@ defmodule Arbiter.Polecat.Sling do
   # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
   # (rig unconfigured, or `provision_worktree: false`) there is nothing to
   # merge, so `:branch` stays absent and completion is a plain bead close.
+  #
+  # Also stashes the resolved Tribunal `review_model` here (when present) so
+  # the polecat — which spawns the Tribunal much later, at `:awaiting_tribunal`
+  # — can forward it without re-reading the workspace. nil means "fall back to
+  # whatever the Tribunal would pick on its own (CLI default)".
   defp build_polecat_meta(%Issue{} = bead, worktree_path, opts) do
-    base = %{worktree_path: worktree_path}
+    base =
+      %{worktree_path: worktree_path}
+      |> maybe_put_meta(:review_model, resolve_review_model(bead, opts))
 
     case worktree_path && resolve_rig_path(bead, Keyword.get(opts, :rig)) do
       repo_path when is_binary(repo_path) ->
@@ -169,6 +179,9 @@ defmodule Arbiter.Polecat.Sling do
         base
     end
   end
+
+  defp maybe_put_meta(meta, _key, nil), do: meta
+  defp maybe_put_meta(meta, key, value), do: Map.put(meta, key, value)
 
   defp merge_title(%Issue{id: id, title: title}) when is_binary(title) and title != "",
     do: "Merge #{id}: #{title}"
@@ -320,10 +333,16 @@ defmodule Arbiter.Polecat.Sling do
         {:error, :missing_worktree}
 
       true ->
+        # Resolve the per-dispatch worker model — workspace policy +
+        # CLI / programmatic override. Threaded into ClaudeSession only when
+        # the default Claude argv is used (the `:claude_command` test escape
+        # hatch bypasses argv construction entirely).
+        work_model = resolve_work_model(bead, opts)
+
         session_opts =
           [owner: polecat_pid, worktree_path: worktree_path] ++
             case Keyword.get(opts, :claude_command) do
-              nil -> [prompt: prompt_for(bead)]
+              nil -> [prompt: prompt_for(bead), model: work_model]
               cmd when is_list(cmd) -> [command: cmd]
             end
 
@@ -340,6 +359,31 @@ defmodule Arbiter.Polecat.Sling do
             {:error, {:claude_start_failed, reason}}
         end
     end
+  end
+
+  # Resolve the worker model for this dispatch: CLI/programmatic `:model`
+  # override wins over workspace policy. Returns `nil` when neither is set —
+  # callers treat that as "let the CLI pick its default".
+  defp resolve_work_model(%Issue{} = bead, opts) do
+    workspace = load_workspace(bead)
+    Routing.choose_work_model(bead, workspace, override: Keyword.get(opts, :model))
+  end
+
+  # Same shape for the Tribunal reviewer.
+  defp resolve_review_model(%Issue{} = bead, opts) do
+    workspace = load_workspace(bead)
+    Routing.choose_review_model(bead, workspace, override: Keyword.get(opts, :review_model))
+  end
+
+  defp load_workspace(%Issue{workspace_id: nil}), do: nil
+
+  defp load_workspace(%Issue{workspace_id: ws_id}) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{} = ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   @doc false

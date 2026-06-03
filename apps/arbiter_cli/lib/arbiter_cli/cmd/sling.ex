@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.Sling do
   @moduledoc """
-  `arb sling <bead-id> [<rig>] [--with-claude]` — spawn a polecat to work
-  on a bead.
+  `arb sling <bead-id> [<rig>] [--with-claude] [--model <alias>] [--review-model <alias>]`
+  — spawn a polecat to work on a bead.
 
   POSTs to `/api/polecats/sling`. The server transitions the bead to
   `:in_progress`, starts a polecat GenServer under
@@ -15,17 +15,31 @@ defmodule ArbiterCli.Cmd.Sling do
   bead nobody worked is never what you want.)
 
   Flags:
-    --with-claude  spawn a real Claude subprocess in the worktree, which
-                   works the bead and closes it on completion (`arb done`).
-                   Requires a worktree (rig must be in
-                   `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
-                   **This consumes Anthropic API credits.** Off by default.
-    --json         emit JSON instead of human-readable text
+    --with-claude       spawn a real Claude subprocess in the worktree, which
+                        works the bead and closes it on completion (`arb done`).
+                        Requires a worktree (rig must be in
+                        `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
+                        **This consumes Anthropic API credits.** Off by default.
+    --model <alias>     Claude model for the worker session (e.g. `haiku`,
+                        `sonnet`, `opus`). Overrides the workspace's
+                        `agent.config.model` / `routing` policy for this one
+                        dispatch. Omit to use the workspace policy (or the
+                        Claude CLI default when no policy is configured).
+    --review-model <a>  Claude model for the Tribunal reviewer session, when
+                        review is required. Overrides
+                        `agent.review_agent.config.model`. Lets a cheap worker
+                        pair with a stronger reviewer (or vice versa).
+    --json              emit JSON instead of human-readable text
   """
 
   alias ArbiterCli.{Client, Output, Vernacular}
 
-  @switches [json: :boolean, with_claude: :boolean]
+  @switches [
+    json: :boolean,
+    with_claude: :boolean,
+    model: :string,
+    review_model: :string
+  ]
 
   def run(argv) do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
@@ -44,10 +58,21 @@ defmodule ArbiterCli.Cmd.Sling do
       %{"bead_id" => bead_id}
       |> maybe_put("rig", rig)
       |> maybe_put("with_claude", if(with_claude, do: true, else: nil))
+      |> maybe_put("model", normalize(opts[:model]))
+      |> maybe_put("review_model", normalize(opts[:review_model]))
 
     case Client.post("/api/polecats/sling", body) do
       {:ok, payload} -> emit(payload, mode)
       {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp normalize(nil), do: nil
+
+  defp normalize(s) when is_binary(s) do
+    case String.trim(s) do
+      "" -> nil
+      v -> v
     end
   end
 

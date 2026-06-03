@@ -162,6 +162,44 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       conn = post(conn, ~p"/api/polecats/sling", %{})
       assert json_response(conn, 400)
     end
+
+    test "review_model param lands in the polecat's meta for Tribunal use",
+         %{conn: conn, ws: ws} do
+      # End-to-end seam: a per-dispatch `review_model` flowing through the
+      # API ends up on the polecat's meta where the Tribunal spawn reads it.
+      {:ok, bead} = Ash.create(Issue, %{title: "review-model", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/polecats/sling", %{
+          "bead_id" => bead.id,
+          "rig" => "test/rig",
+          "review_model" => "opus"
+        })
+
+      assert json_response(conn, 201)["bead"]["id"] == bead.id
+
+      pid = Polecat.whereis(bead.id)
+      assert is_pid(pid)
+      assert %{review_model: "opus"} = Polecat.state(pid).meta
+    end
+
+    test "blank model params are ignored (not stashed as empty strings)",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "blank-model", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/polecats/sling", %{
+          "bead_id" => bead.id,
+          "rig" => "test/rig",
+          "model" => "   ",
+          "review_model" => ""
+        })
+
+      assert json_response(conn, 201)["bead"]["id"] == bead.id
+
+      pid = Polecat.whereis(bead.id)
+      refute Map.has_key?(Polecat.state(pid).meta, :review_model)
+    end
   end
 
   describe "POST /api/polecats/:bead_id/stop" do

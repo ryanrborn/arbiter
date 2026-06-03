@@ -70,5 +70,71 @@ defmodule ArbiterCli.Cmd.SlingTest do
       assert code != 0
       assert err =~ "not found" || err =~ "404"
     end
+
+    test "--model and --review-model are sent in the request body" do
+      parent = self()
+
+      stub_routes([
+        {{"post", "/api/polecats/sling"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:body, body})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{
+             "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+             "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
+             "machine" => %{"id" => "m", "pid" => "y"}
+           })
+         end}
+      ])
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Sling.run([
+            "gte-017",
+            "--model",
+            "haiku",
+            "--review-model",
+            "opus"
+          ])
+        end)
+
+      assert code == 0
+
+      assert_receive {:body, raw}, 1_000
+      assert {:ok, body} = Jason.decode(raw)
+      assert body["model"] == "haiku"
+      assert body["review_model"] == "opus"
+    end
+
+    test "model flags absent → body has no model keys (workspace policy applies on server)" do
+      parent = self()
+
+      stub_routes([
+        {{"post", "/api/polecats/sling"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:body, body})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{
+             "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+             "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
+             "machine" => %{"id" => "m", "pid" => "y"}
+           })
+         end}
+      ])
+
+      {_out, _err, code} = capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017"]) end)
+      assert code == 0
+
+      assert_receive {:body, raw}, 1_000
+      assert {:ok, body} = Jason.decode(raw)
+      refute Map.has_key?(body, "model")
+      refute Map.has_key?(body, "review_model")
+    end
   end
 end

@@ -99,6 +99,7 @@ defmodule Arbiter.Polecat.Tribunal do
           | {:command, [String.t()] | nil}
           | {:timeout_ms, non_neg_integer()}
           | {:verdict_retries, non_neg_integer()}
+          | {:model, String.t() | nil}
 
   @doc """
   Start a Tribunal under `Arbiter.Polecat.Supervisor`.
@@ -189,6 +190,7 @@ defmodule Arbiter.Polecat.Tribunal do
       branch: Keyword.fetch!(opts, :branch),
       target_branch: Keyword.get(opts, :target_branch, "main"),
       command: Keyword.get(opts, :command),
+      model: Keyword.get(opts, :model),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
       retries_left: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
       attempt: 0,
@@ -415,7 +417,7 @@ defmodule Arbiter.Polecat.Tribunal do
     session_opts =
       [owner: reviewer_pid, worktree_path: state.worktree_path] ++
         case state.command do
-          nil -> [prompt: prompt]
+          nil -> [prompt: prompt, model: state.model]
           cmd when is_list(cmd) -> [command: cmd]
         end
 

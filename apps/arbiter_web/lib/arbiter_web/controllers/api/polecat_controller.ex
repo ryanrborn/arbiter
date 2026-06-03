@@ -156,6 +156,11 @@ defmodule ArbiterWeb.Api.PolecatController do
   #   * bare/dry sling → no worker. Park the bead in `:in_progress`
   #     (`start_driver: false`) for a hand to attach, instead of racing the
   #     no-op workflow to a bogus `:closed`.
+  #
+  # The `model` / `review_model` params are per-dispatch overrides that take
+  # precedence over the workspace's `agent.config.model` / `review_agent`
+  # policy in `Arbiter.Agents.Routing`. They are kept regardless of
+  # `with_claude` so a bare sling that's later upgraded carries the intent.
   defp sling_opts(params) do
     base = [rig: params["rig"]]
 
@@ -163,8 +168,22 @@ defmodule ArbiterWeb.Api.PolecatController do
       true -> base ++ [start_claude: true]
       _ -> base ++ [start_driver: false]
     end
+    |> maybe_kv(:model, string_param(params["model"]))
+    |> maybe_kv(:review_model, string_param(params["review_model"]))
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
+
+  defp maybe_kv(opts, _key, nil), do: opts
+  defp maybe_kv(opts, key, value), do: opts ++ [{key, value}]
+
+  defp string_param(v) when is_binary(v) do
+    case String.trim(v) do
+      "" -> nil
+      s -> s
+    end
+  end
+
+  defp string_param(_), do: nil
 
   defp truthy(nil), do: nil
   defp truthy(true), do: true

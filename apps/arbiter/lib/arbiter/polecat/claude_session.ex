@@ -99,6 +99,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
           | {:command, [String.t()] | nil}
           | {:topic, String.t() | nil}
           | {:owner, pid()}
+          | {:model, String.t() | nil}
 
   @type opts :: [opt()]
 
@@ -129,6 +130,11 @@ defmodule Arbiter.Polecat.ClaudeSession do
       shell out to real Claude.
     * `:topic` — PubSub topic to broadcast output on. Defaults to
       `"polecat:" <> bead_id`.
+    * `:model` — Anthropic model alias (`"haiku"` / `"sonnet"` / `"opus"`,
+      or any string the `claude` CLI accepts for `--model`). When `nil` or
+      absent the CLI default is used (no `--model` flag is emitted). Only
+      meaningful for the default Claude argv path; ignored when `:command`
+      is supplied.
 
   ## Returns
 
@@ -186,7 +192,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
       nil ->
         case Keyword.fetch(opts, :prompt) do
           {:ok, prompt} when is_binary(prompt) ->
-            default_claude_argv(prompt)
+            default_claude_argv(prompt, Keyword.get(opts, :model))
 
           _ ->
             {:error, :missing_prompt}
@@ -205,21 +211,40 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # `--print`) so the parent port sees per-turn events instead of a single
   # buffered blob at exit.
   #
+  # An optional `--model <alias>` is injected when the caller supplied a
+  # non-blank model alias — that's the Phase A model-tiering knob. When `nil`
+  # the flag is omitted entirely so the CLI picks its own default and pre-
+  # tiering workspaces see no behavioral change.
+  #
   # The whole thing is wrapped in `sh -c 'exec "$@" < /dev/null'` so the
   # child's stdin is closed immediately — without this the CLI waits ~3s for
   # piped stdin and prints a warning that pollutes the transcript. The claude
-  # path and prompt are passed as positional params ("$@"), never spliced into
-  # the command string, so there is no shell-injection surface.
-  defp default_claude_argv(prompt) do
+  # path, prompt, and model alias are passed as positional params ("$@"),
+  # never spliced into the command string, so there is no shell-injection
+  # surface.
+  @doc false
+  def default_claude_argv(prompt, model \\ nil) do
     case resolve_claude() do
       {:ok, claude} ->
-        inner = [claude, "--print", prompt, "--output-format", "stream-json", "--verbose"]
+        inner =
+          [claude, "--print", prompt, "--output-format", "stream-json", "--verbose"] ++
+            model_flag(model)
+
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
 
       {:error, _} = err ->
         err
     end
   end
+
+  defp model_flag(model) when is_binary(model) do
+    case String.trim(model) do
+      "" -> []
+      m -> ["--model", m]
+    end
+  end
+
+  defp model_flag(_), do: []
 
   defp resolve_claude do
     case System.find_executable("claude") do

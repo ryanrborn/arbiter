@@ -568,10 +568,50 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
   end
 
-  # Start an author through the gate with a *lingering* reviewer (so the Tribunal
-  # stays alive while a test probes or kills it). Cleanup cascades: stopping the
-  # author trips the Tribunal's author-monitor, which stops the reviewer.
-  defp start_live_gate(repo, ws) do
+  # ---- model wiring (Phase A model-tiering) --------------------------------
+
+  describe "model option" do
+    test "Tribunal carries an explicit :model in its state", %{repo: repo, ws: ws} do
+      # Use a lingering reviewer so the Tribunal is still alive when we
+      # introspect it. We're verifying the *plumbing*: the option flows
+      # into init/1's state, which is what start_reviewer_session/3 will
+      # later forward to ClaudeSession.
+      _pid = start_live_gate_with(repo, ws, model: "opus")
+
+      tribunal = wait_until_tribunal()
+      state = :sys.get_state(tribunal)
+      assert state.model == "opus"
+    end
+
+    test "polecat meta[:review_model] is forwarded to the Tribunal", %{repo: repo, ws: ws} do
+      # End-to-end: a polecat that arrives at :awaiting_tribunal with
+      # review_model in its meta must thread that model through to the
+      # Tribunal it spawns. This is the seam Sling uses.
+      pid = start_live_gate(repo, ws, %{review_model: "haiku"})
+
+      tribunal = wait_until_tribunal()
+      state = :sys.get_state(tribunal)
+      assert state.model == "haiku"
+
+      # Cleanup chain: stopping the author trips the Tribunal monitor.
+      safe_stop(pid)
+    end
+
+    test "no review_model in meta → Tribunal state.model is nil (CLI default)",
+         %{repo: repo, ws: ws} do
+      pid = start_live_gate(repo, ws, %{})
+      tribunal = wait_until_tribunal()
+      state = :sys.get_state(tribunal)
+      assert state.model == nil
+
+      safe_stop(pid)
+    end
+  end
+
+  # Variant of start_live_gate/2 that drives the Tribunal directly via opts —
+  # used to exercise Tribunal.start/1's own :model handling without going
+  # through the author polecat's meta.
+  defp start_live_gate_with(repo, ws, extra_opts) do
     bead = new_bead(ws)
     branch = "feature/rev"
     :ok = seed_feature_branch(repo, branch)
@@ -582,16 +622,65 @@ defmodule Arbiter.Polecat.TribunalTest do
         bead_id: bead.id,
         rig: "trib/rig",
         workspace_id: ws.id,
-        meta: %{
-          branch: branch,
-          repo_path: repo,
-          target_branch: "main",
-          merge_title: "Merge #{bead.id}",
-          review_required: true,
-          worktree_path: repo,
-          review_command: [sleep, "10"],
-          review_timeout_ms: 30_000
-        }
+        meta:
+          Map.merge(
+            %{
+              branch: branch,
+              repo_path: repo,
+              target_branch: "main",
+              merge_title: "Merge #{bead.id}",
+              review_required: true,
+              worktree_path: repo,
+              review_command: [sleep, "10"],
+              review_timeout_ms: 30_000
+            },
+            Map.new(extra_opts, fn
+              {:model, m} -> {:review_model, m}
+              kv -> kv
+            end)
+          )
+      )
+
+    on_exit(fn ->
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      if rp = Polecat.whereis(review_id), do: safe_stop(rp)
+      if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    end)
+
+    :ok = Polecat.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
+    wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end, 4_000)
+    pid
+  end
+
+  # Start an author through the gate with a *lingering* reviewer (so the Tribunal
+  # stays alive while a test probes or kills it). Cleanup cascades: stopping the
+  # author trips the Tribunal's author-monitor, which stops the reviewer.
+  defp start_live_gate(repo, ws, extra_meta \\ %{}) do
+    bead = new_bead(ws)
+    branch = "feature/rev"
+    :ok = seed_feature_branch(repo, branch)
+    sleep = System.find_executable("sleep") || "/bin/sleep"
+
+    {:ok, pid} =
+      Polecat.start(
+        bead_id: bead.id,
+        rig: "trib/rig",
+        workspace_id: ws.id,
+        meta:
+          Map.merge(
+            %{
+              branch: branch,
+              repo_path: repo,
+              target_branch: "main",
+              merge_title: "Merge #{bead.id}",
+              review_required: true,
+              worktree_path: repo,
+              review_command: [sleep, "10"],
+              review_timeout_ms: 30_000
+            },
+            extra_meta
+          )
       )
 
     on_exit(fn ->
