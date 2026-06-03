@@ -81,7 +81,14 @@ defmodule ArbiterCli.Cmd.Polecat do
 
     IO.puts("#{Vernacular.cap(v, "issue")}:       #{snap["bead_id"]}")
     IO.puts("Status:     #{snap["status"]}")
-    IO.puts("Step:       #{snap["current_step"]}")
+    # A claude-driven worker has no ticking workflow step; show the live
+    # activity derived from its stream instead of a frozen step. See bd-c919xj.
+    if snap["claude_session"] do
+      IO.puts("Activity:   #{activity_label(snap)}")
+    else
+      IO.puts("Step:       #{snap["current_step"]}")
+    end
+
     IO.puts("#{Vernacular.cap(v, "rig")}:        #{snap["rig"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
@@ -143,9 +150,24 @@ defmodule ArbiterCli.Cmd.Polecat do
     IO.puts("Active #{Vernacular.label(v, "worker")}s (#{length(list)}):")
 
     Enum.each(list, fn p ->
+      step =
+        if p["claude_session"],
+          do: "activity=#{activity_label(p)}",
+          else: "step=#{p["current_step"]}"
+
       IO.puts(
-        "  #{p["bead_id"]}  status=#{p["status"]}  step=#{p["current_step"]}  rig=#{p["rig"]}  started=#{p["started_at"]}"
+        "  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}  started=#{p["started_at"]}"
       )
     end)
+  end
+
+  # The JSON API exposes a claude-driven worker's live activity as a map
+  # (%{"label", "kind", "since"}) or null; render its label, falling back to a
+  # plain "working" until the first stream event lands. See bd-c919xj.
+  defp activity_label(snap) do
+    case snap["activity"] do
+      %{"label" => label} when is_binary(label) and label != "" -> label
+      _ -> "working"
+    end
   end
 end

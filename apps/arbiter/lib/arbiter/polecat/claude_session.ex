@@ -99,6 +99,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
           | {:command, [String.t()] | nil}
           | {:topic, String.t() | nil}
           | {:owner, pid()}
+          | {:env, [{String.t(), String.t() | false}]}
 
   @type opts :: [opt()]
 
@@ -155,7 +156,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
       port_args = %{
         exec: exec,
         argv: argv,
-        cd: worktree_path
+        cd: worktree_path,
+        env: env_pairs(opts)
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -284,15 +286,110 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # display lines; otherwise treat the raw line as output (test echo scripts,
   # non-Claude spikes, stray stderr). The raw fallback path detects "arb done"
   # so non-stream-json children still signal completion.
+  #
+  # The `init` and `result` events also carry structured usage (model, tokens,
+  # cost, duration) — we accumulate that on the session under `:usage` so the
+  # polecat can mint an `Arbiter.Usage.Event` row on session exit.
+  #
+  # A decoded event also refreshes the session's coarse :activity ("thinking",
+  # "editing run.ex", "running tests", …) — the live progress signal the polecat
+  # mirrors into meta for claude-driven views, which have no ticking workflow
+  # Machine to advance a real step (see Arbiter.Polecat.Driver claude-driven mode
+  # and bd-c919xj).
   defp process_line(%{} = session, line) do
     case decode_event(line) do
       {:ok, event} ->
+        session = absorb_usage(session, event)
+
         event
         |> format_event()
-        |> Enum.reduce(session, fn {text, detect?}, acc -> emit_line(acc, text, detect?) end)
+        |> Enum.reduce(maybe_update_activity(session, event), fn {text, detect?}, acc ->
+          emit_line(acc, text, detect?)
+        end)
 
       :error ->
         emit_line(session, line, true)
+    end
+  end
+
+  # Capture structured usage off the two events that carry it. The `init` event
+  # tells us the model and session_id up front; the terminal `result` event
+  # carries tokens + cost + duration. Both update an in-session `:usage` map
+  # that the polecat reads on exit. Best-effort — missing keys leave their slot
+  # nil and the row is still persisted (graceful degradation).
+  defp absorb_usage(session, %{"type" => "system", "subtype" => "init"} = event) do
+    update_usage(session, %{
+      model: event["model"],
+      session_id: event["session_id"]
+    })
+  end
+
+  defp absorb_usage(session, %{"type" => "result"} = event) do
+    usage = event["usage"] || %{}
+
+    update_usage(session, %{
+      tokens_in: number(usage["input_tokens"]),
+      tokens_out: number(usage["output_tokens"]),
+      cache_creation_tokens: number(usage["cache_creation_input_tokens"]),
+      cache_read_tokens: number(usage["cache_read_input_tokens"]),
+      cost_usd: number(event["total_cost_usd"]),
+      duration_ms: number(event["duration_ms"]),
+      result_subtype: event["subtype"],
+      is_error: event["is_error"],
+      raw: event
+    })
+  end
+
+  defp absorb_usage(session, _event), do: session
+
+  defp update_usage(%{} = session, fields) do
+    existing = Map.get(session, :usage, %{}) || %{}
+
+    merged =
+      Enum.reduce(fields, existing, fn {k, v}, acc ->
+        case v do
+          nil -> acc
+          val -> Map.put(acc, k, val)
+        end
+      end)
+
+    Map.put(session, :usage, merged)
+  end
+
+  defp number(n) when is_integer(n), do: n
+  defp number(n) when is_float(n), do: n
+  defp number(_), do: nil
+
+  @doc """
+  Read the accumulated structured usage off a session map.
+
+  Returns an empty map when the session never produced an `init`/`result`
+  event (test echo scripts, non-Claude spikes, premature crashes). Callers
+  treat that as "graceful degradation" — they may still write a usage row
+  with whatever fields they do have.
+  """
+  @spec usage_summary(map()) :: map()
+  def usage_summary(%{} = session), do: Map.get(session, :usage, %{}) || %{}
+
+  # Refresh the session's activity from a decoded event, stamping :activity_at.
+  # Events that carry no salient activity (tool *results*, partial deltas,
+  # unknown types) leave the prior activity in place — so "editing run.ex"
+  # persists across the tool-result turn until the next action.
+  defp maybe_update_activity(%{} = session, event) do
+    case activity_for_event(event) do
+      nil ->
+        session
+
+      label ->
+        since =
+          case Map.get(session, :activity) do
+            %{label: ^label, since: since} -> since
+            _ -> DateTime.utc_now()
+          end
+
+        session
+        |> Map.put(:activity, %{label: label, since: since})
+        |> Map.put(:activity_at, since)
     end
   end
 
@@ -358,6 +455,94 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
   # rate_limit_event, partial-message deltas, unknown types: shown to no one.
   defp format_event(_event), do: []
+
+  # ---- live activity derivation ------------------------------------------
+  #
+  # Reduce a stream-json event to a short, human-readable activity phrase — the
+  # coarse "what is the acolyte doing right now" signal a claude-driven view
+  # shows in place of a frozen workflow step. Returns nil for events that carry
+  # no salient action (tool results, deltas, unknown types) so the caller keeps
+  # the previous activity.
+
+  @doc false
+  @spec activity_for_event(map()) :: String.t() | nil
+  def activity_for_event(%{"type" => "system", "subtype" => "init"}), do: "starting"
+
+  def activity_for_event(%{"type" => "result"}), do: "wrapping up"
+
+  def activity_for_event(%{"type" => "assistant", "message" => %{"content" => content}})
+      when is_list(content) do
+    # An assistant turn may mix thinking, text, and tool calls. Take the last
+    # block that maps to an activity so a turn ending in a tool call reports the
+    # tool (the more informative signal) rather than the preceding prose.
+    content
+    |> Enum.map(&block_activity/1)
+    |> Enum.reject(&is_nil/1)
+    |> List.last()
+  end
+
+  def activity_for_event(_event), do: nil
+
+  defp block_activity(%{"type" => "thinking"}), do: "thinking"
+
+  defp block_activity(%{"type" => "text", "text" => text}) when is_binary(text) do
+    if String.trim(text) == "", do: nil, else: "responding"
+  end
+
+  defp block_activity(%{"type" => "tool_use", "name" => name} = block),
+    do: tool_activity(name, Map.get(block, "input"))
+
+  defp block_activity(_block), do: nil
+
+  defp tool_activity(edit, input) when edit in ~w(Edit Write MultiEdit NotebookEdit),
+    do: verb_for(edit) <> " " <> file_label(input)
+
+  defp tool_activity("Read", input), do: "reading " <> file_label(input)
+  defp tool_activity("Bash", input), do: bash_activity(input)
+  defp tool_activity(search, _input) when search in ~w(Grep Glob), do: "searching"
+  defp tool_activity("Task", input), do: "delegating" <> desc_suffix(input)
+  defp tool_activity(web, _input) when web in ~w(WebFetch WebSearch), do: "researching"
+  # Any other tool (MCP tools, future built-ins) surfaces by its own name rather
+  # than a generic placeholder — still a live, changing signal.
+  defp tool_activity(name, _input) when is_binary(name) and name != "", do: name
+  defp tool_activity(_name, _input), do: nil
+
+  defp verb_for("Read"), do: "reading"
+  defp verb_for("Write"), do: "writing"
+  defp verb_for(_edit), do: "editing"
+
+  defp file_label(input) when is_map(input) do
+    case input["file_path"] || input["path"] || input["notebook_path"] do
+      p when is_binary(p) and p != "" -> Path.basename(p)
+      _ -> "a file"
+    end
+  end
+
+  defp file_label(_input), do: "a file"
+
+  defp bash_activity(input) when is_map(input) do
+    cmd = input["command"]
+
+    cond do
+      is_binary(cmd) and test_command?(cmd) -> "running tests"
+      is_binary(cmd) and cmd != "" -> "running: " <> truncate(cmd, 60)
+      true -> "running a command"
+    end
+  end
+
+  defp bash_activity(_input), do: "running a command"
+
+  defp test_command?(cmd),
+    do: Regex.match?(~r/\b(mix test|npm test|pytest|go test|cargo test|rspec|jest)\b/, cmd)
+
+  defp desc_suffix(input) when is_map(input) do
+    case input["description"] do
+      d when is_binary(d) and d != "" -> " (" <> truncate(d, 40) <> ")"
+      _ -> ""
+    end
+  end
+
+  defp desc_suffix(_input), do: ""
 
   defp assistant_block_lines(%{"type" => "text", "text" => text}) when is_binary(text) do
     Enum.map(text_lines(text), &{&1, true})
@@ -499,17 +684,40 @@ defmodule Arbiter.Polecat.ClaudeSession do
 
   @doc false
   @spec open_port(map()) :: port()
-  def open_port(%{exec: exec, argv: [_ | rest], cd: cd}) do
-    Port.open(
-      {:spawn_executable, exec},
-      [
-        {:args, rest},
-        {:cd, cd},
-        {:line, 65_536},
-        :binary,
-        :exit_status,
-        :stderr_to_stdout
-      ]
-    )
+  def open_port(%{exec: exec, argv: [_ | rest], cd: cd} = port_args) do
+    base_opts = [
+      {:args, rest},
+      {:cd, cd},
+      {:line, 65_536},
+      :binary,
+      :exit_status,
+      :stderr_to_stdout
+    ]
+
+    opts =
+      case Map.get(port_args, :env, []) do
+        [] -> base_opts
+        pairs -> base_opts ++ [{:env, env_charlists(pairs)}]
+      end
+
+    Port.open({:spawn_executable, exec}, opts)
+  end
+
+  # The Agent behaviour returns env as [{String.t(), String.t() | false}]
+  # for ergonomics; Port.open wants charlists. Normalize once at the
+  # boundary so adapters don't have to know about Erlang's I/O list shape.
+  defp env_charlists(pairs) do
+    Enum.map(pairs, fn
+      {name, false} -> {to_charlist(name), false}
+      {name, value} when is_binary(name) and is_binary(value) ->
+        {to_charlist(name), to_charlist(value)}
+    end)
+  end
+
+  defp env_pairs(opts) do
+    case Keyword.get(opts, :env) do
+      list when is_list(list) -> list
+      _ -> []
+    end
   end
 end

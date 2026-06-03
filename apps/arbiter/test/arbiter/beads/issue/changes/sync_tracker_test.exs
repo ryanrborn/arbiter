@@ -126,6 +126,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
           title: "tracked-but-unlinked",
           tracker_type: :github,
           tracker_ref: nil,
+          skip_upstream_create: true,
           workspace_id: ws.id
         })
 

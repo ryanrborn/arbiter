@@ -3,7 +3,10 @@ defmodule Arbiter.Trackers.GitHub do
   GitHub Issues adapter implementing `Arbiter.Trackers.Tracker`.
 
   Wraps GitHub's REST API v3 (`https://api.github.com`) for issue
-  fetch/update/transition flows, so directives can sync to GitHub Issues.
+  fetch/create/update/transition flows, so directives can sync to GitHub
+  Issues. `create/1` POSTs `/repos/:owner/:repo/issues` and returns the new
+  issue number as the canonical ref; used by `arb create` to mirror a new
+  bead into the workspace's GitHub repo.
 
   ## Active-workspace contract
 
@@ -130,6 +133,17 @@ defmodule Arbiter.Trackers.GitHub do
   def parse_ref(_), do: :error
 
   @impl true
+  def list_open(opts) when is_list(opts) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, login} <- resolve_assignee(opts) do
+      case fetch_assigned_open_issues(cfg, login) do
+        {:ok, issues} -> {:ok, Enum.map(issues, &summarize/1)}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  @impl true
   def list_transitions(ref) when is_binary(ref) do
     # GitHub imposes no transition state machine — an issue can move to any of
     # the mapped statuses at any time — so we validate the ref exists, then
@@ -141,6 +155,98 @@ defmodule Arbiter.Trackers.GitHub do
         |> Enum.filter(&Map.has_key?(cfg.status_map, &1))
 
       {:ok, statuses}
+    end
+  end
+
+  @impl true
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs),
+         {:ok, payload} <- build_create_payload(cfg, attrs, title) do
+      case request(cfg, :post, "/repos/#{cfg.owner}/#{cfg.repo}/issues", json: payload) do
+        {:ok, %Req.Response{status: status, body: %{"number" => number}}}
+        when status in 200..299 and is_integer(number) ->
+          {:ok, Integer.to_string(number)}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status,
+             message: "GitHub create response missing \"number\"",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp fetch_title(%{title: title}) when is_binary(title) and title != "", do: {:ok, title}
+  defp fetch_title(%{"title" => title}) when is_binary(title) and title != "", do: {:ok, title}
+
+  defp fetch_title(_),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "create requires a non-empty :title",
+         raw: nil
+       }}
+
+  # Map bead-domain attrs onto GitHub's POST /repos/:o/:r/issues body. `title`
+  # is required; `body`, `assignees`, and the initial status label are optional
+  # — we skip them when the caller didn't supply them.
+  defp build_create_payload(cfg, attrs, title) do
+    description = pluck(attrs, [:description, "description"])
+    assignee = pluck(attrs, [:assignee, "assignee"])
+    status = pluck(attrs, [:status, "status"]) || :open
+
+    payload =
+      %{"title" => title}
+      |> maybe_put("body", description)
+      |> maybe_put_assignees(assignee)
+      |> maybe_put_initial_labels(cfg, status)
+
+    {:ok, payload}
+  end
+
+  defp pluck(map, keys) do
+    Enum.find_value(keys, fn k ->
+      case Map.fetch(map, k) do
+        {:ok, v} -> v
+        :error -> nil
+      end
+    end)
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put_assignees(payload, nil), do: payload
+  defp maybe_put_assignees(payload, ""), do: payload
+
+  defp maybe_put_assignees(payload, login) when is_binary(login),
+    do: Map.put(payload, "assignees", [login])
+
+  defp maybe_put_assignees(payload, _), do: payload
+
+  # If the workspace's status_map has a managed label for the initial bead
+  # status, apply it on create. Default `:open` typically has no label, so this
+  # is a no-op for the common case.
+  defp maybe_put_initial_labels(payload, cfg, status) do
+    case Map.get(cfg.status_map, status) do
+      %{label: label} when is_binary(label) and label != "" ->
+        Map.put(payload, "labels", [label])
+
+      _ ->
+        payload
     end
   end
 
@@ -196,25 +302,14 @@ defmodule Arbiter.Trackers.GitHub do
 
   Pull requests are filtered out — GitHub's `/repos/:owner/:repo/issues`
   endpoint returns both, distinguished by a `"pull_request"` key.
+
+  Paginated: walks `Link: <...>; rel="next"` headers until exhausted, so
+  workspaces with >100 assigned issues still come back complete.
   """
   @spec list_assigned_open_issues(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
   def list_assigned_open_issues(login) when is_binary(login) do
     with {:ok, cfg} <- Config.resolve() do
-      path = "/repos/#{cfg.owner}/#{cfg.repo}/issues"
-      params = [assignee: login, state: "open", per_page: 100]
-
-      request(cfg, :get, path, params: params)
-      |> handle_json()
-      |> case do
-        {:ok, list} when is_list(list) ->
-          {:ok, Enum.reject(list, &Map.has_key?(&1, "pull_request"))}
-
-        {:ok, _} ->
-          {:ok, []}
-
-        {:error, _} = err ->
-          err
-      end
+      fetch_assigned_open_issues(cfg, login)
     end
   end
 
@@ -246,6 +341,163 @@ defmodule Arbiter.Trackers.GitHub do
   @spec issue_status(map()) :: :open | :closed
   def issue_status(%{"state" => "closed"}), do: :closed
   def issue_status(_), do: :open
+
+  # ---- Internals: list_open / pagination ---------------------------------
+
+  # Resolve the assignee opt to a concrete GitHub login. Default (`:viewer`)
+  # asks GitHub for the token's authenticated user — keeps the caller from
+  # having to thread "who am I" through the API.
+  defp resolve_assignee(opts) do
+    case Keyword.get(opts, :assignee, :viewer) do
+      :viewer ->
+        viewer_login()
+
+      login when is_binary(login) and login != "" ->
+        {:ok, login}
+
+      other ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "list_open: invalid :assignee option #{inspect(other)}",
+           raw: nil
+         }}
+    end
+  end
+
+  # Paginated fetch: walks the Link header's rel="next" until exhausted.
+  # Returns the accumulated list of issues, with PRs filtered out (GitHub's
+  # /issues endpoint mixes them in).
+  defp fetch_assigned_open_issues(cfg, login) do
+    initial_path = "/repos/#{cfg.owner}/#{cfg.repo}/issues"
+    initial_params = [assignee: login, state: "open", per_page: 100]
+
+    paginate(cfg, initial_path, params: initial_params)
+  end
+
+  # Cap pages so a runaway response can't hammer the API. 50 pages × 100/page
+  # = 5,000 issues, well above any human's claimable backlog.
+  @max_pages 50
+
+  defp paginate(cfg, path, req_opts) do
+    do_paginate(cfg, path, req_opts, [], @max_pages)
+  end
+
+  defp do_paginate(_cfg, _path, _req_opts, acc, 0), do: {:ok, Enum.reverse(acc) |> List.flatten()}
+
+  defp do_paginate(cfg, path, req_opts, acc, pages_left) do
+    case request(cfg, :get, path, req_opts) do
+      {:ok, %Req.Response{status: status, body: body, headers: headers}}
+      when status in 200..299 ->
+        page = if is_list(body), do: body, else: []
+        filtered = Enum.reject(page, &Map.has_key?(&1, "pull_request"))
+
+        case next_page_url(headers) do
+          nil ->
+            {:ok, Enum.reverse([filtered | acc]) |> List.flatten()}
+
+          {next_path, next_params} ->
+            do_paginate(cfg, next_path, [params: next_params], [filtered | acc], pages_left - 1)
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # Parses GitHub's RFC 5988 Link header. Returns the rel="next" URL split
+  # into its path-relative-to-base + query params, or nil if no next page.
+  defp next_page_url(headers) do
+    headers
+    |> link_header_value()
+    |> parse_next_link()
+  end
+
+  defp link_header_value(headers) when is_map(headers) do
+    case Map.get(headers, "link") || Map.get(headers, "Link") do
+      [v | _] when is_binary(v) -> v
+      v when is_binary(v) -> v
+      _ -> nil
+    end
+  end
+
+  defp link_header_value(headers) when is_list(headers) do
+    Enum.find_value(headers, fn
+      {"link", v} -> v
+      {"Link", v} -> v
+      _ -> nil
+    end)
+  end
+
+  defp link_header_value(_), do: nil
+
+  defp parse_next_link(nil), do: nil
+
+  defp parse_next_link(value) when is_binary(value) do
+    case Regex.run(~r/<([^>]+)>\s*;\s*rel="next"/, value) do
+      [_, url] -> split_url(url)
+      _ -> nil
+    end
+  end
+
+  defp split_url(url) do
+    uri = URI.parse(url)
+
+    params =
+      case uri.query do
+        nil -> []
+        q -> URI.decode_query(q) |> Enum.to_list()
+      end
+
+    {uri.path || "/", params}
+  end
+
+  # Normalizes a raw issue payload into a Tracker.summary.
+  defp summarize(%{"number" => number} = issue) do
+    %{
+      ref: to_string(number),
+      title: title_or_default(issue),
+      url: Map.get(issue, "html_url"),
+      status: status_for(issue),
+      assignees: assignee_logins(issue),
+      raw: issue
+    }
+  end
+
+  defp title_or_default(%{"title" => title}) when is_binary(title) and title != "", do: title
+  defp title_or_default(_), do: "(no title)"
+
+  # An "in progress" issue is an open issue carrying one of the in_progress
+  # labels in the workspace's status_map. Anything else open is :open;
+  # anything else closed is :closed.
+  defp status_for(%{"state" => "closed"}), do: :closed
+
+  defp status_for(issue) do
+    cfg = active_status_map()
+
+    in_progress_label =
+      case Map.get(cfg, :in_progress) do
+        %{label: label} when is_binary(label) -> label
+        _ -> nil
+      end
+
+    if in_progress_label && in_progress_label in current_label_names(issue) do
+      :in_progress
+    else
+      :open
+    end
+  end
+
+  defp active_status_map do
+    case Config.resolve() do
+      {:ok, %{status_map: map}} -> map
+      _ -> %{}
+    end
+  end
 
   # ---- Internals: status / labels -----------------------------------------
 

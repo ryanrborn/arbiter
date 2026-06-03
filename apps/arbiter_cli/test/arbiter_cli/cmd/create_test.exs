@@ -63,4 +63,77 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert exit_code == 1
     assert err =~ "validation failed"
   end
+
+  test "--tracker-ref passes the ref through as tracker_ref" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "bd-002", "title" => "Bound", "tracker_ref" => "777"})
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Create.run(["Bound", "--tracker-ref", "777", "--json"]) end)
+
+    assert exit_code == 0
+    assert {:ok, %{"tracker_ref" => "777"}} = Jason.decode(String.trim(out))
+
+    assert_received {:posted, body}
+    assert body["tracker_ref"] == "777"
+    refute Map.has_key?(body, "skip_upstream_create")
+  end
+
+  test "--no-tracker forwards skip_upstream_create=true to the create action" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "bd-003", "title" => "Local"})
+       end}
+    ])
+
+    {_out, _err, exit_code} = capture(fn -> Create.run(["Local", "--no-tracker"]) end)
+    assert exit_code == 0
+
+    assert_received {:posted, body}
+    assert body["skip_upstream_create"] == true
+  end
+
+  test "upstream-create failure (502 with bead body + error) surfaces non-zero" do
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       {%{
+          "issue" => %{"id" => "bd-004", "title" => "Half"},
+          "error" => %{
+            "type" => "upstream_create_failed",
+            "message" => "bead bd-004 created locally but upstream github create failed: boom",
+            "details" => %{"bead_id" => "bd-004", "tracker_type" => "github"}
+          }
+        }, 502}}
+    ])
+
+    {_out, err, exit_code} = capture(fn -> Create.run(["Half"]) end)
+    assert exit_code != 0
+    assert err =~ "upstream"
+    assert err =~ "bd-004"
+  end
 end
