@@ -1,0 +1,7 @@
+# <%= @coordinator_cap %> Memory
+
+Index of persistent memory across sessions. Each entry links to a file in
+this directory. Keep this lean — one line per memory.
+
+<!-- Add entries below as you accumulate memory. Format: -->
+<!-- - [Title](filename.md) — one-line hook -->
