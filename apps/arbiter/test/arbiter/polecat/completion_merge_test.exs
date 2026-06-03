@@ -11,6 +11,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Messages.Message
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Sling
 
@@ -144,5 +145,67 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     assert {:merge_failed, _reason} = snap.meta.failure_reason
     # Critically: not silently :completed.
     refute snap.status == :completed
+  end
+
+  test "a conflicting auto-merge aborts, keeps main clean, escalates, and does NOT close the bead",
+       %{repo: repo, ws: ws} do
+    # bd-1rhyla: a conflicted auto-merge once left main half-merged + uncompilable
+    # and took the live server down. Prove the full recovery contract end-to-end.
+    {:ok, bead} =
+      Ash.create(Issue, %{
+        title: "conflict me for real",
+        workspace_id: ws.id,
+        issue_type: :feature
+      })
+
+    # Diverging edits to the same file on both branches → a genuine merge conflict.
+    {_, 0} = git(["checkout", "-q", "-b", "feature/conflict"], repo)
+    File.write!(Path.join(repo, "README.md"), "from feature\n")
+    {_, 0} = git(["commit", "-q", "-am", "feature edit"], repo)
+    {_, 0} = git(["checkout", "-q", "main"], repo)
+    File.write!(Path.join(repo, "README.md"), "from main\n")
+    {_, 0} = git(["commit", "-q", "-am", "main edit"], repo)
+
+    {head_before, 0} = git(["rev-parse", "HEAD"], repo)
+
+    meta = %{
+      branch: "feature/conflict",
+      repo_path: repo,
+      target_branch: "main",
+      merge_title: "Merge #{bead.id}"
+    }
+
+    {:ok, pid} =
+      Polecat.start(bead_id: bead.id, rig: "merge/rig", workspace_id: ws.id, meta: meta)
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+    :ok = Polecat.advance(pid, :claude)
+    send(pid, {:__claude_session_done__, "arb done"})
+
+    wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
+
+    # 1. main is unchanged + compilable: HEAD didn't move, no merge commit, tree clean.
+    {head_after, 0} = git(["rev-parse", "HEAD"], repo)
+    assert head_after == head_before
+    {merges, 0} = git(["rev-list", "--merges", "--count", "main"], repo)
+    assert String.trim(merges) == "0"
+    assert {"", 0} = git(["status", "--porcelain"], repo)
+    refute File.read!(Path.join(repo, "README.md")) =~ "<<<<<<<"
+
+    # 2. the bead is NOT closed (parked for rebase) — and the polecat failed, not completed.
+    snap = Polecat.state(pid)
+    assert snap.status == :failed
+    assert snap.meta.failure_reason == :merge_conflict
+    {:ok, reloaded} = Ash.get(Issue, bead.id)
+    refute reloaded.status == :closed
+    assert reloaded.notes =~ "Merge conflict"
+    assert reloaded.notes =~ "README.md"
+
+    # 3. the Admiral inbox got an escalation naming the conflicting files.
+    escalations = Message.inbox("admiral", workspace_id: ws.id)
+    escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
+    assert escalation
+    assert escalation.body =~ "README.md"
+    assert escalation.body =~ "feature/conflict"
   end
 end

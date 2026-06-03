@@ -53,6 +53,39 @@ defmodule Arbiter.Mergers.DirectTest do
     end
   end
 
+  describe "open/4 on a conflicting merge (bd-1rhyla)" do
+    # A conflicting auto-merge once left the canonical tree half-merged and
+    # uncompilable, wedging the live server. open/4 MUST abort the merge so the
+    # tree stays clean + compilable, and report the conflicting files.
+    @tag :tmp_dir
+    test "aborts the merge, leaves main clean + unchanged, and names the conflicting files",
+         %{tmp_dir: dir} do
+      build_conflict_repo(dir)
+
+      # Tip of main before the attempted merge — must be unchanged afterward.
+      {head_before, 0} = git(dir, ["rev-parse", "HEAD"])
+
+      assert {:error, {:merge_conflict, detail}} =
+               Direct.open("feature/conflict", "Merge feature/conflict", "", %{
+                 repo_path: dir,
+                 target_branch: "main"
+               })
+
+      assert detail.branch == "feature/conflict"
+      assert "shared.txt" in detail.files
+      assert is_binary(detail.output)
+
+      # The merge was aborted: HEAD is still main, at the same commit, and the
+      # working tree is clean (no conflict markers, no unmerged paths) — the
+      # canonical checkout the live server compiles from is intact.
+      assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+      assert {^head_before, 0} = git(dir, ["rev-parse", "HEAD"])
+      assert {"", 0} = git(dir, ["status", "--porcelain"])
+      assert {"", 0} = git(dir, ["diff", "--name-only", "--diff-filter=U"])
+      refute File.read!(Path.join(dir, "shared.txt")) =~ "<<<<<<<"
+    end
+  end
+
   describe "no-op / constant callbacks" do
     test "get/1 always reports :merged" do
       assert Direct.get("direct:anything") == {:ok, %{status: :merged}}
@@ -99,6 +132,32 @@ defmodule Arbiter.Mergers.DirectTest do
     {_, 0} = git(dir, ["commit", "-q", "-m", "add feature"])
 
     {_, 0} = git(dir, ["checkout", "-q", "main"])
+  end
+
+  # Builds a repo where `main` and `feature/conflict` both modify the same line
+  # of shared.txt, so a `--no-ff` merge conflicts. Leaves HEAD on main.
+  defp build_conflict_repo(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "polecat@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Polecat"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "shared.txt"), "original\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    # Diverging change on the feature branch.
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/conflict"])
+    File.write!(Path.join(dir, "shared.txt"), "from feature\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "feature change"])
+
+    # Conflicting change on main.
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+    File.write!(Path.join(dir, "shared.txt"), "from main\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "main change"])
   end
 
   defp git(dir, args), do: System.cmd("git", args, stderr_to_stdout: true, cd: dir)
