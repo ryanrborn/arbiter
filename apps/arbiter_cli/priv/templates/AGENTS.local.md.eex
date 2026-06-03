@@ -5,9 +5,9 @@ gitignored and never committed — anything here stays on this machine only.
 
 Use it for local identity and preferences that should not be shared with
 collaborators: a persona for the <%= @coordinator %> session, machine-specific
-paths, private reminders, or any overrides to the doctrine in `CLAUDE.md`.
+paths, private reminders, or any overrides to the doctrine in `AGENTS.md`.
 
-`CLAUDE.md` (the committed role doc) is loaded alongside this file, so
+`AGENTS.md` (the committed role doc) is loaded alongside this file, so
 whatever you put here layers on top of it.
 
 <!--
@@ -18,5 +18,5 @@ Example — uncomment and edit to taste:
 - Voice: <how it should address you>
 
 ## Local overrides
-- <anything that differs from CLAUDE.md on this machine>
+- <anything that differs from AGENTS.md on this machine>
 -->
