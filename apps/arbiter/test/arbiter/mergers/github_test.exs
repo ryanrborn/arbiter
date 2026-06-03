@@ -413,6 +413,129 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "per-rig repo derivation (workspace cfg without :repo)" do
+    setup do
+      # Build a tmp git repo whose origin remote is set so the adapter can
+      # derive owner/repo from it. The repo never has any commits — only the
+      # remote URL is exercised by `git remote get-url origin`.
+      tmp = System.tmp_dir!()
+      rig = Path.join(tmp, "arbiter_github_perrig_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(rig)
+      {_, 0} = System.cmd("git", ["init", "-q", "--initial-branch=main", rig])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          rig,
+          "remote",
+          "add",
+          "origin",
+          "git@github.com:leo-technologies-llc/verus_server.git"
+        ])
+
+      # Workspace cfg has owner + token but no repo — the multi-rig shape.
+      Config.put_active(%{
+        "owner" => "leo-technologies-llc",
+        "credentials_ref" => "env:#{@env_var}",
+        "default_target_branch" => "main"
+      })
+
+      on_exit(fn -> File.rm_rf!(rig) end)
+
+      {:ok, rig: rig}
+    end
+
+    test "open/4 derives owner/repo from :repo_path and embeds them in mr_ref", %{rig: rig} do
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} ==
+                 {"POST", "/repos/leo-technologies-llc/verus_server/pulls"}
+
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 7})
+      end)
+
+      assert {:ok, "leo-technologies-llc/verus_server#7"} =
+               Github.open("feature/x", "T", "B", %{repo_path: rig})
+    end
+
+    test "get/1 routes to the embedded owner/repo, not the cfg one" do
+      # We supply a workspace cfg with no `repo` AND a different owner to
+      # prove the adapter trusts the mr_ref, not the cfg, on read.
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/leo-technologies-llc/verus_server/pulls/7" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "https://github.com/leo-technologies-llc/verus_server/pull/7"
+            })
+
+          "/repos/leo-technologies-llc/verus_server/pulls/7/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok,
+              %{
+                ref: "leo-technologies-llc/verus_server#7",
+                status: :open,
+                url: "https://github.com/leo-technologies-llc/verus_server/pull/7"
+              }} = Github.get("leo-technologies-llc/verus_server#7")
+    end
+
+    test "merge/1 routes to the embedded owner/repo" do
+      stub(fn conn ->
+        assert conn.method == "PUT"
+
+        assert conn.request_path ==
+                 "/repos/leo-technologies-llc/verus_server/pulls/7/merge"
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+      end)
+
+      assert :ok = Github.merge("leo-technologies-llc/verus_server#7")
+    end
+
+    test "open/4 errors when cfg has no repo AND opts has no :repo_path" do
+      assert {:error, %Error{kind: :config_missing}} =
+               Github.open("feature/x", "T", "B", %{})
+    end
+
+    test "open/4 errors when :repo_path points at a non-git path" do
+      tmp = System.tmp_dir!()
+      bad = Path.join(tmp, "arbiter_perrig_not_git_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(bad)
+      on_exit(fn -> File.rm_rf!(bad) end)
+
+      assert {:error, %Error{kind: :config_missing}} =
+               Github.open("feature/x", "T", "B", %{repo_path: bad})
+    end
+
+    test "link_for/1 with embedded mr_ref uses the embedded owner/repo" do
+      assert Github.link_for("leo-technologies-llc/verus_server#7") ==
+               "https://github.com/leo-technologies-llc/verus_server/pull/7"
+    end
+
+    test "workspace cfg repo wins over per-rig derivation when both are present", %{rig: rig} do
+      # Re-pin the workspace cfg to include `repo` — the rig's remote points
+      # at verus_server, but the cfg should still win (single-repo workspace
+      # backwards-compat).
+      Config.put_active(%{
+        "owner" => @owner,
+        "repo" => @repo,
+        "credentials_ref" => "env:#{@env_var}"
+      })
+
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} == {"POST", "/repos/octo/widget/pulls"}
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 9})
+      end)
+
+      assert {:ok, "#9"} = Github.open("feature/x", "T", "B", %{repo_path: rig})
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()

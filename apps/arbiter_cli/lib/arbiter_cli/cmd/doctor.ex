@@ -15,12 +15,7 @@ defmodule ArbiterCli.Cmd.Doctor do
 
   def run(argv) do
     mode = Output.mode(argv)
-
-    results = [
-      check_phoenix(),
-      check_workspaces_exist(),
-      check_active_workspace()
-    ]
+    results = checks()
 
     case mode do
       :json -> emit_json(results)
@@ -30,6 +25,43 @@ defmodule ArbiterCli.Cmd.Doctor do
     if Enum.any?(results, fn r -> r.status == :fail end) do
       Output.halt(1)
     end
+  end
+
+  @doc """
+  Run every health check and return the result structs, in display order.
+  Shared by `arb doctor` and `arb start` so "green" has one definition.
+  """
+  @spec checks() :: [Result.t()]
+  def checks do
+    [
+      check_phoenix(),
+      check_workspaces_exist(),
+      check_active_workspace()
+    ]
+  end
+
+  @doc """
+  True when Phoenix's HTTP API is reachable — the first health check on its
+  own. This is the "is the stack already running?" signal `arb start` uses to
+  stay a no-op.
+  """
+  @spec reachable?() :: boolean()
+  def reachable?, do: check_phoenix().status == :ok
+
+  @doc "True when every health check passes (doctor is fully green)."
+  @spec green?() :: boolean()
+  def green?, do: Enum.all?(checks(), fn r -> r.status == :ok end)
+
+  @doc """
+  Print the human-readable health report to stdout and return whether all
+  checks passed. Lets `arb start` show the same status block `arb doctor`
+  does without duplicating the formatting.
+  """
+  @spec report() :: boolean()
+  def report do
+    results = checks()
+    emit_text(results)
+    Enum.all?(results, fn r -> r.status == :ok end)
   end
 
   defp emit_text(results) do
@@ -59,6 +91,13 @@ defmodule ArbiterCli.Cmd.Doctor do
   defmodule Result do
     @moduledoc false
     defstruct [:name, :status, :detail, :hint]
+
+    @type t :: %__MODULE__{
+            name: String.t(),
+            status: :ok | :fail,
+            detail: nil | String.t(),
+            hint: nil | String.t()
+          }
   end
 
   defp check_phoenix do

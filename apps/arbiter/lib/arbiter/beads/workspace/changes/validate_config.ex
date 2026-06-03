@@ -16,6 +16,14 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"vernacular"` is present, it must be a map.
     * If `"vernacular.aliases"` is present, it must be a map of string → string.
     * If `"vernacular.emoji"` is present, it must be a map of string → string.
+    * If `"agent"` / `"review_agent"` is present, it must be a map.
+    * If `"agent.type"` is present, it must be one of the values in
+      `Arbiter.Agents.valid_agent_types/0` (`"claude"`).
+    * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
+    * If `"routing"` is present, it must be a map.
+    * If `"routing.policy"` is present, it must be one of the values in
+      `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
+      `"by_budget"`, `"round_robin"`).
 
   Unknown keys are allowed (forward-compat). Deeper validation of vernacular keys
   (coordinator, worker, etc.) is deferred to `Arbiter.Vernacular` in gte-P2 —
@@ -40,6 +48,9 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     |> validate_tracker(Map.get(config, "tracker"))
     |> validate_merge(Map.get(config, "merge"))
     |> validate_vernacular(Map.get(config, "vernacular"))
+    |> validate_agent_block("agent", Map.get(config, "agent"))
+    |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
+    |> validate_routing(Map.get(config, "routing"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -140,5 +151,67 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
 
   defp validate_string_map(changeset, _, label) do
     Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
+  end
+
+  defp validate_agent_block(changeset, _label, nil), do: changeset
+
+  defp validate_agent_block(changeset, label, block) when is_map(block) do
+    valid_types = Arbiter.Agents.valid_agent_types()
+
+    changeset
+    |> then(fn cs ->
+      case Map.get(block, "type") do
+        nil ->
+          cs
+
+        type ->
+          if type in valid_types do
+            cs
+          else
+            Changeset.add_error(cs,
+              field: :config,
+              message:
+                "#{label}.type must be one of #{Enum.join(valid_types, ", ")}; got: #{inspect(type)}"
+            )
+          end
+      end
+    end)
+    |> then(fn cs ->
+      case Map.get(block, "config") do
+        nil -> cs
+        c when is_map(c) -> cs
+        _ -> Changeset.add_error(cs, field: :config, message: "#{label}.config must be a map")
+      end
+    end)
+  end
+
+  defp validate_agent_block(changeset, label, _) do
+    Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
+  end
+
+  defp validate_routing(changeset, nil), do: changeset
+
+  defp validate_routing(changeset, routing) when is_map(routing) do
+    valid_policies = Arbiter.Agents.Routing.valid_policies()
+
+    case Map.get(routing, "policy") do
+      nil ->
+        changeset
+
+      policy ->
+        if policy in valid_policies do
+          changeset
+        else
+          Changeset.add_error(changeset,
+            field: :config,
+            message:
+              "routing.policy must be one of #{Enum.join(valid_policies, ", ")}; got: #{inspect(policy)}"
+          )
+        end
+    end
+  end
+
+  defp validate_routing(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "routing must be a map")
   end
 end
