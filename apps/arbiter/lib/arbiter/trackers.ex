@@ -107,4 +107,75 @@ defmodule Arbiter.Trackers do
   @spec list_transitions(Issue.t()) :: {:ok, [Tracker.status()]} | {:error, term()}
   def list_transitions(%Issue{tracker_ref: ref} = issue),
     do: for_bead(issue).list_transitions(ref)
+
+  @doc """
+  Lists open items from the workspace's configured tracker — used by
+  `arb list --tracker` to surface upstream backlog alongside local beads.
+
+  Resolves the adapter from `workspace.config["tracker"]["type"]`, seeds the
+  adapter's per-process config (same dance as `prepare/2`), and delegates.
+  Adapters that don't have a notion of a backlog return
+  `{:error, :not_supported}`, which callers should treat as "render local
+  beads only" rather than a hard failure.
+  """
+  @spec list_open(Arbiter.Beads.Workspace.t(), keyword()) ::
+          {:ok, [Tracker.summary()]} | {:error, :not_supported} | {:error, term()}
+  def list_open(%Arbiter.Beads.Workspace{} = workspace, opts \\ []) do
+    type = workspace_tracker_type(workspace)
+    adapter = adapter_for_workspace_type(type)
+
+    with_workspace(type, workspace, fn -> adapter.list_open(opts) end)
+  end
+
+  @doc """
+  Create a new upstream issue in the workspace's configured tracker.
+
+  Used by the `Issue.create` after-transaction hook so `arb create` can mirror
+  a new bead into the workspace's tracker. Resolves the adapter from
+  `workspace.config["tracker"]["type"]`, seeds the adapter's per-process
+  config (same dance as `prepare/2`), and dispatches to `create/1`. Workspaces
+  without a tracker (`type == :none`) or whose tracker doesn't support
+  outbound create return `{:error, :not_supported}` and callers should treat
+  that as "skip — local-only bead".
+  """
+  @spec create_for_workspace(Arbiter.Beads.Workspace.t(), Tracker.create_attrs()) ::
+          {:ok, Tracker.ref()} | {:error, :not_supported} | {:error, term()}
+  def create_for_workspace(%Arbiter.Beads.Workspace{} = workspace, attrs) when is_map(attrs) do
+    type = workspace_tracker_type(workspace)
+    adapter = adapter_for_workspace_type(type)
+
+    with_workspace(type, workspace, fn -> adapter.create(attrs) end)
+  end
+
+  defp workspace_tracker_type(%Arbiter.Beads.Workspace{config: config}) do
+    case get_in(config || %{}, ["tracker", "type"]) do
+      type when is_binary(type) ->
+        try do
+          String.to_existing_atom(type)
+        rescue
+          ArgumentError -> :none
+        end
+
+      _ ->
+        :none
+    end
+  end
+
+  # Unlike for_bead/1, the workspace-tracker-type may name an adapter we don't
+  # have shipped (e.g. `:linear`). Fall back to None rather than raising —
+  # the caller is asking us to list, and "no backend yet" is naturally
+  # :not_supported (which is what None returns).
+  defp adapter_for_workspace_type(type) do
+    case Map.fetch(@adapters, type) do
+      {:ok, adapter} -> adapter
+      :error -> None
+    end
+  end
+
+  # Seed the adapter's per-process config — same dance as `prepare/2`, but
+  # `prepare/2` takes an Issue and we don't have one here.
+  defp with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
+  defp with_workspace(:jira, workspace, fun), do: Jira.with_workspace(workspace, fun)
+  defp with_workspace(:shortcut, workspace, fun), do: Shortcut.with_workspace(workspace, fun)
+  defp with_workspace(_, _workspace, fun), do: fun.()
 end

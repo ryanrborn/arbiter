@@ -1,14 +1,29 @@
 defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
   `arb create <title> [--description ...] [--priority N] [--type T]
-                       [--deps id1,id2] [--labels a,b] [--assignee a]`
+                       [--deps id1,id2] [--labels a,b] [--assignee a]
+                       [--tracker-ref REF] [--no-tracker]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
+
+  When the workspace has a tracker configured (`config["tracker"]["type"] !=
+  none`), the server **also creates a corresponding upstream issue** and
+  writes the returned ref back into `tracker_ref`. To opt out of that:
+
+    * `--tracker-ref REF` — bind the new bead to an *existing* upstream
+      issue (skip outbound create). The ref is passed through to the create
+      action as `tracker_ref`; the server's after-transaction hook sees the
+      ref is already set and skips the API call.
+    * `--no-tracker` / `--local-only` — create a purely local bead even on a
+      tracker-configured workspace. Forwards `skip_upstream_create=true` as
+      the action argument.
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
   itself is created. If any dependency creation fails the new issue is left
-  in place — the failure is reported and arb exits non-zero.
+  in place — the failure is reported and arb exits non-zero. Mirrors the
+  upstream-create failure semantics: the bead is durable, the failure is
+  surfaced.
 
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning
@@ -24,6 +39,9 @@ defmodule ArbiterCli.Cmd.Create do
     deps: :string,
     labels: :string,
     assignee: :string,
+    tracker_ref: :string,
+    no_tracker: :boolean,
+    local_only: :boolean,
     json: :boolean
   ]
 
@@ -40,12 +58,16 @@ defmodule ArbiterCli.Cmd.Create do
 
     workspace_id = Workspace.id_or_halt()
 
+    skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
+
     payload =
       %{"title" => title, "workspace_id" => workspace_id}
       |> maybe_put("description", opts[:description])
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("issue_type", opts[:type])
       |> maybe_put("assignee", opts[:assignee])
+      |> maybe_put("tracker_ref", opts[:tracker_ref])
+      |> maybe_put_flag("skip_upstream_create", skip_upstream?)
 
     if opts[:labels] && mode == :text do
       IO.puts(
@@ -56,8 +78,15 @@ defmodule ArbiterCli.Cmd.Create do
 
     issue =
       case Client.post("/api/issues", payload) do
-        {:ok, body} -> body
-        {:error, err} -> Output.die(err)
+        {:ok, body} ->
+          body
+
+        {:error, err} ->
+          # Includes the upstream-create-failed (HTTP 502) path: the bead was
+          # created locally but the upstream tracker call failed. The error
+          # message embeds the bead id so the user can recover via
+          # `arb update <id> --tracker-ref N`.
+          Output.die(err)
       end
 
     if opts[:deps] do
@@ -70,6 +99,9 @@ defmodule ArbiterCli.Cmd.Create do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put_flag(map, _key, false), do: map
+  defp maybe_put_flag(map, key, true), do: Map.put(map, key, true)
 
   defp attach_deps(new_id, raw) do
     raw

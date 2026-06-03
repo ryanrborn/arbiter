@@ -551,6 +551,80 @@ defmodule Arbiter.Polecat do
     :error
   end
 
+  # ---- Usage ledger (Arbiter.Usage.Event) -------------------------------
+
+  # Best-effort: persist a row in the structured usage ledger when a Claude
+  # session exits. The session carries everything we need (model, tokens,
+  # cost, duration) in its `:usage` map; we shovel it into `Arbiter.Usage.Event`
+  # alongside the polecat's identifying fields. A reviewer polecat (spawned by
+  # the Tribunal, meta.role == :reviewer) writes a `:review` step row;
+  # everything else writes `:work`. Missing fields are fine — we record what
+  # we have rather than dropping the row.
+  defp record_usage_event(%State{} = state, %{} = session, exit_status) do
+    usage = Arbiter.Polecat.ClaudeSession.usage_summary(session)
+    role = Map.get(state.meta || %{}, :role)
+
+    step =
+      cond do
+        role == :reviewer -> :review
+        true -> :work
+      end
+
+    attrs = %{
+      bead_id: state.bead_id,
+      workspace_id: state.workspace_id,
+      rig: state.rig,
+      step: step,
+      model: Map.get(usage, :model),
+      provider: provider_for(Map.get(usage, :model)),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out),
+      cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
+      cache_read_tokens: Map.get(usage, :cache_read_tokens),
+      cost_usd: Map.get(usage, :cost_usd),
+      duration_ms: Map.get(usage, :duration_ms),
+      exit_status: exit_status,
+      polecat_run_id: state.run_id,
+      session_id: Map.get(usage, :session_id),
+      occurred_at: DateTime.utc_now(),
+      raw: Map.get(usage, :raw)
+    }
+
+    case Ash.create(Arbiter.Usage.Event, attrs) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat.record_usage_event/3 swallowed for bead=#{state.bead_id}: #{inspect(reason)}"
+        )
+
+        :error
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Polecat.record_usage_event/3 raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+      )
+
+      :error
+  end
+
+  # Map a model name to a provider key. Currently every model we see is
+  # Claude — but the column is here for the day we route to other agents and
+  # the ledger needs to roll up cross-provider.
+  defp provider_for(nil), do: nil
+
+  defp provider_for(model) when is_binary(model) do
+    cond do
+      String.starts_with?(model, "claude") -> "claude"
+      String.contains?(model, "gpt") -> "openai"
+      true -> "other"
+    end
+  end
+
+  defp provider_for(_), do: nil
+
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
 
@@ -685,10 +759,17 @@ defmodule Arbiter.Polecat do
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
         |> Map.put(:exited_at, nil)
+        |> Map.put(:activity, "starting")
+        |> Map.put(:activity_at, DateTime.utc_now())
         |> Map.put(:output_log, open_output_log(state))
 
       sessions = Map.put(state.claude_sessions, port, session)
-      new_state = %State{state | claude_sessions: sessions}
+
+      # Mark the polecat claude-driven so views can show the live activity
+      # signal (mirrored below) instead of a frozen workflow step — the
+      # claude-driven Driver never ticks the Machine. See bd-c919xj.
+      meta = Map.put(state.meta || %{}, :claude_session, true)
+      new_state = %State{state | claude_sessions: sessions, meta: meta}
       new_state = sync_session_meta(new_state, port)
 
       {:reply, {:ok, port}, new_state}
@@ -714,6 +795,7 @@ defmodule Arbiter.Polecat do
         updated = Arbiter.Polecat.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
+        record_usage_event(new_state, updated, status)
         {:noreply, sync_session_meta(new_state, port)}
 
       :error ->
@@ -786,13 +868,24 @@ defmodule Arbiter.Polecat do
   defp sync_session_meta(%State{claude_sessions: sessions, meta: meta} = state, port) do
     case Map.get(sessions, port) do
       %{} = session ->
+        new_activity = Map.get(session, :activity)
+        old_activity = Map.get(meta, :activity)
+
         meta =
           meta
           |> Map.put(:output_lines, Enum.reverse(session.output_lines))
           |> Map.put(:exit_status, session.exit_status)
+          |> maybe_put(:activity, new_activity)
+          |> maybe_put(:activity_at, Map.get(session, :activity_at))
           |> maybe_put(:exited_at, session.exited_at)
 
-        %State{state | meta: meta}
+        new_state = %State{state | meta: meta}
+
+        if new_activity != old_activity do
+          broadcast_lifecycle(:updated, new_state)
+        end
+
+        new_state
 
       _ ->
         state
@@ -848,17 +941,23 @@ defmodule Arbiter.Polecat do
           # fires only on tribunal_verdict/2 :approve.
           enter_tribunal(state, branch)
         else
-          merge_branch(state, branch)
+          merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
         end
     end
   end
 
   # The shared "integrate this branch" path: open the MR / run the merge, or fail
   # the polecat (not silently complete it) if the adapter rejects.
-  defp merge_branch(%State{meta: meta} = state, branch) do
+  #
+  # `opts` may carry `:via_tribunal` (default `false`). When true the Warden is
+  # told the gate has already approved this MR, so it merges on its first poll
+  # instead of waiting for a hosted-forge approval signal that will never come
+  # (bd-66ey1o: the Tribunal approves in-process, it does NOT post a GitHub
+  # review).
+  defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
     title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
 
-    case do_open_mr(state, branch, title, "", %{}) do
+    case do_open_mr(state, branch, title, "", opts) do
       {:ok, _mr_ref, new_state} -> new_state
       {:error, reason, _state} -> fail_now(state, {:merge_failed, reason})
     end
@@ -870,6 +969,24 @@ defmodule Arbiter.Polecat do
       _ -> nil
     end
   end
+
+  # Pull merge-adapter overrides out of the polecat's meta so the
+  # tribunal-approve path can route through a test stub adapter without going
+  # through workspace config. Tests set these via `meta:` at polecat start;
+  # production callers leave them nil and rely on workspace resolution.
+  defp merge_opts_from_meta(meta, base) when is_map(base) do
+    meta = meta || %{}
+
+    base
+    |> maybe_put_meta(:adapter, Map.get(meta, :merger_adapter_override))
+    |> maybe_put_meta(:workspace, Map.get(meta, :merger_workspace_override))
+    |> maybe_put_meta(:interval_ms, Map.get(meta, :warden_interval_ms))
+    |> maybe_put_meta(:initial_delay_ms, Map.get(meta, :warden_initial_delay_ms))
+    |> maybe_put_meta(:max_polls, Map.get(meta, :warden_max_polls))
+  end
+
+  defp maybe_put_meta(map, _key, nil), do: map
+  defp maybe_put_meta(map, key, value), do: Map.put(map, key, value)
 
   # ---- review gate (Tribunal) --------------------------------------------
 
@@ -970,7 +1087,10 @@ defmodule Arbiter.Polecat do
   defp apply_tribunal_verdict(%State{} = state, {:approve, findings}) do
     record_tribunal_outcome(state, :approve, findings)
     branch = Map.get(state.meta, :tribunal_branch) || mergeable_branch(state.meta)
-    merge_branch(state, branch)
+    # Tell the Warden the gate approved this MR. Without this, hosted-forge
+    # adapters (Github) park forever at :awaiting_review waiting for a
+    # PR-level approval the Tribunal never posts (bd-66ey1o).
+    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_tribunal: true}))
   end
 
   defp apply_tribunal_verdict(%State{} = state, {:request_changes, findings}) do
@@ -1266,11 +1386,20 @@ defmodule Arbiter.Polecat do
 
   # Spawn the Warden that polls for approval. auto_merge + poll interval come
   # from the workspace config (opts may override, primarily for tests).
+  #
+  # The `:via_tribunal` opt (carried through from the Tribunal-APPROVE merge
+  # path) tells the Warden the gate has already approved this MR; it short-
+  # circuits hosted-forge approval polling and merges on its first poll. The
+  # workspace's auto_merge setting is irrelevant in that case — a Tribunal
+  # APPROVE is the merge-now signal.
   defp start_warden(%State{} = state, workspace, opts) do
+    via_tribunal = Map.get(opts, :via_tribunal, false)
+
     auto_merge =
-      case Map.fetch(opts, :auto_merge) do
-        {:ok, v} -> v
-        :error -> workspace_auto_merge?(workspace)
+      cond do
+        via_tribunal -> true
+        Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
+        true -> workspace_auto_merge?(workspace)
       end
 
     warden_opts =
@@ -1280,10 +1409,12 @@ defmodule Arbiter.Polecat do
         mr_ref: state.mr_ref,
         adapter: state.merger_adapter,
         workspace: workspace,
-        auto_merge: auto_merge
+        auto_merge: auto_merge,
+        via_tribunal: via_tribunal
       ]
       |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
       |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
+      |> maybe_opt(:max_polls, Map.get(opts, :max_polls))
 
     case Arbiter.Polecat.Warden.start(warden_opts) do
       {:ok, _pid} ->
