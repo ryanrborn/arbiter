@@ -85,6 +85,22 @@ defmodule Arbiter.Mergers.Github do
              raw: body
            }}
 
+        {:ok, %Req.Response{status: 422, body: body}} ->
+          # GitHub returns 422 when an open PR already exists for the head
+          # branch. Treat open/4 as idempotent: resolve the existing PR
+          # instead of failing the retry. Reviewer requests are skipped — the
+          # existing PR may already have them, and the merge step is what
+          # the caller actually wants on retry.
+          if already_exists_error?(body) do
+            case find_existing_open_pr_number(cfg, branch) do
+              {:ok, number} -> {:ok, "#" <> Integer.to_string(number)}
+              :none -> {:error, http_error(422, body)}
+              {:error, _} -> {:error, http_error(422, body)}
+            end
+          else
+            {:error, http_error(422, body)}
+          end
+
         {:ok, %Req.Response{status: status, body: body}} ->
           {:error, http_error(status, body)}
 
@@ -217,6 +233,41 @@ defmodule Arbiter.Mergers.Github do
       json: payload
     )
     |> expect_ok()
+  end
+
+  # ---- Internals: idempotent open ------------------------------------------
+
+  # GitHub's 422 "already exists" payload looks like:
+  #   %{"message" => "Validation Failed",
+  #     "errors" => [%{"code" => "custom",
+  #                    "message" => "A pull request already exists for owner:branch."}]}
+  defp already_exists_error?(%{"errors" => errors}) when is_list(errors) do
+    Enum.any?(errors, fn
+      %{"message" => msg} when is_binary(msg) -> String.contains?(msg, "already exists")
+      _ -> false
+    end)
+  end
+
+  defp already_exists_error?(_), do: false
+
+  defp find_existing_open_pr_number(cfg, branch) do
+    head = "#{cfg.owner}:#{branch}"
+
+    case request(cfg, :get, "/repos/#{cfg.owner}/#{cfg.repo}/pulls",
+           params: [head: head, state: "open"]
+         ) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        case body do
+          [%{"number" => number} | _] when is_integer(number) -> {:ok, number}
+          _ -> :none
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
   end
 
   # ---- Internals: response interpretation ----------------------------------
