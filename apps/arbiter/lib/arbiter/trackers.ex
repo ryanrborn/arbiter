@@ -107,4 +107,25 @@ defmodule Arbiter.Trackers do
   @spec list_transitions(Issue.t()) :: {:ok, [Tracker.status()]} | {:error, term()}
   def list_transitions(%Issue{tracker_ref: ref} = issue),
     do: for_bead(issue).list_transitions(ref)
+
+  @doc """
+  Create an upstream item in `type`'s tracker for the given bead-domain attrs.
+
+  Unlike the other wrappers, there's no `Issue` to dispatch from yet —
+  callers (the `Issue.create` after-transaction hook, the CLI `claim` flow if
+  ever inverted) pass the tracker type explicitly. Workspace is used to seed
+  the per-process adapter config exactly like `prepare/2`; pass `nil` to fall
+  back to `Application.get_env/3` defaults.
+  """
+  @spec create(atom(), Arbiter.Beads.Workspace.t() | nil, Tracker.create_attrs()) ::
+          {:ok, Tracker.ref()} | {:error, term()}
+  def create(type, workspace, attrs) when is_atom(type) and is_map(attrs) do
+    prepare_type(type, workspace)
+    for_type(type).create(attrs)
+  end
+
+  defp prepare_type(:github, workspace), do: GitHub.Config.put_active(workspace)
+  defp prepare_type(:jira, workspace), do: Jira.Config.put_active(workspace)
+  defp prepare_type(:shortcut, workspace), do: Shortcut.Config.put_active(workspace)
+  defp prepare_type(_, _), do: :ok
 end

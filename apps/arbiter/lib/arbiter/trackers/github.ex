@@ -144,6 +144,68 @@ defmodule Arbiter.Trackers.GitHub do
     end
   end
 
+  @impl true
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs) do
+      payload =
+        %{"title" => title, "body" => Map.get(attrs, :description) || ""}
+        |> maybe_put_labels(cfg, Map.get(attrs, :status))
+        |> maybe_put_assignees(Map.get(attrs, :assignee))
+
+      path = "/repos/#{cfg.owner}/#{cfg.repo}/issues"
+
+      case request(cfg, :post, path, json: payload) |> handle_json() do
+        {:ok, %{"number" => n}} when is_integer(n) and n > 0 ->
+          {:ok, Integer.to_string(n)}
+
+        {:ok, other} ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: nil,
+             message: "POST /issues returned unexpected payload (no \"number\")",
+             raw: other
+           }}
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  defp fetch_title(%{title: t}) when is_binary(t) and t != "", do: {:ok, t}
+
+  defp fetch_title(_) do
+    {:error,
+     %Error{
+       kind: :validation_failed,
+       status: nil,
+       message: "GitHub create requires a non-empty :title",
+       raw: nil
+     }}
+  end
+
+  # If the bead's status has a managed label, seed the new issue with it so
+  # an :in_progress create lands as an open issue carrying "in progress"
+  # (same vocabulary the transition callback maintains).
+  defp maybe_put_labels(payload, _cfg, nil), do: payload
+
+  defp maybe_put_labels(payload, cfg, status) when is_atom(status) do
+    case Map.get(cfg.status_map, status) do
+      %{label: label} when is_binary(label) and label != "" ->
+        Map.put(payload, "labels", [label])
+
+      _ ->
+        payload
+    end
+  end
+
+  defp maybe_put_assignees(payload, login) when is_binary(login) and login != "",
+    do: Map.put(payload, "assignees", [login])
+
+  defp maybe_put_assignees(payload, _), do: payload
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """

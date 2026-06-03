@@ -91,6 +91,11 @@ defmodule Arbiter.Beads.Issue do
                Arbiter.Beads.Issue.broadcast_lifecycle(:created, issue)
                {:ok, issue}
              end)
+
+      # Mirror the new bead to the configured upstream tracker. Runs in an
+      # after_transaction hook so a tracker failure doesn't roll the bead
+      # back — see the change moduledoc for the rationale.
+      change {Arbiter.Beads.Issue.Changes.CreateTracker, []}
     end
 
     update :update do

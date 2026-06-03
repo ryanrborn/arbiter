@@ -8,6 +8,11 @@ defmodule Arbiter.Trackers.None do
   `parse_ref/1` always returns `:error` (we never own a ref).
   `list_transitions/1` returns the full bead status set, since the bead ledger
   has no externally-imposed restrictions.
+
+  `create/1` is the one explicit error: a bead with `tracker_type: :none` has
+  no upstream to create against, so attempting to mirror it is a programming
+  error. The outbound create-hook is responsible for skipping `:none` beads
+  before reaching this adapter.
   """
 
   @behaviour Arbiter.Trackers.Tracker
@@ -29,4 +34,7 @@ defmodule Arbiter.Trackers.None do
 
   @impl true
   def list_transitions(_ref), do: {:ok, [:open, :in_progress, :closed]}
+
+  @impl true
+  def create(_attrs), do: {:error, :no_tracker_configured}
 end

@@ -1,9 +1,23 @@
 defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
   `arb create <title> [--description ...] [--priority N] [--type T]
-                       [--deps id1,id2] [--labels a,b] [--assignee a]`
+                       [--deps id1,id2] [--labels a,b] [--assignee a]
+                       [--tracker-ref REF | --no-tracker]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
+
+  ## Tracker integration
+
+  When the workspace has a tracker configured (`config["tracker"]["type"] !=
+  "none"`), `arb create` also creates a matching upstream item (e.g. a GitHub
+  issue) and links the new bead to it via `tracker_ref`. Override with:
+
+    * `--tracker-ref REF`  bind the new bead to an *existing* upstream item;
+                           no upstream create is made (the value is passed
+                           through as-is, so use the adapter's canonical
+                           form, e.g. the issue number for GitHub).
+    * `--no-tracker`       create a local-only bead (`tracker_type=none`)
+                           even when the workspace has a tracker.
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
@@ -24,12 +38,18 @@ defmodule ArbiterCli.Cmd.Create do
     deps: :string,
     labels: :string,
     assignee: :string,
-    json: :boolean
+    json: :boolean,
+    tracker_ref: :string,
+    no_tracker: :boolean
   ]
 
   def run(argv) do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
+
+    if opts[:tracker_ref] && opts[:no_tracker] do
+      Output.die("--tracker-ref and --no-tracker are mutually exclusive")
+    end
 
     title =
       case rest do
@@ -46,6 +66,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("priority", opts[:priority])
       |> maybe_put("issue_type", opts[:type])
       |> maybe_put("assignee", opts[:assignee])
+      |> apply_tracker_opts(opts)
 
     if opts[:labels] && mode == :text do
       IO.puts(
@@ -65,6 +86,14 @@ defmodule ArbiterCli.Cmd.Create do
     end
 
     Output.emit_issue(issue, mode)
+  end
+
+  defp apply_tracker_opts(payload, opts) do
+    cond do
+      opts[:no_tracker] -> Map.put(payload, "tracker_type", "none")
+      opts[:tracker_ref] -> Map.put(payload, "tracker_ref", opts[:tracker_ref])
+      true -> payload
+    end
   end
 
   defp maybe_put(map, _key, nil), do: map

@@ -28,6 +28,12 @@ defmodule Arbiter.Trackers.Tracker do
       `:error` if the string is clearly not for this tracker.
     * `list_transitions/1` — return the set of legal next-states from the
       current state, as bead-vocabulary atoms.
+    * `create/1` — create a new upstream item from bead-domain attributes
+      and return its canonical ref. Used by the outbound `arb create` flow
+      that mirrors a newly-created bead to the configured tracker. The
+      `attrs` map carries bead-vocabulary keys (`:title`, `:description`,
+      and optionally `:assignee`, `:status`); the adapter renames and maps
+      as needed (GitHub → labels for status; Jira → ADF for description).
   """
 
   @typedoc "Tracker-specific reference (Jira issue key, Linear node id, etc.)."
@@ -36,10 +42,23 @@ defmodule Arbiter.Trackers.Tracker do
   @typedoc "Bead-domain status atoms."
   @type status :: :open | :in_progress | :closed
 
+  @typedoc """
+  Bead-domain attributes accepted by `create/1`. `:title` is required;
+  everything else is best-effort and may be ignored by adapters that don't
+  support it.
+  """
+  @type create_attrs :: %{
+          required(:title) => String.t(),
+          optional(:description) => String.t(),
+          optional(:assignee) => String.t() | nil,
+          optional(:status) => status()
+        }
+
   @callback fetch(ref) :: {:ok, map()} | {:error, term()}
   @callback transition(ref, status) :: :ok | {:error, term()}
   @callback update_fields(ref, map()) :: :ok | {:error, term()}
   @callback link_for(ref) :: String.t()
   @callback parse_ref(String.t()) :: {:ok, ref} | :error
   @callback list_transitions(ref) :: {:ok, [status]} | {:error, term()}
+  @callback create(create_attrs) :: {:ok, ref} | {:error, term()}
 end

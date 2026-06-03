@@ -164,6 +164,20 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
+  @impl true
+  def create(_attrs) do
+    # Stub: outbound create from a bead to Jira is not yet wired up. The
+    # behaviour is kept total so dispatch from `Arbiter.Trackers.create/3`
+    # never falls through to a function-clause error.
+    {:error,
+     %Error{
+       kind: :not_implemented,
+       status: nil,
+       message: "Jira tracker create/1 is not yet implemented",
+       raw: nil
+     }}
+  end
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """

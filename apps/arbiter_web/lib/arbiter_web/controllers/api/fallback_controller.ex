@@ -79,18 +79,28 @@ defmodule ArbiterWeb.Api.FallbackController do
   end
 
   def call(conn, {:error, %Ash.Error.Unknown{} = err}) do
-    # Surface the cause when we can but never the full stack.
-    causes = err |> Map.get(:errors, []) |> Enum.map(&inspect/1)
+    case extract_create_tracker_error(err) do
+      %Arbiter.Beads.Issue.CreateTrackerError{} = cte ->
+        create_tracker_error_response(conn, cte)
 
-    conn
-    |> put_status(:internal_server_error)
-    |> json(%{
-      error: %{
-        type: "internal_error",
-        message: "internal server error",
-        details: %{causes: causes}
-      }
-    })
+      nil ->
+        # Surface the cause when we can but never the full stack.
+        causes = err |> Map.get(:errors, []) |> Enum.map(&inspect/1)
+
+        conn
+        |> put_status(:internal_server_error)
+        |> json(%{
+          error: %{
+            type: "internal_error",
+            message: "internal server error",
+            details: %{causes: causes}
+          }
+        })
+    end
+  end
+
+  def call(conn, {:error, %Arbiter.Beads.Issue.CreateTrackerError{} = cte}) do
+    create_tracker_error_response(conn, cte)
   end
 
   def call(conn, {:error, reason}) do
@@ -135,5 +145,36 @@ defmodule ArbiterWeb.Api.FallbackController do
       Map.has_key?(err, :message) and is_binary(err.message) -> err.message
       true -> inspect(err)
     end
+  end
+
+  # Ash wraps errors returned from an after_transaction hook inside
+  # `%Ash.Error.Unknown{errors: [...]}`. Because our error uses
+  # `Splode.Error`, it lands in that list as a struct rather than a
+  # stringified `UnknownError.error`. Pull it back out so the caller sees a
+  # tracker-specific response.
+  defp extract_create_tracker_error(%Ash.Error.Unknown{errors: errors}) do
+    Enum.find_value(errors, fn
+      %Arbiter.Beads.Issue.CreateTrackerError{} = cte -> cte
+      %{error: %Arbiter.Beads.Issue.CreateTrackerError{} = cte} -> cte
+      _ -> nil
+    end)
+  end
+
+  defp extract_create_tracker_error(_), do: nil
+
+  defp create_tracker_error_response(conn, %Arbiter.Beads.Issue.CreateTrackerError{} = cte) do
+    conn
+    |> put_status(:bad_gateway)
+    |> json(%{
+      error: %{
+        type: "tracker_upstream_create_failed",
+        message: Exception.message(cte),
+        details: %{
+          bead_id: cte.bead_id,
+          tracker_type: Atom.to_string(cte.tracker_type),
+          upstream_ref: cte.upstream_ref
+        }
+      }
+    })
   end
 end

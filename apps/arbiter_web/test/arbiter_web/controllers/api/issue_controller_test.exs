@@ -1,6 +1,8 @@
 defmodule ArbiterWeb.Api.IssueControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
+  require Ash.Query
+
   alias Arbiter.Beads.{Dependency, Issue, Workspace}
 
   setup %{conn: conn} do
@@ -35,6 +37,53 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       conn = post(conn, ~p"/api/issues", %{workspace_id: ws.id})
 
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "tracker upstream-create failure returns 502 + tracker_upstream_create_failed",
+         %{conn: conn} do
+      env_var = "API_CREATE_TRACKER_TEST_TOKEN"
+      System.put_env(env_var, "test-token")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "gh-api-#{System.unique_integer([:positive])}",
+          prefix: "ghapi",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "ryanrborn",
+                "repo" => "arbiter",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      # GitHub adapter is wired to Req.Test via :github_http_stub (test env).
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn c ->
+        c
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "upstream-fail", workspace_id: gh_ws.id})
+
+      body = json_response(conn, 502)
+      assert body["error"]["type"] == "tracker_upstream_create_failed"
+      assert body["error"]["details"]["tracker_type"] == "github"
+      assert body["error"]["details"]["bead_id"] =~ "ghapi-"
+      assert body["error"]["message"] =~ "created locally"
+
+      # Bead survived.
+      [bead] =
+        Issue
+        |> Ash.Query.filter(workspace_id == ^gh_ws.id and title == "upstream-fail")
+        |> Ash.read!()
+
+      assert bead.tracker_type == :github
+      assert bead.tracker_ref == nil
     end
   end
 

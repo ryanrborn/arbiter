@@ -341,6 +341,156 @@ defmodule Arbiter.Trackers.GitHubTest do
     end
   end
 
+  describe "create/1" do
+    defp issues_path, do: "/repos/#{@owner}/#{@repo}/issues"
+
+    test "POSTs title+body and returns the bare-number ref from the response" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == issues_path()
+        assert ["Bearer test-github-token"] = Plug.Conn.get_req_header(conn, "authorization")
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "Fix the thing"
+        assert decoded["body"] == "Some markdown\n\n- one\n- two"
+        # No status passed → no labels seeded.
+        refute Map.has_key?(decoded, "labels")
+        refute Map.has_key?(decoded, "assignees")
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 99, "title" => "Fix the thing"})
+      end)
+
+      assert {:ok, "99"} =
+               GitHub.create(%{
+                 title: "Fix the thing",
+                 description: "Some markdown\n\n- one\n- two"
+               })
+    end
+
+    test "missing :description still POSTs (body defaults to empty string)" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "minimal"
+        assert decoded["body"] == ""
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 7})
+      end)
+
+      assert {:ok, "7"} = GitHub.create(%{title: "minimal"})
+    end
+
+    test "seeds the in-progress label when :status is :in_progress" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["labels"] == ["in progress"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 12})
+      end)
+
+      assert {:ok, "12"} =
+               GitHub.create(%{title: "wip", description: "", status: :in_progress})
+    end
+
+    test "honours a workspace status_map label override" do
+      Config.put_active(%{
+        "owner" => @owner,
+        "repo" => @repo,
+        "credentials_ref" => "env:#{@env_var}",
+        "status_map" => %{
+          "in_progress" => %{"state" => "open", "label" => "wip"}
+        }
+      })
+
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["labels"] == ["wip"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 13})
+      end)
+
+      assert {:ok, "13"} = GitHub.create(%{title: "wip", status: :in_progress})
+    end
+
+    test "open status doesn't add a labels field (default open is label=nil)" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "labels")
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 14})
+      end)
+
+      assert {:ok, "14"} = GitHub.create(%{title: "fresh", status: :open})
+    end
+
+    test "passes :assignee through as a one-element assignees list" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["assignees"] == ["octocat"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 15})
+      end)
+
+      assert {:ok, "15"} = GitHub.create(%{title: "owned", assignee: "octocat"})
+    end
+
+    test "missing :title returns validation_failed without making a request" do
+      # No stub registered — if create/1 made the request anyway the test
+      # would crash on the unexpected call rather than silently passing.
+      assert {:error, %Error{kind: :validation_failed, message: msg}} =
+               GitHub.create(%{description: "no title"})
+
+      assert msg =~ ":title"
+    end
+
+    test "blank :title returns validation_failed" do
+      assert {:error, %Error{kind: :validation_failed}} = GitHub.create(%{title: ""})
+    end
+
+    test "422 from GitHub surfaces as validation_failed" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               GitHub.create(%{title: "boom"})
+    end
+
+    test "201 with no \"number\" surfaces as validation_failed" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"title" => "weird"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, message: msg}} =
+               GitHub.create(%{title: "weird"})
+
+      assert msg =~ "number"
+    end
+
+    test "missing config returns config_missing" do
+      Config.clear()
+      assert {:error, %Error{kind: :config_missing}} = GitHub.create(%{title: "x"})
+    end
+  end
+
   describe "Trackers integration" do
     test "Trackers.for_type(:github) resolves to this adapter (no raise)" do
       assert Arbiter.Trackers.for_type(:github) == GitHub

@@ -16,6 +16,8 @@ defmodule Arbiter.Trackers.Jira.Error do
       a Jira transition available in the issue's current state
     * `:config_missing` — workspace config is missing host / project_key /
       credentials, or no active workspace is set
+    * `:not_implemented` — a callback that's part of the `Tracker` behaviour
+      but hasn't been wired up for this adapter yet (currently `create/1`).
   """
 
   defstruct [:kind, :status, :message, :raw]
@@ -30,6 +32,7 @@ defmodule Arbiter.Trackers.Jira.Error do
           | :network
           | :transition_not_found
           | :config_missing
+          | :not_implemented
 
   @type t :: %__MODULE__{
           kind: kind,

@@ -121,13 +121,19 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
       forwarding_stub()
       ws = github_workspace()
 
+      # Bypass the outbound `CreateTracker` after_transaction by creating the
+      # bead with `tracker_type: :none`, then promoting it to `:github` via
+      # `:update` (which doesn't fire `CreateTracker`). End state: a github
+      # bead with no ref — exactly the scenario this test is about.
       {:ok, issue} =
         Ash.create(Issue, %{
           title: "tracked-but-unlinked",
-          tracker_type: :github,
+          tracker_type: :none,
           tracker_ref: nil,
           workspace_id: ws.id
         })
+
+      {:ok, issue} = Ash.update(issue, %{tracker_type: :github}, action: :update)
 
       assert {:ok, _closed} = Ash.update(issue, %{}, action: :close)
 
