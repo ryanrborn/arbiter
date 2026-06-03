@@ -22,11 +22,15 @@ defmodule ArbiterWeb.Api.PolecatJSON do
     %{
       data:
         Enum.map(children, fn snap ->
+          meta = Map.get(snap, :meta, %{}) || %{}
+
           %{
             bead_id: snap.bead_id,
             workspace_id: snap.workspace_id,
             rig: snap.rig,
             current_step: snap.current_step,
+            claude_session: Map.get(meta, :claude_session, false),
+            activity: Map.get(meta, :activity),
             status: snap.status,
             started_at: snap.started_at,
             mr_ref: Map.get(snap, :mr_ref),
@@ -46,6 +50,8 @@ defmodule ArbiterWeb.Api.PolecatJSON do
       workspace_id: snap.workspace_id,
       rig: snap.rig,
       current_step: snap.current_step,
+      claude_session: Map.get(meta, :claude_session, false),
+      activity: Map.get(meta, :activity),
       status: snap.status,
       started_at: snap.started_at,
       step_started_at: Map.get(snap, :step_started_at),
@@ -74,6 +80,8 @@ defmodule ArbiterWeb.Api.PolecatJSON do
       workspace_id: run.workspace_id,
       rig: run.rig,
       current_step: nil,
+      claude_session: false,
+      activity: nil,
       status: to_string_atom(run.status),
       started_at: run.started_at,
       completed_at: run.completed_at,

@@ -649,6 +649,25 @@ defmodule ArbiterWeb.DashboardLive do
     if String.length(body) > 80, do: String.slice(body, 0, 80) <> "…", else: body
   end
 
+  # A claude-driven polecat — a streaming Claude subprocess does the real work
+  # and its workflow Machine is never ticked, so current_step sits frozen. Show
+  # the live activity derived from the stream instead. See bd-c919xj.
+  defp claude_session?(%{meta: meta}) when is_map(meta),
+    do: Map.get(meta, :claude_session) == true
+
+  defp claude_session?(_), do: false
+
+  defp live_activity(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :activity) do
+      %{"label" => label} when is_binary(label) -> label
+      %{label: label} when is_binary(label) -> label
+      label when is_binary(label) -> label
+      _ -> "working"
+    end
+  end
+
+  defp live_activity(_), do: "working"
+
   # ---- render ----
 
   @impl true
@@ -798,7 +817,15 @@ defmodule ArbiterWeb.DashboardLive do
 
                   <div class="flex items-center justify-between gap-2 mt-1.5 text-xs text-base-content/60">
                     <span class="truncate">{Map.get(p, :workspace_name) || "(none)"}</span>
-                    <span class="badge badge-ghost badge-sm font-mono">{p.current_step}</span>
+                    <%= if claude_session?(p) do %>
+                      <span class="badge badge-info badge-sm gap-1.5 max-w-[55%]">
+                        <span :if={p.status == :running} class="loading loading-ring loading-xs">
+                        </span>
+                        <span class="truncate">{live_activity(p)}</span>
+                      </span>
+                    <% else %>
+                      <span class="badge badge-ghost badge-sm font-mono">{p.current_step}</span>
+                    <% end %>
                   </div>
 
                   <%!-- Inline lifecycle track: idle → running → awaiting → completed --%>
