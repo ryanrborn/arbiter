@@ -350,7 +350,7 @@ defmodule ArbiterWeb.BeadDetailLive do
                         </span>
                       </span>
                       <%= cond do %>
-                        <% Map.get(@polecat, :claude_session?) and @polecat.status in [:idle, :running] -> %>
+                        <% Map.get(@polecat, :claude_session?) && @polecat.status in [:idle, :running] -> %>
                           <span class="badge badge-primary badge-sm">
                             {polecat_activity_label(@polecat)}
                           </span>

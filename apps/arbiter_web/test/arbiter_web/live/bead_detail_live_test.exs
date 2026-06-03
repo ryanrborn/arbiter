@@ -69,6 +69,19 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
       assert html =~ "view full output"
     end
 
+    # Regression for bd-bb9fev: a polecat snapshot without `:claude_session?`
+    # used to crash render/1 with BadBooleanError because the strict `and`
+    # operator rejected a nil left operand.
+    test "renders when the polecat snapshot has no :claude_session? field",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no-claude", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+
+      {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
+      assert html =~ bead.id
+      assert html =~ "Polecat"
+    end
+
     test "tells the user when no polecat is running", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
 
