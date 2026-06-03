@@ -21,10 +21,29 @@ defmodule Arbiter.Mergers.Github do
 
   ## `mr_ref`
 
-  The opaque ref minted by `open/4` is the PR number prefixed with `#`, e.g.
-  `"#42"`. Owner / repo / token come from the resolved workspace config — the
-  ref carries only the PR-local datum, mirroring how the Jira tracker's ref is
-  just the issue key with host / project resolved from config.
+  The opaque ref minted by `open/4` is one of:
+
+    * `"<owner>/<repo>#<number>"` — when the target repo was derived per-rig
+      from the rig's git remote (multi-repo workspaces where `merge.config`
+      omits `repo`). The owner/repo are baked into the ref so later
+      callbacks (`get/1`, `merge/1`, …) talk to the same repo without
+      re-resolving.
+    * `"#<number>"` — when the target repo came from workspace config
+      (`merge.config.repo`). The legacy single-repo shape; owner/repo are
+      re-read from the active workspace cfg on each callback.
+
+  Callers should treat the ref as opaque — the shape is internal.
+
+  ## Per-rig repo derivation
+
+  When `workspace.config["merge"]["config"]` omits `repo` (a multi-rig
+  workspace whose rigs live in *different* repos, e.g. the `leotech`
+  workspace's four `leo-technologies-llc/*` rigs), `open/4` derives the
+  target repo from the rig's `origin` remote via
+  `Arbiter.Mergers.Github.RepoResolver` and bakes the result into the
+  minted `mr_ref`. The caller passes the rig path through `opts.repo_path`
+  (the same key the `Direct` adapter already requires; the Polecat seeds
+  it from the rig's worktree).
 
   ## Config selection
 
@@ -49,7 +68,7 @@ defmodule Arbiter.Mergers.Github do
 
   @behaviour Arbiter.Mergers.Merger
 
-  alias Arbiter.Mergers.Github.{Config, Error}
+  alias Arbiter.Mergers.Github.{Config, Error, RepoResolver}
 
   @stub_name Arbiter.Mergers.Github.HTTP
 
@@ -58,7 +77,8 @@ defmodule Arbiter.Mergers.Github do
   @impl true
   def open(branch, title, description, opts)
       when is_binary(branch) and is_binary(title) and is_map(opts) do
-    with {:ok, cfg} <- Config.resolve() do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, ref_form}} <- resolve_target(cfg, opts) do
       target = Map.get(opts, :target_branch) || cfg.default_target_branch
 
       payload = %{
@@ -69,11 +89,11 @@ defmodule Arbiter.Mergers.Github do
         "draft" => Map.get(opts, :draft, false)
       }
 
-      case request(cfg, :post, "/repos/#{cfg.owner}/#{cfg.repo}/pulls", json: payload) do
+      case request(cfg, :post, "/repos/#{owner}/#{repo}/pulls", json: payload) do
         {:ok, %Req.Response{status: status, body: %{"number" => number}}}
         when status in 200..299 and is_integer(number) ->
-          mr_ref = "#" <> Integer.to_string(number)
-          maybe_request_reviewers(cfg, number, reviewers(cfg, opts))
+          mr_ref = build_mr_ref(ref_form, owner, repo, number)
+          maybe_request_reviewers(cfg, owner, repo, number, reviewers(cfg, opts))
           {:ok, mr_ref}
 
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
@@ -84,6 +104,22 @@ defmodule Arbiter.Mergers.Github do
              message: "PR creation response missing \"number\"",
              raw: body
            }}
+
+        {:ok, %Req.Response{status: 422, body: body}} ->
+          # GitHub returns 422 when an open PR already exists for the head
+          # branch. Treat open/4 as idempotent: resolve the existing PR
+          # instead of failing the retry. Reviewer requests are skipped — the
+          # existing PR may already have them, and the merge step is what
+          # the caller actually wants on retry.
+          if already_exists_error?(body) do
+            case find_existing_open_pr_number(cfg, owner, repo, branch) do
+              {:ok, number} -> {:ok, build_mr_ref(ref_form, owner, repo, number)}
+              :none -> {:error, http_error(422, body)}
+              {:error, _} -> {:error, http_error(422, body)}
+            end
+          else
+            {:error, http_error(422, body)}
+          end
 
         {:ok, %Req.Response{status: status, body: body}} ->
           {:error, http_error(status, body)}
@@ -97,12 +133,12 @@ defmodule Arbiter.Mergers.Github do
   @impl true
   def get(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, number} <- parse_number(mr_ref),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
          {:ok, pr} <-
-           request(cfg, :get, "/repos/#{cfg.owner}/#{cfg.repo}/pulls/#{number}", [])
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", [])
            |> handle_json(),
          {:ok, reviews} <-
-           request(cfg, :get, "/repos/#{cfg.owner}/#{cfg.repo}/pulls/#{number}/reviews", [])
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", [])
            |> handle_json() do
       {:ok,
        %{
@@ -117,10 +153,10 @@ defmodule Arbiter.Mergers.Github do
   @impl true
   def merge(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, number} <- parse_number(mr_ref) do
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
       payload = %{"merge_method" => Atom.to_string(cfg.merge_method)}
 
-      request(cfg, :put, "/repos/#{cfg.owner}/#{cfg.repo}/pulls/#{number}/merge", json: payload)
+      request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/merge", json: payload)
       |> expect_ok()
     end
   end
@@ -128,10 +164,10 @@ defmodule Arbiter.Mergers.Github do
   @impl true
   def close(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, number} <- parse_number(mr_ref) do
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
       payload = %{"state" => "closed"}
 
-      request(cfg, :patch, "/repos/#{cfg.owner}/#{cfg.repo}/pulls/#{number}", json: payload)
+      request(cfg, :patch, "/repos/#{owner}/#{repo}/pulls/#{number}", json: payload)
       |> expect_ok()
     end
   end
@@ -139,12 +175,10 @@ defmodule Arbiter.Mergers.Github do
   @impl true
   def add_comment(mr_ref, body) when is_binary(mr_ref) and is_binary(body) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, number} <- parse_number(mr_ref) do
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
       payload = %{"body" => body}
 
-      request(cfg, :post, "/repos/#{cfg.owner}/#{cfg.repo}/issues/#{number}/comments",
-        json: payload
-      )
+      request(cfg, :post, "/repos/#{owner}/#{repo}/issues/#{number}/comments", json: payload)
       |> expect_ok()
     end
   end
@@ -152,18 +186,25 @@ defmodule Arbiter.Mergers.Github do
   @impl true
   def request_review(mr_ref, reviewers) when is_binary(mr_ref) and is_list(reviewers) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, number} <- parse_number(mr_ref) do
-      do_request_reviewers(cfg, number, reviewers)
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      do_request_reviewers(cfg, owner, repo, number, reviewers)
     end
   end
 
   @impl true
   def link_for(mr_ref) when is_binary(mr_ref) do
-    number = String.trim_leading(mr_ref, "#")
+    case parse_mr_ref(mr_ref) do
+      {:embedded, owner, repo, number} ->
+        "https://github.com/#{owner}/#{repo}/pull/#{number}"
 
-    case Config.active_repo_slug() do
-      slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
-      nil -> "https://github.com/owner/repo/pull/#{number}"
+      {:bare, number} ->
+        case Config.active_repo_slug() do
+          slug when is_binary(slug) -> "https://github.com/#{slug}/pull/#{number}"
+          nil -> "https://github.com/owner/repo/pull/#{number}"
+        end
+
+      :invalid ->
+        "https://github.com/owner/repo/pull/#{String.trim_leading(mr_ref, "#")}"
     end
   end
 
@@ -198,25 +239,58 @@ defmodule Arbiter.Mergers.Github do
 
   # On open, requesting reviewers is best-effort: the PR already exists, so a
   # failed reviewer request must not orphan it by surfacing as an open/4 error.
-  defp maybe_request_reviewers(_cfg, _number, []), do: :ok
+  defp maybe_request_reviewers(_cfg, _owner, _repo, _number, []), do: :ok
 
-  defp maybe_request_reviewers(cfg, number, reviewers) do
-    _ = do_request_reviewers(cfg, number, reviewers)
+  defp maybe_request_reviewers(cfg, owner, repo, number, reviewers) do
+    _ = do_request_reviewers(cfg, owner, repo, number, reviewers)
     :ok
   end
 
-  defp do_request_reviewers(_cfg, _number, []), do: :ok
+  defp do_request_reviewers(_cfg, _owner, _repo, _number, []), do: :ok
 
-  defp do_request_reviewers(cfg, number, reviewers) do
+  defp do_request_reviewers(cfg, owner, repo, number, reviewers) do
     payload = %{"reviewers" => reviewers}
 
     request(
       cfg,
       :post,
-      "/repos/#{cfg.owner}/#{cfg.repo}/pulls/#{number}/requested_reviewers",
+      "/repos/#{owner}/#{repo}/pulls/#{number}/requested_reviewers",
       json: payload
     )
     |> expect_ok()
+  end
+
+  # ---- Internals: idempotent open ------------------------------------------
+
+  # GitHub's 422 "already exists" payload looks like:
+  #   %{"message" => "Validation Failed",
+  #     "errors" => [%{"code" => "custom",
+  #                    "message" => "A pull request already exists for owner:branch."}]}
+  defp already_exists_error?(%{"errors" => errors}) when is_list(errors) do
+    Enum.any?(errors, fn
+      %{"message" => msg} when is_binary(msg) -> String.contains?(msg, "already exists")
+      _ -> false
+    end)
+  end
+
+  defp already_exists_error?(_), do: false
+
+  defp find_existing_open_pr_number(cfg, owner, repo, branch) do
+    head = "#{owner}:#{branch}"
+
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/pulls", params: [head: head, state: "open"]) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        case body do
+          [%{"number" => number} | _] when is_integer(number) -> {:ok, number}
+          _ -> :none
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
   end
 
   # ---- Internals: response interpretation ----------------------------------
@@ -237,13 +311,94 @@ defmodule Arbiter.Mergers.Github do
 
   defp approved?(_), do: false
 
-  defp parse_number(mr_ref) do
-    case Integer.parse(String.trim_leading(mr_ref, "#")) do
-      {n, ""} when n > 0 ->
-        {:ok, n}
+  # ---- Internals: target / ref resolution ----------------------------------
+
+  # Resolve the {owner, repo, ref_form} target for a fresh open/4. ref_form
+  # determines whether the minted mr_ref will embed owner/repo (per-rig
+  # derivation) or just carry the PR number (single-repo workspace).
+  defp resolve_target(cfg, opts) do
+    cond do
+      is_binary(cfg.repo) ->
+        {:ok, {cfg.owner, cfg.repo, :bare}}
+
+      path = Map.get(opts, :repo_path) ->
+        with {:ok, {owner, repo}} <- RepoResolver.from_remote(path) do
+          {:ok, {owner, repo, :embedded}}
+        end
+
+      true ->
+        {:error,
+         %Error{
+           kind: :config_missing,
+           status: nil,
+           message:
+             "GitHub merger config missing \"repo\" and no :repo_path in opts to derive it from. " <>
+               "Set workspace.config[\"merge\"][\"config\"][\"repo\"] for single-repo workspaces, " <>
+               "or pass :repo_path so the adapter can derive owner/repo from the rig's git remote.",
+           raw: nil
+         }}
+    end
+  end
+
+  # Resolve {owner, repo, number} for a callback that takes an existing mr_ref.
+  # An embedded mr_ref ("<owner>/<repo>#<n>") is self-describing; a bare
+  # ("#<n>") falls back to the active workspace cfg's owner/repo.
+  defp resolve_ref(cfg, mr_ref) do
+    case parse_mr_ref(mr_ref) do
+      {:embedded, owner, repo, number} ->
+        {:ok, {owner, repo, number}}
+
+      {:bare, number} ->
+        case cfg.repo do
+          repo when is_binary(repo) ->
+            {:ok, {cfg.owner, repo, number}}
+
+          _ ->
+            {:error,
+             %Error{
+               kind: :config_missing,
+               status: nil,
+               message:
+                 "mr_ref #{inspect(mr_ref)} omits owner/repo and workspace cfg has no \"repo\"",
+               raw: nil
+             }}
+        end
+
+      :invalid ->
+        {:error, %Error{kind: :validation_failed, message: "invalid mr_ref: #{inspect(mr_ref)}"}}
+    end
+  end
+
+  defp build_mr_ref(:bare, _owner, _repo, number), do: "#" <> Integer.to_string(number)
+
+  defp build_mr_ref(:embedded, owner, repo, number),
+    do: "#{owner}/#{repo}##{number}"
+
+  defp parse_mr_ref(mr_ref) do
+    case String.split(mr_ref, "#", parts: 2) do
+      ["", num_str] ->
+        case parse_pos_int(num_str) do
+          {:ok, n} -> {:bare, n}
+          :error -> :invalid
+        end
+
+      [slug, num_str] when slug != "" ->
+        with [owner, repo] when owner != "" and repo != "" <- String.split(slug, "/", parts: 2),
+             {:ok, n} <- parse_pos_int(num_str) do
+          {:embedded, owner, repo, n}
+        else
+          _ -> :invalid
+        end
 
       _ ->
-        {:error, %Error{kind: :validation_failed, message: "invalid mr_ref: #{inspect(mr_ref)}"}}
+        :invalid
+    end
+  end
+
+  defp parse_pos_int(str) do
+    case Integer.parse(str) do
+      {n, ""} when n > 0 -> {:ok, n}
+      _ -> :error
     end
   end
 

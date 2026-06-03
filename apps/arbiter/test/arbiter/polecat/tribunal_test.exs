@@ -221,6 +221,41 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert reloaded.notes =~ "Tribunal verdict: APPROVE"
     end
 
+    test "APPROVE with a hosted-forge stub adapter that never reports approval still merges (bd-66ey1o)",
+         %{repo: repo, ws: ws} do
+      # Reproduces the production bug: a Tribunal APPROVE arrives, the merger
+      # opens (or reuses) an MR, and the adapter's get/1 reports
+      # `%{status: :open, approved: false}` (no GitHub-side approval). Before
+      # bd-66ey1o the Warden polled forever waiting for `approved: true`. The
+      # fix plumbs `via_tribunal: true` through to the Warden so the merge
+      # fires on its first poll.
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.next_open_ref("!76")
+      # Don't queue any get results → default :open/approved=false forever.
+
+      bead = new_bead(ws)
+
+      {pid, _branch} =
+        start_author(bead, repo, %{
+          merger_adapter_override: Arbiter.Test.StubMerger,
+          warden_interval_ms: 20,
+          warden_initial_delay_ms: 0,
+          warden_max_polls: 50
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+
+      :ok = Polecat.tribunal_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+
+      # The Warden must merge despite never seeing a forge-side approval.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 3_000)
+      assert Arbiter.Test.StubMerger.merge_count("!76") >= 1
+      # The local repo was NOT git-merged (StubMerger is a stub) — the merge
+      # happened entirely through the adapter callback.
+      assert merge_commit_count(repo) == 0
+    end
+
     test "REQUEST_CHANGES parks the bead with findings and does NOT merge",
          %{repo: repo, ws: ws} do
       bead = new_bead(ws)

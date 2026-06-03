@@ -120,6 +120,66 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
     end
   end
 
+  describe "via_tribunal: a Tribunal-approved MR merges without forge approval (bd-66ey1o)" do
+    # Before bd-66ey1o the Warden waited on `approved: true` from the adapter's
+    # get/1 even when the polecat had just been told the gate had approved. For
+    # hosted-forge adapters that approval is never posted (the Tribunal is in-
+    # process), so the polecat hung at :awaiting_review forever. With the
+    # `via_tribunal: true` flag the Warden treats any non-terminal poll as
+    # `:approved` and force-auto-merges on its first poll.
+    test "open_mr with via_tribunal: true drives polecat to :completed without forge approval" do
+      {pid, _bead_id} = running_polecat()
+      StubMerger.next_open_ref("!99")
+      # No queue_get → StubMerger.get/1 returns %{status: :open, approved: false}
+      # forever (the exact "hosted-forge with no approval" case).
+
+      assert {:ok, "!99"} =
+               Polecat.open_mr(
+                 pid,
+                 "feature/trib",
+                 "Tribunal-approved merge",
+                 "",
+                 open_opts(via_tribunal: true, interval_ms: 20, initial_delay_ms: 0)
+               )
+
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      assert Polecat.state(pid).meta.result == :merged
+      # The Warden must have called the adapter's merge/1 — that's the whole
+      # point of via_tribunal: don't just wait for a human, actually merge.
+      assert StubMerger.merge_count("!99") >= 1
+    end
+
+    test "without via_tribunal, the same scenario reproduces the silent hang" do
+      # Regression characterization: with the flag absent and no GitHub-side
+      # approval forthcoming, the polecat stays parked. The watchdog (added in
+      # the same fix) will eventually escalate — see warden_test — but in the
+      # window before that fires we can prove the polecat does NOT auto-merge,
+      # which is exactly the bug the via_tribunal flag closes.
+      {pid, _bead_id} = running_polecat()
+      StubMerger.next_open_ref("!100")
+
+      assert {:ok, "!100"} =
+               Polecat.open_mr(
+                 pid,
+                 "feature/no-trib",
+                 "Unapproved",
+                 "",
+                 open_opts(
+                   via_tribunal: false,
+                   auto_merge: true,
+                   interval_ms: 20,
+                   initial_delay_ms: 0,
+                   max_polls: 1_000
+                 )
+               )
+
+      # Let the Warden poll a few times.
+      Process.sleep(120)
+      assert Polecat.state(pid).status == :awaiting_review
+      assert StubMerger.merge_count("!100") == 0
+    end
+  end
+
   describe "arb-done guard while awaiting review" do
     test "a late 'arb done' does NOT complete a polecat parked for review" do
       {pid, _bead_id} = running_polecat()

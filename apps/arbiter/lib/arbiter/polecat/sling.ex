@@ -49,6 +49,8 @@ defmodule Arbiter.Polecat.Sling do
   NOT attempted because the user may want to inspect what happened).
   """
 
+  alias Arbiter.Agents
+  alias Arbiter.Agents.Routing
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
@@ -320,26 +322,85 @@ defmodule Arbiter.Polecat.Sling do
         {:error, :missing_worktree}
 
       true ->
-        session_opts =
-          [owner: polecat_pid, worktree_path: worktree_path] ++
-            case Keyword.get(opts, :claude_command) do
-              nil -> [prompt: prompt_for(bead)]
-              cmd when is_list(cmd) -> [command: cmd]
-            end
-
-        case ClaudeSession.start(session_opts) do
-          {:ok, port} ->
-            # Move the polecat out of :idle so UI/CLI report a meaningful
-            # status while Claude works. In claude_driven mode the Driver
-            # never ticks the Machine, so without this nudge the polecat
-            # would remain :idle until "arb done" flipped it to :completed.
-            _ = Polecat.advance(polecat_pid, :claude)
-            {:ok, port}
-
-          {:error, reason} ->
-            {:error, {:claude_start_failed, reason}}
+        with {:ok, session_opts} <- build_agent_session_opts(bead, polecat_pid, worktree_path, opts),
+             {:ok, port} <- ClaudeSession.start(session_opts) do
+          # Move the polecat out of :idle so UI/CLI report a meaningful
+          # status while Claude works. In claude_driven mode the Driver
+          # never ticks the Machine, so without this nudge the polecat
+          # would remain :idle until "arb done" flipped it to :completed.
+          _ = Polecat.advance(polecat_pid, :claude)
+          {:ok, port}
+        else
+          {:error, reason} -> {:error, {:claude_start_failed, reason}}
         end
     end
+  end
+
+  # Resolve the agent for this bead through the `Arbiter.Agents` dispatcher
+  # and the configured `Arbiter.Agents.Routing` policy, then assemble the
+  # `ClaudeSession.start/1` options. This is the seam where model-tiering
+  # and key-rotation enter the spawn — both default off, so a workspace
+  # that hasn't opted in sees today's argv + env unchanged.
+  #
+  # The `:claude_command` opt (used by tests to spawn an echo script
+  # instead of the real Claude CLI) bypasses the adapter entirely — it's a
+  # raw argv override and the routing policy has nothing to add.
+  defp build_agent_session_opts(%Issue{} = bead, polecat_pid, worktree_path, opts) do
+    base = [owner: polecat_pid, worktree_path: worktree_path]
+
+    case Keyword.get(opts, :claude_command) do
+      cmd when is_list(cmd) ->
+        {:ok, base ++ [command: cmd]}
+
+      _ ->
+        workspace = load_workspace(bead)
+        :ok = Agents.prepare(workspace, :agent)
+
+        choice = Routing.choose(bead, workspace, %{})
+        adapter = Agents.for_type(choice.type)
+
+        agent_opts = agent_opts_from_choice(choice)
+        prompt = prompt_for(bead)
+
+        case adapter.default_argv(prompt, agent_opts) do
+          {:ok, argv} ->
+            env = safe_spawn_env(adapter, agent_opts)
+            {:ok, base ++ [command: argv, env: env]}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+    end
+  end
+
+  # Translate a Routing.Policy.choice() config map (JSON string-keyed) into
+  # the keyword opts the Agent behaviour expects (`:model`, ...). Unknown
+  # keys are passed through under `:config` so future adapters can read
+  # adapter-specific keys without growing this function.
+  defp agent_opts_from_choice(%{config: config}) when is_map(config) do
+    [
+      model: Map.get(config, "model"),
+      config: config
+    ]
+  end
+
+  defp safe_spawn_env(adapter, agent_opts) do
+    if function_exported?(adapter, :spawn_env, 1) do
+      adapter.spawn_env(agent_opts)
+    else
+      []
+    end
+  end
+
+  defp load_workspace(%Issue{workspace_id: nil}), do: nil
+
+  defp load_workspace(%Issue{workspace_id: ws_id}) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, ws} -> ws
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   @doc false

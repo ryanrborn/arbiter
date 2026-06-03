@@ -127,6 +127,22 @@ defmodule Arbiter.Trackers.Shortcut do
   def parse_ref(_), do: :error
 
   @impl true
+  def list_open(_opts) do
+    # `arb list --tracker` currently only ships the GitHub backlog query.
+    # When Shortcut's "open + owned-by viewer" search is wired up, this
+    # returns the normalized summary list.
+    {:error, :not_supported}
+  end
+
+  @impl true
+  def create(_attrs) do
+    # Outbound create not yet implemented for Shortcut — `arb create` on a
+    # Shortcut-configured workspace currently only creates the local bead.
+    # Wire this up when the Shortcut create path is needed.
+    {:error, :not_supported}
+  end
+
+  @impl true
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, workflows} <- list_workflows(cfg) do

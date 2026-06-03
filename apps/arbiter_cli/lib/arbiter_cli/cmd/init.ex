@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.Init do
 
   Creates, in the target directory (default: cwd):
 
-    * `CLAUDE.md`        — the coordinator role doc: session-start checklist
+    * `AGENTS.md`        — the coordinator role doc: session-start checklist
                            (`arb doctor` / `arb prime`), the arb command
                            reference, core concepts, and memory discipline.
                            Rendered with this install's active vernacular,
@@ -17,10 +17,10 @@ defmodule ArbiterCli.Cmd.Init do
     * `memory/MEMORY.md` — a clean memory index skeleton (and an otherwise
                            empty `memory/` dir).
     * `notes/README.md`  — explains the surface-to-operator drop.
-    * `CLAUDE.local.md`  — a stub personal overlay (gitignored, never
+    * `AGENTS.local.md`  — a stub personal overlay (gitignored, never
                            committed); the operator fills it with persona /
                            local identity.
-    * `.gitignore`       — ignores `CLAUDE.local.md`.
+    * `.gitignore`       — ignores `AGENTS.local.md`.
 
   The terms in the generated docs follow the active workspace's vernacular
   (`/api/settings`), so it reads as the stock coordinator term on a default
@@ -51,22 +51,22 @@ defmodule ArbiterCli.Cmd.Init do
 
   @templates_dir Path.expand(Path.join([__DIR__, "..", "..", "..", "priv", "templates"]))
 
-  @claude_md Path.join(@templates_dir, "CLAUDE.md.eex")
+  @agents_md Path.join(@templates_dir, "AGENTS.md.eex")
   @memory_md Path.join(@templates_dir, "MEMORY.md.eex")
   @notes_readme Path.join(@templates_dir, "notes_README.md.eex")
-  @claude_local Path.join(@templates_dir, "CLAUDE.local.md.eex")
+  @agents_local Path.join(@templates_dir, "AGENTS.local.md.eex")
   @gitignore Path.join(@templates_dir, "gitignore.eex")
 
-  @external_resource @claude_md
+  @external_resource @agents_md
   @external_resource @memory_md
   @external_resource @notes_readme
-  @external_resource @claude_local
+  @external_resource @agents_local
   @external_resource @gitignore
 
-  EEx.function_from_file(:defp, :render_claude_md, @claude_md, [:assigns])
+  EEx.function_from_file(:defp, :render_agents_md, @agents_md, [:assigns])
   EEx.function_from_file(:defp, :render_memory_md, @memory_md, [:assigns])
   EEx.function_from_file(:defp, :render_notes_readme, @notes_readme, [:assigns])
-  EEx.function_from_file(:defp, :render_claude_local, @claude_local, [:assigns])
+  EEx.function_from_file(:defp, :render_agents_local, @agents_local, [:assigns])
 
   # The .gitignore template takes no runtime values — embed it verbatim at
   # compile time rather than running it through EEx with an unused binding.
@@ -90,8 +90,8 @@ defmodule ArbiterCli.Cmd.Init do
 
     results =
       [
-        {"CLAUDE.md", render_claude_md(assigns)},
-        {"CLAUDE.local.md", render_claude_local(assigns)},
+        {"AGENTS.md", render_agents_md(assigns)},
+        {"AGENTS.local.md", render_agents_local(assigns)},
         {".gitignore", render_gitignore(assigns)},
         {"memory/MEMORY.md", render_memory_md(assigns)},
         {"notes/README.md", render_notes_readme(assigns)}

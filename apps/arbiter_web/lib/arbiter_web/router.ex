@@ -78,6 +78,7 @@ defmodule ArbiterWeb.Router do
     post("/workspaces/:workspace_id/claim", ClaimController, :claim)
     get("/workspaces/:workspace_id/sync/plan", ClaimController, :plan)
     post("/workspaces/:workspace_id/sync", ClaimController, :sync)
+    get("/workspaces/:workspace_id/tracker/issues", TrackerController, :issues)
 
     # Global settings
     get("/settings", SettingsController, :show)
@@ -89,6 +90,10 @@ defmodule ArbiterWeb.Router do
     post("/messages", MessageController, :create)
     post("/messages/:id/read", MessageController, :read)
     delete("/messages", MessageController, :clear)
+
+    # Usage ledger (per-session tokens / cost / duration; rollups)
+    get("/usage", UsageController, :summarize)
+    get("/usage/events", UsageController, :events)
 
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)

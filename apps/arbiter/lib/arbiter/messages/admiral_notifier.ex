@@ -7,11 +7,12 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   a durable `:notification` `Arbiter.Messages.Message` — the broadcast kind that
   feeds the Admiral's dashboard (`to_ref` nil, never "consumed"):
 
-  | Event              | Body                                                  |
-  |--------------------|-------------------------------------------------------|
-  | completed          | `<title> completed in <duration>`                     |
-  | failed             | `<title> failed after <duration> — exit code <N>`     |
-  | awaiting_review    | `<title> opened MR <mr_ref> — awaiting review`        |
+  | Event                | Body                                                       |
+  |----------------------|------------------------------------------------------------|
+  | completed            | `<title> completed in <duration>`                          |
+  | failed               | `<title> failed after <duration> — exit code <N>`          |
+  | awaiting_review      | `<title> opened MR <mr_ref> — awaiting review`             |
+  | awaiting_review_stuck| `<title> stuck at awaiting_review (MR <mr_ref>) — escalated` |
 
   Directive-closed events are intentionally **not** posted — too noisy.
 
@@ -70,6 +71,27 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @spec awaiting_review(snapshot()) :: :ok
   def awaiting_review(snapshot), do: post(:awaiting_review, snapshot)
 
+  @doc """
+  Post the `:awaiting_review_stuck` watchdog notification. Best-effort, returns
+  `:ok`. Fired by `Arbiter.Polecat.Warden` when a polecat has been parked at
+  `:awaiting_review` past its poll cap without a terminal MR outcome — so a
+  silent hang surfaces to the operator instead of waiting forever (bd-66ey1o).
+  """
+  @spec awaiting_review_stuck(snapshot(), String.t() | nil) :: :ok
+  def awaiting_review_stuck(snapshot, mr_ref \\ nil) do
+    snapshot =
+      case mr_ref do
+        nil ->
+          snapshot
+
+        ref when is_binary(ref) ->
+          meta = Map.put(Map.get(snapshot, :meta, %{}) || %{}, :mr_ref, ref)
+          Map.put(snapshot, :meta, meta)
+      end
+
+    post(:awaiting_review_stuck, snapshot)
+  end
+
   # ---- core ---------------------------------------------------------------
 
   # A notification must be scoped to a workspace (Message.workspace_id is
@@ -112,6 +134,18 @@ defmodule Arbiter.Messages.AdmiralNotifier do
       case mr_ref(snapshot) do
         nil -> "#{title} — awaiting review"
         ref -> "#{title} opened MR #{ref} — awaiting review"
+      end
+    end)
+  end
+
+  defp build(:awaiting_review_stuck, %{bead_id: bead_id} = snapshot) do
+    base(bead_id, snapshot, "stuck awaiting review", fn title ->
+      case mr_ref(snapshot) do
+        nil ->
+          "#{title} stuck at awaiting_review — escalated (no terminal MR outcome)"
+
+        ref ->
+          "#{title} stuck at awaiting_review (MR #{ref}) — escalated (no terminal MR outcome)"
       end
     end)
   end
