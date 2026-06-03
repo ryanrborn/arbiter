@@ -1,0 +1,22 @@
+# Personal overlay (local, gitignored)
+
+This file is your **personal overlay** for this Arbiter home base. It is
+gitignored and never committed — anything here stays on this machine only.
+
+Use it for local identity and preferences that should not be shared with
+collaborators: a persona for the <%= @coordinator %> session, machine-specific
+paths, private reminders, or any overrides to the doctrine in `CLAUDE.md`.
+
+`CLAUDE.md` (the committed role doc) is loaded alongside this file, so
+whatever you put here layers on top of it.
+
+<!--
+Example — uncomment and edit to taste:
+
+## Identity
+- Name:  <what to call this coordinator session>
+- Voice: <how it should address you>
+
+## Local overrides
+- <anything that differs from CLAUDE.md on this machine>
+-->
