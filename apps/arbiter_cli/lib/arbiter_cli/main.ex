@@ -8,13 +8,19 @@ defmodule ArbiterCli.Main do
       arb init [path] [--force]
       arb show <id>
       arb create <title> [--description ...] [--priority ...] [--type ...]
-                         [--deps id1,id2] [--labels a,b]
+                         [--deps id1,id2] [--labels a,b] [--vanguard <convoy-id>]
       arb close <id> [--reason ...]
       arb reopen <id>
       arb list [--status ...] [--type ...] [--priority ...] [--labels ...]
                 [--tracker]    Also list open assigned issues from the workspace's
                                external tracker (visually distinct, deduped by ref).
       arb update <id> [--priority ...] [--append-notes ...]
+      arb convoy create <title> [--lifecycle system_managed|owned]
+      arb convoy add <convoy-id> <issue-id...>
+      arb convoy rm <convoy-id> <issue-id>
+      arb convoy show <convoy-id>
+      arb convoy close <convoy-id> [--reason ...]
+                       Group directives into a batch (vernacular: "Vanguard").
       arb dep add <from> <type> <to>
       arb dep rm <from> <to>
       arb ready
@@ -102,6 +108,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("claim", args), do: ArbiterCli.Cmd.Claim.run(args)
   defp dispatch_known("sync", args), do: ArbiterCli.Cmd.Sync.run(args)
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
+  defp dispatch_known("convoy", args), do: ArbiterCli.Cmd.Convoy.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do

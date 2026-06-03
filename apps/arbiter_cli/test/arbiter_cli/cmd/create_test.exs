@@ -17,6 +17,45 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert out =~ "Hello"
   end
 
+  test "--vanguard attaches the new issue to the convoy" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
+      {{"post", "/api/convoys/bd-cv-zzz/members"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:member_body, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-cv-zzz"})
+       end}
+    ])
+
+    {out, _err, exit_code} =
+      capture(fn -> Create.run(["X", "--vanguard", "bd-cv-zzz"]) end)
+
+    assert exit_code == 0
+    assert out =~ "bd-007"
+    assert_receive {:member_body, %{"issue_id" => "bd-007"}}
+  end
+
+  test "--vanguard attach failure surfaces and exits non-zero" do
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
+      {{"post", "/api/convoys/bd-cv-zzz/members"},
+       {%{"error" => %{"type" => "not_found", "message" => "resource not found"}}, 404}}
+    ])
+
+    {_out, err, exit_code} =
+      capture(fn -> Create.run(["X", "--vanguard", "bd-cv-zzz"]) end)
+
+    assert exit_code == 4
+    assert err =~ "failed to attach bd-007 to bd-cv-zzz"
+  end
+
   test "no title argument exits non-zero" do
     {_out, err, exit_code} = capture(fn -> Create.run([]) end)
     assert exit_code == 1
