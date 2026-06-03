@@ -1009,6 +1009,26 @@ defmodule Arbiter.Polecat do
     _ -> false
   end
 
+  # Resolve the revise-and-rediscuss round cap (config["review"]["rounds"],
+  # default 2) for the Tribunal. An explicit meta override (`:review_rounds`)
+  # wins — used by tests and advanced callers; otherwise read the workspace
+  # config. Returns nil to let the Tribunal apply its own default when neither is
+  # available. See bd-3jm700.
+  defp resolve_review_rounds(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :review_rounds) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        case state.workspace_id && Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
+          {:ok, ws} -> Arbiter.Beads.Workspace.review_rounds(ws)
+          _ -> nil
+        end
+    end
+  rescue
+    _ -> nil
+  end
+
   # Park at :awaiting_tribunal and spawn the reviewer. The branch + merge title
   # are stashed in meta so tribunal_verdict/2 can fire the same merge path on
   # approval without re-deriving them.
@@ -1064,8 +1084,10 @@ defmodule Arbiter.Polecat do
           target_branch: Map.get(meta, :target_branch, "main")
         ]
         |> maybe_opt(:command, Map.get(meta, :review_command))
+        |> maybe_opt(:revise_command, Map.get(meta, :revise_command))
         |> maybe_opt(:timeout_ms, Map.get(meta, :review_timeout_ms))
         |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
+        |> maybe_opt(:rounds, resolve_review_rounds(state))
 
       case Arbiter.Polecat.Tribunal.start(opts) do
         {:ok, pid} ->
