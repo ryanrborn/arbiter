@@ -33,6 +33,21 @@ defmodule Arbiter.Trackers.Tracker do
       by `arb list --tracker` to surface upstream backlog alongside local
       beads. Adapters that don't have a notion of a backlog return
       `{:error, :not_supported}`.
+    * `create/1` — create a new issue in the tracker from the given attrs
+      and return the canonical `ref`. Used by `arb create` to mirror a new
+      bead into the configured tracker. Attrs use bead-domain keys
+      (`:title`, `:description`, `:assignee`, `:status`); each adapter
+      translates to its own field names. Adapters that don't support
+      outbound creation return `{:error, :not_supported}`.
+
+  ## `create` attrs shape
+
+      %{
+        title: "Wire the thing",
+        description: "...",        # optional, Markdown
+        assignee: "alice",         # optional, tracker-specific login
+        status: :open              # optional, default :open
+      }
 
   ## `list_open` shape
 
@@ -71,6 +86,14 @@ defmodule Arbiter.Trackers.Tracker do
           required(:raw) => map()
         }
 
+  @typedoc "Bead-domain attrs accepted by `create/1`."
+  @type create_attrs :: %{
+          required(:title) => String.t(),
+          optional(:description) => String.t(),
+          optional(:assignee) => String.t() | nil,
+          optional(:status) => status
+        }
+
   @callback fetch(ref) :: {:ok, map()} | {:error, term()}
   @callback transition(ref, status) :: :ok | {:error, term()}
   @callback update_fields(ref, map()) :: :ok | {:error, term()}
@@ -79,4 +102,6 @@ defmodule Arbiter.Trackers.Tracker do
   @callback list_transitions(ref) :: {:ok, [status]} | {:error, term()}
   @callback list_open(opts :: keyword()) ::
               {:ok, [summary]} | {:error, :not_supported} | {:error, term()}
+  @callback create(create_attrs) ::
+              {:ok, ref} | {:error, :not_supported} | {:error, term()}
 end

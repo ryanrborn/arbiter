@@ -3,7 +3,10 @@ defmodule Arbiter.Trackers.GitHub do
   GitHub Issues adapter implementing `Arbiter.Trackers.Tracker`.
 
   Wraps GitHub's REST API v3 (`https://api.github.com`) for issue
-  fetch/update/transition flows, so directives can sync to GitHub Issues.
+  fetch/create/update/transition flows, so directives can sync to GitHub
+  Issues. `create/1` POSTs `/repos/:owner/:repo/issues` and returns the new
+  issue number as the canonical ref; used by `arb create` to mirror a new
+  bead into the workspace's GitHub repo.
 
   ## Active-workspace contract
 
@@ -152,6 +155,98 @@ defmodule Arbiter.Trackers.GitHub do
         |> Enum.filter(&Map.has_key?(cfg.status_map, &1))
 
       {:ok, statuses}
+    end
+  end
+
+  @impl true
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs),
+         {:ok, payload} <- build_create_payload(cfg, attrs, title) do
+      case request(cfg, :post, "/repos/#{cfg.owner}/#{cfg.repo}/issues", json: payload) do
+        {:ok, %Req.Response{status: status, body: %{"number" => number}}}
+        when status in 200..299 and is_integer(number) ->
+          {:ok, Integer.to_string(number)}
+
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status,
+             message: "GitHub create response missing \"number\"",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp fetch_title(%{title: title}) when is_binary(title) and title != "", do: {:ok, title}
+  defp fetch_title(%{"title" => title}) when is_binary(title) and title != "", do: {:ok, title}
+
+  defp fetch_title(_),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "create requires a non-empty :title",
+         raw: nil
+       }}
+
+  # Map bead-domain attrs onto GitHub's POST /repos/:o/:r/issues body. `title`
+  # is required; `body`, `assignees`, and the initial status label are optional
+  # — we skip them when the caller didn't supply them.
+  defp build_create_payload(cfg, attrs, title) do
+    description = pluck(attrs, [:description, "description"])
+    assignee = pluck(attrs, [:assignee, "assignee"])
+    status = pluck(attrs, [:status, "status"]) || :open
+
+    payload =
+      %{"title" => title}
+      |> maybe_put("body", description)
+      |> maybe_put_assignees(assignee)
+      |> maybe_put_initial_labels(cfg, status)
+
+    {:ok, payload}
+  end
+
+  defp pluck(map, keys) do
+    Enum.find_value(keys, fn k ->
+      case Map.fetch(map, k) do
+        {:ok, v} -> v
+        :error -> nil
+      end
+    end)
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp maybe_put_assignees(payload, nil), do: payload
+  defp maybe_put_assignees(payload, ""), do: payload
+
+  defp maybe_put_assignees(payload, login) when is_binary(login),
+    do: Map.put(payload, "assignees", [login])
+
+  defp maybe_put_assignees(payload, _), do: payload
+
+  # If the workspace's status_map has a managed label for the initial bead
+  # status, apply it on create. Default `:open` typically has no label, so this
+  # is a no-op for the common case.
+  defp maybe_put_initial_labels(payload, cfg, status) do
+    case Map.get(cfg.status_map, status) do
+      %{label: label} when is_binary(label) and label != "" ->
+        Map.put(payload, "labels", [label])
+
+      _ ->
+        payload
     end
   end
 
