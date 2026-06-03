@@ -24,7 +24,10 @@ defmodule ArbiterCli.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger, :inets, :ssl] ++ extra_applications(Mix.env())
+      # :eex is bundled so `arb init`'s compiled templates can resolve their
+      # `@assign` references at runtime inside the escript (EEx.Engine lives
+      # in the :eex app, which isn't pulled in by default).
+      extra_applications: [:logger, :inets, :ssl, :eex] ++ extra_applications(Mix.env())
     ]
   end
 
