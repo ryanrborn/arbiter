@@ -36,6 +36,51 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
+
+    test "returns 502 when upstream-create fails (bead body + structured error)",
+         %{conn: conn} do
+      env_var = "GTE_CONTROLLER_OUTBOUND_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "ctrl-gh",
+          prefix: "gh",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "upstream down"})
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "half", workspace_id: gh_ws.id})
+
+      body = json_response(conn, 502)
+
+      assert %{
+               "issue" => %{"id" => bead_id, "title" => "half"},
+               "error" => %{
+                 "type" => "upstream_create_failed",
+                 "message" => msg,
+                 "details" => %{"bead_id" => bead_id, "tracker_type" => "github"}
+               }
+             } = body
+
+      assert is_binary(bead_id)
+      assert msg =~ "upstream github create failed"
+    end
   end
 
   describe "GET /api/issues/:id" do
