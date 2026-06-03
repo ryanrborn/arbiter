@@ -24,6 +24,7 @@ defmodule Arbiter.Polecat.TribunalTest do
   alias Arbiter.Polecat.Tribunal
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
+  @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
 
@@ -380,6 +381,120 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
+    end
+  end
+
+  # ---- verdict re-prompt (bd-8v8ays) ---------------------------------------
+
+  describe "verdict re-prompt" do
+    # A reviewer that produces substantive output but forgets the sentinel must
+    # be re-prompted; a verdict on the re-prompt is honored. The fixture emits NO
+    # verdict on its first pass, so a merge happening at all proves the re-prompt
+    # ran and its APPROVE was honored.
+    test "a reviewer that omits the verdict is re-prompted; APPROVE on re-prompt merges",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reprompt, "APPROVE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 1
+
+      # The re-prompt ran as a distinct follow-up reviewer (its own run row under
+      # the versioned id), separate from the first (verdict-less) pass.
+      reprompt_id = Tribunal.reviewer_bead_id(bead.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Polecats.Run)
+
+      assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
+             "expected a distinct re-prompt reviewer run row"
+    end
+
+    test "REQUEST_CHANGES on re-prompt is honored — no merge, bead parked + escalated",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reprompt, "REQUEST_CHANGES"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
+    end
+
+    # Only a SECOND empty result escalates as inconclusive: the fixture withholds
+    # the verdict on both the first pass and the re-prompt ("NONE").
+    test "a reviewer that omits the verdict twice escalates as inconclusive",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reprompt, "NONE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
+
+      # The re-prompt WAS attempted before escalating — its run row exists.
+      reprompt_id = Tribunal.reviewer_bead_id(bead.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Polecats.Run)
+
+      assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
+             "expected a re-prompt to have been attempted before escalating"
     end
   end
 
