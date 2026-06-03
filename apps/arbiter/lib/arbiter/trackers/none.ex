@@ -7,7 +7,9 @@ defmodule Arbiter.Trackers.None do
   nothing to fetch). `link_for/1` returns an empty string (no URL).
   `parse_ref/1` always returns `:error` (we never own a ref).
   `list_transitions/1` returns the full bead status set, since the bead ledger
-  has no externally-imposed restrictions.
+  has no externally-imposed restrictions. `list_open/1` returns
+  `{:error, :not_supported}` because there is no upstream backlog to list —
+  callers (e.g. `arb list --tracker`) treat that as "render local beads only".
   """
 
   @behaviour Arbiter.Trackers.Tracker
@@ -29,4 +31,7 @@ defmodule Arbiter.Trackers.None do
 
   @impl true
   def list_transitions(_ref), do: {:ok, [:open, :in_progress, :closed]}
+
+  @impl true
+  def list_open(_opts), do: {:error, :not_supported}
 end

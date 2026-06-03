@@ -147,6 +147,14 @@ defmodule Arbiter.Trackers.Jira do
   def parse_ref(_), do: :error
 
   @impl true
+  def list_open(_opts) do
+    # `arb list --tracker` currently only ships the GitHub backlog query.
+    # When Jira's "open + assigned to currentUser()" JQL is wired up, this
+    # returns the normalized summary list.
+    {:error, :not_supported}
+  end
+
+  @impl true
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, jira_transitions} <- list_raw_transitions(cfg, ref) do

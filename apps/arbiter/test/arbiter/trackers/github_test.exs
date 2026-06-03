@@ -347,6 +347,146 @@ defmodule Arbiter.Trackers.GitHubTest do
     end
   end
 
+  describe "list_open/1" do
+    test "fetches /user for viewer login, then assigned open issues, returns normalized summaries" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", "/repos/" <> _ = path} ->
+            # The /issues list endpoint, not a specific issue.
+            assert String.ends_with?(path, "/issues")
+            assert URI.decode_query(conn.query_string)["assignee"] == "me"
+            assert URI.decode_query(conn.query_string)["state"] == "open"
+
+            Req.Test.json(conn, [
+              %{
+                "number" => 42,
+                "title" => "First",
+                "state" => "open",
+                "html_url" => "https://github.com/x/y/issues/42",
+                "assignees" => [%{"login" => "me"}]
+              },
+              %{
+                "number" => 43,
+                "title" => "Second",
+                "state" => "open",
+                "html_url" => "https://github.com/x/y/issues/43",
+                "labels" => [%{"name" => "in progress"}],
+                "assignees" => [%{"login" => "me"}]
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, [first, second]} = GitHub.list_open([])
+
+      assert first.ref == "42"
+      assert first.title == "First"
+      assert first.url == "https://github.com/x/y/issues/42"
+      assert first.status == :open
+      assert first.assignees == ["me"]
+      assert is_map(first.raw)
+
+      assert second.ref == "43"
+      assert second.status == :in_progress
+    end
+
+    test "filters out pull requests (they share the /issues endpoint)" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", _} ->
+            Req.Test.json(conn, [
+              %{"number" => 42, "title" => "An issue", "state" => "open"},
+              %{
+                "number" => 43,
+                "title" => "A PR",
+                "state" => "open",
+                "pull_request" => %{"url" => "..."}
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, [only]} = GitHub.list_open([])
+      assert only.ref == "42"
+    end
+
+    test "follows the Link rel=\"next\" header across pages" do
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", _} ->
+            page = Agent.get_and_update(agent, fn n -> {n, n + 1} end)
+
+            case page do
+              0 ->
+                # Use a relative URL in the Link header; what matters is the
+                # path + query, both of which our parser handles.
+                conn
+                |> Plug.Conn.put_resp_header(
+                  "link",
+                  ~s(</repos/#{@owner}/#{@repo}/issues?page=2>; rel="next")
+                )
+                |> Plug.Conn.put_status(200)
+                |> Req.Test.json([%{"number" => 1, "title" => "p1", "state" => "open"}])
+
+              1 ->
+                Req.Test.json(conn, [%{"number" => 2, "title" => "p2", "state" => "open"}])
+            end
+        end
+      end)
+
+      assert {:ok, [a, b]} = GitHub.list_open([])
+      assert a.ref == "1"
+      assert b.ref == "2"
+    end
+
+    test "accepts an explicit assignee login (skips the viewer lookup)" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            flunk("should not look up /user when assignee is explicit")
+
+          {"GET", _} ->
+            assert URI.decode_query(conn.query_string)["assignee"] == "other"
+            Req.Test.json(conn, [])
+        end
+      end)
+
+      assert {:ok, []} = GitHub.list_open(assignee: "other")
+    end
+
+    test "propagates a missing-config error" do
+      Config.clear()
+      assert {:error, %Error{kind: :config_missing}} = GitHub.list_open([])
+    end
+
+    test "propagates an HTTP error from the issues endpoint" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => "me"})
+
+          {"GET", _} ->
+            conn
+            |> Plug.Conn.put_status(401)
+            |> Req.Test.json(%{"message" => "Bad credentials"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :unauthenticated}} = GitHub.list_open([])
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()
