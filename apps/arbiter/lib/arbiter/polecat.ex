@@ -923,17 +923,23 @@ defmodule Arbiter.Polecat do
           # fires only on tribunal_verdict/2 :approve.
           enter_tribunal(state, branch)
         else
-          merge_branch(state, branch)
+          merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
         end
     end
   end
 
   # The shared "integrate this branch" path: open the MR / run the merge, or fail
   # the polecat (not silently complete it) if the adapter rejects.
-  defp merge_branch(%State{meta: meta} = state, branch) do
+  #
+  # `opts` may carry `:via_tribunal` (default `false`). When true the Warden is
+  # told the gate has already approved this MR, so it merges on its first poll
+  # instead of waiting for a hosted-forge approval signal that will never come
+  # (bd-66ey1o: the Tribunal approves in-process, it does NOT post a GitHub
+  # review).
+  defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
     title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
 
-    case do_open_mr(state, branch, title, "", %{}) do
+    case do_open_mr(state, branch, title, "", opts) do
       {:ok, _mr_ref, new_state} -> new_state
       {:error, reason, _state} -> fail_now(state, {:merge_failed, reason})
     end
@@ -945,6 +951,24 @@ defmodule Arbiter.Polecat do
       _ -> nil
     end
   end
+
+  # Pull merge-adapter overrides out of the polecat's meta so the
+  # tribunal-approve path can route through a test stub adapter without going
+  # through workspace config. Tests set these via `meta:` at polecat start;
+  # production callers leave them nil and rely on workspace resolution.
+  defp merge_opts_from_meta(meta, base) when is_map(base) do
+    meta = meta || %{}
+
+    base
+    |> maybe_put_meta(:adapter, Map.get(meta, :merger_adapter_override))
+    |> maybe_put_meta(:workspace, Map.get(meta, :merger_workspace_override))
+    |> maybe_put_meta(:interval_ms, Map.get(meta, :warden_interval_ms))
+    |> maybe_put_meta(:initial_delay_ms, Map.get(meta, :warden_initial_delay_ms))
+    |> maybe_put_meta(:max_polls, Map.get(meta, :warden_max_polls))
+  end
+
+  defp maybe_put_meta(map, _key, nil), do: map
+  defp maybe_put_meta(map, key, value), do: Map.put(map, key, value)
 
   # ---- review gate (Tribunal) --------------------------------------------
 
@@ -1045,7 +1069,10 @@ defmodule Arbiter.Polecat do
   defp apply_tribunal_verdict(%State{} = state, {:approve, findings}) do
     record_tribunal_outcome(state, :approve, findings)
     branch = Map.get(state.meta, :tribunal_branch) || mergeable_branch(state.meta)
-    merge_branch(state, branch)
+    # Tell the Warden the gate approved this MR. Without this, hosted-forge
+    # adapters (Github) park forever at :awaiting_review waiting for a
+    # PR-level approval the Tribunal never posts (bd-66ey1o).
+    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_tribunal: true}))
   end
 
   defp apply_tribunal_verdict(%State{} = state, {:request_changes, findings}) do
@@ -1341,11 +1368,20 @@ defmodule Arbiter.Polecat do
 
   # Spawn the Warden that polls for approval. auto_merge + poll interval come
   # from the workspace config (opts may override, primarily for tests).
+  #
+  # The `:via_tribunal` opt (carried through from the Tribunal-APPROVE merge
+  # path) tells the Warden the gate has already approved this MR; it short-
+  # circuits hosted-forge approval polling and merges on its first poll. The
+  # workspace's auto_merge setting is irrelevant in that case — a Tribunal
+  # APPROVE is the merge-now signal.
   defp start_warden(%State{} = state, workspace, opts) do
+    via_tribunal = Map.get(opts, :via_tribunal, false)
+
     auto_merge =
-      case Map.fetch(opts, :auto_merge) do
-        {:ok, v} -> v
-        :error -> workspace_auto_merge?(workspace)
+      cond do
+        via_tribunal -> true
+        Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
+        true -> workspace_auto_merge?(workspace)
       end
 
     warden_opts =
@@ -1355,10 +1391,12 @@ defmodule Arbiter.Polecat do
         mr_ref: state.mr_ref,
         adapter: state.merger_adapter,
         workspace: workspace,
-        auto_merge: auto_merge
+        auto_merge: auto_merge,
+        via_tribunal: via_tribunal
       ]
       |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
       |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
+      |> maybe_opt(:max_polls, Map.get(opts, :max_polls))
 
     case Arbiter.Polecat.Warden.start(warden_opts) do
       {:ok, _pid} ->

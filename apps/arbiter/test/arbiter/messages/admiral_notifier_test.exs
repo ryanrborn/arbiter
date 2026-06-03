@@ -120,6 +120,41 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
     end
   end
 
+  describe "awaiting_review_stuck/2 (bd-66ey1o)" do
+    test "names the MR ref passed explicitly even when meta has none" do
+      ws = uniq("ws")
+      bead_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.awaiting_review_stuck(
+                 %{bead_id: bead_id, workspace_id: ws, started_at: started_ago(900), meta: %{}},
+                 "#76"
+               )
+
+      notification = only_notification(ws)
+      assert notification.subject == "#{bead_id} stuck awaiting review"
+
+      assert notification.body ==
+               "#{bead_id} stuck at awaiting_review (MR #76) — escalated (no terminal MR outcome)"
+    end
+
+    test "falls back to the meta mr_ref when no override is passed" do
+      ws = uniq("ws")
+      bead_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.awaiting_review_stuck(%{
+                 bead_id: bead_id,
+                 workspace_id: ws,
+                 started_at: started_ago(60),
+                 meta: %{mr_ref: "!42"}
+               })
+
+      assert only_notification(ws).body ==
+               "#{bead_id} stuck at awaiting_review (MR !42) — escalated (no terminal MR outcome)"
+    end
+  end
+
   describe "guards" do
     test "a polecat with no workspace posts nothing" do
       assert :ok =
