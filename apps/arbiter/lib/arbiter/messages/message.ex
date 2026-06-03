@@ -250,6 +250,32 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
+  The full inter-agent thread about a directive (bead), oldest first: every
+  mailbox-family message whose `directive_ref` is `ref`, regardless of direction
+  or read state.
+
+  This is the durable implementer↔reviewer transcript the Tribunal's
+  revise-and-rediscuss loop builds (each reviewer finding and implementer
+  response is a persisted `:flag` row), so it survives the acolytes that wrote it
+  and escalation can reconstruct the ordered argument for Darth Gnosis. Pass
+  `workspace_id:` to scope to one workspace.
+  """
+  def thread(ref, opts \\ []) when is_binary(ref) do
+    query =
+      __MODULE__
+      |> Ash.Query.filter(directive_ref == ^ref and kind in ^@mailbox_kinds)
+      |> Ash.Query.sort(inserted_at: :asc)
+
+    query =
+      case Keyword.get(opts, :workspace_id) do
+        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
+        _ -> query
+      end
+
+    Ash.read!(query)
+  end
+
+  @doc """
   The `limit` most recent `:notification` messages, newest first. Pass
   `workspace_id:` to scope to one workspace.
   """
