@@ -1,0 +1,9 @@
+# notes/
+
+This is the surface-to-operator drop. When the <%= @coordinator %> has
+something worth highlighting — a risk spotted, a summary of work done, a
+recommendation — it writes a markdown file here. The operator checks this
+directory for those surfaced notes.
+
+(Safe to delete this README once real notes accumulate, or keep it as a
+reminder of what the directory is for.)
