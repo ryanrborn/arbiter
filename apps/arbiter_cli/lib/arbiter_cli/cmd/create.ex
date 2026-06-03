@@ -2,9 +2,14 @@ defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
   `arb create <title> [--description ...] [--priority N] [--type T]
                        [--deps id1,id2] [--labels a,b] [--assignee a]
-                       [--tracker-ref REF] [--no-tracker]`
+                       [--tracker-ref REF] [--no-tracker] [--vanguard <convoy-id>]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
+
+  `--vanguard <convoy-id>` attaches the new issue to an existing convoy
+  (vernacular: "Vanguard") immediately after creation. Like `--deps`, the bead
+  is durable even if the attach fails — the failure is surfaced and arb exits
+  non-zero.
 
   When the workspace has a tracker configured (`config["tracker"]["type"] !=
   none`), the server **also creates a corresponding upstream issue** and
@@ -42,6 +47,7 @@ defmodule ArbiterCli.Cmd.Create do
     tracker_ref: :string,
     no_tracker: :boolean,
     local_only: :boolean,
+    vanguard: :string,
     json: :boolean
   ]
 
@@ -93,6 +99,10 @@ defmodule ArbiterCli.Cmd.Create do
       attach_deps(issue["id"], opts[:deps])
     end
 
+    if opts[:vanguard] do
+      attach_vanguard(issue["id"], opts[:vanguard])
+    end
+
     Output.emit_issue(issue, mode)
   end
 
@@ -121,5 +131,21 @@ defmodule ArbiterCli.Cmd.Create do
           })
       end
     end)
+  end
+
+  # Attach the freshly-created issue to a convoy (vernacular: "Vanguard"). The
+  # bead is durable; a failed attach is surfaced and arb exits non-zero,
+  # mirroring `attach_deps/2`.
+  defp attach_vanguard(new_id, convoy_id) do
+    case Client.post("/api/convoys/" <> convoy_id <> "/members", %{"issue_id" => new_id}) do
+      {:ok, _} ->
+        :ok
+
+      {:error, err} ->
+        Output.die(%{
+          err
+          | message: "failed to attach #{new_id} to #{convoy_id}: #{err.message}"
+        })
+    end
   end
 end

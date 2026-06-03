@@ -66,6 +66,8 @@ defmodule ArbiterWeb.Router do
     post("/convoys", ConvoyController, :create)
     get("/convoys/:id", ConvoyController, :show)
     post("/convoys/:id/close", ConvoyController, :close)
+    post("/convoys/:id/members", ConvoyController, :add_member)
+    delete("/convoys/:id/members/:issue_id", ConvoyController, :remove_member)
 
     # Workspaces
     get("/workspaces", WorkspaceController, :index)
