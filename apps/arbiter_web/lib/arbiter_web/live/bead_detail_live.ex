@@ -349,9 +349,19 @@ defmodule ArbiterWeb.BeadDetailLive do
                           {@polecat.status}
                         </span>
                       </span>
-                      <span class="badge badge-ghost badge-sm font-mono">
-                        {@polecat.current_step}
-                      </span>
+                      <%= cond do %>
+                        <% Map.get(@polecat, :claude_session?) and @polecat.status in [:idle, :running] -> %>
+                          <span class="badge badge-primary badge-sm">
+                            {polecat_activity_label(@polecat)}
+                          </span>
+                        <% Map.get(@polecat, :claude_session?) -> %>
+                          <%!-- Run over: the adjacent status badge already says
+                               what happened; don't show a frozen activity. --%>
+                        <% true -> %>
+                          <span class="badge badge-ghost badge-sm font-mono">
+                            {@polecat.current_step}
+                          </span>
+                      <% end %>
                     </div>
                     <div class="flex items-center gap-1.5 text-xs text-base-content/60">
                       <.icon name="hero-clock" class="size-3.5" />
@@ -591,4 +601,14 @@ defmodule ArbiterWeb.BeadDetailLive do
 
   defp format_started(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
   defp format_started(other), do: to_string(other)
+
+  defp polecat_activity_label(polecat) do
+    case Map.get(polecat, :meta) do
+      %{"activity" => %{"label" => label}} when is_binary(label) -> label
+      %{activity: %{label: label}} when is_binary(label) -> label
+      %{"activity" => label} when is_binary(label) -> label
+      %{activity: label} when is_binary(label) -> label
+      _ -> "working"
+    end
+  end
 end

@@ -270,9 +270,14 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Active #{worker}s (#{length(list)}) ==")
 
     Enum.each(list, fn p ->
-      IO.puts(
-        "  #{p["bead_id"]}  status=#{p["status"]}  step=#{p["current_step"]}  rig=#{p["rig"]}"
-      )
+      # Claude-driven workers have a frozen workflow step; show their live
+      # stream-derived activity instead. See bd-c919xj.
+      step =
+        if p["claude_session"],
+          do: "activity=#{activity_label(p)}",
+          else: "step=#{p["current_step"]}"
+
+      IO.puts("  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}")
     end)
   end
 
@@ -303,5 +308,14 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp truncate(s, max) when is_binary(s) do
     if String.length(s) > max, do: String.slice(s, 0, max - 1) <> "…", else: s
+  end
+
+  # Activity is exposed by the JSON API as a map (%{"label", ...}) or null;
+  # render its label, falling back to "working" until the first event lands.
+  defp activity_label(p) do
+    case p["activity"] do
+      %{"label" => label} when is_binary(label) and label != "" -> label
+      _ -> "working"
+    end
   end
 end
