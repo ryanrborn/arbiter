@@ -132,10 +132,17 @@ defmodule ArbiterCli.Cmd.Start do
 
   # ---- phoenix -----------------------------------------------------------
 
-  # Start Phoenix detached so it survives this escript exiting. `nohup` plus a
-  # redirect to a log file and a backgrounding `&` means the shell returns
-  # immediately while `mix phx.server` keeps running, reparented to init.
-  defp start_phoenix(root) do
+  @doc """
+  Start Phoenix detached so it survives this escript exiting. `nohup` plus a
+  redirect to a log file and a backgrounding `&` means the shell returns
+  immediately while `mix phx.server` keeps running, reparented to init.
+
+  Returns `{:phoenix, :ok, log_path}`. The spawned server inherits this
+  process's environment (so `GITHUB_TOKEN` and friends carry through). Shared
+  with `arb restart` so the two have one definition of "start Phoenix".
+  """
+  @spec start_phoenix(String.t()) :: {:phoenix, :ok, String.t()}
+  def start_phoenix(root) do
     log = phoenix_log_path()
     log_text("Starting Phoenix (mix phx.server)… logging to #{log}")
 
@@ -159,17 +166,25 @@ defmodule ArbiterCli.Cmd.Start do
       )
   end
 
-  defp phoenix_log_path do
+  @doc "Path of the log file Phoenix's stdout/stderr is redirected to. Shared with `arb restart`."
+  @spec phoenix_log_path() :: String.t()
+  def phoenix_log_path do
     Path.join(System.tmp_dir!(), "arbiter-phoenix.log")
   end
 
   # ---- wait loop ---------------------------------------------------------
 
-  # Count-based rather than wall-clock so tests can inject a no-op sleep and
-  # still terminate deterministically.
-  defp attempts_for(timeout_ms), do: div(timeout_ms, @poll_interval_ms) + 1
+  @doc """
+  Number of poll attempts that fit in `timeout_ms`. Count-based rather than
+  wall-clock so tests can inject a no-op sleep and still terminate
+  deterministically. Shared with `arb restart`.
+  """
+  @spec attempts_for(non_neg_integer()) :: pos_integer()
+  def attempts_for(timeout_ms), do: div(timeout_ms, @poll_interval_ms) + 1
 
-  defp wait_until_green(attempts_left) do
+  @doc "Poll `arb doctor` until green or `attempts_left` is exhausted. Shared with `arb restart`."
+  @spec wait_until_green(integer()) :: :ok | :timeout
+  def wait_until_green(attempts_left) do
     cond do
       Doctor.green?() ->
         :ok
@@ -297,27 +312,34 @@ defmodule ArbiterCli.Cmd.Start do
   end
 
   # ---- injectable seams (overridable in tests via the process dict) ------
+  #
+  # `@doc false` keeps these out of the generated docs while letting sibling
+  # commands (notably `arb restart`) route through the same `:bd2_cmd_runner`
+  # / `:bd2_sleep` seams, so one test stub covers both commands.
 
+  @doc false
   # External command execution. Defaults to System.cmd/3; tests stub it to
   # record invocations and flip a fake "now reachable" signal without shelling
   # out. Returns `{output_binary, exit_status}`.
-  defp run_cmd(cmd, args, opts) do
+  def run_cmd(cmd, args, opts) do
     case Process.get(:bd2_cmd_runner) do
       fun when is_function(fun, 3) -> fun.(cmd, args, opts)
       _ -> System.cmd(cmd, args, opts)
     end
   end
 
-  defp sleep(ms) do
+  @doc false
+  def sleep(ms) do
     case Process.get(:bd2_sleep) do
       fun when is_function(fun, 1) -> fun.(ms)
       _ -> Process.sleep(ms)
     end
   end
 
+  @doc false
   # Progress chatter goes to stderr so `--json` stdout stays a single clean
   # object. Suppressed in tests via the same seam to keep captures tidy.
-  defp log_text(msg) do
+  def log_text(msg) do
     case Process.get(:bd2_sleep) do
       # In tests (sleep stubbed) stay quiet; otherwise narrate progress.
       fun when is_function(fun, 1) -> :ok

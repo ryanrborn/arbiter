@@ -26,6 +26,7 @@ defmodule ArbiterCli.Main do
       arb ready
       arb doctor
       arb start [--timeout SECONDS] [--json]
+      arb restart [--timeout SECONDS] [--json]
       arb where
       arb prime
       arb sling <bead-id>
@@ -97,6 +98,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("ready", args), do: ArbiterCli.Cmd.Ready.run(args)
   defp dispatch_known("doctor", args), do: ArbiterCli.Cmd.Doctor.run(args)
   defp dispatch_known("start", args), do: ArbiterCli.Cmd.Start.run(args)
+  defp dispatch_known("restart", args), do: ArbiterCli.Cmd.Restart.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("sling", args), do: ArbiterCli.Cmd.Sling.run(args)
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
