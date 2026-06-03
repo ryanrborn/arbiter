@@ -294,4 +294,28 @@ defmodule Arbiter.Messages.Message do
 
     Ash.read!(query)
   end
+
+  @doc """
+  The `limit` most recent `:escalation` messages, newest first — read *and*
+  unread alike (unlike `inbox/2`, which is unread-only). Escalations are raised
+  solely by the Tribunal review gate on a non-approve verdict
+  (`Arbiter.Polecat` reject/inconclusive path), so this is the durable record of
+  rejected reviews, carrying the reviewer's findings in `:body`. Powers the
+  dashboard's Tribunal view. Pass `workspace_id:` to scope to one workspace.
+  """
+  def recent_escalations(limit \\ 10, opts \\ []) do
+    query =
+      __MODULE__
+      |> Ash.Query.filter(kind == :escalation)
+      |> Ash.Query.sort(inserted_at: :desc)
+      |> Ash.Query.limit(limit)
+
+    query =
+      case Keyword.get(opts, :workspace_id) do
+        ws when is_binary(ws) -> Ash.Query.filter(query, workspace_id == ^ws)
+        _ -> query
+      end
+
+    Ash.read!(query)
+  end
 end

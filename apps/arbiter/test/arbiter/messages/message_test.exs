@@ -164,4 +164,56 @@ defmodule Arbiter.Messages.MessageTest do
       assert bodies == ["second", "first"]
     end
   end
+
+  describe "recent_escalations/2" do
+    test "returns newest escalations first, read and unread alike, scoped to workspace" do
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          workspace_id: @ws,
+          subject: "Tribunal: changes requested for bd-aaa",
+          body: "first"
+        })
+
+      {:ok, second} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          workspace_id: @ws,
+          subject: "Tribunal: review inconclusive for bd-bbb",
+          body: "second"
+        })
+
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          workspace_id: "other-ws",
+          body: "elsewhere"
+        })
+
+      # Acknowledging an escalation must NOT drop it from the view (unlike inbox/2).
+      {:ok, _} = Message.mark_read(second)
+
+      bodies = Message.recent_escalations(10, workspace_id: @ws) |> Enum.map(& &1.body)
+      assert bodies == ["second", "first"]
+    end
+
+    test "ignores non-escalation mailbox kinds" do
+      {:ok, _} =
+        Message.send_mail(%{kind: :info, to_ref: "admiral", workspace_id: @ws, body: "fyi"})
+
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          workspace_id: @ws,
+          body: "needs attention"
+        })
+
+      bodies = Message.recent_escalations(10, workspace_id: @ws) |> Enum.map(& &1.body)
+      assert bodies == ["needs attention"]
+    end
+  end
 end

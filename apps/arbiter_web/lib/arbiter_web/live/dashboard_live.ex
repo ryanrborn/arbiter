@@ -12,7 +12,11 @@ defmodule ArbiterWeb.DashboardLive do
       flags, info. Read-acknowledge per message; clear drains the read tail.
       The dashboard counterpart of `arb inbox` / `arb msg`. Live.
     * Notifications feed — recent `:notification` broadcasts (read-only).
-    * Escalations (placeholder — no Escalation resource yet)
+    * Tribunal (review gate) — reviews in flight (authors parked at
+      `:awaiting_tribunal`, enriched with their reviewer's live activity) plus
+      the durable record of non-approve verdicts (recent `:escalation`
+      messages, carrying the reviewer's findings). Approvals proceed straight to
+      the merge queue, so they surface there, not here. Live.
 
   ## PubSub topics
 
@@ -55,6 +59,9 @@ defmodule ArbiterWeb.DashboardLive do
   # Number of directives shown in the "recent directives" list.
   @recent_beads_limit 20
 
+  # Number of escalations (Tribunal verdicts) shown in the Tribunal view.
+  @recent_escalations_limit 10
+
   @impl true
   def mount(_params, _session, socket) do
     live? = connected?(socket)
@@ -87,6 +94,8 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_polecats()
      |> refresh_merge_queue()
      |> refresh_completed_runs()
+     |> refresh_pending_reviews()
+     |> refresh_escalations()
      |> refresh_recent_beads()}
   end
 
@@ -104,6 +113,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_polecats()
      |> refresh_merge_queue()
      |> refresh_completed_runs()
+     |> refresh_pending_reviews()
      |> refresh_workspaces()
      |> refresh_rigs()}
   end
@@ -112,7 +122,8 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply,
      socket
      |> refresh_notifications()
-     |> refresh_admiral_inbox()}
+     |> refresh_admiral_inbox()
+     |> refresh_escalations()}
   end
 
   # Lightweight 1s tick: only advances the clock so elapsed counters and
@@ -208,6 +219,60 @@ defmodule ArbiterWeb.DashboardLive do
     end
   rescue
     _ -> :direct
+  end
+
+  # ---- tribunal (review gate) ----
+
+  # Reviews in flight right now: author polecats parked at :awaiting_tribunal
+  # while a distinct reviewer mind code-reviews their diff. Each is enriched
+  # with the live activity of its reviewer (a sibling `<bead>#review` polecat,
+  # matched via meta.reviews) so the operator can see what the review is doing,
+  # not just that one is pending. Ordered longest-waiting first.
+  defp refresh_pending_reviews(socket) do
+    children =
+      try do
+        Polecat.list_children()
+      rescue
+        _ -> []
+      end
+
+    workspaces_by_id =
+      socket.assigns[:workspaces_by_id] || index_workspaces(load_workspaces())
+
+    reviewers_by_bead =
+      children
+      |> Enum.filter(fn p -> Map.get(p.meta || %{}, :role) == :reviewer end)
+      |> Map.new(fn p -> {Map.get(p.meta || %{}, :reviews), p} end)
+
+    pending =
+      children
+      |> Enum.filter(&(&1.status == :awaiting_tribunal))
+      |> Enum.map(fn p ->
+        %{
+          bead_id: p.bead_id,
+          workspace_name: workspace_label(workspaces_by_id, p.workspace_id),
+          since: p.step_started_at || p.started_at,
+          reviewer_activity: reviewer_activity(Map.get(reviewers_by_bead, p.bead_id))
+        }
+      end)
+      |> Enum.sort_by(& &1.since, {:asc, DateTime})
+
+    assign(socket, :pending_reviews, pending)
+  end
+
+  # Recent Tribunal escalations: the durable record of non-approve verdicts
+  # (REQUEST_CHANGES / inconclusive), newest first, fleet-wide. Carries the
+  # reviewer's findings in :body. Read and unread alike — a Tribunal verdict
+  # stays in the history once the Admiral has seen it.
+  defp refresh_escalations(socket) do
+    escalations =
+      try do
+        Message.recent_escalations(@recent_escalations_limit)
+      rescue
+        _ -> []
+      end
+
+    assign(socket, :escalations, escalations)
   end
 
   defp refresh_completed_runs(socket) do
@@ -668,6 +733,42 @@ defmodule ArbiterWeb.DashboardLive do
 
   defp live_activity(_), do: "working"
 
+  # A pending review's reviewer activity, or nil when the reviewer exposes no
+  # live activity label (or there is no live reviewer). Unlike live_activity/1
+  # this returns nil rather than a "working" default, so the template can choose
+  # whether to render the reviewer line at all.
+  defp reviewer_activity(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :activity) do
+      %{"label" => label} when is_binary(label) -> label
+      %{label: label} when is_binary(label) -> label
+      label when is_binary(label) -> label
+      _ -> nil
+    end
+  end
+
+  defp reviewer_activity(_), do: nil
+
+  # Derive the verdict an escalation represents from its subject. The Tribunal
+  # raises escalations with subjects of the form
+  # "Tribunal: changes requested for <bead>" or
+  # "Tribunal: review inconclusive for <bead>"; anything else falls back to a
+  # neutral label so a non-Tribunal escalation still renders sensibly.
+  defp escalation_verdict_label(subject) when is_binary(subject) do
+    cond do
+      String.contains?(subject, "inconclusive") -> "Inconclusive"
+      String.contains?(subject, "changes requested") -> "Changes requested"
+      true -> "Escalation"
+    end
+  end
+
+  defp escalation_verdict_label(_), do: "Escalation"
+
+  defp escalation_verdict_class(subject) when is_binary(subject) do
+    if String.contains?(subject, "inconclusive"), do: "badge-warning", else: "badge-error"
+  end
+
+  defp escalation_verdict_class(_), do: "badge-error"
+
   # ---- render ----
 
   @impl true
@@ -939,8 +1040,7 @@ defmodule ArbiterWeb.DashboardLive do
           <div class="card-body p-4 gap-4">
             <div class="flex items-center justify-between gap-2">
               <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-envelope" class="size-5 text-base-content/70" />
-                Admiral Mailbox
+                <.icon name="hero-envelope" class="size-5 text-base-content/70" /> Admiral Mailbox
                 <span class={[
                   "badge badge-sm",
                   if(@admiral_inbox == [], do: "badge-ghost", else: "badge-warning")
@@ -1309,17 +1409,136 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── I. Coming-soon placeholder ───────────────────────────── --%>
-        <section class="card bg-base-200/60 border border-dashed border-base-300">
-          <div class="card-body p-4 gap-2">
-            <h2 class="text-lg font-semibold flex items-center gap-2 text-base-content/70">
-              <.icon name="hero-exclamation-triangle" class="size-5" />
-              {cap_plural(@escalation_label)}
-              <span class="badge badge-ghost badge-sm">soon</span>
+        <%!-- ── I. Tribunal (review gate) ────────────────────────────── --%>
+        <%!-- The review gate: a separate reviewer mind code-reviews each diff
+             before it merges. Two surfaces — reviews in flight right now
+             (authors parked at :awaiting_tribunal), and the durable record of
+             non-approve verdicts (escalations carrying the reviewer's findings).
+             Approvals proceed straight to the merge queue, so they surface
+             there and in Completed, not here. Live. --%>
+        <section id="tribunal-section" class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <h2 class="text-lg font-semibold flex items-center gap-2">
+              <.icon name="hero-scale" class="size-5 text-warning" /> Tribunal
+              <span class="text-sm font-normal text-base-content/50">
+                — code review before merge
+              </span>
             </h2>
-            <p class="text-sm text-base-content/50" id="escalations-empty">
-              No {plural(@escalation_label)}. ({String.capitalize(@escalation_label)} resource is a Phase 5 follow-up.)
-            </p>
+
+            <%!-- In review now: live reviews gating a merge. --%>
+            <div class="space-y-2">
+              <h3 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                <.icon name="hero-magnifying-glass" class="size-4" />
+                In review ({length(@pending_reviews)})
+              </h3>
+
+              <div
+                :if={@pending_reviews == []}
+                id="pending-reviews-empty"
+                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-4 text-center"
+              >
+                <p class="text-sm text-base-content/60">
+                  No reviews in flight. When a {@worker_label} signals done in a {@workspace_label} that requires review, the Tribunal spawns a reviewer and the {@issue_label} appears
+                  here until a verdict lands.
+                </p>
+              </div>
+
+              <ul :if={@pending_reviews != []} id="pending-reviews" class="flex flex-col gap-2">
+                <li
+                  :for={r <- @pending_reviews}
+                  class="rounded-box bg-base-100 border border-base-300 border-l-4 border-warning p-3"
+                >
+                  <div class="flex items-center justify-between gap-2">
+                    <.link
+                      navigate={~p"/polecats/#{r.bead_id}"}
+                      class="flex items-center gap-2 min-w-0 group"
+                    >
+                      <span class="relative flex h-2.5 w-2.5 shrink-0">
+                        <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-75">
+                        </span>
+                        <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>
+                      </span>
+                      <code class="text-xs font-semibold group-hover:text-warning transition-colors truncate">
+                        {r.bead_id}
+                      </code>
+                    </.link>
+                    <span
+                      class="text-xs font-mono text-base-content/70 tabular-nums shrink-0"
+                      title="Time in tribunal"
+                    >
+                      {humanize_seconds(runtime_seconds(r.since, @now))} in review
+                    </span>
+                  </div>
+
+                  <div class="flex items-center justify-between gap-2 mt-1.5 text-xs text-base-content/60">
+                    <span class="truncate">{r.workspace_name}</span>
+                    <span
+                      :if={r.reviewer_activity}
+                      class="badge badge-warning badge-sm gap-1.5 max-w-[55%]"
+                    >
+                      <span class="loading loading-ring loading-xs"></span>
+                      <span class="truncate">{r.reviewer_activity}</span>
+                    </span>
+                  </div>
+                </li>
+              </ul>
+            </div>
+
+            <%!-- Recent verdicts: durable record of escalated (non-approve)
+                 reviews, with the reviewer's findings. --%>
+            <div class="space-y-2">
+              <h3 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                <.icon name="hero-flag" class="size-4" />
+                Recent {cap_plural(@escalation_label)} ({length(@escalations)})
+              </h3>
+
+              <div
+                :if={@escalations == []}
+                id="escalations-empty"
+                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-4 text-center"
+              >
+                <p class="text-sm text-base-content/60">
+                  No {plural(@escalation_label)}. A Tribunal that requests changes or returns
+                  an inconclusive verdict escalates here with the reviewer's findings — the
+                  branch is parked, not merged.
+                </p>
+              </div>
+
+              <ul :if={@escalations != []} id="escalations" class="flex flex-col gap-2">
+                <li
+                  :for={e <- @escalations}
+                  class="rounded-box bg-base-100 border border-base-300 border-l-4 border-error px-3 py-2"
+                >
+                  <div class="flex items-baseline justify-between gap-2">
+                    <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                      <span class={["badge badge-sm shrink-0", escalation_verdict_class(e.subject)]}>
+                        {escalation_verdict_label(e.subject)}
+                      </span>
+                      <.link
+                        :if={e.directive_ref}
+                        navigate={~p"/beads/#{e.directive_ref}"}
+                        class="text-xs link link-hover font-mono text-base-content/60"
+                      >
+                        {e.directive_ref}
+                      </.link>
+                      <span :if={e.subject} class="text-sm truncate">{e.subject}</span>
+                    </div>
+                    <span
+                      class="text-xs text-base-content/50 whitespace-nowrap shrink-0"
+                      title={format_ts(e.inserted_at)}
+                    >
+                      {relative_time(e.inserted_at, @now)}
+                    </span>
+                  </div>
+                  <p
+                    :if={e.body not in [nil, ""]}
+                    class="text-xs mt-1.5 whitespace-pre-wrap text-base-content/70 line-clamp-3"
+                  >
+                    {e.body}
+                  </p>
+                </li>
+              </ul>
+            </div>
           </div>
         </section>
       </div>
