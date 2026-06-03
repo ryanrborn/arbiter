@@ -142,6 +142,65 @@ defmodule Arbiter.Polecat.WardenTest do
     end
   end
 
+  describe "via_tribunal short-circuits forge approval (bd-66ey1o)" do
+    test "treats :pending as :approved and force-auto-merges on first poll" do
+      {pid, bead_id} = running_polecat()
+      # No approval — pure :pending sequence — but via_tribunal must flip it
+      # to :approved so the merge fires anyway.
+      StubMerger.queue_get("!t1", [%{status: :open, approved: false}])
+
+      start_warden(pid, bead_id, "!t1", via_tribunal: true)
+
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      assert Polecat.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!t1") >= 1
+    end
+
+    test "via_tribunal still defers to :merged and :closed terminal status" do
+      {pid, bead_id} = running_polecat()
+      StubMerger.queue_get("!t2", [%{status: :closed}])
+
+      start_warden(pid, bead_id, "!t2", via_tribunal: true)
+
+      wait_until(fn -> Polecat.state(pid).status == :failed end)
+      assert Polecat.state(pid).meta.failure_reason == {:mr_closed, "!t2"}
+      # Importantly: we did NOT call merge/1 on a closed MR even though
+      # via_tribunal was on. Approval overriding is for :pending only.
+      assert StubMerger.merge_count("!t2") == 0
+    end
+  end
+
+  describe "watchdog (bd-66ey1o)" do
+    test "fails the polecat after max_polls consecutive :pending polls" do
+      {pid, bead_id} = running_polecat()
+      # StubMerger default returns approved:false forever, so without via_tribunal
+      # and with auto_merge: false this stays :pending until the watchdog fires.
+      start_warden(pid, bead_id, "!w1",
+        interval_ms: 10,
+        initial_delay_ms: 0,
+        max_polls: 2,
+        auto_merge: false
+      )
+
+      wait_until(fn -> Polecat.state(pid).status == :failed end, 2_000)
+      assert Polecat.state(pid).meta.failure_reason == {:awaiting_review_timeout, 2}
+    end
+
+    test "does not fire when via_tribunal: true (merge happens before cap)" do
+      {pid, bead_id} = running_polecat()
+
+      start_warden(pid, bead_id, "!w2",
+        via_tribunal: true,
+        interval_ms: 10,
+        initial_delay_ms: 0,
+        max_polls: 2
+      )
+
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      refute match?({:awaiting_review_timeout, _}, Polecat.state(pid).meta[:failure_reason])
+    end
+  end
+
   describe "lifecycle" do
     test "stops when the watched polecat dies" do
       {pid, bead_id} = running_polecat()
