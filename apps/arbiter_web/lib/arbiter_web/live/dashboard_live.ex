@@ -657,7 +657,15 @@ defmodule ArbiterWeb.DashboardLive do
 
   defp claude_session?(_), do: false
 
-  defp live_activity(%{meta: meta}) when is_map(meta), do: Map.get(meta, :activity) || "working"
+  defp live_activity(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :activity) do
+      %{"label" => label} when is_binary(label) -> label
+      %{label: label} when is_binary(label) -> label
+      label when is_binary(label) -> label
+      _ -> "working"
+    end
+  end
+
   defp live_activity(_), do: "working"
 
   # ---- render ----

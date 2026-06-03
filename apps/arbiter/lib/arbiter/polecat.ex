@@ -868,15 +868,24 @@ defmodule Arbiter.Polecat do
   defp sync_session_meta(%State{claude_sessions: sessions, meta: meta} = state, port) do
     case Map.get(sessions, port) do
       %{} = session ->
+        new_activity = Map.get(session, :activity)
+        old_activity = Map.get(meta, :activity)
+
         meta =
           meta
           |> Map.put(:output_lines, Enum.reverse(session.output_lines))
           |> Map.put(:exit_status, session.exit_status)
-          |> maybe_put(:activity, Map.get(session, :activity))
+          |> maybe_put(:activity, new_activity)
           |> maybe_put(:activity_at, Map.get(session, :activity_at))
           |> maybe_put(:exited_at, session.exited_at)
 
-        %State{state | meta: meta}
+        new_state = %State{state | meta: meta}
+
+        if new_activity != old_activity do
+          broadcast_lifecycle(:updated, new_state)
+        end
+
+        new_state
 
       _ ->
         state
