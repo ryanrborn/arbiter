@@ -260,7 +260,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
     [
       Atom.to_string(p.permissions.mode),
       "fs=#{p.sandbox.filesystem}",
-      "net=#{if p.sandbox.network, do: "on", else: "off"}",
+      "net=#{if p.sandbox.network, do: "on", else: "tools-off"}",
       "#{deny_count} #{if deny_count == 1, do: "deny", else: "denies"}"
     ]
     |> Enum.join(" · ")

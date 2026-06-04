@@ -84,7 +84,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       assert out =~ "security:"
       assert out =~ "mode:    bypass"
-      assert out =~ "net=off"
+      assert out =~ "net=tools-off"
       assert out =~ "2 safe-default + 1 custom"
     end
 

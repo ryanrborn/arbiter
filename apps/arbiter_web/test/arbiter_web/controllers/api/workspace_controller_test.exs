@@ -54,6 +54,9 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       # The safe-default deny baseline is surfaced and non-empty.
       assert is_list(posture["safe_defaults"]) and posture["safe_defaults"] != []
       assert posture["sandbox"]["filesystem"] == "worktree"
+      # Claude adapter enforces the policy; future adapters default to false.
+      assert posture["provider"] == "claude"
+      assert posture["policy_enforced"] == true
     end
 
     test "returns 404 for missing", %{conn: conn} do

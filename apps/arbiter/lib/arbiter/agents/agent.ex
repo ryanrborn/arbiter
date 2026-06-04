@@ -142,5 +142,18 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback provider() :: String.t()
 
-  @optional_callbacks [spawn_env: 1]
+  @doc """
+  Returns `true` when this adapter honors the normalized `SecurityPolicy`
+  passed in `opts[:security]` — i.e., enforces a non-empty destructive-op deny
+  baseline in `:auto`/`:strict` modes and does not fall through to the host
+  operator's agent config.
+
+  Defaults to `false` so that adapters added before implementing the security
+  contract don't silently claim enforcement. The Claude adapter returns `true`.
+  This value is surfaced in the `security_posture.policy_enforced` REST field so
+  operators can see whether the declared posture is actually being enforced.
+  """
+  @callback security_enforced?() :: boolean()
+
+  @optional_callbacks [spawn_env: 1, security_enforced?: 0]
 end

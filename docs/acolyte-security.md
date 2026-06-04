@@ -70,13 +70,23 @@ requires deliberate opt-in and should only be used for a run you already trust
 | `:no_secret_reads`   | reading `.env`, `*.pem`, `~/.ssh/**`, cloud creds          |
 | `:no_outside_writes` | writing `/etc/**`, `~/.ssh/**`, `~/.claude/**`, …          |
 
-Set `safe_defaults: []` to opt a domain out (not recommended).
+Set `safe_defaults: []` to opt a domain out (not recommended). **Effective floor
+caveat:** the isolated `CLAUDE_CONFIG_DIR/settings.json` is generated once from
+the install-default policy (which includes all four safe-default categories) and
+Claude unions deny lists across settings sources. Setting `safe_defaults: []` in
+workspace config removes those categories from the per-spawn `--settings` deny
+list, but the config-dir floor still carries them. The practical effect is that
+the config-dir safe-default denies are a **hard minimum** that cannot be removed
+through workspace config alone — only changing `SecurityPolicy.base/0` or the
+install-level `acolyte_security_policy` app env removes them.
 
 ### Sandbox
 
 `filesystem: :worktree` keeps file access scoped to the handed worktree;
-`network: false` cuts the agent's network-egress tools (`WebFetch`,
-`WebSearch`, `curl`, `wget`, `nc`, …).
+`network: false` cuts the agent's **network-egress tools** (`WebFetch`,
+`WebSearch`, `curl`, `wget`, `nc`, …). It does **not** block native OS network
+traffic (`git push`, package installs, SSH) — those require a kernel-level
+sandbox. The badge and surface show `net=tools-off` to make this scope explicit.
 
 > **Enforcement level — be honest about it.** For the Claude provider these are
 > *permission-layer* guards inside the agent (it won't run a denied command),
@@ -161,11 +171,20 @@ operator's permission posture.
 
 ## Provider-agnostic by construction
 
-`SecurityPolicy` carries no Claude-specific syntax. A second provider (e.g.
-antigravity) implements the same contract: take the normalized policy, fold in
-its own non-empty destructive-op deny baseline (except in `:bypass`), and emit
-its own flags. The dispatcher, the workspace config shape, `arb prime`, and the
-dashboard are unchanged by adding a provider.
+`SecurityPolicy` carries no Claude-specific syntax. The `Arbiter.Agents.Agent`
+behaviour contract requires any adapter to:
+
+1. Map the normalized `:security` policy to its provider's mechanism.
+2. Enforce a non-empty destructive-op deny baseline (the policy's
+   `safe_defaults`) in `:auto` and `:strict` modes.
+3. Not fall through to the host operator's personal agent config.
+4. Implement `security_enforced?/0` returning `true` once it honors the above.
+
+**Current status:** only the `Claude` adapter enforces the policy
+(`security_enforced? = true`). Future adapters (antigravity, Codex, …) implement
+the same contract their own way. Until an adapter implements it, the REST
+`security_posture.policy_enforced` field returns `false` so operators can see
+whether the declared posture is actually being enforced by the running adapter.
 
 ## Where the posture is surfaced
 
@@ -174,4 +193,5 @@ dashboard are unchanged by adding a provider.
 * **Dashboard** — a per-acolyte permission-mode badge on the active workers
   list (ghost for `auto`, warning for `strict`, error for `bypass`).
 * **REST** — `GET /api/workspaces/:id` includes a resolved `security_posture`
-  object (the single source of truth both surfaces read).
+  object with `provider`, `policy_enforced`, and the full policy summary. This
+  is the single source of truth both surfaces read.

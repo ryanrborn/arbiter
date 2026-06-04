@@ -470,7 +470,7 @@ defmodule Arbiter.Polecat.Sling do
       end
 
     case Keyword.get(opts, :security_mode) do
-      mode when is_binary(mode) or is_atom(mode) ->
+      mode when is_binary(mode) or (is_atom(mode) and not is_nil(mode)) ->
         Map.update(base, "permissions", %{"mode" => mode}, fn perms ->
           Map.put(perms, "mode", mode)
         end)

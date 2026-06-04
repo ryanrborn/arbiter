@@ -57,6 +57,9 @@ defmodule Arbiter.Agents.Claude do
   def provider, do: "claude"
 
   @impl true
+  def security_enforced?, do: true
+
+  @impl true
   def done_sentinel, do: @done_regex
 
   @impl true

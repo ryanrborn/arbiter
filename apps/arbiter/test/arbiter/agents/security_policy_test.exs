@@ -136,5 +136,12 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert line =~ "fs=worktree"
       assert line =~ "net=on"
     end
+
+    test "one_line shows net=tools-off when network: false" do
+      policy = SecurityPolicy.merge(SecurityPolicy.base(), %{sandbox: %{network: false}})
+      line = SecurityPolicy.one_line(policy)
+      assert line =~ "net=tools-off"
+      refute line =~ "net=off"
+    end
   end
 end

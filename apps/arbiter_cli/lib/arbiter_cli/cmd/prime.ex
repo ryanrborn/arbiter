@@ -256,7 +256,7 @@ defmodule ArbiterCli.Cmd.Prime do
     safe = List.wrap(posture["safe_defaults"])
     allow = List.wrap(posture["allow"])
 
-    net = if Map.get(sandbox, "network", true), do: "on", else: "off"
+    net = if Map.get(sandbox, "network", true), do: "on", else: "tools-off"
 
     IO.puts("  security:")
     IO.puts("    mode:    #{posture["mode"] || "auto"}")
