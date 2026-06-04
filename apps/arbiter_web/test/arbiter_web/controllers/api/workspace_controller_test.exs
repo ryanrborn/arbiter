@@ -114,4 +114,64 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert json_response(conn, 200)["description"] == "via put"
     end
   end
+
+  describe "PATCH /api/workspaces/:id/config" do
+    setup do
+      initial = %{
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
+        "rig_paths" => %{"arbiter" => "/srv/arbiter"},
+        "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo", "repo" => "arb"}}
+      }
+
+      {:ok, ws} = Ash.create(Workspace, %{name: "patch-cfg", prefix: "pcf", config: initial})
+      {:ok, ws: ws}
+    end
+
+    test "deep-merges a partial patch — sibling keys untouched", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"merge" => %{"auto_merge" => true}}
+        })
+
+      body = json_response(conn, 200)
+      assert body["config"]["merge"]["auto_merge"] == true
+      # The original footgun: replace semantics would have wiped these.
+      assert body["config"]["merge"]["strategy"] == "github"
+      assert body["config"]["merge"]["config"]["owner"] == "leo"
+      assert body["config"]["tracker"]["type"] == "github"
+      assert body["config"]["rig_paths"]["arbiter"] == "/srv/arbiter"
+    end
+
+    test "unset_paths removes a dotted leaf", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "unset_paths" => ["tracker.config.owner"]
+        })
+
+      body = json_response(conn, 200)
+      refute Map.has_key?(body["config"]["tracker"]["config"], "owner")
+      assert body["config"]["tracker"]["type"] == "github"
+    end
+
+    test "empty body is a no-op (no fields changed)", %{conn: conn, ws: ws} do
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{})
+      body = json_response(conn, 200)
+      assert body["config"]["merge"]["strategy"] == "github"
+    end
+
+    test "validation runs on the merged result", %{conn: conn, ws: ws} do
+      conn =
+        patch(conn, ~p"/api/workspaces/#{ws.id}/config", %{
+          "patch" => %{"tracker" => %{"type" => "asana"}}
+        })
+
+      assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
+    end
+
+    test "returns 404 for a missing workspace", %{conn: conn} do
+      bogus = "00000000-0000-0000-0000-000000000000"
+      conn = patch(conn, ~p"/api/workspaces/#{bogus}/config", %{"patch" => %{}})
+      assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
+    end
+  end
 end
