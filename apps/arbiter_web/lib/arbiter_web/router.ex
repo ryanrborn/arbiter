@@ -69,6 +69,9 @@ defmodule ArbiterWeb.Router do
     post("/convoys/:id/members", ConvoyController, :add_member)
     delete("/convoys/:id/members/:issue_id", ConvoyController, :remove_member)
 
+    # Rigs (repo/project checkouts polecats operate on)
+    get("/rigs", RigController, :index)
+
     # Workspaces
     get("/workspaces", WorkspaceController, :index)
     post("/workspaces", WorkspaceController, :create)
