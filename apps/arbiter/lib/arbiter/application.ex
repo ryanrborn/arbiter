@@ -54,7 +54,15 @@ defmodule Arbiter.Application do
   #
   #   * SingleInstance: hold a session advisory lock that identifies the one
   #     canonical instance per DB. Started FIRST (and synchronously, via its
-  #     init) so the reconcile Task below can read its verdict. See bd-9rouwh.
+  #     init) so the migrator and reconcile Task below can read its verdict.
+  #     See bd-9rouwh.
+  #   * migrator: run pending Ecto migrations to head, SYNCHRONOUSLY, before any
+  #     later child (or the :arbiter_web endpoint) comes up against a stale
+  #     schema. Gated on the SingleInstance primary verdict so only the one
+  #     canonical instance migrates. A migration failure aborts the boot. Placed
+  #     before reconcile/refinery so those run against the current schema. It is
+  #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
+  #     the boot until the schema is current. See Arbiter.Boot.Migrator.
   #   * reconcile: sweep orphaned :running polecat_runs left behind by a node
   #     that died mid-run. Runs once after Repo + Polecat.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
@@ -72,6 +80,7 @@ defmodule Arbiter.Application do
   defp boot_tasks(true) do
     [
       Arbiter.SingleInstance,
+      Arbiter.Boot.Migrator,
       Supervisor.child_spec(
         {Task,
          fn ->

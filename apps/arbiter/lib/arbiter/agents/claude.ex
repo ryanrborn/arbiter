@@ -28,6 +28,7 @@ defmodule Arbiter.Agents.Claude do
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Claude.Config
+  alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Polecat.ClaudeSession
 
   @done_regex ~r/\barb done\b/
@@ -52,6 +53,13 @@ defmodule Arbiter.Agents.Claude do
 
   @impl true
   def spawn_env(opts \\ []) do
+    # Acolyte runs get an isolated CLAUDE_CONFIG_DIR so the operator's personal
+    # ~/.claude/CLAUDE.md (persona) can't bleed into the worker's context
+    # (bd-3y2mda); the optional API key composes on top.
+    ConfigDir.env() ++ api_key_env(opts)
+  end
+
+  defp api_key_env(opts) do
     case Keyword.get(opts, :api_key) || Config.resolve_api_key() do
       key when is_binary(key) and key != "" -> [{"ANTHROPIC_API_KEY", key}]
       _ -> []
@@ -81,7 +89,8 @@ defmodule Arbiter.Agents.Claude do
   end
 
   @impl true
-  def usage_attrs(session), do: ClaudeSession.usage_summary(session) |> Map.put(:provider, provider())
+  def usage_attrs(session),
+    do: ClaudeSession.usage_summary(session) |> Map.put(:provider, provider())
 
   # ---- Internals ---------------------------------------------------------
 

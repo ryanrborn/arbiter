@@ -9,6 +9,9 @@ defmodule ArbiterWeb.Api.PolecatController do
     * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `with_claude`).
       Without `with_claude` the bead parks in `:in_progress` (no Driver); with
       it, a Claude subprocess works the bead and the Driver closes it on `arb done`.
+    * `POST /api/polecats/review`          — :review (body: `bead_id`, optional `rig`).
+      Dispatches a review-only acolyte: no worktree, no per-bead branch, no
+      route through the Crucible/merger. Always claude-driven.
     * `GET  /api/polecats`                 — :index (list active polecats)
     * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output).
       When no live polecat exists for the bead, falls back to the most recent
@@ -48,6 +51,42 @@ defmodule ArbiterWeb.Api.PolecatController do
 
           {:error, reason} ->
             {:error, {:server_error, "sling failed", %{reason: inspect(reason)}}}
+        end
+
+      _ ->
+        {:error, {:invalid_request, "bead_id is required", %{}}}
+    end
+  end
+
+  @doc """
+  Dispatch a review-only directive. The bead is slung with `review: true`,
+  which forces the `CodeReview` workflow, skips worktree provisioning, swaps
+  the work prompt for the review prompt, and tags the polecat as
+  `review_only` so completion does not fan out to the Crucible/merger.
+
+  Always claude-driven (`start_claude: true`) — a review without an agent has
+  nothing to do.
+  """
+  def review(conn, params) do
+    case params do
+      %{"bead_id" => bead_id} when is_binary(bead_id) and bead_id != "" ->
+        opts = review_opts(params)
+
+        case Sling.sling(bead_id, opts) do
+          {:ok, result} ->
+            conn
+            |> put_status(:created)
+            |> render(:sling, result: result)
+
+          {:error, {:bead_not_found, _}} ->
+            {:error, :not_found}
+
+          {:error, {:bead_closed, _}} ->
+            {:error,
+             {:invalid_request, "bead is closed; reopen it before reviewing", %{bead_id: bead_id}}}
+
+          {:error, reason} ->
+            {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}
         end
 
       _ ->
@@ -176,6 +215,30 @@ defmodule ArbiterWeb.Api.PolecatController do
   end
 
   defp add_model_override(opts, _), do: opts
+
+  # Review-only dispatch. `review: true` cascades into Sling: it pulls the
+  # CodeReview workflow, suppresses worktree provisioning, swaps the prompt,
+  # and stamps `review_only` into the polecat's meta so completion doesn't
+  # fan out to the Crucible.
+  #
+  # `with_claude` defaults to true — a reviewer with no agent has nothing to
+  # do. Tests pass `with_claude: false` to dispatch a review without spawning
+  # a Claude subprocess.
+  defp review_opts(params) do
+    base = [rig: params["rig"], review: true]
+
+    start_claude =
+      case truthy(params["with_claude"]) do
+        false -> false
+        _ -> true
+      end
+
+    base
+    |> Keyword.put(:start_claude, start_claude)
+    |> Keyword.put(:start_driver, false)
+    |> add_model_override(params["model"])
+    |> Enum.reject(fn {_, v} -> is_nil(v) end)
+  end
 
   defp truthy(nil), do: nil
   defp truthy(true), do: true

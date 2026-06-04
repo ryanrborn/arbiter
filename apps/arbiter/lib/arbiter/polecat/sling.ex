@@ -58,6 +58,7 @@ defmodule Arbiter.Polecat.Sling do
   alias Arbiter.Polecat.ClaudeSession
   alias Arbiter.Polecat.Driver
   alias Arbiter.Polecat.Worktree
+  alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.Machine
   alias Arbiter.Workflows.Work
 
@@ -69,7 +70,8 @@ defmodule Arbiter.Polecat.Sling do
           start_claude: boolean(),
           claude_command: [String.t()] | nil,
           cleanup_worktree: boolean(),
-          model: String.t() | nil
+          model: String.t() | nil,
+          review: boolean()
         ]
 
   @type sling_result :: %{
@@ -84,6 +86,8 @@ defmodule Arbiter.Polecat.Sling do
 
   @spec sling(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
   def sling(bead_id, opts \\ []) when is_binary(bead_id) do
+    opts = normalize_opts(opts)
+
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
          {:ok, bead} <- transition_to_in_progress(bead),
@@ -107,6 +111,23 @@ defmodule Arbiter.Polecat.Sling do
        }}
     else
       err -> err
+    end
+  end
+
+  # `review: true` is the convenience hook used by `arb review`: it forces the
+  # review-only defaults so the caller doesn't have to spell out four flags in
+  # tandem (and so the CLI/REST surface can't accidentally request, say, a
+  # worktree on a review). Explicit opts still win — tests and advanced callers
+  # can opt back out of any individual default.
+  defp normalize_opts(opts) do
+    case Keyword.get(opts, :review, false) do
+      true ->
+        opts
+        |> Keyword.put_new(:workflow_module, CodeReview)
+        |> Keyword.put_new(:provision_worktree, false)
+
+      _ ->
+        opts
     end
   end
 
@@ -157,7 +178,11 @@ defmodule Arbiter.Polecat.Sling do
   # (rig unconfigured, or `provision_worktree: false`) there is nothing to
   # merge, so `:branch` stays absent and completion is a plain bead close.
   defp build_polecat_meta(%Issue{} = bead, worktree_path, opts) do
-    base = %{worktree_path: worktree_path}
+    base =
+      case Keyword.get(opts, :review, false) do
+        true -> %{worktree_path: worktree_path, review_only: true}
+        _ -> %{worktree_path: worktree_path}
+      end
 
     case worktree_path && resolve_rig_path(bead, Keyword.get(opts, :rig)) do
       repo_path when is_binary(repo_path) ->
@@ -319,22 +344,42 @@ defmodule Arbiter.Polecat.Sling do
       false ->
         {:ok, nil}
 
-      true when is_nil(worktree_path) ->
-        {:error, :missing_worktree}
-
       true ->
-        with {:ok, session_opts} <-
-               build_agent_session_opts(bead, polecat_pid, worktree_path, opts),
-             {:ok, port} <- ClaudeSession.start(session_opts) do
-          # Move the polecat out of :idle so UI/CLI report a meaningful
-          # status while Claude works. In claude_driven mode the Driver
-          # never ticks the Machine, so without this nudge the polecat
-          # would remain :idle until "arb done" flipped it to :completed.
-          _ = Polecat.advance(polecat_pid, :claude)
-          {:ok, port}
-        else
-          {:error, reason} -> {:error, {:claude_start_failed, reason}}
+        # Review dispatches skip worktree provisioning but still need a real
+        # cwd for the Claude port. Fall back to the rig's local checkout so
+        # the reviewer has `git`/`gh`/etc. in scope; an unmapped rig with no
+        # worktree is still rejected — there's nowhere to `cd` to.
+        cwd = worktree_path || review_cwd(bead, opts)
+
+        case cwd do
+          nil ->
+            {:error, :missing_worktree}
+
+          path when is_binary(path) ->
+            with {:ok, session_opts} <-
+                   build_agent_session_opts(bead, polecat_pid, path, opts),
+                 {:ok, port} <- ClaudeSession.start(session_opts) do
+              # Move the polecat out of :idle so UI/CLI report a meaningful
+              # status while Claude works. In claude_driven mode the Driver
+              # never ticks the Machine, so without this nudge the polecat
+              # would remain :idle until "arb done" flipped it to :completed.
+              _ = Polecat.advance(polecat_pid, :claude)
+              {:ok, port}
+            else
+              {:error, reason} -> {:error, {:claude_start_failed, reason}}
+            end
         end
+    end
+  end
+
+  # Resolve a sensible cwd for a review session that has no per-bead worktree.
+  # Only fires when `review: true` is set so a regular sling without
+  # provision_worktree still surfaces `:missing_worktree` instead of silently
+  # running Claude in the rig's main checkout.
+  defp review_cwd(%Issue{} = bead, opts) do
+    case Keyword.get(opts, :review, false) do
+      true -> resolve_rig_path(bead, Keyword.get(opts, :rig))
+      _ -> nil
     end
   end
 
@@ -366,7 +411,7 @@ defmodule Arbiter.Polecat.Sling do
         adapter = Agents.for_type(choice.type)
 
         agent_opts = agent_opts_from_choice(choice)
-        prompt = prompt_for(bead)
+        prompt = prompt_for_bead(bead, opts)
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
@@ -421,7 +466,17 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   @doc false
-  def prompt_for(%Issue{} = bead) do
+  def prompt_for(%Issue{} = bead), do: prompt_for_bead(bead, [])
+
+  @doc false
+  def prompt_for_bead(%Issue{} = bead, opts) do
+    case Keyword.get(opts, :review, false) do
+      true -> review_prompt(bead)
+      _ -> work_prompt(bead)
+    end
+  end
+
+  defp work_prompt(%Issue{} = bead) do
     """
     You are a polecat working autonomously on bead #{bead.id}.
 
@@ -451,6 +506,56 @@ defmodule Arbiter.Polecat.Sling do
 
     on a line by itself, exactly. The polecat watches your stdout and
     will mark the bead complete when it sees that marker.
+    """
+  end
+
+  defp review_prompt(%Issue{} = bead) do
+    tracker_line =
+      case bead.tracker_ref do
+        ref when is_binary(ref) and ref != "" ->
+          "Tracker ref (PR/MR to review): #{bead.tracker_type}:#{ref}\n\n"
+
+        _ ->
+          ""
+      end
+
+    """
+    You are a reviewer polecat. Review the pull/merge request linked to bead
+    #{bead.id} and post a verdict. You are not the author; do not modify the
+    branch.
+
+    Title: #{bead.title}
+
+    Description:
+    #{bead.description || "(none)"}
+
+    Acceptance:
+    #{bead.acceptance || "(none)"}
+
+    #{tracker_line}Your current directory is the rig's local checkout. There is
+    no per-bead branch and no worktree was provisioned — this is a review-only
+    directive.
+
+    Steps:
+      1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
+         <ref>` for GitHub, `glab mr diff <ref>` for GitLab, `git diff` for
+         the Direct local strategy). Do not check out the branch.
+      2. Identify real correctness, security, or contract issues against the
+         bead's intent. Skip style nits.
+      3. Post inline comments for each finding through the same tracker CLI.
+      4. Post a single review-level verdict — `approve` or `request_changes`
+         — with a one-paragraph summary.
+
+    Forbidden:
+      * Do NOT push code.
+      * Do NOT merge or close the PR/MR.
+      * Do NOT modify any branch, including the PR's head.
+
+    When you are completely done, print the line:
+
+        arb done
+
+    on a line by itself, exactly.
     """
   end
 
