@@ -34,6 +34,10 @@ defmodule ArbiterCli.Main do
       arb where
       arb prime
       arb sling <bead-id>
+      arb review <bead-id> [--rig <rig>] [--model <name>]
+                               Dispatch a review-only acolyte against the
+                               PR/MR linked to a bead. No worktree, no branch,
+                               no merge.
       arb polecat show <bead-id>
       arb polecat stop <bead-id>
       arb inbox [--all | read <id> | clear | <bead-id>]
@@ -105,6 +109,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("restart", args), do: ArbiterCli.Cmd.Restart.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("sling", args), do: ArbiterCli.Cmd.Sling.run(args)
+  defp dispatch_known("review", args), do: ArbiterCli.Cmd.Review.run(args)
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
   defp dispatch_known("polecat", args), do: ArbiterCli.Cmd.Polecat.run(args)
   defp dispatch_known("inbox", args), do: ArbiterCli.Cmd.Inbox.run(args)
