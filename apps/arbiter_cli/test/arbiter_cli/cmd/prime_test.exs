@@ -58,6 +58,36 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "Fix the thing"
     end
 
+    test "renders the security posture section when the workspace carries one" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{},
+            "security_posture" => %{
+              "mode" => "bypass",
+              "allow" => [],
+              "deny" => ["Bash(docker:*)"],
+              "safe_defaults" => ["no_destructive_fs", "no_force_push"],
+              "sandbox" => %{"enabled" => true, "filesystem" => "worktree", "network" => false}
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "security:"
+      assert out =~ "mode:    bypass"
+      assert out =~ "net=off"
+      assert out =~ "2 safe-default + 1 custom"
+    end
+
     test "empty polecats and ready beads render '(none)'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],

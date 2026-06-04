@@ -51,6 +51,7 @@ defmodule Arbiter.Polecat.Sling do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
@@ -71,7 +72,9 @@ defmodule Arbiter.Polecat.Sling do
           claude_command: [String.t()] | nil,
           cleanup_worktree: boolean(),
           model: String.t() | nil,
-          review: boolean()
+          review: boolean(),
+          security: map() | nil,
+          security_mode: String.t() | atom() | nil
         ]
 
   @type sling_result :: %{
@@ -410,7 +413,13 @@ defmodule Arbiter.Polecat.Sling do
 
         adapter = Agents.for_type(choice.type)
 
-        agent_opts = agent_opts_from_choice(choice)
+        # Resolve the spawn's security posture from the workspace (per-domain),
+        # with an optional per-dispatch override from sling opts. Threaded into
+        # the adapter so it bakes the right permission-mode + deny/allow into
+        # the argv — no inheritance of the operator's ~/.claude (bd-9u10op).
+        policy = SecurityPolicy.resolve(workspace, security_override(opts))
+
+        agent_opts = agent_opts_from_choice(choice) ++ [security: policy]
         prompt = prompt_for_bead(bead, opts)
 
         case adapter.default_argv(prompt, agent_opts) do
@@ -448,6 +457,28 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   defp apply_model_override(choice, _), do: choice
+
+  # Optional per-dispatch (per-bead) security override. Accepts a raw map under
+  # the `:security` sling opt (same shape as `workspace.config["agent"]["security"]`)
+  # or the `:security_mode` shorthand for the common "just change the mode" case.
+  # Returns `%{}` (no override) when neither is set.
+  defp security_override(opts) do
+    base =
+      case Keyword.get(opts, :security) do
+        %{} = map -> map
+        _ -> %{}
+      end
+
+    case Keyword.get(opts, :security_mode) do
+      mode when is_binary(mode) or is_atom(mode) ->
+        Map.update(base, "permissions", %{"mode" => mode}, fn perms ->
+          Map.put(perms, "mode", mode)
+        end)
+
+      _ ->
+        base
+    end
+  end
 
   defp safe_spawn_env(adapter, agent_opts) do
     if function_exported?(adapter, :spawn_env, 1) do

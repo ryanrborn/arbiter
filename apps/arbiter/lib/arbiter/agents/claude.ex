@@ -29,12 +29,26 @@ defmodule Arbiter.Agents.Claude do
 
   All three default off, so workspaces that haven't opted in see
   unchanged behavior.
+
+  ## Security posture
+
+  `default_argv/2` also bakes in the spawn's **security posture**. The
+  caller threads a resolved `Arbiter.Agents.SecurityPolicy` in via
+  `opts[:security]` (Sling / Tribunal resolve it from the workspace);
+  `Arbiter.Agents.Claude.Security` maps it to `--permission-mode` /
+  `--dangerously-skip-permissions` + an inline `--settings` deny/allow
+  document. A bare call with no `:security` opt falls back to the install-wide
+  hardened default (`SecurityPolicy.default/0`) — so every spawn is
+  safe-by-default and **none** inherits the operator's personal
+  `~/.claude/settings.json`.
   """
 
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Claude.Config
   alias Arbiter.Agents.Claude.ConfigDir
+  alias Arbiter.Agents.Claude.Security
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Polecat.ClaudeSession
 
   @done_regex ~r/\barb done\b/
@@ -49,14 +63,30 @@ defmodule Arbiter.Agents.Claude do
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
     case resolve_claude_executable() do
       {:ok, claude} ->
+        policy = security_policy(opts)
+
         inner =
           [claude, "--print", prompt] ++
-            model_flag(opts) ++ thinking_flag(opts) ++ stream_flags()
+            model_flag(opts) ++
+            thinking_flag(opts) ++
+            Security.permission_argv(policy) ++
+            Security.settings_argv(policy) ++
+            stream_flags()
 
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Threaded in by
+  # the caller (Sling / Tribunal resolve it from the workspace); falls back to
+  # the install-wide hardened default so a bare adapter call is still safe.
+  defp security_policy(opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy -> policy
+      _ -> SecurityPolicy.default()
     end
   end
 

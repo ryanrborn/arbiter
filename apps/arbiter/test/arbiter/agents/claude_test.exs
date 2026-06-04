@@ -148,6 +148,49 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert "16384" in argv
       refute "--reasoning-effort" in argv
     end
+
+    test "bakes in the install-default security posture when no :security opt given" do
+      assert {:ok, argv} = Claude.default_argv("the prompt", [])
+      # safe-by-default: auto mode + a generated --settings deny document.
+      assert "--permission-mode" in argv
+      assert "auto" in argv
+      assert "--settings" in argv
+
+      json = settings_json(argv)
+      deny = get_in(json, ["permissions", "deny"])
+      assert is_list(deny) and deny != []
+      assert Enum.any?(deny, &(&1 =~ "rm -rf"))
+    end
+
+    test "honors a threaded :security policy (strict + custom deny)" do
+      policy =
+        Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+          "permissions" => %{"mode" => "strict", "deny" => ["Bash(docker:*)"]}
+        })
+
+      assert {:ok, argv} = Claude.default_argv("the prompt", security: policy)
+      assert "--permission-mode" in argv
+      assert "default" in argv
+      assert "Bash(docker:*)" in settings_json(argv)["permissions"]["deny"]
+    end
+
+    test "bypass mode emits --dangerously-skip-permissions and no --settings" do
+      policy =
+        Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+          "permissions" => %{"mode" => "bypass"}
+        })
+
+      assert {:ok, argv} = Claude.default_argv("the prompt", security: policy)
+      assert "--dangerously-skip-permissions" in argv
+      refute "--settings" in argv
+      refute "--permission-mode" in argv
+    end
+  end
+
+  # Pull the JSON document out of the `--settings <json>` argv pair.
+  defp settings_json(argv) do
+    idx = Enum.find_index(argv, &(&1 == "--settings"))
+    argv |> Enum.at(idx + 1) |> Jason.decode!()
   end
 
   describe "spawn_env/1 (key rotation)" do

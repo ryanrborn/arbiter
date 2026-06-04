@@ -39,6 +39,23 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert body["name"] == "showme"
     end
 
+    test "includes the resolved acolyte security_posture", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "secure-ws",
+          prefix: "scw",
+          config: %{"agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}}}
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      posture = json_response(conn, 200)["security_posture"]
+
+      assert posture["mode"] == "strict"
+      # The safe-default deny baseline is surfaced and non-empty.
+      assert is_list(posture["safe_defaults"]) and posture["safe_defaults"] != []
+      assert posture["sandbox"]["filesystem"] == "worktree"
+    end
+
     test "returns 404 for missing", %{conn: conn} do
       bogus = "00000000-0000-0000-0000-000000000000"
       conn = get(conn, ~p"/api/workspaces/#{bogus}")
