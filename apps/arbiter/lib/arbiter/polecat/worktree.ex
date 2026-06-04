@@ -40,13 +40,25 @@ defmodule Arbiter.Polecat.Worktree do
           | :invalid_path
           | {:git_failed, String.t()}
           | {:not_a_git_repo, path()}
+          | {:fetch_failed, String.t()}
+          | {:missing_origin_remote, String.t()}
+          | {:missing_origin_ref, String.t()}
 
   @doc """
   Create a worktree at `<worktree_root>/<sanitized_branch_name>/` checked out
-  on `branch_name`, branching from `base_branch`.
+  on `branch_name`, branching from the upstream tip of `base_branch`
+  (`origin/<base_branch>`).
+
+  Before creating the worktree, fetches `<base_branch>` from `origin` in
+  `repo_path`, so every acolyte starts on current upstream regardless of the
+  rig checkout's drift (stale local base, dirty working tree, or HEAD on an
+  unrelated branch). If `origin` is not configured or the ref cannot be
+  resolved after the fetch, the call aborts with a clear error rather than
+  silently falling back to a stale local base.
 
   Idempotent: if the target directory already exists and is on the requested
-  branch, returns `{:ok, path}` without re-invoking git.
+  branch, returns `{:ok, path}` without re-invoking git (no fetch either, so
+  re-provisioning a still-good worktree is cheap).
   """
   @spec create(path(), String.t(), String.t()) :: {:ok, path()} | {:error, error_reason()}
   def create(_repo_path, "", _base_branch), do: {:error, :invalid_branch_name}
@@ -72,10 +84,58 @@ defmodule Arbiter.Polecat.Worktree do
       true ->
         File.mkdir_p!(Path.dirname(path))
 
-        case run_git(["worktree", "add", path, "-b", branch_name, base_branch], cd: repo_path) do
-          {:ok, _stdout} -> {:ok, path}
-          {:error, _} = err -> err
+        with :ok <- ensure_origin_remote(repo_path),
+             :ok <- fetch_origin_branch(repo_path, base_branch),
+             :ok <- ensure_origin_ref(repo_path, base_branch),
+             {:ok, _stdout} <-
+               run_git(
+                 ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
+                 cd: repo_path
+               ) do
+          {:ok, path}
         end
+    end
+  end
+
+  defp ensure_origin_remote(repo_path) do
+    case run_git(["remote", "get-url", "origin"], cd: repo_path) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:git_failed, msg}} ->
+        {:error,
+         {:missing_origin_remote,
+          "rig at #{repo_path} has no `origin` remote configured; " <>
+            "branching from a stale local base is unsafe. git: #{msg}"}}
+    end
+  end
+
+  # Shallow `--no-tags` keeps the fetch fast — we only need the tip of the
+  # target branch. `--prune` drops deleted remote refs so a renamed integration
+  # branch doesn't leave a dangling `origin/<old>` that resolves but is stale.
+  defp fetch_origin_branch(repo_path, base_branch) do
+    case run_git(["fetch", "--no-tags", "--prune", "origin", base_branch], cd: repo_path) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:git_failed, msg}} ->
+        {:error,
+         {:fetch_failed, "git fetch origin #{base_branch} failed in #{repo_path}: #{msg}"}}
+    end
+  end
+
+  defp ensure_origin_ref(repo_path, base_branch) do
+    ref = "refs/remotes/origin/" <> base_branch
+
+    case run_git(["rev-parse", "--verify", "--quiet", ref], cd: repo_path) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        {:error,
+         {:missing_origin_ref,
+          "origin/#{base_branch} does not resolve in #{repo_path} after fetch; " <>
+            "refusing to branch from stale local state"}}
     end
   end
 
