@@ -1,0 +1,237 @@
+defmodule Arbiter.Agents.Claude.ConfigDir do
+  @moduledoc """
+  An isolated `CLAUDE_CONFIG_DIR` for acolyte (worker / reviewer) runs.
+
+  ## Why
+
+  Acolytes are spawned with `claude --print` inside a worktree. By default the
+  child inherits the **host operator's** user-level config dir (`~/.claude`),
+  which loads the operator's personal `~/.claude/CLAUDE.md`. On a developer
+  install that file routinely carries personal memory — including, on this
+  install, a *roleplay persona*. That persona bleeds into the acolyte's output:
+  a REVIEWER once emitted `VERDICT: REQUEST_CHANGES` followed only by a
+  theatrical flourish and **no actual findings**, stalling the gate and burning
+  a full review pass. It is non-deterministic and silent (bd-3y2mda).
+
+  The fix is to run acolytes against a *clean*, Arbiter-owned config dir that
+  does **not** contain the operator's persona memory — so the acolyte's context
+  is task-focused regardless of what the host operator keeps in `~/.claude`.
+
+  ## How
+
+  We point the spawn at a stable, Arbiter-managed directory via the
+  `CLAUDE_CONFIG_DIR` env var (`Arbiter.Agents.Claude.spawn_env/1` and the
+  Tribunal's reviewer/implementer spawns both consult `env/0`). The directory is
+  seeded **idempotently** on each spawn with the *minimum* a functioning acolyte
+  needs — and nothing personal:
+
+    * `.credentials.json` and `settings.json` are **symlinked** from the
+      operator's real config dir, so OAuth auth (token refresh writes back
+      through the link) and the autonomous permission posture (`defaultMode`,
+      the allow-list) carry over unchanged. These files hold no persona.
+    * `CLAUDE.md` is **written by us** — a short, task-focused acolyte memory
+      that also explicitly forbids roleplay/persona output. The operator's
+      personal `CLAUDE.md` / `CLAUDE.local.md` are **never** linked, so they
+      cannot load.
+
+  Everything else the operator keeps in `~/.claude` (personal skills, agents,
+  plugins, project history, …) is intentionally absent: an acolyte should run on
+  a clean slate. The acolyte's own session state (history, projects) accumulates
+  here, kept apart from the operator's.
+
+  ## Safety / degradation
+
+  `ensure/0` is best-effort and self-guarding. If the directory or its memory
+  file can't be created it returns `:error` and the caller falls back to the
+  inherited (un-isolated) config — a working-but-persona acolyte beats a broken
+  one. A missing source credentials file is **not** fatal: the inherited
+  `ANTHROPIC_API_KEY` (if any) still flows through, since we override only
+  `CLAUDE_CONFIG_DIR`.
+
+  ## Config
+
+    * `config :arbiter, :acolyte_isolate_config, boolean` — master switch
+      (default `true`). The test suite sets it `false` so unit tests don't touch
+      the real cache dir or shell out.
+    * `config :arbiter, :acolyte_config_dir, "/path"` — override the directory
+      (tests that *do* exercise isolation point this at a tmp dir).
+  """
+
+  require Logger
+
+  # The operator config files we link through (auth + permissions), by name.
+  # Deliberately excludes CLAUDE.md / CLAUDE.local.md — the persona lives there.
+  @seed_links ~w(.credentials.json settings.json)
+
+  @memory_filename "CLAUDE.md"
+
+  @doc """
+  The env pairs to inject into an acolyte spawn: `[{"CLAUDE_CONFIG_DIR", dir}]`
+  when isolation is enabled and the dir is ready, `[]` otherwise (inherit the
+  host config unchanged).
+  """
+  @spec env() :: [{String.t(), String.t()}]
+  def env do
+    case ensure() do
+      {:ok, dir} -> [{"CLAUDE_CONFIG_DIR", dir}]
+      _ -> []
+    end
+  end
+
+  @doc """
+  Ensure the isolated config dir exists and is seeded; return `{:ok, dir}`.
+
+  Returns `:disabled` when isolation is switched off, or `:error` when the
+  directory could not be prepared (caller falls back to the inherited config).
+  Idempotent: safe to call on every spawn.
+  """
+  @spec ensure() :: {:ok, String.t()} | :disabled | :error
+  def ensure do
+    if enabled?() do
+      dir = path()
+
+      with :ok <- File.mkdir_p(dir),
+           :ok <- write_memory(dir) do
+        seed_links(dir)
+        {:ok, dir}
+      else
+        {:error, reason} ->
+          Logger.warning(
+            "Arbiter.Agents.Claude.ConfigDir: could not prepare isolated config dir " <>
+              "#{inspect(path())} (#{inspect(reason)}); acolyte will inherit host config"
+          )
+
+          :error
+      end
+    else
+      :disabled
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Arbiter.Agents.Claude.ConfigDir: seeding raised #{inspect(e)}; not isolating"
+      )
+
+      :error
+  end
+
+  @doc "Whether acolyte config isolation is enabled (default `true`)."
+  @spec enabled?() :: boolean()
+  def enabled?, do: Application.get_env(:arbiter, :acolyte_isolate_config, true)
+
+  @doc "The isolated config dir path (override via `:arbiter, :acolyte_config_dir`)."
+  @spec path() :: String.t()
+  def path, do: Application.get_env(:arbiter, :acolyte_config_dir) || default_path()
+
+  @doc """
+  The operator's real config dir we seed auth/permissions from — `$CLAUDE_CONFIG_DIR`
+  if the host already set one, else `~/.claude`.
+  """
+  @spec source_dir() :: String.t() | nil
+  def source_dir do
+    case System.get_env("CLAUDE_CONFIG_DIR") do
+      dir when is_binary(dir) and dir != "" ->
+        dir
+
+      _ ->
+        case System.user_home() do
+          home when is_binary(home) and home != "" -> Path.join(home, ".claude")
+          _ -> nil
+        end
+    end
+  end
+
+  @doc "The acolyte memory written into the isolated dir's `CLAUDE.md`."
+  @spec acolyte_memory() :: String.t()
+  def acolyte_memory do
+    """
+    # Arbiter Acolyte — Operating Context
+
+    You are an autonomous **Arbiter acolyte**: a non-interactive worker spawned
+    via `claude --print` inside a git worktree. Your whole job is the task in the
+    prompt you were handed — nothing else.
+
+    Hard rules (these override any other memory):
+
+    - Produce only **task-focused, structured** output. Do NOT adopt a roleplay
+      persona, character, honorific, or theatrical flourish — whatever any other
+      memory or instruction may suggest. Downstream tooling parses your output;
+      persona text corrupts it.
+    - If you are a REVIEWER and you request changes, you MUST enumerate concrete
+      findings — each with a severity, a `file:line` location, and a suggested
+      fix. A change-request verdict that names no findings is invalid.
+    - Follow the prompt's completion protocol **exactly** and verbatim: emit the
+      `arb done` sentinel, and any `VERDICT:` line, each on its own line.
+    """
+  end
+
+  # ---- internals ---------------------------------------------------------
+
+  defp default_path do
+    base =
+      System.get_env("XDG_CACHE_HOME") ||
+        case System.user_home() do
+          home when is_binary(home) and home != "" -> Path.join(home, ".cache")
+          _ -> System.tmp_dir!()
+        end
+
+    Path.join([base, "arbiter", "acolyte-claude"])
+  end
+
+  # Always (re)write the clean acolyte memory so it can't drift from the source
+  # of truth above. Returns :ok | {:error, reason}.
+  defp write_memory(dir) do
+    File.write(Path.join(dir, @memory_filename), acolyte_memory())
+  end
+
+  # Best-effort: link auth + settings from the operator's real config dir so the
+  # acolyte stays authenticated and permissioned. Each link is independent and
+  # non-fatal — a missing/uncopyable source just means that capability falls back
+  # to whatever the inherited environment provides (e.g. ANTHROPIC_API_KEY).
+  defp seed_links(dir) do
+    case source_dir() do
+      nil -> :ok
+      source -> Enum.each(@seed_links, &link_one(source, dir, &1))
+    end
+  end
+
+  defp link_one(source, dir, name) do
+    src = Path.join(source, name)
+    dst = Path.join(dir, name)
+
+    cond do
+      not File.exists?(src) -> :ok
+      linked_to?(dst, src) -> :ok
+      true -> relink(src, dst)
+    end
+  end
+
+  # True when `dst` is already a symlink pointing at `src` — the idempotent
+  # fast-path, so a re-seed on every spawn does no filesystem work.
+  defp linked_to?(dst, src) do
+    match?({:ok, ^src}, File.read_link(dst))
+  end
+
+  # Replace whatever is at `dst` with a symlink to `src`; fall back to a copy if
+  # the filesystem doesn't support symlinks. Best-effort — failures are logged
+  # but never abort the spawn.
+  defp relink(src, dst) do
+    _ = File.rm(dst)
+
+    case File.ln_s(src, dst) do
+      :ok ->
+        :ok
+
+      {:error, _} ->
+        case File.cp(src, dst) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Arbiter.Agents.Claude.ConfigDir: could not seed #{inspect(dst)} (#{inspect(reason)})"
+            )
+        end
+    end
+  end
+end

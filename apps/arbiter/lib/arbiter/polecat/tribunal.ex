@@ -84,6 +84,20 @@ defmodule Arbiter.Polecat.Tribunal do
   mind, not a forgotten sentinel) and still escalates directly without a
   re-prompt.
 
+  The same re-prompt path also covers a **content-free REQUEST_CHANGES**
+  (bd-3y2mda): a verdict that requests changes but lists no concrete findings is
+  useless — the implementer has nothing to act on — so it is treated as malformed
+  and re-prompted (the follow-up names exactly what was missing) rather than
+  entering the revise loop empty-handed. If the re-prompt still yields no findings
+  it escalates as inconclusive; it is never silently merged.
+
+  ## Clean acolyte context (bd-3y2mda)
+
+  Reviewer (and revise-implementer) acolytes are spawned with an isolated
+  `CLAUDE_CONFIG_DIR` (`Arbiter.Agents.Claude.ConfigDir`) so the host operator's
+  personal `~/.claude/CLAUDE.md` — which may carry a roleplay persona — cannot
+  bleed into the review and crowd out structured findings.
+
   ## Testing
 
   `start/1` accepts a `:command` argv (the reviewer) and a `:revise_command` argv
@@ -364,10 +378,48 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp attempt_finish(state) do
     case parse_verdict(Enum.reverse(state.lines)) do
-      :no_verdict -> maybe_reprompt(state)
-      {:approve, _} = verdict -> {:done, finish(state, verdict)}
-      {:request_changes, findings} -> handle_reject(state, findings)
+      :no_verdict ->
+        maybe_reprompt(state, :no_verdict)
+
+      {:approve, _} = verdict ->
+        {:done, finish(state, verdict)}
+
+      {:request_changes, findings} ->
+        # A REQUEST_CHANGES verdict that names no concrete findings is useless: the
+        # implementer has nothing to act on, the gate stalls, and a full review is
+        # wasted (bd-3y2mda). Treat it as malformed and re-prompt for findings
+        # (capped, shares the verdict-retry budget) rather than entering the revise
+        # loop with empty hands.
+        if findings_present?(findings) do
+          handle_reject(state, findings)
+        else
+          maybe_reprompt(state, :empty_findings)
+        end
     end
+  end
+
+  # Whether a REQUEST_CHANGES verdict carries actionable findings. `findings`
+  # spans from the `VERDICT:` line onward (see `findings_from/2`); strip that
+  # sentinel line and any `arb done` marker / blank lines, and require something
+  # substantive to remain. Deliberately conservative — this catches the truly
+  # content-free case (verdict + nothing, or verdict + a bare flourish line) while
+  # not second-guessing a terse-but-real finding; persona removal upstream is the
+  # primary defense against flourishes.
+  @min_findings_chars 16
+
+  defp findings_present?(findings) when is_binary(findings) do
+    body =
+      findings
+      |> String.split("\n")
+      # Drop the matched `VERDICT:` line itself (always first in `findings`).
+      |> Enum.drop(1)
+      |> Enum.reject(fn line ->
+        String.trim(line) == "" or Regex.match?(~r/\barb done\b/, line)
+      end)
+      |> Enum.join("\n")
+      |> String.trim()
+
+    String.length(body) >= @min_findings_chars
   end
 
   # A REQUEST_CHANGES verdict with the round budget exhausted: record the final
@@ -470,12 +522,14 @@ defmodule Arbiter.Polecat.Tribunal do
 
   # ---- verdict re-prompt (bd-8v8ays) -------------------------------------
 
-  # A reviewer finished without a parseable VERDICT line. If we have a re-prompt
-  # budget left, spawn one more minimal follow-up pass (a fresh reviewer mind —
-  # there is no Claude session resume yet — that re-reads the diff but is told it
-  # MUST emit the sentinel). Otherwise escalate as inconclusive. This stays in the
-  # current round: a forgotten sentinel is not a revision.
-  defp maybe_reprompt(%{retries_left: budget} = state) when budget > 0 do
+  # A reviewer pass produced a malformed result: either no parseable VERDICT line
+  # (`:no_verdict`) or a REQUEST_CHANGES with no actionable findings
+  # (`:empty_findings`). If we have a re-prompt budget left, spawn one more minimal
+  # follow-up pass (a fresh reviewer mind — there is no Claude session resume yet —
+  # that re-reads the diff but is told exactly what it got wrong). Otherwise
+  # escalate as inconclusive. This stays in the current round: a malformed verdict
+  # is not a revision.
+  defp maybe_reprompt(%{retries_left: budget} = state, reason) when budget > 0 do
     stop_acolyte(state)
 
     retry_id = reprompt_bead_id(state.review_id, state.attempt)
@@ -484,30 +538,39 @@ defmodule Arbiter.Polecat.Tribunal do
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
-           verdict_reprompt_prompt(state),
+           verdict_reprompt_prompt(state, reason),
            state.command
          ) do
       {:ok, state} ->
         Logger.info(
-          "Tribunal: reviewer for bead=#{state.bead_id} emitted no verdict; re-prompting (attempt #{state.attempt})"
+          "Tribunal: reviewer for bead=#{state.bead_id} returned #{reason}; re-prompting (attempt #{state.attempt})"
         )
 
         {:reprompt, state}
 
-      {:error, reason} ->
+      {:error, spawn_error} ->
         Logger.warning(
-          "Tribunal: verdict re-prompt failed to spawn for bead=#{state.bead_id}: #{inspect(reason)}"
+          "Tribunal: verdict re-prompt failed to spawn for bead=#{state.bead_id}: #{inspect(spawn_error)}"
         )
 
         {:done,
          finish(
            state,
-           {:no_verdict, "Reviewer produced no verdict; re-prompt could not be spawned."}
+           {:no_verdict, "Reviewer produced no usable verdict; re-prompt could not be spawned."}
          )}
     end
   end
 
-  defp maybe_reprompt(state) do
+  defp maybe_reprompt(state, :empty_findings) do
+    {:done,
+     finish(
+       state,
+       {:no_verdict,
+        "Reviewer returned REQUEST_CHANGES with no concrete findings, even after a re-prompt."}
+     )}
+  end
+
+  defp maybe_reprompt(state, _reason) do
     {:done,
      finish(
        state,
@@ -912,23 +975,46 @@ defmodule Arbiter.Polecat.Tribunal do
         VERDICT: APPROVE
         VERDICT: REQUEST_CHANGES
 
-    Follow the verdict with your findings: for REQUEST_CHANGES list each problem
-    with its severity, location, and a suggested fix. Then print, on a line by
-    itself:
+    If you REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of
+    concrete findings — each with a severity, a `file:line` location, and a
+    suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid and
+    will be rejected: the implementer would have nothing to act on. Output only
+    structured review content — no roleplay persona, character, or theatrical
+    flourish. Then print, on a line by itself:
 
         arb done
     """
   end
 
   @doc """
-  Build the verdict re-prompt used when a prior pass finished WITHOUT the
-  required sentinel. Since there is no live Claude session resume yet, the
-  follow-up pass is a fresh reviewer mind with no memory of the prior pass — so
-  it re-supplies the full review context, prefixed with an instruction stressing
-  that the verdict line is mandatory this time. Public for inspection in tests.
+  Build the verdict re-prompt used when a prior pass produced a malformed result:
+  a missing sentinel (`:no_verdict`) or a REQUEST_CHANGES with no findings
+  (`:empty_findings`). Since there is no live Claude session resume yet, the
+  follow-up pass is a fresh reviewer mind with no memory of the prior pass — so it
+  re-supplies the full review context, prefixed with an instruction naming exactly
+  what went wrong so it isn't repeated. Public for inspection in tests.
   """
-  @spec verdict_reprompt_prompt(map()) :: String.t()
-  def verdict_reprompt_prompt(state) do
+  @spec verdict_reprompt_prompt(map(), :no_verdict | :empty_findings) :: String.t()
+  def verdict_reprompt_prompt(state, reason \\ :no_verdict)
+
+  def verdict_reprompt_prompt(state, :empty_findings) do
+    """
+    A prior review pass of this diff returned `VERDICT: REQUEST_CHANGES` but listed
+    NO concrete findings — only a verdict (or a content-free flourish). That is
+    useless: the implementer has nothing to act on. Review the diff again and:
+
+      * if the change is acceptable, finish with `VERDICT: APPROVE`; or
+      * if it genuinely needs changes, finish with `VERDICT: REQUEST_CHANGES`
+        followed by an ENUMERATED list of findings — each with a severity, a
+        `file:line` location, and a concrete suggested fix.
+
+    A REQUEST_CHANGES with no enumerated findings will be rejected again. Do not
+    include any roleplay or persona text — structured findings only.
+
+    """ <> review_prompt(state)
+  end
+
+  def verdict_reprompt_prompt(state, _no_verdict) do
     """
     A prior review pass of this diff finished WITHOUT emitting the required
     verdict line, so its conclusion was lost. Review the diff again and this time
