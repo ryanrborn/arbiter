@@ -38,6 +38,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   use ArbiterWeb, :live_view
 
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
@@ -162,10 +163,27 @@ defmodule ArbiterWeb.DashboardLive do
 
     polecats =
       Enum.map(polecats, fn p ->
-        Map.put(p, :workspace_name, workspace_label(workspaces_by_id, p.workspace_id))
+        p
+        |> Map.put(:workspace_name, workspace_label(workspaces_by_id, p.workspace_id))
+        |> Map.put(:security_mode, security_mode(workspaces_by_id, p.workspace_id))
       end)
 
     assign(socket, :polecats, polecats)
+  end
+
+  # Resolve the acolyte permission mode (:auto | :strict | :bypass) for a
+  # polecat's workspace, so the dashboard can flag at a glance when a worker is
+  # running under a non-default posture (e.g. :bypass, which skips all checks).
+  # Falls back to the install-wide default when the workspace is unknown.
+  defp security_mode(_workspaces_by_id, nil), do: SecurityPolicy.default().permissions.mode
+
+  defp security_mode(workspaces_by_id, ws_id) do
+    case Map.fetch(workspaces_by_id, ws_id) do
+      {:ok, ws} -> SecurityPolicy.resolve(ws).permissions.mode
+      :error -> SecurityPolicy.default().permissions.mode
+    end
+  rescue
+    _ -> SecurityPolicy.default().permissions.mode
   end
 
   # The merge queue (Crucibles): branches integrating via Arbiter.Mergers.
@@ -613,6 +631,19 @@ defmodule ArbiterWeb.DashboardLive do
   defp merger_type_label(:github), do: "GitHub"
   defp merger_type_label(other), do: other |> to_string() |> String.capitalize()
 
+  # Acolyte permission-mode badge: ghost for the safe default (auto), warning
+  # for strict (tighter, worth noticing), error for bypass (all checks off —
+  # the operator should see that immediately).
+  defp security_mode_label(:auto), do: "auto"
+  defp security_mode_label(:strict), do: "strict"
+  defp security_mode_label(:bypass), do: "bypass"
+  defp security_mode_label(other), do: to_string(other)
+
+  defp security_mode_class(:auto), do: "badge-ghost"
+  defp security_mode_class(:strict), do: "badge-warning"
+  defp security_mode_class(:bypass), do: "badge-error"
+  defp security_mode_class(_), do: "badge-ghost"
+
   # Approval/merge state of an in-flight merge, derived from the last
   # Mergers.get/1 result the Warden recorded. Routes through Warden.classify/1
   # — the single approval-detection decision surface — so the dashboard label
@@ -917,7 +948,16 @@ defmodule ArbiterWeb.DashboardLive do
                   </div>
 
                   <div class="flex items-center justify-between gap-2 mt-1.5 text-xs text-base-content/60">
-                    <span class="truncate">{Map.get(p, :workspace_name) || "(none)"}</span>
+                    <span class="flex items-center gap-1.5 min-w-0">
+                      <span class="truncate">{Map.get(p, :workspace_name) || "(none)"}</span>
+                      <span
+                        :if={Map.get(p, :security_mode)}
+                        class={["badge badge-xs shrink-0", security_mode_class(p.security_mode)]}
+                        title={"acolyte permission mode: #{p.security_mode}"}
+                      >
+                        {security_mode_label(p.security_mode)}
+                      </span>
+                    </span>
                     <%= if claude_session?(p) do %>
                       <span class="badge badge-info badge-sm gap-1.5 max-w-[55%]">
                         <span :if={p.status == :running} class="loading loading-ring loading-xs">

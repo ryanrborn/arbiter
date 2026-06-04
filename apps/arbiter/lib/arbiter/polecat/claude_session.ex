@@ -215,7 +215,20 @@ defmodule Arbiter.Polecat.ClaudeSession do
   defp default_claude_argv(prompt) do
     case resolve_claude() do
       {:ok, claude} ->
-        inner = [claude, "--print", prompt, "--output-format", "stream-json", "--verbose"]
+        # Even this built-in path (workspace-less Tribunal runs, bare
+        # ClaudeSession.start/1 callers) is hardened with the install-wide
+        # default security posture, so no acolyte spawn inherits the operator's
+        # personal ~/.claude permission posture (bd-9u10op). Workspace-aware
+        # callers route through Arbiter.Agents.Claude.default_argv/2 instead,
+        # which resolves a per-domain policy.
+        policy = Arbiter.Agents.SecurityPolicy.default()
+
+        inner =
+          [claude, "--print", prompt] ++
+            Arbiter.Agents.Claude.Security.permission_argv(policy) ++
+            Arbiter.Agents.Claude.Security.settings_argv(policy) ++
+            ["--output-format", "stream-json", "--verbose"]
+
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
 
       {:error, _} = err ->
@@ -708,16 +721,24 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # boundary so adapters don't have to know about Erlang's I/O list shape.
   defp env_charlists(pairs) do
     Enum.map(pairs, fn
-      {name, false} -> {to_charlist(name), false}
+      {name, false} ->
+        {to_charlist(name), false}
+
       {name, value} when is_binary(name) and is_binary(value) ->
         {to_charlist(name), to_charlist(value)}
     end)
   end
 
+  # When the caller passes an explicit `:env` (the workspace-aware Sling /
+  # Tribunal path always does, via the adapter's spawn_env/1) we use it
+  # verbatim. When it's absent (bare ClaudeSession.start/1 callers, the
+  # workspace-less Tribunal path) we default to the isolated CLAUDE_CONFIG_DIR
+  # so even those spawns don't inherit the operator's ~/.claude. In the test
+  # env config isolation is disabled, so this resolves to [] there.
   defp env_pairs(opts) do
-    case Keyword.get(opts, :env) do
-      list when is_list(list) -> list
-      _ -> []
+    case Keyword.fetch(opts, :env) do
+      {:ok, list} when is_list(list) -> list
+      _ -> Arbiter.Agents.Claude.ConfigDir.env()
     end
   end
 end

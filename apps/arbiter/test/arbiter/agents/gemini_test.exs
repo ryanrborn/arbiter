@@ -2,6 +2,7 @@ defmodule Arbiter.Agents.GeminiTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Agents.Gemini
+  alias Arbiter.Agents.SecurityPolicy
 
   describe "behaviour" do
     test "module declares the Agent behaviour" do
@@ -58,10 +59,24 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(agy_stub, 0o755)
       File.chmod!(gemini_stub, 0o755)
 
+      # Default policy is :auto — skip-permissions flag is NOT included.
       assert {:ok, argv} = Gemini.default_argv("the prompt", [])
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
-      assert "--dangerously-skip-permissions" in rest
+      refute "--dangerously-skip-permissions" in rest
       refute "--skip-trust" in rest
+    end
+
+    test "agy: :bypass security mode includes --dangerously-skip-permissions", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      bypass_policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :bypass}})
+
+      assert {:ok, argv} = Gemini.default_argv("the prompt", security: bypass_policy)
+      assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
+      assert "--dangerously-skip-permissions" in rest
     end
 
     test "falls back to `gemini` when `agy` is missing", %{tmp: tmp} do
@@ -69,11 +84,26 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(gemini_stub, 0o755)
 
+      # Default policy is :auto — skip-trust is NOT included.
       assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
+      refute "--skip-trust" in rest
+      refute "-y" in rest
+      refute "--dangerously-skip-permissions" in rest
+    end
+
+    test "gemini: :bypass security mode includes --skip-trust -y", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      bypass_policy =
+        SecurityPolicy.merge(SecurityPolicy.base(), %{permissions: %{mode: :bypass}})
+
+      assert {:ok, argv} = Gemini.default_argv("the prompt", security: bypass_policy)
       assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
       assert "--skip-trust" in rest
       assert "-y" in rest
-      refute "--dangerously-skip-permissions" in rest
     end
 
     test "passes through `:model` opt as `--model <name>`", %{tmp: tmp} do

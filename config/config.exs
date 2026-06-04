@@ -59,6 +59,21 @@ config :arbiter,
     Arbiter.Workflows
   ]
 
+# Install-wide default acolyte security posture (the floor every spawn
+# inherits before per-domain workspace overrides). The hardcoded safe baseline
+# lives in `Arbiter.Agents.SecurityPolicy.base/0` — auto mode, a non-empty
+# destructive-op deny list, worktree-scoped filesystem. Set this to override
+# the install default without editing source or anyone's ~/.claude. Example:
+#
+#   config :arbiter, :acolyte_security_policy, %{
+#     "permissions" => %{"mode" => "auto", "deny" => ["Bash(docker:*)"]},
+#     "sandbox" => %{"network" => false}
+#   }
+#
+# Per-domain overrides go in `workspace.config["agent"]["security"]`; see
+# docs/acolyte-security.md.
+config :arbiter, :acolyte_security_policy, %{}
+
 config :arbiter_web,
   ecto_repos: [Arbiter.Repo],
   generators: [context_app: :arbiter]

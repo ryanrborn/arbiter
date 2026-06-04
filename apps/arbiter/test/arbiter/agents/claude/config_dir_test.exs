@@ -57,7 +57,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       refute memory =~ "Always roleplay"
     end
 
-    test "symlinks auth + settings from the source, but never CLAUDE.md", %{
+    test "symlinks auth from the source, but never CLAUDE.md or settings.json", %{
       source: source,
       target: target
     } do
@@ -66,11 +66,42 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert {:ok, src_cred} = File.read_link(Path.join(target, ".credentials.json"))
       assert src_cred == Path.join(source, ".credentials.json")
 
-      assert {:ok, src_settings} = File.read_link(Path.join(target, "settings.json"))
-      assert src_settings == Path.join(source, "settings.json")
-
       # CLAUDE.md is ours (a real file), not a link to the operator's persona.
       assert {:error, :einval} = File.read_link(Path.join(target, "CLAUDE.md"))
+
+      # settings.json is now *generated* (a real file), never symlinked from the
+      # operator's ~/.claude — so the acolyte doesn't inherit the host posture
+      # (bd-9u10op). The operator's source settings had an empty deny; ours
+      # must carry a non-empty hardened deny list.
+      settings_path = Path.join(target, "settings.json")
+      assert {:error, :einval} = File.read_link(settings_path)
+
+      settings = settings_path |> File.read!() |> Jason.decode!()
+      deny = get_in(settings, ["permissions", "deny"])
+      assert is_list(deny) and deny != []
+      assert Enum.any?(deny, &(&1 =~ "rm -rf"))
+      refute settings == %{"permissions" => %{"defaultMode" => "auto"}}
+    end
+
+    test "replaces a stale settings.json symlink instead of writing through it", %{
+      source: source,
+      target: target
+    } do
+      # Simulate an earlier build that symlinked settings.json at the operator's
+      # real file. ensure/0 must NOT follow the link and clobber the source.
+      File.mkdir_p!(target)
+      src_settings = Path.join(source, "settings.json")
+      original = File.read!(src_settings)
+      File.ln_s!(src_settings, Path.join(target, "settings.json"))
+
+      assert {:ok, ^target} = ConfigDir.ensure()
+
+      # The operator's real file is untouched...
+      assert File.read!(src_settings) == original
+      # ...and the target is now a real generated file (link replaced).
+      target_settings = Path.join(target, "settings.json")
+      assert {:error, :einval} = File.read_link(target_settings)
+      assert File.read!(target_settings) =~ "deny"
     end
 
     test "is idempotent — a second call leaves the same links in place", %{target: target} do
