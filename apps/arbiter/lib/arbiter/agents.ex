@@ -30,18 +30,18 @@ defmodule Arbiter.Agents do
   """
 
   alias Arbiter.Agents.Claude
+  alias Arbiter.Agents.Gemini
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
 
   @type adapter :: module()
 
   @adapters %{
-    claude: Claude
-    # :codex, :aider, :gemini wired up only when their adapters ship
-    # (Phase D, gated on ledger data per docs/agent-harness-design.md)
+    claude: Claude,
+    gemini: Gemini
   }
 
-  @valid_agent_types ~w(claude)
+  @valid_agent_types ~w(claude gemini)
 
   @doc """
   Returns the adapter module for the given workspace.
@@ -131,11 +131,13 @@ defmodule Arbiter.Agents do
   @spec prepare(Workspace.t() | nil, :agent | :review_agent) :: :ok
   def prepare(nil, _role) do
     Claude.Config.put_active(nil)
+    Gemini.Config.put_active(nil)
     :ok
   end
 
   def prepare(%Workspace{} = workspace, role) when role in [:agent, :review_agent] do
     Claude.Config.put_active(workspace, role)
+    Gemini.Config.put_active(workspace, role)
     :ok
   end
 
