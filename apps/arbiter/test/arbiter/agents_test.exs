@@ -25,9 +25,9 @@ defmodule Arbiter.AgentsTest do
       assert Agents.for_type(:claude) == Claude
     end
 
-    test "for_type/1 raises for unregistered types (gemini/codex/aider not shipped)" do
-      assert_raise ArgumentError, ~r/no agent adapter registered for :gemini/, fn ->
-        Agents.for_type(:gemini)
+    test "for_type/1 raises for unregistered types (codex/aider not shipped)" do
+      assert_raise ArgumentError, ~r/no agent adapter registered for :codex/, fn ->
+        Agents.for_type(:codex)
       end
     end
   end
@@ -54,29 +54,36 @@ defmodule Arbiter.AgentsTest do
 
   describe "adapters/0 + valid_agent_types/0" do
     test "adapters/0 exposes the registered map" do
-      assert Agents.adapters() == %{claude: Claude}
+      assert Agents.adapters() == %{claude: Claude, gemini: Arbiter.Agents.Gemini}
     end
 
-    test "valid_agent_types/0 is `[\"claude\"]` today" do
-      assert Agents.valid_agent_types() == ["claude"]
+    test "valid_agent_types/0 is `[\"claude\", \"gemini\"]`" do
+      assert Agents.valid_agent_types() == ["claude", "gemini"]
     end
   end
 
   describe "prepare/1 + prepare/2" do
     setup do
-      on_exit(fn -> Claude.Config.clear() end)
+      on_exit(fn ->
+        Claude.Config.clear()
+        Arbiter.Agents.Gemini.Config.clear()
+      end)
+
       :ok
     end
 
     test "nil workspace clears the per-process active config" do
       Claude.Config.put_active(%{"model" => "opus"})
+      Arbiter.Agents.Gemini.Config.put_active(%{"model" => "gemini-medium"})
       assert Claude.Config.active_model() == "opus"
+      assert Arbiter.Agents.Gemini.Config.active_model() == "gemini-medium"
 
       assert Agents.prepare(nil) == :ok
       assert Claude.Config.active_model() == nil
+      assert Arbiter.Agents.Gemini.Config.active_model() == nil
     end
 
-    test "seeds Claude config from the workspace `agent.config`" do
+    test "seeds configurations from the workspace `agent.config`" do
       ws = %Workspace{
         config: %{
           "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}}
@@ -85,6 +92,7 @@ defmodule Arbiter.AgentsTest do
 
       assert Agents.prepare(ws) == :ok
       assert Claude.Config.active_model() == "sonnet"
+      assert Arbiter.Agents.Gemini.Config.active_model() == "sonnet"
     end
 
     test "prepare/2 with :review_agent seeds the reviewer config block" do
@@ -97,6 +105,7 @@ defmodule Arbiter.AgentsTest do
 
       assert Agents.prepare(ws, :review_agent) == :ok
       assert Claude.Config.active_model() == "opus"
+      assert Arbiter.Agents.Gemini.Config.active_model() == "opus"
     end
   end
 end
