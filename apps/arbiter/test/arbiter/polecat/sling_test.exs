@@ -511,4 +511,112 @@ defmodule Arbiter.Polecat.SlingTest do
       assert result.worktree_path == nil
     end
   end
+
+  describe "review dispatch (review: true)" do
+    @env_key :rig_paths
+
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "sling-review-#{:erlang.unique_integer([:positive])}")
+      repo = Path.join(tmp, "source")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      prior = Application.get_env(:arbiter, @env_key)
+      Application.put_env(:arbiter, @env_key, %{"rv/rig" => repo})
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, @env_key, prior),
+          else: Application.delete_env(:arbiter, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo: repo}
+    end
+
+    test "review: true skips the worktree and attaches the CodeReview workflow",
+         %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id, rig: "rv/rig", review: true, start_driver: false)
+
+      # No per-bead branch, no worktree.
+      assert result.worktree_path == nil
+
+      # Workflow attached is CodeReview, not Work.
+      machine_state = Arbiter.Workflows.MachineState |> Ash.get!(result.machine_id)
+      assert machine_state.workflow_module == inspect(Arbiter.Workflows.CodeReview)
+
+      # Polecat is tagged review_only so completion bypasses the Crucible.
+      snap = Polecat.state(result.polecat_pid)
+      assert snap.meta[:review_only] == true
+      refute Map.has_key?(snap.meta, :branch)
+    end
+
+    test "review prompt mentions the bead's tracker ref and bans pushes/merges",
+         %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "external pr review",
+          workspace_id: ws.id,
+          tracker_type: "github",
+          tracker_ref: "999"
+        })
+
+      prompt =
+        Arbiter.Polecat.Sling.prompt_for_bead(bead, review: true)
+
+      assert prompt =~ "reviewer polecat"
+      assert prompt =~ "github:999"
+      assert prompt =~ "Do NOT push"
+      assert prompt =~ "Do NOT merge"
+      assert prompt =~ "arb done"
+
+      # The work prompt is still produced by default for non-review dispatches.
+      work = Arbiter.Polecat.Sling.prompt_for_bead(bead, [])
+      assert work =~ "working autonomously"
+      refute work =~ "reviewer polecat"
+    end
+
+    test "review with start_claude: true uses the rig path as cwd when no worktree",
+         %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "rv/rig",
+          review: true,
+          start_claude: true,
+          start_driver: false,
+          # A no-op argv standing in for a real claude session — proves the
+          # port opened, which means the cwd resolution succeeded.
+          claude_command: ["true"]
+        )
+
+      assert is_port(result.claude_port)
+      assert result.worktree_path == nil
+    end
+
+    test "review without a worktree AND without a mapped rig errors",
+         %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no cwd", workspace_id: ws.id})
+
+      assert {:error, :missing_worktree} =
+               Sling.sling(bead.id,
+                 rig: "no-such-rig",
+                 review: true,
+                 start_claude: true,
+                 claude_command: ["true"]
+               )
+    end
+  end
 end

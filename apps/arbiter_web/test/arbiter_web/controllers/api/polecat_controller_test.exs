@@ -164,6 +164,52 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     end
   end
 
+  describe "POST /api/polecats/review" do
+    test "dispatches a review-only polecat: no worktree, CodeReview workflow attached",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "review me",
+          workspace_id: ws.id,
+          tracker_type: "github",
+          tracker_ref: "42"
+        })
+
+      conn =
+        post(conn, ~p"/api/polecats/review", %{
+          "bead_id" => bead.id,
+          # Drop the Claude session — the test only cares about wiring.
+          "with_claude" => false,
+          "rig" => "no-such-rig"
+        })
+
+      body = json_response(conn, 201)
+
+      assert body["bead"]["id"] == bead.id
+      assert body["bead"]["status"] == "in_progress"
+      assert is_nil(body["worktree_path"])
+
+      # The polecat is tagged review_only so completion bypasses the Crucible.
+      pid = Polecat.whereis(bead.id)
+      assert is_pid(pid)
+      snap = Polecat.state(pid)
+      assert snap.meta[:review_only] == true
+
+      # Cleanup so the next test isn't tripped by a lingering polecat.
+      Polecat.stop(bead.id)
+    end
+
+    test "returns 404 for an unknown bead_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/polecats/review", %{"bead_id" => "no-such-bead"})
+      assert json_response(conn, 404)
+    end
+
+    test "requires a bead_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/polecats/review", %{})
+      assert json_response(conn, 400)
+    end
+  end
+
   describe "POST /api/polecats/:bead_id/stop" do
     test "terminates a running polecat", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})
