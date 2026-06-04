@@ -210,6 +210,13 @@ workspace") — Stage 2 below.
 Missing keys fall back to `{type: "claude", config: {model: <CLI default>}}` —
 no surprises for existing workspaces.
 
+The `agent` block also carries a `security` sub-object — the normalized,
+provider-agnostic acolyte permission + sandbox posture (`mode`, `allow`,
+`deny`, `sandbox`). It is resolved by `Arbiter.Agents.SecurityPolicy` and
+mapped per-adapter (`Arbiter.Agents.Claude.Security`). See
+`docs/acolyte-security.md` (bd-9u10op) for the full shape and the safe
+defaults; it is omitted here to keep this section focused on routing.
+
 `review_agent` is independent of `agent`. The Tribunal-stronger-than-worker
 pattern (cheap acolyte writes, stronger reviewer judges) is expressed by
 asymmetric config. Same shape for both, so a workspace could also flip it

@@ -8,11 +8,22 @@ defmodule Arbiter.Agents.Gemini do
   @behaviour Arbiter.Agents.Agent
 
   alias Arbiter.Agents.Gemini.Config
+  alias Arbiter.Agents.SecurityPolicy
 
   @done_regex ~r/\barb done\b/
 
   @impl true
   def provider, do: "gemini"
+
+  # Gemini/agy CLIs have no per-tool deny lists or fine-grained permission modes
+  # analogous to Claude's --permission-mode + --settings. The policy is honored
+  # at the coarse level: :bypass maps to --dangerously-skip-permissions / --skip-trust;
+  # :auto and :strict omit those flags so the tool does not bypass its own
+  # permission checks. Operator-level deny rules and sandbox scoping are not yet
+  # enforceable — hence enforced? returns false so the REST posture surface can
+  # show the gap rather than claiming full enforcement.
+  @impl true
+  def security_enforced?, do: false
 
   @impl true
   def done_sentinel, do: @done_regex
@@ -21,7 +32,8 @@ defmodule Arbiter.Agents.Gemini do
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
     case resolve_executable() do
       {:ok, {type, exec}} ->
-        inner = build_argv(type, exec, prompt, opts)
+        policy = security_policy(opts)
+        inner = build_argv(type, exec, prompt, opts, policy)
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
 
       {:error, _} = err ->
@@ -103,13 +115,34 @@ defmodule Arbiter.Agents.Gemini do
     end
   end
 
-  defp build_argv(:agy, exec, prompt, opts) do
+  # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Falls back to
+  # the install-wide default so a bare adapter call is still safe.
+  defp security_policy(opts) do
+    case Keyword.get(opts, :security) do
+      %SecurityPolicy{} = policy -> policy
+      _ -> SecurityPolicy.default()
+    end
+  end
+
+  # :bypass → pass skip-permissions so the tool doesn't gate on confirmations.
+  # :auto/:strict → omit the flag; the tool will not bypass its own permission
+  # checks. Operator deny rules are not enforceable on Gemini/agy (no --settings
+  # equivalent) — see security_enforced?/0.
+  defp build_argv(:agy, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--dangerously-skip-permissions"] ++
       model_flag(opts) ++ thinking_flag(opts)
   end
 
-  defp build_argv(:gemini, exec, prompt, opts) do
+  defp build_argv(:agy, exec, prompt, opts, _policy) do
+    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts)
+  end
+
+  defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
     [exec, "-p", prompt, "--skip-trust", "-y"] ++ model_flag(opts) ++ thinking_flag(opts)
+  end
+
+  defp build_argv(:gemini, exec, prompt, opts, _policy) do
+    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts)
   end
 
   defp model_flag(opts) do

@@ -37,8 +37,25 @@ defmodule Arbiter.Agents.Agent do
       caller — `Arbiter.Agents.Claude.Config` for Claude — resolves which
       key (single-key today; round-robin from `api_keys` list in a follow-up).
     * `:config` — adapter-specific extra config (an opaque map).
+    * `:security` — the resolved `Arbiter.Agents.SecurityPolicy` for this
+      spawn (permission mode, allow/deny, sandbox). The caller (Sling /
+      Tribunal) resolves it from the workspace; the adapter maps it to its
+      provider's mechanism. When absent the adapter MUST fall back to
+      `SecurityPolicy.default/0` (the install-wide hardened floor) — a spawn is
+      never un-permissioned.
 
   Adapters may read additional keys; unknown keys are ignored.
+
+  ## Security-policy contract
+
+  Every adapter maps the normalized `:security` policy to its provider and
+  **MUST enforce a non-empty destructive-op deny baseline** (the policy's
+  `permissions.safe_defaults`) in `:auto` and `:strict` modes — never an empty
+  deny. Only `:bypass` (explicit opt-in) skips enforcement. The adapter must
+  also **not** fall through to the host operator's personal agent config for
+  permissions. The Claude adapter does this via
+  `Arbiter.Agents.Claude.Security` + a generated `CLAUDE_CONFIG_DIR`
+  `settings.json`; a second provider implements the same contract its own way.
 
   ## `init_session/1` shape
 
@@ -125,5 +142,18 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback provider() :: String.t()
 
-  @optional_callbacks [spawn_env: 1]
+  @doc """
+  Returns `true` when this adapter honors the normalized `SecurityPolicy`
+  passed in `opts[:security]` — i.e., enforces a non-empty destructive-op deny
+  baseline in `:auto`/`:strict` modes and does not fall through to the host
+  operator's agent config.
+
+  Defaults to `false` so that adapters added before implementing the security
+  contract don't silently claim enforcement. The Claude adapter returns `true`.
+  This value is surfaced in the `security_posture.policy_enforced` REST field so
+  operators can see whether the declared posture is actually being enforced.
+  """
+  @callback security_enforced?() :: boolean()
+
+  @optional_callbacks [spawn_env: 1, security_enforced?: 0]
 end

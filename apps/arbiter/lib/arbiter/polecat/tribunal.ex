@@ -111,6 +111,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
@@ -787,7 +788,12 @@ defmodule Arbiter.Polecat.Tribunal do
         {adapter, role_atom} = adapter_for(ws, role)
         :ok = Agents.prepare(ws, role_atom)
 
-        agent_opts = agent_opts_for_role(ws, role_atom, state.bead_id)
+        # The reviewer/implementer acolyte gets the same per-domain security
+        # posture as a worker spawn — resolved from the workspace, never the
+        # operator's ~/.claude (bd-9u10op).
+        agent_opts =
+          agent_opts_for_role(ws, role_atom, state.bead_id) ++
+            [security: SecurityPolicy.resolve(ws)]
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
