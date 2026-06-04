@@ -536,6 +536,89 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "submit_review/4" do
+    test "submits an APPROVE review via the reviews endpoint" do
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} ==
+                 {"POST", "/repos/octo/widget/pulls/42/reviews"}
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["event"] == "APPROVE"
+        assert decoded["body"] == "Approved: no findings."
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 1})
+      end)
+
+      assert {:ok, _} = Github.submit_review(@ref, :approve, "Approved: no findings.", %{})
+    end
+
+    test "submits a REQUEST_CHANGES review via the reviews endpoint" do
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} ==
+                 {"POST", "/repos/octo/widget/pulls/42/reviews"}
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["event"] == "REQUEST_CHANGES"
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 2})
+      end)
+
+      assert {:ok, _} = Github.submit_review(@ref, :request_changes, "Fix these.", %{})
+    end
+
+    test "422 'your own pull request' on APPROVE falls back to issue comment" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Can not approve your own pull request."})
+
+          {"POST", "/repos/octo/widget/issues/42/comments"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            comment = Jason.decode!(body)["body"]
+            assert comment =~ "VERDICT: APPROVE"
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 99})
+        end
+      end)
+
+      assert {:ok, _} = Github.submit_review(@ref, :approve, "Approved.", %{})
+    end
+
+    test "422 'your own pull request' on REQUEST_CHANGES falls back to issue comment" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "You can not request changes on your own pull request."
+            })
+
+          {"POST", "/repos/octo/widget/issues/42/comments"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            comment = Jason.decode!(body)["body"]
+            assert comment =~ "VERDICT: REQUEST_CHANGES"
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 100})
+        end
+      end)
+
+      assert {:ok, _} = Github.submit_review(@ref, :request_changes, "Fix these.", %{})
+    end
+
+    test "422 with an unrelated message is not treated as self-review" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               Github.submit_review(@ref, :approve, "Approved.", %{})
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()

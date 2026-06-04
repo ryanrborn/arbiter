@@ -50,6 +50,8 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @behaviour Arbiter.Mergers.Merger
 
+  require Logger
+
   alias Arbiter.Mergers.Gitlab.{Config, Error}
 
   @stub_name Arbiter.Mergers.Gitlab.HTTP
@@ -199,11 +201,25 @@ defmodule Arbiter.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case verdict do
         :approve ->
-          with {:ok, _} <-
-                 request(cfg, :post, "/merge_requests/#{iid}/approve", json: %{}) |> handle_json(),
-               {:ok, _} = ok <-
-                 post_summary_note(cfg, iid, body, "Approved") do
-            ok
+          approve_result =
+            request(cfg, :post, "/merge_requests/#{iid}/approve", json: %{}) |> handle_json()
+
+          case approve_result do
+            {:ok, _} ->
+              post_summary_note(cfg, iid, body, "Approved")
+
+            {:error, %Error{} = err} ->
+              if self_approve_error?(err) do
+                Logger.warning(
+                  "GitLab self-review: approve rejected (#{err.message}); " <>
+                    "falling back to verdict note for MR #{iid}"
+                )
+
+                note_body = "VERDICT: APPROVE\n\n#{body || ""}" |> String.trim()
+                post_summary_note(cfg, iid, note_body, "Approved (comment fallback)")
+              else
+                {:error, err}
+              end
           end
 
         :request_changes ->
@@ -363,6 +379,22 @@ defmodule Arbiter.Mergers.Gitlab do
   defp handle_unapprove({:ok, %Req.Response{status: status, body: body}}),
     do: {:error, http_error(status, body)}
   defp handle_unapprove({:error, exception}), do: {:error, transport_error(exception)}
+
+  # GitLab returns 401/403/422 when prevent_author_approval is enabled and the
+  # reviewer is the MR author. The exact message varies across GitLab versions;
+  # match on status + common message fragments that indicate identity conflict.
+  defp self_approve_error?(%Error{status: status, message: msg})
+       when status in [401, 403, 422] and is_binary(msg) do
+    lower = String.downcase(msg)
+
+    String.contains?(lower, "own merge request") or
+      String.contains?(lower, "not allowed to approve") or
+      String.contains?(lower, "not permitted to approve") or
+      String.contains?(lower, "author of this merge request") or
+      String.contains?(lower, "author cannot approve")
+  end
+
+  defp self_approve_error?(_), do: false
 
   # GitLab returns no top-level diff field on `/changes`; the diff sits in
   # `changes[].diff` per-file. Assemble a single unified-diff text the

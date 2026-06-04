@@ -226,6 +226,96 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  describe "submit_review/4" do
+    @approve_path "/api/v4/projects/12345/merge_requests/42/approve"
+    @notes_path "/api/v4/projects/12345/merge_requests/42/notes"
+    @unapprove_path "/api/v4/projects/12345/merge_requests/42/unapprove"
+
+    test ":approve posts to /approve then posts an Approved summary note" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", @approve_path} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"approved" => true})
+
+          {"POST", @notes_path} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            assert Jason.decode!(body)["body"] =~ "Approved"
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.submit_review(@ref, :approve, "Approved: no findings.", %{})
+    end
+
+    test ":request_changes unapproves and posts a Requesting changes note" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", @unapprove_path} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", @notes_path} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            assert Jason.decode!(body)["body"] =~ "Requesting changes"
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 2})
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.submit_review(@ref, :request_changes, "Fix these.", %{})
+    end
+
+    test "422 self-approve on :approve falls back to a VERDICT note" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", @approve_path} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "You are not allowed to approve this merge request."
+            })
+
+          {"POST", @notes_path} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            assert Jason.decode!(body)["body"] =~ "VERDICT: APPROVE"
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 3})
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.submit_review(@ref, :approve, "Approved.", %{})
+    end
+
+    test "401 with author-approval message on :approve falls back to a VERDICT note" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", @approve_path} ->
+            conn
+            |> Plug.Conn.put_status(401)
+            |> Req.Test.json(%{"message" => "Author cannot approve own merge request."})
+
+          {"POST", @notes_path} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            assert Jason.decode!(body)["body"] =~ "VERDICT: APPROVE"
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 4})
+        end
+      end)
+
+      assert {:ok, _} = Gitlab.submit_review(@ref, :approve, "Approved.", %{})
+    end
+
+    test "422 with an unrelated message on :approve is not swallowed" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", @approve_path} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Approvals are not configured for this project."})
+        end
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               Gitlab.submit_review(@ref, :approve, "Approved.", %{})
+    end
+  end
+
   describe "parse_ref/1" do
     test "accepts the !iid shorthand" do
       assert {:ok, "!42"} = Gitlab.parse_ref("!42")

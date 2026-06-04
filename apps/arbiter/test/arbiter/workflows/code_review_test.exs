@@ -239,6 +239,42 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
       {:ok, %{}}
     end
   end
+
+  # Simulates the adapter behaviour AFTER the self-review fallback has been
+  # applied: submit_review/4 returns {:ok, %{}} (success) even though the
+  # formal review was rejected. This tests that the CodeReview workflow does
+  # not fail when an adapter falls back to a comment on a self-authored PR.
+  defmodule SelfReviewFallbackAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(mr_ref, body) do
+      send(:self_review_test_pid, {:comment_fallback, mr_ref, body})
+      :ok
+    end
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      # Adapter has already applied the fallback internally; returns success.
+      send(:self_review_test_pid, {:submit_review_called, mr_ref, verdict, body})
+      {:ok, %{self_review_fallback: true}}
+    end
+  end
 end
 
 defmodule Arbiter.Workflows.CodeReviewTest do
@@ -918,6 +954,132 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
 
       assert {:error, :boom} = Checks.run("DIFF", %{mode: :local})
+    end
+  end
+
+  # =======================================================================
+  # Self-review fallback — workflow succeeds when the adapter falls back
+  # =======================================================================
+
+  describe "self-review fallback (adapter returns {:ok, _} after internal fallback)" do
+    setup do
+      Process.register(self(), :self_review_test_pid)
+      on_exit(fn -> :ok end)
+      :ok
+    end
+
+    test "workflow completes and preserves the verdict when submit_review falls back" do
+      findings = [%{severity: :error, file: "a.ex", line: 1, message: "blocking"}]
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.SelfReviewFallbackAdapter,
+        mr_ref: "#99",
+        findings: findings
+      }
+
+      assert {:ok, %{verdict: :request_changes}} = CodeReview.run_step(:verdict, state)
+      assert_received {:submit_review_called, "#99", :request_changes, _body}
+    end
+
+    test "workflow completes with :approve when submit_review falls back" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.SelfReviewFallbackAdapter,
+        mr_ref: "#99",
+        findings: []
+      }
+
+      assert {:ok, %{verdict: :approve}} = CodeReview.run_step(:verdict, state)
+      assert_received {:submit_review_called, "#99", :approve, _body}
+    end
+  end
+
+  # =======================================================================
+  # End-to-end — self-review fallback against the GitHub adapter
+  # =======================================================================
+
+  describe "Arbiter.Workflow.run/2 — GitHub adapter self-review fallback" do
+    setup do
+      env = "ARB_CODEREVIEW_GH_SELFREVIEW_TOKEN"
+      System.put_env(env, "test-gh-selfreview-token")
+
+      Arbiter.Mergers.Github.Config.put_active(%{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "env:#{env}"
+      })
+
+      on_exit(fn ->
+        Arbiter.Mergers.Github.Config.clear()
+        System.delete_env(env)
+      end)
+
+      :ok
+    end
+
+    test "workflow succeeds and verdict is preserved when GitHub rejects formal review with 422 self-review error" do
+      events = :ets.new(:gh_selfreview_events, [:public, :duplicate_bag])
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and
+              "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+changed\n")
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/5" ->
+            conn
+            |> put_status(200)
+            |> Req.Test.json(%{"number" => 5, "head" => %{"sha" => "abc123"}})
+
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/5/comments" ->
+            conn |> put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          # Formal review rejected: self-authored PR
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/5/reviews" ->
+            :ets.insert(events, {:review_attempted, path})
+
+            conn
+            |> put_status(422)
+            |> Req.Test.json(%{"message" => "Can not approve your own pull request."})
+
+          # Fallback issue comment
+          conn.method == "POST" and path == "/repos/octo/widget/issues/5/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:fallback_comment, Jason.decode!(body)})
+            conn |> put_status(201) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            conn
+            |> put_status(404)
+            |> Req.Test.json(%{"message" => "unhandled #{conn.method} #{path}"})
+        end
+      end)
+
+      runner = fn _diff, _state -> {:ok, []} end
+
+      initial = %{
+        mode: :adapter,
+        adapter: Arbiter.Mergers.Github,
+        mr_ref: "#5",
+        check_runner: runner
+      }
+
+      assert {:ok, final} = Arbiter.Workflow.run(CodeReview, initial)
+
+      # The workflow must succeed and preserve the verdict.
+      assert final.verdict == :approve
+
+      # The formal review was attempted.
+      assert [_] = :ets.lookup(events, :review_attempted)
+
+      # The fallback comment was posted containing the verdict.
+      assert [{:fallback_comment, comment}] = :ets.lookup(events, :fallback_comment)
+      assert comment["body"] =~ "VERDICT: APPROVE"
     end
   end
 end

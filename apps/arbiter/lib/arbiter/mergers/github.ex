@@ -68,6 +68,8 @@ defmodule Arbiter.Mergers.Github do
 
   @behaviour Arbiter.Mergers.Merger
 
+  require Logger
+
   alias Arbiter.Mergers.Github.{Config, Error, RepoResolver}
 
   @stub_name Arbiter.Mergers.Github.HTTP
@@ -230,8 +232,22 @@ defmodule Arbiter.Mergers.Github do
         "body" => body || ""
       }
 
-      request(cfg, :post, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", json: payload)
-      |> handle_json()
+      case request(cfg, :post, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", json: payload) do
+        {:ok, %Req.Response{status: 422, body: err_body}} when is_map(err_body) ->
+          if self_review_error?(err_body) do
+            Logger.warning(
+              "GitHub self-review: #{verdict} rejected (#{inspect(err_body["message"])}); " <>
+                "falling back to issue comment for #{owner}/#{repo}##{number}"
+            )
+
+            fallback_self_review_comment(cfg, owner, repo, number, verdict, body)
+          else
+            {:error, http_error(422, err_body)}
+          end
+
+        other ->
+          handle_json(other)
+      end
     end
   end
 
@@ -455,6 +471,36 @@ defmodule Arbiter.Mergers.Github do
 
   defp verdict_event(:approve), do: "APPROVE"
   defp verdict_event(:request_changes), do: "REQUEST_CHANGES"
+
+  # GitHub returns HTTP 422 with "Can not approve your own pull request." or
+  # "You can not request changes on your own pull request." when reviewer and
+  # PR author share the same identity. Both contain "your own pull request".
+  defp self_review_error?(%{"message" => msg}) when is_binary(msg) do
+    msg |> String.downcase() |> String.contains?("your own pull request")
+  end
+
+  defp self_review_error?(_), do: false
+
+  # Post the verdict as a top-level issue comment when a formal review
+  # submission is rejected because the reviewer is the PR author. The fleet
+  # merge gate uses the internal polecat verdict, not GitHub's review state,
+  # so this comment is for human visibility only.
+  defp fallback_self_review_comment(cfg, owner, repo, number, verdict, body) do
+    verdict_label = if verdict == :approve, do: "APPROVE", else: "REQUEST_CHANGES"
+    text = "VERDICT: #{verdict_label}\n\n#{body || ""}" |> String.trim()
+    payload = %{"body" => text}
+
+    case request(cfg, :post, "/repos/#{owner}/#{repo}/issues/#{number}/comments", json: payload) do
+      {:ok, %Req.Response{status: status, body: resp_body}} when status in 200..299 ->
+        {:ok, resp_body}
+
+      {:ok, %Req.Response{status: status, body: err_body}} ->
+        {:error, http_error(status, err_body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
 
   # Inline review comments require the head SHA of the PR (GitHub's API
   # anchors the comment to a specific commit). Callers can short-circuit
