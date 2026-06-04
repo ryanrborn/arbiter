@@ -162,6 +162,66 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
+  @impl true
+  def get_diff(mr_ref, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      case request(cfg, :get, "/merge_requests/#{iid}/changes", []) do
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          {:ok, changes_to_diff(body)}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def post_inline_comment(mr_ref, finding, _opts)
+      when is_binary(mr_ref) and is_map(finding) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      %{severity: sev, file: file, line: line, message: msg} = finding
+      body = "**#{sev |> Atom.to_string() |> String.upcase()}** at `#{file}:#{line}`: #{msg}"
+
+      request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => body})
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def submit_review(mr_ref, verdict, body, _opts)
+      when is_binary(mr_ref) and verdict in [:approve, :request_changes] do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      case verdict do
+        :approve ->
+          with {:ok, _} <-
+                 request(cfg, :post, "/merge_requests/#{iid}/approve", json: %{}) |> handle_json(),
+               {:ok, _} = ok <-
+                 post_summary_note(cfg, iid, body, "Approved") do
+            ok
+          end
+
+        :request_changes ->
+          # GitLab has no native "request changes" REST verb. Post a
+          # clearly-marked note so reviewers see the verdict in the
+          # discussion timeline, and unapprove if previously approved (the
+          # endpoint is idempotent and tolerates "not currently approved").
+          with {:ok, _} <-
+                 request(cfg, :post, "/merge_requests/#{iid}/unapprove", json: %{})
+                 |> handle_unapprove(),
+               {:ok, _} = ok <-
+                 post_summary_note(cfg, iid, body, "Requesting changes") do
+            ok
+          end
+      end
+    end
+  end
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
@@ -285,6 +345,54 @@ defmodule Arbiter.Mergers.Gitlab do
     do: {:error, http_error(status, body)}
 
   defp handle_ok({:error, exception}), do: {:error, transport_error(exception)}
+
+  defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
+    do: {:ok, body}
+
+  defp handle_json({:ok, %Req.Response{status: status, body: body}}),
+    do: {:error, http_error(status, body)}
+
+  defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
+
+  # POST `/unapprove` is idempotent in spirit but GitLab returns 401/404
+  # depending on whether the caller was the original approver. Treat any
+  # non-2xx that isn't a hard auth/transport failure as "best-effort" —
+  # the summary note is the real signal of `:request_changes`.
+  defp handle_unapprove({:ok, %Req.Response{status: status}}) when status in 200..299, do: {:ok, :unapproved}
+  defp handle_unapprove({:ok, %Req.Response{status: 404}}), do: {:ok, :not_previously_approved}
+  defp handle_unapprove({:ok, %Req.Response{status: status, body: body}}),
+    do: {:error, http_error(status, body)}
+  defp handle_unapprove({:error, exception}), do: {:error, transport_error(exception)}
+
+  # GitLab returns no top-level diff field on `/changes`; the diff sits in
+  # `changes[].diff` per-file. Assemble a single unified-diff text the
+  # check runner can feed to its reviewer.
+  defp changes_to_diff(%{"changes" => changes}) when is_list(changes) do
+    changes
+    |> Enum.map(&render_change/1)
+    |> Enum.join("")
+  end
+
+  defp changes_to_diff(_), do: ""
+
+  defp render_change(%{} = change) do
+    old_path = Map.get(change, "old_path") || Map.get(change, "new_path") || ""
+    new_path = Map.get(change, "new_path") || Map.get(change, "old_path") || ""
+    diff = Map.get(change, "diff") || ""
+
+    "diff --git a/#{old_path} b/#{new_path}\n--- a/#{old_path}\n+++ b/#{new_path}\n" <> diff
+  end
+
+  defp post_summary_note(cfg, iid, body, prefix) do
+    text =
+      case body do
+        b when is_binary(b) and b != "" -> "#{prefix}: #{b}"
+        _ -> prefix
+      end
+
+    request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => text})
+    |> handle_json()
+  end
 
   # ---- Internals: HTTP ----------------------------------------------------
 

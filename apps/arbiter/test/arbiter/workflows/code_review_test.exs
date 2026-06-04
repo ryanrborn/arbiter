@@ -1,12 +1,256 @@
+# ---- stub merger adapters used by the adapter-mode tests ----------------
+#
+# Each stub implements the full Merger behaviour but only the callbacks
+# the test cares about have non-trivial behavior. We define them at the
+# top level so a re-run doesn't trigger "redefining module" warnings.
+
+defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
+  @moduledoc false
+
+  defmodule Base do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule GetWithBranch do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(mr_ref), do: {:ok, %{ref: mr_ref, branch: "feat/y", status: :open}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule FailingGet do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:error, :not_found}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule DiffOk do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff("#42", _opts), do: {:ok, "diff --git a/x b/x\n+hi\n"}
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule DiffError do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:error, :transport_down}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule CommentSpy do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(mr_ref, finding, _opts) do
+      send(:code_review_test_pid, {:posted, mr_ref, finding})
+      {:ok, %{id: 1}}
+    end
+
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule PathAdapter do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{path: "/tmp/reviews/x.md"}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{path: "/tmp/reviews/x.md"}}
+  end
+
+  defmodule FailingComment do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:error, :forbidden}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
+  defmodule VerdictSpy do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(mr_ref, verdict, body, _opts) do
+      send(:verdict_test_pid, {:submitted, mr_ref, verdict, body})
+      {:ok, %{}}
+    end
+  end
+end
+
 defmodule Arbiter.Workflows.CodeReviewTest do
-  # async: false — github-mode tests share the Req.Test stub registry
-  # (`Arbiter.GitHub.HTTP`) which lives in a process-global table.
+  # async: false — adapter-mode tests share the Req.Test stub registries
+  # (`Arbiter.Mergers.Github.HTTP`, `Arbiter.Mergers.Gitlab.HTTP`) which
+  # live in process-global tables.
   use ExUnit.Case, async: false
+
+  alias Arbiter.Workflows.CodeReviewTest.Stubs
 
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.CodeReview.{Checks, LocalMode}
-
-  @token "test-token-abc123"
 
   # ---- fixture git repo for read_diff tests -----------------------------
 
@@ -38,8 +282,6 @@ defmodule Arbiter.Workflows.CodeReviewTest do
     %{repo: repo, tmp: tmp}
   end
 
-  defp stub(fun), do: Req.Test.stub(Arbiter.GitHub.HTTP, fun)
-
   defp put_status(conn, status) do
     %{conn | status: status}
     |> Plug.Conn.put_resp_header("content-type", "application/json")
@@ -56,7 +298,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
     test "vars/0 includes the core inputs" do
       vars = CodeReview.vars()
-      for v <- [:repo, :pr_number, :worktree_path, :mode], do: assert(v in vars)
+      for v <- [:worktree_path, :mode, :adapter, :mr_ref], do: assert(v in vars)
     end
 
     test "step_definition(:load_pr) has expected shape" do
@@ -64,6 +306,8 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert defn.needs == []
       assert :worktree_path in defn.vars
       assert :mode in defn.vars
+      assert :adapter in defn.vars
+      assert :mr_ref in defn.vars
       assert is_binary(defn.description)
     end
 
@@ -71,30 +315,30 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert CodeReview.step_definition(:verdict).needs == [:file_findings]
     end
 
-    test "module does not call GitHub.pr_merge or Polecat.Worktree.push (forbidden actions)" do
-      # Static guarantee: the compiled BEAM does not reference these symbols.
-      # We inspect the BEAM's xref via Module.attribute lookups; simpler is
-      # to inspect the source, ignoring the moduledoc block where the
-      # forbidden function names are referenced as documentation.
+    test "module does not call merger merge/1, Polecat.Worktree.push, or GitHub.pr_merge" do
+      # Static guarantee: the workflow itself does not reference any of the
+      # forbidden merge / push symbols. We inspect the source (stripping the
+      # @moduledoc block so the documented forbidden-actions list doesn't
+      # trigger a false match).
       source =
         File.read!(Path.expand("../../../lib/arbiter/workflows/code_review.ex", __DIR__))
 
-      # Strip the leading @moduledoc """ ... """ block before scanning so
-      # the documented forbidden-actions list doesn't trigger a false match.
       stripped =
         Regex.replace(~r/@moduledoc\s+"""(.|\n)*?"""/m, source, "", global: false)
 
       refute stripped =~ "pr_merge"
       refute stripped =~ "Worktree.push"
-      refute stripped =~ ~r/GitHub\.pr_merge/
+      refute stripped =~ ":merge,"
+      refute stripped =~ ", :merge,"
+      refute stripped =~ "Merger.merge"
     end
   end
 
   # =======================================================================
-  # :load_pr
+  # :load_pr (local mode)
   # =======================================================================
 
-  describe "run_step(:load_pr, ...)" do
+  describe "run_step(:load_pr, ...) — local" do
     test "local mode records the current branch from the worktree" do
       %{repo: repo} = setup_repo()
 
@@ -104,31 +348,28 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert new_state.pr == nil
     end
 
-    test "github mode calls GitHub.pr_get and records branch from head.ref" do
-      stub(fn conn ->
-        assert conn.method == "GET"
-        assert conn.request_path == "/repos/octo/widget/pulls/42"
-
-        conn
-        |> put_status(200)
-        |> Req.Test.json(%{"number" => 42, "head" => %{"ref" => "feature/y", "sha" => "abc"}})
-      end)
-
-      state = %{
-        mode: :github,
-        repo: "octo/widget",
-        pr_number: 42,
-        worktree_path: "/tmp/unused",
-        github_opts: [token: @token]
-      }
-
-      assert {:ok, new_state} = CodeReview.run_step(:load_pr, state)
-      assert new_state.branch == "feature/y"
-      assert is_map(new_state.pr)
-    end
-
     test "missing required keys returns {:error, {:bad_state, _}}" do
       assert {:error, {:bad_state, _}} = CodeReview.run_step(:load_pr, %{mode: :local})
+    end
+  end
+
+  # =======================================================================
+  # :load_pr (adapter mode)
+  # =======================================================================
+
+  describe "run_step(:load_pr, ...) — adapter" do
+    test "adapter mode calls adapter.get/1 and stores the response under :pr" do
+      state = %{mode: :adapter, adapter: Stubs.GetWithBranch, mr_ref: "#7"}
+      assert {:ok, new_state} = CodeReview.run_step(:load_pr, state)
+      assert new_state.branch == "feat/y"
+      assert new_state.pr.ref == "#7"
+    end
+
+    test "load_pr tolerates an adapter.get/1 error so review can proceed" do
+      state = %{mode: :adapter, adapter: Stubs.FailingGet, mr_ref: "#1"}
+      assert {:ok, new_state} = CodeReview.run_step(:load_pr, state)
+      assert is_nil(new_state.branch)
+      assert is_nil(new_state.pr)
     end
   end
 
@@ -137,7 +378,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
   # =======================================================================
 
   describe "run_step(:read_diff, ...)" do
-    test "shells out to git diff against the configured base" do
+    test "local mode shells out to git diff against the configured base" do
       %{repo: repo} = setup_repo()
 
       state = %{mode: :local, worktree_path: repo, base: "main"}
@@ -148,7 +389,17 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert diff =~ "+line one"
     end
 
-    test "missing worktree_path returns {:error, _}" do
+    test "adapter mode calls adapter.get_diff/2 and stores the diff" do
+      state = %{mode: :adapter, adapter: Stubs.DiffOk, mr_ref: "#42"}
+      assert {:ok, %{diff: "diff --git a/x b/x\n+hi\n"}} = CodeReview.run_step(:read_diff, state)
+    end
+
+    test "adapter errors propagate from read_diff" do
+      state = %{mode: :adapter, adapter: Stubs.DiffError, mr_ref: "#1"}
+      assert {:error, :transport_down} = CodeReview.run_step(:read_diff, state)
+    end
+
+    test "missing required keys returns {:error, _}" do
       assert {:error, _} = CodeReview.run_step(:read_diff, %{mode: :local})
     end
   end
@@ -158,11 +409,6 @@ defmodule Arbiter.Workflows.CodeReviewTest do
   # =======================================================================
 
   describe "run_step(:run_checks, ...)" do
-    test "default runner returns findings: []" do
-      state = %{mode: :local, diff: "some diff"}
-      assert {:ok, %{findings: []}} = CodeReview.run_step(:run_checks, state)
-    end
-
     test "custom :check_runner is invoked with (diff, state)" do
       runner = fn diff, state ->
         send(self(), {:ran, diff, state[:mode]})
@@ -179,14 +425,19 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       state = %{mode: :local, diff: "", check_runner: runner}
       assert {:error, :boom} = CodeReview.run_step(:run_checks, state)
     end
+
+    test "default runner short-circuits empty diff to {:ok, []}" do
+      state = %{mode: :local, diff: ""}
+      assert {:ok, %{findings: []}} = CodeReview.run_step(:run_checks, state)
+    end
   end
 
   # =======================================================================
   # :file_findings
   # =======================================================================
 
-  describe "run_step(:file_findings, ...)" do
-    test "local mode writes reviews/<branch>.md with structured contents" do
+  describe "run_step(:file_findings, ...) — local" do
+    test "writes reviews/<branch>.md with structured contents" do
       %{repo: repo} = setup_repo()
 
       findings = [
@@ -216,48 +467,49 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       # Error findings sort before info.
       assert :binary.match(contents, "lib/foo.ex") < :binary.match(contents, "lib/bar.ex")
     end
+  end
 
-    test "github mode posts one inline comment per finding plus a summary" do
-      calls = :counters.new(2, [])
+  describe "run_step(:file_findings, ...) — adapter" do
+    test "posts one inline comment per finding via adapter.post_inline_comment/3" do
+      Process.register(self(), :code_review_test_pid)
 
-      stub(fn conn ->
-        cond do
-          conn.request_path == "/repos/octo/widget/pulls/7" and conn.method == "GET" ->
-            conn
-            |> put_status(200)
-            |> Req.Test.json(%{"number" => 7, "head" => %{"sha" => "deadbeef"}})
+      try do
+        findings = [
+          %{severity: :error, file: "a.ex", line: 1, message: "bad"},
+          %{severity: :warning, file: "b.ex", line: 2, message: "meh"}
+        ]
 
-          String.ends_with?(conn.request_path, "/pulls/7/comments") and conn.method == "POST" ->
-            :counters.add(calls, 1, 1)
-            conn |> put_status(201) |> Req.Test.json(%{"id" => 1})
+        state = %{mode: :adapter, adapter: Stubs.CommentSpy, mr_ref: "#7", findings: findings}
+        assert {:ok, _} = CodeReview.run_step(:file_findings, state)
 
-          String.ends_with?(conn.request_path, "/issues/7/comments") and conn.method == "POST" ->
-            :counters.add(calls, 2, 1)
-            conn |> put_status(201) |> Req.Test.json(%{"id" => 2})
+        assert_received {:posted, "#7", %{file: "a.ex", line: 1}}
+        assert_received {:posted, "#7", %{file: "b.ex", line: 2}}
+      after
+        Process.unregister(:code_review_test_pid)
+      end
+    end
 
-          true ->
-            conn
-            |> put_status(404)
-            |> Req.Test.json(%{"message" => "unhandled #{conn.request_path}"})
-        end
-      end)
-
-      findings = [
-        %{severity: :error, file: "a.ex", line: 1, message: "bad"},
-        %{severity: :warning, file: "b.ex", line: 2, message: "meh"}
-      ]
-
+    test "captures adapter's review_path response (Direct-style)" do
       state = %{
-        mode: :github,
-        repo: "octo/widget",
-        pr_number: 7,
-        findings: findings,
-        github_opts: [token: @token, commit_id: "deadbeef"]
+        mode: :adapter,
+        adapter: Stubs.PathAdapter,
+        mr_ref: "direct:feature/x",
+        findings: [%{severity: :info, file: "a", line: 1, message: "x"}]
       }
 
-      assert {:ok, _} = CodeReview.run_step(:file_findings, state)
-      assert :counters.get(calls, 1) == 2
-      assert :counters.get(calls, 2) == 1
+      assert {:ok, %{review_path: "/tmp/reviews/x.md"}} =
+               CodeReview.run_step(:file_findings, state)
+    end
+
+    test "post_inline_comment error halts and propagates" do
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.FailingComment,
+        mr_ref: "#1",
+        findings: [%{severity: :info, file: "a", line: 1, message: "x"}]
+      }
+
+      assert {:error, :forbidden} = CodeReview.run_step(:file_findings, state)
     end
   end
 
@@ -265,11 +517,10 @@ defmodule Arbiter.Workflows.CodeReviewTest do
   # :verdict
   # =======================================================================
 
-  describe "run_step(:verdict, ...)" do
+  describe "run_step(:verdict, ...) — local" do
     test "no findings → :approve, and the review file is rewritten" do
       %{repo: repo} = setup_repo()
 
-      # First write an initial review file via the helper.
       :ok = LocalMode.write_findings(repo, "feature/x", %{id: "gte-021", title: "t"}, [])
       path = LocalMode.review_path(repo, "feature/x")
 
@@ -299,47 +550,38 @@ defmodule Arbiter.Workflows.CodeReviewTest do
                %{severity: :info, file: "b", line: 1, message: "y"}
              ]) == :approve
     end
+  end
 
-    test "github mode submits a review with the verdict event" do
-      events = :ets.new(:events, [:public])
+  describe "run_step(:verdict, ...) — adapter" do
+    setup do
+      Process.register(self(), :verdict_test_pid)
+      on_exit(fn -> :ok end)
+      :ok
+    end
 
-      stub(fn conn ->
-        cond do
-          String.ends_with?(conn.request_path, "/pulls/7/reviews") and conn.method == "POST" ->
-            {:ok, body, conn} = Plug.Conn.read_body(conn)
-            decoded = Jason.decode!(body)
-            :ets.insert(events, {:review, decoded})
-            conn |> put_status(200) |> Req.Test.json(%{"id" => 99, "state" => "APPROVED"})
-
-          true ->
-            conn |> put_status(404) |> Req.Test.json(%{"message" => "unhandled"})
-        end
-      end)
-
-      state = %{
-        mode: :github,
-        repo: "octo/widget",
-        pr_number: 7,
-        findings: [],
-        github_opts: [token: @token]
-      }
-
+    test "submits an :approve verdict via adapter.submit_review/4" do
+      state = %{mode: :adapter, adapter: Stubs.VerdictSpy, mr_ref: "!42", findings: []}
       assert {:ok, %{verdict: :approve}} = CodeReview.run_step(:verdict, state)
-      assert [{:review, %{"event" => "APPROVE"} = payload}] = :ets.lookup(events, :review)
-      assert is_binary(payload["body"])
+      assert_received {:submitted, "!42", :approve, body}
+      assert body =~ "Approved"
+    end
+
+    test "submits :request_changes when any finding has severity :error" do
+      findings = [%{severity: :error, file: "a", line: 1, message: "x"}]
+      state = %{mode: :adapter, adapter: Stubs.VerdictSpy, mr_ref: "#1", findings: findings}
+      assert {:ok, %{verdict: :request_changes}} = CodeReview.run_step(:verdict, state)
+      assert_received {:submitted, "#1", :request_changes, _body}
     end
   end
 
   # =======================================================================
-  # End-to-end
+  # End-to-end — :local
   # =======================================================================
 
   describe "Arbiter.Workflow.run/2 — local mode end-to-end" do
     test "produces verdict, writes review file, marks all steps completed" do
       %{repo: repo} = setup_repo()
 
-      # Inject a check runner that emits one warning so we exercise the
-      # finding-rendering code path while still landing on :approve.
       runner = fn _diff, _state ->
         {:ok, [%{severity: :warning, file: "added.txt", line: 1, message: "stub"}]}
       end
@@ -372,37 +614,255 @@ defmodule Arbiter.Workflows.CodeReviewTest do
   end
 
   # =======================================================================
-  # GitHub.pr_review/5 — added in this PR
+  # End-to-end — :adapter against the Direct merger
   # =======================================================================
 
-  describe "GitHub.pr_review/5" do
-    test "POSTs /pulls/:n/reviews with event=APPROVE for :approve" do
-      stub(fn conn ->
-        assert conn.method == "POST"
-        assert conn.request_path == "/repos/octo/widget/pulls/9/reviews"
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        decoded = Jason.decode!(body)
-        assert decoded["event"] == "APPROVE"
-        assert decoded["body"] == "lgtm"
-        conn |> put_status(200) |> Req.Test.json(%{"id" => 1})
+  describe "Arbiter.Workflow.run/2 — adapter mode against Direct" do
+    test "fetches the diff, posts findings, writes a verdict — no push, no merge" do
+      %{repo: repo} = setup_repo()
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "added.txt", line: 1, message: "stub error"},
+           %{severity: :info, file: "added.txt", line: 1, message: "stub info"}
+         ]}
+      end
+
+      initial = %{
+        mode: :adapter,
+        adapter: Arbiter.Mergers.Direct,
+        mr_ref: "direct:feature/x",
+        adapter_opts: %{repo_path: repo, target_branch: "main"},
+        bead: %{id: "gte-021", title: "code review"},
+        check_runner: runner
+      }
+
+      assert {:ok, final} = Arbiter.Workflow.run(CodeReview, initial)
+
+      assert final.completed_steps == [
+               :load_pr,
+               :read_diff,
+               :run_checks,
+               :file_findings,
+               :verdict
+             ]
+
+      assert final.verdict == :request_changes
+      assert is_binary(final.diff)
+      assert final.diff =~ "added.txt"
+      assert length(final.findings) == 2
+
+      review_path = Path.join([repo, "reviews", "feature-x.md"])
+      assert File.exists?(review_path)
+      assert final.review_path == review_path
+
+      contents = File.read!(review_path)
+      assert contents =~ "# Code review: feature/x"
+      assert contents =~ "**Bead:** gte-021 — code review"
+      assert contents =~ "**Verdict:** REQUEST_CHANGES"
+      assert contents =~ "added.txt:1 — error"
+      assert contents =~ "stub error"
+
+      # Static guarantee: the workflow doesn't push or merge — main's tip is
+      # unchanged and only the single feature commit lives ahead of it.
+      assert {main_log, 0} = System.cmd("git", ["-C", repo, "log", "--oneline", "main"])
+      assert String.split(main_log, "\n", trim: true) |> length() == 1
+
+      assert {commits, 0} = System.cmd("git", ["-C", repo, "rev-list", "main..feature/x"])
+      assert String.split(commits, "\n", trim: true) |> length() == 1
+    end
+  end
+
+  # =======================================================================
+  # End-to-end — :adapter against the GitHub merger
+  # =======================================================================
+
+  describe "Arbiter.Workflow.run/2 — adapter mode against GitHub" do
+    setup do
+      env = "ARB_CODEREVIEW_GH_TOKEN"
+      System.put_env(env, "test-gh-token")
+
+      Arbiter.Mergers.Github.Config.put_active(%{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "env:#{env}"
+      })
+
+      on_exit(fn ->
+        Arbiter.Mergers.Github.Config.clear()
+        System.delete_env(env)
       end)
 
-      assert {:ok, %{"id" => 1}} =
-               Arbiter.GitHub.pr_review("octo/widget", 9, :approve, "lgtm", token: @token)
+      :ok
     end
 
-    test "POSTs event=REQUEST_CHANGES for :request_changes" do
-      stub(fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        decoded = Jason.decode!(body)
-        assert decoded["event"] == "REQUEST_CHANGES"
-        conn |> put_status(200) |> Req.Test.json(%{"id" => 2})
+    test "fetches the diff via GitHub API, posts inline comments, submits a review" do
+      events = :ets.new(:events, [:public, :duplicate_bag])
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          # Diff fetch: Accept negotiates raw diff
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and
+              "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+            :ets.insert(events, {:get_diff, path})
+
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+hello\n")
+
+          # PR get to fetch head SHA for inline comments
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+            conn
+            |> put_status(200)
+            |> Req.Test.json(%{"number" => 42, "head" => %{"sha" => "deadbeef"}})
+
+          # Inline comment
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:inline_comment, Jason.decode!(body)})
+            conn |> put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          # Submit review
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:submit_review, Jason.decode!(body)})
+            conn |> put_status(200) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            conn
+            |> put_status(404)
+            |> Req.Test.json(%{"message" => "unhandled #{conn.method} #{path}"})
+        end
       end)
 
-      assert {:ok, _} =
-               Arbiter.GitHub.pr_review("octo/widget", 9, :request_changes, "fixme",
-                 token: @token
-               )
+      runner = fn _diff, _state ->
+        {:ok, [%{severity: :error, file: "x.ex", line: 1, message: "boom"}]}
+      end
+
+      initial = %{
+        mode: :adapter,
+        adapter: Arbiter.Mergers.Github,
+        mr_ref: "#42",
+        adapter_opts: %{commit_id: "deadbeef"},
+        check_runner: runner
+      }
+
+      assert {:ok, final} = Arbiter.Workflow.run(CodeReview, initial)
+
+      assert final.verdict == :request_changes
+      assert final.diff =~ "x.ex"
+      assert length(final.findings) == 1
+
+      # Ordering: diff fetched, inline comment posted, review submitted.
+      assert [_] = :ets.lookup(events, :get_diff)
+      assert [{:inline_comment, payload}] = :ets.lookup(events, :inline_comment)
+      assert payload["path"] == "x.ex"
+      assert payload["line"] == 1
+      assert payload["commit_id"] == "deadbeef"
+      assert payload["body"] =~ "ERROR"
+
+      assert [{:submit_review, review}] = :ets.lookup(events, :submit_review)
+      assert review["event"] == "REQUEST_CHANGES"
+      assert review["body"] =~ "Requesting changes"
+    end
+  end
+
+  # =======================================================================
+  # End-to-end — :adapter against the GitLab merger
+  # =======================================================================
+
+  describe "Arbiter.Workflow.run/2 — adapter mode against GitLab" do
+    setup do
+      env = "ARB_CODEREVIEW_GL_TOKEN"
+      System.put_env(env, "test-gl-token")
+
+      Arbiter.Mergers.Gitlab.Config.put_active(%{
+        "host" => "gitlab.example.com",
+        "project_id" => 99,
+        "credentials_ref" => "env:#{env}"
+      })
+
+      on_exit(fn ->
+        Arbiter.Mergers.Gitlab.Config.clear()
+        System.delete_env(env)
+      end)
+
+      :ok
+    end
+
+    test "fetches /changes, posts notes per finding, approves and posts a summary note" do
+      events = :ets.new(:gl_events, [:public, :duplicate_bag])
+
+      Req.Test.stub(Arbiter.Mergers.Gitlab.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and path == "/api/v4/projects/99/merge_requests/7/changes" ->
+            :ets.insert(events, {:get_changes, path})
+
+            conn
+            |> put_status(200)
+            |> Req.Test.json(%{
+              "changes" => [
+                %{
+                  "old_path" => "x.ex",
+                  "new_path" => "x.ex",
+                  "diff" => "@@ -1 +1 @@\n-old\n+new\n"
+                }
+              ]
+            })
+
+          conn.method == "POST" and path == "/api/v4/projects/99/merge_requests/7/notes" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            :ets.insert(events, {:note, Jason.decode!(body)})
+            conn |> put_status(201) |> Req.Test.json(%{"id" => :rand.uniform(1000)})
+
+          conn.method == "POST" and path == "/api/v4/projects/99/merge_requests/7/approve" ->
+            :ets.insert(events, {:approve, path})
+            conn |> put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/api/v4/projects/99/merge_requests/7/unapprove" ->
+            :ets.insert(events, {:unapprove, path})
+            conn |> put_status(201) |> Req.Test.json(%{})
+
+          true ->
+            conn
+            |> put_status(404)
+            |> Req.Test.json(%{"message" => "unhandled #{conn.method} #{path}"})
+        end
+      end)
+
+      runner = fn _diff, _state ->
+        {:ok, [%{severity: :warning, file: "x.ex", line: 1, message: "consider naming"}]}
+      end
+
+      initial = %{
+        mode: :adapter,
+        adapter: Arbiter.Mergers.Gitlab,
+        mr_ref: "!7",
+        check_runner: runner
+      }
+
+      assert {:ok, final} = Arbiter.Workflow.run(CodeReview, initial)
+
+      assert final.verdict == :approve
+      assert final.diff =~ "x.ex"
+      assert length(final.findings) == 1
+
+      assert [_] = :ets.lookup(events, :get_changes)
+      # Two notes total: the per-finding note, and the verdict summary note
+      # posted by submit_review/4.
+      notes = :ets.lookup(events, :note)
+      assert length(notes) == 2
+
+      bodies = Enum.map(notes, fn {:note, body} -> body["body"] end)
+      assert Enum.any?(bodies, &(&1 =~ "WARNING"))
+      assert Enum.any?(bodies, &(&1 =~ "Approved"))
+
+      assert [_] = :ets.lookup(events, :approve)
     end
   end
 
@@ -411,8 +871,53 @@ defmodule Arbiter.Workflows.CodeReviewTest do
   # =======================================================================
 
   describe "Checks.run/2" do
-    test "default Phase 2 runner returns {:ok, []}" do
-      assert {:ok, []} = Checks.run("any diff", %{mode: :local})
+    test "empty diff short-circuits to {:ok, []}" do
+      assert {:ok, []} = Checks.run("", %{mode: :local})
+    end
+
+    test "parses a valid JSON findings response from the override invoker" do
+      raw = ~s({"findings": [{"severity":"error","file":"a.ex","line":3,"message":"oops"}]})
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state -> {:ok, raw} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, [%{severity: :error, file: "a.ex", line: 3, message: "oops"}]} =
+               Checks.run("DIFF", %{mode: :local})
+    end
+
+    test "tolerates surrounding prose around the JSON block" do
+      raw = """
+      Sure! Here's my review:
+
+      {"findings": [{"severity":"info","file":"b.ex","line":1,"message":"nice"}]}
+
+      Hope this helps.
+      """
+
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state -> {:ok, raw} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, [%{severity: :info, file: "b.ex", line: 1, message: "nice"}]} =
+               Checks.run("DIFF", %{mode: :local})
+    end
+
+    test "non-JSON output yields {:ok, []} (treated as clean approval)" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, "no JSON here"}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :local})
+    end
+
+    test "invoker errors propagate" do
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:error, :boom}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:error, :boom} = Checks.run("DIFF", %{mode: :local})
     end
   end
 end
