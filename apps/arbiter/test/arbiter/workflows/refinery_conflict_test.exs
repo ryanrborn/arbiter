@@ -437,4 +437,190 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
                )
     end
   end
+
+  # ---- ConflictResolver.notify_resolution/3 ------------------------------
+
+  describe "ConflictResolver.notify_resolution/3" do
+    test "creates a :notification Message attributed to the bead", %{
+      workspace: ws,
+      bead: bead
+    } do
+      :ok =
+        Arbiter.Workflows.Refinery.ConflictResolver.notify_resolution(
+          bead.id,
+          ws.id,
+          "feature/" <> bead.id
+        )
+
+      messages =
+        Message
+        |> filter(workspace_id == ^ws.id and from_ref == ^bead.id and kind == :notification)
+        |> Ash.read!()
+
+      assert [msg] = messages
+      assert msg.body =~ "auto-resolved"
+      assert msg.body =~ bead.id
+    end
+
+    test "missing workspace_id is a no-op (does not raise)", %{bead: bead} do
+      assert :ok =
+               Arbiter.Workflows.Refinery.ConflictResolver.notify_resolution(
+                 bead.id,
+                 nil,
+                 "x"
+               )
+    end
+  end
+
+  # ---- ConflictResolver.resolve/1 (the production path) ------------------
+
+  # The block below exercises the real `resolve/1` against a fixture git
+  # repo with an existing conflicting branch. This is the path the round-2
+  # Tribunal flagged as untested — every other test in this file uses a
+  # stub that short-circuits `Worktree.attach` and `Polecat.start`. We bypass
+  # the real `claude` invocation via `start_claude: false` (the resolver's
+  # documented test escape) but still exercise the worktree-attach +
+  # polecat-spawn pair where the two Major round-2 defects lived.
+  describe "ConflictResolver.resolve/1 (production path)" do
+
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "rct-prod-#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp)
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      worktree_root = Path.join(tmp, "wt")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt =
+        case Application.fetch_env(:arbiter, :worktree_root) do
+          {:ok, v} -> {:set, v}
+          :error -> :unset
+        end
+
+      Application.put_env(:arbiter, :worktree_root, worktree_root)
+
+      on_exit(fn ->
+        case prior_wt do
+          {:set, v} -> Application.put_env(:arbiter, :worktree_root, v)
+          :unset -> Application.delete_env(:arbiter, :worktree_root)
+        end
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{tmp: tmp, repo: repo}
+    end
+
+    test "attaches an EXISTING branch (does NOT use -b) and spawns a polecat under bead_id:conflict",
+         %{workspace: ws, bead: bead, repo: repo} do
+      # Pre-create the conflicting branch in the fixture repo. This is the
+      # key precondition: the bead's branch already exists (the conflicting
+      # PR is open against it), so `Worktree.create` (which uses -b) would
+      # fail. `Worktree.attach` is the right tool.
+      branch = Arbiter.Polecat.BranchNamer.derive(bead)
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
+
+      # Pre-condition: no polecat registered yet under either slot.
+      assert Arbiter.Polecat.whereis(bead.id) == nil
+      assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == nil
+
+      {:ok, info} =
+        Arbiter.Workflows.Refinery.ConflictResolver.resolve(%{
+          bead_id: bead.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          rig: "test/rig",
+          start_claude: false
+        })
+
+      # The resolver returns a fresh polecat pid for the worktree it attached
+      # to the existing branch.
+      assert is_pid(info.polecat_pid)
+      assert info.branch == branch
+      assert is_binary(info.worktree_path)
+      assert File.dir?(info.worktree_path)
+
+      # Crucial: registry slot for the resolver is `bead_id:conflict`, NOT
+      # `bead_id`. The bead_id slot stays open for the original work polecat.
+      assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == info.polecat_pid
+      assert Arbiter.Polecat.whereis(bead.id) == nil
+
+      # The polecat's meta carries the conflict-resolver role + the branch
+      # being rebased — proves we built the polecat for this job, not
+      # accidentally reused one from elsewhere.
+      snap = Arbiter.Polecat.state(info.polecat_pid)
+      assert snap.meta[:role] == :conflict_resolver
+      assert snap.meta[:conflict_resolver_branch] == branch
+      assert snap.meta[:target_branch] == "main"
+
+      # Cleanup: the polecat was started under the DynamicSupervisor; tear it
+      # down so the test doesn't leak processes.
+      :ok = GenServer.stop(info.polecat_pid, :normal, 1_000)
+    end
+
+    test "a stale resolver polecat (already running for this bead) is surfaced, not papered over",
+         %{workspace: ws, bead: bead, repo: repo} do
+      # Simulate a previous resolver run that hasn't terminated by starting a
+      # second polecat under the resolver's registry key. The resolver must
+      # NOT silently return that pid — the round-2 finding was that the
+      # `:already_started` shortcut hid a real wrong-process bug.
+      branch = Arbiter.Polecat.BranchNamer.derive(bead)
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
+
+      {:ok, prior} =
+        Arbiter.Polecat.start(
+          bead_id: bead.id,
+          registry_key: bead.id <> ":conflict",
+          rig: "test/rig",
+          workspace_id: ws.id
+        )
+
+      result =
+        Arbiter.Workflows.Refinery.ConflictResolver.resolve(%{
+          bead_id: bead.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          rig: "test/rig",
+          start_claude: false
+        })
+
+      assert {:error, {:resolver_already_running, ^prior}} = result
+
+      :ok = GenServer.stop(prior, :normal, 1_000)
+    end
+
+    test "no branch on the repo → {:error, {:worktree_failed, _}} (no silent -b creation)",
+         %{workspace: ws, bead: bead, repo: repo} do
+      # Deliberately do NOT pre-create the bead's branch. The resolver MUST
+      # NOT silently fall back to `-b` and create a new branch; the contract
+      # is "attach to the existing branch" — anything else risks shadowing
+      # the PR's head ref.
+      result =
+        Arbiter.Workflows.Refinery.ConflictResolver.resolve(%{
+          bead_id: bead.id,
+          workspace_id: ws.id,
+          repo_path: repo,
+          rig: "test/rig",
+          start_claude: false
+        })
+
+      assert {:error, {:worktree_failed, {:git_failed, _}}} = result
+      # And no polecat got partially spawned.
+      assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == nil
+    end
+  end
 end
