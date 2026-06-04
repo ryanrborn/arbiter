@@ -244,12 +244,42 @@ defmodule ArbiterCli.Cmd.Prime do
 
     tracker_type = get_in(ws, ["config", "tracker", "type"]) || "none"
     IO.puts("  tracker: #{tracker_type}")
+
+    emit_security_posture(ws["security_posture"])
   end
 
   defp emit_workspace_section({:error, msg}, workspace) do
     IO.puts("== Active #{workspace} ==")
     IO.puts("  (could not resolve: #{msg})")
   end
+
+  # The resolved acolyte security posture (server-computed; see
+  # ArbiterWeb.Api.WorkspaceJSON). Surfaced so a fresh Admiral session sees, up
+  # front, what an acolyte spawned in this domain may and may not do — the
+  # permission mode, the sandbox stance, and how many deny rules are in force.
+  defp emit_security_posture(%{} = posture) do
+    sandbox = posture["sandbox"] || %{}
+    deny = List.wrap(posture["deny"])
+    safe = List.wrap(posture["safe_defaults"])
+    allow = List.wrap(posture["allow"])
+
+    net = if Map.get(sandbox, "network", true), do: "on", else: "tools-off"
+
+    IO.puts("  security:")
+    IO.puts("    mode:    #{posture["mode"] || "auto"}")
+
+    IO.puts(
+      "    sandbox: fs=#{Map.get(sandbox, "filesystem", "worktree")} net=#{net}" <>
+        " enabled=#{Map.get(sandbox, "enabled", true)}"
+    )
+
+    IO.puts(
+      "    deny:    #{length(safe)} safe-default + #{length(deny)} custom" <>
+        ", allow: #{length(allow)}"
+    )
+  end
+
+  defp emit_security_posture(_), do: :ok
 
   defp emit_vernacular_section({:ok, vernacular}) do
     IO.puts("== Vernacular ==")
