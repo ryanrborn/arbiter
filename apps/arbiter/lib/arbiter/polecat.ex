@@ -423,14 +423,22 @@ defmodule Arbiter.Polecat do
   # workspace's Refinery (Crucible) can pick the bead up and drive it through
   # the merge queue. A polecat without a workspace_id (e.g. ad-hoc local runs)
   # has no Refinery listening and so the broadcast is skipped.
+  #
+  # Review-only polecats (`meta[:review_only] == true`) skip the Crucible
+  # broadcast — they don't author code, so there's nothing for the merge queue
+  # to do, and the bead they're reviewing may not even belong to the fleet.
+  # The Admiral notification still fires so the dashboard / inbox feed picks
+  # up the completion.
   defp broadcast_done(%State{workspace_id: nil}), do: :ok
 
-  defp broadcast_done(%State{workspace_id: ws_id, bead_id: bead_id} = state) do
-    Phoenix.PubSub.broadcast(
-      Arbiter.PubSub,
-      "polecat:done:" <> ws_id,
-      {:polecat_done, bead_id}
-    )
+  defp broadcast_done(%State{workspace_id: ws_id, bead_id: bead_id, meta: meta} = state) do
+    unless review_only?(meta) do
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "polecat:done:" <> ws_id,
+        {:polecat_done, bead_id}
+      )
+    end
 
     # The message queue is the single source of truth for the notification
     # feed: record a durable :notification alongside the transient broadcast.
@@ -446,6 +454,10 @@ defmodule Arbiter.Polecat do
       Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
       :ok
   end
+
+  defp review_only?(%{review_only: true}), do: true
+  defp review_only?(%{"review_only" => true}), do: true
+  defp review_only?(_), do: false
 
   # ---- Run history (Arbiter.Polecats.Run) -------------------------------
 

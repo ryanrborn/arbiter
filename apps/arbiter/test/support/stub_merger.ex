@@ -107,6 +107,15 @@ defmodule Arbiter.Test.StubMerger do
   @impl true
   def link_for(ref), do: "https://stub.example/mr/" <> ref
 
+  @impl true
+  def get_diff(_ref, _opts), do: {:ok, ""}
+
+  @impl true
+  def post_inline_comment(_ref, _finding, _opts), do: {:ok, %{}}
+
+  @impl true
+  def submit_review(_ref, _verdict, _body, _opts), do: {:ok, %{}}
+
   # ---- internals ----------------------------------------------------------
 
   defp ensure_started do

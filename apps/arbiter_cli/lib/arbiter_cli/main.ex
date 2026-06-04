@@ -15,6 +15,10 @@ defmodule ArbiterCli.Main do
                 [--tracker]    Also list open assigned issues from the workspace's
                                external tracker (visually distinct, deduped by ref).
       arb update <id> [--priority ...] [--append-notes ...]
+                               Edit an issue's fields.
+      arb update [--timeout SECONDS] [--json]
+                               No id: deploy. git pull --ff-only main, then
+                               restart Phoenix so merged code is live.
       arb convoy create <title> [--lifecycle system_managed|owned]
       arb convoy add <convoy-id> <issue-id...>
       arb convoy rm <convoy-id> <issue-id>
@@ -27,9 +31,16 @@ defmodule ArbiterCli.Main do
       arb doctor
       arb start [--timeout SECONDS] [--json]
       arb restart [--timeout SECONDS] [--json]
+      arb install-service [--system] [--uninstall] [--json]
+                               Install a systemd unit so the stack starts at
+                               boot (ExecStart=arb start). --uninstall removes it.
       arb where
       arb prime
       arb sling <bead-id>
+      arb review <bead-id> [--rig <rig>] [--model <name>]
+                               Dispatch a review-only acolyte against the
+                               PR/MR linked to a bead. No worktree, no branch,
+                               no merge.
       arb polecat show <bead-id>
       arb polecat stop <bead-id>
       arb inbox [--all | read <id> | clear | <bead-id>]
@@ -42,6 +53,9 @@ defmodule ArbiterCli.Main do
                 [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
       arb usage events [--bead <bead-id>] [--workspace <id>] [--step work|review]
                        [--since ...] [--limit N]
+      arb config get   [dotted.key] [--workspace W] [--json]
+      arb config set   <dotted.key> <value> [--workspace W] [--force]
+      arb config unset <dotted.key>         [--workspace W] [--force]
 
   Global flags:
       --json     Emit machine-readable JSON (default is human-readable text)
@@ -99,8 +113,10 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("doctor", args), do: ArbiterCli.Cmd.Doctor.run(args)
   defp dispatch_known("start", args), do: ArbiterCli.Cmd.Start.run(args)
   defp dispatch_known("restart", args), do: ArbiterCli.Cmd.Restart.run(args)
+  defp dispatch_known("install-service", args), do: ArbiterCli.Cmd.InstallService.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("sling", args), do: ArbiterCli.Cmd.Sling.run(args)
+  defp dispatch_known("review", args), do: ArbiterCli.Cmd.Review.run(args)
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
   defp dispatch_known("polecat", args), do: ArbiterCli.Cmd.Polecat.run(args)
   defp dispatch_known("inbox", args), do: ArbiterCli.Cmd.Inbox.run(args)
@@ -111,6 +127,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("sync", args), do: ArbiterCli.Cmd.Sync.run(args)
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
   defp dispatch_known("convoy", args), do: ArbiterCli.Cmd.Convoy.run(args)
+  defp dispatch_known("config", args), do: ArbiterCli.Cmd.Config.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do

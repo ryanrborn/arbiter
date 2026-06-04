@@ -75,6 +75,7 @@ defmodule ArbiterWeb.Router do
     get("/workspaces/:id", WorkspaceController, :show)
     patch("/workspaces/:id", WorkspaceController, :update)
     put("/workspaces/:id", WorkspaceController, :update)
+    patch("/workspaces/:id/config", WorkspaceController, :patch_config)
 
     # Tracker bridge (assignment-as-claim for GitHub Issues)
     post("/workspaces/:workspace_id/claim", ClaimController, :claim)
@@ -99,6 +100,7 @@ defmodule ArbiterWeb.Router do
 
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)
+    post("/polecats/review", PolecatController, :review)
     get("/polecats/history", RunController, :index)
     get("/polecats/history/:id", RunController, :show)
     get("/polecats", PolecatController, :index)
