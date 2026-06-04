@@ -33,6 +33,16 @@ defmodule ArbiterCli.Cmd.InstallService do
       leading `-` means "skip if absent") so secrets like `GITHUB_TOKEN` live in
       a file you control rather than baked into a world-readable unit.
 
+  ## Secret capture
+
+  A boot-time service starts with no interactive shell, so the API keys you
+  normally export (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) are
+  not visible to it. To bridge that gap, install captures any of those keys that
+  are set in the *installing* shell and writes them to `<root>/.arbiter.env`
+  (the same file `EnvironmentFile=` points at). Existing entries are preserved —
+  a managed key already present is updated in place, sibling keys and comments
+  are left untouched — and the file is locked to `0600` since it holds secrets.
+
   ## Idempotent
 
   Re-running rewrites the unit and reloads the daemon, so it's safe to run
@@ -83,12 +93,138 @@ defmodule ArbiterCli.Cmd.InstallService do
     path = unit_path(scope)
     contents = unit_contents(scope, root)
 
+    secrets = capture_secrets(root)
+
     write_unit(path, contents)
     daemon_reload(scope)
     enable_now(scope)
     linger = if scope == :user, do: enable_linger(), else: :not_applicable
 
-    emit_installed(mode, scope, path, root, linger)
+    emit_installed(mode, scope, path, root, linger, secrets)
+  end
+
+  # ---- secret capture ----------------------------------------------------
+
+  # Keys forwarded from the installing shell into `.arbiter.env` so the
+  # detached, login-less service can still reach GitHub and the model
+  # providers. Only keys actually set (and non-empty) in the current
+  # environment are written.
+  @captured_secrets ~w(
+    GITHUB_TOKEN
+    ANTHROPIC_API_KEY
+    ANTHROPIC_API_KEY_2
+    GEMINI_API_KEY
+    GOOGLE_GENAI_API_KEY
+  )
+
+  @doc """
+  Forward any of `@captured_secrets` set in the current environment into
+  `<root>/.arbiter.env`, preserving any keys already present. Returns
+  `{:written, path, keys}` listing the keys captured, or `{:none, path}` when
+  the environment carries none of them.
+  """
+  @spec capture_secrets(String.t()) ::
+          {:written, String.t(), [String.t()]} | {:none, String.t()}
+  def capture_secrets(root) do
+    path = Path.join(root, ".arbiter.env")
+
+    captured =
+      Enum.flat_map(@captured_secrets, fn key ->
+        case System.get_env(key) do
+          v when is_binary(v) and v != "" -> [{key, v}]
+          _ -> []
+        end
+      end)
+
+    case captured do
+      [] ->
+        {:none, path}
+
+      pairs ->
+        merged = path |> read_env_entries() |> merge_env_entries(pairs)
+        write_env_file(path, render_env_entries(merged))
+        {:written, path, Enum.map(pairs, &elem(&1, 0))}
+    end
+  end
+
+  # Read `.arbiter.env` into an ordered list of entries: `{:kv, key, value}`
+  # for `KEY=value` lines and `{:raw, line}` for everything else (comments,
+  # blanks). Keeping the raw lines lets us round-trip the file without
+  # clobbering the user's own keys or formatting. Missing file → empty.
+  defp read_env_entries(path) do
+    case File.read(path) do
+      {:ok, body} ->
+        body
+        |> String.split("\n")
+        |> Enum.map(&classify_env_line/1)
+        |> drop_trailing_blanks()
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp classify_env_line(line) do
+    case Regex.run(~r/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/, line) do
+      [_, key, value] -> {:kv, key, value}
+      _ -> {:raw, line}
+    end
+  end
+
+  defp drop_trailing_blanks(entries) do
+    entries
+    |> Enum.reverse()
+    |> Enum.drop_while(&match?({:raw, ""}, &1))
+    |> Enum.reverse()
+  end
+
+  # Update managed keys in place where they already appear; append the rest.
+  # Sibling keys (and comments) ride along untouched.
+  defp merge_env_entries(entries, pairs) do
+    updates = Map.new(pairs)
+
+    {rewritten, seen} =
+      Enum.map_reduce(entries, MapSet.new(), fn
+        {:kv, key, value}, seen ->
+          case Map.fetch(updates, key) do
+            {:ok, new_value} -> {{:kv, key, new_value}, MapSet.put(seen, key)}
+            :error -> {{:kv, key, value}, seen}
+          end
+
+        other, seen ->
+          {other, seen}
+      end)
+
+    appended =
+      pairs
+      |> Enum.reject(fn {k, _v} -> MapSet.member?(seen, k) end)
+      |> Enum.map(fn {k, v} -> {:kv, k, v} end)
+
+    rewritten ++ appended
+  end
+
+  defp render_env_entries(entries) do
+    body =
+      Enum.map_join(entries, "\n", fn
+        {:kv, key, value} -> "#{key}=#{value}"
+        {:raw, line} -> line
+      end)
+
+    body <> "\n"
+  end
+
+  # `.arbiter.env` holds secrets, so it's written 0600 (owner read/write only)
+  # on every write — both at creation and when tightening an existing file.
+  defp write_env_file(path, body) do
+    path |> Path.dirname() |> File.mkdir_p!()
+    File.write!(path, body)
+    File.chmod!(path, 0o600)
+  rescue
+    e in File.Error ->
+      Output.die(
+        "could not write secrets to #{path}: #{:file.format_error(e.reason)}",
+        "Check the destination is writable: #{Path.dirname(path)}"
+      )
   end
 
   # ---- uninstall ---------------------------------------------------------
@@ -316,7 +452,13 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   # ---- output ------------------------------------------------------------
 
-  defp emit_installed(:json, scope, path, root, linger) do
+  defp emit_installed(:json, scope, path, root, linger, secrets) do
+    {env_path, captured} =
+      case secrets do
+        {:written, p, keys} -> {p, keys}
+        {:none, p} -> {p, []}
+      end
+
     IO.puts(
       Jason.encode!(%{
         action: "install",
@@ -325,6 +467,8 @@ defmodule ArbiterCli.Cmd.InstallService do
         unit_path: path,
         root: root,
         linger: to_string(linger),
+        env_file: env_path,
+        secrets_captured: captured,
         status_cmd: status_cmd(scope),
         logs_cmd: logs_cmd(scope),
         base_url: Client.base_url(),
@@ -333,10 +477,11 @@ defmodule ArbiterCli.Cmd.InstallService do
     )
   end
 
-  defp emit_installed(:text, scope, path, _root, linger) do
+  defp emit_installed(:text, scope, path, _root, linger, secrets) do
     IO.puts("Installed #{@unit_name} (#{scope} scope).")
     IO.puts("  unit:   #{path}")
     IO.puts("  starts: #{Client.base_url()} at boot")
+    IO.puts(secrets_note(secrets))
     IO.puts("")
     IO.puts(linger_note(scope, linger))
     IO.puts("Check it with:")
@@ -373,6 +518,15 @@ defmodule ArbiterCli.Cmd.InstallService do
       IO.puts("Linger was left enabled; drop it with `loginctl disable-linger` if no other")
       IO.puts("user services need boot-before-login.")
     end
+  end
+
+  defp secrets_note({:written, path, keys}),
+    do: "  secrets: #{Enum.join(keys, ", ")} → #{path}"
+
+  defp secrets_note({:none, path}) do
+    "  secrets: none found in the environment — set GITHUB_TOKEN (and any\n" <>
+      "           ANTHROPIC_API_KEY / GEMINI_API_KEY) then re-run, or add them\n" <>
+      "           to #{path} yourself."
   end
 
   defp linger_note(:system, _), do: "Enabled at boot via the system manager."
