@@ -247,20 +247,26 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   # ---- worktree / polecat / claude wiring ---------------------------------
 
-  # Cut a worktree from the conflicting branch — checked out as-is. The
-  # resolver acolyte fetches the latest target branch and rebases onto it from
-  # there. If a worktree already exists for this branch (a previous resolver
-  # run, or sibling work), reuse it: the rebase command is idempotent enough,
-  # and concurrent acolyte spawning is debounced one layer up by the Refinery.
-  defp create_worktree(%{repo_path: repo_path, branch: branch}) do
-    case Worktree.create(repo_path, branch, branch) do
-      {:ok, path} ->
-        {:ok, path}
+  # Registry suffix the conflict-resolver polecat registers under. The original
+  # work polecat is still registered (and sitting `:completed`) when the
+  # Crucible picks up the CONFLICTING signal — the registry key is keyed on
+  # bead_id and the original is only torn down on bead `:close`. Spawning under
+  # `<bead_id>:conflict` gives the resolver its own slot so `Polecat.start`
+  # doesn't return `:already_started` and we don't accidentally open a Claude
+  # session against the finished polecat.
+  @resolver_registry_suffix ":conflict"
 
-      # An existing worktree on a *different* branch is the only failure
-      # mode where reuse is unsafe — surface it.
-      {:error, reason} ->
-        {:error, {:worktree_failed, reason}}
+  # Attach a worktree to the (existing) PR branch — the branch already exists
+  # in the repo because the conflicting PR was opened against it, so we must
+  # NOT use `Worktree.create/3` (that runs `git worktree add -b <branch> …`,
+  # which fails when the branch already exists). `Worktree.attach/2` runs
+  # `git worktree add <path> <existing-branch>` and is idempotent on the
+  # same-branch path. The resolver acolyte then fetches the latest target
+  # branch and rebases onto it from that worktree.
+  defp create_worktree(%{repo_path: repo_path, branch: branch}) do
+    case Worktree.attach(repo_path, branch) do
+      {:ok, path} -> {:ok, path}
+      {:error, reason} -> {:error, {:worktree_failed, reason}}
     end
   end
 
@@ -276,6 +282,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
     opts = [
       bead_id: bead.id,
+      registry_key: bead.id <> @resolver_registry_suffix,
       workspace_id: bead.workspace_id,
       rig: context.rig || "unknown",
       meta: meta
@@ -285,11 +292,12 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
       {:ok, pid} ->
         {:ok, pid}
 
-      # An existing polecat for this bead means a worker is already running —
-      # don't spawn another. The caller (Refinery) treats this as success;
-      # the in-flight acolyte will push the resolved branch.
+      # A resolver is already in flight for this bead (a previous tick's
+      # spawn that hasn't terminated yet). Don't open a second Claude session
+      # against it — surface the collision so the Refinery's escalation path
+      # mails the Admiral instead of pretending we restarted the rebase.
       {:error, {:already_started, pid}} ->
-        {:ok, pid}
+        {:error, {:resolver_already_running, pid}}
 
       {:error, reason} ->
         {:error, {:polecat_start_failed, reason}}
