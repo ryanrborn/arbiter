@@ -80,15 +80,16 @@ defmodule Arbiter.Agents.Claude.Config do
     "premium" => "opus"
   }
 
-  # Default thinking → reasoning-effort flag value passed to the Claude CLI
-  # via `--reasoning-effort <level>`. `none` omits the flag (CLI default).
-  # Workspaces can override per-level argv with `agent.config["thinking_argv"]`
-  # (e.g. swap to `--max-thinking-tokens` if a newer CLI prefers that).
+  # Default thinking → effort flag value passed to the Claude CLI via
+  # `--effort <level>`. `none` omits the flag (CLI default). Workspaces
+  # can override per-level argv with `agent.config["thinking_argv"]`.
   @default_thinking_argv %{
     "none" => [],
-    "low" => ["--reasoning-effort", "low"],
-    "medium" => ["--reasoning-effort", "medium"],
-    "high" => ["--reasoning-effort", "high"]
+    "low" => ["--effort", "low"],
+    "medium" => ["--effort", "medium"],
+    "high" => ["--effort", "high"],
+    "xhigh" => ["--effort", "xhigh"],
+    "max" => ["--effort", "max"]
   }
 
   @doc """
@@ -220,12 +221,12 @@ defmodule Arbiter.Agents.Claude.Config do
 
   @doc """
   Resolve an abstract `thinking` level (`"none"` | `"low"` | `"medium"` |
-  `"high"`) to a list of CLI argv tokens to append to the spawn command.
-  Returns `[]` for `nil` / unknown / `"none"`.
+  `"high"` | `"xhigh"` | `"max"`) to a list of CLI argv tokens to append
+  to the spawn command. Returns `[]` for `nil` / unknown / `"none"`.
 
   Workspace config can override the per-level argv under
   `agent.config["thinking_argv"]`. Missing keys fall back to the built-in
-  default (`--reasoning-effort <level>`).
+  default (`--effort <level>`).
   """
   @spec thinking_argv(String.t() | nil) :: [String.t()]
   def thinking_argv(nil), do: []
