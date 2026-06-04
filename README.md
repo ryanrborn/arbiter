@@ -69,6 +69,18 @@ arb start
 `docker compose up -d` and launches `mix phx.server` detached, then
 polls `arb doctor` until everything is green.
 
+To have the stack come up automatically at boot (no manual `arb start`),
+install it as a systemd service:
+
+```sh
+arb install-service          # user unit + loginctl enable-linger
+arb install-service --system # system-wide unit (needs sudo)
+```
+
+This writes a unit whose `ExecStart` is `arb start`, enables it, and
+prints how to check status/logs. `arb install-service --uninstall`
+removes it again.
+
 ## Initialize your Admiral session
 
 The Admiral is a dedicated Claude Code session that acts as your
@@ -123,6 +135,7 @@ arb sling <id> [ship]   # dispatch an Acolyte to work a Directive
 arb polecat list        # list running Acolytes
 arb doctor              # health-check the stack
 arb start               # boot Postgres + Phoenix if down
+arb install-service     # install a systemd unit so the stack starts at boot
 ```
 
 All commands accept `--help` and `--json`. The CLI keeps the literal
