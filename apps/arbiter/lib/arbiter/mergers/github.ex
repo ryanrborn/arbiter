@@ -192,6 +192,50 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
+  def get_diff(mr_ref, _opts) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      request_diff(cfg, "/repos/#{owner}/#{repo}/pulls/#{number}")
+    end
+  end
+
+  @impl true
+  def post_inline_comment(mr_ref, finding, opts)
+      when is_binary(mr_ref) and is_map(finding) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, commit_id} <- fetch_commit_id(cfg, owner, repo, number, opts) do
+      %{severity: sev, file: file, line: line, message: msg} = finding
+
+      payload = %{
+        "body" => "**#{severity_label(sev)}**: #{msg}",
+        "path" => file,
+        "line" => line,
+        "commit_id" => commit_id,
+        "side" => "RIGHT"
+      }
+
+      request(cfg, :post, "/repos/#{owner}/#{repo}/pulls/#{number}/comments", json: payload)
+      |> handle_json()
+    end
+  end
+
+  @impl true
+  def submit_review(mr_ref, verdict, body, _opts)
+      when is_binary(mr_ref) and verdict in [:approve, :request_changes] do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      payload = %{
+        "event" => verdict_event(verdict),
+        "body" => body || ""
+      }
+
+      request(cfg, :post, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", json: payload)
+      |> handle_json()
+    end
+  end
+
+  @impl true
   def link_for(mr_ref) when is_binary(mr_ref) do
     case parse_mr_ref(mr_ref) do
       {:embedded, owner, repo, number} ->
@@ -399,6 +443,78 @@ defmodule Arbiter.Mergers.Github do
     case Integer.parse(str) do
       {n, ""} when n > 0 -> {:ok, n}
       _ -> :error
+    end
+  end
+
+  # ---- Internals: review helpers -------------------------------------------
+
+  defp severity_label(:info), do: "INFO"
+  defp severity_label(:warning), do: "WARNING"
+  defp severity_label(:error), do: "ERROR"
+  defp severity_label(other), do: other |> to_string() |> String.upcase()
+
+  defp verdict_event(:approve), do: "APPROVE"
+  defp verdict_event(:request_changes), do: "REQUEST_CHANGES"
+
+  # Inline review comments require the head SHA of the PR (GitHub's API
+  # anchors the comment to a specific commit). Callers can short-circuit
+  # the lookup by passing `:commit_id` in opts.
+  defp fetch_commit_id(_cfg, _owner, _repo, _number, %{commit_id: id})
+       when is_binary(id) and id != "",
+       do: {:ok, id}
+
+  defp fetch_commit_id(cfg, owner, repo, number, _opts) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
+      {:ok, %{"head" => %{"sha" => sha}}} when is_binary(sha) and sha != "" ->
+        {:ok, sha}
+
+      {:ok, _} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "PR payload missing head.sha",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # GitHub returns the raw unified diff when Accept negotiates for it. We
+  # piggy-back on the existing `request/4` plumbing but swap headers so the
+  # response body is a string, not JSON. Stub plugs see the same path; tests
+  # can stub-text-body the response.
+  defp request_diff(cfg, path) do
+    url = cfg.base_url <> path
+
+    diff_headers = [
+      {"authorization", "Bearer " <> cfg.token},
+      {"accept", "application/vnd.github.v3.diff"},
+      {"x-github-api-version", "2022-11-28"},
+      {"user-agent", "arbiter"}
+    ]
+
+    full_opts =
+      [
+        method: :get,
+        url: url,
+        headers: diff_headers,
+        receive_timeout: 15_000,
+        retry: false
+      ]
+      |> Keyword.merge(stub_opts())
+
+    case Req.request(full_opts) do
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, to_string(body)}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
     end
   end
 
