@@ -48,10 +48,23 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       end
     end
 
+    @impl true
     def escalate_unresolved(bead_id, workspace_id, branch, reason) do
       case lookup(bead_id) do
         {pid, _} ->
           send(pid, {:escalate_called, bead_id, workspace_id, branch, reason})
+          :ok
+
+        nil ->
+          :ok
+      end
+    end
+
+    @impl true
+    def notify_resolution(bead_id, workspace_id, branch) do
+      case lookup(bead_id) do
+        {pid, _} ->
+          send(pid, {:notify_called, bead_id, workspace_id, branch})
           :ok
 
         nil ->
@@ -194,15 +207,17 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
 
       %{items: [item]} = Refinery.state(name)
       assert item.status == :conflict_resolving
-      assert item.resolver_attempts == 1
       assert %DateTime{} = item.resolver_spawned_at
       assert item.prior_status == :awaiting_approval
     end
 
-    test "second conflicting tick does NOT re-spawn while one is in flight", %{
+    test "second conflicting tick does NOT re-spawn — escalates instead", %{
       workspace: ws,
       bead: bead
     } do
+      # One mechanical rebase pass is all the resolver gets. If the next tick
+      # still sees mergeable: false, the conflict is semantic — escalate
+      # rather than spinning on more spawns.
       StubResolverWithCallback.register(bead.id, self(), :ok)
 
       stub(fn conn ->
@@ -220,25 +235,28 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
         end
       end)
 
-      {_pid, name} = start_refinery(ws, resolver_max_attempts: 5)
+      {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
       :ok = Refinery.tick(name)
 
       assert_received {:resolver_called, _}
 
-      # Second tick with the same conflict — must NOT spawn again.
+      # Second tick with the same conflict — must NOT spawn again, and must
+      # escalate.
       :ok = Refinery.tick(name)
       refute_received {:resolver_called, _}
+      assert_received {:escalate_called, _, _, _, :resolver_did_not_clear_conflict}
 
       %{items: [item]} = Refinery.state(name)
-      assert item.status == :conflict_resolving
-      assert item.resolver_attempts == 1
+      assert item.status == :failed
+      assert item.last_error == :conflict_unresolved
     end
 
     test "successful resolution (mergeable: true on next tick) restores prior status", %{
       workspace: ws,
       bead: bead
     } do
+      bead_id = bead.id
       StubResolverWithCallback.register(bead.id, self(), :ok)
 
       # Toggle: first GET returns conflicting, second returns clean.
@@ -291,13 +309,17 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       %{items: [item]} = Refinery.state(name)
       assert item.status == :awaiting_approval
       assert item.prior_status == nil
+      assert item.resolver_spawned_at == nil
+
+      # Acceptance criterion: Admiral / author is notified of the resolution.
+      assert_received {:notify_called, ^bead_id, _ws_id, _branch}
     end
   end
 
   # ---- escalation ---------------------------------------------------------
 
   describe "escalation via mailbox" do
-    test "resolver attempts exhausted → escalation + item marked :failed", %{
+    test "second conflicting tick → escalation + item marked :failed", %{
       workspace: ws,
       bead: bead
     } do
@@ -318,9 +340,10 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
         end
       end)
 
-      # max_attempts: 1 — the first spawn counts, and the next conflict-while-
-      # in-flight tick has nothing else to do but escalate.
-      {_pid, name} = start_refinery(ws, resolver_max_attempts: 1)
+      # One mechanical rebase pass per conflict — the first spawn happens on
+      # the first tick, and a second consecutive CONFLICTING observation
+      # means the rebase didn't clear it → escalate.
+      {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
 
       :ok = Refinery.tick(name)
@@ -330,7 +353,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       assert_received {:escalate_called, bead_id, ws_id, _branch, reason}
       assert bead_id == bead.id
       assert ws_id == ws.id
-      assert match?({:attempts_exhausted, _}, reason)
+      assert reason == :resolver_did_not_clear_conflict
 
       %{items: [item]} = Refinery.state(name)
       assert item.status == :failed

@@ -61,15 +61,19 @@ defmodule Arbiter.Workflows.Refinery do
                             ClaudeSession running rebase + force-push)
         │   acolyte pushes resolved branch
         ▼
-      (next tick observes mergeable: true; restore_after_resolution/1
-       returns the item to its prior status and the queue resumes)
+      (next tick observes mergeable: true; restore_after_resolution/2
+       returns the item to its prior status, posts a :notification so the
+       Admiral feed sees the auto-rebase succeeded, and the queue resumes)
 
-  The resolver acolyte is spawned at most `:resolver_max_attempts` times
-  (default 1) per item. When attempts are exhausted — or the spawn itself
-  fails — the Refinery posts an `:escalation` mail to the workspace's
-  Admiral mailbox via
-  `Arbiter.Workflows.Refinery.ConflictResolver.escalate_unresolved/4` and
-  marks the item `:failed`. Better a loud escalation than a silent stall.
+  Each conflict gets **exactly one** resolver attempt. The resolver is a
+  *mechanical* rebase; if a single pass + force-push doesn't unblock the
+  PR (the next tick still sees `mergeable: false`), the conflict is almost
+  certainly semantic and the Refinery posts an `:escalation` mail (via
+  `Arbiter.Workflows.Refinery.ConflictResolver.escalate_unresolved/4`)
+  and parks the item `:failed`. Spawn failures (no rig configured,
+  worktree creation failed, workspace gone, resolver already running)
+  take the same escalation path. Better a loud escalation than a silent
+  stall.
 
   The resolver module is injected via `:conflict_resolver` (start_link opt)
   → `:arbiter, :refinery_conflict_resolver` (application env) → the default
@@ -129,10 +133,6 @@ defmodule Arbiter.Workflows.Refinery do
       `Arbiter.Workflows.Refinery.ConflictResolver` behaviour. Defaults to
       the real implementation (which spawns a Polecat + ClaudeSession);
       tests pass a stub.
-    * `:resolver_max_attempts` — cap on consecutive resolver spawns per
-      item before the Refinery escalates and marks the item :failed.
-      Defaults to `1` (one mechanical rebase pass; anything semantic
-      needs a human).
   """
 
   use GenServer
@@ -144,12 +144,6 @@ defmodule Arbiter.Workflows.Refinery do
 
   @default_poll_interval_ms 30_000
   @default_strategy "squash"
-
-  # Cap on consecutive conflict-resolver acolyte spawns for a single item
-  # before the Refinery gives up and escalates to the Admiral. One attempt is
-  # the sensible default: if a clean rebase + force-push didn't unblock the
-  # PR, the conflict is almost certainly semantic and a human needs to look.
-  @default_resolver_max_attempts 1
 
   @typedoc "Status atom for an in-flight item."
   @type status ::
@@ -172,7 +166,6 @@ defmodule Arbiter.Workflows.Refinery do
           last_polled_at: DateTime.t() | nil,
           last_error: term() | nil,
           resolver_spawned_at: DateTime.t() | nil,
-          resolver_attempts: non_neg_integer(),
           prior_status: status() | nil
         }
 
@@ -187,7 +180,6 @@ defmodule Arbiter.Workflows.Refinery do
       :auto_tick,
       :pubsub_topic,
       :conflict_resolver,
-      :resolver_max_attempts,
       items: []
     ]
   end
@@ -267,8 +259,6 @@ defmodule Arbiter.Workflows.Refinery do
             Arbiter.Workflows.Refinery.ConflictResolver
           )
         ),
-      resolver_max_attempts:
-        Keyword.get(opts, :resolver_max_attempts, @default_resolver_max_attempts),
       items: []
     }
 
@@ -421,16 +411,18 @@ defmodule Arbiter.Workflows.Refinery do
       # Top-priority guard: a CONFLICTING PR never advances state. Before
       # bd-dolcqq this just froze the item and the bead sat there until a
       # human rebased. Now the Crucible auto-spawns an acolyte to rebase +
-      # resolve + force-push (debounced via :resolver_spawned_at so back-
-      # to-back ticks don't spawn duplicates), and escalates via the
-      # mailbox when attempts are exhausted.
+      # resolve + force-push (one attempt; the in-flight resolver parks the
+      # item at :conflict_resolving so back-to-back ticks don't spawn
+      # duplicates). A second observation of CONFLICTING while parked means
+      # the rebase didn't clear it — escalate via the mailbox.
       GitHub.conflicting?(pr_payload) ->
         handle_conflict(state, item)
 
       # Once the conflict clears (mergeable: true on a later tick) restore
-      # the item to its prior status so the normal advancement resumes.
+      # the item to its prior status so the normal advancement resumes —
+      # and announce the auto-resolution so the Admiral feed sees it.
       item.status == :conflict_resolving ->
-        restored = restore_after_resolution(item)
+        restored = restore_after_resolution(state, item)
         advance_status(state, restored, pr_payload)
 
       item.status == :awaiting_approval and review == "APPROVED" and merge_state == "clean" ->
@@ -451,33 +443,26 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  # Handle a CONFLICTING PR payload. First-touch spawns the resolver acolyte;
-  # subsequent ticks while the same conflict persists either keep waiting (if
-  # under the attempt cap) or escalate + park.
+  # Handle a CONFLICTING PR payload. First observation spawns the resolver;
+  # observing the conflict again while already in `:conflict_resolving` means
+  # the rebase did not clear the conflict (semantic, not mechanical) — escalate
+  # and park `:failed`. There is no retry loop — the resolver is one
+  # mechanical rebase pass; anything more is a human decision.
   defp handle_conflict(state, %{status: :conflict_resolving} = item) do
-    cond do
-      item.resolver_attempts >= state.resolver_max_attempts ->
-        escalate_resolver_exhausted(state, item)
-        {%{item | status: :failed, last_error: :conflict_unresolved}, state}
+    safe_escalate(
+      state.conflict_resolver,
+      item.bead_id,
+      state.workspace_id,
+      item_branch_label(item),
+      :resolver_did_not_clear_conflict
+    )
 
-      true ->
-        # Resolver is still in flight; the next poll will either see mergeable
-        # again (rebase pushed) or we'll re-enter this branch and bump the
-        # attempt counter.
-        {item, state}
-    end
+    {%{item | status: :failed, last_error: :conflict_unresolved}, state}
   end
 
-  defp handle_conflict(state, item) do
-    if item.resolver_attempts >= state.resolver_max_attempts do
-      escalate_resolver_exhausted(state, item)
-      {%{item | status: :failed, last_error: :conflict_unresolved}, state}
-    else
-      spawn_conflict_resolver(state, item)
-    end
-  end
+  defp handle_conflict(state, item), do: spawn_conflict_resolver(state, item)
 
-  # Re-fire the resolver and transition the item to :conflict_resolving. The
+  # Spawn the resolver and transition the item to :conflict_resolving. The
   # item's prior status is stashed so a successful push restores us to
   # exactly where the state machine was before the conflict was detected
   # (e.g. :awaiting_approval) — we don't want a clean rebase to silently
@@ -494,17 +479,13 @@ defmodule Arbiter.Workflows.Refinery do
 
     case safe_resolve(state.conflict_resolver, args) do
       {:ok, _info} ->
-        Logger.info(
-          "Refinery: spawned conflict resolver for bead=#{item.bead_id} " <>
-            "(attempt #{item.resolver_attempts + 1})"
-        )
+        Logger.info("Refinery: spawned conflict resolver for bead=#{item.bead_id}")
 
         item = %{
           item
           | status: :conflict_resolving,
             prior_status: prior,
-            resolver_spawned_at: DateTime.utc_now(),
-            resolver_attempts: item.resolver_attempts + 1
+            resolver_spawned_at: DateTime.utc_now()
         }
 
         {item, state}
@@ -515,9 +496,9 @@ defmodule Arbiter.Workflows.Refinery do
         )
 
         # We couldn't even spawn the acolyte (no rig configured, worktree
-        # creation failed, workspace gone). Escalate to the Admiral so the
-        # bead doesn't sit in CONFLICTING limbo, and mark the item :failed
-        # so we don't spin on the next tick.
+        # creation failed, workspace gone, resolver already running).
+        # Escalate to the Admiral so the bead doesn't sit in CONFLICTING
+        # limbo, and mark the item :failed so we don't spin on the next tick.
         safe_escalate(
           state.conflict_resolver,
           item.bead_id,
@@ -530,11 +511,19 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  defp restore_after_resolution(%{prior_status: nil} = item),
-    do: %{item | status: :awaiting_approval, prior_status: nil}
+  # Restore item state after a successful auto-rebase. Posts a :notification
+  # via the resolver module so the Admiral feed sees the success — symmetric
+  # with the :escalation we post on failure (acceptance criterion: notified
+  # of the resolution OR the escalation).
+  defp restore_after_resolution(state, %{prior_status: nil} = item) do
+    safe_notify_resolution(state, item)
+    %{item | status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil}
+  end
 
-  defp restore_after_resolution(%{prior_status: prior} = item),
-    do: %{item | status: prior, prior_status: nil}
+  defp restore_after_resolution(state, %{prior_status: prior} = item) do
+    safe_notify_resolution(state, item)
+    %{item | status: prior, prior_status: nil, resolver_spawned_at: nil}
+  end
 
   defp safe_resolve(resolver_module, args) when is_atom(resolver_module) do
     resolver_module.resolve(args)
@@ -542,16 +531,6 @@ defmodule Arbiter.Workflows.Refinery do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  defp escalate_resolver_exhausted(state, item) do
-    safe_escalate(
-      state.conflict_resolver,
-      item.bead_id,
-      state.workspace_id,
-      item_branch_label(item),
-      {:attempts_exhausted, item.resolver_attempts}
-    )
   end
 
   # Call `escalate_unresolved/4` on the injected resolver module (so test
@@ -571,6 +550,31 @@ defmodule Arbiter.Workflows.Refinery do
     e ->
       Logger.warning(
         "Refinery.safe_escalate: swallowed exception for bead=#{bead_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Mirror of safe_escalate/5 for the success path: post a :notification
+  # message announcing the auto-resolution. Routed through the injected
+  # resolver module so test stubs can intercept it (real module is the
+  # fallback when the stub doesn't implement the optional callback).
+  defp safe_notify_resolution(%State{conflict_resolver: resolver_module} = state, item) do
+    target =
+      if function_exported?(resolver_module, :notify_resolution, 3) do
+        resolver_module
+      else
+        Arbiter.Workflows.Refinery.ConflictResolver
+      end
+
+    target.notify_resolution(item.bead_id, state.workspace_id, item_branch_label(item))
+  rescue
+    e ->
+      Logger.warning(
+        "Refinery.safe_notify_resolution: swallowed exception for bead=#{item.bead_id}: " <>
           Exception.message(e)
       )
 
@@ -638,7 +642,6 @@ defmodule Arbiter.Workflows.Refinery do
       last_polled_at: nil,
       last_error: nil,
       resolver_spawned_at: nil,
-      resolver_attempts: 0,
       prior_status: nil
     }
 

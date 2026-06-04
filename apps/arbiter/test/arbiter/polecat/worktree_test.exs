@@ -166,4 +166,34 @@ defmodule Arbiter.Polecat.WorktreeTest do
       assert [] = Worktree.list("/tmp/definitely-not-a-repo-#{:erlang.unique_integer([:positive])}")
     end
   end
+
+  describe "attach/2" do
+    test "checks out an EXISTING branch into a worktree (no -b)", %{repo: repo, root: root} do
+      # Create a branch in the repo without making a worktree for it.
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", "feature/exists"])
+
+      assert {:ok, path} = Worktree.attach(repo, "feature/exists")
+      assert path == Path.join(root, "feature-exists")
+      assert File.dir?(path)
+      assert {:ok, "feature/exists"} = Worktree.current_branch(path)
+    end
+
+    test "fails when the branch does NOT exist (this is the contract — no -b)", %{repo: repo} do
+      assert {:error, {:git_failed, msg}} = Worktree.attach(repo, "feature/never-existed")
+      assert is_binary(msg)
+    end
+
+    test "is idempotent on the same-branch path", %{repo: repo} do
+      {_, 0} = System.cmd("git", ["-C", repo, "branch", "feature/attach-idem"])
+
+      {:ok, p1} = Worktree.attach(repo, "feature/attach-idem")
+      {:ok, p2} = Worktree.attach(repo, "feature/attach-idem")
+      assert p1 == p2
+    end
+
+    test "empty / nil branch name returns :invalid_branch_name", %{repo: repo} do
+      assert {:error, :invalid_branch_name} = Worktree.attach(repo, "")
+      assert {:error, :invalid_branch_name} = Worktree.attach(repo, nil)
+    end
+  end
 end

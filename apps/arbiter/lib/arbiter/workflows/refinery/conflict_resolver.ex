@@ -52,6 +52,11 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   require Logger
 
+  # This module both defines the behaviour and ships the default
+  # implementation, so it implements itself. The `@impl true` annotations
+  # on resolve/1, escalate_unresolved/4, and notify_resolution/3 require this.
+  @behaviour __MODULE__
+
   @type resolve_args :: %{
           required(:bead_id) => String.t(),
           required(:workspace_id) => String.t() | nil,
@@ -84,12 +89,41 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   @callback resolve(args :: resolve_args()) :: resolve_result()
 
   @doc """
+  Optional: post an `:escalation` mailbox message to the Admiral about an
+  unresolved conflict. The Refinery calls this on spawn failure and on the
+  second consecutive CONFLICTING observation. The real
+  `Arbiter.Workflows.Refinery.ConflictResolver` implements it; test stubs
+  may implement it to intercept escalations for assertion.
+  """
+  @callback escalate_unresolved(
+              bead_id :: String.t(),
+              workspace_id :: String.t() | nil,
+              branch :: String.t(),
+              reason :: term()
+            ) :: :ok
+
+  @doc """
+  Optional: post a `:notification` announcing a successful auto-resolution.
+  The Refinery calls this when a CONFLICTING PR turns mergeable again on
+  a poll. The real `Arbiter.Workflows.Refinery.ConflictResolver` implements
+  it; test stubs may implement it to intercept notifications for assertion.
+  """
+  @callback notify_resolution(
+              bead_id :: String.t(),
+              workspace_id :: String.t() | nil,
+              branch :: String.t()
+            ) :: :ok
+
+  @optional_callbacks escalate_unresolved: 4, notify_resolution: 3
+
+  @doc """
   Default implementation of `resolve/1`. Spawns a real Polecat with a
   ClaudeSession running the resolver prompt inside a fresh worktree.
 
   Tests should pass a stub module via the Refinery's `:conflict_resolver`
   opt so they don't shell out to git or spawn `claude`.
   """
+  @impl true
   @spec resolve(resolve_args()) :: resolve_result()
   def resolve(%{bead_id: bead_id} = args) when is_binary(bead_id) do
     with {:ok, bead} <- load_bead(bead_id),
@@ -391,11 +425,13 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   @doc """
   Post an `:escalation` mailbox message to the Admiral about an unresolved
   conflict. Used by the Refinery when the resolver itself can't be spawned
-  or its attempts are exhausted.
+  or the second consecutive CONFLICTING observation arrives (the rebase
+  pass didn't unblock the PR).
 
   Best-effort: a DB hiccup is logged but never re-raised so the caller's
   state machine isn't disrupted.
   """
+  @impl true
   @spec escalate_unresolved(String.t(), String.t() | nil, String.t(), term()) :: :ok
   def escalate_unresolved(bead_id, workspace_id, branch, reason)
       when is_binary(bead_id) and is_binary(workspace_id) do
@@ -430,6 +466,49 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   end
 
   def escalate_unresolved(_bead_id, _workspace_id, _branch, _reason), do: :ok
+
+  @doc """
+  Post a `:notification` announcing a successful auto-resolution. Used by
+  the Refinery when the next poll after a resolver spawn shows the PR is
+  mergeable again — the rebase + force-push worked.
+
+  Symmetric with `escalate_unresolved/4` so the acceptance criterion
+  ("notified of the resolution OR the escalation") is satisfied on both
+  sides. Best-effort: DB hiccups are logged but never re-raised.
+  """
+  @impl true
+  @spec notify_resolution(String.t(), String.t() | nil, String.t()) :: :ok
+  def notify_resolution(bead_id, workspace_id, branch)
+      when is_binary(bead_id) and is_binary(workspace_id) do
+    body =
+      """
+      The Crucible auto-resolved a CONFLICTING PR for bead #{bead_id}
+      (branch #{branch}) — the conflict-resolver acolyte rebased onto the
+      current target branch, resolved the conflict, and force-pushed. The
+      merge queue is resuming.
+      """
+
+    Message.notify(%{
+      from_ref: bead_id,
+      workspace_id: workspace_id,
+      subject: "Crucible: auto-resolved conflict on #{bead_id}",
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "ConflictResolver.notify_resolution swallowed for bead=#{bead_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def notify_resolution(_bead_id, _workspace_id, _branch), do: :ok
 
   defp inspect_short(reason) when is_binary(reason), do: reason
   defp inspect_short(reason), do: reason |> inspect() |> String.slice(0, 200)
