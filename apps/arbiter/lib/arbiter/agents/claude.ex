@@ -18,8 +18,8 @@ defmodule Arbiter.Agents.Claude do
       `Claude.Config.model_for_tier/1`) →
       `Arbiter.Agents.Claude.Config.active_model/0` → CLI default
       (no `--model` flag).
-    * `:thinking` opt routes through the configured reasoning-effort
-      argv (default `--reasoning-effort <level>` for low/medium/high; the
+    * `:thinking` opt routes through the configured effort argv (default
+      `--effort <level>` for low/medium/high; the
       cheap second lever the moduledoc has always called out). Resolved
       via `Claude.Config.thinking_argv/1`.
     * Multi-key rotation: when `api_keys` is set on the workspace, each
