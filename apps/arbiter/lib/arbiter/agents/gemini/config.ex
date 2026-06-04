@@ -18,6 +18,27 @@ defmodule Arbiter.Agents.Gemini.Config do
           raw: map()
         }
 
+  # Default tier → concrete Gemini model. Overridable per-workspace via
+  # `agent.config["tier_models"]` (string keys). The values are short
+  # model identifiers the agy / gemini CLI accept via `--model`.
+  @default_tier_models %{
+    "economy" => "gemini-2.5-flash-lite",
+    "standard" => "gemini-2.5-flash",
+    "premium" => "gemini-2.5-pro"
+  }
+
+  # Default thinking → CLI argv tokens. Gemini's thinking knob varies per
+  # CLI fork (agy vs gemini), so the default leaves the argv empty and
+  # exposes the level via env var (`GEMINI_THINKING_LEVEL`) — workspaces
+  # can override per-level argv with `agent.config["thinking_argv"]` (e.g.
+  # `--thinking-budget 8192`) once they pin a CLI surface.
+  @default_thinking_argv %{
+    "none" => [],
+    "low" => [],
+    "medium" => [],
+    "high" => []
+  }
+
   @doc """
   Set the active Gemini agent config for the current process.
   """
@@ -100,6 +121,79 @@ defmodule Arbiter.Agents.Gemini.Config do
     cfg.model
   end
 
+  @doc """
+  Resolve an abstract `model_tier` (`"economy"` | `"standard"` |
+  `"premium"`) to a concrete Gemini model name. Returns `nil` for an
+  unknown / nil tier — the adapter falls back to its CLI default.
+
+  Workspace config can override the mapping under
+  `agent.config["tier_models"]`. Missing keys fall back to the built-in
+  default (`#{inspect(@default_tier_models)}`).
+  """
+  @spec model_for_tier(String.t() | nil) :: String.t() | nil
+  def model_for_tier(nil), do: nil
+  def model_for_tier(""), do: nil
+
+  def model_for_tier(tier) when is_binary(tier) do
+    {:ok, cfg} = resolve()
+    overrides = stringy_map(Map.get(cfg.raw, "tier_models"))
+
+    case Map.get(overrides, tier) || Map.get(@default_tier_models, tier) do
+      m when is_binary(m) and m != "" -> m
+      _ -> nil
+    end
+  end
+
+  def model_for_tier(_), do: nil
+
+  @doc """
+  Resolve an abstract `thinking` level to a list of CLI argv tokens to
+  append to the spawn command. The default mapping is empty for all
+  levels — Gemini's reasoning knob varies per CLI fork; the level is
+  surfaced via the `GEMINI_THINKING_LEVEL` env var instead (see
+  `thinking_env/1`) and the workspace can opt into CLI argv via
+  `agent.config["thinking_argv"]` once a flag is pinned.
+  """
+  @spec thinking_argv(String.t() | nil) :: [String.t()]
+  def thinking_argv(nil), do: []
+  def thinking_argv(""), do: []
+  def thinking_argv("none"), do: []
+
+  def thinking_argv(level) when is_binary(level) do
+    {:ok, cfg} = resolve()
+    overrides = list_map(Map.get(cfg.raw, "thinking_argv"))
+
+    case Map.get(overrides, level) || Map.get(@default_thinking_argv, level) do
+      argv when is_list(argv) -> argv
+      _ -> []
+    end
+  end
+
+  def thinking_argv(_), do: []
+
+  @doc """
+  Resolve an abstract `thinking` level to a list of `{name, value}` env
+  pairs. The default surfaces the level itself via
+  `GEMINI_THINKING_LEVEL` so an external wrapper / shim can consume it
+  without a CLI flag. `none` / `nil` / unknown → `[]`.
+  """
+  @spec thinking_env(String.t() | nil) :: [{String.t(), String.t()}]
+  def thinking_env(nil), do: []
+  def thinking_env(""), do: []
+  def thinking_env("none"), do: []
+
+  def thinking_env(level) when level in ["low", "medium", "high"] do
+    [{"GEMINI_THINKING_LEVEL", level}]
+  end
+
+  def thinking_env(_), do: []
+
+  @doc "Built-in default tier → model map (testing / introspection)."
+  def default_tier_models, do: @default_tier_models
+
+  @doc "Built-in default thinking → argv map (testing / introspection)."
+  def default_thinking_argv, do: @default_thinking_argv
+
   # ---- Internals --------------------------------------------------------
 
   defp ambient_api_key do
@@ -133,4 +227,25 @@ defmodule Arbiter.Agents.Gemini.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
+
+  defp stringy_map(nil), do: %{}
+
+  defp stringy_map(m) when is_map(m) do
+    for {k, v} <- m, is_binary(k), is_binary(v) and v != "", into: %{}, do: {k, v}
+  end
+
+  defp stringy_map(_), do: %{}
+
+  defp list_map(nil), do: %{}
+
+  defp list_map(m) when is_map(m) do
+    for {k, v} <- m,
+        is_binary(k),
+        is_list(v),
+        Enum.all?(v, &is_binary/1),
+        into: %{},
+        do: {k, v}
+  end
+
+  defp list_map(_), do: %{}
 end
