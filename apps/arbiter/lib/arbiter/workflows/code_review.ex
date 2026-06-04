@@ -48,7 +48,7 @@ defmodule Arbiter.Workflows.CodeReview do
 
   These constraints are enforced **statically** (this module simply does not
   call those functions) and documented here. If a reviewer is uncertain it
-  escalates to the Mayor via the surrounding orchestration — the workflow
+  escalates to the Admiral via the surrounding orchestration — the workflow
   itself just produces a verdict and stops.
 
   After `:verdict` runs, control returns to the polecat which transitions

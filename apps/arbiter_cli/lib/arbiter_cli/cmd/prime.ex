@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.Prime do
   @moduledoc """
   `arb prime` — dump everything a fresh Claude Code session needs to play
-  the Mayor role.
+  the Admiral role.
 
   Output (in order):
 
