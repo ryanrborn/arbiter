@@ -1,0 +1,160 @@
+# <%= @coordinator_cap %> Operator Field Guide
+
+Hard-won operating knowledge for the <%= @coordinator_cap %> seat.
+Generic — applies to any Arbiter install. Update it as you learn.
+
+Run `arb prime` at the start of every session.
+
+---
+
+## 1. Role & Loop
+
+You coordinate; the fleet executes. Core loop:
+
+1. File <%= @issue_article %> <%= @issue %> with crisp acceptance criteria, difficulty, and
+   priority.
+2. Sling to a <%= @rig %> (`arb sling <id> [<%= @rig %>] --with-claude`).
+3. Monitor — `arb prime` / `arb polecat show <id>` / `arb polecat list`.
+4. Tribunal (pre-merge review gate) escalates for your judgment; decide, don't
+   rubber-stamp.
+5. Merge and close the <%= @issue %> (or let close-on-merge handle it).
+
+External comms (GitHub, Slack) stay in normal professional voice.
+
+## 2. File <%= @issue_plural_cap %> Well
+
+- **Crisp acceptance criteria** — reference real files and line numbers.
+- **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
+  <%= @worker %>.
+- **PRIORITY (P0–P4)** — drives scheduling urgency.
+- They are **orthogonal** — a P0 can be D0 (trivial config bump); a P3 can be
+  D4 (hard architectural change). Do not conflate them.
+- Set `target_branch` when it is not the workspace default.
+
+```
+D0 Trivial  — single-file, fully specified, no judgment (typo, config, doc edit)
+D1 Simple   — localized, clear approach, light reasoning
+D2 Moderate — multi-file or some design choice (default if omitted)
+D3 Hard     — cross-cutting, non-obvious design, correctness-critical
+D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
+```
+
+Drop a one-line difficulty justification in the description so reviewers can
+sanity-check your call.
+
+## 3. Concurrency Discipline
+
+Parallel <%= @worker_plural %> are good. **Keep concurrent <%= @issue_plural %>
+FILE-DISJOINT.**
+
+<%= @issue_plural_cap %> that touch the same file — especially the CLI verb list,
+command-alias map, or the router — **will collide at merge**. The
+auto-conflict-resolver helps, but do not rely on it. Serialize those
+<%= @issue_plural %>.
+
+## 4. Freshness
+
+<%= @worker_plural_cap %> branch from the <%= @rig %>'s base branch. A stale <%= @rig %>
+means stale, possibly regressed state for every new <%= @worker %>. Keep <%= @rig_plural %>
+current; let provisioning fetch from origin.
+
+## 5. Config Safety
+
+Workspace config is a single JSON map stored in the database.
+
+**NEVER** send a partial config via the raw API PATCH — it replaces the whole
+map and **silently clobbers** siblings (`rig_paths`, tracker, merge config,
+vernacular).
+
+**Use `arb config get/set/unset` (deep-merge) only.**
+
+## 6. Deploy Safely
+
+A real deploy = pull + run migrations + rebuild the CLI escript + restart the
+server.
+
+**Restarting the server KILLS all in-flight <%= @worker_plural %>** and abandons
+their work. Before restarting:
+
+1. Check for active <%= @worker_plural %> (`arb prime` or `arb polecat list`).
+2. If any are running, wait for them to finish — or explicitly stop them first.
+3. Never restart mid-flight as a shortcut.
+
+## 7. Trust State, But Verify
+
+- A <%= @worker %> can show "running" while its subprocess is dead — check the
+  port or log, not just status.
+- A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
+  Read the real `git diff origin/main...<branch>` before calling work "empty"
+  or "failed".
+- Close-on-merge can miss on out-of-band merges — close the <%= @issue %>
+  manually if it stalls.
+
+## 8. Tribunal
+
+The pre-merge review gate. After the round cap it escalates for **your**
+judgment.
+
+Read the full implementer↔reviewer transcript before deciding. Do not assume
+the worst on a stalled exchange; do not rubber-stamp because a round ran.
+Decide for yourself.
+
+## 9. Watch Efficiently
+
+Use shell-poll monitors that wake only on real state changes. Avoid
+fixed-interval wakeups that burn tokens re-reading context on every tick.
+
+## 10. Provider-Agnostic
+
+Never hardcode model names. Route via abstract tiers:
+
+| Tier | Use |
+|------|-----|
+| economy | Cheap, fast, simple tasks |
+| standard | Most <%= @issue_plural %> (default) |
+| premium | Hard / correctness-critical work |
+
+Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
+sling time.
+
+**Verify CLI flags against the installed agent CLI version** — a wrong flag
+crashes the <%= @worker %> at launch with no useful error.
+
+## 11. Review Capability
+
+`arb review <id>` reviews a PR/MR tracker-side: fetches the diff and posts
+findings + verdict via the configured tracker API. The PR author needs **no**
+Arbiter setup.
+
+## 12. Lanes & Merge Posture
+
+Use **separate workspaces** for separate concerns (self-dev vs company repos).
+
+| Lane | `auto_merge` | Why |
+|------|-------------|-----|
+| Company / shared | OFF | A human merges |
+| Self-dev / experimental | ON | Safe to automate |
+
+## 13. Vernacular (Gas-Town Defaults)
+
+| Term | Meaning |
+|------|---------|
+| Admiral | <%= @coordinator_cap %> — you |
+| Acolyte | <%= @worker_cap %> — a worker agent |
+| Fleet | The set of active <%= @worker_plural %> |
+| Directive | <%= @issue_cap %> — a unit of work |
+| Campaign | <%= @batch_cap %> — a batch of related <%= @issue_plural %> |
+| Strike Force | A set of directives deployed together |
+| Inquisitor | Reviewer agent |
+| Crucible | The review / escalation system |
+| Tribunal | The pre-merge review gate |
+| Warden | The process managing the <%= @worker %> subprocess |
+| Dispatch | The act of slinging a <%= @worker %> |
+| Outpost | <%= @rig_cap %> — a local git repo for worktrees |
+| Summons | The initial prompt given to a new <%= @worker %> |
+| Refinery | The merge queue |
+| Witness | A monitor / watchdog |
+
+---
+
+_Generated by `arb init`. Generic — not operator-personal. Edit freely._

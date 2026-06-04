@@ -49,11 +49,12 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "== Vernacular =="
       assert out =~ "worker: Acolyte"
 
-      assert out =~ "== Active polecats (1) =="
+      # Section headers use the active vernacular.
+      assert out =~ "== Active Acolytes (1) =="
       assert out =~ "bd-001"
       assert out =~ "step=implement"
 
-      assert out =~ "== Ready beads (1) =="
+      assert out =~ "== Ready Directives (1) =="
       assert out =~ "bd-002"
       assert out =~ "Fix the thing"
     end
@@ -168,6 +169,53 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       refute out =~ "Standing Orders"
     end
 
+    test "always shows the Operating Pitfalls digest with a pointer to ARBITER_OPERATOR.md" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Operating Pitfalls =="
+      assert out =~ "[ ] Concurrency:"
+      assert out =~ "[ ] Config:"
+      assert out =~ "[ ] Deploy:"
+      assert out =~ "[ ] Tribunal:"
+      assert out =~ "ARBITER_OPERATOR.md"
+
+      # Surfaced above the work list.
+      pitfalls_at = :binary.match(out, "== Operating Pitfalls ==") |> elem(0)
+      ready_at = :binary.match(out, "== Ready beads ==") |> elem(0)
+      assert pitfalls_at < ready_at
+    end
+
+    test "Operating Pitfalls digest uses the active vernacular terms" do
+      stub_all(
+        [
+          %{
+            "id" => "ws-1",
+            "name" => "default",
+            "prefix" => "bd",
+            "config" => %{
+              "vernacular" => %{"worker" => "Acolyte", "issue" => "Directive", "rig" => "Outpost"}
+            }
+          }
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "Directive"
+      assert out =~ "Acolyte"
+      assert out =~ "Outpost"
+    end
+
     test "empty vernacular reports 'default gas-town'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
@@ -181,7 +229,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
   end
 
   describe "--json mode" do
-    test "emits a single JSON object with the four sections" do
+    test "emits a single JSON object with all sections including field_guide_pitfalls" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -198,6 +246,9 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert Map.has_key?(decoded, "ready")
       assert Map.has_key?(decoded, "admiral_inbox")
       assert Map.has_key?(decoded, "standing_orders")
+      assert Map.has_key?(decoded, "field_guide_pitfalls")
+      assert is_list(decoded["field_guide_pitfalls"])
+      assert length(decoded["field_guide_pitfalls"]) > 0
     end
 
     test "standing_orders carries the config list through --json" do

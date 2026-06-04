@@ -8,19 +8,25 @@ defmodule ArbiterCli.Cmd.Init do
 
   Creates, in the target directory (default: cwd):
 
-    * `AGENTS.md`        — the coordinator role doc: session-start checklist
-                           (`arb doctor` / `arb prime`), the arb command
-                           reference, core concepts, and memory discipline.
-                           Rendered with this install's active vernacular,
-                           domain, and host. Contains NO persona — that is
-                           the operator's private layer.
-    * `memory/MEMORY.md` — a clean memory index skeleton (and an otherwise
-                           empty `memory/` dir).
-    * `notes/README.md`  — explains the surface-to-operator drop.
-    * `AGENTS.local.md`  — a stub personal overlay (gitignored, never
-                           committed); the operator fills it with persona /
-                           local identity.
-    * `.gitignore`       — ignores `AGENTS.local.md`.
+    * `AGENTS.md`              — the coordinator role doc: session-start
+                                 checklist (`arb doctor` / `arb prime`), the
+                                 arb command reference, core concepts, and
+                                 memory discipline. Rendered with this
+                                 install's active vernacular, domain, and
+                                 host. Contains NO persona — that is the
+                                 operator's private layer.
+    * `ARBITER_OPERATOR.md`    — the operator field guide: hard-won operating
+                                 knowledge (concurrency discipline, config
+                                 safety, deploy protocol, trust-but-verify
+                                 patterns, and the full vernacular table).
+                                 Generic and transferable; edit freely.
+    * `memory/MEMORY.md`       — a clean memory index skeleton (and an
+                                 otherwise empty `memory/` dir).
+    * `notes/README.md`        — explains the surface-to-operator drop.
+    * `AGENTS.local.md`        — a stub personal overlay (gitignored, never
+                                 committed); the operator fills it with
+                                 persona / local identity.
+    * `.gitignore`             — ignores `AGENTS.local.md`.
 
   The terms in the generated docs follow the active workspace's vernacular
   (`/api/settings`), so it reads as the stock coordinator term on a default
@@ -52,18 +58,21 @@ defmodule ArbiterCli.Cmd.Init do
   @templates_dir Path.expand(Path.join([__DIR__, "..", "..", "..", "priv", "templates"]))
 
   @agents_md Path.join(@templates_dir, "AGENTS.md.eex")
+  @operator_guide Path.join(@templates_dir, "OPERATOR_FIELD_GUIDE.md.eex")
   @memory_md Path.join(@templates_dir, "MEMORY.md.eex")
   @notes_readme Path.join(@templates_dir, "notes_README.md.eex")
   @agents_local Path.join(@templates_dir, "AGENTS.local.md.eex")
   @gitignore Path.join(@templates_dir, "gitignore.eex")
 
   @external_resource @agents_md
+  @external_resource @operator_guide
   @external_resource @memory_md
   @external_resource @notes_readme
   @external_resource @agents_local
   @external_resource @gitignore
 
   EEx.function_from_file(:defp, :render_agents_md, @agents_md, [:assigns])
+  EEx.function_from_file(:defp, :render_operator_guide, @operator_guide, [:assigns])
   EEx.function_from_file(:defp, :render_memory_md, @memory_md, [:assigns])
   EEx.function_from_file(:defp, :render_notes_readme, @notes_readme, [:assigns])
   EEx.function_from_file(:defp, :render_agents_local, @agents_local, [:assigns])
@@ -91,6 +100,7 @@ defmodule ArbiterCli.Cmd.Init do
     results =
       [
         {"AGENTS.md", render_agents_md(assigns)},
+        {"ARBITER_OPERATOR.md", render_operator_guide(assigns)},
         {"AGENTS.local.md", render_agents_local(assigns)},
         {".gitignore", render_gitignore(assigns)},
         {"memory/MEMORY.md", render_memory_md(assigns)},
@@ -140,6 +150,7 @@ defmodule ArbiterCli.Cmd.Init do
       worker: label.("worker"),
       worker_cap: cap.("worker"),
       worker_plural: plural(label.("worker")),
+      worker_plural_cap: plural(cap.("worker")),
       worker_article: article(label.("worker")),
       issue: label.("issue"),
       issue_cap: cap.("issue"),

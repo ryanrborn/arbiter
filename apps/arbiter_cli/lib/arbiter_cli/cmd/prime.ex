@@ -10,12 +10,17 @@ defmodule ArbiterCli.Cmd.Prime do
        checklist, sourced from `config.standing_orders`. Surfaced high so the
        disciplines greet a fresh agent before the work list. Omitted entirely
        when the domain carries no orders.
-    3. **Vernacular** — the workspace's custom labels and aliases (only
-       printed if non-empty; otherwise "(default gas-town)" is shown).
-    4. **Admiral Inbox** — up to 5 most recent unread messages addressed to
+    3. **Operating Pitfalls** — a concise digest of the most-burned-by
+       operating pitfalls (concurrency, config safety, deploy, freshness,
+       verify, tribunal). Always shown. Points to `ARBITER_OPERATOR.md`
+       for the full operator field guide.
+    4. **Vernacular** — the workspace's custom labels and aliases sourced from
+       `config.vernacular`. Only printed if non-empty; otherwise "(default
+       gas-town)" is shown.
+    5. **Admiral Inbox** — up to 5 most recent unread messages addressed to
        the Admiral. Omitted entirely when there are none.
-    5. **Active polecats** — bead_id, status, current_step, runtime.
-    6. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
+    6. **Active polecats** — bead_id, status, current_step, runtime.
+    7. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
 
   ## Standing Orders are data, not code
 
@@ -60,7 +65,8 @@ defmodule ArbiterCli.Cmd.Prime do
       vernacular: unwrap(sections.vernacular),
       admiral_inbox: unwrap(sections.admiral_inbox),
       polecats: unwrap(sections.polecats),
-      ready: unwrap(sections.ready)
+      ready: unwrap(sections.ready),
+      field_guide_pitfalls: field_guide_pitfalls()
     }
   end
 
@@ -71,7 +77,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp gather do
     workspace = gather_workspace()
-    vernacular = gather_vernacular()
+    vernacular = gather_vernacular(workspace)
 
     %{
       workspace: workspace,
@@ -110,13 +116,13 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
-  defp gather_vernacular do
-    case Client.get("/api/settings") do
-      {:ok, %{"data" => %{"vernacular" => v}}} -> {:ok, v}
-      {:ok, _} -> {:ok, %{}}
-      {:error, %Client.Error{} = err} -> {:error, err.message}
-    end
-  end
+  # Vernacular is per-workspace config — no extra API call needed since we
+  # already resolved the workspace. Extract from config.vernacular if present.
+  defp gather_vernacular({:ok, %{"config" => %{"vernacular" => v}}}) when is_map(v),
+    do: {:ok, v}
+
+  defp gather_vernacular({:ok, _}), do: {:ok, %{}}
+  defp gather_vernacular({:error, _} = err), do: err
 
   defp gather_polecats do
     case Client.get("/api/polecats") do
@@ -145,19 +151,20 @@ defmodule ArbiterCli.Cmd.Prime do
   # ---- render ------------------------------------------------------------
 
   defp emit_text(sections) do
-    {worker, issue, workspace} =
+    {worker, issue, workspace, rig} =
       case sections.vernacular do
         {:ok, v} ->
           {Map.get(v, "worker", "polecat"), Map.get(v, "issue", "bead"),
-           Map.get(v, "workspace", "workspace")}
+           Map.get(v, "workspace", "workspace"), Map.get(v, "rig", "rig")}
 
         _ ->
-          {"polecat", "bead", "workspace"}
+          {"polecat", "bead", "workspace", "rig"}
       end
 
     emit_workspace_section(sections.workspace, workspace)
     IO.puts("")
     maybe_emit_standing_orders_section(sections.standing_orders)
+    emit_field_guide_digest(issue, worker, rig)
     emit_vernacular_section(sections.vernacular)
     IO.puts("")
     maybe_emit_admiral_inbox(sections.admiral_inbox)
@@ -248,7 +255,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("== Vernacular ==")
 
     if vernacular == %{} do
-      IO.puts("  (defaults)")
+      IO.puts("  (default gas-town)")
     else
       vernacular
       |> Enum.sort_by(&elem(&1, 0))
@@ -257,6 +264,30 @@ defmodule ArbiterCli.Cmd.Prime do
   end
 
   defp emit_vernacular_section({:error, _}), do: IO.puts("== Vernacular ==\n  (n/a)")
+
+  # Condensed digest of the most-burned-by pitfalls. Always shown so a fresh
+  # session starts with the essentials even before reading the full guide.
+  defp emit_field_guide_digest(issue, worker, rig) do
+    IO.puts("== Operating Pitfalls ==")
+
+    Enum.each(field_guide_pitfalls(issue, worker, rig), fn line ->
+      IO.puts("  [ ] #{line}")
+    end)
+
+    IO.puts("  Full guide: ARBITER_OPERATOR.md")
+    IO.puts("")
+  end
+
+  defp field_guide_pitfalls(issue \\ "bead", worker \\ "polecat", rig \\ "rig") do
+    [
+      "Concurrency: keep parallel #{issue}s FILE-DISJOINT — same file = merge collision",
+      "Config: use `arb config get/set` only — raw API PATCH silently clobbers siblings",
+      "Deploy: check for active #{worker}s before restarting the server — they will be abandoned",
+      "Freshness: keep #{rig}s current — a stale #{rig} propagates regressed state",
+      "Verify: check the port/log to confirm a #{worker} is live — status alone can lie",
+      "Tribunal: read the full implementer↔reviewer transcript before deciding"
+    ]
+  end
 
   defp format_vernacular_value(v) when is_map(v), do: inspect(v)
   defp format_vernacular_value(v), do: to_string(v)
