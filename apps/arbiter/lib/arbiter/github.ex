@@ -248,6 +248,33 @@ defmodule Arbiter.GitHub do
     :persistent_term.get(@rate_limit_key, nil)
   end
 
+  @doc """
+  Classify a `pr_get/3` payload as CONFLICTING — i.e. the head branch can't
+  be merged into the base because of textual conflicts. Used by
+  `Arbiter.Workflows.Refinery` to decide when to spawn the conflict-
+  resolution acolyte.
+
+  Two signals from GitHub:
+
+    * `"mergeable" => false` — GitHub computed the merge and a conflict
+      exists. This is the canonical conflict signal.
+    * `"mergeStateStatus" => "dirty"` — the GraphQL-shaped detail field
+      (only present on payloads fetched with the GraphQL surface or via
+      `pr_get/3` shaped responses from the dashboard wrappers). Treated as
+      a corroborating signal so we catch the case where `mergeable` is
+      nil (still computing) but the merge state is already known dirty.
+
+  Returns `false` for nil / missing / "mergeable computing" payloads — a
+  conflict has to be a positive determination.
+  """
+  @spec conflicting?(map()) :: boolean()
+  def conflicting?(payload) when is_map(payload) do
+    Map.get(payload, "mergeable") == false or
+      Map.get(payload, "mergeStateStatus") == "dirty"
+  end
+
+  def conflicting?(_), do: false
+
   # ---- Internals -----------------------------------------------------------
 
   defp fetch_commit_id(repo, pr_number, opts) do

@@ -80,6 +80,53 @@ defmodule Arbiter.Polecat.Worktree do
   end
 
   @doc """
+  Attach a worktree at `<worktree_root>/<sanitized_branch_name>/` to an
+  **existing** branch — no `-b`, no new branch creation.
+
+  Counterpart to `create/3`. Use it when you need a worktree checked out on
+  a branch that already exists in the repo — typically because a remote PR
+  was opened against it. The Crucible's conflict-resolver acolyte
+  (`Arbiter.Workflows.Refinery.ConflictResolver`) is the primary caller: it
+  rebases the existing PR branch in place, so it must NOT create a new
+  branch that would shadow the PR's head ref.
+
+  Idempotent on the same-branch path: if the target directory already exists
+  and is on the requested branch, returns `{:ok, path}` without re-invoking
+  git. If the directory exists on a different branch, returns
+  `{:error, {:git_failed, _}}` rather than silently switching it.
+  """
+  @spec attach(path(), String.t()) :: {:ok, path()} | {:error, error_reason()}
+  def attach(_repo_path, ""), do: {:error, :invalid_branch_name}
+  def attach(_repo_path, nil), do: {:error, :invalid_branch_name}
+
+  def attach(repo_path, branch_name)
+      when is_binary(repo_path) and is_binary(branch_name) do
+    path = worktree_path(branch_name)
+
+    cond do
+      File.dir?(path) ->
+        case current_branch(path) do
+          {:ok, ^branch_name} ->
+            {:ok, path}
+
+          {:ok, _other} ->
+            {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
+
+          {:error, _} = err ->
+            err
+        end
+
+      true ->
+        File.mkdir_p!(Path.dirname(path))
+
+        case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
+          {:ok, _stdout} -> {:ok, path}
+          {:error, _} = err -> err
+        end
+    end
+  end
+
+  @doc """
   Remove the worktree rooted at `worktree_path`.
 
   Idempotent: returns `:ok` whether or not the worktree existed. Uses
