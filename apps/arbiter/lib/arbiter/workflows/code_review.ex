@@ -3,79 +3,90 @@ defmodule Arbiter.Workflows.CodeReview do
   Peer-review workflow (gte-021). The Elixir port of Go GT's
   `mol-polecat-code-review` formula.
 
-  Reviews a branch's diff against a bead's acceptance criteria and produces
+  Reviews a PR/MR's diff against a bead's acceptance criteria and produces
   a verdict (`:approve` or `:request_changes`). Two modes:
 
-    * `:local`  — writes `reviews/<branch>.md` in the worktree.
-    * `:github` — posts inline comments + a top-level review via the
-      `Arbiter.GitHub` HTTP client (no `gh` shell-out).
+    * `:local`    — writes `reviews/<branch>.md` in a local worktree.
+    * `:adapter`  — dispatches every side-effect through an
+      `Arbiter.Mergers.Merger` adapter (Direct / GitLab / GitHub), so a
+      review can run against an arbitrary PR/MR — including ones the fleet
+      did not author — through the configured tracker.
 
   ## Steps
 
-  1. `:load_pr`       — record branch / load PR metadata
-  2. `:read_diff`     — `git diff <base>..HEAD` against the worktree
+  1. `:load_pr`       — record branch / load PR metadata (no-op in `:adapter` mode)
+  2. `:read_diff`     — fetch the diff via the adapter (or `git diff` locally)
   3. `:run_checks`    — invoke the `:check_runner` to produce findings
-  4. `:file_findings` — write the review file (local) or post comments (github)
+  4. `:file_findings` — write the review file (local) or post comments (adapter)
   5. `:verdict`       — compute approve / request_changes; finalize
 
   ## State
 
       %{
-        repo: "owner/name",          # github mode only
-        pr_number: integer | nil,
+        mode: :local | :adapter,
+
+        # :local mode requires:
         worktree_path: "/path/to/worktree",
-        mode: :local | :github,
         base: "main",                # diff base; default "main"
-        bead: %{id: _, title: _},    # optional, only used in the report header
+
+        # :adapter mode requires:
+        adapter: module(),           # an Arbiter.Mergers.Merger impl
+        mr_ref: String.t(),          # opaque ref minted by the adapter
+        workspace: Workspace.t() | nil,  # when set, Mergers.prepare/1 is called
+        adapter_opts: %{...},        # forwarded to every adapter call
+
+        # Common:
+        bead: %{id: _, title: _},    # optional, included in the file/notes
         check_runner: fun | nil,     # 2-arity (diff, state) -> {:ok, findings}
-        github_opts: keyword(),      # forwarded to Arbiter.GitHub.* calls
+
         # Populated as steps run:
-        pr: map() | nil,
-        branch: String.t(),
+        branch: String.t() | nil,
         diff: String.t(),
         findings: [Checks.finding()],
         verdict: :approve | :request_changes,
-        review_path: String.t() | nil  # local mode only
+        review_path: String.t() | nil  # populated by the local file mode
       }
+
+  ## Default check runner
+
+  Without an explicit `:check_runner`, `Arbiter.Workflows.CodeReview.Checks`
+  runs a Claude session on the diff and parses structured findings from its
+  JSON output. Tests can short-circuit Claude by passing a stub runner via
+  `state.check_runner`.
 
   ## Forbidden actions
 
   A reviewer polecat MUST NOT:
 
     * push code (no `Polecat.Worktree.push/2` call lives in this workflow)
-    * merge PRs (no `GitHub.pr_merge/4` call lives in this workflow)
-    * make non-comment GitHub mutations beyond inline comments + a single review
+    * merge PRs (no `GitHub.pr_merge/4` / `Merger.merge/1` call lives here)
+    * make non-comment mutations beyond inline comments + a single review
 
-  These constraints are enforced **statically** (this module simply does not
-  call those functions) and documented here. If a reviewer is uncertain it
-  escalates to the Mayor via the surrounding orchestration — the workflow
-  itself just produces a verdict and stops.
+  These constraints are enforced **statically** (this module simply does
+  not call those functions) and documented here.
 
   After `:verdict` runs, control returns to the polecat which transitions
   back to `:idle`. The workflow does not drive the polecat state directly.
-
-  ## Extending checks
-
-  Real check logic is a follow-up. To plug in checks, set `state.check_runner`
-  to a 2-arity function `(diff, state) -> {:ok, [finding]} | {:error, term}`.
-  Default runner returns `{:ok, []}` (see
-  `Arbiter.Workflows.CodeReview.Checks`).
   """
 
   use Arbiter.Workflow,
     steps: [:load_pr, :read_diff, :run_checks, :file_findings, :verdict]
 
-  alias Arbiter.GitHub
+  alias Arbiter.Mergers
   alias Arbiter.Polecat.Worktree
-  alias Arbiter.Workflows.CodeReview.{Checks, GithubMode, LocalMode}
+  alias Arbiter.Workflows.CodeReview.{Checks, LocalMode}
 
   step(:load_pr,
-    description: "Load PR metadata (github) or record branch (local)",
+    description: "Record branch (local) or accept adapter mr_ref (adapter)",
     needs: [],
-    vars: [:repo, :pr_number, :worktree_path, :mode]
+    vars: [:worktree_path, :mode, :adapter, :mr_ref]
   )
 
-  step(:read_diff, description: "Read the branch diff vs base", needs: [:load_pr], vars: [:base])
+  step(:read_diff,
+    description: "Read the diff via the adapter or local git",
+    needs: [:load_pr],
+    vars: [:base, :adapter_opts]
+  )
 
   step(:run_checks,
     description: "Run automated checks against the diff",
@@ -84,7 +95,7 @@ defmodule Arbiter.Workflows.CodeReview do
   )
 
   step(:file_findings,
-    description: "Write review file (local) or post comments (github)",
+    description: "Write review file (local) or post comments (adapter)",
     needs: [:run_checks],
     vars: [:bead]
   )
@@ -105,29 +116,33 @@ defmodule Arbiter.Workflows.CodeReview do
     end
   end
 
-  def run_step(:load_pr, %{mode: :github, repo: repo, pr_number: n} = state)
-      when is_binary(repo) and is_integer(n) do
-    opts = Map.get(state, :github_opts, [])
+  def run_step(:load_pr, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
 
-    case GitHub.pr_get(repo, n, opts) do
-      {:ok, pr} ->
-        branch = get_in(pr, ["head", "ref"]) || ""
-        {:ok, state |> Map.put(:pr, pr) |> Map.put(:branch, branch)}
+    case safe_adapter_call(adapter, :get, [mr_ref]) do
+      {:ok, info} ->
+        branch = Map.get(info, :branch) || Map.get(info, "branch")
+        {:ok, state |> Map.put(:pr, info) |> Map.put(:branch, branch)}
 
-      {:error, _} = err ->
-        err
+      # Adapters whose `get/1` doesn't surface a branch (Direct, GitLab in
+      # the abbreviated bead-domain view) still let the workflow proceed —
+      # the branch isn't load-bearing for any later step in :adapter mode.
+      {:error, _} ->
+        {:ok, state |> Map.put(:pr, nil) |> Map.put(:branch, nil)}
     end
   end
 
   def run_step(:load_pr, state) do
     {:error,
      {:bad_state,
-      "load_pr requires :mode + :worktree_path (local) or :repo+:pr_number (github), got: #{inspect(Map.take(state, [:mode, :worktree_path, :repo, :pr_number]))}"}}
+      "load_pr requires :mode + :worktree_path (local) or :adapter + :mr_ref (adapter), got: " <>
+        inspect(Map.take(state, [:mode, :worktree_path, :adapter, :mr_ref]))}}
   end
 
   # ---- :read_diff --------------------------------------------------------
 
-  def run_step(:read_diff, %{worktree_path: wt} = state) when is_binary(wt) do
+  def run_step(:read_diff, %{mode: :local, worktree_path: wt} = state) when is_binary(wt) do
     base = Map.get(state, :base, "main")
 
     case System.cmd("git", ["-C", wt, "diff", "#{base}..HEAD"], stderr_to_stdout: true) do
@@ -138,8 +153,19 @@ defmodule Arbiter.Workflows.CodeReview do
     e in ErlangError -> {:error, {:git_diff_failed, Exception.message(e)}}
   end
 
+  def run_step(:read_diff, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
+    opts = adapter_opts(state)
+
+    case safe_adapter_call(adapter, :get_diff, [mr_ref, opts]) do
+      {:ok, diff} when is_binary(diff) -> {:ok, Map.put(state, :diff, diff)}
+      {:error, _} = err -> err
+    end
+  end
+
   def run_step(:read_diff, _state),
-    do: {:error, {:bad_state, "read_diff requires :worktree_path"}}
+    do: {:error, {:bad_state, "read_diff requires :worktree_path (local) or :adapter+:mr_ref"}}
 
   # ---- :run_checks -------------------------------------------------------
 
@@ -168,14 +194,17 @@ defmodule Arbiter.Workflows.CodeReview do
     {:ok, Map.put(state, :review_path, LocalMode.review_path(wt, branch))}
   end
 
-  def run_step(:file_findings, %{mode: :github, repo: repo, pr_number: n} = state) do
+  def run_step(:file_findings, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
     findings = Map.get(state, :findings, [])
-    opts = Map.get(state, :github_opts, [])
+    opts = adapter_opts(state)
 
-    case GithubMode.post_findings(repo, n, findings, opts) do
-      :ok -> {:ok, state}
-      {:error, _} = err -> err
-    end
+    # Inline comments are the per-finding artifact; the verdict step posts
+    # the single review-level summary via submit_review/4. No separate
+    # add_comment call — that would double-post on hosted forges where
+    # submit_review already carries a body.
+    post_each_finding(adapter, mr_ref, findings, opts, state)
   end
 
   def run_step(:file_findings, _state),
@@ -190,15 +219,23 @@ defmodule Arbiter.Workflows.CodeReview do
     {:ok, Map.put(state, :verdict, verdict)}
   end
 
-  def run_step(:verdict, %{mode: :github, repo: repo, pr_number: n} = state) do
+  def run_step(:verdict, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
+      when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
     findings = Map.get(state, :findings, [])
     verdict = compute_verdict(findings)
-    opts = Map.get(state, :github_opts, [])
     body = verdict_summary(verdict, findings)
+    opts = adapter_opts(state)
 
-    case GithubMode.post_verdict(repo, n, verdict, body, opts) do
-      {:ok, _} -> {:ok, Map.put(state, :verdict, verdict)}
-      {:error, _} = err -> err
+    case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
+      {:ok, response} ->
+        {:ok,
+         state
+         |> Map.put(:verdict, verdict)
+         |> maybe_capture_path(response)}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -224,5 +261,43 @@ defmodule Arbiter.Workflows.CodeReview do
   defp verdict_summary(:request_changes, findings) do
     errors = Enum.count(findings, &(&1[:severity] == :error))
     "Requesting changes: #{errors} blocking finding(s) out of #{length(findings)}."
+  end
+
+  defp post_each_finding(adapter, mr_ref, findings, opts, state) do
+    Enum.reduce_while(findings, {:ok, state}, fn finding, {:ok, acc} ->
+      case safe_adapter_call(adapter, :post_inline_comment, [mr_ref, finding, opts]) do
+        {:ok, response} -> {:cont, {:ok, maybe_capture_path(acc, response)}}
+        :ok -> {:cont, {:ok, acc}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # Some adapters (Direct) write findings to a local file and return its
+  # path. Expose that on the state so callers can locate the artifact.
+  defp maybe_capture_path(state, %{path: path}) when is_binary(path),
+    do: Map.put_new(state, :review_path, path)
+
+  defp maybe_capture_path(state, _), do: state
+
+  defp adapter_opts(state) do
+    state
+    |> Map.get(:adapter_opts, %{})
+    |> Map.put_new(:bead, Map.get(state, :bead))
+  end
+
+  # Adapters that need workspace-scoped per-process state (Github, Gitlab)
+  # have their `prepare/1` invoked by `Arbiter.Mergers.prepare/1` before any
+  # adapter call. The workflow forwards the workspace once at the start of
+  # every step — adapters that don't need it (Direct) ignore the call.
+  defp prepare_adapter(%{workspace: ws}) when not is_nil(ws), do: Mergers.prepare(ws)
+  defp prepare_adapter(_), do: :ok
+
+  defp safe_adapter_call(adapter, fun, args) do
+    apply(adapter, fun, args)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 end

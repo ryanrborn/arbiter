@@ -29,6 +29,24 @@ defmodule Arbiter.Mergers.Direct do
       returning `:ok` (there is no MR to act on).
     * `link_for/1` — returns an empty string (no web UI).
 
+  ## Review callbacks
+
+  `Direct` has no MR to comment on and no forge UI to host a review. For
+  the `Arbiter.Workflows.CodeReview` adapter path it implements:
+
+    * `get_diff/2` — runs `git diff <base>..<branch>` in `opts[:repo_path]`,
+      where `<branch>` is decoded from the `mr_ref` (the canonical
+      `"direct:<branch>"` form, or a bare branch name as a fallback).
+      `:target_branch` in opts overrides the base; default is `"main"`.
+    * `post_inline_comment/3` — appends a per-finding section to a local
+      Markdown review file under `opts[:repo_path]/reviews/<branch>.md`,
+      mirroring the `LocalMode` format the `:local` workflow path uses.
+    * `submit_review/4` — rewrites the verdict line in the same review file.
+
+  This keeps "direct" reviews reproducible artifacts — the review is a
+  file in the repo, with the same shape `:local` mode produces — while
+  letting the workflow stay adapter-shaped.
+
   ## Conflict handling — never leave the canonical tree broken
 
   `open/4` operates on the *canonical* checkout (the rig), and the live Phoenix
@@ -89,7 +107,127 @@ defmodule Arbiter.Mergers.Direct do
   @impl true
   def link_for(_mr_ref), do: ""
 
+  # ---- Review callbacks ----
+
+  @impl true
+  def get_diff(mr_ref, opts) when is_binary(mr_ref) and is_map(opts) do
+    case Map.get(opts, :repo_path) do
+      path when is_binary(path) ->
+        branch = branch_from_ref(mr_ref)
+        base = Map.get(opts, :target_branch) || "main"
+
+        case run_git(["diff", "#{base}..#{branch}"], path) do
+          {:ok, output} -> {:ok, output}
+          {:error, reason} -> {:error, reason}
+        end
+
+      _ ->
+        {:error, :no_repo_path}
+    end
+  end
+
+  @impl true
+  def post_inline_comment(mr_ref, finding, opts)
+      when is_binary(mr_ref) and is_map(finding) and is_map(opts) do
+    case Map.get(opts, :repo_path) do
+      path when is_binary(path) ->
+        branch = branch_from_ref(mr_ref)
+        file_path = review_file_path(path, branch)
+        File.mkdir_p!(Path.dirname(file_path))
+        ensure_header(file_path, branch, Map.get(opts, :bead))
+        File.write!(file_path, render_finding(finding), [:append])
+        {:ok, %{path: file_path}}
+
+      _ ->
+        {:error, :no_repo_path}
+    end
+  end
+
+  @impl true
+  def submit_review(mr_ref, verdict, body, opts)
+      when is_binary(mr_ref) and verdict in [:approve, :request_changes] and is_map(opts) do
+    case Map.get(opts, :repo_path) do
+      path when is_binary(path) ->
+        branch = branch_from_ref(mr_ref)
+        file_path = review_file_path(path, branch)
+        File.mkdir_p!(Path.dirname(file_path))
+        ensure_header(file_path, branch, Map.get(opts, :bead))
+        rewrite_verdict(file_path, verdict, body)
+        {:ok, %{path: file_path, verdict: verdict}}
+
+      _ ->
+        {:error, :no_repo_path}
+    end
+  end
+
   # ---- helpers ----
+
+  defp branch_from_ref("direct:" <> branch), do: branch
+  defp branch_from_ref(other), do: other
+
+  defp review_file_path(repo_path, branch) do
+    leaf = String.replace(branch, "/", "-") <> ".md"
+    Path.join([repo_path, "reviews", leaf])
+  end
+
+  defp ensure_header(file_path, branch, bead) do
+    unless File.exists?(file_path) do
+      File.write!(file_path, render_header(branch, bead))
+    end
+  end
+
+  defp render_header(branch, bead) do
+    bead_line =
+      case bead do
+        %{id: id, title: title} -> "**Bead:** #{id} — #{title}"
+        %{"id" => id, "title" => title} -> "**Bead:** #{id} — #{title}"
+        _ -> "**Bead:** (none)"
+      end
+
+    """
+    # Code review: #{branch}
+
+    #{bead_line}
+    **Mode:** direct
+    **Verdict (pending):** _to be set in submit_review_
+
+    ## Findings
+
+    """
+  end
+
+  defp render_finding(%{severity: sev, file: file, line: line, message: msg}) do
+    """
+    ### #{file}:#{line} — #{Atom.to_string(sev)}
+    #{msg}
+
+    """
+  end
+
+  defp rewrite_verdict(file_path, verdict, body) do
+    contents = File.read!(file_path)
+    label = verdict_label(verdict)
+
+    rewritten =
+      String.replace(
+        contents,
+        ~r/^\*\*Verdict.*$/m,
+        "**Verdict:** #{label}",
+        global: false
+      )
+
+    final =
+      if is_binary(body) and body != "" do
+        rewritten <> "\n## Summary\n\n#{body}\n"
+      else
+        rewritten
+      end
+
+    File.write!(file_path, final)
+  end
+
+  defp verdict_label(:approve), do: "APPROVE"
+  defp verdict_label(:request_changes), do: "REQUEST_CHANGES"
 
   # A merge failed. Capture the conflicting paths (while the index still holds
   # them), then `git merge --abort` to restore a clean, compilable tree — the
