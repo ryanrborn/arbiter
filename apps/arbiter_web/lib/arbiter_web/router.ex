@@ -99,6 +99,7 @@ defmodule ArbiterWeb.Router do
 
     # Polecats (workflow runner)
     post("/polecats/sling", PolecatController, :sling)
+    post("/polecats/review", PolecatController, :review)
     get("/polecats/history", RunController, :index)
     get("/polecats/history/:id", RunController, :show)
     get("/polecats", PolecatController, :index)
