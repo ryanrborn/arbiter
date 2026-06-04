@@ -59,12 +59,31 @@ defmodule Arbiter.ApplicationTest do
       assert guard_ix < reconcile_ix
     end
 
+    test "the migrator runs after the single-instance guard and before reconcile/refinery" do
+      # The migrator reads Arbiter.SingleInstance.primary?/0 (so the guard must
+      # precede it) and brings the schema to head SYNCHRONOUSLY, so it must run
+      # before the reconcile/refinery boot Tasks query the database.
+      ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
+
+      assert Arbiter.Boot.Migrator in ids
+
+      guard_ix = Enum.find_index(ids, &(&1 == Arbiter.SingleInstance))
+      migrator_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.Migrator))
+      reconcile_ix = Enum.find_index(ids, &(&1 == :reconcile_boot_task))
+      refinery_ix = Enum.find_index(ids, &(&1 == :refinery_boot_task))
+
+      assert guard_ix < migrator_ix
+      assert migrator_ix < reconcile_ix
+      assert migrator_ix < refinery_ix
+    end
+
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 
       refute :reconcile_boot_task in ids
       refute :refinery_boot_task in ids
       refute Arbiter.SingleInstance in ids
+      refute Arbiter.Boot.Migrator in ids
     end
   end
 end
