@@ -122,6 +122,13 @@ defmodule Arbiter.Polecat do
     @moduledoc false
     defstruct [
       :bead_id,
+      # Registry name this polecat is registered under. Defaults to bead_id
+      # but can be overridden via the `:registry_key` start opt so multiple
+      # polecats can coexist for the same bead (e.g. the Crucible's short-lived
+      # conflict-resolver runs alongside the original work polecat under a
+      # `bead_id <> ":conflict"` key). `terminate/2` uses this when
+      # unregistering so we don't accidentally wipe the bead's primary slot.
+      :registry_key,
       :workspace_id,
       :rig,
       :current_step,
@@ -162,12 +169,17 @@ defmodule Arbiter.Polecat do
   Start a polecat under the dynamic supervisor.
 
   Required opts:
-    * `:bead_id` — string, used as the registry key.
+    * `:bead_id` — string, used as the default registry key.
     * `:rig`    — string, the repo/project key the polecat operates on.
 
   Optional opts:
-    * `:workspace_id` — string.
-    * `:meta`         — initial map of workflow-specific state.
+    * `:workspace_id`   — string.
+    * `:meta`           — initial map of workflow-specific state.
+    * `:registry_key`   — string. Overrides the registry key (defaults to
+      `:bead_id`). Lets multiple polecats coexist for the same bead — the
+      Crucible's conflict-resolver acolyte uses `bead_id <> ":conflict"` so
+      it doesn't collide with the completed-but-still-resident original
+      work polecat (whose lifecycle is tied to bead `:close`).
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
@@ -183,7 +195,8 @@ defmodule Arbiter.Polecat do
       {:ok, bead_id} when is_binary(bead_id) and bead_id != "" ->
         case Keyword.fetch(opts, :rig) do
           {:ok, rig} when is_binary(rig) and rig != "" ->
-            GenServer.start_link(__MODULE__, opts, name: PRegistry.via_tuple(bead_id))
+            registry_key = resolve_registry_key(opts, bead_id)
+            GenServer.start_link(__MODULE__, opts, name: PRegistry.via_tuple(registry_key))
 
           _ ->
             {:error, :missing_rig}
@@ -191,6 +204,13 @@ defmodule Arbiter.Polecat do
 
       _ ->
         {:error, :missing_bead_id}
+    end
+  end
+
+  defp resolve_registry_key(opts, bead_id) do
+    case Keyword.get(opts, :registry_key) do
+      key when is_binary(key) and key != "" -> key
+      _ -> bead_id
     end
   end
 
@@ -370,9 +390,11 @@ defmodule Arbiter.Polecat do
   @impl true
   def init(opts) do
     now = DateTime.utc_now()
+    bead_id = Keyword.fetch!(opts, :bead_id)
 
     state = %State{
-      bead_id: Keyword.fetch!(opts, :bead_id),
+      bead_id: bead_id,
+      registry_key: resolve_registry_key(opts, bead_id),
       workspace_id: Keyword.get(opts, :workspace_id),
       rig: Keyword.fetch!(opts, :rig),
       current_step: :idle,
@@ -1330,7 +1352,7 @@ defmodule Arbiter.Polecat do
   end
 
   @impl true
-  def terminate(_reason, %State{bead_id: bead_id} = state) do
+  def terminate(_reason, %State{} = state) do
     # Finalize the run row before we tear down. This is the normal-path
     # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
     # real acolyte-completion path is `arb done` -> bead closes -> the bead
@@ -1344,7 +1366,10 @@ defmodule Arbiter.Polecat do
     # `GenServer.stop/1` see `nil` deterministically. Registry's own
     # monitor-based cleanup runs asynchronously and was the source of a flaky
     # test where `whereis/1` returned the dead pid briefly after stop.
-    PRegistry.unregister(bead_id)
+    # Use the registry_key the polecat actually registered under — defaults
+    # to bead_id but the Crucible's conflict-resolver overrides it so its
+    # teardown doesn't accidentally unregister the original work polecat.
+    PRegistry.unregister(state.registry_key || state.bead_id)
     broadcast_lifecycle(:stopped, state)
     :ok
   end
