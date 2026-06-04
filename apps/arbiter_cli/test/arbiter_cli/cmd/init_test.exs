@@ -35,7 +35,7 @@ defmodule ArbiterCli.Cmd.InitTest do
   end
 
   describe "scaffolding" do
-    test "creates all five artifacts pre-filled with the active install" do
+    test "creates all six artifacts pre-filled with the active install" do
       stub_install()
       dir = tmp_dir()
 
@@ -43,6 +43,7 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert exit_code == 0
 
       assert File.exists?(Path.join(dir, "AGENTS.md"))
+      assert File.exists?(Path.join(dir, "ARBITER_OPERATOR.md"))
       assert File.exists?(Path.join(dir, "AGENTS.local.md"))
       assert File.exists?(Path.join(dir, ".gitignore"))
       assert File.exists?(Path.join(dir, "memory/MEMORY.md"))
@@ -50,6 +51,45 @@ defmodule ArbiterCli.Cmd.InitTest do
 
       assert out =~ "created"
       assert out =~ "AGENTS.md"
+      assert out =~ "ARBITER_OPERATOR.md"
+    end
+
+    test "ARBITER_OPERATOR.md is the operator field guide with all key sections" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
+
+      # Rendered with the active vernacular.
+      assert guide =~ "Admiral Operator Field Guide"
+      assert guide =~ "acolytes"
+      assert guide =~ "directive"
+
+      # Covers the required sections.
+      assert guide =~ "Role & Loop"
+      assert guide =~ "Concurrency Discipline"
+      assert guide =~ "Config Safety"
+      assert guide =~ "Deploy Safely"
+      assert guide =~ "Trust State, But Verify"
+      assert guide =~ "Tribunal"
+      assert guide =~ "Provider-Agnostic"
+
+      # Generic — no operator-personal content.
+      refute guide =~ "ryan"
+      refute guide =~ "Ryan"
+    end
+
+    test "ARBITER_OPERATOR.md uses the active vernacular and domain prefix" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
+
+      assert guide =~ "Admiral"
+      assert guide =~ "acolyte"
+      assert guide =~ "directive"
     end
 
     test "AGENTS.md uses the active vernacular and the domain name/prefix" do
