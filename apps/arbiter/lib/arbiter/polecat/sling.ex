@@ -425,12 +425,15 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Translate a Routing.Policy.choice() config map (JSON string-keyed) into
-  # the keyword opts the Agent behaviour expects (`:model`, ...). Unknown
-  # keys are passed through under `:config` so future adapters can read
-  # adapter-specific keys without growing this function.
+  # the keyword opts the Agent behaviour expects (`:model`, `:model_tier`,
+  # `:thinking`, ...). Unknown keys are passed through under `:config` so
+  # future adapters can read adapter-specific keys without growing this
+  # function.
   defp agent_opts_from_choice(%{config: config}) when is_map(config) do
     [
       model: Map.get(config, "model"),
+      model_tier: Map.get(config, "model_tier"),
+      thinking: Map.get(config, "thinking"),
       config: config
     ]
   end

@@ -95,6 +95,45 @@ defmodule Arbiter.Beads.IssueTest do
       assert p0.priority == 0
     end
 
+    test "difficulty defaults to nil and accepts 0..4", %{ws: ws} do
+      {:ok, default} =
+        Ash.create(Issue, %{title: "no-difficulty", workspace_id: ws.id})
+
+      assert default.difficulty == nil
+
+      for d <- 0..4 do
+        {:ok, set} =
+          Ash.create(Issue, %{
+            title: "d#{d}",
+            difficulty: d,
+            workspace_id: ws.id
+          })
+
+        assert set.difficulty == d
+      end
+    end
+
+    test "difficulty rejects out-of-range integers", %{ws: ws} do
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Issue, %{title: "d5", difficulty: 5, workspace_id: ws.id})
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Ash.create(Issue, %{title: "dneg", difficulty: -1, workspace_id: ws.id})
+    end
+
+    test "difficulty persists across reload and can be updated", %{ws: ws} do
+      {:ok, b} = Ash.create(Issue, %{title: "d3", difficulty: 3, workspace_id: ws.id})
+      assert Ash.get!(Issue, b.id).difficulty == 3
+
+      {:ok, updated} = Ash.update(b, %{difficulty: 1})
+      assert updated.difficulty == 1
+      assert Ash.get!(Issue, b.id).difficulty == 1
+
+      # Clearing is allowed (nullable).
+      {:ok, cleared} = Ash.update(updated, %{difficulty: nil})
+      assert cleared.difficulty == nil
+    end
+
     test "issue_type must be in enum", %{ws: ws} do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Issue, %{title: "weird", issue_type: :rumor, workspace_id: ws.id})
