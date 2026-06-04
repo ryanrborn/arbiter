@@ -3,7 +3,7 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
                        [--assignee a] [--tracker-ref REF] [--no-tracker]
-                       [--vanguard <convoy-id>]`
+                       [--target-branch NAME] [--vanguard <convoy-id>]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
@@ -73,6 +73,7 @@ defmodule ArbiterCli.Cmd.Create do
     labels: :string,
     assignee: :string,
     tracker_ref: :string,
+    target_branch: :string,
     no_tracker: :boolean,
     local_only: :boolean,
     vanguard: :string,
@@ -104,6 +105,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("issue_type", opts[:type])
       |> maybe_put("assignee", opts[:assignee])
       |> maybe_put("tracker_ref", opts[:tracker_ref])
+      |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
 
     if opts[:labels] && mode == :text do

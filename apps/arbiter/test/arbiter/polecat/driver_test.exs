@@ -262,6 +262,12 @@ defmodule Arbiter.Polecat.DriverTest do
       {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
 
+      # Worktree.create fetches from origin/<base>; provide a bare upstream.
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
       worktree_root = Path.join(tmp, "wt")
       File.mkdir_p!(worktree_root)
 

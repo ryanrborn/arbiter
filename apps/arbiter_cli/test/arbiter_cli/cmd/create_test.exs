@@ -155,6 +155,32 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert body["skip_upstream_create"] == true
   end
 
+  test "--target-branch forwards as target_branch in the POST body" do
+    parent = self()
+
+    stub_routes([
+      {{"get", "/api/workspaces"},
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+      {{"post", "/api/issues"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{"id" => "bd-010", "title" => "T", "target_branch" => "dolphin"})
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn -> Create.run(["T", "--target-branch", "dolphin"]) end)
+
+    assert exit_code == 0
+
+    assert_received {:posted, body}
+    assert body["target_branch"] == "dolphin"
+  end
+
   test "--difficulty forwards as difficulty in the POST body" do
     parent = self()
 
