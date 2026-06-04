@@ -15,6 +15,10 @@ defmodule ArbiterCli.Main do
                 [--tracker]    Also list open assigned issues from the workspace's
                                external tracker (visually distinct, deduped by ref).
       arb update <id> [--priority ...] [--append-notes ...]
+                               Edit an issue's fields.
+      arb update [--timeout SECONDS] [--json]
+                               No id: deploy. git pull --ff-only main, then
+                               restart Phoenix so merged code is live.
       arb convoy create <title> [--lifecycle system_managed|owned]
       arb convoy add <convoy-id> <issue-id...>
       arb convoy rm <convoy-id> <issue-id>
