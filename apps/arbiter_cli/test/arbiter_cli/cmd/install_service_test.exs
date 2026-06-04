@@ -54,6 +54,8 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       assert contents =~ "RemainAfterExit=yes"
       assert contents =~ "WantedBy=default.target"
       assert contents =~ "WorkingDirectory=/tmp/arbiter-install-test"
+      # MIX_HOME must be pinned so Phoenix/Mix can boot under systemd.
+      assert contents =~ "Environment=MIX_HOME="
 
       # Orchestration, in the user manager, in order.
       assert_received {:cmd, "systemctl", ["--user", "daemon-reload"]}
@@ -190,6 +192,12 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       refute contents =~ "docker.service"
       assert contents =~ "WantedBy=default.target"
       assert contents =~ "EnvironmentFile=-/srv/arbiter/.arbiter.env"
+    end
+
+    test "pins MIX_HOME so Mix can resolve archives/escripts under systemd" do
+      mix_home = System.get_env("MIX_HOME") || Path.join(System.user_home!(), ".mix")
+      contents = InstallService.unit_contents(:user, "/srv/arbiter")
+      assert contents =~ "Environment=MIX_HOME=#{mix_home}"
     end
   end
 end
