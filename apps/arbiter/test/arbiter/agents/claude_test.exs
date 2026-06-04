@@ -23,7 +23,9 @@ defmodule Arbiter.Agents.ClaudeTest do
 
   describe "default_argv/2 with a stubbed claude binary" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "arbiter-claude-stub-#{System.unique_integer([:positive])}")
+      tmp =
+        Path.join(System.tmp_dir!(), "arbiter-claude-stub-#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(tmp)
       stub = Path.join(tmp, "claude")
       File.write!(stub, "#!/bin/sh\nexit 0\n")
@@ -117,7 +119,32 @@ defmodule Arbiter.Agents.ClaudeTest do
       # Wraps back to the first key on the next call.
       assert Claude.spawn_env([]) == [{"ANTHROPIC_API_KEY", "key-a"}]
     end
+
+    test "prepends an isolated CLAUDE_CONFIG_DIR when config isolation is enabled" do
+      target =
+        Path.join(System.tmp_dir!(), "arbiter-spawnenv-iso-#{System.unique_integer([:positive])}")
+
+      prev_isolate = Application.get_env(:arbiter, :acolyte_isolate_config)
+      prev_dir = Application.get_env(:arbiter, :acolyte_config_dir)
+      Application.put_env(:arbiter, :acolyte_isolate_config, true)
+      Application.put_env(:arbiter, :acolyte_config_dir, target)
+
+      on_exit(fn ->
+        put_or_delete(:acolyte_isolate_config, prev_isolate)
+        put_or_delete(:acolyte_config_dir, prev_dir)
+        File.rm_rf!(target)
+      end)
+
+      # Config-dir isolation comes first; the API key composes on top.
+      assert Claude.spawn_env(api_key: "literal-token") == [
+               {"CLAUDE_CONFIG_DIR", target},
+               {"ANTHROPIC_API_KEY", "literal-token"}
+             ]
+    end
   end
+
+  defp put_or_delete(key, nil), do: Application.delete_env(:arbiter, key)
+  defp put_or_delete(key, val), do: Application.put_env(:arbiter, key, val)
 
   describe "usage_attrs/1" do
     test "returns an empty-ish map tagged with the provider when no usage was absorbed" do
