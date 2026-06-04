@@ -42,6 +42,9 @@ defmodule ArbiterCli.Main do
                 [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
       arb usage events [--bead <bead-id>] [--workspace <id>] [--step work|review]
                        [--since ...] [--limit N]
+      arb config get   [dotted.key] [--workspace W] [--json]
+      arb config set   <dotted.key> <value> [--workspace W] [--force]
+      arb config unset <dotted.key>         [--workspace W] [--force]
 
   Global flags:
       --json     Emit machine-readable JSON (default is human-readable text)
@@ -111,6 +114,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("sync", args), do: ArbiterCli.Cmd.Sync.run(args)
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
   defp dispatch_known("convoy", args), do: ArbiterCli.Cmd.Convoy.run(args)
+  defp dispatch_known("config", args), do: ArbiterCli.Cmd.Config.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do

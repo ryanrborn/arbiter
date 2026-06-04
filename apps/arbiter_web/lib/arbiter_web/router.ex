@@ -75,6 +75,7 @@ defmodule ArbiterWeb.Router do
     get("/workspaces/:id", WorkspaceController, :show)
     patch("/workspaces/:id", WorkspaceController, :update)
     put("/workspaces/:id", WorkspaceController, :update)
+    patch("/workspaces/:id/config", WorkspaceController, :patch_config)
 
     # Tracker bridge (assignment-as-claim for GitHub Issues)
     post("/workspaces/:workspace_id/claim", ClaimController, :claim)
