@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.Restart do
   reconciler (`Arbiter.Polecats.ReconcileGuard`), which fails any orphaned
   `:running` polecat runs left behind by the previous node — something a hot
   reload never does. Pairs with `arb start` (boot the stack if down) and
-  `arb update` (pull + migrate).
+  `arb update` (pull latest main, then restart — it reuses `perform/2` below).
 
   What it does:
 
@@ -68,6 +68,25 @@ defmodule ArbiterCli.Cmd.Restart do
           )
       end
 
+    case perform(root, timeout_ms) do
+      {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
+      {:timeout, actions, _was_running} -> emit_timeout(mode, actions, timeout_ms)
+    end
+  end
+
+  @doc """
+  Stop the running Phoenix, start a fresh one, and wait up to `timeout_ms` for
+  the stack to go green.
+
+  Returns `{result, actions, was_running}` where `result` is `:ok` or
+  `:timeout`, `actions` is the `[{:phoenix_stop, _, _}, {:phoenix, :ok, _}]`
+  list, and `was_running` records whether the API was reachable before the
+  bounce. Shared with `arb update`, which runs a `git pull` first and then
+  reuses this to load the freshly-merged code — so the two commands have one
+  definition of "bounce Phoenix".
+  """
+  @spec perform(String.t(), non_neg_integer()) :: {:ok | :timeout, list(), boolean()}
+  def perform(root, timeout_ms) do
     port = api_port()
     was_running = Doctor.reachable?()
 
@@ -77,8 +96,8 @@ defmodule ArbiterCli.Cmd.Restart do
     actions = [stop_action, start_action]
 
     case Start.wait_until_green(Start.attempts_for(timeout_ms)) do
-      :ok -> emit_restarted(mode, actions, was_running)
-      :timeout -> emit_timeout(mode, actions, timeout_ms)
+      :ok -> {:ok, actions, was_running}
+      :timeout -> {:timeout, actions, was_running}
     end
   end
 
