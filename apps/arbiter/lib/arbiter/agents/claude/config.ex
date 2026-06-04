@@ -80,15 +80,15 @@ defmodule Arbiter.Agents.Claude.Config do
     "premium" => "opus"
   }
 
-  # Default thinking → reasoning-effort flag value passed to the Claude CLI
-  # via `--reasoning-effort <level>`. `none` omits the flag (CLI default).
+  # Default thinking → effort flag passed to the Claude CLI via `--effort <level>`.
+  # `none` omits the flag (CLI default).
   # Workspaces can override per-level argv with `agent.config["thinking_argv"]`
   # (e.g. swap to `--max-thinking-tokens` if a newer CLI prefers that).
   @default_thinking_argv %{
     "none" => [],
-    "low" => ["--reasoning-effort", "low"],
-    "medium" => ["--reasoning-effort", "medium"],
-    "high" => ["--reasoning-effort", "high"]
+    "low" => ["--effort", "low"],
+    "medium" => ["--effort", "medium"],
+    "high" => ["--effort", "high"]
   }
 
   @doc """
