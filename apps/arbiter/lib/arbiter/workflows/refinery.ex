@@ -329,7 +329,15 @@ defmodule Arbiter.Workflows.Refinery do
 
   defp open_pr_for(state, bead, strategy) do
     repo = state.repo || strategy_for(bead.workspace, "merge", "repo", nil)
-    base = state.base || strategy_for(bead.workspace, "merge", "base", "main") || "main"
+    # PR base: per-bead override wins (matches the branch the worktree was cut
+    # from), else workspace `merge.base`, else `"main"`. Without this, a bead
+    # with a custom `target_branch` would have its branch cut from one ref but
+    # its PR opened against another.
+    base =
+      state.base ||
+        bead_target_branch(bead) ||
+        strategy_for(bead.workspace, "merge", "base", "main") || "main"
+
     branch = strategy_for(bead.workspace, "merge", "branch_prefix", "") <> bead.id
     title = bead.title
     body = bead.description || ""
@@ -391,8 +399,7 @@ defmodule Arbiter.Workflows.Refinery do
         advance_status(state, item, pr_payload)
 
       {:error, reason} ->
-        {%{item | status: :failed, last_error: reason, last_polled_at: DateTime.utc_now()},
-         state}
+        {%{item | status: :failed, last_error: reason, last_polled_at: DateTime.utc_now()}, state}
     end
   end
 
@@ -616,15 +623,11 @@ defmodule Arbiter.Workflows.Refinery do
             broadcast_refinery_event(state, {:bead_closed_by_refinery, item.bead_id})
 
           {:error, reason} ->
-            Logger.warning(
-              "Refinery: failed to close bead #{item.bead_id}: #{inspect(reason)}"
-            )
+            Logger.warning("Refinery: failed to close bead #{item.bead_id}: #{inspect(reason)}")
         end
 
       {:error, reason} ->
-        Logger.warning(
-          "Refinery: bead #{item.bead_id} vanished before close: #{inspect(reason)}"
-        )
+        Logger.warning("Refinery: bead #{item.bead_id} vanished before close: #{inspect(reason)}")
     end
 
     state
@@ -651,6 +654,9 @@ defmodule Arbiter.Workflows.Refinery do
   defp already_queued?(%State{items: items}, bead_id) do
     Enum.any?(items, fn i -> i.bead_id == bead_id and i.status not in [:done, :failed] end)
   end
+
+  defp bead_target_branch(%{target_branch: t}) when is_binary(t) and t != "", do: t
+  defp bead_target_branch(_), do: nil
 
   defp strategy_for(workspace, key1, key2, default) do
     case workspace && workspace.config do

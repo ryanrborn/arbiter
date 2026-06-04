@@ -189,7 +189,7 @@ defmodule Arbiter.Polecat.Sling do
         Map.merge(base, %{
           branch: BranchNamer.derive(bead),
           repo_path: repo_path,
-          target_branch: resolve_base_branch(bead, opts),
+          target_branch: resolve_target_branch(bead, opts),
           merge_title: merge_title(bead)
         })
 
@@ -215,14 +215,21 @@ defmodule Arbiter.Polecat.Sling do
     end
   end
 
-  # Provision a fresh git worktree on a per-bead branch.
+  # Provision a fresh git worktree on a per-bead branch, cut from the upstream
+  # tip of the resolved target branch (`origin/<target>`).
+  #
+  # The arbiter — not the acolyte — fetches from origin before creating the
+  # worktree. The acolyte then starts on a clean, current branch with no git
+  # plumbing in its context.
   #
   # Behaviour:
   #   - `provision_worktree: false` in opts → skip, return `{:ok, nil}`.
   #   - rig has no mapping in workspace config or Application env → skip,
   #     return `{:ok, nil}` (the default no-op stance).
-  #   - Otherwise, derive a branch name from the bead via `BranchNamer` and
-  #     call `Worktree.create/3`. Returns `{:ok, path}` or `{:error, ...}`.
+  #   - Otherwise, derive a branch name and call `Worktree.create/3`, which
+  #     `git fetch origin <target>` + `git worktree add -b <branch>
+  #     origin/<target>`. A fetch or ref-resolve failure aborts with a clear
+  #     error rather than silently falling back to a stale local base.
   #
   # ## Rig path lookup order
   #
@@ -247,9 +254,9 @@ defmodule Arbiter.Polecat.Sling do
 
           repo_path when is_binary(repo_path) ->
             branch = BranchNamer.derive(bead)
-            base_branch = resolve_base_branch(bead, opts)
+            target_branch = resolve_target_branch(bead, opts)
 
-            case Worktree.create(repo_path, branch, base_branch) do
+            case Worktree.create(repo_path, branch, target_branch) do
               {:ok, path} -> {:ok, path}
               {:error, reason} -> {:error, {:worktree_failed, reason}}
             end
@@ -260,7 +267,7 @@ defmodule Arbiter.Polecat.Sling do
   defp resolve_rig_path(_bead, nil), do: nil
 
   defp resolve_rig_path(%Issue{workspace_id: ws_id}, rig) when is_binary(rig) do
-    workspace_path(ws_id, rig) || application_path(rig)
+    workspace_rig_path(ws_id, rig) || application_rig_path(rig)
   end
 
   # Resolve the integration branch — the branch the worktree is cut from and
@@ -270,19 +277,30 @@ defmodule Arbiter.Polecat.Sling do
   # Resolution order:
   #   1. Explicit `:base_branch` opt — kept as an escape hatch for callers
   #      (and tests) that know better than the workspace config.
-  #   2. Workspace merge config (`workspace.config["merge"]["base"]`) — the
+  #   2. Bead's own `:target_branch` field — per-bead override.
+  #   3. Per-rig default in workspace config — the `rig_paths` map entry can
+  #      be a string (the path) or a `{"path" => ..., "target_branch" => ...}`
+  #      map for an integration branch shared by every bead worked in that rig.
+  #   4. Workspace merge config (`workspace.config["merge"]["base"]`) — the
   #      same key the `Refinery` reads when opening PRs, so the worktree base
   #      and the eventual PR base stay in lockstep.
-  #   3. `"main"` — the default integration branch.
-  defp resolve_base_branch(%Issue{} = bead, opts) do
-    Keyword.get(opts, :base_branch) || workspace_base_branch(bead) || "main"
+  #   5. `"main"` — the default integration branch.
+  defp resolve_target_branch(%Issue{} = bead, opts) do
+    Keyword.get(opts, :base_branch) ||
+      bead_target_branch(bead) ||
+      workspace_rig_target(bead, Keyword.get(opts, :rig)) ||
+      workspace_base_branch(bead) ||
+      "main"
   end
+
+  defp bead_target_branch(%Issue{target_branch: t}) when is_binary(t) and t != "", do: t
+  defp bead_target_branch(_), do: nil
 
   defp workspace_base_branch(%Issue{workspace_id: nil}), do: nil
 
   defp workspace_base_branch(%Issue{workspace_id: ws_id}) do
-    case Ash.get(Workspace, ws_id) do
-      {:ok, %Workspace{config: %{} = config}} ->
+    case load_workspace_config(ws_id) do
+      %{} = config ->
         case get_in(config, ["merge", "base"]) do
           base when is_binary(base) and base != "" -> base
           _ -> nil
@@ -291,34 +309,53 @@ defmodule Arbiter.Polecat.Sling do
       _ ->
         nil
     end
-  rescue
-    _ -> nil
   end
 
-  defp workspace_path(nil, _rig), do: nil
+  defp workspace_rig_target(_bead, nil), do: nil
 
-  defp workspace_path(ws_id, rig) do
-    case Ash.get(Workspace, ws_id) do
-      {:ok, %Workspace{config: %{} = config}} ->
-        case get_in(config, ["rig_paths", rig]) do
-          path when is_binary(path) and path != "" -> path
-          _ -> nil
-        end
+  defp workspace_rig_target(%Issue{workspace_id: nil}, _rig), do: nil
+
+  defp workspace_rig_target(%Issue{workspace_id: ws_id}, rig) when is_binary(rig) do
+    case load_workspace_config(ws_id) do
+      %{} = config ->
+        rig_target_from_config(get_in(config, ["rig_paths", rig]))
 
       _ ->
         nil
     end
-  rescue
-    _ -> nil
   end
 
-  defp application_path(rig) do
-    rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
+  defp rig_target_from_config(%{"target_branch" => t}) when is_binary(t) and t != "", do: t
+  defp rig_target_from_config(_), do: nil
 
-    case Map.get(rig_paths, rig) do
-      path when is_binary(path) and path != "" -> path
+  defp workspace_rig_path(nil, _rig), do: nil
+
+  defp workspace_rig_path(ws_id, rig) do
+    case load_workspace_config(ws_id) do
+      %{} = config ->
+        rig_path_from_config(get_in(config, ["rig_paths", rig]))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp rig_path_from_config(p) when is_binary(p) and p != "", do: p
+  defp rig_path_from_config(%{"path" => p}) when is_binary(p) and p != "", do: p
+  defp rig_path_from_config(_), do: nil
+
+  defp application_rig_path(rig) do
+    rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
+    rig_path_from_config(Map.get(rig_paths, rig))
+  end
+
+  defp load_workspace_config(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{config: %{} = config}} -> config
       _ -> nil
     end
+  rescue
+    _ -> nil
   end
 
   # Spawn a Claude subprocess in the worktree, attached to the polecat.

@@ -148,6 +148,7 @@ defmodule ArbiterCli.Output do
         {"Assignee", issue["assignee"]},
         {Vernacular.cap(vern, "workspace"), issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
+        {"Target", issue["target_branch"]},
         {"Created", issue["created_at"]},
         {"Updated", issue["updated_at"]},
         {"Closed", issue["closed_at"]}

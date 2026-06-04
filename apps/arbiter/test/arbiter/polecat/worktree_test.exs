@@ -24,10 +24,12 @@ defmodule Arbiter.Polecat.WorktreeTest do
     {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
     {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
 
-    # A bare repo to push to, so we can actually exercise push/2.
+    # A bare repo to push to, so we can actually exercise push/2 — and so
+    # `origin/main` exists for the fetch-from-origin path in `create/3`.
     remote = Path.join(tmp, "remote.git")
-    {_, 0} = System.cmd("git", ["init", "-q", "--bare", remote])
+    {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
     {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
 
     worktree_root = Path.join(tmp, "worktrees")
     File.mkdir_p!(worktree_root)
@@ -78,12 +80,90 @@ defmodule Arbiter.Polecat.WorktreeTest do
       assert {:error, :invalid_branch_name} = Worktree.create(repo, nil, "main")
     end
 
-    test "nonexistent base branch returns {:error, {:git_failed, _}}", %{repo: repo} do
-      assert {:error, {:git_failed, msg}} =
-               Worktree.create(repo, "feature/no-base", "does-not-exist")
+    test "nonexistent base branch aborts before branching from stale state",
+         %{repo: repo} do
+      # `git fetch origin does-not-exist` fails before we can attempt the
+      # worktree-add — so the result is `:fetch_failed` (or
+      # `:missing_origin_ref` if a host's git ever silently succeeds). Either
+      # way: we MUST NOT fall back to the local ref.
+      assert {:error, reason} = Worktree.create(repo, "feature/no-base", "does-not-exist")
 
-      assert is_binary(msg)
-      assert msg != ""
+      assert match?({:fetch_failed, _}, reason) or match?({:missing_origin_ref, _}, reason),
+             "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
+    end
+
+    test "aborts when the rig has no `origin` remote configured",
+         %{tmp: tmp} do
+      # Build a rig with NO origin remote. We MUST refuse to provision rather
+      # than silently branching from the rig's (potentially stale) local base.
+      local_only = Path.join(tmp, "local-only")
+      File.mkdir_p!(local_only)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local_only])
+      {_, 0} = System.cmd("git", ["-C", local_only, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", local_only, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", local_only, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(local_only, "f"), "x")
+      {_, 0} = System.cmd("git", ["-C", local_only, "add", "f"])
+      {_, 0} = System.cmd("git", ["-C", local_only, "commit", "-q", "-m", "i"])
+
+      assert {:error, {:missing_origin_remote, msg}} =
+               Worktree.create(local_only, "feature/local-only", "main")
+
+      assert msg =~ "origin"
+    end
+
+    test "fetches origin: worktree starts from upstream tip, NOT the rig's stale local base",
+         %{repo: repo, remote: remote, tmp: tmp} do
+      # Simulate the failure case from the bead: the rig's local `main` is
+      # behind origin/main. A second clone advances origin; the rig's local
+      # `main` stays put. The new worktree must start from origin/main (sees
+      # the new file), not from the stale local ref.
+      clone = Path.join(tmp, "advance-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, "UPSTREAM_ADVANCE.md"), "added on origin\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "UPSTREAM_ADVANCE.md"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance origin"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+
+      # The rig's local `main` has NOT been fetched yet — it's stale.
+      refute File.exists?(Path.join(repo, "UPSTREAM_ADVANCE.md"))
+
+      assert {:ok, path} = Worktree.create(repo, "feature/from-upstream", "main")
+
+      # Worktree saw the upstream advance — proves we cut from origin/main,
+      # not from the stale local `main`.
+      assert File.exists?(Path.join(path, "UPSTREAM_ADVANCE.md"))
+    end
+
+    test "dirty rig working tree does not block worktree provisioning",
+         %{repo: repo} do
+      # Per the bead's guards: the rig is read but a separate worktree is
+      # created, so a dirty rig must NOT prevent provisioning.
+      File.write!(Path.join(repo, "scratch.txt"), "wip in rig\n")
+
+      assert {:ok, path} = Worktree.create(repo, "feature/dirty-rig", "main")
+      assert File.dir?(path)
+      assert {:ok, "feature/dirty-rig"} = Worktree.current_branch(path)
+    end
+
+    test "fetches origin even when the rig's HEAD is on an unrelated branch",
+         %{repo: repo} do
+      # The rig's HEAD is on a side branch — `main` exists but the working
+      # tree is checked out elsewhere. The new worktree should still start
+      # from `origin/main`, not blow up over the rig's HEAD state.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "rig-side"])
+      File.write!(Path.join(repo, "SIDE.md"), "side branch\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "SIDE.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "side"])
+
+      assert {:ok, path} = Worktree.create(repo, "feature/from-main", "main")
+
+      # The new worktree is on `main`, not the rig's `rig-side`.
+      assert {:ok, "feature/from-main"} = Worktree.current_branch(path)
+      refute File.exists?(Path.join(path, "SIDE.md"))
     end
   end
 
@@ -163,7 +243,8 @@ defmodule Arbiter.Polecat.WorktreeTest do
     end
 
     test "returns [] for a non-existent path" do
-      assert [] = Worktree.list("/tmp/definitely-not-a-repo-#{:erlang.unique_integer([:positive])}")
+      assert [] =
+               Worktree.list("/tmp/definitely-not-a-repo-#{:erlang.unique_integer([:positive])}")
     end
   end
 

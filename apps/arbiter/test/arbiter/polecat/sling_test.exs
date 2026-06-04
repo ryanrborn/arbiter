@@ -124,6 +124,14 @@ defmodule Arbiter.Polecat.SlingTest do
       File.write!(Path.join(repo, "README.md"), "x\n")
       {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      # Bare origin: Worktree.create fetches from origin and branches from
+      # origin/<base>; provide an upstream the provisioner can consult.
+      remote = Path.join(tmp, sub <> "-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
       repo
     end
 
@@ -142,15 +150,7 @@ defmodule Arbiter.Polecat.SlingTest do
       # Sling.maybe_provision_worktree returns nil when rig is unmapped, but
       # we need a worktree_path for ClaudeSession; so we point a tmp rig at
       # a real git repo and let Sling provision the worktree itself.
-      repo = Path.join(tmp, "repo")
-      File.mkdir_p!(repo)
-      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
-      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
-      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
-      File.write!(Path.join(repo, "README.md"), "x\n")
-      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
-      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+      repo = seed_repo!(tmp, "repo")
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
       Application.put_env(:arbiter, :rig_paths, %{"claude/rig" => repo})
@@ -191,15 +191,7 @@ defmodule Arbiter.Polecat.SlingTest do
          %{ws: ws, tmp: tmp} do
       {:ok, bead} = Ash.create(Issue, %{title: "drvr-mode", workspace_id: ws.id})
 
-      repo = Path.join(tmp, "drvrepo")
-      File.mkdir_p!(repo)
-      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
-      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
-      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
-      File.write!(Path.join(repo, "README.md"), "x\n")
-      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
-      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+      repo = seed_repo!(tmp, "drvrepo")
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "drv-wt"))
       Application.put_env(:arbiter, :rig_paths, %{"drvr/rig" => repo})
@@ -396,6 +388,14 @@ defmodule Arbiter.Polecat.SlingTest do
       {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
 
+      # Bare origin: Worktree.create fetches from `origin` and branches from
+      # `origin/<base>`. Tests set it up explicitly so the rig has an upstream
+      # the provisioning path can consult.
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
       worktree_root = Path.join(tmp, "worktrees")
       File.mkdir_p!(worktree_root)
 
@@ -417,7 +417,7 @@ defmodule Arbiter.Polecat.SlingTest do
         File.rm_rf!(tmp)
       end)
 
-      %{repo: repo, worktree_root: worktree_root}
+      %{repo: repo, remote: remote, worktree_root: worktree_root, tmp: tmp}
     end
 
     test "creates a worktree on a derived branch when rig is configured",
@@ -468,12 +468,14 @@ defmodule Arbiter.Polecat.SlingTest do
     test "cuts the worktree from (and targets) the workspace's configured base branch",
          %{repo: repo} do
       # The source repo's default branch is `main`. Create a `develop` branch
-      # that diverges from it, then configure a workspace whose merge config
+      # that diverges from it (pushed to origin so the fetch-from-origin
+      # provisioner can see it), then configure a workspace whose merge config
       # points the integration branch at `develop`.
       {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "develop"])
       File.write!(Path.join(repo, "DEVELOP_ONLY.md"), "only on develop\n")
       {_, 0} = System.cmd("git", ["-C", repo, "add", "DEVELOP_ONLY.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "develop-only file"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "develop"])
       # Leave the repo's HEAD on `main` so a hardcoded "main" base would NOT
       # see the develop-only file — the assertion below proves we cut from
       # `develop`, not from whatever HEAD happens to be.
@@ -509,6 +511,122 @@ defmodule Arbiter.Polecat.SlingTest do
         Sling.sling(bead.id, rig: "st/rig", start_driver: false, provision_worktree: false)
 
       assert result.worktree_path == nil
+    end
+
+    test "worktree starts from upstream tip even when the rig's local base is stale",
+         %{repo: repo, remote: remote, tmp: tmp, ws: ws} do
+      # Reproduces the 2026-06-04 incident: a second clone advances origin/main;
+      # the rig's local `main` stays put. Sling must still produce a worktree
+      # at the upstream tip.
+      clone = Path.join(tmp, "advance")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, "UPSTREAM.md"), "added on origin\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "UPSTREAM.md"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+
+      refute File.exists?(Path.join(repo, "UPSTREAM.md"))
+
+      {:ok, bead} = Ash.create(Issue, %{title: "stale local base", workspace_id: ws.id})
+
+      {:ok, result} = Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+
+      assert File.exists?(Path.join(result.worktree_path, "UPSTREAM.md"))
+    end
+
+    test "fetch failure aborts the sling with a clear error", %{ws: ws, tmp: tmp} do
+      # Rig with a broken `origin` (points at a nonexistent path): the fetch
+      # must fail and the sling abort with a structured error rather than
+      # silently falling back to the stale local base.
+      broken = Path.join(tmp, "broken-origin")
+      File.mkdir_p!(broken)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", broken])
+      {_, 0} = System.cmd("git", ["-C", broken, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", broken, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", broken, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(broken, "x"), "x")
+      {_, 0} = System.cmd("git", ["-C", broken, "add", "x"])
+      {_, 0} = System.cmd("git", ["-C", broken, "commit", "-q", "-m", "i"])
+      # Origin points at a path that doesn't exist — `git fetch` will fail.
+      {_, 0} =
+        System.cmd("git", ["-C", broken, "remote", "add", "origin", Path.join(tmp, "no-such")])
+
+      Application.put_env(:arbiter, :rig_paths, %{"broken/rig" => broken})
+
+      {:ok, bead} = Ash.create(Issue, %{title: "fetch failure", workspace_id: ws.id})
+
+      assert {:error, {:worktree_failed, reason}} =
+               Sling.sling(bead.id, rig: "broken/rig", start_driver: false)
+
+      assert match?({:fetch_failed, _}, reason) or match?({:missing_origin_ref, _}, reason),
+             "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
+    end
+
+    test "per-bead target_branch overrides the workspace default", %{repo: repo, remote: remote} do
+      # Push a `dolphin` branch to origin so Worktree.create can fetch it.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "dolphin"])
+      File.write!(Path.join(repo, "DOLPHIN.md"), "dolphin\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "DOLPHIN.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "dolphin"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "dolphin"])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      _ = remote
+
+      {:ok, ws_local} =
+        Ash.create(Workspace, %{
+          name: "per-bead-target-#{System.unique_integer([:positive])}",
+          prefix: "pb",
+          # Workspace default is the bare "main"; the bead overrides to dolphin.
+          config: %{"rig_paths" => %{"pb/rig" => repo}, "merge" => %{"base" => "main"}}
+        })
+
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "per-bead target",
+          workspace_id: ws_local.id,
+          target_branch: "dolphin"
+        })
+
+      {:ok, result} = Sling.sling(bead.id, rig: "pb/rig", start_driver: false)
+
+      # The bead-specified target wins: the worktree carries the dolphin file
+      # and the polecat's meta records dolphin as the merge target.
+      assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
+      assert %{target_branch: "dolphin"} = Polecat.state(result.polecat_pid).meta
+    end
+
+    test "per-rig target_branch default applies when bead has none", %{repo: repo} do
+      # Push a `dolphin` branch and configure the rig to default to it.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "dolphin"])
+      File.write!(Path.join(repo, "DOLPHIN.md"), "dolphin\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "DOLPHIN.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "dolphin"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "dolphin"])
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "main"])
+
+      {:ok, ws_local} =
+        Ash.create(Workspace, %{
+          name: "rig-default-target-#{System.unique_integer([:positive])}",
+          prefix: "rd",
+          # Rig-level default beats the workspace default ("main").
+          config: %{
+            "rig_paths" => %{
+              "rd/rig" => %{"path" => repo, "target_branch" => "dolphin"}
+            },
+            "merge" => %{"base" => "main"}
+          }
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "rig default", workspace_id: ws_local.id})
+
+      {:ok, result} = Sling.sling(bead.id, rig: "rd/rig", start_driver: false)
+
+      assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
+      assert %{target_branch: "dolphin"} = Polecat.state(result.polecat_pid).meta
     end
   end
 

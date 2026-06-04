@@ -82,6 +82,7 @@ defmodule Arbiter.Beads.Issue do
         :assignee,
         :tracker_type,
         :tracker_ref,
+        :target_branch,
         :workspace_id
       ]
 
@@ -121,7 +122,8 @@ defmodule Arbiter.Beads.Issue do
         :issue_type,
         :assignee,
         :tracker_type,
-        :tracker_ref
+        :tracker_ref,
+        :target_branch
       ]
 
       require_atomic? false
@@ -300,6 +302,17 @@ defmodule Arbiter.Beads.Issue do
       public? true
       constraints max_length: 255, trim?: true
       description "External tracker's ID for this bead (e.g. \"VR-17585\" for Jira)."
+    end
+
+    attribute :target_branch, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description """
+      The branch this bead's work is based on AND the PR merge target.
+      Nullable; when unset the effective target is resolved from the rig's
+      default, then the workspace's `merge.base`, then `"main"`.
+      """
     end
 
     attribute :closed_at, :utc_datetime_usec do
