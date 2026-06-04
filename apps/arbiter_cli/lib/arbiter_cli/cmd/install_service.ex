@@ -147,14 +147,20 @@ defmodule ArbiterCli.Cmd.InstallService do
   end
 
   # `Environment=` lines for the values the stack needs outside an interactive
-  # shell. PATH and ARB_HOME are always pinned; ARB_HOST / ARB_WORKSPACE are
-  # forwarded only when set, so we don't freeze a stale default into the unit.
+  # shell. PATH, ARB_HOME, and MIX_HOME are always pinned; ARB_HOST /
+  # ARB_WORKSPACE are forwarded only when set, so we don't freeze a stale
+  # default into the unit. MIX_HOME must be present or Phoenix fails to boot
+  # under systemd (Mix can't find its archives/escripts otherwise); prefer the
+  # current MIX_HOME, falling back to the standard `~/.mix`.
   defp environment_lines(root) do
+    mix_home = System.get_env("MIX_HOME") || Path.join(System.user_home!(), ".mix")
+
     [
       {"PATH", System.get_env("PATH")},
       {"ARB_HOME", root},
       {"ARB_HOST", System.get_env("ARB_HOST")},
-      {"ARB_WORKSPACE", System.get_env("ARB_WORKSPACE")}
+      {"ARB_WORKSPACE", System.get_env("ARB_WORKSPACE")},
+      {"MIX_HOME", mix_home}
     ]
     |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
     |> Enum.map_join("\n", fn {k, v} -> "Environment=#{k}=#{v}" end)
