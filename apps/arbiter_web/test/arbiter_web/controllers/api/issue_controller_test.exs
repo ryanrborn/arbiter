@@ -31,6 +31,30 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert ws_id == ws.id
     end
 
+    test "accepts and persists `difficulty` (0..4)", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "d3-feature",
+          workspace_id: ws.id,
+          difficulty: 3
+        })
+
+      assert %{"id" => id, "difficulty" => 3} = json_response(conn, 201)
+
+      conn = get(conn, ~p"/api/issues/#{id}")
+      assert %{"difficulty" => 3} = json_response(conn, 200)
+    end
+
+    test "leaves difficulty nil when omitted", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "no-difficulty",
+          workspace_id: ws.id
+        })
+
+      assert %{"difficulty" => nil} = json_response(conn, 201)
+    end
+
     test "returns 422 with validation_error on missing title", %{conn: conn, ws: ws} do
       conn = post(conn, ~p"/api/issues", %{workspace_id: ws.id})
 

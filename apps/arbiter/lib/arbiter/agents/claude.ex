@@ -14,15 +14,21 @@ defmodule Arbiter.Agents.Claude do
   vendors:
 
     * `:model` opt routes through `claude --model <name>`. Resolution
-      order is `opts[:model]` → `Arbiter.Agents.Claude.Config.active_model/0`
-      → CLI default (no `--model` flag).
+      order is `opts[:model]` → `:model_tier` (resolved per-adapter via
+      `Claude.Config.model_for_tier/1`) →
+      `Arbiter.Agents.Claude.Config.active_model/0` → CLI default
+      (no `--model` flag).
+    * `:thinking` opt routes through the configured reasoning-effort
+      argv (default `--reasoning-effort <level>` for low/medium/high; the
+      cheap second lever the moduledoc has always called out). Resolved
+      via `Claude.Config.thinking_argv/1`.
     * Multi-key rotation: when `api_keys` is set on the workspace, each
       session picks the next key via per-process round-robin and exports
       `ANTHROPIC_API_KEY` for the spawn — addresses rate-limit relief
       without new harness code.
 
-  Both default off, so workspaces that haven't opted in see unchanged
-  behavior.
+  All three default off, so workspaces that haven't opted in see
+  unchanged behavior.
   """
 
   @behaviour Arbiter.Agents.Agent
@@ -43,7 +49,10 @@ defmodule Arbiter.Agents.Claude do
   def default_argv(prompt, opts \\ []) when is_binary(prompt) do
     case resolve_claude_executable() do
       {:ok, claude} ->
-        inner = [claude, "--print", prompt] ++ model_flag(opts) ++ stream_flags()
+        inner =
+          [claude, "--print", prompt] ++
+            model_flag(opts) ++ thinking_flag(opts) ++ stream_flags()
+
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
 
       {:error, _} = err ->
@@ -137,8 +146,24 @@ defmodule Arbiter.Agents.Claude do
 
   defp resolve_model(opts) do
     case Keyword.get(opts, :model) do
-      m when is_binary(m) and m != "" -> m
-      _ -> Config.active_model()
+      m when is_binary(m) and m != "" ->
+        m
+
+      _ ->
+        case Keyword.get(opts, :model_tier) do
+          tier when is_binary(tier) and tier != "" ->
+            Config.model_for_tier(tier) || Config.active_model()
+
+          _ ->
+            Config.active_model()
+        end
+    end
+  end
+
+  defp thinking_flag(opts) do
+    case Keyword.get(opts, :thinking) do
+      level when is_binary(level) and level != "" -> Config.thinking_argv(level)
+      _ -> []
     end
   end
 

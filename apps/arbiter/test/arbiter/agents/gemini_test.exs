@@ -86,6 +86,80 @@ defmodule Arbiter.Agents.GeminiTest do
       assert "--model" in rest
       assert "gemini-flash" in rest
     end
+
+    test "resolves :model_tier to a concrete Gemini model via the default tier map",
+         %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      for {tier, model} <- [
+            {"premium", "gemini-2.5-pro"},
+            {"standard", "gemini-2.5-flash"},
+            {"economy", "gemini-2.5-flash-lite"}
+          ] do
+        {:ok, argv} = Gemini.default_argv("the prompt", model_tier: tier)
+        assert "--model" in argv
+        assert model in argv
+      end
+    end
+
+    test ":model wins over :model_tier when both are set", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} =
+        Gemini.default_argv("the prompt", model: "custom-model", model_tier: "economy")
+
+      assert "custom-model" in argv
+      refute "gemini-2.5-flash-lite" in argv
+    end
+
+    test ":model_tier can be overridden per-workspace via tier_models config", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      Gemini.Config.put_active(%{
+        "tier_models" => %{"premium" => "gemini-ultra"}
+      })
+
+      on_exit(fn -> Gemini.Config.clear() end)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", model_tier: "premium")
+      assert "gemini-ultra" in argv
+      refute "gemini-2.5-pro" in argv
+    end
+
+    test ":thinking opt is empty in argv by default (env-var path)", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", thinking: "high")
+      # No CLI flag is committed by default — workspace can opt in via
+      # thinking_argv overrides if it pins a CLI flag.
+      refute Enum.any?(argv, &String.starts_with?(&1, "--thinking"))
+      refute Enum.any?(argv, &String.starts_with?(&1, "--reasoning"))
+    end
+
+    test ":thinking argv can be overridden per-workspace via thinking_argv config",
+         %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      Gemini.Config.put_active(%{
+        "thinking_argv" => %{"medium" => ["--thinking-budget", "8192"]}
+      })
+
+      on_exit(fn -> Gemini.Config.clear() end)
+
+      {:ok, argv} = Gemini.default_argv("the prompt", thinking: "medium")
+      assert "--thinking-budget" in argv
+      assert "8192" in argv
+    end
   end
 
   describe "spawn_env/1" do
@@ -99,6 +173,32 @@ defmodule Arbiter.Agents.GeminiTest do
                {"GEMINI_API_KEY", "my-token"},
                {"GOOGLE_GENAI_API_KEY", "my-token"}
              ]
+    end
+
+    test "exports GEMINI_THINKING_LEVEL for low/medium/high :thinking" do
+      for level <- ["low", "medium", "high"] do
+        env = Gemini.spawn_env(thinking: level)
+
+        assert {"GEMINI_THINKING_LEVEL", ^level} =
+                 Enum.find(env, &match?({"GEMINI_THINKING_LEVEL", _}, &1))
+      end
+    end
+
+    test "omits GEMINI_THINKING_LEVEL when :thinking is none / nil" do
+      refute Enum.any?(
+               Gemini.spawn_env(thinking: "none"),
+               &match?({"GEMINI_THINKING_LEVEL", _}, &1)
+             )
+
+      refute Enum.any?(Gemini.spawn_env([]), &match?({"GEMINI_THINKING_LEVEL", _}, &1))
+    end
+
+    test "composes thinking + api key" do
+      env = Gemini.spawn_env(api_key: "k", thinking: "high")
+
+      assert {"GEMINI_API_KEY", "k"} in env
+      assert {"GOOGLE_GENAI_API_KEY", "k"} in env
+      assert {"GEMINI_THINKING_LEVEL", "high"} in env
     end
   end
 end

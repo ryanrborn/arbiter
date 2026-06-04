@@ -77,6 +77,7 @@ defmodule Arbiter.Beads.Issue do
         :qa_notes,
         :deployment_notes,
         :priority,
+        :difficulty,
         :issue_type,
         :assignee,
         :tracker_type,
@@ -116,6 +117,7 @@ defmodule Arbiter.Beads.Issue do
         :deployment_notes,
         :status,
         :priority,
+        :difficulty,
         :issue_type,
         :assignee,
         :tracker_type,
@@ -255,6 +257,24 @@ defmodule Arbiter.Beads.Issue do
       default 2
       constraints min: 0, max: 4
       description "0 = P0 (highest), 4 = P4 (lowest). Default 2 (P2)."
+    end
+
+    attribute :difficulty, :integer do
+      public? true
+      constraints min: 0, max: 4
+
+      description """
+      How hard the task is (0..4 / D0..D4). Orthogonal to :priority.
+      Drives provider-agnostic model/thinking routing via
+      `Arbiter.Agents.Routing.ByDifficulty`. Nullable; routing treats
+      `nil` as D2 (the default tier).
+
+      D0 Trivial  — single-file, fully specified, no judgment.
+      D1 Simple   — localized, clear approach, light reasoning.
+      D2 Moderate — multi-file or some design choice (default).
+      D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
+      D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
+      """
     end
 
     attribute :issue_type, :atom do

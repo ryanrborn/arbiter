@@ -9,28 +9,36 @@ defmodule Arbiter.Agents.Routing do
     * `:static` (default) — always return the workspace's `agent` config.
     * `:by_priority` — map `bead.priority` to a rule under
       `routing.rules["P0".."P4"]`, falling back to the workspace default.
-    * `:by_budget` — `:by_priority` until the ledger says the workspace has
-      blown its daily budget; then degrade one tier (Opus → Sonnet → Haiku).
+    * `:by_difficulty` — map `bead.difficulty` to abstract
+      `{model_tier, thinking}` under `routing.rules["D0".."D4"]`, falling
+      back to a default mapping. Provider-agnostic: each adapter resolves
+      the tier + thinking abstractions to its own knobs.
+    * `:by_budget` — `:by_priority` (or `:by_difficulty`, see the
+      `routing.base_policy` option) until the ledger says the workspace
+      has blown its daily budget; then degrade one tier (premium →
+      standard → economy, or Opus → Sonnet → Haiku for legacy
+      concrete-model configs).
     * `:round_robin` — cycle through `routing.adapters` per dispatch.
 
-  Only `:static` and `:by_priority` are usefully exercised today (the
-  other two need ledger data + a second adapter to balance between).
-  All four ship as the seam; `Arbiter.Agents.Routing.choose/3` returns the
-  same `%{type:, config:}` shape regardless of which policy is active.
+  Only `:static`, `:by_priority`, and `:by_difficulty` are exercised on
+  the worker dispatch path today; `:by_budget` and `:round_robin` ship as
+  seams. `Arbiter.Agents.Routing.choose/3` returns the same
+  `%{type:, config:}` shape regardless of which policy is active.
   """
 
-  alias Arbiter.Agents.Routing.{ByBudget, ByPriority, Policy, RoundRobin, Static}
+  alias Arbiter.Agents.Routing.{ByBudget, ByDifficulty, ByPriority, Policy, RoundRobin, Static}
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
 
   @policies %{
     static: Static,
     by_priority: ByPriority,
+    by_difficulty: ByDifficulty,
     by_budget: ByBudget,
     round_robin: RoundRobin
   }
 
-  @valid_policies ~w(static by_priority by_budget round_robin)
+  @valid_policies ~w(static by_priority by_difficulty by_budget round_robin)
 
   @doc """
   Choose an agent for `bead`. `:ledger_snapshot` is reserved for

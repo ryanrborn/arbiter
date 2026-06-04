@@ -21,7 +21,7 @@ defmodule ArbiterWeb.Api.IssueController do
   action_fallback ArbiterWeb.Api.FallbackController
 
   @atom_fields ~w(status issue_type tracker_type)a
-  @filter_fields ~w(status priority issue_type assignee workspace_id)a
+  @filter_fields ~w(status priority difficulty issue_type assignee workspace_id)a
 
   def index(conn, params) do
     with {:ok, filters} <- build_filters(params) do
@@ -155,14 +155,17 @@ defmodule ArbiterWeb.Api.IssueController do
     end)
   end
 
-  defp coerce_filter_value(:priority, raw) when is_binary(raw) do
+  defp coerce_filter_value(field, raw)
+       when field in [:priority, :difficulty] and is_binary(raw) do
     case Integer.parse(raw) do
       {n, ""} -> {:ok, n}
-      _ -> {:error, {:invalid_request, "priority must be an integer"}}
+      _ -> {:error, {:invalid_request, "#{field} must be an integer"}}
     end
   end
 
-  defp coerce_filter_value(:priority, raw) when is_integer(raw), do: {:ok, raw}
+  defp coerce_filter_value(field, raw)
+       when field in [:priority, :difficulty] and is_integer(raw),
+       do: {:ok, raw}
 
   defp coerce_filter_value(field, raw) when field in [:status, :issue_type] and is_binary(raw) do
     try do

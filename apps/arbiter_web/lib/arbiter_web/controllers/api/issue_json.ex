@@ -26,6 +26,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
       deployment_notes: issue.deployment_notes,
       status: to_string_atom(issue.status),
       priority: issue.priority,
+      difficulty: issue.difficulty,
       issue_type: to_string_atom(issue.issue_type),
       assignee: issue.assignee,
       tracker_type: to_string_atom(issue.tracker_type),

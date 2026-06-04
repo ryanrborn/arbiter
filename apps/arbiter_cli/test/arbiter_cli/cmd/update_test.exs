@@ -44,4 +44,29 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 1
     assert err =~ "at least one field flag"
   end
+
+  test "updates difficulty via PATCH" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         decoded = Jason.decode!(body)
+         assert decoded["difficulty"] == 3
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "difficulty" => 3})
+       end}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Update.run(["bd-001", "--difficulty", "3"]) end)
+    assert exit_code == 0
+    assert out =~ "bd-001"
+  end
+
+  test "--difficulty out-of-range exits non-zero before patching" do
+    {_out, err, exit_code} = capture(fn -> Update.run(["bd-001", "--difficulty", "7"]) end)
+    assert exit_code == 1
+    assert err =~ "difficulty"
+  end
 end

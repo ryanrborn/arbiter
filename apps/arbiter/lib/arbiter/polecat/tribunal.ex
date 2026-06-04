@@ -787,7 +787,7 @@ defmodule Arbiter.Polecat.Tribunal do
         {adapter, role_atom} = adapter_for(ws, role)
         :ok = Agents.prepare(ws, role_atom)
 
-        agent_opts = [model: model_for_role(ws, role_atom, state.bead_id)]
+        agent_opts = agent_opts_for_role(ws, role_atom, state.bead_id)
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
@@ -805,23 +805,51 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp adapter_for(%Workspace{} = ws, :implementer), do: {Agents.for_workspace(ws), :agent}
 
-  # The reviewer slot has its own config under `review_agent.config.model`
+  # The reviewer slot has its own config under `review_agent.config.*`
   # (falls back to the worker `agent` block so a workspace that names only
-  # `agent` still spawns a reviewer).
-  defp model_for_role(%Workspace{config: config}, :review_agent, _bead_id) do
-    get_in(config || %{}, ["review_agent", "config", "model"]) ||
-      get_in(config || %{}, ["agent", "config", "model"])
+  # `agent` still spawns a reviewer). The model/tier/thinking knobs are
+  # read directly from the configured block — the reviewer doesn't route
+  # by difficulty (the bead's difficulty drives the *worker*; the reviewer
+  # has its own fixed config).
+  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, _bead_id) do
+    block =
+      get_in(config || %{}, ["review_agent", "config"]) ||
+        get_in(config || %{}, ["agent", "config"]) || %{}
+
+    [
+      model: Map.get(block, "model"),
+      model_tier: Map.get(block, "model_tier"),
+      thinking: Map.get(block, "thinking"),
+      config: block
+    ]
   end
 
   # The implementer slot is a worker session on the same bead — route it
-  # through the configured policy (`:static` / `:by_priority` / ...) so a
-  # revise round picks the same model the initial dispatch would have, not
-  # a flat workspace default. Best-effort: a missing bead falls back to the
-  # workspace's `agent.config.model`.
-  defp model_for_role(%Workspace{} = ws, :agent, bead_id) do
+  # through the configured policy (`:static` / `:by_priority` /
+  # `:by_difficulty` / ...) so a revise round picks the same model the
+  # initial dispatch would have, not a flat workspace default. Best-effort:
+  # a missing bead falls back to the workspace's `agent.config`.
+  defp agent_opts_for_role(%Workspace{} = ws, :agent, bead_id) do
     case load_issue(bead_id) do
-      nil -> get_in(ws.config || %{}, ["agent", "config", "model"])
-      %Issue{} = bead -> bead |> Routing.choose(ws, %{}) |> get_in([:config, "model"])
+      nil ->
+        block = get_in(ws.config || %{}, ["agent", "config"]) || %{}
+
+        [
+          model: Map.get(block, "model"),
+          model_tier: Map.get(block, "model_tier"),
+          thinking: Map.get(block, "thinking"),
+          config: block
+        ]
+
+      %Issue{} = bead ->
+        config = bead |> Routing.choose(ws, %{}) |> Map.get(:config) || %{}
+
+        [
+          model: Map.get(config, "model"),
+          model_tier: Map.get(config, "model_tier"),
+          thinking: Map.get(config, "thinking"),
+          config: config
+        ]
     end
   end
 

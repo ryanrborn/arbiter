@@ -84,6 +84,70 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert "--model" in rest
       assert "haiku" in rest
     end
+
+    test "resolves :model_tier to a concrete model via the default tier map", %{stub: stub} do
+      assert {:ok, argv} = Claude.default_argv("the prompt", model_tier: "premium")
+      assert ["sh", "-c", _exec, "sh", ^stub, "--print", "the prompt" | rest] = argv
+      assert "--model" in rest
+      assert "opus" in rest
+
+      assert {:ok, argv} = Claude.default_argv("the prompt", model_tier: "standard")
+      assert "sonnet" in argv
+
+      assert {:ok, argv} = Claude.default_argv("the prompt", model_tier: "economy")
+      assert "haiku" in argv
+    end
+
+    test ":model wins over :model_tier when both are set", %{stub: stub} do
+      assert {:ok, argv} =
+               Claude.default_argv("the prompt", model: "opus", model_tier: "economy")
+
+      assert ["sh", "-c", _exec, "sh", ^stub, "--print", "the prompt" | rest] = argv
+      assert "--model" in rest
+      assert "opus" in rest
+      refute "haiku" in argv
+    end
+
+    test ":model_tier can be overridden per-workspace via tier_models config" do
+      Claude.Config.put_active(%{
+        "tier_models" => %{"premium" => "opus-custom"}
+      })
+
+      on_exit(fn -> Claude.Config.clear() end)
+
+      assert {:ok, argv} = Claude.default_argv("the prompt", model_tier: "premium")
+      assert "opus-custom" in argv
+      refute "opus" in argv
+    end
+
+    test ":thinking emits --reasoning-effort for low/medium/high", %{stub: _stub} do
+      for level <- ["low", "medium", "high"] do
+        {:ok, argv} = Claude.default_argv("the prompt", thinking: level)
+        assert "--reasoning-effort" in argv
+        assert level in argv
+      end
+    end
+
+    test ":thinking 'none' / nil emits no reasoning-effort flag" do
+      {:ok, argv1} = Claude.default_argv("the prompt", thinking: "none")
+      refute "--reasoning-effort" in argv1
+
+      {:ok, argv2} = Claude.default_argv("the prompt", thinking: nil)
+      refute "--reasoning-effort" in argv2
+    end
+
+    test ":thinking argv can be overridden per-workspace via thinking_argv config" do
+      Claude.Config.put_active(%{
+        "thinking_argv" => %{"high" => ["--max-thinking-tokens", "16384"]}
+      })
+
+      on_exit(fn -> Claude.Config.clear() end)
+
+      {:ok, argv} = Claude.default_argv("the prompt", thinking: "high")
+      assert "--max-thinking-tokens" in argv
+      assert "16384" in argv
+      refute "--reasoning-effort" in argv
+    end
   end
 
   describe "spawn_env/1 (key rotation)" do

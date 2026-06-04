@@ -70,6 +70,27 @@ defmodule Arbiter.Agents.Claude.Config do
           raw: map()
         }
 
+  # Default tier → concrete Claude model. Overridable per-workspace via
+  # `agent.config["tier_models"]` (string keys). The values are the model
+  # names the Claude CLI accepts via `--model`. Keeping these conservative
+  # (haiku/sonnet/opus) so a new workspace doesn't have to define them.
+  @default_tier_models %{
+    "economy" => "haiku",
+    "standard" => "sonnet",
+    "premium" => "opus"
+  }
+
+  # Default thinking → reasoning-effort flag value passed to the Claude CLI
+  # via `--reasoning-effort <level>`. `none` omits the flag (CLI default).
+  # Workspaces can override per-level argv with `agent.config["thinking_argv"]`
+  # (e.g. swap to `--max-thinking-tokens` if a newer CLI prefers that).
+  @default_thinking_argv %{
+    "none" => [],
+    "low" => ["--reasoning-effort", "low"],
+    "medium" => ["--reasoning-effort", "medium"],
+    "high" => ["--reasoning-effort", "high"]
+  }
+
   @doc """
   Set the active Claude agent config for the current process. Accepts a
   `Workspace` (reads its `config["agent"]["config"]`), a raw agent-config
@@ -172,6 +193,63 @@ defmodule Arbiter.Agents.Claude.Config do
     cfg.model
   end
 
+  @doc """
+  Resolve an abstract `model_tier` (`"economy"` | `"standard"` |
+  `"premium"`) to a concrete Claude model name. Returns `nil` for an
+  unknown / nil tier — the adapter falls back to its CLI default.
+
+  Workspace config can override the mapping under
+  `agent.config["tier_models"]`. Missing keys fall back to the
+  built-in default (`#{inspect(@default_tier_models)}`).
+  """
+  @spec model_for_tier(String.t() | nil) :: String.t() | nil
+  def model_for_tier(nil), do: nil
+  def model_for_tier(""), do: nil
+
+  def model_for_tier(tier) when is_binary(tier) do
+    {:ok, cfg} = resolve()
+    overrides = stringy_map(Map.get(cfg.raw, "tier_models"))
+
+    case Map.get(overrides, tier) || Map.get(@default_tier_models, tier) do
+      m when is_binary(m) and m != "" -> m
+      _ -> nil
+    end
+  end
+
+  def model_for_tier(_), do: nil
+
+  @doc """
+  Resolve an abstract `thinking` level (`"none"` | `"low"` | `"medium"` |
+  `"high"`) to a list of CLI argv tokens to append to the spawn command.
+  Returns `[]` for `nil` / unknown / `"none"`.
+
+  Workspace config can override the per-level argv under
+  `agent.config["thinking_argv"]`. Missing keys fall back to the built-in
+  default (`--reasoning-effort <level>`).
+  """
+  @spec thinking_argv(String.t() | nil) :: [String.t()]
+  def thinking_argv(nil), do: []
+  def thinking_argv(""), do: []
+  def thinking_argv("none"), do: []
+
+  def thinking_argv(level) when is_binary(level) do
+    {:ok, cfg} = resolve()
+    overrides = list_map(Map.get(cfg.raw, "thinking_argv"))
+
+    case Map.get(overrides, level) || Map.get(@default_thinking_argv, level) do
+      argv when is_list(argv) -> argv
+      _ -> []
+    end
+  end
+
+  def thinking_argv(_), do: []
+
+  @doc "Built-in default tier → model map (testing / introspection)."
+  def default_tier_models, do: @default_tier_models
+
+  @doc "Built-in default thinking → argv map (testing / introspection)."
+  def default_thinking_argv, do: @default_thinking_argv
+
   # ---- Internals --------------------------------------------------------
 
   defp resolve_ref(nil), do: nil
@@ -201,4 +279,27 @@ defmodule Arbiter.Agents.Claude.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
+
+  # Filter a workspace-supplied map down to string→string entries.
+  defp stringy_map(nil), do: %{}
+
+  defp stringy_map(m) when is_map(m) do
+    for {k, v} <- m, is_binary(k), is_binary(v) and v != "", into: %{}, do: {k, v}
+  end
+
+  defp stringy_map(_), do: %{}
+
+  # Filter a workspace-supplied map down to string→list-of-strings entries.
+  defp list_map(nil), do: %{}
+
+  defp list_map(m) when is_map(m) do
+    for {k, v} <- m,
+        is_binary(k),
+        is_list(v),
+        Enum.all?(v, &is_binary/1),
+        into: %{},
+        do: {k, v}
+  end
+
+  defp list_map(_), do: %{}
 end

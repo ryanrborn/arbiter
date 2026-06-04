@@ -1,10 +1,37 @@
 defmodule ArbiterCli.Cmd.Create do
   @moduledoc """
-  `arb create <title> [--description ...] [--priority N] [--type T]
-                       [--deps id1,id2] [--labels a,b] [--assignee a]
-                       [--tracker-ref REF] [--no-tracker] [--vanguard <convoy-id>]`
+  `arb create <title> [--description ...] [--priority N] [--difficulty N]
+                       [--type T] [--deps id1,id2] [--labels a,b]
+                       [--assignee a] [--tracker-ref REF] [--no-tracker]
+                       [--vanguard <convoy-id>]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
+
+  ## --difficulty N (0..4 / D0..D4)
+
+  Sets how hard the task is. Orthogonal to `--priority`: priority answers
+  "how urgent?"; difficulty answers "how hard?" and drives the model +
+  thinking budget routed to acolytes that work the bead. Classify by the
+  MAX over: scope (files/modules touched), design uncertainty, reasoning
+  depth (mechanical vs concurrency/correctness), blast radius, breadth of
+  context required.
+
+      D0 Trivial  — single-file, fully specified, no judgment
+                    (typo, rename, config bump, doc edit).
+      D1 Simple   — localized, clear approach, light reasoning;
+                    follows an existing pattern.
+      D2 Moderate — multi-file or some design choice; the common
+                    feature case. **Default when unspecified.**
+      D3 Hard     — cross-cutting, non-obvious design,
+                    concurrency/state/edge-case correctness,
+                    several components.
+      D4 Extreme  — novel architecture, deep ambiguity,
+                    correctness-critical; may warrant exploration
+                    or multiple passes.
+
+  The Admiral / filing session sets `--difficulty` at create time with a
+  one-line justification in the bead's description. Routing maps the value
+  to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
   `--vanguard <convoy-id>` attaches the new issue to an existing convoy
   (vernacular: "Vanguard") immediately after creation. Like `--deps`, the bead
@@ -40,6 +67,7 @@ defmodule ArbiterCli.Cmd.Create do
   @switches [
     description: :string,
     priority: :integer,
+    difficulty: :integer,
     type: :string,
     deps: :string,
     labels: :string,
@@ -66,10 +94,13 @@ defmodule ArbiterCli.Cmd.Create do
 
     skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
 
+    validate_difficulty!(opts[:difficulty])
+
     payload =
       %{"title" => title, "workspace_id" => workspace_id}
       |> maybe_put("description", opts[:description])
       |> maybe_put("priority", opts[:priority])
+      |> maybe_put("difficulty", opts[:difficulty])
       |> maybe_put("issue_type", opts[:type])
       |> maybe_put("assignee", opts[:assignee])
       |> maybe_put("tracker_ref", opts[:tracker_ref])
@@ -112,6 +143,13 @@ defmodule ArbiterCli.Cmd.Create do
 
   defp maybe_put_flag(map, _key, false), do: map
   defp maybe_put_flag(map, key, true), do: Map.put(map, key, true)
+
+  defp validate_difficulty!(nil), do: :ok
+  defp validate_difficulty!(n) when is_integer(n) and n in 0..4, do: :ok
+
+  defp validate_difficulty!(other) do
+    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..4 / D0..D4)")
+  end
 
   defp attach_deps(new_id, raw) do
     raw

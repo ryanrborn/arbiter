@@ -64,6 +64,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   @edit_switches [
     priority: :integer,
+    difficulty: :integer,
     append_notes: :string,
     notes: :string,
     status: :string,
@@ -361,9 +362,12 @@ defmodule ArbiterCli.Cmd.Update do
         end
       end
 
+    validate_difficulty!(opts[:difficulty])
+
     payload =
       %{}
       |> put_if("priority", opts[:priority])
+      |> put_if("difficulty", opts[:difficulty])
       |> put_if("notes", opts[:notes])
       |> put_if("status", opts[:status])
       |> put_if("description", opts[:description])
@@ -384,6 +388,13 @@ defmodule ArbiterCli.Cmd.Update do
   defp put_if(map, _key, nil), do: map
   defp put_if(map, _key, ""), do: map
   defp put_if(map, key, value), do: Map.put(map, key, value)
+
+  defp validate_difficulty!(nil), do: :ok
+  defp validate_difficulty!(n) when is_integer(n) and n in 0..4, do: :ok
+
+  defp validate_difficulty!(other) do
+    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..4 / D0..D4)")
+  end
 
   defp maybe_append_notes(payload, nil, _existing), do: payload
 

@@ -89,6 +89,35 @@ Set `ARB_WORKSPACE=<name>` to target a specific <%= @workspace %>. The active
 - **<%= @workspace_cap %>** — a project scope. Holds <%= @rig_plural %>, tracker config, and vernacular.
 - **Vernacular** — installation-wide vocabulary. The terms in this document are rendered from it, so they match whatever this install calls things.
 
+## Filing convention: set difficulty up front
+
+Every <%= @issue %> you file should carry **two** orthogonal axes:
+
+- `--priority 0..4` (P0..P4) — *how urgent* (drives scheduling order).
+- `--difficulty 0..4` (D0..D4) — *how hard* (drives the model + thinking
+  budget routed to <%= @worker_article %> <%= @worker %>).
+
+A P0 can be a one-line config bump (D0); a P3 can be a hard refactor
+(D3). Don't conflate them.
+
+Use the MAX over: scope (files/modules touched), design uncertainty,
+reasoning depth (mechanical vs concurrency/correctness), blast radius,
+breadth of context required.
+
+```
+D0 Trivial  — single-file, fully specified, no judgment
+              (typo, rename, config bump, doc edit).
+D1 Simple   — localized, clear approach, light reasoning.
+D2 Moderate — multi-file or some design choice (default if omitted).
+D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
+D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
+```
+
+When filing, also drop a one-line **difficulty justification** in the
+description ("D3 because the change spans the routing dispatcher, two
+adapter configs, and the tribunal seam") so reviewers can sanity-check
+your call. `arb create --help` carries the same rubric inline.
+
 ## Memory discipline
 
 At the end of each session, update `memory/MEMORY.md` with anything worth

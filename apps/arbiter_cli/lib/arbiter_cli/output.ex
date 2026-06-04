@@ -143,6 +143,7 @@ defmodule ArbiterCli.Output do
         {"Title", issue["title"]},
         {"Status", issue["status"]},
         {"Priority", issue["priority"]},
+        {"Difficulty", difficulty_label(issue["difficulty"])},
         {"Type", issue["issue_type"]},
         {"Assignee", issue["assignee"]},
         {Vernacular.cap(vern, "workspace"), issue["workspace_id"]},
@@ -169,6 +170,10 @@ defmodule ArbiterCli.Output do
 
     header <> sections
   end
+
+  defp difficulty_label(nil), do: nil
+  defp difficulty_label(n) when is_integer(n) and n in 0..4, do: "D#{n}"
+  defp difficulty_label(other), do: to_string(other)
 
   defp tracker_label(%{"tracker_type" => nil}), do: nil
   defp tracker_label(%{"tracker_type" => "none"}), do: nil
