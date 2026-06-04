@@ -12,7 +12,7 @@ defmodule Arbiter.Workflows.CodeReview.GithubMode do
 
   The workflow itself does **not** call `GitHub.pr_merge/4`. Merging is the
   responsibility of the polecat-orchestrator after a successful review;
-  reviewers escalate to the Mayor if they are unsure.
+  reviewers escalate to the Admiral if they are unsure.
   """
 
   alias Arbiter.GitHub
