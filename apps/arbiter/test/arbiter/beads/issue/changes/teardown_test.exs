@@ -62,6 +62,13 @@ defmodule Arbiter.Beads.Issue.Changes.TeardownTest do
       {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
 
+      # Worktree.create now fetches from origin and branches from
+      # origin/<base>; provide a bare upstream so it has somewhere to fetch.
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
       worktree_root = Path.join(tmp, "wt")
       File.mkdir_p!(worktree_root)
 
