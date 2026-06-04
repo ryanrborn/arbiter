@@ -42,10 +42,39 @@ defmodule Arbiter.Mergers.Merger do
     * `request_review/2` — request review from `reviewers`.
     * `link_for/1` — return a human-clickable URL for the ref (empty string
       when the backend has no web UI, e.g. `Direct`).
+
+  ## Review callbacks
+
+  The remaining callbacks let `Arbiter.Workflows.CodeReview` operate on a
+  PR/MR through the same adapter abstraction, instead of hard-coding a
+  GitHub HTTP client. They take a small `opts` map so callers can pass
+  adapter-specific context (e.g. the `Direct` adapter's `:repo_path` and
+  `:target_branch`) without having to pre-seed a per-process config.
+
+    * `get_diff/2` — fetch the unified diff text for `mr_ref`. For local
+      adapters this is `git diff <base>..<branch>`; for hosted forges it is
+      the diff payload returned by the API.
+    * `post_inline_comment/3` — post a single finding as an inline review
+      comment (or its adapter-specific equivalent, e.g. a local-file entry
+      for `Direct`).
+    * `submit_review/4` — submit a final review verdict (approve or
+      request_changes) with a body. Adapters that have no concept of a
+      "review" (e.g. `Direct`) write the verdict locally.
   """
 
   @typedoc "Adapter-specific merge-request reference (opaque binary)."
   @type mr_ref :: String.t()
+
+  @typedoc "A code-review finding produced by the check runner."
+  @type finding :: %{
+          required(:severity) => :info | :warning | :error,
+          required(:file) => String.t(),
+          required(:line) => pos_integer(),
+          required(:message) => String.t()
+        }
+
+  @typedoc "Final review verdict."
+  @type verdict :: :approve | :request_changes
 
   @callback open(
               branch :: String.t(),
@@ -60,4 +89,10 @@ defmodule Arbiter.Mergers.Merger do
   @callback add_comment(mr_ref, body :: String.t()) :: :ok | {:error, term()}
   @callback request_review(mr_ref, reviewers :: [term()]) :: :ok | {:error, term()}
   @callback link_for(mr_ref) :: String.t()
+
+  @callback get_diff(mr_ref, opts :: map()) :: {:ok, String.t()} | {:error, term()}
+  @callback post_inline_comment(mr_ref, finding, opts :: map()) ::
+              {:ok, term()} | {:error, term()}
+  @callback submit_review(mr_ref, verdict, body :: String.t(), opts :: map()) ::
+              {:ok, term()} | {:error, term()}
 end
