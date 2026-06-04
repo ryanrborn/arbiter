@@ -162,6 +162,102 @@ defmodule Arbiter.Beads.WorkspaceTest do
     end
   end
 
+  describe "patch_config/2" do
+    test "deep-merges a patch without clobbering sibling keys" do
+      initial = %{
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
+        "rig_paths" => %{"arbiter" => "/srv/arbiter"},
+        "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo", "repo" => "arbiter"}}
+      }
+
+      {:ok, ws} = Ash.create(Workspace, %{name: "deep-merge", config: initial})
+
+      {:ok, updated} =
+        Ash.update(ws, %{patch: %{"merge" => %{"auto_merge" => true}}}, action: :patch_config)
+
+      # The auto_merge leaf was set...
+      assert updated.config["merge"]["auto_merge"] == true
+      # ...and every other sibling survived (this is the original footgun).
+      assert updated.config["merge"]["strategy"] == "github"
+      assert updated.config["merge"]["config"]["owner"] == "leo"
+      assert updated.config["merge"]["config"]["repo"] == "arbiter"
+      assert updated.config["tracker"]["type"] == "github"
+      assert updated.config["rig_paths"]["arbiter"] == "/srv/arbiter"
+    end
+
+    test "merges into a nil/empty existing config" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "empty-cfg"})
+      assert ws.config == %{}
+
+      {:ok, updated} =
+        Ash.update(ws, %{patch: %{"tracker" => %{"type" => "none"}}}, action: :patch_config)
+
+      assert updated.config["tracker"]["type"] == "none"
+    end
+
+    test "unset_paths removes a dotted leaf without touching siblings" do
+      initial = %{
+        "tracker" => %{
+          "type" => "jira",
+          "config" => %{"host" => "h.example", "project_key" => "VR"}
+        }
+      }
+
+      {:ok, ws} = Ash.create(Workspace, %{name: "unset-leaf", config: initial})
+
+      {:ok, updated} =
+        Ash.update(ws, %{unset_paths: ["tracker.config.host"]}, action: :patch_config)
+
+      refute Map.has_key?(updated.config["tracker"]["config"], "host")
+      assert updated.config["tracker"]["config"]["project_key"] == "VR"
+      assert updated.config["tracker"]["type"] == "jira"
+    end
+
+    test "unset of an absent path is a no-op" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "unset-absent", config: %{"foo" => 1}})
+
+      {:ok, updated} =
+        Ash.update(ws, %{unset_paths: ["nonexistent.key"]}, action: :patch_config)
+
+      assert updated.config == %{"foo" => 1}
+    end
+
+    test "runs ValidateConfig on the merged result (rejects invalid tracker.type)" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "validates"})
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.update(ws, %{patch: %{"tracker" => %{"type" => "asana"}}},
+                 action: :patch_config
+               )
+
+      assert err |> Exception.message() |> String.contains?("tracker.type must be one of")
+    end
+
+    test "patch + unset can be combined in one call" do
+      initial = %{"a" => %{"b" => 1, "c" => 2}, "d" => 3}
+      {:ok, ws} = Ash.create(Workspace, %{name: "combo", config: initial})
+
+      {:ok, updated} =
+        Ash.update(
+          ws,
+          %{patch: %{"a" => %{"e" => 4}}, unset_paths: ["a.b"]},
+          action: :patch_config
+        )
+
+      assert updated.config == %{"a" => %{"c" => 2, "e" => 4}, "d" => 3}
+    end
+
+    test "lists replace (not append) — matches deep_merge contract" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{name: "list-replace", config: %{"xs" => [1, 2, 3]}})
+
+      {:ok, updated} =
+        Ash.update(ws, %{patch: %{"xs" => [9]}}, action: :patch_config)
+
+      assert updated.config["xs"] == [9]
+    end
+  end
+
   describe "valid_tracker_types/0" do
     test "returns the canonical set" do
       assert Workspace.valid_tracker_types() == ~w(none jira shortcut linear github)

@@ -76,6 +76,32 @@ defmodule Arbiter.Beads.Workspace do
       require_atomic? false
       change {Arbiter.Beads.Workspace.Changes.ValidateConfig, []}
     end
+
+    update :patch_config do
+      description """
+      Field-level config update. Deep-merges `patch` into the existing config
+      and removes `unset_paths` (dotted strings), then runs ValidateConfig on
+      the result. Unlike `:update`, this **never** replaces the whole config
+      map — siblings of the changed key are preserved.
+      """
+
+      require_atomic? false
+      accept []
+
+      argument :patch, :map do
+        allow_nil? true
+        description "Partial config to deep-merge into the existing config."
+      end
+
+      argument :unset_paths, {:array, :string} do
+        allow_nil? true
+
+        description "Dotted paths to remove from the existing config (e.g. \"tracker.config.host\")."
+      end
+
+      change {Arbiter.Beads.Workspace.Changes.PatchConfig, []}
+      change {Arbiter.Beads.Workspace.Changes.ValidateConfig, []}
+    end
   end
 
   attributes do

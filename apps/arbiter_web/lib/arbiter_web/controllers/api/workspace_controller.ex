@@ -4,10 +4,11 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
   Routes:
 
-    * `POST  /api/workspaces`     — :create
-    * `GET   /api/workspaces`     — :index
-    * `GET   /api/workspaces/:id` — :show
-    * `PATCH /api/workspaces/:id` — :update (also `PUT`)
+    * `POST  /api/workspaces`            — :create
+    * `GET   /api/workspaces`            — :index
+    * `GET   /api/workspaces/:id`        — :show
+    * `PATCH /api/workspaces/:id`        — :update (also `PUT`)
+    * `PATCH /api/workspaces/:id/config` — :patch_config (deep-merge / unset)
   """
 
   use ArbiterWeb, :controller
@@ -49,6 +50,30 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
     with {:ok, ws} <- Ash.get(Workspace, id),
          {:ok, updated} <- Ash.update(ws, attrs) do
+      render(conn, :show, workspace: updated)
+    end
+  end
+
+  @doc """
+  Field-level config update. Body shape:
+
+      {
+        "patch": {"merge": {"auto_merge": true}},
+        "unset_paths": ["tracker.config.host"]
+      }
+
+  Both keys are optional. The existing `config` is read, `unset_paths` are
+  removed, then `patch` is deep-merged in (siblings preserved). The result
+  is validated; on failure the existing config is untouched.
+  """
+  def patch_config(conn, %{"id" => id} = params) do
+    patch = Map.get(params, "patch") || %{}
+    unset_paths = Map.get(params, "unset_paths") || []
+
+    args = %{patch: patch, unset_paths: unset_paths}
+
+    with {:ok, ws} <- Ash.get(Workspace, id),
+         {:ok, updated} <- Ash.update(ws, args, action: :patch_config) do
       render(conn, :show, workspace: updated)
     end
   end
