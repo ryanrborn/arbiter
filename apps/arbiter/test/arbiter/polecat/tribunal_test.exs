@@ -32,6 +32,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
+  @empty_findings Path.expand("../../fixtures/review_empty_findings.sh", __DIR__)
   @rounds Path.expand("../../fixtures/review_rounds.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
 
@@ -642,6 +643,80 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
              "expected a re-prompt to have been attempted before escalating"
+    end
+
+    # bd-3y2mda: a REQUEST_CHANGES verdict with NO findings is useless (the
+    # implementer has nothing to act on). The Tribunal treats it as malformed and
+    # re-prompts — exactly like a missing sentinel — rather than entering the
+    # revise loop empty-handed.
+    test "REQUEST_CHANGES with no findings is re-prompted; a valid re-prompt is honored",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        worktree_path: repo,
+        # First pass: REQUEST_CHANGES with no findings → re-prompt → APPROVE.
+        review_command: [@empty_findings, "APPROVE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 6_000)
+      # The findings-less verdict did NOT enter the revise loop; the re-prompt's
+      # APPROVE merged. A merge at all proves the empty verdict was re-prompted.
+      assert merge_commit_count(repo) == 1
+
+      reprompt_id = Tribunal.reviewer_bead_id(bead.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Polecats.Run)
+
+      assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
+             "expected a distinct re-prompt reviewer run row"
+    end
+
+    # The acceptance's hard guarantee: a reviewer that requests changes but never
+    # lists findings, even after the re-prompt, is escalated as inconclusive —
+    # never silently accepted, never merged.
+    test "REQUEST_CHANGES with no findings twice escalates as inconclusive — no merge",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@empty_findings, "EMPTY"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
     end
   end
 
