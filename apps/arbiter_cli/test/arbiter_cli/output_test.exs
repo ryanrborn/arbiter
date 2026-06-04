@@ -54,6 +54,21 @@ defmodule ArbiterCli.OutputTest do
       assert Output.format_issue_detail(%{"id" => "x", "title" => "T", "tracker_type" => "none"})
              |> String.contains?("Tracker:") == false
     end
+
+    test "renders Difficulty as D<n> when set" do
+      issue = %{"id" => "x", "title" => "T", "status" => "open", "difficulty" => 3}
+      out = Output.format_issue_detail(issue)
+      assert out =~ "Difficulty:"
+      assert out =~ "D3"
+    end
+
+    test "omits Difficulty line when unset" do
+      issue = %{"id" => "x", "title" => "T", "status" => "open"}
+      refute Output.format_issue_detail(issue) =~ "Difficulty:"
+
+      issue_nil = Map.put(issue, "difficulty", nil)
+      refute Output.format_issue_detail(issue_nil) =~ "Difficulty:"
+    end
   end
 
   describe "mode/1" do

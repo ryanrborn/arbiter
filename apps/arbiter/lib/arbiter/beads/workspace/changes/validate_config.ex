@@ -23,7 +23,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
-      `"by_budget"`, `"round_robin"`).
+      `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
 
   Unknown keys are allowed (forward-compat). Deeper validation of vernacular keys
   (coordinator, worker, etc.) is deferred to `Arbiter.Vernacular` in gte-P2 —

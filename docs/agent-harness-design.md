@@ -233,12 +233,66 @@ Initial policies:
 |---|---|---|
 | `:static` | Always returns `workspace.config["agent"]`. | Workspace only |
 | `:by_priority` | Maps `bead.priority` (P0..P4) → `rules[<priority>]`. | Workspace + bead |
-| `:by_budget` | `:by_priority` until daily/weekly USD threshold; then degrade one tier. | Workspace + bead + ledger |
+| `:by_difficulty` | Maps `bead.difficulty` (D0..D4) → abstract `{model_tier, thinking}` via `rules[<difficulty>]` with a built-in default mapping. Provider-agnostic — adapters resolve tier/thinking to their own knobs. | Workspace + bead |
+| `:by_budget` | Wraps `:by_priority` (default) or `:by_difficulty` (set `routing.base_policy = "by_difficulty"`) until daily/weekly USD threshold; then degrade one tier on `"model_tier"` and/or `"model"`. | Workspace + bead + ledger |
 | `:round_robin` | Cycle adapter list per dispatch. Useful for A/B. | Workspace + dispatch counter |
 
-`:static` and `:by_priority` ship in Phase B (no ledger needed). `:by_budget`
-and `:round_robin` ship in Phase D only — they're only meaningful when we have
-two adapters to balance between, or real ledger data to throttle on.
+`:static`, `:by_priority`, and `:by_difficulty` ship for the worker
+dispatch path (no ledger needed). `:by_budget` and `:round_robin` ship
+as seams — `:by_budget` is only useful once the ledger feeds usage data
+into a per-dispatch snapshot.
+
+### 4.3.1 `:by_difficulty` — provider-agnostic tier + thinking routing
+
+Priority answers "how urgent?"; difficulty answers "how hard?". The two
+are orthogonal — both can be set on a bead, and a workspace picks one
+policy (or wraps it in `:by_budget`).
+
+The policy emits **abstract** knobs only:
+
+* `"model_tier"` — `"economy" | "standard" | "premium"`.
+* `"thinking"` — `"none" | "low" | "medium" | "high"` (reasoning effort).
+
+Concrete model names live inside each adapter's `Config` and are
+resolved at spawn time:
+
+* **Claude** — tier → `haiku` / `sonnet` / `opus`; thinking →
+  `--reasoning-effort <level>` (default; configurable per-workspace via
+  `agent.config["thinking_argv"]`).
+* **Gemini** — tier → `gemini-2.5-flash-lite` / `gemini-2.5-flash` /
+  `gemini-2.5-pro`; thinking → `GEMINI_THINKING_LEVEL` env var
+  (default; configurable per-workspace via `thinking_argv`).
+
+Built-in default mapping (signed off by the Admiral; do not change
+without re-litigation):
+
+| Difficulty | model_tier | thinking |
+|------------|------------|----------|
+| D0 (trivial) | economy | none |
+| D1 (simple) | economy | low |
+| D2 (moderate, default for unset) | standard | medium |
+| D3 (hard) | premium | high |
+| D4 (extreme) | premium | high |
+
+Bead with `difficulty = nil` is treated as D2.
+
+Workspace override example:
+
+```json
+{
+  "agent": { "type": "claude", "config": {} },
+  "routing": {
+    "policy": "by_difficulty",
+    "rules": {
+      "D0": { "thinking": "none" },
+      "D4": { "model_tier": "premium", "thinking": "high" }
+    }
+  }
+}
+```
+
+A rule merges on top of the default mapping for that tier — keys the
+rule omits keep their defaults.
 
 ### 4.5 Where the seam cuts in `Sling`
 
