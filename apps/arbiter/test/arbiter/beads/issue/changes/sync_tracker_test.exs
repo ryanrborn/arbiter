@@ -277,6 +277,128 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
     end
   end
 
+  describe "gated forward transition on a jira-tracked bead" do
+    @jira_env "GTE_SYNC_TRACKER_JIRA_TOKEN"
+    @jira_ref "VR-17585"
+
+    defp jira_workspace do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "jira-ws-#{System.unique_integer([:positive])}",
+          prefix: "jr",
+          config: %{
+            "tracker" => %{
+              "type" => "jira",
+              "config" => %{
+                "host" => "leotechnologies.atlassian.net",
+                "project_key" => "VR",
+                "credentials_ref" => "env:#{@jira_env}",
+                "email" => "tester@example.com",
+                "status_map" => %{"closed" => "Code Merged"},
+                "field_ids" => %{
+                  "qa_notes" => "customfield_10184",
+                  "deployment_notes" => "customfield_10185"
+                }
+              }
+            }
+          }
+        })
+
+      ws
+    end
+
+    # Forwards each Jira call to the test pid; answers the field PUT and the
+    # transitions GET/POST so a full push-then-transition succeeds.
+    defp jira_forwarding_stub do
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        case {conn.method, path} do
+          {"PUT", _} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:jira, :put_fields, path, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          {"GET", _} ->
+            send(test_pid, {:jira, :get_transitions, path})
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"transitions" => [%{"id" => "31", "name" => "Code Merged"}]})
+
+          {"POST", _} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:jira, :transition, path, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+    end
+
+    setup do
+      System.put_env(@jira_env, "test-jira-token")
+      on_exit(fn -> System.delete_env(@jira_env) end)
+      :ok
+    end
+
+    test "pushes QA + Deployment notes BEFORE transitioning the ticket" do
+      jira_forwarding_stub()
+      ws = jira_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "tracked-with-notes",
+          tracker_type: :jira,
+          tracker_ref: @jira_ref,
+          qa_notes: "Verify the new endpoint returns 200 for a valid token.",
+          deployment_notes: "No migrations. Gated behind the `jira_sync` flag.",
+          skip_upstream_create: true,
+          workspace_id: ws.id
+        })
+
+      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.status == :closed
+
+      # The custom fields are written first…
+      fields_path = "/rest/api/3/issue/#{@jira_ref}"
+      assert_receive {:jira, :put_fields, ^fields_path, %{"fields" => fields}}
+      assert Map.has_key?(fields, "customfield_10184")
+      assert Map.has_key?(fields, "customfield_10185")
+      # …markdown is ADF-encoded.
+      assert fields["customfield_10184"]["type"] == "doc"
+
+      # …then the transition fires.
+      assert_receive {:jira, :get_transitions, _}
+      transitions_path = "/rest/api/3/issue/#{@jira_ref}/transitions"
+      assert_receive {:jira, :transition, ^transitions_path, %{"transition" => %{"id" => "31"}}}
+    end
+
+    test "BLOCKS the transition when the gated notes are missing" do
+      jira_forwarding_stub()
+      ws = jira_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "tracked-without-notes",
+          tracker_type: :jira,
+          tracker_ref: @jira_ref,
+          qa_notes: nil,
+          deployment_notes: nil,
+          skip_upstream_create: true,
+          workspace_id: ws.id
+        })
+
+      # Local close still succeeds (best-effort sync) …
+      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.status == :closed
+
+      # … but NOTHING is pushed to Jira: no field write, no transition.
+      refute_receive {:jira, :put_fields, _, _}
+      refute_receive {:jira, :transition, _, _}
+    end
+  end
+
   describe "config isolation" do
     test "prepare/2 uses the bead's workspace config, not a stale process config" do
       # Seed a *different* workspace config in the process dict; the sync must

@@ -141,6 +141,7 @@ defmodule Arbiter.Workflows.Refinery do
 
   alias Arbiter.Beads.Issue
   alias Arbiter.GitHub
+  alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
   @default_strategy "squash"
@@ -349,7 +350,7 @@ defmodule Arbiter.Workflows.Refinery do
 
       true ->
         case GitHub.pr_open(repo, branch, base, title, body, gh_opts(state)) do
-          {:ok, %{"number" => pr_number}} when is_integer(pr_number) ->
+          {:ok, %{"number" => pr_number} = pr_payload} when is_integer(pr_number) ->
             item =
               new_item(bead.id, strategy,
                 pr_number: pr_number,
@@ -360,6 +361,12 @@ defmodule Arbiter.Workflows.Refinery do
             # Record PR number on the bead's pr_ref field. Best-effort: failure
             # to update the bead doesn't fail the whole enqueue.
             _ = maybe_record_pr_ref(bead, pr_number)
+
+            # Link the PR back onto the upstream tracker ticket (e.g. a Jira
+            # remote link on the VR ticket) so the ticket references the code.
+            # Best-effort and tracker-agnostic — a no-op for trackers without
+            # remote links.
+            _ = maybe_link_pr_to_tracker(bead, repo, pr_number, pr_payload)
 
             {:ok, %{state | items: [item | state.items]}}
 
@@ -687,6 +694,54 @@ defmodule Arbiter.Workflows.Refinery do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Attach the opened PR as a remote link on the bead's upstream tracker
+  # ticket. Dispatches on the bead's `tracker_type` (which may be `:jira` even
+  # though the *merge* runs through GitHub PRs), seeds the adapter's
+  # per-process config from the bead's workspace, and tolerates trackers that
+  # don't support remote links. Never fails the enqueue.
+  defp maybe_link_pr_to_tracker(%Issue{tracker_type: :none}, _repo, _pr_number, _payload), do: :ok
+
+  defp maybe_link_pr_to_tracker(%Issue{} = bead, repo, pr_number, payload) do
+    url = Map.get(payload, "html_url") || "https://github.com/#{repo}/pull/#{pr_number}"
+    title = pr_link_title(bead, repo, pr_number)
+
+    Trackers.prepare(bead, bead.workspace)
+
+    case Trackers.add_remote_link(bead, url, title) do
+      :ok ->
+        :ok
+
+      {:error, :not_supported} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Refinery: failed to link PR ##{pr_number} onto tracker " <>
+            "#{bead.tracker_type} ref=#{bead.tracker_ref} for bead=#{bead.id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Refinery: error linking PR ##{pr_number} for bead=#{bead.id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "Refinery: exit linking PR ##{pr_number} for bead=#{bead.id}: #{inspect(reason)}"
+      )
+
+      :ok
+  end
+
+  defp pr_link_title(%Issue{id: id}, repo, pr_number) do
+    "PR #{repo}##{pr_number} (bead #{id})"
   end
 
   defp schedule_tick(%State{poll_interval_ms: ms}) do

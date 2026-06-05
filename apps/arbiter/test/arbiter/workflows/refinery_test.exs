@@ -181,6 +181,65 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
+  describe "enqueue/2 PR remote-link on the upstream tracker" do
+    @jira_env "GTE_REFINERY_JIRA_TOKEN"
+    @ws_pr_jira %{
+      "merge" => %{"strategy" => "github"},
+      "tracker" => %{
+        "type" => "jira",
+        "config" => %{
+          "host" => "leotechnologies.atlassian.net",
+          "project_key" => "VR",
+          "credentials_ref" => "env:GTE_REFINERY_JIRA_TOKEN",
+          "email" => "tester@example.com"
+        }
+      }
+    }
+
+    setup do
+      System.put_env(@jira_env, "test-jira-token")
+      on_exit(fn -> System.delete_env(@jira_env) end)
+      :ok
+    end
+
+    @tag workspace_config: @ws_pr_jira
+    test "posts a Jira remote link pointing at the opened PR", %{workspace: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "jira-backed",
+          tracker_type: :jira,
+          tracker_ref: "VR-17585",
+          skip_upstream_create: true,
+          workspace_id: ws.id
+        })
+
+      test_pid = self()
+
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{
+          "number" => 88,
+          "html_url" => "https://github.com/octo/widget/pull/88"
+        })
+      end)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:jira_remotelink, conn.request_path, Jason.decode!(body)})
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+      end)
+
+      {pid, name} = start_refinery(ws)
+      Req.Test.allow(Arbiter.Trackers.Jira.HTTP, self(), pid)
+
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:jira_remotelink, "/rest/api/3/issue/VR-17585/remotelink", payload}
+      assert payload["object"]["url"] == "https://github.com/octo/widget/pull/88"
+    end
+  end
+
   describe "enqueue/2 with merge_strategy=direct" do
     @tag workspace_config: @ws_direct
     test "never calls GitHub APIs and closes the bead immediately", %{
@@ -271,7 +330,10 @@ defmodule Arbiter.Workflows.RefineryTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(
-              pr_payload(%{"reviewDecision" => "CHANGES_REQUESTED", "mergeStateStatus" => "blocked"})
+              pr_payload(%{
+                "reviewDecision" => "CHANGES_REQUESTED",
+                "mergeStateStatus" => "blocked"
+              })
             )
 
           conn.method == "PUT" ->

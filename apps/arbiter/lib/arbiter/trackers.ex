@@ -104,6 +104,35 @@ defmodule Arbiter.Trackers do
   @spec link_for(Issue.t()) :: String.t()
   def link_for(%Issue{tracker_ref: ref} = issue), do: for_bead(issue).link_for(ref)
 
+  @doc """
+  Attach a remote link (typically the implementing PR/MR) to the bead's
+  tracked item so the ticket references the code.
+
+  Resolves the adapter from the bead's `tracker_type` and dispatches to its
+  optional `add_remote_link/3`. Adapters that don't implement it — or beads
+  with no `tracker_ref` — return `{:error, :not_supported}`, which callers
+  treat as "nothing to link" rather than a hard failure. Callers must have
+  seeded the adapter's per-process config first (see `prepare/2`).
+  """
+  @spec add_remote_link(Issue.t(), String.t(), String.t()) ::
+          :ok | {:error, :not_supported} | {:error, term()}
+  def add_remote_link(%Issue{tracker_ref: ref} = issue, url, title)
+      when is_binary(url) and is_binary(title) do
+    cond do
+      not is_binary(ref) or ref == "" ->
+        {:error, :not_supported}
+
+      true ->
+        adapter = for_bead(issue)
+
+        if function_exported?(adapter, :add_remote_link, 3) do
+          adapter.add_remote_link(ref, url, title)
+        else
+          {:error, :not_supported}
+        end
+    end
+  end
+
   @spec list_transitions(Issue.t()) :: {:ok, [Tracker.status()]} | {:error, term()}
   def list_transitions(%Issue{tracker_ref: ref} = issue),
     do: for_bead(issue).list_transitions(ref)
