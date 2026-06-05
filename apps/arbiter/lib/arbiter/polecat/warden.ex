@@ -51,11 +51,16 @@ defmodule Arbiter.Polecat.Warden do
 
   @default_interval_ms 60_000
   # Watchdog ceiling on consecutive :pending polls before we escalate and stop.
-  # 30 polls × default 60s interval = 30 minutes of nothing happening — well
-  # past any reasonable hosted-forge approval latency. After this many polls
-  # without a terminal outcome, the Warden notifies the Admiral and fails the
-  # polecat so the bead can't hang silently (bd-66ey1o).
-  @default_max_polls 30
+  #
+  # auto_merge ON (CI/forge merges): 30 polls × 60s = 30 min. If auto-merge
+  # hasn't fired after that long, something is broken — fail loudly (bd-66ey1o).
+  #
+  # auto_merge OFF (human-merge lanes): :infinity — a human reviewer may take
+  # hours or overnight. Failing the polecat after 30 min was a false negative
+  # (bd-akr4il, VR-17739). The Warden polls indefinitely until the MR is
+  # merged or closed. Override via workspace config["merge"]["warden_max_polls"].
+  @default_max_polls_auto 30
+  @default_max_polls_manual :infinity
 
   @type opt ::
           {:bead_id, String.t()}
@@ -87,9 +92,14 @@ defmodule Arbiter.Polecat.Warden do
       without waiting for a hosted-forge approval the gate never posts.
     * `:interval_ms` (default `#{@default_interval_ms}`)
     * `:initial_delay_ms` (default `0` — poll once promptly, then on the interval)
-    * `:max_polls` (default `#{@default_max_polls}`) — consecutive `:pending`
-      polls before the Warden escalates to the Admiral and fails the polecat.
-      Pass `:infinity` to disable the watchdog.
+    * `:max_polls` — consecutive `:pending` polls before the Warden escalates.
+      Default is `#{@default_max_polls_auto}` when `auto_merge: true` (fail
+      loudly — auto-merge should fire quickly) and `:infinity` when
+      `auto_merge: false` (human-merge lanes; a human may take overnight or
+      longer, so the Warden parks rather than hard-fails). When a finite cap is
+      reached on a manual lane the polecat is **left parked** in
+      `:awaiting_review` and the Warden stops polling — it is NOT failed.
+      Pass `:infinity` to disable the watchdog entirely.
   """
   @spec start(opts()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
@@ -115,9 +125,16 @@ defmodule Arbiter.Polecat.Warden do
   @spec default_interval_ms() :: pos_integer()
   def default_interval_ms, do: @default_interval_ms
 
-  @doc "Default watchdog cap on consecutive `:pending` polls before escalation."
-  @spec default_max_polls() :: pos_integer()
-  def default_max_polls, do: @default_max_polls
+  @doc """
+  Default watchdog cap for `auto_merge: true` lanes (30 polls).
+  For `auto_merge: false` lanes the default is `:infinity`.
+  """
+  @spec default_max_polls_auto() :: pos_integer()
+  def default_max_polls_auto, do: @default_max_polls_auto
+
+  @doc "Default watchdog cap for `auto_merge: false` (manual-merge) lanes."
+  @spec default_max_polls_manual() :: :infinity
+  def default_max_polls_manual, do: @default_max_polls_manual
 
   @doc """
   Classify a `Arbiter.Mergers.get/1` result map into an approval outcome.
@@ -161,6 +178,8 @@ defmodule Arbiter.Polecat.Warden do
         # tests) but default to true when the gate has approved.
         auto_merge = Keyword.get(opts, :auto_merge, via_tribunal)
 
+        default_max_polls = if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
+
         state = %{
           bead_id: bead_id,
           polecat_pid: polecat_pid,
@@ -170,7 +189,7 @@ defmodule Arbiter.Polecat.Warden do
           auto_merge: auto_merge,
           via_tribunal: via_tribunal,
           interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
-          max_polls: Keyword.get(opts, :max_polls, @default_max_polls),
+          max_polls: Keyword.get(opts, :max_polls, default_max_polls),
           poll_count: 0
         }
 
@@ -272,12 +291,17 @@ defmodule Arbiter.Polecat.Warden do
     end)
   end
 
-  # Watchdog: bd-66ey1o. After `:max_polls` consecutive non-terminal polls,
-  # escalate to the Admiral and fail the polecat instead of polling forever.
-  # A silent hang at :awaiting_review is worse than a loud failure — at least a
-  # failed polecat surfaces in the notification feed and unblocks the operator.
+  # Watchdog: bd-66ey1o / bd-akr4il. After `:max_polls` consecutive non-terminal
+  # polls, escalate to the Admiral and either:
+  #   - auto_merge ON  → fail the polecat (auto-merge should fire quickly; a 30-
+  #                       min timeout means something is broken on the forge side)
+  #   - auto_merge OFF → park the polecat (a human reviewer may take overnight or
+  #                       longer; failing here was a false negative — VR-17739).
+  #                       The Warden stops polling to free resources, and the
+  #                       polecat stays in :awaiting_review so a boot-resume or
+  #                       webhook can re-attach it later.
   # Pass `max_polls: :infinity` to disable.
-  defp reschedule(%{max_polls: cap, poll_count: count} = state)
+  defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: true} = state)
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
       "Polecat.Warden: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
@@ -286,6 +310,17 @@ defmodule Arbiter.Polecat.Warden do
 
     escalate_watchdog(state)
     safe(fn -> Polecat.fail(state.polecat_pid, {:awaiting_review_timeout, cap}) end)
+    {:stop, :normal, %{state | poll_count: count + 1}}
+  end
+
+  defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: false} = state)
+       when is_integer(cap) and cap > 0 and count + 1 >= cap do
+    Logger.warning(
+      "Polecat.Warden: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
+        "#{cap} polls on a manual-merge lane; parking (polecat stays :awaiting_review)"
+    )
+
+    escalate_watchdog(state)
     {:stop, :normal, %{state | poll_count: count + 1}}
   end
 
