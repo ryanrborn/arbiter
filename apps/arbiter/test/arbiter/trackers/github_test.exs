@@ -660,4 +660,111 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:error, %Error{kind: :config_missing}} = GitHub.fetch("1")
     end
   end
+
+  describe "search_by_title/1" do
+    test "returns matching issues (exact, case-insensitive match)" do
+      stub(fn conn ->
+        assert conn.request_path == "/search/issues"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 2,
+          "items" => [
+            %{
+              "number" => 42,
+              "title" => "Fix the Thing",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/42",
+              "state" => "open"
+            },
+            %{
+              "number" => 43,
+              "title" => "Fix the Thing and more",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/43",
+              "state" => "open"
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [%{ref: "42", title: "Fix the Thing", url: url}]} =
+               GitHub.search_by_title("fix the thing")
+
+      assert url =~ "issues/42"
+    end
+
+    test "returns empty list when no exact match" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 1,
+          "items" => [
+            %{
+              "number" => 10,
+              "title" => "Something else entirely",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/10",
+              "state" => "open"
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, []} = GitHub.search_by_title("My Title")
+    end
+
+    test "filters out pull requests from results" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "total_count" => 2,
+          "items" => [
+            %{
+              "number" => 55,
+              "title" => "a pr title",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/pull/55",
+              "state" => "open",
+              "pull_request" => %{"url" => "..."}
+            },
+            %{
+              "number" => 56,
+              "title" => "a pr title",
+              "html_url" => "https://github.com/#{@owner}/#{@repo}/issues/56",
+              "state" => "open"
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [%{ref: "56"}]} = GitHub.search_by_title("a pr title")
+    end
+
+    test "returns empty list when search API returns no items key" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"total_count" => 0})
+      end)
+
+      assert {:ok, []} = GitHub.search_by_title("anything")
+    end
+
+    test "returns error on API failure" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               GitHub.search_by_title("bad query")
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = GitHub.search_by_title("test")
+    end
+  end
 end

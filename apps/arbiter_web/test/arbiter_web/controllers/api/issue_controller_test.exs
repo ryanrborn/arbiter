@@ -105,6 +105,213 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert is_binary(bead_id)
       assert msg =~ "upstream github create failed"
     end
+
+    test "returns 409 when an open bead with the same title exists", %{conn: conn, ws: ws} do
+      {:ok, _existing} = Ash.create(Issue, %{title: "Duplicate Title", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues", %{title: "Duplicate Title", workspace_id: ws.id})
+
+      body = json_response(conn, 409)
+
+      assert %{
+               "error" => %{
+                 "type" => "duplicate_bead",
+                 "message" => msg,
+                 "details" => %{"matches" => [%{"title" => "Duplicate Title"}]}
+               }
+             } = body
+
+      assert msg =~ "--force"
+    end
+
+    test "dedup is case-insensitive and trims whitespace", %{conn: conn, ws: ws} do
+      {:ok, _existing} = Ash.create(Issue, %{title: "Foo Bar", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/issues", %{title: "  foo bar  ", workspace_id: ws.id})
+
+      assert %{"error" => %{"type" => "duplicate_bead"}} = json_response(conn, 409)
+    end
+
+    test "no dedup for beads in a different workspace", %{conn: conn, ws: ws} do
+      {:ok, ws2} = Ash.create(Workspace, %{name: "other-dedup", prefix: "oth2"})
+      {:ok, _existing} = Ash.create(Issue, %{title: "Unique Title", workspace_id: ws2.id})
+
+      conn = post(conn, ~p"/api/issues", %{title: "Unique Title", workspace_id: ws.id})
+
+      assert json_response(conn, 201)
+    end
+
+    test "no dedup when the matching bead is closed", %{conn: conn, ws: ws} do
+      {:ok, existing} = Ash.create(Issue, %{title: "Closed Bead", workspace_id: ws.id})
+      {:ok, _} = Ash.update(existing, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/issues", %{title: "Closed Bead", workspace_id: ws.id})
+
+      assert json_response(conn, 201)
+    end
+
+    test "--force bypasses the local dedup check", %{conn: conn, ws: ws} do
+      {:ok, _existing} = Ash.create(Issue, %{title: "Forced Title", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/issues", %{title: "Forced Title", workspace_id: ws.id, force: true})
+
+      assert json_response(conn, 201)
+    end
+
+    test "returns 409 when GitHub has an open issue with the same title", %{conn: conn} do
+      env_var = "GTE_TRACKER_DEDUP_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "dedup-gh",
+          prefix: "ddp",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        cond do
+          conn.request_path == "/search/issues" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "total_count" => 1,
+              "items" => [
+                %{
+                  "number" => 99,
+                  "title" => "tracker dup",
+                  "html_url" => "https://github.com/o/r/issues/99",
+                  "state" => "open"
+                }
+              ]
+            })
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 100})
+        end
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "tracker dup", workspace_id: gh_ws.id})
+
+      body = json_response(conn, 409)
+
+      assert %{
+               "error" => %{
+                 "type" => "duplicate_tracker_issue",
+                 "message" => msg,
+                 "details" => %{"matches" => [%{"ref" => "99", "url" => url}]}
+               }
+             } = body
+
+      assert msg =~ "--force"
+      assert url =~ "issues/99"
+    end
+
+    test "--force bypasses the tracker dedup check", %{conn: conn} do
+      env_var = "GTE_TRACKER_DEDUP_FORCE_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "dedup-gh-force",
+          prefix: "ddf",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        cond do
+          conn.request_path == "/search/issues" ->
+            Req.Test.json(conn, %{
+              "total_count" => 1,
+              "items" => [
+                %{
+                  "number" => 99,
+                  "title" => "forced dup",
+                  "html_url" => "https://github.com/o/r/issues/99",
+                  "state" => "open"
+                }
+              ]
+            })
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 101})
+        end
+      end)
+
+      conn =
+        post(conn, ~p"/api/issues", %{
+          title: "forced dup",
+          workspace_id: gh_ws.id,
+          force: true
+        })
+
+      assert json_response(conn, 201)
+    end
+
+    test "tracker search error is silently ignored (does not block create)", %{conn: conn} do
+      env_var = "GTE_TRACKER_DEDUP_ERR_TEST_TOKEN"
+      System.put_env(env_var, "tok")
+      on_exit(fn -> System.delete_env(env_var) end)
+
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "dedup-gh-err",
+          prefix: "dde",
+          config: %{
+            "tracker" => %{
+              "type" => "github",
+              "config" => %{
+                "owner" => "o",
+                "repo" => "r",
+                "credentials_ref" => "env:#{env_var}"
+              }
+            }
+          }
+        })
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        cond do
+          conn.request_path == "/search/issues" ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "search down"})
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 102})
+        end
+      end)
+
+      conn = post(conn, ~p"/api/issues", %{title: "search error bead", workspace_id: gh_ws.id})
+
+      assert json_response(conn, 201)
+    end
   end
 
   describe "GET /api/issues/:id" do
