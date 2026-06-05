@@ -363,6 +363,63 @@ defmodule ArbiterCli.Cmd.RestartTest do
     end
   end
 
+  describe "spawn working directory" do
+    test "spawns Phoenix with cd set to the project root when .run-server.sh is absent" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        send(test_pid, {:cmd, cmd, args, opts})
+
+        case cmd do
+          "lsof" -> {"", 1}
+          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
+          _ -> {"", 0}
+        end
+      end)
+
+      capture(fn -> Restart.run([]) end)
+
+      assert_received {:cmd, "sh", ["-c", _script], opts}
+      assert Keyword.get(opts, :cd) == "/tmp/arbiter-restart-test"
+    end
+
+    test "delegates to .run-server.sh when it exists in the project root" do
+      arb_home = System.get_env("ARB_HOME")
+      File.mkdir_p!(arb_home)
+      run_sh = Path.join(arb_home, ".run-server.sh")
+      File.write!(run_sh, "#!/bin/sh\nexec mix phx.server\n")
+      on_exit(fn -> File.rm(run_sh) end)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        send(test_pid, {:cmd, cmd, args, opts})
+
+        case cmd do
+          "lsof" -> {"", 1}
+          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
+          _ -> {"", 0}
+        end
+      end)
+
+      capture(fn -> Restart.run([]) end)
+
+      assert_received {:cmd, "sh", ["-c", script], opts}
+      assert script =~ ".run-server.sh"
+      refute Keyword.has_key?(opts, :cd)
+    end
+  end
+
   describe "port resolution" do
     test "honors a custom ARB_HOST port" do
       System.put_env("ARB_HOST", "http://127.0.0.1:5005")
