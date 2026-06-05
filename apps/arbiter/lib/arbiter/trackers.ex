@@ -224,6 +224,28 @@ defmodule Arbiter.Trackers do
     end
   end
 
+  @doc """
+  Returns the adapter module for the workspace's configured tracker.
+
+  Falls back to `None` for unknown types (e.g. `:linear` before its adapter
+  lands), mirroring `adapter_for_workspace_type/1`.
+  """
+  @spec for_workspace(Arbiter.Beads.Workspace.t()) :: adapter
+  def for_workspace(%Arbiter.Beads.Workspace{} = workspace),
+    do: adapter_for_workspace_type(workspace_tracker_type(workspace))
+
+  @doc """
+  Seed the per-process adapter config for `workspace`, run `fun`, and restore
+  the previous state. The `type` arg lets callers avoid re-computing the
+  tracker type when they already have it.
+
+  Mirrors the adapter-specific `with_workspace/2` helpers — callers that want
+  to stay tracker-agnostic use this instead of reaching into a specific adapter.
+  """
+  @spec with_workspace(atom(), Arbiter.Beads.Workspace.t(), (-> result)) :: result
+        when result: any()
+  def with_workspace(type, workspace, fun), do: do_with_workspace(type, workspace, fun)
+
   defp workspace_tracker_type(%Arbiter.Beads.Workspace{config: config}) do
     case get_in(config || %{}, ["tracker", "type"]) do
       type when is_binary(type) ->
@@ -249,10 +271,8 @@ defmodule Arbiter.Trackers do
     end
   end
 
-  # Seed the adapter's per-process config — same dance as `prepare/2`, but
-  # `prepare/2` takes an Issue and we don't have one here.
-  defp with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
-  defp with_workspace(:jira, workspace, fun), do: Jira.with_workspace(workspace, fun)
-  defp with_workspace(:shortcut, workspace, fun), do: Shortcut.with_workspace(workspace, fun)
-  defp with_workspace(_, _workspace, fun), do: fun.()
+  defp do_with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
+  defp do_with_workspace(:jira, workspace, fun), do: Jira.with_workspace(workspace, fun)
+  defp do_with_workspace(:shortcut, workspace, fun), do: Shortcut.with_workspace(workspace, fun)
+  defp do_with_workspace(_, _workspace, fun), do: fun.()
 end
