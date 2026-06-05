@@ -82,6 +82,30 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert "A" in p.permissions.deny
       assert "B" in p.permissions.deny
     end
+
+    test "workspace config overrides via security.mode" do
+      ws = %Workspace{
+        config: %{
+          "security" => %{"mode" => "auto"}
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws)
+      assert p.permissions.mode == :auto
+    end
+
+    test "workspace config overrides via agent.config.security_mode" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "config" => %{"security_mode" => "strict"}
+          }
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws)
+      assert p.permissions.mode == :strict
+    end
   end
 
   describe "merge/2 leniency" do

@@ -64,7 +64,7 @@ freezes mid-task. The directive stalls silently.
 `:bypass` uses `--dangerously-skip-permissions` to skip the interactive
 classifier entirely, preventing headless freezes. Crucially, the deny list is a
 **separate, orthogonal mechanism** — deny rules are hard tool-level blocks
-enforced before the classifier, and they are still applied via `--settings` even
+enforced at the tool layer, and they are still applied via `--settings` even
 in `:bypass` mode. So:
 
 > **Worktree containment = blast-radius fence. Deny list = real security fence.

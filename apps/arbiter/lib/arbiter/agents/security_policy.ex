@@ -193,7 +193,27 @@ defmodule Arbiter.Agents.SecurityPolicy do
   def resolve(_other, override), do: merge(default(), override)
 
   defp resolve_from_config(config, override) do
-    workspace_policy = get_in(config || %{}, ["agent", "security"]) || %{}
+    config = config || %{}
+    workspace_policy = get_in(config, ["agent", "security"]) || %{}
+
+    alt_mode =
+      case get_in(config, ["security", "mode"]) do
+        m when is_binary(m) or is_atom(m) -> m
+        _ ->
+          case get_in(config, ["agent", "config", "security_mode"]) do
+            m when is_binary(m) or is_atom(m) -> m
+            _ -> nil
+          end
+      end
+
+    workspace_policy =
+      if alt_mode do
+        Map.update(workspace_policy, "permissions", %{"mode" => alt_mode}, fn perms ->
+          Map.put(perms, "mode", alt_mode)
+        end)
+      else
+        workspace_policy
+      end
 
     default()
     |> merge(workspace_policy)
