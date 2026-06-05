@@ -138,6 +138,51 @@ defmodule Arbiter.Beads.WorkspaceTest do
 
       assert err |> Exception.message() |> String.contains?("merge must be a map")
     end
+
+    test "accepts agent.type as a single valid string" do
+      config = %{"agent" => %{"type" => "claude"}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-single", config: config})
+      assert ws.config["agent"]["type"] == "claude"
+    end
+
+    test "accepts agent.type as a list of valid strings (multi-provider pool)" do
+      config = %{"agent" => %{"type" => ["claude", "gemini"]}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-pool", config: config})
+      assert ws.config["agent"]["type"] == ["claude", "gemini"]
+    end
+
+    test "accepts agent.type as a single-element list" do
+      config = %{"agent" => %{"type" => ["gemini"]}}
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-singleton-list", config: config})
+      assert ws.config["agent"]["type"] == ["gemini"]
+    end
+
+    test "rejects agent.type as an empty list" do
+      config = %{"agent" => %{"type" => []}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "agent-empty-list", config: config})
+
+      assert err |> Exception.message() |> String.contains?("agent.type list must not be empty")
+    end
+
+    test "rejects agent.type list with invalid entries" do
+      config = %{"agent" => %{"type" => ["claude", "robots"]}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "agent-bad-list", config: config})
+
+      assert err |> Exception.message() |> String.contains?("agent.type list contains invalid types")
+    end
+
+    test "rejects agent.type as a non-string non-list" do
+      config = %{"agent" => %{"type" => 42}}
+
+      assert {:error, %Ash.Error.Invalid{} = err} =
+               Ash.create(Workspace, %{name: "agent-int-type", config: config})
+
+      assert err |> Exception.message() |> String.contains?("agent.type must be a string or list")
+    end
   end
 
   describe "update/2" do

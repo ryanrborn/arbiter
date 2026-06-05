@@ -15,10 +15,11 @@ defmodule Arbiter.Agents do
 
   ## Resolution rule
 
-  `workspace.config["agent"]["type"]` is one of the strings in
-  `valid_agent_types/0` (`"claude"` today). Missing key falls back to
-  `:claude` so existing workspaces — none of which carry an `"agent"`
-  sub-object — see unchanged behavior.
+  `workspace.config["agent"]["type"]` is a string or a list of strings from
+  `valid_agent_types/0`. Missing key falls back to `:claude` so existing
+  workspaces see unchanged behavior. When the value is a list (multi-provider
+  pool), `Arbiter.Agents.ProviderPool` picks the first healthy provider; a
+  provider is unhealthy while its circuit-breaker cooldown is active.
 
   ## Reviewer dispatch
 
@@ -31,6 +32,7 @@ defmodule Arbiter.Agents do
 
   alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Gemini
+  alias Arbiter.Agents.ProviderPool
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
 
@@ -146,11 +148,13 @@ defmodule Arbiter.Agents do
   defp agent_type(%Workspace{config: config}, role) do
     case get_in(config || %{}, [Atom.to_string(role), "type"]) do
       type when is_binary(type) ->
-        try do
-          String.to_existing_atom(type)
-        rescue
-          ArgumentError -> :claude
-        end
+        safe_type_atom(type)
+
+      types when is_list(types) ->
+        types
+        |> Enum.map(&safe_type_atom/1)
+        |> Enum.reject(&is_nil/1)
+        |> ProviderPool.pick()
 
       _ when role == :agent ->
         :claude
@@ -159,4 +163,12 @@ defmodule Arbiter.Agents do
         nil
     end
   end
+
+  defp safe_type_atom(t) when is_binary(t) do
+    String.to_existing_atom(t)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp safe_type_atom(_), do: nil
 end
