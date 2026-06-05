@@ -1857,8 +1857,9 @@ defmodule Arbiter.Polecat do
 
   # Append the verdict + findings to the bead's notes so it surfaces in
   # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.
-  defp record_tribunal_outcome(%State{bead_id: bead_id}, verdict, findings) do
-    block = format_tribunal_note(verdict, findings)
+  defp record_tribunal_outcome(%State{bead_id: bead_id, meta: meta}, verdict, findings) do
+    rounds = Map.get(meta || %{}, :tribunal_rounds)
+    block = format_tribunal_note(verdict, findings, rounds)
 
     with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
       notes =
@@ -1877,7 +1878,7 @@ defmodule Arbiter.Polecat do
     e -> log_tribunal_warning(bead_id, e)
   end
 
-  defp format_tribunal_note(verdict, findings) do
+  defp format_tribunal_note(verdict, findings, rounds) do
     header =
       case verdict do
         :approve -> "Tribunal verdict: APPROVE"
@@ -1886,7 +1887,8 @@ defmodule Arbiter.Polecat do
       end
 
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
-    "## #{header} (#{stamp})\n\n#{findings}"
+    rounds_line = if rounds, do: "\nrounds: #{rounds}", else: ""
+    "## #{header} (#{stamp})#{rounds_line}\n\n#{findings}"
   end
 
   # On a non-approve verdict, raise an escalation to the Admiral's mailbox with
