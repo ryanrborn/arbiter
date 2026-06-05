@@ -29,5 +29,15 @@ defmodule ArbiterWeb.Api.VersionControllerTest do
 
       assert {:ok, _dt, _} = DateTime.from_iso8601(body["built_at"])
     end
+
+    test "sha reflects the current HEAD, not a stale compile-time value", %{conn: conn} do
+      {expected_sha, 0} =
+        System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
+
+      conn = get(conn, ~p"/api/version")
+      body = json_response(conn, 200)
+
+      assert body["sha"] == String.trim(expected_sha)
+    end
   end
 end
