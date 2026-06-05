@@ -709,6 +709,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # (`:no_verdict`) is forwarded as such; the author's safe default for it is to
   # escalate without merging.
   defp report(state, verdict) do
+    safe(fn -> Polecat.report(state.author, :tribunal_rounds, state.round) end)
     safe(fn -> Polecat.tribunal_verdict(state.author, normalize_verdict(verdict)) end)
     :ok
   end
