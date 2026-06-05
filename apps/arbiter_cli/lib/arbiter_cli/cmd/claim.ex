@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Claim do
   @moduledoc """
-  `arb claim <issue#> [--force] [--rig <rig>] [--json]` — create a bead
+  `arb claim <issue#> [--force] [--difficulty N] [--rig <rig>] [--json]` — create a bead
   linked to a GitHub issue assigned to the workspace user.
 
   POSTs to `/api/workspaces/:workspace_id/claim`. The server fetches the
@@ -13,6 +13,9 @@ defmodule ArbiterCli.Cmd.Claim do
     --force        Skip the assignment-as-claim check. Use only when you
                    *know* you want a bead for an issue you don't own (e.g.
                    to track someone else's work).
+    --difficulty N Task difficulty (0..4): D0 trivial · D1 easy · D2 medium ·
+                   D3 hard · D4 very hard. Drives model tier and thinking
+                   budget routed to acolytes. (default: D2 on the server)
     --rig <rig>    Hint for a later `arb sling`. Recorded as a tip in the
                    command's text output — not persisted on the bead.
     --json         Emit JSON instead of human-readable text.
@@ -22,6 +25,7 @@ defmodule ArbiterCli.Cmd.Claim do
 
   @switches [
     force: :boolean,
+    difficulty: :integer,
     rig: :string,
     json: :boolean
   ]
@@ -39,9 +43,12 @@ defmodule ArbiterCli.Cmd.Claim do
 
     workspace_id = Workspace.id_or_halt()
 
+    validate_difficulty!(opts[:difficulty])
+
     body =
       %{"ref" => ref}
       |> maybe_put("force", opts[:force])
+      |> maybe_put("difficulty", opts[:difficulty])
 
     case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
       {:ok, payload} -> emit(payload, opts[:rig], mode)
@@ -52,6 +59,13 @@ defmodule ArbiterCli.Cmd.Claim do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, false), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp validate_difficulty!(nil), do: :ok
+  defp validate_difficulty!(n) when is_integer(n) and n in 0..4, do: :ok
+
+  defp validate_difficulty!(other) do
+    Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..4 / D0..D4)")
+  end
 
   defp emit(payload, _rig, :json), do: IO.puts(Jason.encode!(payload))
 

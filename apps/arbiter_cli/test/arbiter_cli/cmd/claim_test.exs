@@ -120,4 +120,47 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert code != 0
     assert err =~ "not assigned"
   end
+
+  test "--difficulty forwards as difficulty in the POST body" do
+    parent = self()
+
+    stub_routes([
+      @workspace_lookup,
+      {{"post", "/api/workspaces/ws-1/claim"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         send(parent, {:posted, Jason.decode!(body)})
+
+         conn
+         |> Plug.Conn.put_status(201)
+         |> Req.Test.json(%{
+           "status" => "created",
+           "bead" => %{
+             "id" => "bd-abc",
+             "title" => "Hard task",
+             "status" => "open",
+             "tracker_type" => "github",
+             "tracker_ref" => "43",
+             "difficulty" => 3
+           }
+         })
+       end}
+    ])
+
+    {_out, _err, code} = capture(fn -> Claim.run(["43", "--difficulty", "3"]) end)
+    assert code == 0
+
+    assert_received {:posted, body}
+    assert body["difficulty"] == 3
+  end
+
+  test "--difficulty out-of-range exits non-zero before posting" do
+    stub_routes([
+      @workspace_lookup
+    ])
+
+    {_out, err, code} = capture(fn -> Claim.run(["43", "--difficulty", "9"]) end)
+    assert code != 0
+    assert err =~ "difficulty"
+  end
 end
