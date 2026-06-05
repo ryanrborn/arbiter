@@ -85,6 +85,7 @@ defmodule ArbiterWeb.Router do
     get("/workspaces/:workspace_id/sync/plan", ClaimController, :plan)
     post("/workspaces/:workspace_id/sync", ClaimController, :sync)
     get("/workspaces/:workspace_id/tracker/issues", TrackerController, :issues)
+    post("/workspaces/:workspace_id/tracker/tickets", TrackerController, :create_ticket)
 
     # Global settings
     get("/settings", SettingsController, :show)

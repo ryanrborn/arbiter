@@ -588,6 +588,61 @@ defmodule Arbiter.Trackers.GitHubTest do
 
       assert {:ok, "101"} = GitHub.create(%{title: "with-label", status: :open})
     end
+
+    test "maps :priority to a 'priority: N' label in the outbound request body" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "urgent work"
+        assert "priority: 1" in decoded["labels"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 200})
+      end)
+
+      assert {:ok, "200"} = GitHub.create(%{title: "urgent work", priority: 1})
+    end
+
+    test "maps :issue_type to a 'type: T' label in the outbound request body" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["title"] == "bug report"
+        assert "type: bug" in decoded["labels"]
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 201})
+      end)
+
+      assert {:ok, "201"} = GitHub.create(%{title: "bug report", issue_type: "bug"})
+    end
+
+    test "merges priority, type, and status labels in a single 'labels' field" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        labels = decoded["labels"]
+        assert "in progress" in labels
+        assert "priority: 2" in labels
+        assert "type: feature" in labels
+        # All three present and no duplicates.
+        assert length(labels) == 3
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 202})
+      end)
+
+      assert {:ok, "202"} =
+               GitHub.create(%{
+                 title: "combined",
+                 status: :in_progress,
+                 priority: 2,
+                 issue_type: "feature"
+               })
+    end
   end
 
   describe "with_workspace/2" do

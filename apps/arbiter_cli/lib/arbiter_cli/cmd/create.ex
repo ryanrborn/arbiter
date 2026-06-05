@@ -3,7 +3,8 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
                        [--assignee a] [--tracker-ref REF] [--no-tracker]
-                       [--target-branch NAME] [--vanguard <convoy-id>]`
+                       [--target-branch NAME] [--vanguard <convoy-id>]
+                       [--ticket-only]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
 
@@ -49,6 +50,14 @@ defmodule ArbiterCli.Cmd.Create do
     * `--no-tracker` / `--local-only` — create a purely local bead even on a
       tracker-configured workspace. Forwards `skip_upstream_create=true` as
       the action argument.
+    * `--ticket-only` / `--no-bead` / `--unclaimed` — create ONLY the upstream
+      tracker ticket, with NO local bead. The ticket sits unclaimed on the
+      shared tracker; anyone can pick it up via `arb claim <ref>`. The workspace
+      must have a tracker configured. Mutually exclusive with `--no-tracker` /
+      `--local-only` (opposite intent).
+      Honored: `--title`, `--description`, `--priority`, `--type`, `--assignee`.
+      Not honored (warning emitted): `--difficulty`, `--deps`, `--vanguard`,
+      `--tracker-ref`, `--target-branch`, `--labels`.
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
@@ -76,6 +85,9 @@ defmodule ArbiterCli.Cmd.Create do
     target_branch: :string,
     no_tracker: :boolean,
     local_only: :boolean,
+    ticket_only: :boolean,
+    no_bead: :boolean,
+    unclaimed: :boolean,
     vanguard: :string,
     json: :boolean
   ]
@@ -91,9 +103,63 @@ defmodule ArbiterCli.Cmd.Create do
         many -> Enum.join(many, " ")
       end
 
+    ticket_only? = opts[:ticket_only] == true or opts[:no_bead] == true or opts[:unclaimed] == true
+    skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
+
+    if ticket_only? and skip_upstream? do
+      Output.die(
+        "--ticket-only and --no-tracker/--local-only are mutually exclusive: " <>
+          "--ticket-only creates ONLY the tracker ticket, while --no-tracker skips the tracker entirely"
+      )
+    end
+
+    if ticket_only? do
+      run_ticket_only(opts, title, mode)
+    else
+      run_bead_create(opts, rest, title, skip_upstream?, mode)
+    end
+  end
+
+  defp run_ticket_only(opts, title, mode) do
     workspace_id = Workspace.id_or_halt()
 
-    skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
+    ignored =
+      [
+        {"--difficulty", opts[:difficulty]},
+        {"--deps", opts[:deps]},
+        {"--vanguard", opts[:vanguard]},
+        {"--tracker-ref", opts[:tracker_ref]},
+        {"--target-branch", opts[:target_branch]},
+        {"--labels", opts[:labels]}
+      ]
+      |> Enum.filter(fn {_flag, val} -> not is_nil(val) end)
+      |> Enum.map(fn {flag, _val} -> flag end)
+
+    if ignored != [] and mode == :text do
+      IO.puts(
+        :stderr,
+        "arb: warning: --ticket-only ignores #{Enum.join(ignored, ", ")} (no local bead is created)."
+      )
+    end
+
+    payload =
+      %{"title" => title}
+      |> maybe_put("description", opts[:description])
+      |> maybe_put("priority", opts[:priority])
+      |> maybe_put("issue_type", opts[:type])
+      |> maybe_put("assignee", opts[:assignee])
+
+    ticket =
+      case Client.post("/api/workspaces/#{workspace_id}/tracker/tickets", payload) do
+        {:ok, body} -> body
+        {:error, err} -> Output.die(err)
+      end
+
+    Output.emit_ticket(ticket, mode)
+  end
+
+  defp run_bead_create(opts, _rest, title, skip_upstream?, mode) do
+    workspace_id = Workspace.id_or_halt()
 
     validate_difficulty!(opts[:difficulty])
 
