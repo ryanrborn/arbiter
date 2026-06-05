@@ -17,8 +17,8 @@ defmodule ArbiterCli.Main do
       arb update <id> [--priority ...] [--append-notes ...]
                                Edit an issue's fields.
       arb update [--timeout SECONDS] [--json]
-                               No id: deploy. git pull --ff-only main, then
-                               restart Phoenix so merged code is live.
+                               No id: deploy. git pull --ff-only main, run
+                               migrations, rebuild CLI if changed, restart Phoenix.
       arb convoy create <title> [--lifecycle system_managed|owned]
       arb convoy add <convoy-id> <issue-id...>
       arb convoy rm <convoy-id> <issue-id>
@@ -31,6 +31,8 @@ defmodule ArbiterCli.Main do
       arb doctor
       arb start [--timeout SECONDS] [--json]
       arb restart [--timeout SECONDS] [--json]
+      arb install-cli [--json]
+                               Build and install the CLI escript to ~/.local/bin/arb.
       arb install-service [--system] [--uninstall] [--json]
                                Install a systemd unit so the stack starts at
                                boot (ExecStart=arb start). --uninstall removes it.
@@ -113,6 +115,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("doctor", args), do: ArbiterCli.Cmd.Doctor.run(args)
   defp dispatch_known("start", args), do: ArbiterCli.Cmd.Start.run(args)
   defp dispatch_known("restart", args), do: ArbiterCli.Cmd.Restart.run(args)
+  defp dispatch_known("install-cli", args), do: ArbiterCli.Cmd.InstallCli.run(args)
   defp dispatch_known("install-service", args), do: ArbiterCli.Cmd.InstallService.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("sling", args), do: ArbiterCli.Cmd.Sling.run(args)
