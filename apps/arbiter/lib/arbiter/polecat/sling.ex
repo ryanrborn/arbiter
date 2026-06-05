@@ -102,6 +102,7 @@ defmodule Arbiter.Polecat.Sling do
 
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
+         {:ok, opts} <- maybe_resolve_rig_for_real_work(bead, opts),
          :ok <- maybe_preflight(bead, opts),
          {:ok, bead} <- transition_to_in_progress(bead),
          {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
@@ -559,6 +560,68 @@ defmodule Arbiter.Polecat.Sling do
     end
   rescue
     _ -> nil
+  end
+
+  # Real-work rig resolution (bd-1ziw04): when start_claude: true the dispatch
+  # MUST bind a rig — a no-rig idle stub does nothing and looks dispatched.
+  #
+  # Contract (approach b):
+  #   * Explicit rig that resolves in :rig_paths → proceed.
+  #   * Explicit rig that does NOT resolve     → {:error, {:rig_not_found, rig}}.
+  #   * No rig, exactly one rig in :rig_paths  → auto-select, update opts.
+  #   * No rig, zero rigs in :rig_paths        → {:error, :no_rig_configured}.
+  #   * No rig, multiple rigs in :rig_paths    → {:error, {:ambiguous_rig, rigs}}.
+  #
+  # The check fires only for `start_claude: true` dispatches; a dry/manual sling
+  # (no agent) is allowed to park without a rig.
+  defp maybe_resolve_rig_for_real_work(%Issue{} = bead, opts) do
+    case Keyword.get(opts, :start_claude, false) do
+      false -> {:ok, opts}
+      true -> resolve_rig_for_dispatch(bead, opts)
+    end
+  end
+
+  defp resolve_rig_for_dispatch(%Issue{} = bead, opts) do
+    case Keyword.get(opts, :rig) do
+      rig when is_binary(rig) and rig != "" ->
+        case resolve_rig_path(bead, rig) do
+          nil -> {:error, {:rig_not_found, rig}}
+          _path -> {:ok, opts}
+        end
+
+      _ ->
+        case all_available_rigs(bead) do
+          [] -> {:error, :no_rig_configured}
+          [sole] -> {:ok, Keyword.put(opts, :rig, sole)}
+          rigs -> {:error, {:ambiguous_rig, rigs}}
+        end
+    end
+  end
+
+  # Enumerate all rig names that have a resolvable path, drawn from:
+  #   1. The bead's workspace config `rig_paths` map.
+  #   2. The global Application env `:rig_paths` map.
+  # Both sources are combined, de-duplicated, and sorted.
+  defp all_available_rigs(%Issue{workspace_id: ws_id}) do
+    ws_rigs =
+      case load_workspace_config(ws_id) do
+        %{"rig_paths" => rp} when is_map(rp) ->
+          Enum.flat_map(rp, fn {k, v} ->
+            if rig_path_from_config(v) != nil, do: [k], else: []
+          end)
+
+        _ ->
+          []
+      end
+
+    app_rigs =
+      :arbiter
+      |> Application.get_env(:rig_paths, %{})
+      |> Enum.flat_map(fn {k, v} ->
+        if rig_path_from_config(v) != nil, do: [k], else: []
+      end)
+
+    (ws_rigs ++ app_rigs) |> Enum.uniq() |> Enum.sort()
   end
 
   # Pre-flight auth check (bd-awi4nw): before transitioning the bead and
