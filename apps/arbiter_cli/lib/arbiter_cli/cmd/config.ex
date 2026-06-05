@@ -34,7 +34,7 @@ defmodule ArbiterCli.Cmd.Config do
 
     * empty `rig_paths` (when `rig_paths` exists and would become `{}`)
     * `tracker.type != "none"` with `tracker.config` missing or empty
-    * `merge.strategy == "github"` with `merge.config.owner` or `.repo` missing
+    * `merge.strategy == "github"` — no static check (owner + repo are per-rig derivable)
 
   Destructive changes (any unset, or any set that overwrites a non-empty
   existing leaf) print a before/after diff. The server-side `ValidateConfig`
@@ -302,27 +302,11 @@ defmodule ArbiterCli.Cmd.Config do
     end
   end
 
-  defp check_github_merge(reasons, config) do
-    case get_in_path(config, ["merge"]) do
-      %{"strategy" => "github"} = merge ->
-        cfg = Map.get(merge, "config") || %{}
-        owner = Map.get(cfg, "owner")
-        repo = Map.get(cfg, "repo")
-
-        cond do
-          not (is_binary(owner) and owner != "") ->
-            ["merge.strategy is \"github\" but merge.config.owner is missing" | reasons]
-
-          not (is_binary(repo) and repo != "") ->
-            ["merge.strategy is \"github\" but merge.config.repo is missing" | reasons]
-
-          true ->
-            reasons
-        end
-
-      _ ->
-        reasons
-    end
+  defp check_github_merge(reasons, _config) do
+    # owner and repo are both per-rig derivable from the rig's origin remote
+    # (Arbiter.Mergers.Github.RepoResolver). No static check needed here —
+    # the runtime raises a clear error if credentials are missing.
+    reasons
   end
 
   defp confirm_or_die!(before, after_, force, label) do

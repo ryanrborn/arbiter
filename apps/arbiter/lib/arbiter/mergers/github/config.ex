@@ -29,11 +29,12 @@ defmodule Arbiter.Mergers.Github.Config do
         "merge_method" => "squash"
       }
 
-  `owner` is required. `repo` is optional: a single-repo workspace pins it
-  here, but a multi-rig workspace whose rigs live in different repos (e.g.
-  the `leotech` workspace's four `leo-technologies-llc/*` rigs) omits it and
-  the adapter derives the target repo per-rig from the rig's `origin` remote
-  via `Arbiter.Mergers.Github.RepoResolver`.
+  Both `owner` and `repo` are optional: a workspace can omit both and let the
+  adapter derive them per-rig from the rig's `origin` remote via
+  `Arbiter.Mergers.Github.RepoResolver` (the leotech workspace does this for
+  all four of its `leo-technologies-llc/*` rigs). A single-repo workspace may
+  still pin `repo` here for the legacy bare-ref shape, but this is deprecated —
+  repo is a rig-level concern.
 
   `credentials_ref` is a small DSL: `"env:NAME"` looks up `System.get_env/1`.
   A bare string (no prefix) is treated as a literal token, but this should be
@@ -55,7 +56,7 @@ defmodule Arbiter.Mergers.Github.Config do
 
   @type config :: %{
           base_url: String.t(),
-          owner: String.t(),
+          owner: String.t() | nil,
           repo: String.t() | nil,
           token: String.t(),
           default_target_branch: String.t(),
@@ -106,12 +107,11 @@ defmodule Arbiter.Mergers.Github.Config do
         Application.get_env(:arbiter, :github_merger_default_config) ||
         %{}
 
-    with {:ok, owner} <- fetch_string(raw, "owner"),
-         {:ok, token} <- fetch_token(raw) do
+    with {:ok, token} <- fetch_token(raw) do
       {:ok,
        %{
          base_url: stringy(Map.get(raw, "base_url")) || @default_base_url,
-         owner: owner,
+         owner: optional_string(raw, "owner"),
          repo: optional_string(raw, "repo"),
          token: token,
          default_target_branch:
@@ -154,23 +154,6 @@ defmodule Arbiter.Mergers.Github.Config do
     case Map.get(map, key) do
       v when is_binary(v) and v != "" -> v
       _ -> nil
-    end
-  end
-
-  defp fetch_string(map, key) do
-    case Map.get(map, key) do
-      v when is_binary(v) and v != "" ->
-        {:ok, v}
-
-      _ ->
-        {:error,
-         %Error{
-           kind: :config_missing,
-           status: nil,
-           message:
-             "GitHub merger config missing #{inspect(key)}. Set workspace.config[\"merge\"][\"config\"][#{inspect(key)}] or :arbiter, :github_merger_default_config in Application env.",
-           raw: nil
-         }}
     end
   end
 
