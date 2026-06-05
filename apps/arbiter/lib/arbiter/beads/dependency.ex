@@ -39,11 +39,11 @@ defmodule Arbiter.Beads.Dependency do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Beads,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   @types ~w(blocks depends_on relates_to discovered_from parent_of)a
 
-  postgres do
+  sqlite do
     table "dependencies"
     repo Arbiter.Repo
 
