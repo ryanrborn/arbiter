@@ -50,8 +50,10 @@ defmodule Arbiter.Polecat.Sling do
   """
 
   alias Arbiter.Agents
+  alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Messages.AdmiralNotifier
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
@@ -74,7 +76,10 @@ defmodule Arbiter.Polecat.Sling do
           model: String.t() | nil,
           review: boolean(),
           security: map() | nil,
-          security_mode: String.t() | atom() | nil
+          security_mode: String.t() | atom() | nil,
+          preflight: boolean(),
+          probe_command: [String.t()] | nil,
+          agent_adapter: module() | nil
         ]
 
   @type sling_result :: %{
@@ -93,6 +98,7 @@ defmodule Arbiter.Polecat.Sling do
 
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
+         :ok <- maybe_preflight(bead, opts),
          {:ok, bead} <- transition_to_in_progress(bead),
          {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
          {:ok, polecat_pid} <- start_polecat(bead, worktree_path, opts),
@@ -359,6 +365,76 @@ defmodule Arbiter.Polecat.Sling do
     end
   rescue
     _ -> nil
+  end
+
+  # Pre-flight auth check (bd-awi4nw): before transitioning the bead and
+  # dispatching a (paid, autonomous) acolyte, verify the agent CLI can
+  # authenticate with a single cheap probe. If it can't — the confirmed
+  # OAuth-expiry case where every spawn 401s — REFUSE to sling, escalate to the
+  # Admiral with a re-auth remediation, and abort before any bead/worktree state
+  # is mutated.
+  #
+  # Only runs on the real-agent path: skipped unless `start_claude: true`, and
+  # skipped when a `:claude_command` test override is in play (no real CLI to
+  # probe) unless the caller injects a `:probe_command`. Opt out entirely with
+  # `preflight: false`.
+  defp maybe_preflight(%Issue{} = bead, opts) do
+    cond do
+      Keyword.get(opts, :preflight, true) == false ->
+        :ok
+
+      not Keyword.get(opts, :start_claude, false) ->
+        :ok
+
+      Keyword.has_key?(opts, :claude_command) and not Keyword.has_key?(opts, :probe_command) ->
+        :ok
+
+      true ->
+        run_preflight(bead, opts)
+    end
+  end
+
+  defp run_preflight(%Issue{} = bead, opts) do
+    workspace = load_workspace(bead)
+    :ok = Agents.prepare(workspace, :agent)
+    adapter = preflight_adapter(bead, workspace, opts)
+    probe_opts = preflight_opts(opts)
+
+    case Preflight.check(adapter, probe_opts) do
+      :ok ->
+        :ok
+
+      :skipped ->
+        :ok
+
+      {:error, reason} ->
+        AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
+        {:error, {:auth_check_failed, reason}}
+    end
+  end
+
+  # Resolve the workspace's worker adapter so we probe the CLI that will
+  # actually be slung. A test `:agent_adapter` override wins (lets a test point
+  # the probe at a stub adapter without a workspace).
+  defp preflight_adapter(_bead, workspace, opts) do
+    case Keyword.get(opts, :agent_adapter) do
+      mod when is_atom(mod) and not is_nil(mod) -> mod
+      _ -> Agents.for_workspace(workspace)
+    end
+  end
+
+  defp preflight_opts(opts) do
+    opts
+    |> Keyword.take([:probe_command, :probe_env, :timeout_ms, :api_key, :model, :model_tier])
+  end
+
+  defp preflight_snapshot(%Issue{id: id, workspace_id: ws_id}, opts) do
+    %{
+      bead_id: id,
+      workspace_id: ws_id,
+      rig: Keyword.get(opts, :rig),
+      meta: %{}
+    }
   end
 
   # Spawn a Claude subprocess in the worktree, attached to the polecat.

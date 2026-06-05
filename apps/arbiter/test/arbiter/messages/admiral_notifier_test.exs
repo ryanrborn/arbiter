@@ -168,4 +168,87 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       assert Message.recent_notifications(10) |> Enum.filter(&(&1.from_ref == "bd-x")) == []
     end
   end
+
+  describe "acolyte_stopped/2 (bd-awi4nw)" do
+    alias Arbiter.Polecat.StopReason
+
+    defp only_escalation(ws) do
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      escalation
+    end
+
+    test "raises an addressed escalation naming the bead + cause + remediation" do
+      ws = uniq("ws")
+      bead_id = uniq("bd")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               AdmiralNotifier.acolyte_stopped(
+                 %{
+                   bead_id: bead_id,
+                   workspace_id: ws,
+                   rig: "team/repo",
+                   meta: %{activity: %{label: "editing run.ex"}}
+                 },
+                 reason
+               )
+
+      escalation = only_escalation(ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "admiral"
+      assert escalation.directive_ref == bead_id
+      assert escalation.subject =~ bead_id
+      assert escalation.subject =~ "credentials expired"
+      assert escalation.body =~ "Rig: team/repo"
+      assert escalation.body =~ "Last activity: editing run.ex"
+      assert escalation.body =~ "Exit code: 1"
+      assert escalation.body =~ "Re-authenticate"
+    end
+
+    test "names the kill signal when present" do
+      ws = uniq("ws")
+      bead_id = uniq("bd")
+      reason = StopReason.classify(137, [])
+
+      assert :ok =
+               AdmiralNotifier.acolyte_stopped(
+                 %{bead_id: bead_id, workspace_id: ws, rig: "r", meta: %{}},
+                 reason
+               )
+
+      assert only_escalation(ws).body =~ "signal 9"
+    end
+
+    test "a stop with no workspace posts nothing" do
+      reason = StopReason.classify(1, ["boom"])
+
+      assert :ok =
+               AdmiralNotifier.acolyte_stopped(
+                 %{bead_id: "bd-noworkspace", workspace_id: nil, rig: "r", meta: %{}},
+                 reason
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
+  describe "preflight_failed/2 (bd-awi4nw)" do
+    alias Arbiter.Polecat.StopReason
+
+    test "raises a 'refused to sling' escalation" do
+      ws = uniq("ws")
+      bead_id = uniq("bd")
+      reason = StopReason.classify(1, ["401 invalid authentication credentials"])
+
+      assert :ok =
+               AdmiralNotifier.preflight_failed(
+                 %{bead_id: bead_id, workspace_id: ws, rig: "r", meta: %{}},
+                 reason
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.subject =~ "pre-flight auth failed"
+      assert escalation.body =~ "Refused to sling"
+    end
+  end
 end
