@@ -17,8 +17,9 @@ defmodule ArbiterWeb.Api.IssueController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Beads.Issue
+  require Ash.Query
 
-  action_fallback ArbiterWeb.Api.FallbackController
+  action_fallback(ArbiterWeb.Api.FallbackController)
 
   @atom_fields ~w(status issue_type tracker_type)a
   @filter_fields ~w(status priority difficulty issue_type assignee workspace_id)a
