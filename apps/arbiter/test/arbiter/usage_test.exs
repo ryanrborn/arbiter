@@ -414,5 +414,89 @@ defmodule Arbiter.UsageTest do
       assert ev.model == "claude-sonnet-4-6"
       assert_in_delta ev.cost_usd, 0.15, 0.001
     end
+
+    test "gemini/agy session writes provider=gemini even without stream-json events" do
+      bead_id = "bd-gemini-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-usage")
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-gemini")
+
+      # Simulate agy plain-text output (no stream-json). Pass provider: "gemini"
+      # as ClaudeSession opt, mirroring what the Tribunal does when it resolves
+      # the Gemini adapter for the workspace.
+      command = ["sh", "-c", "echo 'Reviewing code...'; echo 'VERDICT: APPROVE'; echo 'arb done'"]
+
+      {:ok, _port} =
+        Arbiter.Polecat.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: command,
+          provider: "gemini"
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(bead_id == ^bead_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      assert ev.provider == "gemini"
+      assert ev.model == nil
+      assert ev.cost_usd == nil
+      assert ev.tokens_in == nil
+      assert ev.step == :work
+      assert is_integer(ev.duration_ms), "wall-clock duration should be set"
+      assert ev.duration_ms >= 0
+    end
+
+    test "gemini reviewer session writes :review step with provider=gemini" do
+      reviewer_id = "bd-gemini-rev-#{System.unique_integer([:positive])}#review"
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: reviewer_id,
+          rig: "arbiter",
+          workspace_id: nil,
+          meta: %{role: :reviewer, reviews: "bd-author"}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-gemini-review")
+
+      command = ["sh", "-c", "echo 'VERDICT: APPROVE'; echo 'arb done'"]
+
+      {:ok, _port} =
+        Arbiter.Polecat.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: command,
+          provider: "gemini"
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(bead_id == ^reviewer_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      assert ev.step == :review
+      assert ev.provider == "gemini"
+      assert ev.model == nil
+      assert ev.cost_usd == nil
+      assert is_integer(ev.duration_ms), "wall-clock duration should be set"
+    end
   end
 end

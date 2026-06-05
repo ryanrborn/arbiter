@@ -604,19 +604,34 @@ defmodule Arbiter.Polecat do
         true -> :work
       end
 
+    model = Map.get(usage, :model)
+
+    # Provider: prefer the explicitly-set provider (passed in session opts for
+    # non-Claude adapters like Gemini/agy, which have no stream-json init event
+    # to carry model/provider) over the model-name inference used for Claude.
+    provider =
+      Map.get(session, :provider) || provider_for(model)
+
+    # Duration: prefer the value from the CLI's result event (millisecond-precise)
+    # but fall back to wall-clock elapsed for adapters that don't emit one (e.g.
+    # Gemini/agy), so the row is still usable for latency analysis.
+    duration_ms =
+      Map.get(usage, :duration_ms) ||
+        wall_clock_duration_ms(Map.get(session, :started_at), Map.get(session, :exited_at))
+
     attrs = %{
       bead_id: state.bead_id,
       workspace_id: state.workspace_id,
       rig: state.rig,
       step: step,
-      model: Map.get(usage, :model),
-      provider: provider_for(Map.get(usage, :model)),
+      model: model,
+      provider: provider,
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out),
       cache_creation_tokens: Map.get(usage, :cache_creation_tokens),
       cache_read_tokens: Map.get(usage, :cache_read_tokens),
       cost_usd: Map.get(usage, :cost_usd),
-      duration_ms: Map.get(usage, :duration_ms),
+      duration_ms: duration_ms,
       exit_status: exit_status,
       polecat_run_id: state.run_id,
       session_id: Map.get(usage, :session_id),
@@ -658,6 +673,12 @@ defmodule Arbiter.Polecat do
   end
 
   defp provider_for(_), do: nil
+
+  defp wall_clock_duration_ms(%DateTime{} = started_at, %DateTime{} = exited_at) do
+    DateTime.diff(exited_at, started_at, :millisecond)
+  end
+
+  defp wall_clock_duration_ms(_started_at, _exited_at), do: nil
 
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
@@ -785,6 +806,7 @@ defmodule Arbiter.Polecat do
   def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
     try do
       port = Arbiter.Polecat.ClaudeSession.open_port(port_args)
+      now = DateTime.utc_now()
 
       session =
         session_config
@@ -793,8 +815,9 @@ defmodule Arbiter.Polecat do
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
         |> Map.put(:exited_at, nil)
+        |> Map.put(:started_at, now)
         |> Map.put(:activity, "starting")
-        |> Map.put(:activity_at, DateTime.utc_now())
+        |> Map.put(:activity_at, now)
         |> Map.put(:output_log, open_output_log(state))
 
       sessions = Map.put(state.claude_sessions, port, session)
@@ -1118,6 +1141,8 @@ defmodule Arbiter.Polecat do
         done_regex: Arbiter.Polecat.ClaudeSession.done_regex()
       }
 
+      now = DateTime.utc_now()
+
       session =
         session_config
         |> Map.put(:port, port)
@@ -1125,8 +1150,9 @@ defmodule Arbiter.Polecat do
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
         |> Map.put(:exited_at, nil)
+        |> Map.put(:started_at, now)
         |> Map.put(:activity, "starting")
-        |> Map.put(:activity_at, DateTime.utc_now())
+        |> Map.put(:activity_at, now)
         |> Map.put(:output_log, open_output_log(state))
 
       new_meta =
