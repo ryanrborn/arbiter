@@ -12,9 +12,9 @@ defmodule Arbiter.Agents.Claude.Security do
 
   | Normalized mode | Claude argv | Deny enforced? |
   |---|---|---|
-  | `:auto`   | `--permission-mode auto`         | yes |
-  | `:strict` | `--permission-mode default`      | yes (unallowed ⇒ blocked) |
-  | `:bypass` | `--dangerously-skip-permissions` | **no** (all checks skipped) |
+  | `:bypass` | `--dangerously-skip-permissions` + `--settings` | **yes** (deny list applied) |
+  | `:auto`   | `--permission-mode auto`                        | yes |
+  | `:strict` | `--permission-mode default`                     | yes (unallowed ⇒ blocked) |
 
   The allow/deny rules ride on a generated settings document passed inline as
   `--settings '<json>'` (the CLI accepts a JSON string, not just a file — so
@@ -28,9 +28,12 @@ defmodule Arbiter.Agents.Claude.Security do
     * the operator's `allow` rules,
     * `defaultMode` mirroring the chosen mode.
 
-  In `:bypass` mode no settings are emitted — the flag skips every check, so
-  emitting deny rules would only mislead. That is the deliberate, opt-in
-  "I trust this run" posture.
+  `:bypass` is the headless-safe default. `--dangerously-skip-permissions` skips
+  the interactive approval classifier (preventing headless freezes) but deny rules
+  in `--settings` are a separate, orthogonal mechanism — they are hard tool-level
+  blocks enforced before the classifier. So `--dangerously-skip-permissions` +
+  `--settings` with deny rules gives the desired posture: no interactive freeze,
+  deny list still enforced.
 
   ## Honesty about enforcement level
 
@@ -64,11 +67,10 @@ defmodule Arbiter.Agents.Claude.Security do
 
   @doc """
   The `--settings` argv fragment carrying the generated allow/deny document.
-  Empty in `:bypass` mode (the flag enforces nothing, so settings are moot).
+  Emitted for all modes including `:bypass` — the deny rules are orthogonal to
+  the interactive classifier and must still be applied in headless runs.
   """
   @spec settings_argv(SecurityPolicy.t()) :: [String.t()]
-  def settings_argv(%SecurityPolicy{permissions: %{mode: :bypass}}), do: []
-
   def settings_argv(%SecurityPolicy{} = policy),
     do: ["--settings", Jason.encode!(settings(policy))]
 

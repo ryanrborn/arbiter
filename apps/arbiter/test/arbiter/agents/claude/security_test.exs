@@ -24,21 +24,35 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
   end
 
   describe "settings_argv/1" do
-    test "emits a --settings JSON document for auto/strict" do
+    test "emits a --settings JSON document for bypass (default)" do
       assert ["--settings", json] = Security.settings_argv(policy())
+      assert {:ok, decoded} = Jason.decode(json)
+      assert decoded["permissions"]["defaultMode"] == "bypassPermissions"
+      assert is_list(decoded["permissions"]["deny"])
+      assert decoded["permissions"]["deny"] != []
+    end
+
+    test "emits a --settings JSON document for auto mode" do
+      assert ["--settings", json] =
+               Security.settings_argv(policy(%{"permissions" => %{"mode" => "auto"}}))
+
       assert {:ok, decoded} = Jason.decode(json)
       assert decoded["permissions"]["defaultMode"] == "auto"
       assert is_list(decoded["permissions"]["deny"])
       assert decoded["permissions"]["deny"] != []
     end
 
-    test "emits nothing in bypass mode (the flag enforces nothing)" do
-      assert Security.settings_argv(policy(%{"permissions" => %{"mode" => "bypass"}})) == []
+    test "emits --settings for bypass: deny list is enforced even though interactive classifier is skipped" do
+      p = policy(%{"permissions" => %{"mode" => "bypass"}})
+      assert ["--settings", json] = Security.settings_argv(p)
+      assert {:ok, decoded} = Jason.decode(json)
+      assert is_list(decoded["permissions"]["deny"])
+      assert decoded["permissions"]["deny"] != []
     end
   end
 
   describe "deny_rules/1" do
-    test "the safe-default baseline is non-empty even in auto mode" do
+    test "the safe-default baseline is non-empty even in bypass mode" do
       rules = Security.deny_rules(policy())
       assert Enum.any?(rules, &(&1 =~ "rm -rf"))
       assert Enum.any?(rules, &(&1 =~ "git push --force"))

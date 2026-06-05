@@ -6,10 +6,10 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
   alias Arbiter.Beads.Workspace
 
   describe "base/0 and default/0" do
-    test "base is the safe baseline: auto mode, non-empty safe_defaults, worktree fs" do
+    test "base is the safe baseline: bypass mode, non-empty safe_defaults, worktree fs" do
       p = SecurityPolicy.base()
 
-      assert p.permissions.mode == :auto
+      assert p.permissions.mode == :bypass
       assert p.permissions.allow == []
       assert p.permissions.deny == []
       refute Enum.empty?(p.permissions.safe_defaults)
@@ -93,7 +93,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
         })
 
       # All fall back to base.
-      assert p.permissions.mode == :auto
+      assert p.permissions.mode == :bypass
       assert p.sandbox.filesystem == :worktree
       assert p.sandbox.network == true
     end
@@ -124,7 +124,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
     test "summary is JSON-friendly and string-keyed" do
       s = SecurityPolicy.summary(SecurityPolicy.base())
 
-      assert s["mode"] == "auto"
+      assert s["mode"] == "bypass"
       assert is_list(s["safe_defaults"])
       assert s["sandbox"]["filesystem"] == "worktree"
       assert s["sandbox"]["network"] == true
@@ -132,7 +132,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
     test "one_line summarizes mode, fs, net, deny count" do
       line = SecurityPolicy.one_line(SecurityPolicy.base())
-      assert line =~ "auto"
+      assert line =~ "bypass"
       assert line =~ "fs=worktree"
       assert line =~ "net=on"
     end

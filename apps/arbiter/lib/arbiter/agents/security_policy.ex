@@ -37,15 +37,22 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   ### `permissions.mode`
 
-    * `:auto`   — the safe default. The agent works autonomously (edits are
-      auto-accepted) but the **deny list is still enforced**, so destructive
-      ops are blocked even though no human is in the loop.
+    * `:bypass` — the headless-safe default. The interactive permission
+      classifier is skipped entirely (`--dangerously-skip-permissions`) so
+      there is no approval prompt that can freeze a headless acolyte.
+      The **deny list is still enforced** via `--settings` — the deny list is
+      a hard block at the tool level, orthogonal to the interactive classifier.
+      This is the right default for autonomous, headless acolyte runs where
+      worktree containment + the deny list are the real fence.
+    * `:auto`   — opt-in for interactive/supervised runs. The permission
+      classifier is active (`--permission-mode auto`): edits are auto-accepted
+      but the classifier can pause and ask for approval. The deny list is also
+      enforced. **Do not use as the acolyte default**: in headless `--print`
+      mode, a classifier prompt that can't be answered freezes the run
+      silently.
     * `:strict` — only explicitly allowed tools run; anything not on the
-      allow-list is blocked (in non-interactive `--print` mode there is no
-      human to prompt, so "ask" collapses to "deny"). Deny still enforced.
-    * `:bypass` — escape hatch: **all** permission checks are skipped,
-      including the deny list. Requires deliberate opt-in; use only for a run
-      you fully trust (e.g. one already wrapped in OS-level isolation).
+      allow-list is blocked (in non-interactive `--print` mode "ask" collapses
+      to "deny"). Deny still enforced.
 
   ### `permissions.safe_defaults`
 
@@ -132,15 +139,16 @@ defmodule Arbiter.Agents.SecurityPolicy do
   def safe_default_categories, do: @safe_default_categories
 
   @doc """
-  The hardcoded safe baseline: `auto` mode, the full destructive-op deny
-  baseline, worktree-scoped filesystem, network on (acolytes need it for
-  `git push` / package installs), no operator extras.
+  The hardcoded safe baseline: `bypass` mode (headless-safe — no interactive
+  classifier freeze), the full destructive-op deny baseline, worktree-scoped
+  filesystem, network on (acolytes need it for `git push` / package installs),
+  no operator extras. See `permissions.mode` in the moduledoc for rationale.
   """
   @spec base() :: t()
   def base do
     %__MODULE__{
       permissions: %{
-        mode: :auto,
+        mode: :bypass,
         allow: [],
         deny: [],
         safe_defaults: @safe_default_categories
