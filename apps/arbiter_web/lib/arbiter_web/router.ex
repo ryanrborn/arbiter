@@ -39,9 +39,23 @@ defmodule ArbiterWeb.Router do
       live("/settings/branding", GlobalBrandingLive)
       live("/workspace/:id/settings/vernacular", WorkspaceVernacularLive)
       live("/audit", AuditLogLive)
+
+      # Entity index pages (list everything, filterable + paged) and their
+      # detail pages. Literal segments are declared before the dynamic
+      # `:bead_id`/`:id` catch-alls so e.g. `/polecats/history` isn't claimed
+      # as a polecat detail.
+      live("/beads", BeadIndexLive)
+      live("/beads/:id", BeadDetailLive)
+
+      live("/convoys", ConvoyIndexLive)
+      live("/convoys/:id", ConvoyDetailLive)
+
+      live("/crucible", CrucibleIndexLive)
+
+      live("/polecats", PolecatIndexLive)
+      live("/polecats/history", RunIndexLive)
       live("/polecats/history/:id", RunDetailLive)
       live("/polecats/:bead_id", PolecatDetailLive)
-      live("/beads/:id", BeadDetailLive)
     end
   end
 

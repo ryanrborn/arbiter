@@ -228,7 +228,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert render(view) =~ "via-rest-api-title"
     end
 
-    test "closing a bead pushes a PubSub update and the new status renders", %{
+    test "closing a bead drops it from the current directives list (PubSub)", %{
       conn: conn,
       ws: ws
     } do
@@ -239,31 +239,30 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       {:ok, _closed} = Ash.update(b, %{}, action: :close)
 
-      html = render(view)
-      assert html =~ "to-close-on-dashboard"
-      assert html =~ "closed"
+      # The landing shows only CURRENT (non-closed) directives now; closing the
+      # bead removes it from the recent list. The full history (incl. closed)
+      # lives on the /beads index.
+      refute render(view) =~ "to-close-on-dashboard"
     end
 
-    test "non-closed directives sort before closed, even when closed is newer", %{
+    test "only current (non-closed) directives appear; closed ones are not shown", %{
       conn: conn,
       ws: ws
     } do
-      # Active bead created first → older updated_at.
       {:ok, _active} = Ash.create(Issue, %{title: "zzz-active-directive", workspace_id: ws.id})
 
-      # Closed bead created and closed last → its close bumps updated_at to be
-      # the most recent of the two. A pure updated_at-desc sort would float it
-      # to the top; the grouped sort must keep it below the active directive.
       {:ok, to_close} = Ash.create(Issue, %{title: "aaa-closed-directive", workspace_id: ws.id})
       {:ok, _closed} = Ash.update(to_close, %{}, action: :close)
 
       {:ok, _view, html} = live(conn, "/")
 
-      active_pos = bead_position(html, "zzz-active-directive")
-      closed_pos = bead_position(html, "aaa-closed-directive")
+      assert html =~ "zzz-active-directive"
+      refute html =~ "aaa-closed-directive"
+    end
 
-      assert active_pos < closed_pos,
-             "expected the non-closed directive to render before the more-recently-updated closed one"
+    test "the recent directives section links to the /beads index", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ ~s(href="/beads")
     end
   end
 
@@ -581,15 +580,6 @@ defmodule ArbiterWeb.DashboardLiveTest do
       send(view.pid, :tick)
 
       assert render(view) =~ "Dashboard"
-    end
-  end
-
-  # Byte offset of the first occurrence of `needle` in the rendered HTML, for
-  # asserting relative render order of two beads in the recent-directives list.
-  defp bead_position(html, needle) do
-    case :binary.match(html, needle) do
-      {start, _len} -> start
-      :nomatch -> flunk("#{needle} not found in rendered HTML")
     end
   end
 end

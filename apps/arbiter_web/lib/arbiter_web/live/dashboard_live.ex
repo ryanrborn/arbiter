@@ -39,6 +39,7 @@ defmodule ArbiterWeb.DashboardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Beads.Convoy
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
@@ -57,8 +58,14 @@ defmodule ArbiterWeb.DashboardLive do
   # the `arb prime` Admiral Inbox section.
   @admiral_ref "admiral"
 
-  # Number of directives shown in the "recent directives" list.
-  @recent_beads_limit 20
+  # Number of CURRENT (non-closed) directives shown in the dashboard's
+  # recent-directives list. The landing shows only this current slice, capped;
+  # the full, filterable history lives on the `/beads` index ("See all").
+  @recent_beads_limit 8
+
+  # Number of open campaigns (convoys) shown in the dashboard's current
+  # campaigns section, capped. Everything lives on the `/convoys` index.
+  @current_convoys_limit 6
 
   # Number of escalations (Tribunal verdicts) shown in the Tribunal view.
   @recent_escalations_limit 10
@@ -83,6 +90,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> assign(:rig_label, Vernacular.label(:rig))
      |> assign(:worktree_label, Vernacular.label(:worktree))
      |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:convoy_label, Vernacular.label(:batch))
      |> assign(:workspace_label, Vernacular.label(:workspace))
      |> assign(:pr_label, Vernacular.label(:pr))
      |> assign(:merge_queue_label, Vernacular.label(:merge_queue))
@@ -97,7 +105,8 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_completed_runs()
      |> refresh_pending_reviews()
      |> refresh_escalations()
-     |> refresh_recent_beads()}
+     |> refresh_recent_beads()
+     |> refresh_convoys()}
   end
 
   @impl true
@@ -105,6 +114,7 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply,
      socket
      |> refresh_recent_beads()
+     |> refresh_convoys()
      |> refresh_workspaces()}
   end
 
@@ -308,27 +318,17 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :completed_runs, runs)
   end
 
-  # Non-closed directives surface ahead of closed ones; each group is ordered
-  # by updated_at desc. We read each group bounded by the display limit, then
-  # concat and take the limit — so active directives are never pushed off the
-  # list by more-recently-updated closed ones (the limit applies AFTER the
-  # grouped sort, not before).
+  # CURRENT directives only: the landing shows the open + in-progress slice,
+  # newest-updated first, capped at @recent_beads_limit. Closed directives are
+  # never shown here — they live on the `/beads` index ("See all"). This keeps
+  # the landing bounded as the directive history grows unbounded.
   defp refresh_recent_beads(socket) do
-    active =
+    beads =
       Issue
       |> Ash.Query.filter(status != :closed)
       |> Ash.Query.sort(updated_at: :desc)
       |> Ash.Query.limit(@recent_beads_limit)
       |> Ash.read!()
-
-    closed =
-      Issue
-      |> Ash.Query.filter(status == :closed)
-      |> Ash.Query.sort(updated_at: :desc)
-      |> Ash.Query.limit(@recent_beads_limit)
-      |> Ash.read!()
-
-    beads = Enum.take(active ++ closed, @recent_beads_limit)
 
     blocked_counts = blocked_counts_for(Enum.map(beads, & &1.id))
 
@@ -338,6 +338,25 @@ defmodule ArbiterWeb.DashboardLive do
       end)
 
     assign(socket, :recent_beads, beads)
+  end
+
+  # CURRENT campaigns only: open convoys, newest-updated first, capped. The
+  # full, filterable list (open + closed) lives on the `/convoys` index. Each
+  # convoy is loaded with its issue-progress aggregate for the inline bar.
+  defp refresh_convoys(socket) do
+    convoys =
+      try do
+        Convoy
+        |> Ash.Query.filter(status == :open)
+        |> Ash.Query.load([:total_issues, :closed_issues])
+        |> Ash.Query.sort(updated_at: :desc)
+        |> Ash.Query.limit(@current_convoys_limit)
+        |> Ash.read!()
+      rescue
+        _ -> []
+      end
+
+    assign(socket, :convoys, convoys)
   end
 
   # For the given bead ids, count how many of each bead's `:depends_on` edges
@@ -914,6 +933,7 @@ defmodule ArbiterWeb.DashboardLive do
                   <.icon name="hero-bolt" class="size-5 text-info" />
                   Active {cap_plural(@worker_label)} ({length(@polecats)})
                 </h2>
+                <.see_all_link navigate={~p"/polecats"} />
               </div>
 
               <div
@@ -1018,10 +1038,13 @@ defmodule ArbiterWeb.DashboardLive do
           <%!-- Directive queue --%>
           <section class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
-              <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-queue-list" class="size-5 text-base-content/70" />
-                Recent {cap_plural(@issue_label)} ({length(@recent_beads)})
-              </h2>
+              <div class="flex items-center justify-between">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-queue-list" class="size-5 text-base-content/70" />
+                  Recent {cap_plural(@issue_label)} ({length(@recent_beads)})
+                </h2>
+                <.see_all_link navigate={~p"/beads"} />
+              </div>
 
               <div
                 :if={@recent_beads == []}
@@ -1032,7 +1055,12 @@ defmodule ArbiterWeb.DashboardLive do
                   class="size-8 mx-auto text-base-content/30"
                 />
                 <p class="mt-2 text-sm text-base-content/60">
-                  No {plural(@issue_label)} yet. New and updated {plural(@issue_label)} surface here.
+                  No active {plural(@issue_label)} right now. Open and in-progress {plural(
+                    @issue_label
+                  )} surface here; closed ones live on the <.link
+                    navigate={~p"/beads"}
+                    class="link link-hover text-primary"
+                  >{@issue_label} index</.link>.
                 </p>
               </div>
 
@@ -1090,6 +1118,60 @@ defmodule ArbiterWeb.DashboardLive do
             </div>
           </section>
         </div>
+
+        <%!-- ── C2. Campaigns (open convoys) ─────────────────────────── --%>
+        <%!-- Only OPEN campaigns surface on the landing, capped. The full,
+             filterable list (open + closed) lives on the /convoys index. --%>
+        <section id="convoys-section" class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-rectangle-stack" class="size-5 text-base-content/70" />
+                Open {cap_plural(@convoy_label)} ({length(@convoys)})
+              </h2>
+              <.see_all_link navigate={~p"/convoys"} />
+            </div>
+
+            <div
+              :if={@convoys == []}
+              id="convoys-empty"
+              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
+            >
+              <.icon name="hero-rectangle-stack" class="size-8 mx-auto text-base-content/30" />
+              <p class="mt-2 text-sm text-base-content/60">
+                No open {plural(@convoy_label)}. Batches of related {plural(@issue_label)} appear here while active.
+              </p>
+            </div>
+
+            <ul :if={@convoys != []} id="convoys" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <li
+                :for={c <- @convoys}
+                class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-primary/40"
+              >
+                <.link navigate={~p"/convoys/#{c.id}"} class="group block">
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="truncate text-sm font-medium group-hover:text-primary transition-colors"
+                      title={c.title}
+                    >
+                      {c.title}
+                    </span>
+                    <span class="text-xs font-mono tabular-nums text-base-content/60 shrink-0 ml-auto">
+                      {c.closed_issues}/{c.total_issues}
+                    </span>
+                  </div>
+                  <code class="text-xs text-base-content/50">{c.id}</code>
+                  <progress
+                    class="progress progress-success w-full mt-2 h-1.5"
+                    value={c.closed_issues}
+                    max={max(c.total_issues, 1)}
+                  >
+                  </progress>
+                </.link>
+              </li>
+            </ul>
+          </div>
+        </section>
 
         <%!-- ── D. Admiral mailbox ───────────────────────────────────── --%>
         <%!-- Unread mailbox-family mail addressed to the coordinator
@@ -1327,10 +1409,13 @@ defmodule ArbiterWeb.DashboardLive do
         <%!-- ── G. Completed workers ─────────────────────────────────── --%>
         <section class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
-            <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-check-circle" class="size-5 text-base-content/70" />
-              Completed {cap_plural(@worker_label)} ({length(@completed_runs)})
-            </h2>
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-check-circle" class="size-5 text-base-content/70" />
+                Completed {cap_plural(@worker_label)} ({length(@completed_runs)})
+              </h2>
+              <.see_all_link navigate={~p"/polecats/history"} />
+            </div>
 
             <div
               :if={@completed_runs == []}
@@ -1381,13 +1466,16 @@ defmodule ArbiterWeb.DashboardLive do
         <%!-- ── H. Merge queue (Crucibles) ───────────────────────────── --%>
         <section id="merge-queue-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
-            <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-arrow-path-rounded-square" class="size-5 text-primary" />
-              {cap_plural(@merge_queue_label)} ({length(@merge_queue)})
-              <span class="text-sm font-normal text-base-content/50">
-                — {plural(@pr_label)} integrating now
-              </span>
-            </h2>
+            <div class="flex items-center justify-between gap-2">
+              <h2 class="text-lg font-semibold flex items-center gap-2">
+                <.icon name="hero-arrow-path-rounded-square" class="size-5 text-primary" />
+                {cap_plural(@merge_queue_label)} ({length(@merge_queue)})
+                <span class="text-sm font-normal text-base-content/50">
+                  — {plural(@pr_label)} integrating now
+                </span>
+              </h2>
+              <.see_all_link navigate={~p"/crucible"} />
+            </div>
 
             <div
               :if={@merge_queue == []}
@@ -1607,24 +1695,8 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   # ---- view helpers (labels + stats + status visuals) ----
-
-  # English pluralization for vernacular labels so headers read naturally
-  # regardless of the configured vocabulary ("refinery" → "refineries",
-  # "watch" → "watches", "bead" → "beads"). Naive `label <> "s"` breaks on
-  # trailing -y and sibilant endings, which a polished surface shouldn't show.
-  defp pluralize(word) when is_binary(word) do
-    cond do
-      String.ends_with?(word, ~w(s x z ch sh)) -> word <> "es"
-      Regex.match?(~r/[^aeiou]y$/u, word) -> String.replace_suffix(word, "y", "ies")
-      true -> word <> "s"
-    end
-  end
-
-  # Pluralize a label, preserving its configured case (for inline prose).
-  defp plural(label), do: pluralize(label)
-
-  # Capitalize then pluralize a label (for section headers / stat titles).
-  defp cap_plural(label), do: label |> String.capitalize() |> pluralize()
+  # `plural/1` and `cap_plural/1` come from `ArbiterWeb.Labels` (imported via
+  # `ArbiterWeb`), shared with the index/detail pages.
 
   defp open_issue_total(workspaces) do
     Enum.reduce(workspaces, 0, fn ws, acc -> acc + Map.get(ws, :open, 0) end)
