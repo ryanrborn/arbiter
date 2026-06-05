@@ -61,9 +61,9 @@ defmodule ArbiterCli.Cmd.InstallService do
       `systemctl`/`loginctl` step failed.
   """
 
-  alias ArbiterCli.{Client, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Restart, Cmd.Start, Output}
 
-  @switches [system: :boolean, uninstall: :boolean, json: :boolean]
+  @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
 
   @unit_name "arbiter.service"
 
@@ -78,10 +78,12 @@ defmodule ArbiterCli.Cmd.InstallService do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     scope = if opts[:system], do: :system, else: :user
+    force = opts[:force] || false
 
     if opts[:uninstall] do
       uninstall(scope, mode)
     else
+      Restart.guard_active_polecats!(force)
       install(scope, mode)
     end
   end
@@ -90,6 +92,8 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   defp install(scope, mode) do
     root = resolve_root()
+    # Persist the root so `arb start/restart/update` resolve it from any cwd.
+    Start.record_home(root)
     path = unit_path(scope)
     contents = unit_contents(scope, root)
 
