@@ -42,6 +42,20 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   @impl true
+  def auth_probe_argv(_opts \\ []) do
+    # Cheap token-validity probe for whichever CLI is on PATH. A bad/expired key
+    # makes Gemini print "API key not valid" / "RESOURCE_EXHAUSTED" (or 401) and
+    # exit non-zero — classified by Arbiter.Polecat.StopReason.
+    case resolve_executable() do
+      {:ok, {_type, exec}} ->
+        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", "ping"]}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
   def spawn_env(opts \\ []) do
     api_key_env(opts) ++ thinking_env(opts)
   end

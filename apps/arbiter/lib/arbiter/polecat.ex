@@ -163,6 +163,21 @@ defmodule Arbiter.Polecat do
   # doesn't bloat the row to many MB.
   @max_output_lines 500
 
+  # Statuses in which a subprocess exit means "the acolyte stopped without
+  # completing" — i.e. a stall to detect + escalate (bd-awi4nw). The review-gate
+  # states (:awaiting_tribunal/:awaiting_review) and terminal states
+  # (:completed/:failed) are excluded: there the subprocess SHOULD exit and the
+  # next stage (Tribunal/Warden) owns the outcome, not the dead port.
+  @live_statuses [:idle, :running, :awaiting]
+
+  # Grace after a subprocess exit before we classify+escalate a stop. This drains
+  # any in-flight `arb done` message that the port's exit_status raced ahead of
+  # (the done marker is enqueued while processing the data line; the exit_status
+  # message can be processed first). A normal completion flips the polecat to a
+  # terminal/review state within this window, so the deferred check no-ops.
+  # Overridable for tests via `config :arbiter, :polecat_exit_grace_ms`.
+  @exit_grace_ms 500
+
   # ---- public API ---------------------------------------------------------
 
   @doc """
@@ -862,11 +877,46 @@ defmodule Arbiter.Polecat do
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
         record_usage_event(new_state, updated, status)
-        {:noreply, sync_session_meta(new_state, port)}
+        new_state = sync_session_meta(new_state, port)
+
+        # bd-awi4nw: the port closing is the PRIMARY stop signal. If the polecat
+        # is still in a live state, the acolyte died/stopped without completing
+        # (token exhaustion, crash, kill, flag-rejection). Don't strand the bead
+        # at a silent in_progress — schedule a classify+escalate after a short
+        # grace so an in-flight `arb done` (which the exit_status message can
+        # race ahead of) still wins and the check no-ops on a normal completion.
+        if new_state.status in @live_statuses do
+          Process.send_after(self(), {:__acolyte_stopped__, port}, exit_grace_ms())
+        end
+
+        {:noreply, new_state}
 
       :error ->
         {:noreply, state}
     end
+  end
+
+  # Deferred stop check (scheduled by the exit_status handler). By now an
+  # in-flight `arb done` has been processed: if the polecat moved to a
+  # terminal/review state, the exit was the expected end of a normal completion
+  # — nothing to do. Otherwise the subprocess is genuinely gone with the bead
+  # unfinished: classify the cause from exit status + captured output and fail +
+  # escalate to the Admiral (bd-awi4nw).
+  def handle_info({:__acolyte_stopped__, port}, %State{status: status} = state)
+      when status in @live_statuses do
+    case Map.fetch(state.claude_sessions, port) do
+      {:ok, session} ->
+        {:noreply, fail_stopped(state, session)}
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:__acolyte_stopped__, _port}, %State{} = state) do
+    # The acolyte completed (arb done won the race) or already failed — the
+    # subprocess exit was expected. No escalation.
+    {:noreply, state}
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
@@ -981,6 +1031,37 @@ defmodule Arbiter.Polecat do
     record_run_finished(new_state)
     Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
     new_state
+  end
+
+  # bd-awi4nw: a stopped/dead acolyte detected via the closed port. Classify the
+  # stop from the exit status + captured output, fail the polecat into an
+  # obviously-stalled state (not silent in_progress), and raise an addressed
+  # Admiral escalation naming the bead + cause + remediation. Distinct from
+  # fail_now/2's generic "exit code N" notification: the StopReason carries the
+  # actionable classification (auth expiry, credit exhaustion, kill, …).
+  defp fail_stopped(%State{} = state, session) do
+    exit_status = Map.get(session, :exit_status)
+    output_lines = Enum.reverse(Map.get(session, :output_lines, []))
+    reason = Arbiter.Polecat.StopReason.classify(exit_status, output_lines)
+
+    Logger.warning(
+      "Polecat: acolyte for bead=#{state.bead_id} stopped — #{Arbiter.Polecat.StopReason.label(reason)}"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Polecat.StopReason.to_map(reason))
+
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.AdmiralNotifier.acolyte_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    new_state
+  end
+
+  defp exit_grace_ms do
+    Application.get_env(:arbiter, :polecat_exit_grace_ms, @exit_grace_ms)
   end
 
   # Handle the acolyte's "arb done" marker. Before bd-7qq81g this closed the bead
@@ -1397,7 +1478,10 @@ defmodule Arbiter.Polecat do
   defp escalate_commit_gate(_state, _subject, _summary), do: :ok
 
   defp log_commit_gate_warning(bead_id, reason) do
-    Logger.warning("Polecat: commit-gate escalation swallowed for bead=#{bead_id}: #{inspect(reason)}")
+    Logger.warning(
+      "Polecat: commit-gate escalation swallowed for bead=#{bead_id}: #{inspect(reason)}"
+    )
+
     :error
   end
 

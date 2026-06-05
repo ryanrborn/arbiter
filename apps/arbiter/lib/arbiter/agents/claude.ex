@@ -94,6 +94,23 @@ defmodule Arbiter.Agents.Claude do
   end
 
   @impl true
+  def auth_probe_argv(_opts \\ []) do
+    # Cheapest token-validity probe: a one-word `claude --print` round-trip.
+    # No streaming/model flags — we only care that the CLI authenticates. stdin
+    # is closed via the sh wrapper (same as a real spawn) so the CLI doesn't
+    # block waiting for piped input. An expired OAuth / bad key makes this print
+    # "401 / invalid authentication credentials" and exit non-zero, which
+    # Arbiter.Polecat.StopReason classifies as :auth_expired.
+    case resolve_claude_executable() do
+      {:ok, claude} ->
+        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", claude, "--print", "ping"]}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
   def spawn_env(opts \\ []) do
     # Acolyte runs get an isolated CLAUDE_CONFIG_DIR so the operator's personal
     # ~/.claude/CLAUDE.md (persona) can't bleed into the worker's context
