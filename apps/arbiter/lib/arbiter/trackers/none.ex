@@ -40,4 +40,19 @@ defmodule Arbiter.Trackers.None do
 
   @impl true
   def create(_attrs), do: {:error, :not_supported}
+
+  @impl true
+  def current_user, do: {:error, :not_supported}
+
+  @impl true
+  def assignees(_), do: []
+
+  @impl true
+  def issue_status(_), do: :open
+
+  @impl true
+  def extract_title(_), do: "(no title)"
+
+  @impl true
+  def extract_description(_), do: ""
 end

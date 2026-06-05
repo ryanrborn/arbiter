@@ -335,8 +335,48 @@ defmodule Arbiter.Trackers.JiraTest do
   end
 
   describe "list_open/1" do
-    test "returns {:error, :not_supported} (search-by-currentUser not yet wired)" do
-      assert Jira.list_open([]) == {:error, :not_supported}
+    test "returns issues matching the assignee (default: currentUser())" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/rest/api/3/search"
+        assert conn.query_string =~ "currentUser"
+
+        Req.Test.json(conn, %{
+          "issues" => [
+            %{
+              "key" => "VR-42",
+              "fields" => %{
+                "summary" => "Open ticket",
+                "assignee" => %{"accountId" => "account-123"},
+                "status" => %{"statusCategory" => %{"key" => "new"}}
+              }
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [summary]} = Jira.list_open([])
+      assert summary.ref == "VR-42"
+      assert summary.title == "Open ticket"
+      assert summary.status == :open
+      assert summary.assignees == ["account-123"]
+    end
+
+    test "accepts an explicit assignee id" do
+      stub(fn conn ->
+        assert conn.query_string =~ "account-456"
+        Req.Test.json(conn, %{"issues" => []})
+      end)
+
+      assert {:ok, []} = Jira.list_open(assignee: "account-456")
+    end
+
+    test "returns empty list when no issues match" do
+      stub(fn conn ->
+        Req.Test.json(conn, %{"issues" => []})
+      end)
+
+      assert {:ok, []} = Jira.list_open([])
     end
   end
 

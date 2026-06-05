@@ -116,6 +116,43 @@ defmodule Arbiter.Trackers.Tracker do
               {:ok, ref} | {:error, :not_supported} | {:error, term()}
 
   @doc """
+  Returns the identity (login, accountId, member UUID, etc.) for the
+  authenticated user in the current workspace context. Used by the claim model
+  to enforce assignment-as-claim against "me".
+
+  Returns `{:error, :not_supported}` when the tracker has no concept of a
+  current user (e.g. `Tracker.None`), which signals that claim/sync is not
+  supported for this workspace.
+  """
+  @callback current_user() ::
+              {:ok, String.t()} | {:error, :not_supported} | {:error, term()}
+
+  @doc """
+  Extracts the set of assignee identifiers (login, accountId, member UUID,
+  etc.) from a raw issue map returned by `fetch/1`. The identifier format
+  matches what `current_user/0` returns for the same tracker.
+  """
+  @callback assignees(map()) :: [String.t()]
+
+  @doc """
+  Derives the bead-vocabulary status (`:open | :in_progress | :closed`) from
+  a raw issue map returned by `fetch/1`.
+  """
+  @callback issue_status(map()) :: status()
+
+  @doc """
+  Extracts the display title from a raw issue map returned by `fetch/1`.
+  """
+  @callback extract_title(map()) :: String.t()
+
+  @doc """
+  Extracts the body/description from a raw issue map returned by `fetch/1`.
+  Returns an empty string when the tracker has no body or the format is not
+  convertible.
+  """
+  @callback extract_description(map()) :: String.t()
+
+  @doc """
   Attach a remote link (e.g. the implementing PR/MR) to the tracked item.
 
   `title` is the human label shown on the ticket; `url` is the link target.
@@ -124,5 +161,29 @@ defmodule Arbiter.Trackers.Tracker do
   @callback add_remote_link(ref, url :: String.t(), title :: String.t()) ::
               :ok | {:error, :not_supported} | {:error, term()}
 
-  @optional_callbacks add_remote_link: 3
+  @doc """
+  Check whether the ref has already been claimed by another Arbiter
+  installation. Returns `:ok` if clear, or
+  `{:error, {:already_claimed, comment_body}}` if a prior-ownership marker is
+  found. Optional — adapters without a comment/annotation mechanism skip the
+  check (callers get `:ok`).
+  """
+  @callback check_prior_claim(ref) ::
+              :ok | {:error, {:already_claimed, String.t()}}
+
+  @doc """
+  Post-claim side-effects: mark ownership on the upstream item (e.g. post an
+  ownership comment and assign the user). Non-fatal — failures do not roll
+  back the bead. Optional — adapters that have no ownership-signal mechanism
+  simply don't implement it.
+
+  `context` carries claim metadata:
+  - `:bead_id` — the newly-created bead's id
+  - `:workspace_name` / `:workspace_prefix` — the workspace identifiers
+  - `:current_user` — the viewer's tracker identity
+  - `:host` — the Arbiter host string
+  """
+  @callback signal_claim(ref, bead_id :: String.t(), context :: map()) :: :ok
+
+  @optional_callbacks add_remote_link: 3, check_prior_claim: 1, signal_claim: 3
 end

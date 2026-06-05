@@ -271,6 +271,57 @@ defmodule Arbiter.Trackers.GitHub do
     end
   end
 
+  # ---- Tracker behaviour: claim callbacks ------------------------------------
+
+  @impl true
+  def current_user, do: viewer_login()
+
+  @impl true
+  def assignees(issue_map), do: assignee_logins(issue_map)
+
+  @impl true
+  def issue_status(%{"state" => "closed"}), do: :closed
+  def issue_status(_), do: :open
+
+  @impl true
+  def extract_title(%{"title" => title}) when is_binary(title) and title != "", do: title
+  def extract_title(_), do: "(no title)"
+
+  @impl true
+  def extract_description(%{"body" => body}) when is_binary(body), do: body
+  def extract_description(_), do: ""
+
+  @ownership_marker "Arbiter installation:"
+
+  @impl true
+  def check_prior_claim(ref) do
+    case list_comments(ref) do
+      {:ok, comments} ->
+        case Enum.find(comments, &String.contains?(&1["body"] || "", @ownership_marker)) do
+          nil -> :ok
+          %{"body" => body} -> {:error, {:already_claimed, body}}
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  @impl true
+  def signal_claim(ref, bead_id, %{
+        workspace_name: name,
+        workspace_prefix: prefix,
+        current_user: login,
+        host: host
+      }) do
+    body =
+      "Claimed as #{bead_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+
+    post_comment(ref, body)
+    assign_user(ref, login)
+    :ok
+  end
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
@@ -434,17 +485,6 @@ defmodule Arbiter.Trackers.GitHub do
 
   def assignee_logins(%{"assignee" => %{"login" => login}}) when is_binary(login), do: [login]
   def assignee_logins(_), do: []
-
-  @doc """
-  Returns the issue's bead-vocabulary status from its raw GitHub payload.
-
-  GitHub Issues only have `"open"` / `"closed"` natively; this is sufficient
-  for `arb sync`'s reconcile logic (which only cares whether to close a bead
-  whose issue went to `"closed"`).
-  """
-  @spec issue_status(map()) :: :open | :closed
-  def issue_status(%{"state" => "closed"}), do: :closed
-  def issue_status(_), do: :open
 
   # ---- Internals: list_open / pagination ---------------------------------
 
