@@ -94,6 +94,54 @@ defmodule ArbiterWeb.Api.PolecatController do
     end
   end
 
+  @doc """
+  Resume a stopped acolyte (bd-auma3z). Re-attaches a fresh agent to the bead's
+  preserved outpost worktree with a git-derived briefing of the prior run's
+  work, so it continues rather than restarting from scratch. Always
+  claude-driven. Renders the same payload as `sling/2`.
+  """
+  def resume(conn, %{"bead_id" => bead_id} = params)
+      when is_binary(bead_id) and bead_id != "" do
+    opts = resume_opts(params)
+
+    case Sling.resume(bead_id, opts) do
+      {:ok, result} ->
+        conn
+        |> put_status(:created)
+        |> render(:sling, result: result)
+
+      {:error, {:bead_not_found, _}} ->
+        {:error, :not_found}
+
+      {:error, {:bead_closed, _}} ->
+        {:error,
+         {:invalid_request, "bead is closed; reopen it before resuming", %{bead_id: bead_id}}}
+
+      {:error, :no_outpost} ->
+        {:error,
+         {:invalid_request,
+          "no preserved outpost worktree for this bead — nothing to resume; sling it fresh instead",
+          %{bead_id: bead_id}}}
+
+      {:error, :rig_unknown} ->
+        {:error,
+         {:invalid_request,
+          "could not resolve the rig for this bead; pass it explicitly: `arb resume <bead> <rig>`",
+          %{bead_id: bead_id}}}
+
+      {:error, {:acolyte_active, status}} ->
+        {:error,
+         {:invalid_request,
+          "an acolyte is still active for this bead (#{status}); stop it before resuming",
+          %{bead_id: bead_id}}}
+
+      {:error, reason} ->
+        {:error, {:server_error, "resume failed", %{reason: inspect(reason)}}}
+    end
+  end
+
+  def resume(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+
   def index(conn, _params) do
     render(conn, :index, children: Polecat.list_children())
   end
@@ -204,6 +252,15 @@ defmodule ArbiterWeb.Api.PolecatController do
       true -> base ++ [start_claude: true]
       _ -> base ++ [start_driver: false]
     end
+    |> Enum.reject(fn {_, v} -> is_nil(v) end)
+  end
+
+  # Map request params onto `Sling.resume/2` opts. Rig is optional — resume
+  # falls back to the bead's most recent run's rig when omitted. `--model` is an
+  # optional per-dispatch override, same as sling.
+  defp resume_opts(params) do
+    [rig: params["rig"]]
+    |> add_model_override(params["model"])
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 

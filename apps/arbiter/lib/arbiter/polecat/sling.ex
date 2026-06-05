@@ -60,10 +60,14 @@ defmodule Arbiter.Polecat.Sling do
   alias Arbiter.Polecat.BranchNamer
   alias Arbiter.Polecat.ClaudeSession
   alias Arbiter.Polecat.Driver
+  alias Arbiter.Polecat.ResumeContext
   alias Arbiter.Polecat.Worktree
+  alias Arbiter.Polecats.Run
   alias Arbiter.Workflows.CodeReview
   alias Arbiter.Workflows.Machine
   alias Arbiter.Workflows.Work
+
+  require Ash.Query
 
   @type sling_opts :: [
           rig: String.t() | nil,
@@ -121,6 +125,159 @@ defmodule Arbiter.Polecat.Sling do
     else
       err -> err
     end
+  end
+
+  @doc """
+  Resume a stopped acolyte (bd-auma3z): re-attach a **fresh** agent to the
+  bead's **preserved** outpost worktree, briefed with a git-derived summary of
+  the prior acolyte's committed + uncommitted work, so it continues from where
+  the stopped run left off instead of restarting from scratch.
+
+  This is the explicit `arb resume <bead>` path. It is provider-agnostic — no
+  Claude/Gemini session-resume id; the continuity comes entirely from the
+  preserved worktree state plus a `Arbiter.Polecat.ResumeContext` briefing
+  prepended to the standard work prompt (Admiral sign-off 2026-06-05, approach
+  (b)).
+
+  ## Steps
+
+  1. Load + validate the bead (must not be `:closed`).
+  2. Refuse if a polecat is still **actively** working the bead — resume only
+     applies to a stopped/failed/dead acolyte. Stop the active one first.
+  3. Resolve the rig (explicit opt, else the bead's most recent run's rig).
+  4. Require the outpost worktree to still exist on disk — `{:error,
+     :no_outpost}` if it was cleaned up (nothing to resume; re-`sling` instead).
+  5. Build the resume briefing from the worktree's git state.
+  6. Stop any prior (failed) polecat still resident for the bead so a fresh
+     `polecat_run` starts cleanly rather than the new sling attaching to the
+     dead one (which would skip the run row and collide on the registry key —
+     the same class of bug fixed in the conflict-resolver).
+  7. Delegate to `sling/2` with the resume markers set: it reuses the existing
+     worktree (idempotent `Worktree.create`), prepends the briefing, links the
+     new run to the prior via `resumed_from_run_id`, and passes the bead's
+     existing `pr_ref` so completion reuses any open PR rather than duplicating.
+
+  Returns the same `{:ok, sling_result()}` / `{:error, reason}` shape as
+  `sling/2`. Resume-specific errors: `{:error, :no_outpost}`,
+  `{:error, {:acolyte_active, status}}`, `{:error, :rig_unknown}`.
+  """
+  @spec resume(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
+  def resume(bead_id, opts \\ []) when is_binary(bead_id) do
+    with {:ok, bead} <- load_bead(bead_id),
+         :ok <- ensure_not_closed(bead),
+         :ok <- ensure_not_active(bead_id),
+         {:ok, rig} <- resolve_resume_rig(bead, opts),
+         {:ok, worktree_path} <- resume_worktree(bead, rig),
+         target_branch <- resolve_target_branch(bead, Keyword.put(opts, :rig, rig)),
+         {:ok, context} <- ResumeContext.build(bead, worktree_path, target_branch) do
+      prior_run_id = latest_run_id(bead_id)
+
+      # Free the registry slot: a stopped acolyte's polecat lingers in :failed,
+      # still registered under bead_id. Without stopping it, sling/2's
+      # start_polecat would hit {:already_started, pid} and attach to the dead
+      # one — no fresh run, no resumed_from_run_id. Stopping it does NOT touch
+      # the worktree (terminate/2 never cleans up), so the outpost is preserved.
+      _ = stop_prior_polecat(bead_id)
+
+      resume_opts =
+        opts
+        |> Keyword.put(:rig, rig)
+        |> Keyword.put(:start_claude, true)
+        |> Keyword.put(:resume, true)
+        |> Keyword.put(:resume_context, context)
+        |> Keyword.put(:resumed_from_run_id, prior_run_id)
+        |> Keyword.put(:existing_pr_ref, bead.pr_ref)
+
+      sling(bead_id, resume_opts)
+    end
+  end
+
+  # Resume only applies to a stopped/failed/dead acolyte. If a polecat is still
+  # live in a working state, refuse rather than stomp in-flight work — the
+  # operator should `arb polecat stop` it first. A :failed (the stopped state)
+  # or :completed polecat, or no polecat at all, is resumable.
+  defp ensure_not_active(bead_id) do
+    case Polecat.whereis(bead_id) do
+      nil ->
+        :ok
+
+      pid ->
+        case safe_polecat_status(pid) do
+          status when status in [:failed, :completed, nil] -> :ok
+          status -> {:error, {:acolyte_active, status}}
+        end
+    end
+  end
+
+  defp safe_polecat_status(pid) do
+    case Polecat.state(pid) do
+      %{status: status} -> status
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # The rig: an explicit opt wins; otherwise inherit the bead's most recent run's
+  # rig so `arb resume <bead>` works without re-specifying it. No run + no opt is
+  # an error — we can't resolve the outpost without knowing the rig.
+  defp resolve_resume_rig(%Issue{id: bead_id}, opts) do
+    case Keyword.get(opts, :rig) do
+      rig when is_binary(rig) and rig != "" ->
+        {:ok, rig}
+
+      _ ->
+        case latest_run(bead_id) do
+          %Run{rig: rig} when is_binary(rig) and rig != "" -> {:ok, rig}
+          _ -> {:error, :rig_unknown}
+        end
+    end
+  end
+
+  # Resolve the preserved outpost path for the bead's per-bead branch and require
+  # it to exist on disk. A missing worktree means there's nothing to resume.
+  defp resume_worktree(%Issue{} = bead, rig) do
+    case resolve_rig_path(bead, rig) do
+      repo_path when is_binary(repo_path) ->
+        path = Worktree.worktree_path(BranchNamer.derive(bead))
+        if File.dir?(path), do: {:ok, path}, else: {:error, :no_outpost}
+
+      _ ->
+        {:error, :rig_unknown}
+    end
+  end
+
+  defp stop_prior_polecat(bead_id) do
+    case Polecat.whereis(bead_id) do
+      nil -> :ok
+      _pid -> Polecat.stop(bead_id, :normal)
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp latest_run_id(bead_id) do
+    case latest_run(bead_id) do
+      %Run{id: id} -> id
+      _ -> nil
+    end
+  end
+
+  defp latest_run(nil), do: nil
+
+  defp latest_run(bead_id) when is_binary(bead_id) do
+    Run
+    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
   end
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
@@ -193,6 +350,8 @@ defmodule Arbiter.Polecat.Sling do
         _ -> %{worktree_path: worktree_path}
       end
 
+    base = maybe_put_resume_meta(base, opts)
+
     case worktree_path && resolve_rig_path(bead, Keyword.get(opts, :rig)) do
       repo_path when is_binary(repo_path) ->
         Map.merge(base, %{
@@ -206,6 +365,28 @@ defmodule Arbiter.Polecat.Sling do
         base
     end
   end
+
+  # bd-auma3z: stamp the resume markers into the polecat's :meta so (1) the
+  # GenServer boots into `:resuming` rather than `:idle`, (2) `record_run_started`
+  # links the new run to the prior one via `resumed_from_run_id`, and (3) the
+  # completion path can reuse an already-open PR (`existing_pr_ref`) instead of
+  # opening a duplicate. No-op on a normal fresh sling.
+  defp maybe_put_resume_meta(base, opts) do
+    case Keyword.get(opts, :resume, false) do
+      true ->
+        base
+        |> Map.put(:resume, true)
+        |> put_if_present(:resumed_from_run_id, Keyword.get(opts, :resumed_from_run_id))
+        |> put_if_present(:existing_pr_ref, Keyword.get(opts, :existing_pr_ref))
+
+      _ ->
+        base
+    end
+  end
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, _key, ""), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
 
   defp merge_title(%Issue{id: id, title: title}) when is_binary(title) and title != "",
     do: "Merge #{id}: #{title}"
@@ -632,11 +813,21 @@ defmodule Arbiter.Polecat.Sling do
   def prompt_for_bead(%Issue{} = bead, opts) do
     case Keyword.get(opts, :review, false) do
       true -> review_prompt(bead)
-      _ -> work_prompt(bead)
+      _ -> work_prompt(bead, opts)
     end
   end
 
-  defp work_prompt(%Issue{} = bead) do
+  # When resuming (bd-auma3z) the work prompt is prefixed with a git-derived
+  # briefing of the prior acolyte's committed + uncommitted work, so the fresh
+  # agent continues from the preserved outpost instead of redoing finished
+  # steps. `:resume_context` is built by `Arbiter.Polecat.ResumeContext`; it's
+  # absent (empty prefix) on a normal fresh sling.
+  defp work_prompt(%Issue{} = bead, opts) do
+    resume_prefix = Keyword.get(opts, :resume_context) || ""
+    resume_prefix <> base_work_prompt(bead)
+  end
+
+  defp base_work_prompt(%Issue{} = bead) do
     """
     You are a polecat working autonomously on bead #{bead.id}.
 
