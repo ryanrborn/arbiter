@@ -425,4 +425,21 @@ defmodule Arbiter.Agents.RoutingTest do
                ["by_budget", "by_difficulty", "by_priority", "round_robin", "static"]
     end
   end
+
+  describe "agent_type_atom/1 with a list (pool dispatch, no exhaustion)" do
+    test "picks first type in the list when all are healthy" do
+      result = Routing.agent_type_atom(%{"type" => ["claude", "gemini"]})
+      assert result == :claude
+    end
+
+    test "ignores unknown entries in the list and picks the first valid one" do
+      result = Routing.agent_type_atom(%{"type" => ["claude"]})
+      assert result == :claude
+    end
+
+    test "returns :claude when list is empty (fallback)" do
+      result = Routing.agent_type_atom(%{"type" => []})
+      assert result == :claude
+    end
+  end
 end

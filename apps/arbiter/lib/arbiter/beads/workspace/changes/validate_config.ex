@@ -18,7 +18,8 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"vernacular.emoji"` is present, it must be a map of string → string.
     * If `"agent"` / `"review_agent"` is present, it must be a map.
     * If `"agent.type"` is present, it must be one of the values in
-      `Arbiter.Agents.valid_agent_types/0` (`"claude"`).
+      `Arbiter.Agents.valid_agent_types/0` (`"claude"`, `"gemini"`), OR a
+      non-empty list of such strings (multi-provider pool).
     * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in
@@ -164,7 +165,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
         nil ->
           cs
 
-        type ->
+        type when is_binary(type) ->
           if type in valid_types do
             cs
           else
@@ -174,6 +175,35 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
                 "#{label}.type must be one of #{Enum.join(valid_types, ", ")}; got: #{inspect(type)}"
             )
           end
+
+        types when is_list(types) ->
+          invalid = Enum.reject(types, &(&1 in valid_types))
+
+          cond do
+            types == [] ->
+              Changeset.add_error(cs,
+                field: :config,
+                message: "#{label}.type list must not be empty"
+              )
+
+            invalid != [] ->
+              Changeset.add_error(cs,
+                field: :config,
+                message:
+                  "#{label}.type list contains invalid types #{inspect(invalid)}; " <>
+                    "each must be one of #{Enum.join(valid_types, ", ")}"
+              )
+
+            true ->
+              cs
+          end
+
+        other ->
+          Changeset.add_error(cs,
+            field: :config,
+            message:
+              "#{label}.type must be a string or list of strings; got: #{inspect(other)}"
+          )
       end
     end)
     |> then(fn cs ->

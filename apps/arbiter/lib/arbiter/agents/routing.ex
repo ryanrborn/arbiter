@@ -26,6 +26,7 @@ defmodule Arbiter.Agents.Routing do
   `%{type:, config:}` shape regardless of which policy is active.
   """
 
+  alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.Routing.{ByBudget, ByDifficulty, ByPriority, Policy, RoundRobin, Static}
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
@@ -101,5 +102,20 @@ defmodule Arbiter.Agents.Routing do
     end
   end
 
+  def agent_type_atom(%{"type" => list}) when is_list(list) do
+    list
+    |> Enum.map(&safe_to_atom/1)
+    |> Enum.reject(&is_nil/1)
+    |> ProviderPool.pick() || :claude
+  end
+
   def agent_type_atom(_), do: :claude
+
+  defp safe_to_atom(t) when is_binary(t) do
+    String.to_existing_atom(t)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp safe_to_atom(_), do: nil
 end
