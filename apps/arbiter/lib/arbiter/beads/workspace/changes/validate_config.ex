@@ -25,6 +25,8 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
       `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
+    * If `"tribunal"` is present, it must be a map.
+    * If `"tribunal.max_rounds"` is present, it must be a positive integer.
 
   Unknown keys are allowed (forward-compat). Deeper validation of vernacular keys
   (coordinator, worker, etc.) is deferred to `Arbiter.Vernacular` in gte-P2 —
@@ -52,6 +54,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     |> validate_agent_block("agent", Map.get(config, "agent"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
+    |> validate_tribunal(Map.get(config, "tribunal"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -267,5 +270,41 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
 
   defp validate_routing(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "routing must be a map")
+  end
+
+  defp validate_tribunal(changeset, nil), do: changeset
+
+  defp validate_tribunal(changeset, tribunal) when is_map(tribunal) do
+    case Map.get(tribunal, "max_rounds") do
+      nil ->
+        changeset
+
+      n when is_integer(n) and n > 0 ->
+        changeset
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 ->
+            changeset
+
+          _ ->
+            Changeset.add_error(changeset,
+              field: :config,
+              message:
+                "tribunal.max_rounds must be a positive integer; got: #{inspect(s)}"
+            )
+        end
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message:
+            "tribunal.max_rounds must be a positive integer; got: #{inspect(other)}"
+        )
+    end
+  end
+
+  defp validate_tribunal(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "tribunal must be a map")
   end
 end
