@@ -56,8 +56,20 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
     test "creates a bead linked to #43 when assigned to viewer", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -72,8 +84,20 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
     test "200 when bead already exists (idempotent)", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -103,7 +127,14 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
     test "force=true bypasses the assignment check", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", _} -> Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -161,6 +192,15 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
 
           {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
             Req.Test.json(conn, issue_payload(%{"number" => 43, "title" => "Issue 43"}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 

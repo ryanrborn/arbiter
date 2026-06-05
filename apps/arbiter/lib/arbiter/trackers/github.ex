@@ -314,6 +314,40 @@ defmodule Arbiter.Trackers.GitHub do
   end
 
   @doc """
+  Post a comment on a GitHub issue.
+  """
+  @spec post_comment(String.t(), String.t()) :: :ok | {:error, Error.t()}
+  def post_comment(ref, body) when is_binary(ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve() do
+      path = "/repos/#{cfg.owner}/#{cfg.repo}/issues/#{ref}/comments"
+      request(cfg, :post, path, json: %{"body" => body}) |> expect_ok()
+    end
+  end
+
+  @doc """
+  List comments on a GitHub issue (first page, up to 100).
+  """
+  @spec list_comments(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
+  def list_comments(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      path = "/repos/#{cfg.owner}/#{cfg.repo}/issues/#{ref}/comments"
+      request(cfg, :get, path, params: [per_page: 100]) |> handle_json()
+    end
+  end
+
+  @doc """
+  Add a login as an assignee to a GitHub issue. Non-fatal: callers should
+  treat errors as soft failures (assignment requires collaborator access).
+  """
+  @spec assign_user(String.t(), String.t()) :: :ok | {:error, Error.t()}
+  def assign_user(ref, login) when is_binary(ref) and is_binary(login) do
+    with {:ok, cfg} <- Config.resolve() do
+      path = "/repos/#{cfg.owner}/#{cfg.repo}/issues/#{ref}/assignees"
+      request(cfg, :post, path, json: %{"assignees" => [login]}) |> expect_ok()
+    end
+  end
+
+  @doc """
   Extracts assignee logins from a fetched issue map. Tolerant of GitHub's two
   shapes: `"assignees"` (a list of user maps) and the legacy `"assignee"`
   (a single user map).
