@@ -49,6 +49,28 @@ defmodule ArbiterWeb.Api.PolecatController do
             {:error,
              {:invalid_request, "bead is closed; reopen it before slinging", %{bead_id: bead_id}}}
 
+          {:error, :no_rig_configured} ->
+            {:error,
+             {:invalid_request,
+              "no rigs configured — add at least one rig to your workspace config " <>
+                "(rig_paths) or application env (:arbiter, :rig_paths), " <>
+                "or pass a rig explicitly: `arb sling #{bead_id} <rig>`",
+              %{bead_id: bead_id}}}
+
+          {:error, {:rig_not_found, rig}} ->
+            {:error,
+             {:invalid_request,
+              "rig #{inspect(rig)} is not in :rig_paths — check your workspace config or " <>
+                "application env (:arbiter, :rig_paths)",
+              %{bead_id: bead_id, rig: rig}}}
+
+          {:error, {:ambiguous_rig, rigs}} ->
+            {:error,
+             {:invalid_request,
+              "multiple rigs available (#{Enum.join(rigs, ", ")}) — specify one: " <>
+                "`arb sling #{bead_id} <rig>`",
+              %{bead_id: bead_id, available_rigs: rigs}}}
+
           {:error, reason} ->
             {:error, {:server_error, "sling failed", %{reason: inspect(reason)}}}
         end

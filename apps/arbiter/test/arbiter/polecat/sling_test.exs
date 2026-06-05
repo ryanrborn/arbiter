@@ -84,6 +84,20 @@ defmodule Arbiter.Polecat.SlingTest do
   describe "pre-flight auth check (bd-awi4nw)" do
     alias Arbiter.Messages.Message
 
+    # bd-1ziw04: real-work slings now require the rig to be in :rig_paths.
+    # Configure a minimal entry so rig validation passes and the preflight check
+    # actually fires. No real git repo is needed — the probe aborts before the
+    # worktree provisioning step.
+    setup do
+      prior = Application.get_env(:arbiter, :rig_paths)
+      Application.put_env(:arbiter, :rig_paths, %{"test/rig" => "/tmp"})
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, :rig_paths, prior),
+          else: Application.delete_env(:arbiter, :rig_paths)
+      end)
+    end
+
     test "a failing auth probe REFUSES to sling and leaves the bead untouched", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "auth gate", workspace_id: ws.id})
 
@@ -132,10 +146,12 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "no preflight", workspace_id: ws.id})
 
       # Even with a probe_command that would 401, no start_claude means no probe.
+      # provision_worktree: false so we don't try to git-fetch /tmp.
       assert {:ok, result} =
                Sling.sling(bead.id,
                  rig: "test/rig",
                  start_driver: false,
+                 provision_worktree: false,
                  probe_command: ["sh", "-c", "exit 1"]
                )
 
@@ -145,14 +161,16 @@ defmodule Arbiter.Polecat.SlingTest do
     test "preflight: false bypasses the probe even with start_claude", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
 
-      # start_claude with no worktree errors at the claude-start step
-      # (:missing_worktree) — proving we got PAST the (disabled) preflight
-      # rather than being refused by it.
+      # start_claude + preflight: false + provision_worktree: false errors at the
+      # claude-start step (:missing_worktree) — proving we got PAST the (disabled)
+      # preflight rather than being refused by it. The rig must be valid so the
+      # rig-resolution guard (bd-1ziw04) passes before reaching the preflight gate.
       assert {:error, :missing_worktree} =
                Sling.sling(bead.id,
-                 rig: "unmapped/rig",
+                 rig: "test/rig",
                  start_driver: false,
                  start_claude: true,
+                 provision_worktree: false,
                  preflight: false,
                  probe_command: ["sh", "-c", "echo 401; exit 1"]
                )
@@ -266,11 +284,11 @@ defmodule Arbiter.Polecat.SlingTest do
       assert is_binary(result.worktree_path)
     end
 
-    test "start_claude: true without a worktree returns {:error, :missing_worktree}",
+    test "start_claude: true with an unresolvable rig returns {:error, {:rig_not_found, rig}}",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
 
-      assert {:error, :missing_worktree} =
+      assert {:error, {:rig_not_found, "no-such-rig"}} =
                Sling.sling(bead.id,
                  rig: "no-such-rig",
                  start_driver: false,
@@ -1065,17 +1083,154 @@ defmodule Arbiter.Polecat.SlingTest do
       assert result.worktree_path == nil
     end
 
-    test "review without a worktree AND without a mapped rig errors",
+    test "review with start_claude: true and an unresolvable rig errors",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no cwd", workspace_id: ws.id})
 
-      assert {:error, :missing_worktree} =
+      assert {:error, {:rig_not_found, "no-such-rig"}} =
                Sling.sling(bead.id,
                  rig: "no-such-rig",
                  review: true,
                  start_claude: true,
                  claude_command: ["true"]
                )
+    end
+  end
+
+  describe "real-work rig resolution (bd-1ziw04)" do
+    # Tests verify that start_claude: true dispatches fail loudly when no rig
+    # can be resolved, and auto-select when exactly one rig is available.
+
+    @env_key :rig_paths
+
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "sling-rig-#{:erlang.unique_integer([:positive])}")
+      repo = Path.join(tmp, "source")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      worktree_root = Path.join(tmp, "worktrees")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt_root = Application.get_env(:arbiter, :worktree_root)
+      prior_rig_paths = Application.get_env(:arbiter, @env_key)
+
+      Application.put_env(:arbiter, :worktree_root, worktree_root)
+
+      on_exit(fn ->
+        if prior_wt_root,
+          do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
+          else: Application.delete_env(:arbiter, :worktree_root)
+
+        if prior_rig_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_rig_paths),
+          else: Application.delete_env(:arbiter, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo: repo}
+    end
+
+    test "0 rigs: start_claude: true with no rig and empty :rig_paths fails loudly",
+         %{ws: ws} do
+      Application.delete_env(:arbiter, @env_key)
+      {:ok, bead} = Ash.create(Issue, %{title: "no rigs", workspace_id: ws.id})
+
+      assert {:error, :no_rig_configured} =
+               Sling.sling(bead.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      # Refused BEFORE any state mutation: bead still :open, no polecat.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :open
+      assert Polecat.whereis(bead.id) == nil
+    end
+
+    test "1 rig: start_claude: true with no rig auto-selects the sole configured rig",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{"sole/rig" => repo})
+      {:ok, bead} = Ash.create(Issue, %{title: "auto-select", workspace_id: ws.id})
+
+      assert {:ok, result} =
+               Sling.sling(bead.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["sleep", "2"],
+                 preflight: false
+               )
+
+      # Worktree provisioned using the auto-selected rig.
+      assert is_binary(result.worktree_path)
+      assert File.dir?(result.worktree_path)
+    end
+
+    test "multi-rig: start_claude: true with no rig and multiple :rig_paths fails loudly",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{"rig/a" => repo, "rig/b" => repo})
+      {:ok, bead} = Ash.create(Issue, %{title: "multi rigs", workspace_id: ws.id})
+
+      assert {:error, {:ambiguous_rig, rigs}} =
+               Sling.sling(bead.id,
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert "rig/a" in rigs
+      assert "rig/b" in rigs
+
+      # Refused before any state mutation.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :open
+      assert Polecat.whereis(bead.id) == nil
+    end
+
+    test "explicit rig not in :rig_paths fails with {:rig_not_found, rig}",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{"real/rig" => repo})
+      {:ok, bead} = Ash.create(Issue, %{title: "bad rig", workspace_id: ws.id})
+
+      assert {:error, {:rig_not_found, "no-such/rig"}} =
+               Sling.sling(bead.id,
+                 rig: "no-such/rig",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      # Refused before any state mutation.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :open
+      assert Polecat.whereis(bead.id) == nil
+    end
+
+    test "dry sling (no start_claude) is unaffected — still parks without a rig", %{ws: ws} do
+      Application.delete_env(:arbiter, @env_key)
+      {:ok, bead} = Ash.create(Issue, %{title: "dry sling", workspace_id: ws.id})
+
+      # No --with-claude → no rig required → succeeds and parks as :in_progress.
+      assert {:ok, result} = Sling.sling(bead.id, start_driver: false)
+      assert result.bead.status == :in_progress
+      assert result.worktree_path == nil
     end
   end
 end
