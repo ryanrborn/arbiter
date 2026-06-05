@@ -97,6 +97,9 @@ defmodule ArbiterWeb.Router do
     post("/messages/:id/read", MessageController, :read)
     delete("/messages", MessageController, :clear)
 
+    # Version stamp
+    get("/version", VersionController, :show)
+
     # Usage ledger (per-session tokens / cost / duration; rollups)
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)
