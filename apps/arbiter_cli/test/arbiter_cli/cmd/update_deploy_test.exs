@@ -11,6 +11,9 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
   setup do
     System.put_env("ARB_HOME", "/tmp/arbiter-update-test")
     System.delete_env("ARB_HOST")
+    # Clear the acolyte guard env so deploy tests run even when executed
+    # from inside an acolyte session.
+    System.delete_env("ARB_ACOLYTE_BEAD_ID")
     on_exit(fn -> System.delete_env("ARB_HOME") end)
     Process.put(:bd2_sleep, fn _ms -> :ok end)
     # TCP port check seam: default to "port is free" so wait_port_free returns
@@ -60,7 +63,17 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
         {"git", ["log" | _]} ->
           {"bbbbbbb merge feature two\nababab1 merge feature one\n", 0}
 
+        {"git", ["diff" | _]} ->
+          {"", 0}
+
+        {"mix", ["arbiter.migrate"]} ->
+          {~s({"migrations_applied":0,"status":"ok"}), 0}
+
         # ---- reused restart lifecycle ----
+        # Simulate no systemd service installed — restart falls back to sh.
+        {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+          {"", 1}
+
         {"lsof", _} ->
           if Process.get(:terminated), do: {"", 1}, else: {"4242\n", 0}
 
@@ -285,6 +298,15 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
 
           {"git", ["log" | _]} ->
             {"bbbbbbb a commit\n", 0}
+
+          {"git", ["diff" | _]} ->
+            {"", 0}
+
+          {"mix", ["arbiter.migrate"]} ->
+            {~s({"migrations_applied":0,"status":"ok"}), 0}
+
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"", 1}
 
           {"lsof", _} ->
             if Process.get(:terminated), do: {"", 1}, else: {"7\n", 0}
