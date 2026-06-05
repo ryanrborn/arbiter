@@ -2,7 +2,9 @@ defmodule Arbiter.Beads.ClaimTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Beads.{Claim, Issue, Workspace}
-  alias Arbiter.Trackers.GitHub.Config
+  alias Arbiter.Trackers.GitHub.Config, as: GHConfig
+  alias Arbiter.Trackers.Jira.Config, as: JiraConfig
+  alias Arbiter.Trackers.Shortcut.Config, as: SCConfig
 
   @viewer "test-acolyte"
   @env_var "ARBITER_CLAIM_TEST_TOKEN"
@@ -32,15 +34,50 @@ defmodule Arbiter.Beads.ClaimTest do
         prefix: "cn"
       })
 
+    {:ok, jira_ws} =
+      Ash.create(Workspace, %{
+        name: "claim-jira",
+        prefix: "cj",
+        config: %{
+          "tracker" => %{
+            "type" => "jira",
+            "config" => %{
+              "host" => "test.atlassian.net",
+              "project_key" => "TEST",
+              "credentials_ref" => "env:#{@env_var}",
+              "email" => "tester@example.com"
+            }
+          }
+        }
+      })
+
+    {:ok, sc_ws} =
+      Ash.create(Workspace, %{
+        name: "claim-sc",
+        prefix: "cs",
+        config: %{
+          "tracker" => %{
+            "type" => "shortcut",
+            "config" => %{
+              "credentials_ref" => "env:#{@env_var}"
+            }
+          }
+        }
+      })
+
     on_exit(fn ->
-      Config.clear()
+      GHConfig.clear()
+      JiraConfig.clear()
+      SCConfig.clear()
       System.delete_env(@env_var)
     end)
 
-    {:ok, github_ws: github_ws, none_ws: none_ws}
+    {:ok, github_ws: github_ws, none_ws: none_ws, jira_ws: jira_ws, sc_ws: sc_ws}
   end
 
-  defp stub(fun), do: Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fun)
+  defp stub_gh(fun), do: Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fun)
+  defp stub_jira(fun), do: Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fun)
+  defp stub_sc(fun), do: Req.Test.stub(Arbiter.Trackers.Shortcut.HTTP, fun)
 
   defp issue_payload(overrides \\ %{}) do
     Map.merge(
@@ -56,9 +93,45 @@ defmodule Arbiter.Beads.ClaimTest do
     )
   end
 
-  describe "claim/3" do
+  @jira_account_id "jira-account-abc123"
+  @sc_member_id "sc-member-uuid-456"
+
+  defp jira_issue_payload(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "key" => "TEST-43",
+        "fields" => %{
+          "summary" => "Wire up the thing",
+          "description" => nil,
+          "assignee" => %{"accountId" => @jira_account_id},
+          "status" => %{
+            "name" => "In Progress",
+            "statusCategory" => %{"key" => "indeterminate"}
+          }
+        }
+      },
+      overrides
+    )
+  end
+
+  defp sc_story_payload(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "id" => 43,
+        "name" => "Wire up the thing",
+        "description" => "Mirror me into a bead.",
+        "app_url" => "https://app.shortcut.com/story/43",
+        "owner_ids" => [@sc_member_id],
+        "completed" => false,
+        "started" => false
+      },
+      overrides
+    )
+  end
+
+  describe "claim/3 — GitHub" do
     test "creates a bead mirrored from the issue when assigned to viewer", %{github_ws: ws} do
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -87,7 +160,7 @@ defmodule Arbiter.Beads.ClaimTest do
     end
 
     test "is idempotent — returns existing bead instead of duplicating", %{github_ws: ws} do
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
           {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
@@ -105,7 +178,7 @@ defmodule Arbiter.Beads.ClaimTest do
     end
 
     test "refuses when the issue isn't assigned to the viewer", %{github_ws: ws} do
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -119,7 +192,7 @@ defmodule Arbiter.Beads.ClaimTest do
     end
 
     test "force: true bypasses the assignment check", %{github_ws: ws} do
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
           {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
@@ -135,7 +208,7 @@ defmodule Arbiter.Beads.ClaimTest do
     end
 
     test "accepts decorated refs like '#43' and 'gh-43' and a full URL", %{github_ws: ws} do
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
           {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
@@ -157,11 +230,17 @@ defmodule Arbiter.Beads.ClaimTest do
     end
 
     test "returns invalid_ref for garbage", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
+        end
+      end)
+
       assert {:error, {:invalid_ref, "not-a-number"}} = Claim.claim(ws, "not-a-number")
     end
 
-    test "no-ops cleanly when the workspace tracker isn't github", %{none_ws: ws} do
-      assert {:error, :tracker_not_github} = Claim.claim(ws, "43")
+    test "returns tracker_not_supported when the workspace tracker is none", %{none_ws: ws} do
+      assert {:error, :tracker_not_supported} = Claim.claim(ws, "43")
     end
 
     test "refuses when another Arbiter installation has already claimed the issue",
@@ -169,7 +248,7 @@ defmodule Arbiter.Beads.ClaimTest do
       prior_body =
         "Claimed as other-bd-abc123 by other-fleet (other). Arbiter installation: other-host."
 
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -189,7 +268,7 @@ defmodule Arbiter.Beads.ClaimTest do
       prior_body =
         "Claimed as other-bd-abc123 by other-fleet (other). Arbiter installation: other-host."
 
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -214,7 +293,7 @@ defmodule Arbiter.Beads.ClaimTest do
     test "ownership comment is posted when a new bead is created", %{github_ws: ws} do
       test_pid = self()
 
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -247,7 +326,7 @@ defmodule Arbiter.Beads.ClaimTest do
     test "ownership comment is NOT posted for an already-existing bead", %{github_ws: ws} do
       test_pid = self()
 
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -270,13 +349,12 @@ defmodule Arbiter.Beads.ClaimTest do
       assert {:ok, :created, _} = Claim.claim(ws, "43")
       assert_receive :comment_posted
 
-      # Second claim — must not post another comment.
       assert {:ok, :existing, _} = Claim.claim(ws, "43")
       refute_receive :comment_posted
     end
 
     test "comment-fetch failure does not abort a claim", %{github_ws: ws} do
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
@@ -299,12 +377,89 @@ defmodule Arbiter.Beads.ClaimTest do
     end
   end
 
-  describe "plan/1 and apply_plan/2" do
+  describe "claim/3 — Jira" do
+    test "creates a bead when the issue is assigned to the current user", %{jira_ws: ws} do
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", "/rest/api/3/issue/TEST-43"} ->
+            Req.Test.json(conn, jira_issue_payload())
+        end
+      end)
+
+      assert {:ok, :created, %Issue{} = bead} = Claim.claim(ws, "TEST-43")
+      assert bead.tracker_type == :jira
+      assert bead.tracker_ref == "TEST-43"
+      assert bead.title == "Wire up the thing"
+    end
+
+    test "refuses when the issue is not assigned to the current user", %{jira_ws: ws} do
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", "/rest/api/3/issue/TEST-43"} ->
+            other = %{"accountId" => "someone-else-id"}
+            Req.Test.json(conn, jira_issue_payload(%{"fields" => %{"assignee" => other, "summary" => "Wire up the thing", "status" => %{"statusCategory" => %{"key" => "new"}}}}))
+        end
+      end)
+
+      assert {:error, {:not_assigned, @jira_account_id}} = Claim.claim(ws, "TEST-43")
+    end
+
+    test "is idempotent for Jira claims", %{jira_ws: ws} do
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} -> Req.Test.json(conn, %{"accountId" => @jira_account_id})
+          {"GET", _} -> Req.Test.json(conn, jira_issue_payload())
+        end
+      end)
+
+      assert {:ok, :created, first} = Claim.claim(ws, "TEST-43")
+      assert {:ok, :existing, second} = Claim.claim(ws, "TEST-43")
+      assert first.id == second.id
+    end
+  end
+
+  describe "claim/3 — Shortcut" do
+    test "creates a bead when the story is owned by the current member", %{sc_ws: ws} do
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"GET", "/api/v3/stories/43"} ->
+            Req.Test.json(conn, sc_story_payload())
+        end
+      end)
+
+      assert {:ok, :created, %Issue{} = bead} = Claim.claim(ws, "43")
+      assert bead.tracker_type == :shortcut
+      assert bead.tracker_ref == "43"
+      assert bead.title == "Wire up the thing"
+    end
+
+    test "refuses when the story is not owned by the current member", %{sc_ws: ws} do
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"GET", "/api/v3/stories/43"} ->
+            Req.Test.json(conn, sc_story_payload(%{"owner_ids" => ["different-member-id"]}))
+        end
+      end)
+
+      assert {:error, {:not_assigned, @sc_member_id}} = Claim.claim(ws, "43")
+    end
+  end
+
+  describe "plan/1 and apply_plan/2 — GitHub" do
     test "creates beads for assigned-open issues with no bead, and closes orphan beads",
          %{github_ws: ws} do
-      # Pre-seed: a bead for #44 already exists; the GitHub side will report
-      # #44 as no-longer-assigned, so plan should close it. #43 is freshly
-      # assigned with no bead → plan should create it.
       {:ok, _existing} =
         Ash.create(Issue, %{
           title: "Stale claim for 44",
@@ -313,21 +468,17 @@ defmodule Arbiter.Beads.ClaimTest do
           workspace_id: ws.id
         })
 
-      stub(fn conn ->
+      stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
             Req.Test.json(conn, %{"login" => @viewer})
 
           {"GET", "/repos/ryanrborn/arbiter/issues"} ->
-            # Listed issues = assigned + open. #43 is assigned; #44 is not in
-            # the list (reassigned away).
             Req.Test.json(conn, [
               issue_payload(%{"number" => 43, "title" => "Issue 43"})
             ])
 
           {"GET", "/repos/ryanrborn/arbiter/issues/44"} ->
-            # The reason-fetch for the orphan: returns the current state of
-            # the issue (open, assigned to someone else).
             Req.Test.json(
               conn,
               issue_payload(%{
@@ -352,8 +503,6 @@ defmodule Arbiter.Beads.ClaimTest do
       end)
 
       assert {:ok, plan} = Claim.plan(ws)
-
-      # Two actions, deterministically ordered: creates before closes.
       assert [{:create, "43", %{title: "Issue 43"}}, {:close, _bead_id, _reason}] = plan
 
       assert {:ok, results} = Claim.apply_plan(ws, plan)
@@ -361,7 +510,6 @@ defmodule Arbiter.Beads.ClaimTest do
       assert Enum.any?(results, &match?({:created, _}, &1))
       assert Enum.any?(results, &match?({:closed, _}, &1))
 
-      # Verify side-effects in the DB.
       beads =
         Ash.read!(Issue)
         |> Enum.filter(&(&1.workspace_id == ws.id))
@@ -373,8 +521,60 @@ defmodule Arbiter.Beads.ClaimTest do
       assert bead_44.status == :closed
     end
 
-    test "empty plan when tracker isn't github", %{none_ws: ws} do
+    test "empty plan when tracker doesn't support claim", %{none_ws: ws} do
       assert {:ok, []} = Claim.plan(ws)
+    end
+  end
+
+  describe "plan/1 and apply_plan/2 — Jira" do
+    test "creates beads for assigned open Jira issues with no bead", %{jira_ws: ws} do
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", "/rest/api/3/search"} ->
+            Req.Test.json(conn, %{
+              "issues" => [jira_issue_payload()]
+            })
+
+          {"GET", "/rest/api/3/issue/TEST-43"} ->
+            Req.Test.json(conn, jira_issue_payload())
+        end
+      end)
+
+      assert {:ok, plan} = Claim.plan(ws)
+      assert [{:create, "TEST-43", _}] = plan
+
+      assert {:ok, results} = Claim.apply_plan(ws, plan)
+      assert [{:created, bead}] = results
+      assert bead.tracker_type == :jira
+      assert bead.tracker_ref == "TEST-43"
+    end
+  end
+
+  describe "plan/1 and apply_plan/2 — Shortcut" do
+    test "creates beads for assigned open Shortcut stories with no bead", %{sc_ws: ws} do
+      stub_sc(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => @sc_member_id})
+
+          {"POST", "/api/v3/stories/search"} ->
+            Req.Test.json(conn, [sc_story_payload()])
+
+          {"GET", "/api/v3/stories/43"} ->
+            Req.Test.json(conn, sc_story_payload())
+        end
+      end)
+
+      assert {:ok, plan} = Claim.plan(ws)
+      assert [{:create, "43", _}] = plan
+
+      assert {:ok, results} = Claim.apply_plan(ws, plan)
+      assert [{:created, bead}] = results
+      assert bead.tracker_type == :shortcut
+      assert bead.tracker_ref == "43"
     end
   end
 end

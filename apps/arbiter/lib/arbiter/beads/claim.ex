@@ -1,23 +1,26 @@
 defmodule Arbiter.Beads.Claim do
   @moduledoc """
-  Bridges GitHub issues ↔ beads via the "claim then bead" model.
+  Bridges tracker issues ↔ beads via the "claim then bead" model.
 
-  GitHub issues are the shared backlog; *assignment is the claim*. A bead is
-  created only for an issue assigned to the workspace's GitHub user — so the
-  fleet never beads work someone else owns.
+  Tracker issues are the shared backlog; *assignment is the claim*. A bead is
+  created only for an issue assigned to the workspace's authenticated user — so
+  the fleet never beads work someone else owns.
+
+  Generalised over the `Tracker` behaviour: works with any adapter that
+  implements `current_user/0` (GitHub, Jira, Shortcut). Trackers that return
+  `{:error, :not_supported}` from `current_user/0` (e.g. `None`) degrade
+  cleanly: `claim/3` returns `{:error, :tracker_not_supported}` and `plan/1`
+  returns `{:ok, []}`.
 
   Two operations:
 
     * `claim/3` — fetch one issue by ref and create a linked bead (idempotent).
     * `plan/1` + `apply_plan/3` — reconcile assigned-to-viewer open issues
       against open beads, in both directions.
-
-  Both no-op cleanly when the workspace's tracker is anything other than
-  `:github`.
   """
 
   alias Arbiter.Beads.{Issue, Workspace}
-  alias Arbiter.Trackers.GitHub
+  alias Arbiter.Trackers
 
   require Ash.Query
 
@@ -38,19 +41,18 @@ defmodule Arbiter.Beads.Claim do
           | {:error, action(), term()}
 
   @doc """
-  Claim a GitHub issue: fetch it via the workspace tracker, refuse unless it
-  is assigned to the workspace's GitHub user (overridable with `force: true`),
-  and create a bead linked by `tracker_ref`. Idempotent: returns the existing
-  bead if one already references the issue.
+  Claim a tracker issue: fetch it via the workspace adapter, refuse unless it
+  is assigned to the workspace's authenticated user (overridable with
+  `force: true`), and create a bead linked by `tracker_ref`. Idempotent:
+  returns the existing bead if one already references the issue.
 
-  On a new claim, posts an ownership comment to the GitHub issue
-  (`"Claimed as <bead-id> by <workspace-name> (<prefix>). Arbiter installation: <host>."`)
-  and attempts to assign the issue to the viewer. These side-effects are
-  non-fatal; a failure does not roll back the bead.
+  For adapters that implement the optional `check_prior_claim/1` callback
+  (currently GitHub), also checks for an existing ownership comment and refuses
+  if another Arbiter installation has already claimed the issue.
 
-  Before creating, checks the issue's comments for an existing Arbiter
-  ownership comment from another installation. Returns
-  `{:error, {:already_claimed, body}}` if one is found, unless `force: true`.
+  For adapters that implement the optional `signal_claim/3` callback (currently
+  GitHub), posts an ownership comment and assigns the issue to the viewer after
+  creating the bead. These side-effects are non-fatal.
 
   Options:
 
@@ -61,57 +63,47 @@ defmodule Arbiter.Beads.Claim do
 
     * `{:ok, :created, %Issue{}}` — a new bead was inserted.
     * `{:ok, :existing, %Issue{}}` — a bead for this ref already existed.
-    * `{:error, :tracker_not_github}` — the workspace's tracker is not GitHub.
-    * `{:error, {:not_assigned, login}}` — the issue isn't assigned to the
-      workspace viewer.
+    * `{:error, :tracker_not_supported}` — the workspace's tracker does not
+      support the claim operation (e.g. `none`).
+    * `{:error, {:not_assigned, identity}}` — the issue isn't assigned to the
+      workspace's authenticated user.
     * `{:error, {:already_claimed, body}}` — another Arbiter installation has
       already claimed this issue (override with `force: true`).
     * `{:error, term}` — surfaced from the tracker adapter or Ash.
   """
   @spec claim(Workspace.t(), String.t(), keyword()) :: claim_result
   def claim(%Workspace{} = workspace, ref, opts \\ []) when is_binary(ref) do
+    type = Trackers.workspace_type(workspace)
+    adapter = Trackers.for_type(type)
     force? = Keyword.get(opts, :force, false)
 
-    with :ok <- ensure_github_tracker(workspace),
-         {:ok, ref} <- normalize_ref(ref),
-         {:ok, issue_map} <- in_workspace(workspace, fn -> GitHub.fetch(ref) end),
-         :ok <- check_assignment(workspace, issue_map, force?) do
-      case find_existing(workspace, ref) do
-        {:ok, bead} ->
-          {:ok, :existing, bead}
-
-        :none ->
-          with :ok <- check_prior_claim(workspace, ref, force?) do
-            case create_bead(workspace, ref, issue_map) do
-              {:ok, :created, bead} = result ->
-                signal_ownership(workspace, ref, bead)
-                result
-
-              error ->
-                error
-            end
-          end
-      end
-    end
+    Trackers.with_workspace(type, workspace, fn ->
+      do_claim(adapter, type, workspace, ref, force?)
+    end)
   end
 
   @doc """
   Build a reconcile plan for the workspace. Two directions:
 
     * issue assigned to viewer + open + no open bead → `{:create, ref, summary}`.
-    * open bead with a github ref whose issue is unassigned (or closed) →
+    * open bead with a tracker ref whose issue is unassigned (or closed) →
       `{:close, bead_id, reason}`.
 
   Returns `{:ok, plan}` or `{:error, reason}`. `plan` is an empty list when
-  the workspace tracker isn't GitHub.
+  the workspace tracker doesn't support the claim operation.
   """
   @spec plan(Workspace.t()) :: {:ok, [action()]} | {:error, term()}
   def plan(%Workspace{} = workspace) do
-    case ensure_github_tracker(workspace) do
-      :ok -> build_plan(workspace)
-      {:error, :tracker_not_github} -> {:ok, []}
-      {:error, _} = err -> err
-    end
+    type = Trackers.workspace_type(workspace)
+    adapter = Trackers.for_type(type)
+
+    Trackers.with_workspace(type, workspace, fn ->
+      case adapter.current_user() do
+        {:ok, current_user_id} -> build_plan(workspace, adapter, type, current_user_id)
+        {:error, :not_supported} -> {:ok, []}
+        {:error, _} = err -> err
+      end
+    end)
   end
 
   @doc """
@@ -123,21 +115,41 @@ defmodule Arbiter.Beads.Claim do
   """
   @spec apply_plan(Workspace.t(), [action()], keyword()) :: {:ok, [action_result]}
   def apply_plan(%Workspace{} = workspace, plan, _opts \\ []) when is_list(plan) do
-    results =
-      in_workspace(workspace, fn ->
-        Enum.map(plan, &apply_action(workspace, &1))
-      end)
-
+    results = Enum.map(plan, &apply_action(workspace, &1))
     {:ok, results}
   end
 
   # ---- internals: claim ----------------------------------------------------
 
-  defp create_bead(workspace, ref, issue_map) do
+  defp do_claim(adapter, type, workspace, ref, force?) do
+    with {:ok, current_user_id} <- get_current_user(adapter, workspace),
+         {:ok, ref} <- normalize_ref(adapter, ref),
+         {:ok, issue_map} <- adapter.fetch(ref),
+         :ok <- check_assignment(adapter, issue_map, current_user_id, force?) do
+      case find_existing(workspace, type, ref) do
+        {:ok, bead} ->
+          {:ok, :existing, bead}
+
+        :none ->
+          with :ok <- maybe_check_prior_claim(adapter, ref, force?) do
+            case create_bead(workspace, type, ref, issue_map, adapter) do
+              {:ok, :created, bead} = result ->
+                maybe_signal_claim(adapter, ref, bead, workspace, current_user_id)
+                result
+
+              error ->
+                error
+            end
+          end
+      end
+    end
+  end
+
+  defp create_bead(workspace, type, ref, issue_map, adapter) do
     attrs = %{
-      title: title_for(issue_map),
-      description: description_for(issue_map),
-      tracker_type: :github,
+      title: adapter.extract_title(issue_map),
+      description: adapter.extract_description(issue_map),
+      tracker_type: type,
       tracker_ref: ref,
       workspace_id: workspace.id
     }
@@ -148,17 +160,11 @@ defmodule Arbiter.Beads.Claim do
     end
   end
 
-  defp title_for(%{"title" => title}) when is_binary(title) and title != "", do: title
-  defp title_for(_), do: "(no title)"
-
-  defp description_for(%{"body" => body}) when is_binary(body), do: body
-  defp description_for(_), do: ""
-
-  defp find_existing(workspace, ref) do
+  defp find_existing(workspace, type, ref) do
     query =
       Issue
       |> Ash.Query.filter(
-        workspace_id == ^workspace.id and tracker_type == :github and tracker_ref == ^ref
+        workspace_id == ^workspace.id and tracker_type == ^type and tracker_ref == ^ref
       )
 
     case Ash.read(query) do
@@ -168,68 +174,81 @@ defmodule Arbiter.Beads.Claim do
     end
   end
 
-  defp check_assignment(_workspace, _issue_map, true), do: :ok
+  defp check_assignment(_adapter, _issue_map, _current_user_id, true), do: :ok
 
-  defp check_assignment(workspace, issue_map, false) do
-    case viewer_login_cached(workspace) do
-      {:ok, login} ->
-        if login in GitHub.assignee_logins(issue_map) do
-          :ok
-        else
-          {:error, {:not_assigned, login}}
-        end
+  defp check_assignment(adapter, issue_map, current_user_id, false) do
+    if current_user_id in adapter.assignees(issue_map) do
+      :ok
+    else
+      {:error, {:not_assigned, current_user_id}}
+    end
+  end
 
-      {:error, _} = err ->
-        err
+  defp maybe_check_prior_claim(_adapter, _ref, true), do: :ok
+
+  defp maybe_check_prior_claim(adapter, ref, false) do
+    if function_exported?(adapter, :check_prior_claim, 1) do
+      adapter.check_prior_claim(ref)
+    else
+      :ok
+    end
+  end
+
+  defp maybe_signal_claim(adapter, ref, bead, workspace, current_user_id) do
+    if function_exported?(adapter, :signal_claim, 3) do
+      host = System.get_env("ARB_HOST") || local_hostname()
+
+      context = %{
+        bead_id: bead.id,
+        workspace_name: workspace.name,
+        workspace_prefix: workspace.prefix,
+        current_user: current_user_id,
+        host: host
+      }
+
+      adapter.signal_claim(ref, bead.id, context)
+    else
+      :ok
     end
   end
 
   # ---- internals: plan -----------------------------------------------------
 
-  defp build_plan(workspace) do
-    with {:ok, login} <- viewer_login_cached(workspace),
-         {:ok, assigned_issues} <-
-           in_workspace(workspace, fn -> GitHub.list_assigned_open_issues(login) end) do
-      assigned_by_ref =
-        Map.new(assigned_issues, fn issue ->
-          {to_string(issue["number"]), issue}
-        end)
+  defp build_plan(workspace, adapter, type, current_user_id) do
+    with {:ok, summaries} <- adapter.list_open(assignee: current_user_id) do
+      assigned_by_ref = Map.new(summaries, &{&1.ref, &1})
 
-      open_github_beads = read_open_github_beads(workspace)
-      bead_by_ref = Map.new(open_github_beads, &{&1.tracker_ref, &1})
+      open_tracker_beads = read_open_tracker_beads(workspace, type)
+      bead_by_ref = Map.new(open_tracker_beads, &{&1.tracker_ref, &1})
 
       creates =
-        for {ref, issue} <- assigned_by_ref, not Map.has_key?(bead_by_ref, ref) do
+        for {ref, summary} <- assigned_by_ref, not Map.has_key?(bead_by_ref, ref) do
           {:create, ref,
            %{
-             number: issue["number"],
-             title: title_for(issue),
-             html_url: issue["html_url"]
+             ref: ref,
+             title: summary.title,
+             url: summary.url
            }}
         end
 
       closes =
         for {ref, bead} <- bead_by_ref, not Map.has_key?(assigned_by_ref, ref) do
-          # The bead's ref isn't in the assigned-to-viewer open set. Either the
-          # issue was closed on GitHub, or it was reassigned away from the
-          # viewer. Either way: the bead should close. We re-fetch the issue
-          # to capture the precise reason for the audit trail.
           reason =
-            case in_workspace(workspace, fn -> GitHub.fetch(ref) end) do
+            case adapter.fetch(ref) do
               {:ok, issue} ->
                 cond do
-                  GitHub.issue_status(issue) == :closed ->
-                    "tracker issue ##{ref} closed"
+                  adapter.issue_status(issue) == :closed ->
+                    "tracker issue #{ref} closed"
 
-                  GitHub.assignee_logins(issue) == [] ->
-                    "tracker issue ##{ref} unassigned"
+                  adapter.assignees(issue) == [] ->
+                    "tracker issue #{ref} unassigned"
 
                   true ->
-                    "tracker issue ##{ref} reassigned to #{Enum.join(GitHub.assignee_logins(issue), ", ")}"
+                    "tracker issue #{ref} reassigned to #{Enum.join(adapter.assignees(issue), ", ")}"
                 end
 
               {:error, _} ->
-                "tracker issue ##{ref} no longer assigned"
+                "tracker issue #{ref} no longer assigned"
             end
 
           {:close, bead.id, reason}
@@ -244,11 +263,11 @@ defmodule Arbiter.Beads.Claim do
   defp action_order({:create, _, _}, {:close, _, _}), do: true
   defp action_order({:close, _, _}, {:create, _, _}), do: false
 
-  defp read_open_github_beads(workspace) do
+  defp read_open_tracker_beads(workspace, type) do
     query =
       Issue
       |> Ash.Query.filter(
-        workspace_id == ^workspace.id and tracker_type == :github and status != :closed and
+        workspace_id == ^workspace.id and tracker_type == ^type and status != :closed and
           not is_nil(tracker_ref)
       )
 
@@ -278,72 +297,26 @@ defmodule Arbiter.Beads.Claim do
     end
   end
 
-  # ---- internals: ownership signal -----------------------------------------
-
-  @ownership_marker "Arbiter installation:"
-
-  # Check if the issue already has an ownership comment from another Arbiter
-  # installation. Returns :ok if clear (or if comment fetch fails — don't block
-  # on transient errors), or {:error, {:already_claimed, body}} if found.
-  defp check_prior_claim(_workspace, _ref, true), do: :ok
-
-  defp check_prior_claim(workspace, ref, false) do
-    case in_workspace(workspace, fn -> GitHub.list_comments(ref) end) do
-      {:ok, comments} ->
-        case Enum.find(comments, &String.contains?(&1["body"] || "", @ownership_marker)) do
-          nil -> :ok
-          %{"body" => body} -> {:error, {:already_claimed, body}}
-        end
-
-      {:error, _} ->
-        :ok
-    end
-  end
-
-  # Post an ownership comment on the GitHub issue and attempt to assign the
-  # viewer. Both are non-fatal: a failure does not roll back the bead.
-  defp signal_ownership(workspace, ref, bead) do
-    arb_host = System.get_env("ARB_HOST") || local_hostname()
-
-    body =
-      "Claimed as #{bead.id} by #{workspace.name} (#{workspace.prefix}). " <>
-        "#{@ownership_marker} #{arb_host}."
-
-    in_workspace(workspace, fn -> GitHub.post_comment(ref, body) end)
-
-    case viewer_login_cached(workspace) do
-      {:ok, login} -> in_workspace(workspace, fn -> GitHub.assign_user(ref, login) end)
-      _ -> :ok
-    end
-
-    :ok
-  end
-
-  defp local_hostname do
-    case :inet.gethostname() do
-      {:ok, hostname} -> List.to_string(hostname)
-      _ -> "unknown"
-    end
-  end
-
   # ---- internals: viewer caching ------------------------------------------
 
-  # The viewer login is workspace-scoped (resolves against the workspace's
-  # token) and stable for the duration of a request, so we look it up once and
-  # cache in the process dict to avoid hitting /user multiple times during a
-  # single sync.
-  defp viewer_login_cached(workspace) do
-    key = {__MODULE__, :viewer_login, workspace.id}
+  # The current user identity is workspace-scoped and stable for the duration
+  # of a request, so we look it up once per workspace and cache in the process
+  # dict to avoid hitting the API multiple times during a single sync.
+  defp get_current_user(adapter, workspace) do
+    key = {__MODULE__, :current_user, workspace.id}
 
     case Process.get(key) do
-      {:ok, login} ->
-        {:ok, login}
+      {:ok, _} = cached ->
+        cached
 
       _ ->
-        case in_workspace(workspace, &GitHub.viewer_login/0) do
-          {:ok, login} = ok ->
+        case adapter.current_user() do
+          {:ok, id} = ok ->
             Process.put(key, ok)
-            {:ok, login}
+            {:ok, id}
+
+          {:error, :not_supported} ->
+            {:error, :tracker_not_supported}
 
           {:error, _} = err ->
             err
@@ -353,19 +326,17 @@ defmodule Arbiter.Beads.Claim do
 
   # ---- internals: helpers --------------------------------------------------
 
-  defp ensure_github_tracker(%Workspace{config: config}) do
-    case get_in(config || %{}, ["tracker", "type"]) do
-      "github" -> :ok
-      _ -> {:error, :tracker_not_github}
-    end
-  end
-
-  defp normalize_ref(ref) when is_binary(ref) do
-    case GitHub.parse_ref(ref) do
+  defp normalize_ref(adapter, ref) when is_binary(ref) do
+    case adapter.parse_ref(ref) do
       {:ok, normalized} -> {:ok, normalized}
       :error -> {:error, {:invalid_ref, ref}}
     end
   end
 
-  defp in_workspace(workspace, fun), do: GitHub.with_workspace(workspace, fun)
+  defp local_hostname do
+    case :inet.gethostname() do
+      {:ok, hostname} -> List.to_string(hostname)
+      _ -> "unknown"
+    end
+  end
 end

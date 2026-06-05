@@ -171,11 +171,32 @@ defmodule Arbiter.Trackers.Jira do
   def parse_ref(_), do: :error
 
   @impl true
-  def list_open(_opts) do
-    # `arb list --tracker` currently only ships the GitHub backlog query.
-    # When Jira's "open + assigned to currentUser()" JQL is wired up, this
-    # returns the normalized summary list.
-    {:error, :not_supported}
+  def list_open(opts) when is_list(opts) do
+    with {:ok, cfg} <- Config.resolve() do
+      assignee_jql =
+        case Keyword.get(opts, :assignee, :viewer) do
+          :viewer -> "currentUser()"
+          id when is_binary(id) and id != "" -> "\"#{id}\""
+          _ -> "currentUser()"
+        end
+
+      jql = "assignee = #{assignee_jql} AND resolution = Unresolved ORDER BY updated DESC"
+
+      case request(cfg, :get, "/search", params: [jql: jql, maxResults: 100]) do
+        {:ok, %Req.Response{status: status_code, body: %{"issues" => issues}}}
+        when status_code in 200..299 ->
+          {:ok, Enum.map(issues, &summarize_issue(&1, cfg))}
+
+        {:ok, %Req.Response{status: status_code, body: _body}} when status_code in 200..299 ->
+          {:ok, []}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
   end
 
   @impl true
@@ -204,6 +225,56 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
+  # ---- Tracker behaviour: claim callbacks ------------------------------------
+
+  @impl true
+  def current_user do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{"accountId" => id}} when is_binary(id) <-
+           request(cfg, :get, "/myself", []) |> handle_json() do
+      {:ok, id}
+    else
+      {:ok, _other} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "GET /myself returned no accountId",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
+  def assignees(%{"fields" => %{"assignee" => %{"accountId" => id}}}) when is_binary(id),
+    do: [id]
+
+  def assignees(_), do: []
+
+  @impl true
+  def issue_status(%{"fields" => %{"status" => %{"statusCategory" => %{"key" => key}}}}) do
+    case key do
+      "done" -> :closed
+      "indeterminate" -> :in_progress
+      _ -> :open
+    end
+  end
+
+  def issue_status(_), do: :open
+
+  @impl true
+  def extract_title(%{"fields" => %{"summary" => title}}) when is_binary(title) and title != "",
+    do: title
+
+  def extract_title(%{"key" => key}) when is_binary(key), do: key
+  def extract_title(_), do: "(no title)"
+
+  @impl true
+  def extract_description(_), do: ""
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
@@ -222,6 +293,21 @@ defmodule Arbiter.Trackers.Jira do
     after
       if prev, do: Config.put_active(prev), else: Config.clear()
     end
+  end
+
+  # ---- Internals: list_open -----------------------------------------------
+
+  defp summarize_issue(%{"key" => key} = issue, cfg) do
+    fields = Map.get(issue, "fields") || %{}
+
+    %{
+      ref: key,
+      title: Map.get(fields, "summary") || "(no title)",
+      url: "https://#{cfg.host}/browse/#{key}",
+      status: issue_status(issue),
+      assignees: assignees(issue),
+      raw: issue
+    }
   end
 
   # ---- Internals: transitions ---------------------------------------------
