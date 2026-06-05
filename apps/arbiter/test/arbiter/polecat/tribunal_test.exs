@@ -953,6 +953,146 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
   end
 
+  # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------
+
+  describe "pre-spawn commit gate (bd-1mksks)" do
+    # The Tribunal must gate on commits BEFORE spawning the reviewer. Even if the
+    # polecat commit gate already fired, this second layer catches the revise-round
+    # case (the revise implementer's polecat has no worktree_path in meta, so its
+    # commit gate does not fire).
+    test "Tribunal escalates as request_changes when branch has no commits",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/no-commits"
+
+      # Create the branch at the same commit as main — no commits ahead.
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      # HEAD is NOW on feature/no-commits at the same SHA as main.
+      # Return to main so the repo state is clear.
+      {_, 0} = git(["checkout", "-q", "main"], repo)
+
+      # Park the author polecat at :awaiting_tribunal via review_spawn: false so
+      # the polecat commit gate does NOT fire (no worktree_path in meta → gate
+      # skips). We then start a Tribunal manually, pointing at a worktree that is
+      # actually on feature/no-commits with 0 commits ahead.
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{bead.id}",
+        review_required: true,
+        review_spawn: false
+      }
+
+      {:ok, author} =
+        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+      :ok = Polecat.advance(author, :claude)
+      send(author, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(author)) end)
+
+      # Switch the branch worktree to `feature/no-commits` so the Tribunal sees
+      # the branch with 0 commits ahead. We use a fresh sub-worktree for this.
+      sub_wt = Path.join(Path.dirname(repo), "no-commits-wt")
+      File.mkdir_p!(sub_wt)
+
+      on_exit(fn ->
+        _ = System.cmd("git", ["-C", sub_wt, "worktree", "remove", "--force", sub_wt])
+        File.rm_rf!(sub_wt)
+      end)
+
+      {_, 0} =
+        System.cmd("git", ["worktree", "add", sub_wt, branch],
+          cd: repo,
+          stderr_to_stdout: true
+        )
+
+      # Directly spawn a Tribunal that points at the zero-commit worktree.
+      # A real reviewer command is supplied but should NEVER be reached — the
+      # Tribunal must escalate before it spawns the reviewer.
+      {:ok, _tribunal} =
+        Tribunal.start(
+          author: author,
+          bead_id: bead.id,
+          workspace_id: ws.id,
+          rig: "trib/rig",
+          worktree_path: sub_wt,
+          branch: branch,
+          target_branch: "main",
+          command: [@reviewer, "APPROVE"],
+          timeout_ms: 5_000
+        )
+
+      # The Tribunal should report :request_changes immediately (no reviewer spawn).
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(author)) end, 4_000)
+      snap = Polecat.state(author)
+      assert snap.meta.failure_reason == :tribunal_rejected
+      assert snap.meta.tribunal_findings =~ "no commits ahead"
+      # The branch was NOT merged.
+      assert merge_commit_count(repo) == 0
+    end
+  end
+
+  describe "review_prompt/1 HEAD-SHA anchoring (bd-1mksks)" do
+    # The review prompt must embed the HEAD SHA verified at spawn time so the
+    # reviewer can confirm it is on the correct commit before diffing.
+    test "includes the HEAD SHA when the worktree is on the expected branch",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws, %{description: "impl desc", acceptance: "it works"})
+      branch = "feature/rev"
+
+      # Put the repo HEAD on the feature branch with a commit ahead of main.
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      File.write!(Path.join(repo, "work.txt"), "done\n")
+      {_, 0} = git(["add", "work.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "the work"], repo)
+
+      {sha_out, 0} = git(["rev-parse", "--short", "HEAD"], repo)
+      expected_sha = String.trim(sha_out)
+
+      state = %{
+        bead_id: bead.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 1,
+        head_sha: expected_sha
+      }
+
+      prompt = Tribunal.review_prompt(state)
+
+      assert prompt =~ expected_sha,
+             "review_prompt must embed the HEAD SHA so the reviewer can verify the commit"
+
+      assert prompt =~ "git log --oneline -1",
+             "review_prompt must instruct the reviewer to confirm HEAD"
+    end
+
+    test "omits the HEAD SHA anchor when head_sha is nil (no worktree / ad-hoc)",
+         %{ws: ws} do
+      bead = new_bead(ws)
+
+      state = %{
+        bead_id: bead.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1,
+        head_sha: nil
+      }
+
+      prompt = Tribunal.review_prompt(state)
+
+      # No SHA anchor — the prompt must still be valid.
+      refute prompt =~ "HEAD at dispatch time was commit",
+             "review_prompt must not emit a SHA anchor when head_sha is nil"
+
+      assert prompt =~ "git diff main...HEAD",
+             "review_prompt must still include the diff command"
+    end
+  end
+
   describe "review-gate hardening (bd-2y0gd5)" do
     test "snapshotting the supervisor's children never crashes the Tribunal",
          %{repo: repo, ws: ws} do
