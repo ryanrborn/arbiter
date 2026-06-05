@@ -376,4 +376,55 @@ defmodule Arbiter.Beads.WorkspaceTest do
       assert Workspace.auto_merge?(off) == false
     end
   end
+
+  describe "warden_max_polls/1" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wmp-int",
+          config: %{"merge" => %{"warden_max_polls" => 1440}}
+        })
+
+      assert Workspace.warden_max_polls(ws) == 1440
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wmp-str",
+          config: %{"merge" => %{"warden_max_polls" => "720"}}
+        })
+
+      assert Workspace.warden_max_polls(ws) == 720
+    end
+
+    test "returns :infinity when set to the string \"infinity\"" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wmp-inf",
+          config: %{"merge" => %{"warden_max_polls" => "infinity"}}
+        })
+
+      assert Workspace.warden_max_polls(ws) == :infinity
+    end
+
+    test "returns nil when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "wmp-unset"})
+      assert Workspace.warden_max_polls(ws) == nil
+    end
+
+    test "validate_config rejects invalid warden_max_polls" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "wmp-bad",
+                 config: %{"merge" => %{"warden_max_polls" => -5}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "wmp-bad2",
+                 config: %{"merge" => %{"warden_max_polls" => "not-a-number"}}
+               })
+    end
+  end
 end

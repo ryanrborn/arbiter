@@ -2104,7 +2104,7 @@ defmodule Arbiter.Polecat do
       ]
       |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
       |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
-      |> maybe_opt(:max_polls, Map.get(opts, :max_polls))
+      |> maybe_opt(:max_polls, Map.get(opts, :max_polls) || workspace_warden_max_polls(workspace))
 
     case Arbiter.Polecat.Warden.start(warden_opts) do
       {:ok, _pid} ->
@@ -2123,6 +2123,11 @@ defmodule Arbiter.Polecat do
     do: Arbiter.Beads.Workspace.auto_merge?(ws)
 
   defp workspace_auto_merge?(_), do: false
+
+  defp workspace_warden_max_polls(%Arbiter.Beads.Workspace{} = ws),
+    do: Arbiter.Beads.Workspace.warden_max_polls(ws)
+
+  defp workspace_warden_max_polls(_), do: nil
 
   defp maybe_opt(opts, _key, nil), do: opts
   defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)

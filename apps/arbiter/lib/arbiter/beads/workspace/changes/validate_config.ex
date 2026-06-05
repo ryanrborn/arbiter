@@ -95,21 +95,45 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
   defp validate_merge(changeset, merge) when is_map(merge) do
     valid_strategies = Arbiter.Beads.Workspace.valid_merger_strategies()
 
-    case Map.get(merge, "strategy") do
-      nil ->
-        changeset
+    changeset
+    |> then(fn cs ->
+      case Map.get(merge, "strategy") do
+        nil ->
+          cs
 
-      strategy ->
-        if strategy in valid_strategies do
-          changeset
-        else
-          Changeset.add_error(changeset,
+        strategy ->
+          if strategy in valid_strategies do
+            cs
+          else
+            Changeset.add_error(cs,
+              field: :config,
+              message:
+                "merge.strategy must be one of #{Enum.join(valid_strategies, ", ")}; got: #{inspect(strategy)}"
+            )
+          end
+      end
+    end)
+    |> then(fn cs ->
+      case Map.get(merge, "warden_max_polls") do
+        nil -> cs
+        n when is_integer(n) and n > 0 -> cs
+        "infinity" -> cs
+        s when is_binary(s) ->
+          case Integer.parse(s) do
+            {n, ""} when n > 0 -> cs
+            _ ->
+              Changeset.add_error(cs,
+                field: :config,
+                message: "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
+              )
+          end
+        other ->
+          Changeset.add_error(cs,
             field: :config,
-            message:
-              "merge.strategy must be one of #{Enum.join(valid_strategies, ", ")}; got: #{inspect(strategy)}"
+            message: "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
           )
-        end
-    end
+      end
+    end)
   end
 
   defp validate_merge(changeset, _) do

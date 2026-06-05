@@ -170,20 +170,41 @@ defmodule Arbiter.Polecat.WardenTest do
     end
   end
 
-  describe "watchdog (bd-66ey1o)" do
-    test "fails the polecat after max_polls consecutive :pending polls" do
+  describe "watchdog (bd-66ey1o / bd-akr4il)" do
+    test "fails the polecat after max_polls on auto_merge: true lanes" do
       {pid, bead_id} = running_polecat()
-      # StubMerger default returns approved:false forever, so without via_tribunal
-      # and with auto_merge: false this stays :pending until the watchdog fires.
+      # auto_merge ON: if the forge never auto-merges after cap polls something
+      # is broken — fail loudly so the bead surfaces in the notification feed.
       start_warden(pid, bead_id, "!w1",
         interval_ms: 10,
         initial_delay_ms: 0,
         max_polls: 2,
-        auto_merge: false
+        auto_merge: true
       )
 
       wait_until(fn -> Polecat.state(pid).status == :failed end, 2_000)
       assert Polecat.state(pid).meta.failure_reason == {:awaiting_review_timeout, 2}
+    end
+
+    test "parks (does not fail) the polecat after max_polls on auto_merge: false lanes" do
+      {pid, bead_id} = running_polecat()
+      # auto_merge OFF (human-merge): a reviewer may take hours or overnight.
+      # Hitting the poll cap must NOT fail the bead — the polecat stays parked
+      # at :awaiting_review and the Warden stops to free resources (bd-akr4il).
+      wpid =
+        start_warden(pid, bead_id, "!w3",
+          interval_ms: 10,
+          initial_delay_ms: 0,
+          max_polls: 2,
+          auto_merge: false
+        )
+
+      wref = Process.monitor(wpid)
+
+      # Warden stops without failing the polecat.
+      assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 2_000
+      assert Polecat.state(pid).status == :awaiting_review
+      refute match?({:awaiting_review_timeout, _}, Polecat.state(pid).meta[:failure_reason])
     end
 
     test "does not fire when via_tribunal: true (merge happens before cap)" do
