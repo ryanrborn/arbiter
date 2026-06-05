@@ -236,4 +236,165 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert err =~ "upstream"
     assert err =~ "bd-004"
   end
+
+  describe "--ticket-only" do
+    test "posts to /api/workspaces/:id/tracker/tickets and prints ref + url" do
+      parent = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/tracker/tickets"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:posted, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{
+             "ref" => "99",
+             "url" => "https://github.com/o/r/issues/99",
+             "tracker_type" => "github"
+           })
+         end}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn -> Create.run(["Unclaimed ticket", "--ticket-only"]) end)
+
+      assert exit_code == 0
+      assert out =~ "99"
+      assert out =~ "github"
+
+      assert_received {:posted, body}
+      assert body["title"] == "Unclaimed ticket"
+      refute Map.has_key?(body, "workspace_id")
+    end
+
+    test "--no-bead alias works the same as --ticket-only" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/tracker/tickets"},
+         {%{"ref" => "77", "url" => "https://github.com/o/r/issues/77", "tracker_type" => "github"},
+          201}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Create.run(["No-bead title", "--no-bead"]) end)
+      assert exit_code == 0
+      assert out =~ "77"
+    end
+
+    test "--unclaimed alias works the same as --ticket-only" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/tracker/tickets"},
+         {%{"ref" => "55", "url" => "https://github.com/o/r/issues/55", "tracker_type" => "github"},
+          201}}
+      ])
+
+      {out, _err, exit_code} = capture(fn -> Create.run(["Unclaimed", "--unclaimed"]) end)
+      assert exit_code == 0
+      assert out =~ "55"
+    end
+
+    test "--json emits JSON" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/tracker/tickets"},
+         {%{"ref" => "42", "url" => "https://github.com/o/r/issues/42", "tracker_type" => "github"},
+          201}}
+      ])
+
+      {out, _err, exit_code} =
+        capture(fn -> Create.run(["My ticket", "--ticket-only", "--json"]) end)
+
+      assert exit_code == 0
+      assert {:ok, %{"ref" => "42", "tracker_type" => "github"}} = Jason.decode(String.trim(out))
+    end
+
+    test "forwards --description and --assignee to the tickets endpoint" do
+      parent = self()
+
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/tracker/tickets"},
+         fn conn ->
+           {:ok, body, conn} = Plug.Conn.read_body(conn)
+           send(parent, {:posted, Jason.decode!(body)})
+
+           conn
+           |> Plug.Conn.put_status(201)
+           |> Req.Test.json(%{"ref" => "10", "url" => nil, "tracker_type" => "github"})
+         end}
+      ])
+
+      {_out, _err, exit_code} =
+        capture(fn ->
+          Create.run([
+            "Detailed",
+            "--ticket-only",
+            "--description",
+            "some body",
+            "--assignee",
+            "alice"
+          ])
+        end)
+
+      assert exit_code == 0
+      assert_received {:posted, body}
+      assert body["description"] == "some body"
+      assert body["assignee"] == "alice"
+    end
+
+    test "--ticket-only and --no-tracker errors before posting" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}}
+      ])
+
+      {_out, err, exit_code} =
+        capture(fn -> Create.run(["T", "--ticket-only", "--no-tracker"]) end)
+
+      assert exit_code == 1
+      assert err =~ "mutually exclusive"
+    end
+
+    test "--ticket-only and --local-only errors before posting" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}}
+      ])
+
+      {_out, err, exit_code} =
+        capture(fn -> Create.run(["T", "--ticket-only", "--local-only"]) end)
+
+      assert exit_code == 1
+      assert err =~ "mutually exclusive"
+    end
+
+    test "server error (e.g. no tracker configured) surfaces non-zero" do
+      stub_routes([
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
+        {{"post", "/api/workspaces/ws-1/tracker/tickets"},
+         {%{
+            "error" => %{
+              "type" => "invalid_request",
+              "message" => "workspace has no tracker configured",
+              "details" => %{}
+            }
+          }, 400}}
+      ])
+
+      {_out, err, exit_code} =
+        capture(fn -> Create.run(["T", "--ticket-only"]) end)
+
+      assert exit_code != 0
+      assert err =~ "tracker"
+    end
+  end
 end

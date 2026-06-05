@@ -176,6 +176,30 @@ defmodule Arbiter.Trackers do
     with_workspace(type, workspace, fn -> adapter.create(attrs) end)
   end
 
+  @doc """
+  Returns a human-clickable URL for a tracker ref in the context of the given workspace.
+
+  Resolves the adapter from `workspace.config["tracker"]["type"]`, seeds the
+  adapter's per-process config, and delegates to `link_for/1`. Used by the
+  `--ticket-only` path so callers can print the URL without a local bead.
+  """
+  @spec link_for_workspace(Arbiter.Beads.Workspace.t(), Tracker.ref()) :: String.t()
+  def link_for_workspace(%Arbiter.Beads.Workspace{} = workspace, ref) when is_binary(ref) do
+    type = workspace_tracker_type(workspace)
+    adapter = adapter_for_workspace_type(type)
+
+    with_workspace(type, workspace, fn -> adapter.link_for(ref) end)
+  end
+
+  @doc """
+  Returns the tracker type atom for a workspace's configured tracker.
+
+  Exposed so callers (e.g. the ticket-only controller) can check whether a
+  workspace has a real tracker before attempting an outbound create.
+  """
+  @spec workspace_type(Arbiter.Beads.Workspace.t()) :: atom()
+  def workspace_type(%Arbiter.Beads.Workspace{} = workspace), do: workspace_tracker_type(workspace)
+
   defp workspace_tracker_type(%Arbiter.Beads.Workspace{config: config}) do
     case get_in(config || %{}, ["tracker", "type"]) do
       type when is_binary(type) ->

@@ -54,6 +54,24 @@ defmodule ArbiterCli.Output do
   def emit_issue(issue, :json), do: IO.puts(Jason.encode!(issue))
   def emit_issue(issue, :text), do: IO.puts(format_issue_detail(issue))
 
+  @doc """
+  Print an upstream tracker ticket created via `--ticket-only`. Mode-aware.
+
+  Text: `{tracker_type}:{ref}\\n{url}` (or just ref if URL is absent).
+  JSON: raw response map.
+  """
+  @spec emit_ticket(map(), :text | :json) :: :ok
+  def emit_ticket(ticket, :json), do: IO.puts(Jason.encode!(ticket))
+
+  def emit_ticket(ticket, :text) do
+    tracker_type = ticket["tracker_type"] || "tracker"
+    ref = ticket["ref"] || ""
+    url = ticket["url"]
+
+    IO.puts("#{tracker_type}:#{ref}")
+    if url && url != "", do: IO.puts(url)
+  end
+
   @doc "Print a list of issues. Mode-aware."
   @spec emit_issue_list([map()], :text | :json) :: :ok
   def emit_issue_list(issues, :json), do: IO.puts(Jason.encode!(%{data: issues}))

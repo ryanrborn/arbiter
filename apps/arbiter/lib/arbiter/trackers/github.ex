@@ -200,18 +200,22 @@ defmodule Arbiter.Trackers.GitHub do
        }}
 
   # Map bead-domain attrs onto GitHub's POST /repos/:o/:r/issues body. `title`
-  # is required; `body`, `assignees`, and the initial status label are optional
-  # — we skip them when the caller didn't supply them.
+  # is required; `body`, `assignees`, and labels are optional — we skip them
+  # when the caller didn't supply them. Labels are a merged set of: the
+  # initial-status label from the workspace status_map, a `"priority: N"` label
+  # when `:priority` is set, and a `"type: T"` label when `:issue_type` is set.
   defp build_create_payload(cfg, attrs, title) do
     description = pluck(attrs, [:description, "description"])
     assignee = pluck(attrs, [:assignee, "assignee"])
     status = pluck(attrs, [:status, "status"]) || :open
+    priority = pluck(attrs, [:priority, "priority"])
+    issue_type = pluck(attrs, [:issue_type, "issue_type"])
 
     payload =
       %{"title" => title}
       |> maybe_put("body", description)
       |> maybe_put_assignees(assignee)
-      |> maybe_put_initial_labels(cfg, status)
+      |> maybe_put_labels(cfg, status, priority, issue_type)
 
     {:ok, payload}
   end
@@ -237,16 +241,33 @@ defmodule Arbiter.Trackers.GitHub do
 
   defp maybe_put_assignees(payload, _), do: payload
 
-  # If the workspace's status_map has a managed label for the initial bead
-  # status, apply it on create. Default `:open` typically has no label, so this
-  # is a no-op for the common case.
-  defp maybe_put_initial_labels(payload, cfg, status) do
-    case Map.get(cfg.status_map, status) do
-      %{label: label} when is_binary(label) and label != "" ->
-        Map.put(payload, "labels", [label])
+  # Merge labels from three sources: the workspace status_map for the initial
+  # bead status, a "priority: N" label when priority is given, and a "type: T"
+  # label when issue_type is given. Only sets "labels" if there is at least one.
+  defp maybe_put_labels(payload, cfg, status, priority, issue_type) do
+    status_label =
+      case Map.get(cfg.status_map, status) do
+        %{label: label} when is_binary(label) and label != "" -> [label]
+        _ -> []
+      end
 
-      _ ->
-        payload
+    priority_label =
+      case priority do
+        p when is_integer(p) -> ["priority: #{p}"]
+        _ -> []
+      end
+
+    type_label =
+      case issue_type do
+        t when is_binary(t) and t != "" -> ["type: #{t}"]
+        _ -> []
+      end
+
+    all_labels = status_label ++ priority_label ++ type_label
+
+    case all_labels do
+      [] -> payload
+      labels -> Map.put(payload, "labels", labels)
     end
   end
 
