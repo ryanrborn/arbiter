@@ -16,6 +16,16 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   Directive-closed events are intentionally **not** posted — too noisy.
 
+  ## Actionable escalations (`acolyte_stopped`, `preflight_failed`)
+
+  A dead/stopped acolyte (token exhaustion, crash, external kill, auth expiry)
+  or a failed pre-flight auth probe is not just dashboard noise — it needs the
+  operator to *act* (re-authenticate, top up credits, re-sling). Those go out as
+  addressed `:escalation` **mailbox** messages (`to_ref: "admiral"`,
+  `directive_ref: <bead>`) so they land in `arb inbox` rather than scrolling off
+  the broadcast feed. The classified cause + remediation
+  (`Arbiter.Polecat.StopReason`) is baked into the subject/body. See bd-awi4nw.
+
   ## Reconciliation with the bead spec
 
   The originating bead (bd-25ftl0) imagined dedicated `:completion` / `:failure`
@@ -45,6 +55,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
+  alias Arbiter.Polecat.StopReason
 
   @config_key "admiral_notifications"
 
@@ -55,6 +66,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @type snapshot :: %{
           required(:bead_id) => String.t(),
           optional(:workspace_id) => String.t() | nil,
+          optional(:rig) => String.t() | nil,
           optional(:started_at) => DateTime.t() | nil,
           optional(:meta) => map() | nil
         }
@@ -92,6 +104,33 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     post(:awaiting_review_stuck, snapshot)
   end
 
+  @doc """
+  Escalate a stopped/dead acolyte to the Admiral (bd-awi4nw).
+
+  Unlike the lifecycle `:notification`s above, this is an addressed
+  `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
+  `arb inbox` as an actionable item. The `Arbiter.Polecat.StopReason` carries
+  the classified cause + remediation; the subject names the bead + cause and
+  the body spells out the rig, last activity, exit code, and fix. Best-effort,
+  returns `:ok`.
+  """
+  @spec acolyte_stopped(snapshot(), StopReason.t()) :: :ok
+  def acolyte_stopped(snapshot, %StopReason{} = reason),
+    do: escalate(:acolyte_stopped, snapshot, reason)
+
+  @doc """
+  Escalate a failed pre-flight auth probe to the Admiral (bd-awi4nw).
+
+  Fired by `Arbiter.Polecat.Sling` when the agent CLI fails its cheap
+  token-validity probe *before* any acolyte is dispatched — so a wave of spawns
+  that would all 401 is refused up front and the operator is told to
+  re-authenticate. Same addressed `:escalation` shape as `acolyte_stopped/2`.
+  Best-effort, returns `:ok`.
+  """
+  @spec preflight_failed(snapshot(), StopReason.t()) :: :ok
+  def preflight_failed(snapshot, %StopReason{} = reason),
+    do: escalate(:preflight_failed, snapshot, reason)
+
   # ---- core ---------------------------------------------------------------
 
   # A notification must be scoped to a workspace (Message.workspace_id is
@@ -109,6 +148,92 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   end
 
   defp post(_event, _snapshot), do: :ok
+
+  # Actionable escalations are addressed mailbox messages (not broadcast
+  # notifications) so they queue in `arb inbox` for the Admiral. They are NOT
+  # gated by the `admiral_notifications` toggle — silencing routine completion
+  # noise must never silence a "your credentials expired" alarm. A polecat with
+  # no workspace_id has nowhere to post (Message.workspace_id is required).
+  defp escalate(event, %{workspace_id: ws_id} = snapshot, %StopReason{} = reason)
+       when is_binary(ws_id) do
+    {subject, body} = escalation_payload(event, snapshot, reason)
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: Map.get(snapshot, :bead_id, "system"),
+      workspace_id: ws_id,
+      directive_ref: Map.get(snapshot, :bead_id),
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.escalate/3 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate(_event, _snapshot, _reason), do: :ok
+
+  defp escalation_payload(event, %{bead_id: bead_id} = snapshot, %StopReason{} = reason) do
+    verb =
+      case event do
+        :acolyte_stopped -> "stopped"
+        :preflight_failed -> "pre-flight auth failed"
+      end
+
+    subject = "#{bead_id} #{verb} — #{StopReason.label(reason)}"
+
+    lead =
+      case event do
+        :acolyte_stopped ->
+          "Acolyte for #{title_for(bead_id)} stopped: #{reason.summary}."
+
+        :preflight_failed ->
+          "Refused to sling #{title_for(bead_id)} — agent pre-flight auth probe failed: " <>
+            "#{reason.summary}."
+      end
+
+    body =
+      [
+        lead,
+        "Bead: #{bead_id}",
+        "Rig: #{rig(snapshot)}",
+        exit_line(reason),
+        activity_line(snapshot),
+        reason.remediation && "Remediation: #{reason.remediation}"
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    {subject, body}
+  end
+
+  defp rig(%{rig: rig}) when is_binary(rig) and rig != "", do: rig
+  defp rig(_), do: "unknown"
+
+  defp exit_line(%StopReason{exit_status: nil, signal: nil}), do: nil
+  defp exit_line(%StopReason{exit_status: nil}), do: nil
+
+  defp exit_line(%StopReason{exit_status: code, signal: nil}),
+    do: "Exit code: #{code}"
+
+  defp exit_line(%StopReason{exit_status: code, signal: sig}),
+    do: "Exit code: #{code} (signal #{sig})"
+
+  defp activity_line(%{meta: meta}) when is_map(meta) do
+    case Map.get(meta, :activity) do
+      %{label: label} when is_binary(label) -> "Last activity: #{label}"
+      label when is_binary(label) and label != "" -> "Last activity: #{label}"
+      _ -> nil
+    end
+  end
+
+  defp activity_line(_), do: nil
 
   # ---- payload construction ----------------------------------------------
 

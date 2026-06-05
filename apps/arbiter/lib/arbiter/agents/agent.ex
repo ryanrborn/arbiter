@@ -155,5 +155,17 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback security_enforced?() :: boolean()
 
-  @optional_callbacks [spawn_env: 1, security_enforced?: 0]
+  @doc """
+  Argv for a cheap auth pre-flight probe — a single round-trip that verifies the
+  CLI can authenticate (bd-awi4nw). Returns `{:ok, argv}`, or `{:error, reason}`
+  when the CLI can't be resolved.
+
+  `Arbiter.Agents.Preflight` runs this through a port (with the adapter's
+  `spawn_env/1`) before a wave of acolytes is dispatched; a clean exit with no
+  auth/credit signature means the credentials are valid. Optional — an adapter
+  that omits it is treated as unprobeable (pre-flight is skipped, never blocks).
+  """
+  @callback auth_probe_argv(opts :: keyword()) :: {:ok, [String.t()]} | {:error, term()}
+
+  @optional_callbacks [spawn_env: 1, security_enforced?: 0, auth_probe_argv: 1]
 end
