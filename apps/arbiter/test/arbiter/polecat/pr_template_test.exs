@@ -186,4 +186,76 @@ defmodule Arbiter.Polecat.PRTemplateTest do
       refute out =~ "{{"
     end
   end
+
+  describe "default_body/1" do
+    test "produces a heading from the bead title" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Add widget",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none
+      }
+
+      out = PRTemplate.default_body(bead)
+      assert out =~ "## Add widget"
+    end
+
+    test "includes description when present" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Add widget",
+        description: "Adds a new widget to the dashboard.",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none
+      }
+
+      out = PRTemplate.default_body(bead)
+      assert out =~ "## Add widget"
+      assert out =~ "Adds a new widget to the dashboard."
+    end
+
+    test "omits description section when nil" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Add widget",
+        description: nil,
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none
+      }
+
+      out = PRTemplate.default_body(bead)
+      assert out == "## Add widget"
+    end
+
+    test "omits description section when empty string" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Add widget",
+        description: "   ",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none
+      }
+
+      out = PRTemplate.default_body(bead)
+      assert out == "## Add widget"
+    end
+
+    test "omits tracker link for :none-tracked beads" do
+      bead = %Issue{
+        id: "x-1",
+        title: "T",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none,
+        tracker_ref: nil
+      }
+
+      out = PRTemplate.default_body(bead)
+      refute out =~ "http"
+    end
+  end
 end
