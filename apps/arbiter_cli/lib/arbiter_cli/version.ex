@@ -4,10 +4,41 @@ defmodule ArbiterCli.Version do
 
   All fields are captured when `mix escript.build` runs, so an installed
   `arb` binary carries an exact record of what it was built from.
+
+  `.git/HEAD` and the branch ref it points to are declared as
+  `@external_resource` so Mix recompiles this module — and re-captures the
+  SHA — whenever `git pull` moves the branch tip to a new commit.
   """
 
   @app_version Mix.Project.config()[:version]
 
+  # ── git-ref tracking (forces recompile on git pull) ──────────────────────
+  @git_dir Path.expand("../../../../..", __DIR__) |> Path.join(".git")
+  @git_head_path Path.join(@git_dir, "HEAD")
+  @external_resource @git_head_path
+
+  # Resolve and track the ref file that HEAD points to (e.g. refs/heads/main).
+  @git_ref_path (case File.read(@git_head_path) do
+    {:ok, "ref: " <> ref} ->
+      candidate = Path.join(@git_dir, String.trim(ref))
+      if File.exists?(candidate), do: candidate, else: nil
+
+    _ ->
+      nil
+  end)
+
+  if @git_ref_path do
+    @external_resource @git_ref_path
+  end
+
+  # packed-refs is updated by git fetch/pull when refs are stored packed.
+  @git_packed_refs_path Path.join(@git_dir, "packed-refs")
+
+  if File.exists?(@git_packed_refs_path) do
+    @external_resource @git_packed_refs_path
+  end
+
+  # ── compile-time stamp ────────────────────────────────────────────────────
   {sha_raw, sha_rc} = System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true)
   @git_sha if sha_rc == 0, do: String.trim(sha_raw), else: "unknown"
 
