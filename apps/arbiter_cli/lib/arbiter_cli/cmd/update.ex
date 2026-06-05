@@ -74,7 +74,7 @@ defmodule ArbiterCli.Cmd.Update do
     json: :boolean
   ]
 
-  @deploy_switches [json: :boolean, timeout: :integer]
+  @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
   def run(argv) do
     if deploy_invocation?(argv) do
@@ -106,6 +106,7 @@ defmodule ArbiterCli.Cmd.Update do
 
     mode = if opts[:json], do: :json, else: :text
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
+    force = opts[:force] || false
 
     root =
       case Start.project_root() do
@@ -121,6 +122,7 @@ defmodule ArbiterCli.Cmd.Update do
 
     ensure_on_integration_branch(root)
     ensure_clean_tree(root)
+    Restart.guard_active_polecats!(force)
 
     before_sha = head_sha(root)
     git_pull(root)
@@ -171,10 +173,21 @@ defmodule ArbiterCli.Cmd.Update do
         :ok
 
       {out, 0} ->
-        Output.die(
-          "the working tree has uncommitted changes",
-          "Commit or stash them before `arb update`:\n" <> String.trim_trailing(out)
-        )
+        # `??` lines are untracked files — safe to ignore for a fast-forward
+        # deploy. Only tracked modifications (staged or unstaged) block the update.
+        tracked =
+          out
+          |> String.split("\n", trim: true)
+          |> Enum.reject(&String.starts_with?(&1, "??"))
+
+        if tracked == [] do
+          :ok
+        else
+          Output.die(
+            "the working tree has uncommitted changes",
+            "Commit or stash them before `arb update`:\n" <> Enum.join(tracked, "\n")
+          )
+        end
 
       {out, _code} ->
         Output.die(

@@ -254,9 +254,20 @@ defmodule ArbiterCli.Cmd.Start do
   # ---- project root ------------------------------------------------------
 
   @doc """
-  Resolve the umbrella root the stack is started from: `ARB_HOME`, else the
-  escript-derived umbrella, else a walk up from the current directory looking
-  for `compose.yml`. Returns `{:ok, dir}` or `:error`.
+  Resolve the umbrella root the stack is started from.
+
+  Resolution order:
+
+    1. `ARB_HOME` — explicit override; set this to your Arbiter checkout path
+       if the other heuristics can't find it (e.g. when running from `$HOME`
+       with an on-PATH escript install).
+    2. The umbrella inferred from the running escript's path (build-tree only:
+       path ends with `/apps/arbiter_cli/arb`).
+    3. The path recorded by `arb install-service` at `~/.config/arbiter/home`
+       (written on first install so commands work from any cwd after that).
+    4. A walk up from the current directory looking for `compose.yml`.
+
+  Returns `{:ok, dir}` or `:error`.
   """
   @spec project_root() :: {:ok, String.t()} | :error
   def project_root do
@@ -267,11 +278,49 @@ defmodule ArbiterCli.Cmd.Start do
       dir = escript_umbrella() ->
         {:ok, dir}
 
+      dir = recorded_home() ->
+        {:ok, dir}
+
       dir = walk_up_for_compose(File.cwd!()) ->
         {:ok, dir}
 
       true ->
         :error
+    end
+  end
+
+  @doc """
+  Record `root` as the Arbiter home path so future invocations from any
+  working directory can resolve it without `ARB_HOME`. Called by
+  `arb install-service` after it has resolved the project root.
+  """
+  @spec record_home(String.t()) :: :ok
+  def record_home(root) do
+    path = recorded_home_path()
+    path |> Path.dirname() |> File.mkdir_p!()
+    File.write!(path, root)
+  rescue
+    _ -> :ok
+  end
+
+  @doc false
+  @spec recorded_home_path() :: String.t()
+  def recorded_home_path do
+    Path.join([System.user_home!(), ".config", "arbiter", "home"])
+  end
+
+  # Read back the home path written by `record_home/1`. Returns the expanded
+  # path when the file exists and is non-empty, nil otherwise.
+  defp recorded_home do
+    path = recorded_home_path()
+
+    case File.read(path) do
+      {:ok, home} when home not in ["", "\n"] ->
+        expanded = home |> String.trim() |> Path.expand()
+        if File.dir?(expanded), do: expanded, else: nil
+
+      _ ->
+        nil
     end
   end
 
