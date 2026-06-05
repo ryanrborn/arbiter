@@ -129,7 +129,7 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
 
     @tag workspace_config: @ws_pr
-    test "records pr_number on the bead's tracker_ref", %{workspace: ws, bead: bead} do
+    test "records pr_number on the bead's pr_ref", %{workspace: ws, bead: bead} do
       stub(fn conn ->
         conn
         |> Plug.Conn.put_status(201)
@@ -140,11 +140,14 @@ defmodule Arbiter.Workflows.RefineryTest do
       :ok = Refinery.enqueue(name, bead.id)
 
       reloaded = Ash.get!(Issue, bead.id)
-      assert reloaded.tracker_ref == "77"
+      assert reloaded.pr_ref == "77"
     end
 
     @tag workspace_config: @ws_pr
-    test "does not overwrite an existing tracker_ref", %{workspace: ws, bead: bead} do
+    test "writes pr_ref even when tracker_ref is already set (issue ref preserved)", %{
+      workspace: ws,
+      bead: bead
+    } do
       {:ok, bead} = Ash.update(bead, %{tracker_ref: "PRE-123"}, action: :update)
 
       stub(fn conn ->
@@ -156,6 +159,7 @@ defmodule Arbiter.Workflows.RefineryTest do
 
       reloaded = Ash.get!(Issue, bead.id)
       assert reloaded.tracker_ref == "PRE-123"
+      assert reloaded.pr_ref == "77"
     end
 
     @tag workspace_config: @ws_pr
