@@ -630,6 +630,51 @@ defmodule Arbiter.Polecat.SlingTest do
     end
   end
 
+  describe "work prompt completion notes (tracker-backed beads)" do
+    test "instructs a tracker-backed acolyte to produce QA + Deployment notes", %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "tracked work",
+          workspace_id: ws.id,
+          tracker_type: "jira",
+          tracker_ref: "VR-17585",
+          skip_upstream_create: true
+        })
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      assert prompt =~ "backed by an external tracker"
+      assert prompt =~ "--qa-notes"
+      assert prompt =~ "--deployment-notes"
+      assert prompt =~ "arb update #{bead.id}"
+    end
+
+    test "untracked beads get no completion-notes step", %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{title: "local work", workspace_id: ws.id, tracker_type: "none"})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      refute prompt =~ "--qa-notes"
+      refute prompt =~ "backed by an external tracker"
+    end
+
+    test "a tracker type without a tracker_ref gets no completion-notes step", %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "tracked but unlinked",
+          workspace_id: ws.id,
+          tracker_type: "jira",
+          tracker_ref: nil,
+          skip_upstream_create: true
+        })
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      refute prompt =~ "--qa-notes"
+    end
+  end
+
   describe "review dispatch (review: true)" do
     @env_key :rig_paths
 

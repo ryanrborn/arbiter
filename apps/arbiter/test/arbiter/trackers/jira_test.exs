@@ -224,6 +224,43 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
+  describe "add_remote_link/3" do
+    test "POSTs a remote link with the url, title, and an idempotent globalId" do
+      url = "https://github.com/leo/voice-id-core/pull/42"
+      title = "PR leo/voice-id-core#42 (bead bd-abc)"
+
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/rest/api/3/issue/#{@ref}/remotelink"
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert decoded["object"]["url"] == url
+        assert decoded["object"]["title"] == title
+        # globalId keys off the URL so re-posting the same PR is idempotent.
+        assert decoded["globalId"] == "arbiter-pr=#{url}"
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => 10_001})
+      end)
+
+      assert :ok = Jira.add_remote_link(@ref, url, title)
+    end
+
+    test "propagates an HTTP error" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"errorMessages" => ["Issue does not exist"]})
+      end)
+
+      assert {:error, %Error{kind: :not_found, status: 404}} =
+               Jira.add_remote_link(@ref, "https://example.com/pr/1", "PR 1")
+    end
+  end
+
   describe "link_for/1" do
     test "builds the browse URL from the active workspace host" do
       assert Jira.link_for(@ref) == "https://#{@host}/browse/#{@ref}"

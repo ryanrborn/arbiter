@@ -562,7 +562,7 @@ defmodule Arbiter.Polecat.Sling do
     Your current directory is a fresh git worktree on a per-bead branch.
     Work the bead to completion: load context, design, implement, test,
     commit on this branch, then push and open a PR if appropriate.
-
+    #{completion_notes_step(bead)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{bead.id}
@@ -577,6 +577,35 @@ defmodule Arbiter.Polecat.Sling do
 
     on a line by itself, exactly. The polecat watches your stdout and
     will mark the bead complete when it sees that marker.
+    """
+  end
+
+  # For tracker-backed beads (an upstream Jira/etc. ticket), completing the
+  # work includes producing the gated completion notes the tracker requires
+  # before it will transition the ticket forward. We make this an explicit,
+  # non-optional step in the acolyte's prompt and tell it exactly how to
+  # persist the notes on the bead (`arb update`), so the downstream
+  # tracker-sync has the fields to push. Untracked beads get nothing extra.
+  defp completion_notes_step(%Issue{tracker_type: :none}), do: ""
+
+  defp completion_notes_step(%Issue{tracker_ref: ref}) when ref in [nil, ""], do: ""
+
+  defp completion_notes_step(%Issue{id: id}) do
+    """
+
+    This bead is backed by an external tracker ticket. Before you finish, you
+    MUST produce its completion notes and persist them on the bead — the
+    tracker gates the ticket's forward transition until both are filled:
+
+        arb update #{id} \\
+          --qa-notes "What QA should verify: the user-facing behaviour to
+                      exercise, edge cases, and how to confirm the fix." \\
+          --deployment-notes "Rollout considerations: DB migrations, feature
+                      flags, config/env changes, ordering, and any backout
+                      steps. Write 'None' only if there genuinely are none."
+
+    Base the notes on the change you actually made. This is part of "done":
+    do it before printing `arb done`.
     """
   end
 

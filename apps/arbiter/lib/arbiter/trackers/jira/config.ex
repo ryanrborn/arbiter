@@ -21,13 +21,18 @@ defmodule Arbiter.Trackers.Jira.Config do
         "status_map" => %{
           "open" => "To Do",
           "in_progress" => "In Progress",
-          "closed" => "Approved and merged"
+          # Bead status -> Jira *transition name*. "Code Merged" is the
+          # gated forward transition on LeoTech's VR (Verus) workflow — it
+          # moves the ticket to "Code Complete" and is blocked until the
+          # "QA Testing Notes" and "Deployment Notes" custom fields are set.
+          "closed" => "Code Merged"
         },
         "field_ids" => %{
           "title" => "summary",
           "description" => "description",
-          "qa_notes" => "customfield_10300",
-          "deployment_notes" => "customfield_10400",
+          # Verified LeoTech VR custom-field IDs (textarea, ADF-encoded).
+          "qa_notes" => "customfield_10184",
+          "deployment_notes" => "customfield_10185",
           "assignee" => "assignee"
         }
       }
@@ -49,10 +54,19 @@ defmodule Arbiter.Trackers.Jira.Config do
     closed: "Done"
   }
 
+  # The QA / Deployment custom-field IDs default to LeoTech's verified VR
+  # (Verus) workspace IDs — these are the gated fields LeoTech requires before
+  # a forward transition (`com.atlassian.jira.plugin.system.customfieldtypes:textarea`,
+  # so they take ADF). A workspace running a *different* Jira instance overrides
+  # them via `tracker.config.field_ids`; the merge in `field_ids/1` lets the
+  # workspace win. Keeping them here (rather than only in workspace config)
+  # means the gate is correct out-of-the-box for the common case.
   @default_field_ids %{
     title: "summary",
     description: "description",
-    assignee: "assignee"
+    assignee: "assignee",
+    qa_notes: "customfield_10184",
+    deployment_notes: "customfield_10185"
   }
 
   @type config :: %{
