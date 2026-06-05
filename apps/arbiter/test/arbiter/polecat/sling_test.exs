@@ -68,6 +68,84 @@ defmodule Arbiter.Polecat.SlingTest do
     end
   end
 
+  describe "pre-flight auth check (bd-awi4nw)" do
+    alias Arbiter.Messages.Message
+
+    test "a failing auth probe REFUSES to sling and leaves the bead untouched", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "auth gate", workspace_id: ws.id})
+
+      assert {:error, {:auth_check_failed, reason}} =
+               Sling.sling(bead.id,
+                 rig: "test/rig",
+                 start_driver: false,
+                 start_claude: true,
+                 probe_command: [
+                   "sh",
+                   "-c",
+                   "echo '401 invalid authentication credentials'; exit 1"
+                 ],
+                 probe_env: []
+               )
+
+      assert reason.category == :auth_expired
+
+      # Refused BEFORE any state mutation: bead is still :open, no polecat spawned.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :open
+      assert Polecat.whereis(bead.id) == nil
+    end
+
+    test "a failed pre-flight escalates to the Admiral with a re-auth message", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "auth escalate", workspace_id: ws.id})
+
+      {:error, {:auth_check_failed, _}} =
+        Sling.sling(bead.id,
+          rig: "test/rig",
+          start_driver: false,
+          start_claude: true,
+          probe_command: ["sh", "-c", "echo '401 invalid authentication credentials'; exit 1"],
+          probe_env: []
+        )
+
+      assert [escalation] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.directive_ref == bead.id))
+
+      assert escalation.subject =~ "pre-flight auth failed"
+      assert escalation.body =~ "Re-authenticate"
+    end
+
+    test "pre-flight is skipped when start_claude is false (default path unaffected)", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no preflight", workspace_id: ws.id})
+
+      # Even with a probe_command that would 401, no start_claude means no probe.
+      assert {:ok, result} =
+               Sling.sling(bead.id,
+                 rig: "test/rig",
+                 start_driver: false,
+                 probe_command: ["sh", "-c", "exit 1"]
+               )
+
+      assert result.bead.status == :in_progress
+    end
+
+    test "preflight: false bypasses the probe even with start_claude", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
+
+      # start_claude with no worktree errors at the claude-start step
+      # (:missing_worktree) — proving we got PAST the (disabled) preflight
+      # rather than being refused by it.
+      assert {:error, :missing_worktree} =
+               Sling.sling(bead.id,
+                 rig: "unmapped/rig",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false,
+                 probe_command: ["sh", "-c", "echo 401; exit 1"]
+               )
+    end
+  end
+
   describe "sling/2 result shape" do
     test "returns a map with the standard keys", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
@@ -165,9 +243,10 @@ defmodule Arbiter.Polecat.SlingTest do
           rig: "claude/rig",
           start_driver: false,
           start_claude: true,
-          # Stand-in for `claude --print prompt` — runs and exits quickly,
+          # Stand-in for a running `claude --print` session — stays alive (so it
+          # isn't caught by bd-awi4nw stop-detection as a died-early acolyte),
           # but proves ClaudeSession.start was wired into Sling.
-          claude_command: ["echo", "hello from a polecat"]
+          claude_command: ["sleep", "2"]
         )
 
       assert is_port(result.claude_port)
@@ -205,7 +284,11 @@ defmodule Arbiter.Polecat.SlingTest do
         Sling.sling(bead.id,
           rig: "drvr/rig",
           start_claude: true,
-          claude_command: ["true"],
+          # A stand-in for a *running* Claude session: it must stay alive for the
+          # duration of this test. A command that exits immediately would (since
+          # bd-awi4nw) trip stop-detection and fail the polecat — exactly the
+          # "acolyte died without `arb done`" path we now catch.
+          claude_command: ["sleep", "2"],
           # Speed up the polecat-status polling for the assertion below.
           interval_ms: 5,
           max_ticks: 50
@@ -266,7 +349,11 @@ defmodule Arbiter.Polecat.SlingTest do
         Sling.sling(bead.id,
           rig: "m/rig",
           start_driver: false,
-          start_claude: true
+          start_claude: true,
+          # This test asserts the WORK-spawn argv; disable the bd-awi4nw auth
+          # pre-flight so its probe (which invokes the same `claude` stub) doesn't
+          # write to the shared argv file and race the work spawn's capture.
+          preflight: false
         )
 
       wait_until(fn -> File.exists?(argv_file) end)
@@ -303,7 +390,9 @@ defmodule Arbiter.Polecat.SlingTest do
           rig: "o/rig",
           start_driver: false,
           start_claude: true,
-          model: "opus"
+          model: "opus",
+          # WORK-spawn argv assertion — skip the auth pre-flight probe (bd-awi4nw).
+          preflight: false
         )
 
       wait_until(fn -> File.exists?(argv_file) end)
@@ -343,7 +432,13 @@ defmodule Arbiter.Polecat.SlingTest do
         Ash.create(Issue, %{title: "trivial", workspace_id: ws.id, priority: 4})
 
       {:ok, _result} =
-        Sling.sling(bead.id, rig: "p/rig", start_driver: false, start_claude: true)
+        Sling.sling(bead.id,
+          rig: "p/rig",
+          start_driver: false,
+          start_claude: true,
+          # WORK-spawn argv assertion — skip the auth pre-flight probe (bd-awi4nw).
+          preflight: false
+        )
 
       wait_until(fn -> File.exists?(argv_file) end)
       args = File.read!(argv_file) |> String.split("\n", trim: true)
