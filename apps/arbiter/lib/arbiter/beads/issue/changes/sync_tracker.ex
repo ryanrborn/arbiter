@@ -115,7 +115,64 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
             "-> #{issue.status}: #{inspect(reason)}"
         )
     end
+
+    # For close transitions, verify the upstream issue is actually closed —
+    # a silent no-op or a stale server can leave it open even after :ok.
+    if issue.status == :closed do
+      verify_and_close(issue)
+    end
   end
+
+  defp verify_and_close(issue) do
+    case Trackers.fetch(issue) do
+      {:ok, raw} ->
+        if upstream_closed?(issue.tracker_type, raw) do
+          :ok
+        else
+          Logger.warning(
+            "SyncTracker: upstream still open after close transition for bead=#{issue.id} " <>
+              "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — issuing follow-up close"
+          )
+
+          case Trackers.transition(issue, :closed) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              Logger.warning(
+                "SyncTracker: follow-up close also failed for bead=#{issue.id} " <>
+                  "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)}"
+              )
+          end
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "SyncTracker: could not verify closed state for bead=#{issue.id} " <>
+            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)} " <>
+            "— local close still succeeds"
+        )
+    end
+  end
+
+  # GitHub issues carry a top-level "state" field.
+  defp upstream_closed?(:github, %{"state" => "closed"}), do: true
+  defp upstream_closed?(:github, _), do: false
+
+  # Jira issues carry fields.status.statusCategory.key; "done" covers all
+  # Done-category statuses (e.g. "Code Merged", "Done", "Closed") without
+  # needing the workspace's status_map config.
+  defp upstream_closed?(:jira, raw) do
+    get_in(raw, ["fields", "status", "statusCategory", "key"]) == "done"
+  end
+
+  # Shortcut stories have a top-level "completed" boolean.
+  defp upstream_closed?(:shortcut, %{"completed" => true}), do: true
+  defp upstream_closed?(:shortcut, _), do: false
+
+  # Unknown tracker type or :none — assume closed to avoid spurious retries.
+  # :none is already gated out in maybe_sync/4 before do_transition is reached.
+  defp upstream_closed?(_, _), do: true
 
   # Only the forward (closing) transition is gated; open ⇄ in_progress and
   # reopen never touch the gated custom fields. For non-gated trackers
