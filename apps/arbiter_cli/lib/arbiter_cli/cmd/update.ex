@@ -6,9 +6,9 @@ defmodule ArbiterCli.Cmd.Update do
 
   With **no issue id**, `arb update` deploys freshly-merged work: it
   `git pull --ff-only`s the integration branch (`main`) in the Arbiter
-  checkout, reports what changed, then reuses `arb restart` to bounce Phoenix
-  so the new code is live. One verb for the contributor + Admiral to ship
-  merged work.
+  checkout, then runs an explicit deploy sequence: migrations → CLI escript
+  rebuild (if changed) → Phoenix restart. One verb for the contributor +
+  Admiral to ship merged work.
 
   Steps:
 
@@ -22,11 +22,16 @@ defmodule ArbiterCli.Cmd.Update do
        git itself abort; we surface its message rather than force anything.
     4. **Report the short log** of the commits that arrived
        (`git log --oneline old..new`). If nothing arrived, say "already up to
-       date" and skip the restart — there's no new code to load.
-    5. **Restart Phoenix** via `ArbiterCli.Cmd.Restart.perform/2`, which also
-       re-runs the boot reconciler. Migrations are handled at boot by the
-       app's supervision-tree migrator, so `arb update` carries no migration
-       logic of its own.
+       date" and exit — there's no new code to load.
+    5. **Run database migrations** as an explicit step via `mix arbiter.migrate`,
+       reporting how many migrations were applied (or 0 if the schema was already
+       current). Migrations must succeed before proceeding.
+    6. **Rebuild and install the CLI escript** if `apps/arbiter_cli` changed
+       in the pulled commits. Detects changes via `git diff --name-only`, builds
+       via `mix escript.build`, and installs to `~/.local/bin/arb`, making it
+       executable. Skips rebuild if the CLI didn't change.
+    7. **Restart Phoenix** via `ArbiterCli.Cmd.Restart.perform/2` to load the
+       freshly-pulled code. Also re-runs the boot reconciler.
 
   ## Issue-edit mode — `arb update <id> [field flags]`
 
@@ -52,7 +57,7 @@ defmodule ArbiterCli.Cmd.Update do
       Phoenix not coming back green after the restart.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Migrate, Cmd.Restart, Cmd.Start, Output}
 
   # The branch `arb update` fast-forwards. Matches the repo's integration
   # branch (`main`); a deploy is always a pull of merged work into it.
@@ -132,14 +137,31 @@ defmodule ArbiterCli.Cmd.Update do
       emit_up_to_date(mode)
     else
       commits = short_log(root, before_sha, after_sha)
-      Start.log_text("Pulled #{length(commits)} new commit(s); restarting Phoenix…")
+      Start.log_text("Pulled #{length(commits)} new commit(s); deploying…")
 
+      # Run migrations as an explicit step
+      migration_result = Migrate.run(root)
+      migrations_applied = case migration_result do
+        {:ok, count} -> count
+        {:error, err} -> Output.die("Database migration failed", err)
+      end
+
+      # Check if CLI changed and rebuild/install if needed
+      cli_changed = files_in_diff(root, before_sha, after_sha) |> Enum.any?(&String.starts_with?(&1, "apps/arbiter_cli"))
+      cli_built = if cli_changed do
+        build_and_install_cli(root)
+        true
+      else
+        false
+      end
+
+      # Finally restart Phoenix to load the new code
       case Restart.perform(root, timeout_ms) do
         {:ok, actions, was_running} ->
-          emit_deployed(mode, before_sha, after_sha, commits, actions, was_running)
+          emit_deployed(mode, before_sha, after_sha, commits, actions, was_running, migrations_applied, cli_built)
 
         {:timeout, actions, _was_running} ->
-          emit_deploy_timeout(mode, before_sha, after_sha, commits, actions, timeout_ms)
+          emit_deploy_timeout(mode, before_sha, after_sha, commits, actions, timeout_ms, migrations_applied, cli_built)
       end
     end
   end
@@ -245,6 +267,62 @@ defmodule ArbiterCli.Cmd.Update do
     end
   end
 
+  # Get the list of files that changed between two commits
+  defp files_in_diff(root, before_sha, after_sha) do
+    case git(root, ["diff", "--name-only", "#{before_sha}..#{after_sha}"]) do
+      {out, 0} ->
+        out
+        |> String.split("\n", trim: true)
+
+      {_out, _code} ->
+        # The pull already succeeded; a diff failure shouldn't abort the deploy.
+        []
+    end
+  end
+
+  # Build the CLI escript and install it to ~/.local/bin/arb
+  defp build_and_install_cli(root) do
+    cli_dir = Path.join(root, "apps/arbiter_cli")
+
+    Start.log_text("Building CLI escript (mix escript.build)…")
+
+    case Start.run_cmd("mix", ["escript.build"], cd: cli_dir, stderr_to_stdout: true) do
+      {_out, 0} ->
+        escript_path = Path.join(cli_dir, "arb")
+        install_path = Path.join(System.user_home!(), ".local/bin/arb")
+
+        # Ensure ~/.local/bin exists
+        install_dir = Path.dirname(install_path)
+        File.mkdir_p!(install_dir)
+
+        # Copy the escript to ~/.local/bin/arb
+        case File.copy(escript_path, install_path) do
+          {:ok, _} ->
+            # Make it executable
+            File.chmod!(install_path, 0o755)
+            Start.log_text("Installed CLI escript to #{install_path}")
+
+          {:error, reason} ->
+            Output.die(
+              "failed to install CLI escript",
+              "Could not copy escript to #{install_path}: #{inspect(reason)}"
+            )
+        end
+
+      {out, code} ->
+        Output.die(
+          "failed to build CLI escript (exit #{code})",
+          "Output:\n" <> String.trim_trailing(out)
+        )
+    end
+  rescue
+    e in ErlangError ->
+      Output.die(
+        "could not run mix: #{inspect(e.original)}",
+        "Ensure Elixir/`mix` is installed and on your PATH."
+      )
+  end
+
   # `git`, routed through `arb start`'s `:bd2_cmd_runner` seam so one test stub
   # covers the pull and the reused restart. Always run inside `root`.
   defp git(root, args) do
@@ -277,7 +355,7 @@ defmodule ArbiterCli.Cmd.Update do
     IO.puts("(Run `arb restart` if you want to bounce Phoenix anyway.)")
   end
 
-  defp emit_deployed(:json, before_sha, after_sha, commits, actions, was_running) do
+  defp emit_deployed(:json, before_sha, after_sha, commits, actions, was_running, migrations_applied, cli_built) do
     IO.puts(
       Jason.encode!(%{
         branch: @integration_branch,
@@ -289,6 +367,8 @@ defmodule ArbiterCli.Cmd.Update do
         new_sha: after_sha,
         commits: commits,
         actions: action_payload(actions),
+        migrations_applied: migrations_applied,
+        cli_rebuilt: cli_built,
         base_url: Client.base_url(),
         checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
         ok: Doctor.green?()
@@ -296,17 +376,26 @@ defmodule ArbiterCli.Cmd.Update do
     )
   end
 
-  defp emit_deployed(:text, _before, _after, commits, _actions, _was_running) do
+  defp emit_deployed(:text, _before, _after, commits, _actions, _was_running, migrations_applied, cli_built) do
     IO.puts("")
     IO.puts("Pulled #{length(commits)} new commit(s) onto #{@integration_branch}:")
     print_commits(commits)
+    IO.puts("")
+    if migrations_applied > 0 do
+      IO.puts("Applied #{migrations_applied} migration(s)")
+    else
+      IO.puts("Database schema already current (no migrations to apply)")
+    end
+    if cli_built do
+      IO.puts("Rebuilt and installed CLI escript")
+    end
     IO.puts("")
     IO.puts("Arbiter Phoenix restarted at #{Client.base_url()}")
     IO.puts("")
     Doctor.report()
   end
 
-  defp emit_deploy_timeout(:json, before_sha, after_sha, commits, actions, timeout_ms) do
+  defp emit_deploy_timeout(:json, before_sha, after_sha, commits, actions, timeout_ms, migrations_applied, cli_built) do
     IO.puts(
       Jason.encode!(%{
         branch: @integration_branch,
@@ -317,6 +406,8 @@ defmodule ArbiterCli.Cmd.Update do
         new_sha: after_sha,
         commits: commits,
         actions: action_payload(actions),
+        migrations_applied: migrations_applied,
+        cli_rebuilt: cli_built,
         base_url: Client.base_url(),
         checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
         ok: false,
@@ -327,10 +418,19 @@ defmodule ArbiterCli.Cmd.Update do
     Output.halt(1)
   end
 
-  defp emit_deploy_timeout(:text, _before, _after, commits, _actions, timeout_ms) do
+  defp emit_deploy_timeout(:text, _before, _after, commits, _actions, timeout_ms, migrations_applied, cli_built) do
     IO.puts("")
     IO.puts("Pulled #{length(commits)} new commit(s) onto #{@integration_branch}:")
     print_commits(commits)
+    IO.puts("")
+    if migrations_applied > 0 do
+      IO.puts("Applied #{migrations_applied} migration(s)")
+    else
+      IO.puts("Database schema already current (no migrations to apply)")
+    end
+    if cli_built do
+      IO.puts("Rebuilt and installed CLI escript")
+    end
     IO.puts("")
     IO.puts("…but Phoenix did not come back up within #{div(timeout_ms, 1000)}s.")
     IO.puts("Last status:")
