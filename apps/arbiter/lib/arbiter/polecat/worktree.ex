@@ -223,18 +223,48 @@ defmodule Arbiter.Polecat.Worktree do
     end
   end
 
+  # Top-level build-artifact paths that git may report as untracked even though
+  # they should be ignored. Per-bead worktrees symlink `deps` (and sometimes
+  # `_build`) to a shared cache; the repo's directory-only `/deps/` `/_build/`
+  # ignore patterns do NOT match a symlink, so `git status --porcelain` emits
+  # `?? deps`. Counting that as "uncommitted" false-fails the commit gate on
+  # genuinely-committed work — the inverse of the bug the gate exists to catch.
+  # See bd-dg0gs6 / #172.
+  @ignored_artifact_paths ~w(deps deps/ _build _build/)
+
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
   (staged, unstaged, or untracked), else `{:ok, false}`.
+
+  Untracked build-artifact roots (`deps`, `_build`) are ignored — see
+  `@ignored_artifact_paths` — so a worktree whose only "change" is a leaked
+  `deps` symlink reads as clean.
   """
   @spec has_uncommitted?(path()) :: {:ok, boolean()} | {:error, error_reason()}
   def has_uncommitted?(path) when is_binary(path) do
     case run_git(["status", "--porcelain"], cd: path) do
-      {:ok, ""} -> {:ok, false}
-      {:ok, output} -> {:ok, String.trim(output) != ""}
-      {:error, _} = err -> err
+      {:ok, output} ->
+        dirty? =
+          output
+          |> String.split("\n", trim: true)
+          |> Enum.reject(&artifact_entry?/1)
+          |> Enum.any?()
+
+        {:ok, dirty?}
+
+      {:error, _} = err ->
+        err
     end
   end
+
+  # A porcelain line is `XY <path>` (two status chars, a space, then the path).
+  # Returns true when the path is one of the known build-artifact roots, so the
+  # caller can disregard a leaked `deps`/`_build` entry without masking real
+  # untracked source files (e.g. `lib/deps_helper.ex` still counts).
+  defp artifact_entry?(<<_status::binary-size(2), " ", rest::binary>>),
+    do: String.trim(rest) in @ignored_artifact_paths
+
+  defp artifact_entry?(_line), do: false
 
   @doc """
   Return `{:ok, true}` if the worktree's current branch has commits not

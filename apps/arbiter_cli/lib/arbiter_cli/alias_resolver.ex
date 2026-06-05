@@ -34,7 +34,7 @@ defmodule ArbiterCli.AliasResolver do
   dispatching to nothing.
   """
 
-  @known_verbs ~w(init show create close reopen list update dep ready doctor start restart install-service version where help sling review prime polecat inbox notify message msg claim sync usage convoy config warships)
+  @known_verbs ~w(init show create close reopen list update dep ready doctor start restart install-service install-cli version where help sling review prime polecat inbox notify message msg claim sync usage convoy config warships)
 
   # Noun-vernacular keys that also name a command verb. Lets a renamed noun
   # double as a verb alias — e.g. when `vernacular["batch"] == "Vanguard"`,

@@ -182,6 +182,27 @@ defmodule Arbiter.Polecat.WorktreeTest do
       File.write!(Path.join(path, "scratch.txt"), "wip\n")
       assert {:ok, true} = Worktree.has_uncommitted?(path)
     end
+
+    # Regression for bd-dg0gs6 / #172: per-bead worktrees symlink `deps`
+    # (and sometimes `_build`) to a shared cache. The repo's directory-only
+    # `/deps/` `/_build/` ignore patterns don't match a symlink, so git emits
+    # `?? deps` — which previously false-tripped the commit gate on committed
+    # work. A worktree whose only untracked entries are those artifact roots
+    # must read as clean.
+    test "ignores leaked deps/_build artifact entries", %{repo: repo} do
+      {:ok, path} = Worktree.create(repo, "feature/artifacts", "main")
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      # A `deps` symlink (as the real worktree setup creates) and an untracked
+      # `_build` dir — both should be disregarded.
+      File.ln_s!(System.tmp_dir!(), Path.join(path, "deps"))
+      File.mkdir_p!(Path.join(path, "_build/dev"))
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      # A genuine untracked source file still counts as dirty.
+      File.write!(Path.join(path, "lib_real.ex"), "defmodule X do end\n")
+      assert {:ok, true} = Worktree.has_uncommitted?(path)
+    end
   end
 
   describe "cleanup/1" do
