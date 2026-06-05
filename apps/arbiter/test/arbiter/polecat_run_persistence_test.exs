@@ -5,8 +5,11 @@ defmodule Arbiter.PolecatRunPersistenceTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Polecat
+  alias Arbiter.Polecat.ClaudeSession
   alias Arbiter.Polecats.Run
   require Ash.Query
+
+  @fixture Path.expand("../fixtures/echo_with_done.sh", __DIR__)
 
   defp runs_for(bead_id) do
     Run
@@ -136,6 +139,63 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     assert run.status == :failed
     assert run.failure_reason == ":max_ticks_exceeded"
     assert %DateTime{} = run.completed_at
+  end
+
+  test "ClaudeSession output lines flow end-to-end into the Run row on completion" do
+    # Exercises the full path from port data through the polecat's session
+    # tracking, sync_session_meta, and record_run_finished into the DB, so that
+    # `arb polecat show <bead-id>` on a closed bead shows real output.
+    bead_id = "bd-sessionlines-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: System.tmp_dir!(),
+        command: [@fixture]
+      )
+
+    # Wait for the fixture's "arb done" to land and the Run row to be stamped.
+    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(bead_id)) end, 2000)
+
+    [run] = runs_for(bead_id)
+    assert run.status == :completed
+    assert %DateTime{} = run.completed_at
+    # The fixture emits these lines; they must survive into the DB row.
+    assert "doing important work" in run.output_lines
+    assert "arb done" in run.output_lines
+    # Lines appear oldest-first, so "doing important work" precedes "arb done".
+    assert Enum.find_index(run.output_lines, &(&1 == "doing important work")) <
+             Enum.find_index(run.output_lines, &(&1 == "arb done"))
+  end
+
+  test "output_lines capped to last #{500} lines when session is very chatty" do
+    # Verifies that a session producing more than @max_output_lines (500) lines
+    # only persists the last 500 rather than bloating the row indefinitely.
+    bead_id = "bd-linesclip-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    # Inject 600 lines directly via report/3 (same mechanism sync_session_meta
+    # uses) so we don't need a subprocess fixture that produces 600+ lines.
+    lines = Enum.map(1..600, &"line #{&1}")
+    :ok = Polecat.advance(pid, :implement)
+    :ok = Polecat.report(pid, :output_lines, lines)
+    :ok = Polecat.complete(pid, :done)
+
+    [run] = runs_for(bead_id)
+    assert length(run.output_lines) == 500
+    # The LAST 500 lines (101–600) should be retained, not the first 500.
+    assert "line 101" in run.output_lines
+    assert "line 600" in run.output_lines
+    refute "line 100" in run.output_lines
   end
 
   defp wait_until(fun, timeout_ms \\ 500, step_ms \\ 20) do
