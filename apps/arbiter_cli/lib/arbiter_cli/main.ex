@@ -128,6 +128,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
   defp dispatch_known("convoy", args), do: ArbiterCli.Cmd.Convoy.run(args)
   defp dispatch_known("config", args), do: ArbiterCli.Cmd.Config.run(args)
+  defp dispatch_known("warships", args), do: ArbiterCli.Cmd.Warships.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do
