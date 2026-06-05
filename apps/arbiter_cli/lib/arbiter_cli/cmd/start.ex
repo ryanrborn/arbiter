@@ -135,28 +135,47 @@ defmodule ArbiterCli.Cmd.Start do
   @doc """
   Start Phoenix detached so it survives this escript exiting. `nohup` plus a
   redirect to a log file and a backgrounding `&` means the shell returns
-  immediately while `mix phx.server` keeps running, reparented to init.
+  immediately while the server keeps running, reparented to init.
 
-  Returns `{:phoenix, :ok, log_path}`. If `.arbiter.env` exists in the project
-  root it is sourced (via `set -a` so all assignments are automatically
-  exported) before Phoenix launches, ensuring secrets like `GITHUB_TOKEN` reach
-  the server even when they were not pre-exported in the invoking shell. Shared
-  with `arb restart` so the two have one definition of "start Phoenix".
+  Returns `{:phoenix, :ok, log_path}`. Shared with `arb restart` so the two
+  have one definition of "start Phoenix".
+
+  Launch strategy (in priority order):
+
+  1. **`.run-server.sh`** — if `root/.run-server.sh` exists, delegate to it.
+     That script `cd`s to the project root itself and re-exports the full
+     runtime environment (`PATH` with mise shims, `GITHUB_TOKEN`, `JIRA_TOKEN`,
+     `PORT=4848`), guaranteeing identical behaviour whether Phoenix was started
+     by hand or by `arb start`/`arb restart`. This is the preferred path on a
+     properly-set-up dev machine.
+
+  2. **Inline fallback** — when `.run-server.sh` is absent, run
+     `mix phx.server` directly from `root` (via `cd: root`). If `.arbiter.env`
+     exists in `root` it is sourced first (via `set -a` so every assignment is
+     automatically exported) to carry secrets into Phoenix's environment.
   """
   @spec start_phoenix(String.t()) :: {:phoenix, :ok, String.t()}
   def start_phoenix(root) do
     log = phoenix_log_path()
-    log_text("Starting Phoenix (mix phx.server)… logging to #{log}")
+    run_server_sh = Path.join(root, ".run-server.sh")
 
-    # Source .arbiter.env if present, using `set -a` so every assignment is
-    # automatically exported into Phoenix's environment. The check is in the
-    # shell script (not Elixir) so it runs at the moment the process is
-    # spawned rather than at the moment `arb start` is invoked.
-    script =
-      "if [ -f .arbiter.env ]; then set -a; . ./.arbiter.env; set +a; fi; " <>
-        "nohup mix phx.server > '#{log}' 2>&1 < /dev/null &"
+    {script, run_opts} =
+      if File.exists?(run_server_sh) do
+        log_text("Starting Phoenix (#{run_server_sh})… logging to #{log}")
+        # Run via `sh script` so no executable bit is required on the file.
+        {"nohup sh '#{run_server_sh}' > '#{log}' 2>&1 < /dev/null &",
+         [stderr_to_stdout: true]}
+      else
+        log_text("Starting Phoenix (mix phx.server)… logging to #{log}")
+        # Source .arbiter.env if present so secrets reach Phoenix's env.
+        script =
+          "if [ -f .arbiter.env ]; then set -a; . ./.arbiter.env; set +a; fi; " <>
+            "nohup mix phx.server > '#{log}' 2>&1 < /dev/null &"
 
-    case run_cmd("sh", ["-c", script], cd: root, stderr_to_stdout: true) do
+        {script, [cd: root, stderr_to_stdout: true]}
+      end
+
+    case run_cmd("sh", ["-c", script], run_opts) do
       {_out, 0} ->
         {:phoenix, :ok, log}
 
