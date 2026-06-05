@@ -77,7 +77,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
   end
 
   describe ":close on a github-tracked bead" do
-    test "PATCHes the linked issue to state=closed" do
+    test "does NOT close the upstream issue by default" do
       forwarding_stub()
       ws = github_workspace()
 
@@ -90,6 +90,24 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.status == :closed
+
+      refute_receive {:github, :patch, _, _}
+    end
+
+    test "PATCHes the linked issue to state=closed when close_upstream: true" do
+      forwarding_stub()
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "tracked",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
       assert closed.status == :closed
 
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
@@ -192,7 +210,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
 
       # Close first (with a stub) so we can reopen.
       forwarding_stub()
-      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
 
       test_pid = self()
 
@@ -298,7 +316,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      assert {:ok, _closed} = Ash.update(issue, %{}, action: :close)
+      assert {:ok, _closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
 
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :patch, ^expected_path, _}

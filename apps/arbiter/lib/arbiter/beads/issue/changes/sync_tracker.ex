@@ -30,16 +30,18 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
   @impl true
   def change(changeset, _opts, _context) do
     Ash.Changeset.after_action(changeset, fn cs, issue ->
-      maybe_sync(cs.data.status, issue)
+      close_upstream = Ash.Changeset.get_argument(cs, :close_upstream)
+      maybe_sync(cs.data.status, issue, cs.action.name, close_upstream)
       {:ok, issue}
     end)
   end
 
-  defp maybe_sync(old_status, issue) do
+  defp maybe_sync(old_status, issue, action_name, close_upstream) do
     cond do
       old_status == issue.status -> :ok
       issue.tracker_type == :none -> :ok
       blank?(issue.tracker_ref) -> :ok
+      action_name == :close and not close_upstream -> :ok
       true -> sync(issue)
     end
   end

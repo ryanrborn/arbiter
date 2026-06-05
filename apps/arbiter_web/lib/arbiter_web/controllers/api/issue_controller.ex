@@ -123,7 +123,12 @@ defmodule ArbiterWeb.Api.IssueController do
 
   def close(conn, %{"id" => id} = params) do
     reason = params["reason"]
-    args = if reason, do: %{reason: reason}, else: %{}
+    close_upstream = params["close_upstream"] in [true, "true", "1"]
+
+    args =
+      %{}
+      |> then(fn a -> if reason, do: Map.put(a, :reason, reason), else: a end)
+      |> Map.put(:close_upstream, close_upstream)
 
     with {:ok, issue} <- Ash.get(Issue, id),
          {:ok, closed} <- Ash.update(issue, args, action: :close) do
