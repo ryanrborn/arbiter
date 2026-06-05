@@ -260,8 +260,21 @@ defmodule Arbiter.Polecat.Sling do
             target_branch = resolve_target_branch(bead, opts)
 
             case Worktree.create(repo_path, branch, target_branch) do
-              {:ok, path} -> {:ok, path}
-              {:error, reason} -> {:error, {:worktree_failed, reason}}
+              {:ok, path} ->
+                {:ok, path}
+
+              {:error, {:git_failed, msg}} when is_binary(msg) ->
+                if String.contains?(msg, "already exists") do
+                  case Worktree.attach(repo_path, branch) do
+                    {:ok, path} -> {:ok, path}
+                    {:error, reason} -> {:error, {:worktree_failed, reason}}
+                  end
+                else
+                  {:error, {:worktree_failed, {:git_failed, msg}}}
+                end
+
+              {:error, reason} ->
+                {:error, {:worktree_failed, reason}}
             end
         end
     end
