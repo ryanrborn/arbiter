@@ -34,6 +34,7 @@ defmodule ArbiterCli.Main do
       arb install-service [--system] [--uninstall] [--json]
                                Install a systemd unit so the stack starts at
                                boot (ExecStart=arb start). --uninstall removes it.
+      arb version
       arb where
       arb prime
       arb sling <bead-id>
@@ -114,6 +115,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("start", args), do: ArbiterCli.Cmd.Start.run(args)
   defp dispatch_known("restart", args), do: ArbiterCli.Cmd.Restart.run(args)
   defp dispatch_known("install-service", args), do: ArbiterCli.Cmd.InstallService.run(args)
+  defp dispatch_known("version", args), do: ArbiterCli.Cmd.Version.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("sling", args), do: ArbiterCli.Cmd.Sling.run(args)
   defp dispatch_known("review", args), do: ArbiterCli.Cmd.Review.run(args)
