@@ -415,12 +415,16 @@ defmodule Arbiter.Polecat.DriverTest do
         })
 
       {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
 
       {:ok, driver_pid} =
         Driver.start(
           bead_id: bead.id,
           polecat_pid: polecat_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
           interval_ms: 5,
           claude_driven: true
         )
