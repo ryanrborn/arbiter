@@ -894,6 +894,65 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
   end
 
+  # ---- Stage 3: same-mind continuity briefing (bd-1na62i) ------------------
+
+  describe "revise_prompt/2 git-state briefing" do
+    # The revise-round implementer is a fresh mind. Stage 3 prepends a
+    # git-derived "work so far" briefing so it continues the prior round's
+    # thread instead of re-deriving it from a raw diff.
+    test "prepends the prior round's committed + uncommitted work", %{repo: repo, ws: ws} do
+      bead = new_bead(ws, %{description: "the directive", acceptance: "it works"})
+      branch = "feature/rev"
+
+      # Put HEAD on the feature branch with a commit ahead of main, plus an
+      # uncommitted edit — exactly the state a prior revise round would leave.
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      File.write!(Path.join(repo, "fix.ex"), "defmodule Fix, do: nil\n")
+      {_, 0} = git(["add", "fix.ex"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "round 1 fix from prior implementer"], repo)
+      File.write!(Path.join(repo, "README.md"), "seed\nstraggler edit\n")
+
+      state = %{
+        bead_id: bead.id,
+        branch: branch,
+        target_branch: "main",
+        worktree_path: repo,
+        round: 2
+      }
+
+      prompt = Tribunal.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix the thing")
+
+      # The briefing surfaces both the committed work and the uncommitted WIP.
+      assert prompt =~ "Work done so far on this branch"
+      assert prompt =~ "round 1 fix from prior implementer"
+      assert prompt =~ "Uncommitted work-in-progress"
+      assert prompt =~ "straggler edit"
+      # The findings and directive still travel alongside the briefing.
+      assert prompt =~ "fix the thing"
+      assert prompt =~ "the directive"
+    end
+
+    # A worktree-less Tribunal (ad-hoc / test run) must degrade to the
+    # directive-only prompt rather than crash trying to read git state.
+    test "degrades gracefully with no worktree", %{ws: ws} do
+      bead = new_bead(ws, %{description: "the directive"})
+
+      state = %{
+        bead_id: bead.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1
+      }
+
+      prompt = Tribunal.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix it")
+
+      refute prompt =~ "Work done so far on this branch"
+      assert prompt =~ "fix it"
+      assert prompt =~ "the directive"
+    end
+  end
+
   describe "review-gate hardening (bd-2y0gd5)" do
     test "snapshotting the supervisor's children never crashes the Tribunal",
          %{repo: repo, ws: ws} do
