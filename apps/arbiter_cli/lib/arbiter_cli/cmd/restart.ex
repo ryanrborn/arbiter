@@ -36,7 +36,7 @@ defmodule ArbiterCli.Cmd.Restart do
 
   alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Start, Output}
 
-  @switches [json: :boolean, timeout: :integer]
+  @switches [json: :boolean, timeout: :integer, force: :boolean]
 
   # How long to wait for the freshly-started stack to go green. A cold
   # `mix phx.server` may recompile first, so the default is generous.
@@ -55,6 +55,7 @@ defmodule ArbiterCli.Cmd.Restart do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
+    force = opts[:force] || false
 
     root =
       case Start.project_root() do
@@ -67,6 +68,8 @@ defmodule ArbiterCli.Cmd.Restart do
             "Set ARB_HOME to your Arbiter checkout, or run `arb restart` from inside it."
           )
       end
+
+    guard_active_polecats!(force)
 
     case perform(root, timeout_ms) do
       {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
@@ -144,8 +147,10 @@ defmodule ArbiterCli.Cmd.Restart do
     end
   end
 
-  # Pids of processes LISTENing on `port`, via `lsof -t`. lsof exits non-zero
-  # when nothing matches, which we treat as "no listeners".
+  # Pids of processes LISTENing on `port`. Tries lsof first; if lsof is absent
+  # (:enoent) falls back to `ss` (iproute2, standard on modern Linux), then
+  # `pgrep -f "phx.server"` as a last resort. Returns [] when nothing is found
+  # or when every tool is unavailable.
   defp listeners(port) do
     case run_cmd("lsof", ["-ti", "tcp:#{port}", "-sTCP:LISTEN"], stderr_to_stdout: true) do
       {out, 0} -> parse_pids(out)
@@ -153,11 +158,46 @@ defmodule ArbiterCli.Cmd.Restart do
     end
   rescue
     e in ErlangError ->
-      # System.cmd raises when the executable isn't found (:enoent).
-      Output.die(
-        "could not run lsof: #{inspect(e.original)}",
-        "Install lsof (it's used to find the running server) and ensure it's on your PATH."
-      )
+      if e.original == :enoent do
+        listeners_without_lsof(port)
+      else
+        Output.die(
+          "could not run lsof: #{inspect(e.original)}",
+          "Ensure lsof is on your PATH, or it will be auto-skipped if absent."
+        )
+      end
+  end
+
+  # lsof is absent; try ss (iproute2) then pgrep as ordered fallbacks.
+  defp listeners_without_lsof(port) do
+    pids = listeners_via_ss(port)
+    if pids != [], do: pids, else: listeners_via_pgrep()
+  end
+
+  # `ss -Htlnp sport = :<port>` emits lines like:
+  #   LISTEN 0 128 0.0.0.0:4848 0.0.0.0:* users:(("beam.smp",pid=1234,fd=20))
+  # Extract every `pid=\d+` match.
+  defp listeners_via_ss(port) do
+    case run_cmd("ss", ["-Htlnp", "sport", "=", ":#{port}"], stderr_to_stdout: true) do
+      {out, _} ->
+        ~r/pid=(\d+)/
+        |> Regex.scan(out)
+        |> Enum.map(fn [_, pid] -> pid end)
+        |> Enum.uniq()
+    end
+  rescue
+    _ -> []
+  end
+
+  # Fallback when both lsof and ss are unavailable: find mix phx.server processes
+  # by name. Not port-specific, but good enough when only one server runs locally.
+  defp listeners_via_pgrep do
+    case run_cmd("pgrep", ["-f", "phx.server"], stderr_to_stdout: true) do
+      {out, 0} -> parse_pids(out)
+      _ -> []
+    end
+  rescue
+    _ -> []
   end
 
   defp parse_pids(out) do
@@ -170,9 +210,12 @@ defmodule ArbiterCli.Cmd.Restart do
     run_cmd("kill", ["-#{sig}" | pids], stderr_to_stdout: true)
   end
 
+  # Poll until the port accepts no connection (i.e. the old server released it).
+  # Uses a TCP connect probe instead of lsof so it works without any external
+  # tool, and avoids repeated lsof/ss invocations on every poll tick.
   defp wait_port_free(port, attempts_left) do
     cond do
-      listeners(port) == [] ->
+      port_free?(port) ->
         :ok
 
       attempts_left <= 0 ->
@@ -181,6 +224,68 @@ defmodule ArbiterCli.Cmd.Restart do
       true ->
         sleep(@poll_interval_ms)
         wait_port_free(port, attempts_left - 1)
+    end
+  end
+
+  # Returns true when nothing answers on `port`. The `:bd2_port_check` seam lets
+  # tests override this without shelling out or opening real sockets.
+  defp port_free?(port) do
+    case Process.get(:bd2_port_check) do
+      fun when is_function(fun, 1) ->
+        fun.(port)
+
+      _ ->
+        case :gen_tcp.connect(~c"127.0.0.1", port, [], 500) do
+          {:ok, sock} ->
+            :gen_tcp.close(sock)
+            false
+
+          {:error, _} ->
+            true
+        end
+    end
+  end
+
+  # ---- active-work guard -------------------------------------------------
+
+  # Statuses that mean a Claude acolyte is actively spending tokens and has an
+  # outpost (worktree) that would be abandoned if the server is bounced now.
+  @active_statuses ~w(running awaiting awaiting_tribunal awaiting_review)
+
+  @doc """
+  Abort with a helpful error when any polecats are actively working, unless
+  `force` is true. Safe to call when the server is down: a connection error
+  means no polecats can be running.
+
+  Shared with `arb update` (deploy) and `arb install-service`.
+  """
+  @spec guard_active_polecats!(boolean()) :: :ok
+  def guard_active_polecats!(force) do
+    case Client.get("/api/polecats") do
+      {:ok, %{"data" => polecats}} ->
+        active =
+          Enum.filter(polecats, fn p ->
+            p["status"] in @active_statuses
+          end)
+
+        if active != [] and not force do
+          list =
+            Enum.map_join(active, "\n", fn p ->
+              "  #{p["bead_id"]}  (#{p["status"]})"
+            end)
+
+          Output.die(
+            "#{length(active)} acolyte(s) are actively working",
+            "Restarting now kills in-flight work and abandons their outposts and token spend.\n" <>
+              "Active:\n" <>
+              list <>
+              "\nPass --force to override."
+          )
+        end
+
+      _ ->
+        # Server unreachable or unexpected response — no active polecats possible.
+        :ok
     end
   end
 
