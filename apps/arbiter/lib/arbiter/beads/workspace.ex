@@ -193,6 +193,30 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
+  Workspace-override for the Warden watchdog cap (`config["merge"]["warden_max_polls"]`).
+
+  Returns a positive integer, `:infinity`, or `nil` when not configured (the
+  Warden then uses its mode-specific default: `#{Arbiter.Polecat.Warden.default_max_polls_auto()}` for
+  `auto_merge: true` lanes, `:infinity` for `auto_merge: false` lanes).
+
+  Accepts an integer, a stringified integer (round-trips through JSON), or the
+  string `"infinity"`.
+  """
+  @spec warden_max_polls(t()) :: pos_integer() | :infinity | nil
+  def warden_max_polls(workspace) do
+    case get_in(workspace.config || %{}, ["merge", "warden_max_polls"]) do
+      n when is_integer(n) and n > 0 -> n
+      "infinity" -> :infinity
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 -> n
+          _ -> nil
+        end
+      _ -> nil
+    end
+  end
+
+  @doc """
   Whether a Tribunal (second-acolyte code review) gates merges for this
   workspace, from `config["review"]["required"]`.
 
