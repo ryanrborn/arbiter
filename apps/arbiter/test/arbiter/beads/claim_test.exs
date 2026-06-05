@@ -65,6 +65,15 @@ defmodule Arbiter.Beads.ClaimTest do
 
           {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
             Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -81,7 +90,12 @@ defmodule Arbiter.Beads.ClaimTest do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
           {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -107,8 +121,13 @@ defmodule Arbiter.Beads.ClaimTest do
     test "force: true bypasses the assignment check", %{github_ws: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", _} ->
-            Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
+          {"GET", _} -> Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -119,7 +138,12 @@ defmodule Arbiter.Beads.ClaimTest do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
           {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -138,6 +162,140 @@ defmodule Arbiter.Beads.ClaimTest do
 
     test "no-ops cleanly when the workspace tracker isn't github", %{none_ws: ws} do
       assert {:error, :tracker_not_github} = Claim.claim(ws, "43")
+    end
+
+    test "refuses when another Arbiter installation has already claimed the issue",
+         %{github_ws: ws} do
+      prior_body =
+        "Claimed as other-bd-abc123 by other-fleet (other). Arbiter installation: other-host."
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [%{"body" => prior_body, "user" => %{"login" => "other-bot"}}])
+        end
+      end)
+
+      assert {:error, {:already_claimed, ^prior_body}} = Claim.claim(ws, "43")
+    end
+
+    test "force: true bypasses the prior-claim check", %{github_ws: ws} do
+      prior_body =
+        "Claimed as other-bd-abc123 by other-fleet (other). Arbiter installation: other-host."
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [%{"body" => prior_body, "user" => %{"login" => "other-bot"}}])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, _bead} = Claim.claim(ws, "43", force: true)
+    end
+
+    test "ownership comment is posted when a new bead is created", %{github_ws: ws} do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:comment_posted, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, bead} = Claim.claim(ws, "43")
+
+      assert_receive {:comment_posted, %{"body" => comment_body}}
+      assert String.contains?(comment_body, bead.id)
+      assert String.contains?(comment_body, ws.name)
+      assert String.contains?(comment_body, ws.prefix)
+      assert String.contains?(comment_body, "Arbiter installation:")
+    end
+
+    test "ownership comment is NOT posted for an already-existing bead", %{github_ws: ws} do
+      test_pid = self()
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            send(test_pid, :comment_posted)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, _} = Claim.claim(ws, "43")
+      assert_receive :comment_posted
+
+      # Second claim — must not post another comment.
+      assert {:ok, :existing, _} = Claim.claim(ws, "43")
+      refute_receive :comment_posted
+    end
+
+    test "comment-fetch failure does not abort a claim", %{github_ws: ws} do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "server error"})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, _bead} = Claim.claim(ws, "43")
     end
   end
 
@@ -181,6 +339,15 @@ defmodule Arbiter.Beads.ClaimTest do
 
           {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
             Req.Test.json(conn, issue_payload(%{"number" => 43, "title" => "Issue 43"}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 

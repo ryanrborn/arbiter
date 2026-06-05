@@ -43,18 +43,30 @@ defmodule Arbiter.Beads.Claim do
   and create a bead linked by `tracker_ref`. Idempotent: returns the existing
   bead if one already references the issue.
 
+  On a new claim, posts an ownership comment to the GitHub issue
+  (`"Claimed as <bead-id> by <workspace-name> (<prefix>). Arbiter installation: <host>."`)
+  and attempts to assign the issue to the viewer. These side-effects are
+  non-fatal; a failure does not roll back the bead.
+
+  Before creating, checks the issue's comments for an existing Arbiter
+  ownership comment from another installation. Returns
+  `{:error, {:already_claimed, body}}` if one is found, unless `force: true`.
+
   Options:
 
-    * `:force` — when `true`, skip the assignment-as-claim check.
+    * `:force` — when `true`, skip both the assignment check and the prior
+      claim check.
 
   Returns:
 
     * `{:ok, :created, %Issue{}}` — a new bead was inserted.
     * `{:ok, :existing, %Issue{}}` — a bead for this ref already existed.
     * `{:error, :tracker_not_github}` — the workspace's tracker is not GitHub.
-    * `{:error, :not_assigned, login}` — the issue isn't assigned to the
+    * `{:error, {:not_assigned, login}}` — the issue isn't assigned to the
       workspace viewer.
-    * `{:error, term}` — surface from the tracker adapter or Ash.
+    * `{:error, {:already_claimed, body}}` — another Arbiter installation has
+      already claimed this issue (override with `force: true`).
+    * `{:error, term}` — surfaced from the tracker adapter or Ash.
   """
   @spec claim(Workspace.t(), String.t(), keyword()) :: claim_result
   def claim(%Workspace{} = workspace, ref, opts \\ []) when is_binary(ref) do
@@ -69,7 +81,16 @@ defmodule Arbiter.Beads.Claim do
           {:ok, :existing, bead}
 
         :none ->
-          create_bead(workspace, ref, issue_map)
+          with :ok <- check_prior_claim(workspace, ref, force?) do
+            case create_bead(workspace, ref, issue_map) do
+              {:ok, :created, bead} = result ->
+                signal_ownership(workspace, ref, bead)
+                result
+
+              error ->
+                error
+            end
+          end
       end
     end
   end
@@ -254,6 +275,54 @@ defmodule Arbiter.Beads.Claim do
       {:closed, closed}
     else
       {:error, reason} -> {:error, action, reason}
+    end
+  end
+
+  # ---- internals: ownership signal -----------------------------------------
+
+  @ownership_marker "Arbiter installation:"
+
+  # Check if the issue already has an ownership comment from another Arbiter
+  # installation. Returns :ok if clear (or if comment fetch fails — don't block
+  # on transient errors), or {:error, {:already_claimed, body}} if found.
+  defp check_prior_claim(_workspace, _ref, true), do: :ok
+
+  defp check_prior_claim(workspace, ref, false) do
+    case in_workspace(workspace, fn -> GitHub.list_comments(ref) end) do
+      {:ok, comments} ->
+        case Enum.find(comments, &String.contains?(&1["body"] || "", @ownership_marker)) do
+          nil -> :ok
+          %{"body" => body} -> {:error, {:already_claimed, body}}
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  # Post an ownership comment on the GitHub issue and attempt to assign the
+  # viewer. Both are non-fatal: a failure does not roll back the bead.
+  defp signal_ownership(workspace, ref, bead) do
+    arb_host = System.get_env("ARB_HOST") || local_hostname()
+
+    body =
+      "Claimed as #{bead.id} by #{workspace.name} (#{workspace.prefix}). " <>
+        "#{@ownership_marker} #{arb_host}."
+
+    in_workspace(workspace, fn -> GitHub.post_comment(ref, body) end)
+
+    case viewer_login_cached(workspace) do
+      {:ok, login} -> in_workspace(workspace, fn -> GitHub.assign_user(ref, login) end)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp local_hostname do
+    case :inet.gethostname() do
+      {:ok, hostname} -> List.to_string(hostname)
+      _ -> "unknown"
     end
   end
 
