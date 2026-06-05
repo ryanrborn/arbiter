@@ -83,6 +83,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     if opts[:uninstall] do
       uninstall(scope, mode)
     else
+      Restart.guard_acolyte_session!()
       Restart.guard_active_polecats!(force)
       install(scope, mode)
     end
