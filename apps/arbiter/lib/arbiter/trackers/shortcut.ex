@@ -127,11 +127,27 @@ defmodule Arbiter.Trackers.Shortcut do
   def parse_ref(_), do: :error
 
   @impl true
-  def list_open(_opts) do
-    # `arb list --tracker` currently only ships the GitHub backlog query.
-    # When Shortcut's "open + owned-by viewer" search is wired up, this
-    # returns the normalized summary list.
-    {:error, :not_supported}
+  def list_open(opts) when is_list(opts) do
+    with {:ok, cfg} <- Config.resolve() do
+      case Keyword.get(opts, :assignee, :viewer) do
+        :viewer ->
+          with {:ok, member_id} <- current_user() do
+            fetch_stories_by_owner(cfg, member_id)
+          end
+
+        id when is_binary(id) and id != "" ->
+          fetch_stories_by_owner(cfg, id)
+
+        other ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: nil,
+             message: "list_open: invalid :assignee option #{inspect(other)}",
+             raw: nil
+           }}
+      end
+    end
   end
 
   @impl true
@@ -161,6 +177,46 @@ defmodule Arbiter.Trackers.Shortcut do
     end
   end
 
+  # ---- Tracker behaviour: claim callbacks ------------------------------------
+
+  @impl true
+  def current_user do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, %{"id" => id}} when is_binary(id) <-
+           request(cfg, :get, "/member", []) |> handle_json() do
+      {:ok, id}
+    else
+      {:ok, _other} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message: "GET /member returned no id",
+           raw: nil
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  @impl true
+  def assignees(%{"owner_ids" => ids}) when is_list(ids), do: ids
+  def assignees(_), do: []
+
+  @impl true
+  def issue_status(%{"completed" => true}), do: :closed
+  def issue_status(%{"started" => true}), do: :in_progress
+  def issue_status(_), do: :open
+
+  @impl true
+  def extract_title(%{"name" => name}) when is_binary(name) and name != "", do: name
+  def extract_title(_), do: "(no title)"
+
+  @impl true
+  def extract_description(%{"description" => desc}) when is_binary(desc), do: desc
+  def extract_description(_), do: ""
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
@@ -178,6 +234,42 @@ defmodule Arbiter.Trackers.Shortcut do
     after
       if prev, do: Config.put_active(prev), else: Config.clear()
     end
+  end
+
+  # ---- Internals: list_open -----------------------------------------------
+
+  defp fetch_stories_by_owner(cfg, member_id) do
+    payload = %{
+      "owner_ids" => [member_id],
+      "completed" => false,
+      "archived" => false
+    }
+
+    case request(cfg, :post, "/stories/search", json: payload) do
+      {:ok, %Req.Response{status: status_code, body: stories}}
+      when status_code in 200..299 and is_list(stories) ->
+        {:ok, Enum.map(stories, &summarize_story/1)}
+
+      {:ok, %Req.Response{status: status_code, body: _body}} when status_code in 200..299 ->
+        {:ok, []}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp summarize_story(%{"id" => id} = story) do
+    %{
+      ref: to_string(id),
+      title: Map.get(story, "name") || "(no title)",
+      url: Map.get(story, "app_url"),
+      status: issue_status(story),
+      assignees: assignees(story),
+      raw: story
+    }
   end
 
   # ---- Internals: workflows / states --------------------------------------

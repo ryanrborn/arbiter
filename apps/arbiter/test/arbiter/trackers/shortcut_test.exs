@@ -329,8 +329,57 @@ defmodule Arbiter.Trackers.ShortcutTest do
   end
 
   describe "list_open/1" do
-    test "returns {:error, :not_supported} (search-by-owner not yet wired)" do
-      assert Shortcut.list_open([]) == {:error, :not_supported}
+    test "resolves :viewer by calling /member and then searches by owner_id" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} ->
+            Req.Test.json(conn, %{"id" => "member-uuid-999"})
+
+          {"POST", "/api/v3/stories/search"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["owner_ids"] == ["member-uuid-999"]
+
+            Req.Test.json(conn, [
+              %{
+                "id" => 1234,
+                "name" => "Open story",
+                "app_url" => "https://app.shortcut.com/story/1234",
+                "owner_ids" => ["member-uuid-999"],
+                "completed" => false,
+                "started" => false
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, [summary]} = Shortcut.list_open([])
+      assert summary.ref == "1234"
+      assert summary.title == "Open story"
+      assert summary.status == :open
+      assert summary.assignees == ["member-uuid-999"]
+    end
+
+    test "accepts an explicit assignee id and skips /member lookup" do
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} == {"POST", "/api/v3/stories/search"}
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["owner_ids"] == ["explicit-member-id"]
+        Req.Test.json(conn, [])
+      end)
+
+      assert {:ok, []} = Shortcut.list_open(assignee: "explicit-member-id")
+    end
+
+    test "returns empty list when no stories match" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/member"} -> Req.Test.json(conn, %{"id" => "m123"})
+          {"POST", "/api/v3/stories/search"} -> Req.Test.json(conn, [])
+        end
+      end)
+
+      assert {:ok, []} = Shortcut.list_open([])
     end
   end
 
