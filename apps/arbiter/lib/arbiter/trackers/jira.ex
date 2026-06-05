@@ -115,6 +115,30 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   @impl true
+  def add_remote_link(ref, url, title)
+      when is_binary(ref) and is_binary(url) and is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      # `globalId` makes the link idempotent: re-posting the same PR URL
+      # updates the existing remote link rather than creating a duplicate.
+      payload = %{
+        "globalId" => "arbiter-pr=#{url}",
+        "object" => %{"url" => url, "title" => title}
+      }
+
+      case request(cfg, :post, "/issue/#{ref}/remotelink", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
   def parse_ref(s) when is_binary(s) do
     cond do
       String.starts_with?(s, "jira:") ->

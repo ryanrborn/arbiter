@@ -39,6 +39,35 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 0
   end
 
+  test "--qa-notes and --deployment-notes are sent as fields" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         decoded = Jason.decode!(body)
+         assert decoded["qa_notes"] == "verify the endpoint"
+         assert decoded["deployment_notes"] == "no migrations"
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "qa_notes" => decoded["qa_notes"]})
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn ->
+        Update.run([
+          "bd-001",
+          "--qa-notes",
+          "verify the endpoint",
+          "--deployment-notes",
+          "no migrations"
+        ])
+      end)
+
+    assert exit_code == 0
+  end
+
   test "no fields supplied → error" do
     {_out, err, exit_code} = capture(fn -> Update.run(["bd-001"]) end)
     assert exit_code == 1

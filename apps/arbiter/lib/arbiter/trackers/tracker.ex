@@ -39,6 +39,12 @@ defmodule Arbiter.Trackers.Tracker do
       (`:title`, `:description`, `:assignee`, `:status`); each adapter
       translates to its own field names. Adapters that don't support
       outbound creation return `{:error, :not_supported}`.
+    * `add_remote_link/3` — attach an external link (typically the PR/MR that
+      implements the ticket) to the tracked item so the ticket references the
+      code. **Optional** — adapters that have no notion of remote links simply
+      don't implement it, and `Arbiter.Trackers.add_remote_link/3` returns
+      `{:error, :not_supported}` for them. The Jira adapter implements it via
+      the issue `remotelink` endpoint.
 
   ## `create` attrs shape
 
@@ -104,4 +110,15 @@ defmodule Arbiter.Trackers.Tracker do
               {:ok, [summary]} | {:error, :not_supported} | {:error, term()}
   @callback create(create_attrs) ::
               {:ok, ref} | {:error, :not_supported} | {:error, term()}
+
+  @doc """
+  Attach a remote link (e.g. the implementing PR/MR) to the tracked item.
+
+  `title` is the human label shown on the ticket; `url` is the link target.
+  Optional — adapters without remote links don't implement it.
+  """
+  @callback add_remote_link(ref, url :: String.t(), title :: String.t()) ::
+              :ok | {:error, :not_supported} | {:error, term()}
+
+  @optional_callbacks add_remote_link: 3
 end
