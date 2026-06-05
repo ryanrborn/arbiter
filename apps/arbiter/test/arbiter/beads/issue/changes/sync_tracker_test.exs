@@ -53,6 +53,8 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
 
   # Stub that forwards each request to the test process so we can assert on the
   # method + decoded body, and answers GET (current issue) / PATCH (the write).
+  # GET returns state=closed so verify_and_close sees a closed issue and skips
+  # the follow-up retry on the happy path.
   defp forwarding_stub do
     test_pid = self()
 
@@ -63,7 +65,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
 
           conn
           |> Plug.Conn.put_status(200)
-          |> Req.Test.json(%{"number" => 36, "state" => "open", "labels" => []})
+          |> Req.Test.json(%{"number" => 36, "state" => "closed", "labels" => []})
 
         "PATCH" ->
           {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -113,6 +115,93 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :get, ^expected_path}
       assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
+    end
+  end
+
+  describe "verify-then-close on a github-tracked bead" do
+    test "fires a follow-up close when the initial transition leaves the issue open" do
+      test_pid = self()
+
+      # Stub: GET always returns state=open (simulates a no-op transition).
+      # PATCH records the call and returns 200.
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            send(test_pid, {:github, :get, conn.request_path})
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "open", "labels" => []})
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:github, :patch, conn.request_path, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "open"})
+        end
+      end)
+
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "no-op-transition",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      # Local close must succeed regardless of tracker state.
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
+      assert closed.status == :closed
+
+      path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
+      # Initial close transition fires.
+      assert_receive {:github, :patch, ^path, %{"state" => "closed"}}
+      # Verify fetch sees "open" → follow-up close fires.
+      assert_receive {:github, :patch, ^path, %{"state" => "closed"}}
+    end
+
+    test "does NOT fire a follow-up close when the issue is already closed" do
+      test_pid = self()
+
+      # GET returns closed, so verify short-circuits.
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "closed", "labels" => []})
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:github, :patch, conn.request_path, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "closed"})
+        end
+      end)
+
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "already-closed-upstream",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
+      assert closed.status == :closed
+
+      path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
+      # Exactly one PATCH (the initial transition); no follow-up.
+      assert_receive {:github, :patch, ^path, %{"state" => "closed"}}
+      refute_receive {:github, :patch, ^path, _}
     end
   end
 
@@ -327,6 +416,8 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
 
     # Forwards each Jira call to the test pid; answers the field PUT and the
     # transitions GET/POST so a full push-then-transition succeeds.
+    # Issue-fetch GETs (used by verify_and_close) return a closed issue so the
+    # verify short-circuits without triggering a follow-up transition.
     defp jira_forwarding_stub do
       test_pid = self()
 
@@ -339,12 +430,25 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
             send(test_pid, {:jira, :put_fields, path, Jason.decode!(body)})
             conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
 
-          {"GET", _} ->
+          {"GET", _} when binary_part(path, byte_size(path) - 12, 12) == "/transitions" ->
             send(test_pid, {:jira, :get_transitions, path})
 
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{"transitions" => [%{"id" => "31", "name" => "Code Merged"}]})
+
+          {"GET", _} ->
+            # Issue fetch for verify_and_close: return a closed issue.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "fields" => %{
+                "status" => %{
+                  "name" => "Code Merged",
+                  "statusCategory" => %{"key" => "done"}
+                }
+              }
+            })
 
           {"POST", _} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -375,7 +479,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
       assert closed.status == :closed
 
       # The custom fields are written first…
@@ -408,7 +512,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
         })
 
       # Local close still succeeds (best-effort sync) …
-      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
       assert closed.status == :closed
 
       # … but NOTHING is pushed to Jira: no field write, no transition.
