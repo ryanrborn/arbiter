@@ -150,7 +150,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
         bead_id: bead_id,
         topic: topic,
         line_cap: @line_cap,
-        done_regex: @done_regex
+        done_regex: @done_regex,
+        provider: Keyword.get(opts, :provider)
       }
 
       port_args = %{
