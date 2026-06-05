@@ -86,6 +86,7 @@ defmodule Arbiter.Polecat do
 
   require Logger
 
+  alias Arbiter.Polecat.PRTemplate
   alias Arbiter.Polecat.Registry, as: PRegistry
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
@@ -1521,11 +1522,27 @@ defmodule Arbiter.Polecat do
   # review).
   defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
     title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
+    description = build_pr_body(state.bead_id, Map.get(meta, :worktree_path))
 
-    case do_open_mr(state, branch, title, "", opts) do
+    case do_open_mr(state, branch, title, description, opts) do
       {:ok, _mr_ref, new_state} -> new_state
       {:error, reason, _state} -> park_merge_failure(state, branch, reason)
     end
+  end
+
+  # Build the PR/MR body from the repo's pull_request_template.md, falling back
+  # to a minimal default when the template is absent or the bead can't be loaded.
+  defp build_pr_body(bead_id, worktree_path) do
+    case Ash.get(Arbiter.Beads.Issue, bead_id) do
+      {:ok, bead} ->
+        template = is_binary(worktree_path) && PRTemplate.read(worktree_path)
+        if template, do: PRTemplate.fill(template, bead), else: PRTemplate.default_body(bead)
+
+      _ ->
+        ""
+    end
+  rescue
+    _ -> ""
   end
 
   # A merge failed. The adapter has already restored the canonical tree (the
