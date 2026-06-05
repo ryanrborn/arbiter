@@ -497,6 +497,24 @@ defmodule Arbiter.Mergers.GithubTest do
       assert :ok = Github.merge("leo-technologies-llc/verus_server#7")
     end
 
+    test "open/4 with NO owner in cfg still derives both owner and repo from :repo_path (bd-a53kv2)",
+         %{rig: rig} do
+      # Workspace cfg carries only credentials — both owner and repo are absent.
+      # This is the "single-rig workspace after merge.config.repo + owner removal"
+      # shape: everything is derived per-rig from the git remote.
+      Config.put_active(%{"credentials_ref" => "env:#{@env_var}"})
+
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} ==
+                 {"POST", "/repos/leo-technologies-llc/verus_server/pulls"}
+
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 5})
+      end)
+
+      assert {:ok, "leo-technologies-llc/verus_server#5"} =
+               Github.open("feature/x", "T", "B", %{repo_path: rig})
+    end
+
     test "open/4 errors when cfg has no repo AND opts has no :repo_path" do
       assert {:error, %Error{kind: :config_missing}} =
                Github.open("feature/x", "T", "B", %{})
