@@ -257,5 +257,142 @@ defmodule Arbiter.Polecat.PRTemplateTest do
       out = PRTemplate.default_body(bead)
       refute out =~ "http"
     end
+
+    test ":github tracker with bare numeric ref appends Closes #N" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix bug",
+        priority: 2,
+        issue_type: :bug,
+        tracker_type: :github,
+        tracker_ref: "42"
+      }
+
+      out = PRTemplate.default_body(bead)
+      assert out =~ "Closes #42"
+    end
+
+    test ":github tracker with non-numeric ref does not append closing keyword" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix bug",
+        priority: 2,
+        issue_type: :bug,
+        tracker_type: :github,
+        tracker_ref: "gh-42"
+      }
+
+      out = PRTemplate.default_body(bead)
+      refute out =~ "Closes"
+    end
+
+    test ":jira tracker does not append closing keyword" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix bug",
+        priority: 2,
+        issue_type: :bug,
+        tracker_type: :jira,
+        tracker_ref: "VR-17585"
+      }
+
+      out = PRTemplate.default_body(bead)
+      refute out =~ "Closes"
+    end
+
+    test ":none tracker does not append closing keyword" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix bug",
+        priority: 2,
+        issue_type: :bug,
+        tracker_type: :none,
+        tracker_ref: nil
+      }
+
+      out = PRTemplate.default_body(bead)
+      refute out =~ "Closes"
+    end
+  end
+
+  describe "fill/3 — Closes keyword for github beads" do
+    test "appends Closes #N for :github bead with numeric ref" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :github,
+        tracker_ref: "99"
+      }
+
+      template = "## Summary\n\nSome body."
+      out = PRTemplate.fill(template, bead)
+      assert out =~ "Closes #99"
+    end
+
+    test "does not append Closes for :jira bead" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :jira,
+        tracker_ref: "VR-100"
+      }
+
+      template = "## Summary\n\nSome body."
+      out = PRTemplate.fill(template, bead)
+      refute out =~ "Closes"
+    end
+
+    test "does not append Closes for :none bead" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none,
+        tracker_ref: nil
+      }
+
+      template = "## Summary\n\nSome body."
+      out = PRTemplate.fill(template, bead)
+      refute out =~ "Closes"
+    end
+
+    test "tracker.closes placeholder resolves to Closes #N for github and is droppable" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :github,
+        tracker_ref: "7"
+      }
+
+      # A template that explicitly places {{tracker.closes}} inline
+      template = "## Summary\n\n{{tracker.closes}}"
+      out = PRTemplate.fill(template, bead)
+      # The explicit placeholder expands + the auto-append adds it too
+      assert out =~ "Closes #7"
+    end
+
+    test "tracker.closes placeholder is line-dropped for :none bead" do
+      bead = %Issue{
+        id: "x-1",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :none,
+        tracker_ref: nil
+      }
+
+      template = "before\n{{tracker.closes}}\nafter"
+      out = PRTemplate.fill(template, bead)
+      refute out =~ "Closes"
+      assert out =~ "before"
+      assert out =~ "after"
+    end
   end
 end

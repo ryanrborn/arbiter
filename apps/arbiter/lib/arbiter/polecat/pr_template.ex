@@ -23,6 +23,8 @@ defmodule Arbiter.Polecat.PRTemplate do
       string for `Tracker.None`.
     * `{{tracker.ref}}` — `issue.tracker_ref` (e.g. `"VR-17585"` or `""`).
     * `{{tracker.type}}` — `"jira" | "linear" | "github" | "none"`.
+    * `{{tracker.closes}}` — `"Closes #N"` for `:github` beads with a bare
+      numeric `tracker_ref`; `""` (line-dropped) for all others.
 
   Unknown placeholders are left in the output verbatim so templates can use
   `{{...}}` for non-substitution purposes if needed.
@@ -64,7 +66,9 @@ defmodule Arbiter.Polecat.PRTemplate do
   Build a minimal PR body when no `.github/pull_request_template.md` exists.
 
   Produces a clean description containing: title (as a Markdown heading),
-  description (if present), and tracker link (if present).
+  description (if present), tracker link (if present), and — for
+  `:github`-tracked beads with a bare numeric `tracker_ref` — a
+  `Closes #N` keyword so GitHub auto-closes the issue on merge.
   """
   @spec default_body(Issue.t()) :: String.t()
   def default_body(%Issue{} = bead) do
@@ -79,6 +83,9 @@ defmodule Arbiter.Polecat.PRTemplate do
 
     parts = if link != "", do: parts ++ [link], else: parts
 
+    closing = closing_keyword(bead)
+    parts = if closing != "", do: parts ++ [closing], else: parts
+
     Enum.join(parts, "\n\n")
   end
 
@@ -92,10 +99,19 @@ defmodule Arbiter.Polecat.PRTemplate do
   def fill(template, %Issue{} = bead, _opts \\ []) when is_binary(template) do
     placeholders = placeholders_for(bead)
 
-    template
-    |> String.split("\n", trim: false)
-    |> Enum.flat_map(&render_line(&1, placeholders))
-    |> Enum.join("\n")
+    body =
+      template
+      |> String.split("\n", trim: false)
+      |> Enum.flat_map(&render_line(&1, placeholders))
+      |> Enum.join("\n")
+
+    closing = closing_keyword(bead)
+
+    if closing != "" do
+      body <> "\n\n" <> closing
+    else
+      body
+    end
   end
 
   # ---- internals ----
@@ -147,9 +163,21 @@ defmodule Arbiter.Polecat.PRTemplate do
       "bead.issue_type" => Atom.to_string(bead.issue_type || :task),
       "tracker.link" => safe_link_for(bead),
       "tracker.ref" => bead.tracker_ref || "",
-      "tracker.type" => Atom.to_string(bead.tracker_type || :none)
+      "tracker.type" => Atom.to_string(bead.tracker_type || :none),
+      "tracker.closes" => closing_keyword(bead)
     }
   end
+
+  # Returns "Closes #N" for :github-tracked beads whose tracker_ref is a bare
+  # integer string (e.g. "42"), so GitHub auto-closes the issue on merge.
+  # Returns "" for all other tracker types — Jira/Linear/etc. have no such
+  # native close keyword.
+  defp closing_keyword(%Issue{tracker_type: :github, tracker_ref: ref})
+       when is_binary(ref) do
+    if Regex.match?(~r/^\d+$/, ref), do: "Closes ##{ref}", else: ""
+  end
+
+  defp closing_keyword(_bead), do: ""
 
   # Trackers.link_for/1 may raise for unregistered types; we don't want a
   # template-fill to crash the polecat. Treat any failure as no-link.
