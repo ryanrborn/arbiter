@@ -115,6 +115,49 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert "phoenix" in components
     end
 
+    test "spawns Phoenix with cd set to the project root when .run-server.sh is absent" do
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        send(test_pid, {:cmd, cmd, args, opts})
+        if cmd == "sh", do: stub_get("/api/workspaces", @green)
+        {"", 0}
+      end)
+
+      capture(fn -> Start.run([]) end)
+
+      assert_received {:cmd, "sh", ["-c", _script], opts}
+      assert Keyword.get(opts, :cd) == "/tmp/arbiter-start-test"
+    end
+
+    test "delegates to .run-server.sh when it exists in the project root" do
+      arb_home = System.get_env("ARB_HOME")
+      File.mkdir_p!(arb_home)
+      run_sh = Path.join(arb_home, ".run-server.sh")
+      File.write!(run_sh, "#!/bin/sh\nexec mix phx.server\n")
+      on_exit(fn -> File.rm(run_sh) end)
+
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, opts ->
+        send(test_pid, {:cmd, cmd, args, opts})
+        if cmd == "sh", do: stub_get("/api/workspaces", @green)
+        {"", 0}
+      end)
+
+      capture(fn -> Start.run([]) end)
+
+      assert_received {:cmd, "sh", ["-c", script], opts}
+      assert script =~ ".run-server.sh"
+      refute Keyword.has_key?(opts, :cd)
+    end
+
     test "times out with exit 1 when the stack never comes up" do
       # Never flips — the API stays refused for the whole wait loop.
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
