@@ -47,16 +47,32 @@ syntax.
 
 ### Permission modes
 
-| Mode      | Meaning                                                        | Deny enforced? |
-|-----------|---------------------------------------------------------------|----------------|
-| `:auto`   | Safe default. Works autonomously; edits auto-accepted.        | **yes**        |
-| `:strict` | Only explicitly-allowed tools run; everything else is blocked.| **yes**        |
-| `:bypass` | Escape hatch — *all* checks skipped, including the deny list.  | no             |
+| Mode      | Meaning                                                                     | Interactive classifier? | Deny enforced? |
+|-----------|-----------------------------------------------------------------------------|------------------------|----------------|
+| `:bypass` | **Headless-safe default.** No interactive classifier; deny list still on.   | **no** (headless-safe) | **yes**        |
+| `:auto`   | Opt-in for supervised runs. Classifier active; can pause and ask approval.  | yes (can freeze)       | **yes**        |
+| `:strict` | Only explicitly-allowed tools run; everything else is blocked.              | yes (collapses to deny)| **yes**        |
 
-`:auto` is the safe default: an acolyte can get its job done without a human in
-the loop, but the destructive-op deny list is **still enforced**. `:bypass`
-requires deliberate opt-in and should only be used for a run you already trust
-(e.g. one wrapped in external OS isolation).
+#### Why `:bypass` is the headless-safe default
+
+Acolytes are headless — they run via `claude --print` with no human watching.
+The interactive permission classifier in `:auto` mode was designed for
+*interactive* sessions: it can pause and ask "do you want to allow this?" When
+no human is present, that prompt has no one to answer it, and the acolyte
+freezes mid-task. The directive stalls silently.
+
+`:bypass` uses `--dangerously-skip-permissions` to skip the interactive
+classifier entirely, preventing headless freezes. Crucially, the deny list is a
+**separate, orthogonal mechanism** — deny rules are hard tool-level blocks
+enforced at the tool layer, and they are still applied via `--settings` even
+in `:bypass` mode. So:
+
+> **Worktree containment = blast-radius fence. Deny list = real security fence.
+> `:bypass` = headless-safe, deny list on.**
+
+Use `security.mode: auto` in workspace config if you want the interactive
+classifier (and accept the freeze risk for headless runs). Use `:strict` for
+the tightest allow-list posture.
 
 ### Safe-by-default deny
 
@@ -100,7 +116,9 @@ sandbox. The badge and surface show `net=tools-off` to make this scope explicit.
 ### Per-domain (the common case)
 
 Set it in the workspace `config` JSON under `agent.security` — no source edits,
-no touching anyone's `~/.claude`:
+no touching anyone's `~/.claude`. The default is `:bypass` (headless-safe). To
+opt into the interactive classifier (and accept the freeze risk), set
+`"mode": "auto"`:
 
 ```json
 {
@@ -149,8 +167,10 @@ that sets them.
 
 `Arbiter.Agents.Claude.Security` translates the normalized policy into the CLI:
 
-* **mode** → `--permission-mode auto|default` (or
-  `--dangerously-skip-permissions` for `:bypass`).
+* **mode** → `--dangerously-skip-permissions` for `:bypass` (the default);
+  `--permission-mode auto|default` for `:auto`/`:strict`. In all modes, deny
+  rules are applied via `--settings` — bypass only skips the interactive
+  classifier, not the deny list.
 * **allow / deny / safe_defaults / sandbox** → an inline
   `--settings '<json>'` permission document (the CLI accepts a JSON string, so
   there is no shared-file race and nothing is read from `~/.claude`).
