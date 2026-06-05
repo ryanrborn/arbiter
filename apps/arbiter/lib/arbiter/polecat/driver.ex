@@ -149,8 +149,9 @@ defmodule Arbiter.Polecat.Driver do
 
   def handle_info(:check_polecat, state) do
     case safe_polecat_state(state.polecat_pid) do
-      %{status: :completed} ->
-        close_bead(state.bead_id)
+      %{status: :completed} = polecat_state ->
+        close_upstream = should_close_upstream(polecat_state)
+        close_bead(state.bead_id, close_upstream)
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
@@ -237,6 +238,9 @@ defmodule Arbiter.Polecat.Driver do
     :exit, _ -> nil
   end
 
+  defp should_close_upstream(%{mr_ref: mr_ref}) when is_binary(mr_ref) and mr_ref != "", do: true
+  defp should_close_upstream(_), do: false
+
   defp safe(fun) do
     fun.()
   rescue
@@ -245,14 +249,21 @@ defmodule Arbiter.Polecat.Driver do
     :exit, _ -> :ok
   end
 
-  defp close_bead(bead_id) do
-    with {:ok, bead} <- Ash.get(Issue, bead_id),
-         {:ok, _} <- Ash.update(bead, %{}, action: :close) do
-      :ok
+  defp close_bead(bead_id, close_upstream \\ false) do
+    with {:ok, bead} <- Ash.get(Issue, bead_id) do
+      attrs =
+        %{}
+        |> then(fn a -> if close_upstream, do: Map.put(a, :close_upstream, true), else: a end)
+
+      case Ash.update(bead, attrs, action: :close) do
+        {:ok, _} -> :ok
+        {:error, err} ->
+          Logger.warning("Polecat.Driver: failed to close bead #{bead_id}: #{inspect(err)}")
+          :error
+      end
     else
       err ->
         Logger.warning("Polecat.Driver: failed to close bead #{bead_id}: #{inspect(err)}")
-
         :error
     end
   end
