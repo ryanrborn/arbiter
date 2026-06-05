@@ -667,7 +667,7 @@ defmodule Arbiter.Workflows.Refinery do
   defp close_bead_and_finalize(state, item) do
     case Ash.get(Issue, item.bead_id) do
       {:ok, bead} ->
-        case Ash.update(bead, %{}, action: :close) do
+        case Ash.update(bead, %{close_upstream: true}, action: :close) do
           {:ok, _closed} ->
             broadcast_refinery_event(state, {:bead_closed_by_refinery, item.bead_id})
 
