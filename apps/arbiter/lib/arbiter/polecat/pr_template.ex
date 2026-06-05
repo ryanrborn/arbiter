@@ -61,6 +61,28 @@ defmodule Arbiter.Polecat.PRTemplate do
   end
 
   @doc """
+  Build a minimal PR body when no `.github/pull_request_template.md` exists.
+
+  Produces a clean description containing: title (as a Markdown heading),
+  description (if present), and tracker link (if present).
+  """
+  @spec default_body(Issue.t()) :: String.t()
+  def default_body(%Issue{} = bead) do
+    link = safe_link_for(bead)
+
+    parts = ["## #{bead.title}"]
+
+    parts =
+      if bead.description && String.trim(bead.description) != "",
+        do: parts ++ [String.trim(bead.description)],
+        else: parts
+
+    parts = if link != "", do: parts ++ [link], else: parts
+
+    Enum.join(parts, "\n\n")
+  end
+
+  @doc """
   Substitute placeholders in `template` using `bead` (an `%Issue{}`).
 
   Drops lines whose only placeholder resolves to empty (typical: a `:none`
