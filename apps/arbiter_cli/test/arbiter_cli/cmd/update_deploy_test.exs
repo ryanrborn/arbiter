@@ -6,25 +6,31 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
   alias ArbiterCli.Cmd.Update
 
   @green %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
+  @no_polecats %{"data" => []}
 
   setup do
     System.put_env("ARB_HOME", "/tmp/arbiter-update-test")
     System.delete_env("ARB_HOST")
     on_exit(fn -> System.delete_env("ARB_HOME") end)
     Process.put(:bd2_sleep, fn _ms -> :ok end)
+    # TCP port check seam: default to "port is free" so wait_port_free returns
+    # immediately in tests without opening real sockets.
+    Process.put(:bd2_port_check, fn _port -> true end)
     :ok
   end
 
   # A cmd runner covering both the git preflight/pull and the reused restart
   # lifecycle. Knobs:
   #   * branch   — what `rev-parse --abbrev-ref HEAD` reports
-  #   * dirty    — whether the tree has uncommitted changes
+  #   * dirty    — whether the tree has tracked (staged/unstaged) changes
+  #   * untracked — whether the tree has untracked files only
   #   * pull     — {output, exit_code} returned by `git pull --ff-only`
   #   * changed  — whether the pull advanced HEAD (drives before/after sha)
   # Records every invocation to the test pid as {:cmd, cmd, args}.
   defp stub_deploy(opts) do
     branch = Keyword.get(opts, :branch, "main")
     dirty = Keyword.get(opts, :dirty, false)
+    untracked = Keyword.get(opts, :untracked, false)
     pull = Keyword.get(opts, :pull, {"Updating aaaaaaa..bbbbbbb\n", 0})
     changed = Keyword.get(opts, :changed, true)
     test_pid = self()
@@ -37,7 +43,11 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
           {branch <> "\n", 0}
 
         {"git", ["status", "--porcelain"]} ->
-          if dirty, do: {" M apps/foo/lib/foo.ex\n", 0}, else: {"", 0}
+          cond do
+            dirty -> {" M apps/foo/lib/foo.ex\n", 0}
+            untracked -> {"?? .run-server.sh\n", 0}
+            true -> {"", 0}
+          end
 
         {"git", ["rev-parse", "HEAD"]} ->
           if Process.get(:pulled), do: {"bbbbbbb\n", 0}, else: {"aaaaaaa\n", 0}
@@ -70,7 +80,11 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
 
   describe "deploy (no issue id)" do
     test "pulls new commits, restarts Phoenix, reports the short log, exits 0" do
-      stub_get("/api/workspaces", @green)
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       stub_deploy(changed: true)
 
       {out, _err, code} = capture(fn -> Update.run([]) end)
@@ -90,7 +104,11 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     end
 
     test "--json emits a single object describing the pull and restart" do
-      stub_get("/api/workspaces", @green)
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       stub_deploy(changed: true)
 
       {out, _err, code} = capture(fn -> Update.run(["--json"]) end)
@@ -107,7 +125,11 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     end
 
     test "already up to date: skips the restart and exits 0" do
-      stub_get("/api/workspaces", @green)
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       stub_deploy(changed: false, pull: {"Already up to date.\n", 0})
 
       {out, _err, code} = capture(fn -> Update.run([]) end)
@@ -123,8 +145,12 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
   end
 
   describe "deploy preflight aborts" do
-    test "dirty working tree aborts before pulling, exit 1" do
-      stub_get("/api/workspaces", @green)
+    test "tracked modifications abort before pulling, exit 1" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       stub_deploy(dirty: true)
 
       {_out, err, code} = capture(fn -> Update.run([]) end)
@@ -134,8 +160,27 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       refute_received {:cmd, "git", ["pull", "--ff-only"]}
     end
 
+    test "untracked-only working tree does NOT abort: proceeds to pull" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
+      stub_deploy(untracked: true, changed: true)
+
+      {out, _err, code} = capture(fn -> Update.run([]) end)
+
+      assert code == 0
+      assert out =~ "Pulled 2 new commit(s)"
+      assert_received {:cmd, "git", ["pull", "--ff-only"]}
+    end
+
     test "off the integration branch aborts before pulling, exit 1" do
-      stub_get("/api/workspaces", @green)
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       stub_deploy(branch: "feature/wip")
 
       {_out, err, code} = capture(fn -> Update.run([]) end)
@@ -147,7 +192,11 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     end
 
     test "non-fast-forward pull surfaces git's error, exit 1" do
-      stub_get("/api/workspaces", @green)
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       stub_deploy(pull: {"fatal: Not possible to fast-forward, aborting.\n", 1})
 
       {_out, err, code} = capture(fn -> Update.run([]) end)
@@ -158,10 +207,63 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     end
   end
 
+  describe "active-work guard" do
+    test "refuses deploy when acolytes are actively working (no --force)" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"},
+         {%{"data" => [%{"bead_id" => "bd-xyz", "status" => "running"}]}, 200}}
+      ])
+
+      stub_deploy([])
+
+      {_out, err, code} = capture(fn -> Update.run([]) end)
+
+      assert code == 1
+      assert err =~ "acolyte"
+      assert err =~ "bd-xyz"
+      assert err =~ "--force"
+      refute_received {:cmd, "git", ["pull", "--ff-only"]}
+    end
+
+    test "--force deploys even with active acolytes" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"},
+         {%{"data" => [%{"bead_id" => "bd-xyz", "status" => "running"}]}, 200}}
+      ])
+
+      stub_deploy(changed: true)
+
+      {out, _err, code} = capture(fn -> Update.run(["--force"]) end)
+
+      assert code == 0
+      assert out =~ "Pulled 2 new commit(s)"
+    end
+
+    test "proceeds normally when no acolytes are active" do
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
+      stub_deploy(changed: true)
+
+      {out, _err, code} = capture(fn -> Update.run([]) end)
+
+      assert code == 0
+      assert out =~ "Pulled 2 new commit(s)"
+    end
+  end
+
   describe "deploy timeout" do
     test "exits 1 when Phoenix never comes back green after the pull" do
       # Reachable during preflight, but the started server never goes green.
-      stub_get("/api/workspaces", @green)
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
       test_pid = self()
 
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
