@@ -36,7 +36,8 @@ defmodule ArbiterCli.Cmd.Doctor do
     [
       check_phoenix(),
       check_workspaces_exist(),
-      check_active_workspace()
+      check_active_workspace(),
+      check_versions()
     ]
   end
 
@@ -146,6 +147,43 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :fail,
           detail: err.message,
           hint: err.hint
+        }
+    end
+  end
+
+  defp check_versions do
+    cli_sha = ArbiterCli.Version.git_sha_clean()
+    cli_vsn = ArbiterCli.Version.app_version()
+
+    case Client.get("/api/version") do
+      {:ok, %{"sha" => server_sha, "version" => server_vsn}} ->
+        if cli_sha != server_sha do
+          %Result{
+            name: "version",
+            status: :fail,
+            detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
+            hint: "Rebuild the escript (`mix escript.build`) and/or redeploy the server."
+          }
+        else
+          %Result{
+            name: "version",
+            status: :ok,
+            detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)"
+          }
+        end
+
+      {:error, %Client.Error{kind: :connection_refused}} ->
+        %Result{
+          name: "version",
+          status: :ok,
+          detail: "CLI #{cli_vsn} @ #{cli_sha} (server unreachable)"
+        }
+
+      {:error, %Client.Error{} = err} ->
+        %Result{
+          name: "version",
+          status: :ok,
+          detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})"
         }
     end
   end
