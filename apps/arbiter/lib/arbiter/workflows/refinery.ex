@@ -1,7 +1,7 @@
 defmodule Arbiter.Workflows.Refinery do
   @moduledoc """
   Per-workspace merge-queue GenServer. Picks up "polecat done" events,
-  opens PRs (or merges directly per workspace config), polls them for
+  opens MRs/PRs (or merges directly per workspace config), polls them for
   approval + CI, merges with the configured strategy, and transitions
   beads to `:closed` when the merge lands.
 
@@ -16,26 +16,26 @@ defmodule Arbiter.Workflows.Refinery do
       receives {:polecat_done, bead_id}
         │
         ▼
-      loads bead → reads merge_strategy → opens PR (or skips for :direct)
+      loads bead → resolves merge adapter → opens MR (or skips for :direct)
         │
         ▼
-      tick/0 (every poll_interval_ms) → polls in-flight PRs → merges → closes bead
+      tick/0 (every poll_interval_ms) → polls in-flight MRs → merges → closes bead
 
   ## State machine (per in-flight item)
 
   The status is an explicit atom enum, not a polymorphic struct or behaviour:
 
       :opening
-        │   pr_open succeeded
+        │   adapter.open succeeded
         ▼
       :awaiting_approval
-        │   reviewDecision == "APPROVED"
+        │   approved == true
         ▼
       :ci_running
-        │   mergeStateStatus == "clean"
+        │   ci_clean == true
         ▼
       :ready_to_merge
-        │   pr_merge accepted
+        │   adapter.merge accepted
         ▼
       :merging
         │   merge confirmed
@@ -48,26 +48,26 @@ defmodule Arbiter.Workflows.Refinery do
 
   ## Auto-resolved merge conflicts (bd-dolcqq)
 
-  When `pr_get` reports a CONFLICTING PR (`mergeable: false`) we used to
+  When `adapter.get` reports `conflicting: true` we used to
   freeze the item and wait for a human rebase — twice in one morning that
   meant an Admiral page on parallel dispatcher-bead waves. Now the Refinery
   side-steps that:
 
       :awaiting_approval (or any non-terminal status)
-        │   pr_get reports mergeable: false
+        │   adapter.get reports conflicting: true
         ▼
       :conflict_resolving — spawn `Arbiter.Workflows.Refinery.ConflictResolver`
                             (a swappable behaviour, defaults to a Polecat +
                             ClaudeSession running rebase + force-push)
         │   acolyte pushes resolved branch
         ▼
-      (next tick observes mergeable: true; restore_after_resolution/2
+      (next tick observes conflicting: false; restore_after_resolution/2
        returns the item to its prior status, posts a :notification so the
        Admiral feed sees the auto-rebase succeeded, and the queue resumes)
 
   Each conflict gets **exactly one** resolver attempt. The resolver is a
   *mechanical* rebase; if a single pass + force-push doesn't unblock the
-  PR (the next tick still sees `mergeable: false`), the conflict is almost
+  MR (the next tick still sees `conflicting: true`), the conflict is almost
   certainly semantic and the Refinery posts an `:escalation` mail (via
   `Arbiter.Workflows.Refinery.ConflictResolver.escalate_unresolved/4`)
   and parks the item `:failed`. Spawn failures (no rig configured,
@@ -79,25 +79,17 @@ defmodule Arbiter.Workflows.Refinery do
   → `:arbiter, :refinery_conflict_resolver` (application env) → the default
   real implementation. Tests pass a stub so they don't spawn real acolytes.
 
-  ## merge_strategy
+  ## Merge adapter
 
-  Read from `workspace.config["merge"]["strategy"]`. Valid values:
+  The merge adapter is resolved from `workspace.config["merge"]["strategy"]`
+  via `Arbiter.Mergers.for_workspace/1`. Valid values:
 
-    * `"squash"` (default) — `GitHub.pr_merge/4` with `:squash`
-    * `"merge"`            — `:merge`
-    * `"rebase"`           — `:rebase`
-    * `"direct"`           — **never opens a PR**. The bead is immediately
-      transitioned to `:done` (and then `:closed`). This is the "personal
-      project" path; the polecat is assumed to have already pushed +
-      merged its branch out-of-band. It exists specifically because
-      verus_server-style team workflows must default to `pr`, and earlier
-      Phase-3 code conflated "merge directly" with "no PR" in a way that
-      was hostile to the team default.
-
-  In particular, **`merge_strategy="pr"` (or any non-direct value) MUST
-  NEVER call `Worktree.push/2` from this module**. The polecat that
-  produced the "done" event is responsible for pushing its branch. The
-  refinery's job ends at the PR boundary.
+    * `"github"` — `Arbiter.Mergers.Github` adapter (PR-based)
+    * `"gitlab"` — `Arbiter.Mergers.Gitlab` adapter (MR-based)
+    * `"direct"` — `Arbiter.Mergers.Direct` adapter. **Never opens a
+      MR/PR**. The bead is immediately transitioned to `:done` (and then
+      `:closed`). This is the "personal project" path; the polecat is
+      assumed to have already pushed + merged its branch out-of-band.
 
   ## PubSub topic
 
@@ -123,9 +115,8 @@ defmodule Arbiter.Workflows.Refinery do
     * `:workspace_id` (string, required) — the workspace this refinery serves.
     * `:name` — process name (default `__MODULE__`).
     * `:poll_interval_ms` — how often `:tick` fires (default 30_000).
-    * `:repo` / `:base` — override the repo + base branch instead of reading
-      them from `workspace.config["merge"]`. Convenient for tests.
-    * `:github_token` — passed through to every `Arbiter.GitHub` call.
+    * `:base` — override the base branch instead of reading it from
+      `workspace.config["merge"]`. Convenient for tests.
     * `:auto_tick` — when `false` (default `true`), the periodic `:tick`
       timer is not scheduled. Tests use `false` and drive ticks via
       `tick/1` so they don't race with real time.
@@ -140,11 +131,11 @@ defmodule Arbiter.Workflows.Refinery do
   require Logger
 
   alias Arbiter.Beads.Issue
-  alias Arbiter.GitHub
+  alias Arbiter.Beads.Workspace
+  alias Arbiter.Mergers
   alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
-  @default_strategy "squash"
 
   @typedoc "Status atom for an in-flight item."
   @type status ::
@@ -160,7 +151,7 @@ defmodule Arbiter.Workflows.Refinery do
   @typedoc "An in-flight merge queue item."
   @type item :: %{
           bead_id: String.t(),
-          pr_number: pos_integer() | nil,
+          mr_ref: String.t() | nil,
           status: status(),
           strategy: String.t(),
           opened_at: DateTime.t() | nil,
@@ -174,9 +165,8 @@ defmodule Arbiter.Workflows.Refinery do
     @moduledoc false
     defstruct [
       :workspace_id,
-      :repo,
+      :adapter,
       :base,
-      :github_token,
       :poll_interval_ms,
       :auto_tick,
       :pubsub_topic,
@@ -199,7 +189,7 @@ defmodule Arbiter.Workflows.Refinery do
   @doc """
   Synchronously enqueue a bead for merging. Behaves the same as receiving
   a `{:polecat_done, bead_id}` PubSub message. Returns `:ok` on enqueue
-  even if the actual PR open / merge hasn't happened yet (it runs inside
+  even if the actual MR open / merge hasn't happened yet (it runs inside
   the GenServer's `handle_call` though, so by the time this returns the
   initial state transition has been recorded).
   """
@@ -242,11 +232,16 @@ defmodule Arbiter.Workflows.Refinery do
     # Subscribe to polecat done events for this workspace.
     :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
 
+    # Resolve adapter from workspace config. Defaults to Direct when the
+    # workspace can't be loaded (e.g. a fake ID in supervisor tests, or DB
+    # not yet ready at boot).
+    {adapter, workspace} = load_adapter_for(workspace_id)
+    if workspace, do: Mergers.prepare(workspace)
+
     state = %State{
       workspace_id: workspace_id,
-      repo: Keyword.get(opts, :repo),
+      adapter: adapter,
       base: Keyword.get(opts, :base, "main"),
-      github_token: Keyword.get(opts, :github_token),
       poll_interval_ms: poll_interval_ms,
       auto_tick: auto_tick,
       pubsub_topic: topic,
@@ -304,32 +299,39 @@ defmodule Arbiter.Workflows.Refinery do
         # Reload workspace to pick up the merge config block. Issue belongs_to
         # workspace but the relationship isn't always loaded.
         {:ok, bead} = Ash.load(bead, [:workspace])
-        strategy = strategy_for(bead.workspace, "merge", "strategy", @default_strategy)
+
+        # Re-seed the adapter's per-process config from the latest workspace
+        # state, then resolve the adapter module.
+        Mergers.prepare(bead.workspace)
+        adapter = Mergers.for_workspace(bead.workspace)
+        state = %{state | adapter: adapter}
+
+        strategy = Atom.to_string(Workspace.merger_strategy(bead.workspace))
 
         cond do
           already_queued?(state, bead_id) ->
             {{:ok, :already_queued}, state}
 
           strategy == "direct" ->
-            # direct: never call PR APIs. The polecat owned the push + merge;
+            # direct: never call MR/PR APIs. The polecat owned the push + merge;
             # we just transition the bead. This is the explicit escape hatch
-            # for personal projects that don't use the PR workflow.
+            # for personal projects that don't use the PR/MR workflow.
             item = new_item(bead_id, strategy, status: :done)
             state = %{state | items: [item | state.items]}
             state = close_bead_and_finalize(state, item)
             {:ok, state}
 
-          existing_pr_number(bead) ->
-            # bd-auma3z: the bead already has an open PR (e.g. a prior acolyte
-            # opened one before it stopped, and was then resumed). Adopt that PR
+          existing_mr_ref(bead) ->
+            # bd-auma3z: the bead already has an open MR/PR (e.g. a prior acolyte
+            # opened one before it stopped, and was then resumed). Adopt that MR
             # into the queue and poll it to completion rather than calling
-            # `pr_open` again — that would create a DUPLICATE PR for the same
-            # branch. The resumed acolyte's work lands on the same branch the PR
+            # `adapter.open` again — that would create a DUPLICATE for the same
+            # branch. The resumed acolyte's work lands on the same branch the MR
             # already tracks.
-            adopt_existing_pr(state, bead, strategy)
+            adopt_existing_mr(state, bead, strategy)
 
           true ->
-            open_pr_for(state, bead, strategy)
+            open_mr_for(state, bead, strategy)
         end
 
       {:error, _} = err ->
@@ -337,33 +339,25 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  # The bead's recorded PR number, if any — set by `maybe_record_pr_ref/2` when
-  # a PR was opened. Parsed from the string `pr_ref` field. nil/blank/non-numeric
-  # means no open PR to adopt.
-  defp existing_pr_number(%Issue{pr_ref: ref}) when is_binary(ref) and ref != "" do
-    case Integer.parse(ref) do
-      {n, _} when n > 0 -> n
-      _ -> nil
-    end
-  end
+  # The bead's recorded MR ref, if any — set by `maybe_record_mr_ref/2` when
+  # an MR was opened. nil/blank means no open MR to adopt.
+  defp existing_mr_ref(%Issue{pr_ref: ref}) when is_binary(ref) and ref != "", do: ref
+  defp existing_mr_ref(_), do: nil
 
-  defp existing_pr_number(_), do: nil
-
-  # Adopt a bead's already-open PR into the merge queue without opening a new
-  # one (bd-auma3z no-duplicate-PR guard). Slots it in at `:awaiting_approval`
-  # so the normal poll loop drives it the rest of the way, exactly as if we'd
-  # just opened it.
-  defp adopt_existing_pr(state, bead, strategy) do
-    pr_number = existing_pr_number(bead)
+  # Adopt a bead's already-open MR into the merge queue without opening a new
+  # one (bd-auma3z no-duplicate guard). Slots it in at `:awaiting_approval`
+  # so the normal poll loop drives it the rest of the way.
+  defp adopt_existing_mr(state, bead, strategy) do
+    mr_ref = existing_mr_ref(bead)
 
     Logger.info(
-      "Refinery: bead #{bead.id} already has PR ##{pr_number}; adopting it " <>
+      "Refinery: bead #{bead.id} already has MR #{mr_ref}; adopting it " <>
         "instead of opening a duplicate"
     )
 
     item =
       new_item(bead.id, strategy,
-        pr_number: pr_number,
+        mr_ref: mr_ref,
         status: :awaiting_approval,
         opened_at: DateTime.utc_now()
       )
@@ -371,12 +365,7 @@ defmodule Arbiter.Workflows.Refinery do
     {:ok, %{state | items: [item | state.items]}}
   end
 
-  defp open_pr_for(state, bead, strategy) do
-    repo = state.repo || strategy_for(bead.workspace, "merge", "repo", nil)
-    # PR base: per-bead override wins (matches the branch the worktree was cut
-    # from), else workspace `merge.base`, else `"main"`. Without this, a bead
-    # with a custom `target_branch` would have its branch cut from one ref but
-    # its PR opened against another.
+  defp open_mr_for(state, bead, strategy) do
     base =
       state.base ||
         bead_target_branch(bead) ||
@@ -384,43 +373,30 @@ defmodule Arbiter.Workflows.Refinery do
 
     branch = strategy_for(bead.workspace, "merge", "branch_prefix", "") <> bead.id
     title = bead.title
-    body = bead.description || ""
+    description = bead.description || ""
 
-    cond do
-      is_nil(repo) ->
-        item = new_item(bead.id, strategy, status: :failed, last_error: :no_repo_configured)
-        {{:error, :no_repo_configured}, %{state | items: [item | state.items]}}
+    case state.adapter.open(branch, title, description, %{target_branch: base}) do
+      {:ok, mr_ref} when is_binary(mr_ref) ->
+        item =
+          new_item(bead.id, strategy,
+            mr_ref: mr_ref,
+            status: :awaiting_approval,
+            opened_at: DateTime.utc_now()
+          )
 
-      true ->
-        case GitHub.pr_open(repo, branch, base, title, body, gh_opts(state)) do
-          {:ok, %{"number" => pr_number} = pr_payload} when is_integer(pr_number) ->
-            item =
-              new_item(bead.id, strategy,
-                pr_number: pr_number,
-                status: :awaiting_approval,
-                opened_at: DateTime.utc_now()
-              )
+        # Record MR ref on the bead's pr_ref field. Best-effort: failure
+        # to update the bead doesn't fail the whole enqueue.
+        _ = maybe_record_mr_ref(bead, mr_ref)
 
-            # Record PR number on the bead's pr_ref field. Best-effort: failure
-            # to update the bead doesn't fail the whole enqueue.
-            _ = maybe_record_pr_ref(bead, pr_number)
+        # Link the MR back onto the upstream tracker ticket. Best-effort and
+        # tracker-agnostic — a no-op for trackers without remote links.
+        _ = maybe_link_mr_to_tracker(bead, state.adapter, mr_ref)
 
-            # Link the PR back onto the upstream tracker ticket (e.g. a Jira
-            # remote link on the VR ticket) so the ticket references the code.
-            # Best-effort and tracker-agnostic — a no-op for trackers without
-            # remote links.
-            _ = maybe_link_pr_to_tracker(bead, repo, pr_number, pr_payload)
+        {:ok, %{state | items: [item | state.items]}}
 
-            {:ok, %{state | items: [item | state.items]}}
-
-          {:ok, _other} ->
-            item = new_item(bead.id, strategy, status: :failed, last_error: :pr_open_no_number)
-            {{:error, :pr_open_no_number}, %{state | items: [item | state.items]}}
-
-          {:error, reason} ->
-            item = new_item(bead.id, strategy, status: :failed, last_error: reason)
-            {{:error, reason}, %{state | items: [item | state.items]}}
-        end
+      {:error, reason} ->
+        item = new_item(bead.id, strategy, status: :failed, last_error: reason)
+        {{:error, reason}, %{state | items: [item | state.items]}}
     end
   end
 
@@ -436,61 +412,55 @@ defmodule Arbiter.Workflows.Refinery do
   defp poll_item(state, %{status: :failed} = item), do: {item, state}
   defp poll_item(state, %{status: :done} = item), do: {item, state}
 
-  defp poll_item(state, %{pr_number: nil} = item) do
-    # Should not happen: only the :direct path skips pr_number, and that path
+  defp poll_item(state, %{mr_ref: nil} = item) do
+    # Should not happen: only the :direct path skips mr_ref, and that path
     # sets status to :done immediately. Defensive.
     {item, state}
   end
 
   defp poll_item(state, item) do
-    case GitHub.pr_get(repo_for(state, item), item.pr_number, gh_opts(state)) do
-      {:ok, pr_payload} ->
-        advance_status(state, item, pr_payload)
+    case state.adapter.get(item.mr_ref) do
+      {:ok, mr_state} ->
+        advance_status(state, item, mr_state)
 
       {:error, reason} ->
         {%{item | status: :failed, last_error: reason, last_polled_at: DateTime.utc_now()}, state}
     end
   end
 
-  # Walk the PR payload through the status machine. We re-evaluate the
-  # *current* status against the payload on every tick so a long-lived item
-  # can climb several rungs in one cycle (e.g. open → approved + clean in
-  # one poll → ready_to_merge → merging → done).
-  defp advance_status(state, item, pr_payload) do
-    review = Map.get(pr_payload, "reviewDecision")
-    merge_state = Map.get(pr_payload, "mergeStateStatus")
+  # Walk the MR state through the status machine. We re-evaluate the
+  # *current* status against the adapter response on every tick so a long-lived
+  # item can climb several rungs in one cycle.
+  defp advance_status(state, item, mr_state) do
     now = DateTime.utc_now()
-
     item = %{item | last_polled_at: now}
 
     cond do
-      # Top-priority guard: a CONFLICTING PR never advances state. Before
-      # bd-dolcqq this just froze the item and the bead sat there until a
-      # human rebased. Now the Crucible auto-spawns an acolyte to rebase +
-      # resolve + force-push (one attempt; the in-flight resolver parks the
-      # item at :conflict_resolving so back-to-back ticks don't spawn
-      # duplicates). A second observation of CONFLICTING while parked means
-      # the rebase didn't clear it — escalate via the mailbox.
-      GitHub.conflicting?(pr_payload) ->
+      # Top-priority guard: a CONFLICTING MR never advances state. The
+      # Crucible auto-spawns an acolyte to rebase + resolve + force-push
+      # (one attempt; the in-flight resolver parks the item at
+      # :conflict_resolving so back-to-back ticks don't spawn duplicates).
+      # A second observation of conflicting while parked means the rebase
+      # didn't clear it — escalate via the mailbox.
+      mr_state.conflicting ->
         handle_conflict(state, item)
 
-      # Once the conflict clears (mergeable: true on a later tick) restore
-      # the item to its prior status so the normal advancement resumes —
-      # and announce the auto-resolution so the Admiral feed sees it.
+      # Once the conflict clears (conflicting: false on a later tick) restore
+      # the item to its prior status so the normal advancement resumes.
       item.status == :conflict_resolving ->
         restored = restore_after_resolution(state, item)
-        advance_status(state, restored, pr_payload)
+        advance_status(state, restored, mr_state)
 
-      item.status == :awaiting_approval and review == "APPROVED" and merge_state == "clean" ->
+      item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->
         try_merge(state, %{item | status: :ready_to_merge})
 
-      item.status == :awaiting_approval and review == "APPROVED" ->
+      item.status == :awaiting_approval and mr_state.approved ->
         {%{item | status: :ci_running}, state}
 
-      item.status == :ci_running and merge_state == "clean" ->
+      item.status == :ci_running and mr_state.ci_clean ->
         try_merge(state, %{item | status: :ready_to_merge})
 
-      item.status == :ready_to_merge and merge_state == "clean" ->
+      item.status == :ready_to_merge and mr_state.ci_clean ->
         try_merge(state, item)
 
       true ->
@@ -499,7 +469,7 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  # Handle a CONFLICTING PR payload. First observation spawns the resolver;
+  # Handle a CONFLICTING MR payload. First observation spawns the resolver;
   # observing the conflict again while already in `:conflict_resolving` means
   # the rebase did not clear the conflict (semantic, not mechanical) — escalate
   # and park `:failed`. There is no retry loop — the resolver is one
@@ -520,9 +490,7 @@ defmodule Arbiter.Workflows.Refinery do
 
   # Spawn the resolver and transition the item to :conflict_resolving. The
   # item's prior status is stashed so a successful push restores us to
-  # exactly where the state machine was before the conflict was detected
-  # (e.g. :awaiting_approval) — we don't want a clean rebase to silently
-  # downgrade an already-approved PR.
+  # exactly where the state machine was before the conflict was detected.
   defp spawn_conflict_resolver(state, item) do
     prior = item.prior_status || item.status
 
@@ -530,7 +498,7 @@ defmodule Arbiter.Workflows.Refinery do
       bead_id: item.bead_id,
       workspace_id: state.workspace_id,
       target_branch: state.base,
-      pr_ref: item.pr_number
+      pr_ref: item.mr_ref
     }
 
     case safe_resolve(state.conflict_resolver, args) do
@@ -551,10 +519,6 @@ defmodule Arbiter.Workflows.Refinery do
           "Refinery: conflict resolver failed for bead=#{item.bead_id}: #{inspect(reason)}"
         )
 
-        # We couldn't even spawn the acolyte (no rig configured, worktree
-        # creation failed, workspace gone, resolver already running).
-        # Escalate to the Admiral so the bead doesn't sit in CONFLICTING
-        # limbo, and mark the item :failed so we don't spin on the next tick.
         safe_escalate(
           state.conflict_resolver,
           item.bead_id,
@@ -567,10 +531,7 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  # Restore item state after a successful auto-rebase. Posts a :notification
-  # via the resolver module so the Admiral feed sees the success — symmetric
-  # with the :escalation we post on failure (acceptance criterion: notified
-  # of the resolution OR the escalation).
+  # Restore item state after a successful auto-rebase.
   defp restore_after_resolution(state, %{prior_status: nil} = item) do
     safe_notify_resolution(state, item)
     %{item | status: :awaiting_approval, prior_status: nil, resolver_spawned_at: nil}
@@ -589,9 +550,6 @@ defmodule Arbiter.Workflows.Refinery do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  # Call `escalate_unresolved/4` on the injected resolver module (so test
-  # stubs can intercept the escalation) and fall back to the real resolver
-  # when the injected module doesn't implement that optional callback.
   defp safe_escalate(resolver_module, bead_id, workspace_id, branch, reason)
        when is_atom(resolver_module) do
     target =
@@ -614,10 +572,6 @@ defmodule Arbiter.Workflows.Refinery do
     :exit, _ -> :ok
   end
 
-  # Mirror of safe_escalate/5 for the success path: post a :notification
-  # message announcing the auto-resolution. Routed through the injected
-  # resolver module so test stubs can intercept it (real module is the
-  # fallback when the stub doesn't implement the optional callback).
   defp safe_notify_resolution(%State{conflict_resolver: resolver_module} = state, item) do
     target =
       if function_exported?(resolver_module, :notify_resolution, 3) do
@@ -639,22 +593,14 @@ defmodule Arbiter.Workflows.Refinery do
     :exit, _ -> :ok
   end
 
-  # Best-effort human label for a branch we may not have the canonical name
-  # for in the item map. PRs carry the head ref on their payload, but the
-  # Refinery has been deliberately keeping its item state minimal — fall
-  # back to the bead id which is what the escalation reader cares about.
   defp item_branch_label(%{bead_id: bead_id}), do: "bead=" <> bead_id
 
   defp try_merge(state, item) do
-    strategy_atom = strategy_to_atom(item.strategy)
-    repo = repo_for(state, item)
-
-    case GitHub.pr_merge(repo, item.pr_number, strategy_atom, gh_opts(state)) do
-      {:ok, _payload} ->
+    case state.adapter.merge(item.mr_ref) do
+      :ok ->
         item = %{item | status: :merging}
-        # Synchronously finalize. We could leave :merging in place and confirm
-        # on the next tick, but pr_merge returning {:ok, ...} is the merge
-        # confirmation from GitHub's perspective, so it's safe to close now.
+        # Synchronously finalize. adapter.merge/1 returning :ok is the merge
+        # confirmation, so it's safe to close now.
         item = %{item | status: :done}
         state = close_bead_and_finalize(state, item)
         {item, state}
@@ -687,7 +633,7 @@ defmodule Arbiter.Workflows.Refinery do
   defp new_item(bead_id, strategy, overrides) do
     base = %{
       bead_id: bead_id,
-      pr_number: nil,
+      mr_ref: nil,
       status: :opening,
       strategy: strategy,
       opened_at: nil,
@@ -722,33 +668,22 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  defp strategy_to_atom("squash"), do: :squash
-  defp strategy_to_atom("merge"), do: :merge
-  defp strategy_to_atom("rebase"), do: :rebase
-  defp strategy_to_atom(_), do: :squash
-
-  defp gh_opts(%State{github_token: nil}), do: []
-  defp gh_opts(%State{github_token: token}), do: [token: token]
-
-  defp repo_for(state, _item), do: state.repo
-
-  defp maybe_record_pr_ref(%Issue{} = bead, pr_number) do
-    case Ash.update(bead, %{pr_ref: to_string(pr_number)}, action: :update) do
+  defp maybe_record_mr_ref(%Issue{} = bead, mr_ref) do
+    case Ash.update(bead, %{pr_ref: mr_ref}, action: :update) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
-  # Attach the opened PR as a remote link on the bead's upstream tracker
-  # ticket. Dispatches on the bead's `tracker_type` (which may be `:jira` even
-  # though the *merge* runs through GitHub PRs), seeds the adapter's
+  # Attach the opened MR as a remote link on the bead's upstream tracker
+  # ticket. Dispatches on the bead's `tracker_type`, seeds the adapter's
   # per-process config from the bead's workspace, and tolerates trackers that
   # don't support remote links. Never fails the enqueue.
-  defp maybe_link_pr_to_tracker(%Issue{tracker_type: :none}, _repo, _pr_number, _payload), do: :ok
+  defp maybe_link_mr_to_tracker(%Issue{tracker_type: :none}, _adapter, _mr_ref), do: :ok
 
-  defp maybe_link_pr_to_tracker(%Issue{} = bead, repo, pr_number, payload) do
-    url = Map.get(payload, "html_url") || "https://github.com/#{repo}/pull/#{pr_number}"
-    title = pr_link_title(bead, repo, pr_number)
+  defp maybe_link_mr_to_tracker(%Issue{} = bead, adapter, mr_ref) do
+    url = adapter.link_for(mr_ref)
+    title = "MR #{mr_ref} (bead #{bead.id})"
 
     Trackers.prepare(bead, bead.workspace)
 
@@ -761,7 +696,7 @@ defmodule Arbiter.Workflows.Refinery do
 
       {:error, reason} ->
         Logger.warning(
-          "Refinery: failed to link PR ##{pr_number} onto tracker " <>
+          "Refinery: failed to link MR #{mr_ref} onto tracker " <>
             "#{bead.tracker_type} ref=#{bead.tracker_ref} for bead=#{bead.id}: #{inspect(reason)}"
         )
 
@@ -770,21 +705,17 @@ defmodule Arbiter.Workflows.Refinery do
   rescue
     e ->
       Logger.warning(
-        "Refinery: error linking PR ##{pr_number} for bead=#{bead.id}: #{Exception.message(e)}"
+        "Refinery: error linking MR #{mr_ref} for bead=#{bead.id}: #{Exception.message(e)}"
       )
 
       :ok
   catch
     :exit, reason ->
       Logger.warning(
-        "Refinery: exit linking PR ##{pr_number} for bead=#{bead.id}: #{inspect(reason)}"
+        "Refinery: exit linking MR #{mr_ref} for bead=#{bead.id}: #{inspect(reason)}"
       )
 
       :ok
-  end
-
-  defp pr_link_title(%Issue{id: id}, repo, pr_number) do
-    "PR #{repo}##{pr_number} (bead #{id})"
   end
 
   defp schedule_tick(%State{poll_interval_ms: ms}) do
@@ -799,12 +730,24 @@ defmodule Arbiter.Workflows.Refinery do
   defp snapshot(%State{} = s) do
     %{
       workspace_id: s.workspace_id,
-      repo: s.repo,
+      adapter: s.adapter,
       base: s.base,
       poll_interval_ms: s.poll_interval_ms,
       auto_tick: s.auto_tick,
       pubsub_topic: s.pubsub_topic,
       items: s.items
     }
+  end
+
+  # Load the workspace and resolve the adapter module. Returns {adapter, workspace}
+  # with workspace=nil if the load fails (e.g. fake ID in supervisor tests or DB
+  # not yet ready). Defaults to Mergers.Direct so the Refinery still starts.
+  defp load_adapter_for(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, workspace} -> {Mergers.for_workspace(workspace), workspace}
+      _ -> {Mergers.Direct, nil}
+    end
+  rescue
+    _ -> {Mergers.Direct, nil}
   end
 end

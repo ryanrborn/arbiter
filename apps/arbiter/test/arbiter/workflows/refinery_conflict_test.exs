@@ -18,8 +18,18 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
   alias Arbiter.Messages.Message
   alias Arbiter.Workflows.Refinery
 
-  @repo "octo/widget"
   @token "test-token-abc123"
+
+  @ws_github %{
+    "merge" => %{
+      "strategy" => "github",
+      "config" => %{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => @token
+      }
+    }
+  }
 
   # ---- stub resolver ------------------------------------------------------
 
@@ -88,7 +98,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
   # ---- setup --------------------------------------------------------------
 
   setup tags do
-    workspace_config = Map.get(tags, :workspace_config, %{"merge" => %{"strategy" => "github"}})
+    workspace_config = Map.get(tags, :workspace_config, @ws_github)
     ws_name = "ws-#{System.unique_integer([:positive])}"
 
     {:ok, workspace} =
@@ -116,9 +126,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
     full_opts =
       [
         workspace_id: workspace.id,
-        repo: @repo,
         base: "main",
-        github_token: @token,
         auto_tick: false,
         conflict_resolver: StubResolverWithCallback,
         name: name
@@ -126,12 +134,12 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       |> Keyword.merge(opts)
 
     {:ok, pid} = Refinery.start_link(full_opts)
-    Req.Test.allow(Arbiter.GitHub.HTTP, self(), pid)
+    Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
     Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, self(), pid)
     {pid, name}
   end
 
-  defp stub(fun), do: Req.Test.stub(Arbiter.GitHub.HTTP, fun)
+  defp stub(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
 
   defp pr_payload(overrides) do
     Map.merge(
@@ -140,10 +148,41 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
         "state" => "open",
         "mergeable" => true,
         "mergeStateStatus" => "clean",
-        "reviewDecision" => "APPROVED"
+        "html_url" => "https://github.com/octo/widget/pull/99"
       },
       overrides
     )
+  end
+
+  # Build a stub that serves PR open, PR get, reviews, and (optionally) merge.
+  # `conflicting: true` → pr has `mergeable: false`; reviews always returns [].
+  defp conflicting_stub(pr_number, extra_pr_overrides \\ %{}) do
+    n = pr_number
+
+    stub(fn conn ->
+      cond do
+        conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"number" => n, "html_url" => "https://github.com/octo/widget/pull/#{n}"})
+
+        conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+        conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{n}") ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(
+            pr_payload(Map.merge(%{"number" => n, "mergeable" => false}, extra_pr_overrides))
+          )
+
+        conn.method == "PUT" ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
+
+        true ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+      end
+    end)
   end
 
   # ---- conflict-detection helper ------------------------------------------
@@ -179,21 +218,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       bead: bead
     } do
       StubResolverWithCallback.register(bead.id, self(), :ok)
-
-      stub(fn conn ->
-        cond do
-          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 901})
-
-          conn.method == "GET" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(pr_payload(%{"number" => 901, "mergeable" => false}))
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      conflicting_stub(901)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
@@ -203,7 +228,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       assert args.bead_id == bead.id
       assert args.workspace_id == ws.id
       assert args.target_branch == "main"
-      assert args.pr_ref == 901
+      assert args.pr_ref == "#901"
 
       %{items: [item]} = Refinery.state(name)
       assert item.status == :conflict_resolving
@@ -219,21 +244,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       # still sees mergeable: false, the conflict is semantic — escalate
       # rather than spinning on more spawns.
       StubResolverWithCallback.register(bead.id, self(), :ok)
-
-      stub(fn conn ->
-        cond do
-          conn.method == "POST" ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 902})
-
-          conn.method == "GET" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(pr_payload(%{"number" => 902, "mergeable" => false}))
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      conflicting_stub(902)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
@@ -264,10 +275,15 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
 
       stub(fn conn ->
         cond do
-          conn.method == "POST" ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 903})
+          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 903, "html_url" => "https://github.com/octo/widget/pull/903"})
 
-          conn.method == "GET" ->
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/903") ->
             n = :counters.get(tick_count, 1)
             :counters.add(tick_count, 1, 1)
 
@@ -275,19 +291,17 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
               if n == 0 do
                 pr_payload(%{"number" => 903, "mergeable" => false})
               else
-                # Clean — but not approved/clean enough to advance to merge.
+                # Clean — but not approved/ci_clean enough to advance to merge.
                 pr_payload(%{
                   "number" => 903,
                   "mergeable" => true,
-                  "mergeStateStatus" => "blocked",
-                  "reviewDecision" => nil
+                  "mergeStateStatus" => "blocked"
                 })
               end
 
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(payload)
 
           conn.method == "PUT" ->
-            # If a merge fires we should know — failing the test.
             send(self(), :unexpected_merge)
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
 
@@ -324,21 +338,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       bead: bead
     } do
       StubResolverWithCallback.register(bead.id, self(), :ok)
-
-      stub(fn conn ->
-        cond do
-          conn.method == "POST" ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 904})
-
-          conn.method == "GET" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(pr_payload(%{"number" => 904, "mergeable" => false}))
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      conflicting_stub(904)
 
       # One mechanical rebase pass per conflict — the first spawn happens on
       # the first tick, and a second consecutive CONFLICTING observation
@@ -370,21 +370,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       # the stub's escalate_unresolved is also wired and we want both layers
       # observed.
       StubResolverWithCallback.register(bead.id, self(), {:error, :no_repo_path})
-
-      stub(fn conn ->
-        cond do
-          conn.method == "POST" ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 905})
-
-          conn.method == "GET" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(pr_payload(%{"number" => 905, "mergeable" => false}))
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      conflicting_stub(905)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
