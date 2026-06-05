@@ -4,6 +4,8 @@ defmodule Arbiter.Polecats.ReconcilerTest do
   # PolecatRunPersistenceTest.
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Messages.Message
   alias Arbiter.Polecat
   alias Arbiter.Polecats.Reconciler
   alias Arbiter.Polecats.Run
@@ -113,5 +115,106 @@ defmodule Arbiter.Polecats.ReconcilerTest do
       |> Enum.reject(fn run -> Polecat.whereis(run.bead_id) end)
 
     assert surviving == []
+  end
+
+  # ---- reconcile_open_pr_beads (bd-crqku8 regression) -------------------
+
+  defp create_workspace do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "reconcile-ws-#{System.unique_integer([:positive])}",
+        prefix: "rw"
+      })
+
+    ws
+  end
+
+  defp create_issue(workspace_id, attrs \\ %{}) do
+    {create_attrs, update_attrs} = Map.split(attrs, [:status, :pr_ref])
+
+    base = %{
+      title: "test-issue-#{System.unique_integer([:positive])}",
+      workspace_id: workspace_id
+    }
+
+    {:ok, issue} = Ash.create(Issue, Map.merge(base, update_attrs))
+
+    if map_size(create_attrs) > 0 do
+      {:ok, issue} = Ash.update(issue, create_attrs)
+      issue
+    else
+      issue
+    end
+  end
+
+  test "escalates an :in_progress bead with a pr_ref and no live polecat to Admiral" do
+    ws = create_workspace()
+
+    issue =
+      create_issue(ws.id, %{
+        status: :in_progress,
+        pr_ref: "#{System.unique_integer([:positive])}"
+      })
+
+    assert {:ok, 1} = Reconciler.reconcile_open_pr_beads()
+
+    mail = Message.inbox("admiral", workspace_id: ws.id)
+    assert length(mail) >= 1
+
+    escalation = Enum.find(mail, &(&1.directive_ref == issue.id))
+    assert escalation != nil
+    assert escalation.kind == :escalation
+    assert escalation.subject =~ issue.id
+    assert escalation.subject =~ "stuck"
+  end
+
+  test "does not escalate an :in_progress bead with a pr_ref when a live polecat is running" do
+    ws = create_workspace()
+
+    issue =
+      create_issue(ws.id, %{
+        status: :in_progress,
+        pr_ref: "#{System.unique_integer([:positive])}"
+      })
+
+    # The Issue's id IS the bead_id used to register polecats.
+    {:ok, pid} = Polecat.start(bead_id: issue.id, rig: "arbiter", workspace_id: ws.id)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()
+
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "does not escalate an :in_progress bead with no pr_ref" do
+    ws = create_workspace()
+    _issue = create_issue(ws.id, %{status: :in_progress})
+
+    assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()
+
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "does not escalate a :closed or :open bead even if it somehow has a pr_ref" do
+    ws = create_workspace()
+    _issue = create_issue(ws.id, %{pr_ref: "99"})
+
+    assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()
+
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "skips when primary?: false" do
+    ws = create_workspace()
+
+    _issue =
+      create_issue(ws.id, %{
+        status: :in_progress,
+        pr_ref: "#{System.unique_integer([:positive])}"
+      })
+
+    assert {:ok, :skipped} = Reconciler.reconcile_open_pr_beads(primary?: false)
+
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 end

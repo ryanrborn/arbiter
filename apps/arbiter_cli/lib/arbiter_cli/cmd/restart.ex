@@ -57,6 +57,8 @@ defmodule ArbiterCli.Cmd.Restart do
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
     force = opts[:force] || false
 
+    guard_acolyte_session!()
+
     root =
       case Start.project_root() do
         {:ok, dir} ->
@@ -243,6 +245,33 @@ defmodule ArbiterCli.Cmd.Restart do
           {:error, _} ->
             true
         end
+    end
+  end
+
+  # ---- acolyte-session guard ---------------------------------------------
+
+  @doc """
+  Abort with an error when the calling process is itself inside an acolyte
+  session (i.e. `ARB_ACOLYTE_BEAD_ID` is set in the environment).
+
+  An acolyte must never be able to bounce or kill the live orchestrating
+  server — doing so would kill the polecat that owns the acolyte and leave
+  the bead stuck. Shared with `arb update` (deploy), `arb start`, and
+  `arb install-service`.
+  """
+  @spec guard_acolyte_session!() :: :ok
+  def guard_acolyte_session! do
+    case System.get_env("ARB_ACOLYTE_BEAD_ID") do
+      id when is_binary(id) and id != "" ->
+        Output.die(
+          "this command cannot be run from inside an acolyte session",
+          "Bead #{id} is the active acolyte. Running arb restart/update/start/install-service\n" <>
+            "from within an acolyte would kill the orchestrating server and leave the bead stuck.\n" <>
+            "Run this command from a normal shell outside the acolyte worktree."
+        )
+
+      _ ->
+        :ok
     end
   end
 
