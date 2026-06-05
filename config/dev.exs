@@ -14,14 +14,11 @@ config :arbiter, :worktree_root, Path.expand("~/dev/arbiter-worktrees")
 config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-polecat-logs")
 
 config :arbiter, Arbiter.Repo,
-  username: "arbiter",
-  password: "arbiter_dev_password",
-  hostname: "127.0.0.1",
-  port: 5433,
-  database: "arbiter_dev",
+  database: Path.expand("~/dev/arbiter_dev.sqlite3"),
+  journal_mode: :wal,
+  busy_timeout: 5000,
   stacktrace: true,
-  show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+  pool_size: 5
 
 config :arbiter_web, ArbiterWeb.Endpoint,
   http: [ip: {0, 0, 0, 0}, port: 4848],

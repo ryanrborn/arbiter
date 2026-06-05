@@ -22,11 +22,11 @@ defmodule Arbiter.Polecats.Run do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Polecats,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   @statuses ~w(running completed failed)a
 
-  postgres do
+  sqlite do
     table("polecat_runs")
     repo(Arbiter.Repo)
 

@@ -58,7 +58,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Dashboard"
       assert html =~ "Workspaces"
       assert html =~ "Active "
-      assert html =~ "Recent Beads"
+      assert html =~ "Current "
       # Merge queue (Crucibles) section header, from the (default) merge_queue
       # vernacular ("refinery" → "Refineries").
       assert html =~ "Refineries"

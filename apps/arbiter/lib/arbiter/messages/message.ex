@@ -39,14 +39,14 @@ defmodule Arbiter.Messages.Message do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Messages,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   require Ash.Query
 
   @kinds ~w(notification mailbox direction flag completion failure escalation info)a
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)a
 
-  postgres do
+  sqlite do
     table "messages"
     repo Arbiter.Repo
 

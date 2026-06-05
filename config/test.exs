@@ -2,11 +2,9 @@ import Config
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true
 
 config :arbiter, Arbiter.Repo,
-  username: "arbiter",
-  password: "arbiter_dev_password",
-  hostname: "127.0.0.1",
-  port: 5433,
-  database: "arbiter_test#{System.get_env("MIX_TEST_PARTITION")}",
+  database: Path.join(System.tmp_dir!(), "arbiter_test#{System.get_env("MIX_TEST_PARTITION", "")}.sqlite3"),
+  journal_mode: :wal,
+  busy_timeout: 5000,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 

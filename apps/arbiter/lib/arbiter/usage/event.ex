@@ -32,11 +32,11 @@ defmodule Arbiter.Usage.Event do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Usage,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   @steps ~w(work review other)a
 
-  postgres do
+  sqlite do
     table "usage_events"
     repo Arbiter.Repo
 
