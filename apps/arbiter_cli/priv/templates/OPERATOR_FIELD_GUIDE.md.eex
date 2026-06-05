@@ -21,7 +21,36 @@ You coordinate; the fleet executes. Core loop:
 
 External comms (GitHub, Slack) stay in normal professional voice.
 
-## 2. File <%= @issue_plural_cap %> Well
+## 2. Directive Intake — Claim & Create
+
+When taking in new directives locally via `arb claim` or `arb create`, **always
+set difficulty immediately after intake**. Both commands create beads without
+prompting for difficulty, and the field defaults to unset. Difficulty drives the
+model tier and thinking budget — set it before slinging to avoid under-scoped work.
+
+Workflow:
+
+```bash
+# Option A: Claim an existing upstream issue
+arb claim 42
+arb update <bead-id> --difficulty <n>
+
+# Option B: Create a new local directive
+arb create "Fix widget crash on startup" --description "..."
+arb update <bead-id> --difficulty <n>
+```
+
+Difficulty scale (D0–D4):
+
+```
+D0 Trivial  — single-file, fully specified, no judgment (typo, config, doc edit)
+D1 Simple   — localized, clear approach, light reasoning; follows existing pattern
+D2 Moderate — multi-file or some design choice (default if omitted by coordinator)
+D3 Hard     — cross-cutting, non-obvious design, correctness-critical
+D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
+```
+
+## 3. File <%= @issue_plural_cap %> Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
@@ -31,18 +60,10 @@ External comms (GitHub, Slack) stay in normal professional voice.
   D4 (hard architectural change). Do not conflate them.
 - Set `target_branch` when it is not the workspace default.
 
-```
-D0 Trivial  — single-file, fully specified, no judgment (typo, config, doc edit)
-D1 Simple   — localized, clear approach, light reasoning
-D2 Moderate — multi-file or some design choice (default if omitted)
-D3 Hard     — cross-cutting, non-obvious design, correctness-critical
-D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
-```
-
 Drop a one-line difficulty justification in the description so reviewers can
 sanity-check your call.
 
-## 3. Concurrency Discipline
+## 4. Concurrency Discipline
 
 Parallel <%= @worker_plural %> are good. **Keep concurrent <%= @issue_plural %>
 FILE-DISJOINT.**
@@ -52,13 +73,13 @@ command-alias map, or the router — **will collide at merge**. The
 auto-conflict-resolver helps, but do not rely on it. Serialize those
 <%= @issue_plural %>.
 
-## 4. Freshness
+## 5. Freshness
 
 <%= @worker_plural_cap %> branch from the <%= @rig %>'s base branch. A stale <%= @rig %>
 means stale, possibly regressed state for every new <%= @worker %>. Keep <%= @rig_plural %>
 current; let provisioning fetch from origin.
 
-## 5. Config Safety
+## 6. Config Safety
 
 Workspace config is a single JSON map stored in the database.
 
@@ -68,7 +89,7 @@ vernacular).
 
 **Use `arb config get/set/unset` (deep-merge) only.**
 
-## 6. Deploy Safely
+## 7. Deploy Safely
 
 A real deploy = pull + run migrations + rebuild the CLI escript + restart the
 server.
@@ -80,7 +101,7 @@ their work. Before restarting:
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
-## 7. Trust State, But Verify
+## 8. Trust State, But Verify
 
 - A <%= @worker %> can show "running" while its subprocess is dead — check the
   port or log, not just status.
@@ -90,7 +111,7 @@ their work. Before restarting:
 - Close-on-merge can miss on out-of-band merges — close the <%= @issue %>
   manually if it stalls.
 
-## 8. Tribunal
+## 9. Tribunal
 
 The pre-merge review gate. After the round cap it escalates for **your**
 judgment.
@@ -99,12 +120,12 @@ Read the full implementer↔reviewer transcript before deciding. Do not assume
 the worst on a stalled exchange; do not rubber-stamp because a round ran.
 Decide for yourself.
 
-## 9. Watch Efficiently
+## 10. Watch Efficiently
 
 Use shell-poll monitors that wake only on real state changes. Avoid
 fixed-interval wakeups that burn tokens re-reading context on every tick.
 
-## 10. Provider-Agnostic
+## 11. Provider-Agnostic
 
 Never hardcode model names. Route via abstract tiers:
 
@@ -120,13 +141,13 @@ sling time.
 **Verify CLI flags against the installed agent CLI version** — a wrong flag
 crashes the <%= @worker %> at launch with no useful error.
 
-## 11. Review Capability
+## 12. Review Capability
 
 `arb review <id>` reviews a PR/MR tracker-side: fetches the diff and posts
 findings + verdict via the configured tracker API. The PR author needs **no**
 Arbiter setup.
 
-## 12. Lanes & Merge Posture
+## 13. Lanes & Merge Posture
 
 Use **separate workspaces** for separate concerns (self-dev vs company repos).
 
@@ -135,7 +156,7 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 | Company / shared | OFF | A human merges |
 | Self-dev / experimental | ON | Safe to automate |
 
-## 13. Vernacular (Gas-Town Defaults)
+## 14. Vernacular (Gas-Town Defaults)
 
 | Term | Meaning |
 |------|---------|
