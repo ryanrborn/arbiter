@@ -160,9 +160,13 @@ defmodule Arbiter.Polecat.Tribunal do
   # one before escalating as inconclusive. Capped; default 1. See bd-8v8ays.
   @default_verdict_retries 1
 
-  # Hard cap on revise-and-rediscuss rounds (one round = one reviewer pass) when
-  # the workspace config doesn't say otherwise. See bd-3jm700.
-  @default_rounds 2
+  # Default revise-and-rediscuss round cap when no difficulty is available and
+  # no workspace override is set — matches D2 (moderate). See bd-3jm700.
+  @default_rounds 3
+
+  # Difficulty → default round cap. D0/D1 are straightforward; D3/D4 are
+  # architecturally significant and may need more back-and-forth to converge.
+  @rounds_by_difficulty %{0 => 2, 1 => 2, 2 => 3, 3 => 4, 4 => 4}
 
   # Defensive cap on the escalation diff so a huge branch can't bloat the
   # Admiral's mailbox row beyond reason.
@@ -222,6 +226,27 @@ defmodule Arbiter.Polecat.Tribunal do
   """
   @spec reviewer_bead_id(String.t()) :: String.t()
   def reviewer_bead_id(bead_id) when is_binary(bead_id), do: bead_id <> "#review"
+
+  @doc """
+  The default revise-and-rediscuss round cap for a bead's difficulty level.
+
+  | Difficulty | Label    | Default rounds |
+  |------------|----------|---------------|
+  | 0          | trivial  | 2             |
+  | 1          | simple   | 2             |
+  | 2          | moderate | 3             |
+  | 3          | hard     | 4             |
+  | 4          | extreme  | 4             |
+  | nil        | unknown  | 3 (D2)        |
+
+  Used by `Arbiter.Polecat.resolve_review_rounds/1` to derive the default cap
+  from the bead's difficulty when no workspace `config["tribunal"]["max_rounds"]`
+  override is set.
+  """
+  @spec rounds_for_difficulty(0..4 | nil) :: pos_integer()
+  def rounds_for_difficulty(difficulty) do
+    Map.get(@rounds_by_difficulty, difficulty, @default_rounds)
+  end
 
   # ---- verdict parsing (pure) --------------------------------------------
 

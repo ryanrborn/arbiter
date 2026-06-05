@@ -427,4 +427,53 @@ defmodule Arbiter.Beads.WorkspaceTest do
                })
     end
   end
+
+  describe "tribunal_max_rounds/1" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmr-int",
+          config: %{"tribunal" => %{"max_rounds" => 3}}
+        })
+
+      assert Workspace.tribunal_max_rounds(ws) == 3
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmr-str",
+          config: %{"tribunal" => %{"max_rounds" => "2"}}
+        })
+
+      assert Workspace.tribunal_max_rounds(ws) == 2
+    end
+
+    test "returns nil when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "tmr-unset"})
+      assert Workspace.tribunal_max_rounds(ws) == nil
+    end
+
+    test "validate_config rejects non-positive max_rounds" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmr-bad",
+                 config: %{"tribunal" => %{"max_rounds" => 0}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmr-bad2",
+                 config: %{"tribunal" => %{"max_rounds" => "not-a-number"}}
+               })
+    end
+
+    test "validate_config rejects tribunal as a non-map" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmr-bad3",
+                 config: %{"tribunal" => "invalid"}
+               })
+    end
+  end
 end
