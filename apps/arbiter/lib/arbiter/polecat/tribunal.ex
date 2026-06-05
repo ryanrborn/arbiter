@@ -54,8 +54,22 @@ defmodule Arbiter.Polecat.Tribunal do
   current diff. He judges with the complete argument in hand, not a summary.
 
   The reviewer must be a DIFFERENT mind than the author at every round, and each
-  implementer revision is a fresh mind too. (TRUE same-session continuity — resume
-  the original implementer — rides on bd-igu12c and is Stage 3.)
+  implementer revision is a fresh mind too.
+
+  ## Stage 3 — same-mind continuity (bd-1na62i)
+
+  Literal session resume (`claude --resume <id>`) was dropped: session ids are
+  transient, are invalidated by a billing pause or crash, and have no
+  Gemini/agy equivalent — it violates the provider-agnostic constraint. Stage 3
+  instead **approximates** continuity the way the `arb resume` path does
+  (bd-auma3z): each revise-round implementer is briefed with the outpost's git
+  state — commits since the branch cut plus uncommitted work-in-progress
+  (`Arbiter.Polecat.ResumeContext.work_so_far/2`) — prepended to its revise
+  prompt. Combined with the reviewer findings and the original directive (both
+  already in that prompt), the fresh mind continues the prior round's thread
+  with full context rather than re-deriving it from a raw diff. The reviewer's
+  own continuity is the prior implementer↔reviewer thread carried in
+  `rereview_prompt/1`.
 
   ## Verdict protocol
 
@@ -116,6 +130,7 @@ defmodule Arbiter.Polecat.Tribunal do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.ClaudeSession
+  alias Arbiter.Polecat.ResumeContext
 
   # Default ceiling on how long we wait for a reviewer / implementer pass before
   # escalating as timed out. Real Claude work can take a while; tests override.
@@ -1100,8 +1115,15 @@ defmodule Arbiter.Polecat.Tribunal do
   Build the implementer's revise prompt for a round of the revise-and-rediscuss
   loop: the reviewer's findings, and the instruction to address EACH one (fix or
   rebut) on the same branch, committing any code changes so the next review can
-  see them. A fresh mind — there is no session resume yet — so it re-supplies the
-  bead context. Public for inspection in tests.
+  see them.
+
+  Stage 3 (bd-1na62i) prepends a git-derived "work so far" briefing
+  (`ResumeContext.work_so_far/2`) so this fresh implementer mind continues the
+  prior round's thread with full context — the same provider-agnostic
+  continuity the `arb resume` path uses — instead of re-deriving what was done
+  from a raw diff. Combined with the reviewer findings and the bead directive
+  below, that approximates the original implementer resuming its own session.
+  Public for inspection in tests.
   """
   @spec revise_prompt(map(), String.t()) :: String.t()
   def revise_prompt(state, findings) do
@@ -1120,7 +1142,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
     Acceptance criteria:
     #{bead.acceptance}
-
+    #{work_so_far_briefing(state)}
     Reviewer findings (round #{state.round}):
     #{findings}
 
@@ -1147,6 +1169,27 @@ defmodule Arbiter.Polecat.Tribunal do
         arb done
     """
   end
+
+  # Stage 3 (bd-1na62i): the same-mind-continuity briefing prepended to a
+  # revise-round implementer. Each revision is a FRESH mind (literal Claude/Gemini
+  # session resume was dropped — provider-specific and fragile across billing
+  # pauses/crashes), so we hand it the git-derived picture of what the prior
+  # round(s) actually did — commits since the branch cut + any uncommitted work —
+  # exactly as the `arb resume` path (bd-auma3z) briefs a resumed acolyte. Skipped
+  # (empty string) for a worktree-less Tribunal: an ad-hoc / test run with nothing
+  # on disk to summarize falls back to today's directive-only prompt.
+  defp work_so_far_briefing(%{worktree_path: wt, target_branch: tb})
+       when is_binary(wt) and is_binary(tb) do
+    """
+
+    Work done so far on this branch by the prior round(s) — continue from here,
+    do NOT restart; build on what is already committed:
+
+    #{ResumeContext.work_so_far(wt, tb)}
+    """
+  end
+
+  defp work_so_far_briefing(_state), do: ""
 
   @doc """
   Build the reviewer's re-review prompt for round >= 2: the base review prompt,
