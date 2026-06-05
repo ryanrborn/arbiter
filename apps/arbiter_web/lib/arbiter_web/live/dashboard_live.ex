@@ -1041,7 +1041,7 @@ defmodule ArbiterWeb.DashboardLive do
               <div class="flex items-center justify-between">
                 <h2 class="text-lg font-semibold flex items-center gap-2">
                   <.icon name="hero-queue-list" class="size-5 text-base-content/70" />
-                  Recent {cap_plural(@issue_label)} ({length(@recent_beads)})
+                  Current {cap_plural(@issue_label)} ({length(@recent_beads)})
                 </h2>
                 <.see_all_link navigate={~p"/beads"} />
               </div>
