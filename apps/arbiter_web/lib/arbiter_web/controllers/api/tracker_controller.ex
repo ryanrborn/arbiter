@@ -4,27 +4,25 @@ defmodule ArbiterWeb.Api.TrackerController do
 
   Routes:
 
-    * `GET /api/workspaces/:workspace_id/tracker/issues` — list the open
+    * `GET  /api/workspaces/:workspace_id/tracker/issues` — list the open
       items assigned to the workspace's authenticated user. Adapters that
       don't have a backlog notion (currently: `:none`, plus Jira/Shortcut
       until their search is wired) reply with `supported: false` and an
       empty data list, so callers (`arb list --tracker`) can degrade
       cleanly without treating it as an error.
 
-  Response shape on success:
+    * `POST /api/workspaces/:workspace_id/tracker/tickets` — create an
+      upstream tracker ticket WITHOUT creating a local bead. Used by
+      `arb create --ticket-only` to post unclaimed work to the shared
+      tracker so any fleet contributor can pick it up via `arb claim`.
+      Requires a configured tracker (`tracker_type != :none`).
+
+  `POST /tracker/tickets` response shape on success:
 
       {
-        "data": [
-          {
-            "ref": "42",
-            "title": "Wire the thing",
-            "url": "https://github.com/o/r/issues/42",
-            "status": "open",
-            "assignees": ["alice"]
-          },
-          ...
-        ],
-        "supported": true
+        "ref": "42",
+        "url": "https://github.com/owner/repo/issues/42",
+        "tracker_type": "github"
       }
   """
 
@@ -53,6 +51,59 @@ defmodule ArbiterWeb.Api.TrackerController do
     end
   end
 
+  def create_ticket(conn, %{"workspace_id" => workspace_id} = params) do
+    with {:ok, workspace} <- get_workspace(workspace_id),
+         :ok <- require_tracker(workspace) do
+      attrs = build_ticket_attrs(params)
+      tracker_type = Trackers.workspace_type(workspace)
+
+      case Trackers.create_for_workspace(workspace, attrs) do
+        {:ok, ref} ->
+          url = Trackers.link_for_workspace(workspace, ref)
+
+          conn
+          |> put_status(:created)
+          |> json(%{ref: ref, url: url, tracker_type: Atom.to_string(tracker_type)})
+
+        {:error, :not_supported} ->
+          {:error,
+           {:invalid_request,
+            "tracker #{tracker_type} does not support outbound ticket creation"}}
+
+        {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
+          tracker_error_response(conn, err)
+
+        {:error, _} = err ->
+          err
+      end
+    end
+  end
+
+  # ---- helpers -----------------------------------------------------------
+
+  defp build_ticket_attrs(params) do
+    %{}
+    |> put_if_present(:title, params["title"])
+    |> put_if_present(:description, params["description"])
+    |> put_if_present(:assignee, params["assignee"])
+  end
+
+  defp put_if_present(map, _key, nil), do: map
+  defp put_if_present(map, _key, ""), do: map
+  defp put_if_present(map, key, value), do: Map.put(map, key, value)
+
+  defp require_tracker(workspace) do
+    case Trackers.workspace_type(workspace) do
+      :none ->
+        {:error,
+         {:invalid_request,
+          "workspace has no tracker configured; use arb create (without --ticket-only) for a local bead"}}
+
+      _ ->
+        :ok
+    end
+  end
+
   # ---- serialization -----------------------------------------------------
 
   defp serialize(%{
@@ -70,8 +121,6 @@ defmodule ArbiterWeb.Api.TrackerController do
       assignees: assignees
     }
   end
-
-  # ---- helpers -----------------------------------------------------------
 
   defp get_workspace(id) do
     case Ash.get(Workspace, id) do
