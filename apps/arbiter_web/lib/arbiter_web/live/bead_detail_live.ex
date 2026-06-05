@@ -262,6 +262,16 @@ defmodule ArbiterWeb.BeadDetailLive do
                     </span>
                   </dd>
 
+                  <dt class="font-medium text-base-content/60">Difficulty</dt>
+                  <dd>
+                    <span class={[
+                      "badge badge-sm font-mono",
+                      difficulty_badge_class(@bead.difficulty)
+                    ]}>
+                      {difficulty_label(@bead.difficulty)}
+                    </span>
+                  </dd>
+
                   <dt class="font-medium text-base-content/60">Type</dt>
                   <dd>{@bead.issue_type}</dd>
 
@@ -569,6 +579,18 @@ defmodule ArbiterWeb.BeadDetailLive do
   defp status_dot_class(:completed), do: "bg-success"
   defp status_dot_class(:failed), do: "bg-error"
   defp status_dot_class(_), do: "bg-base-content/30"
+
+  defp difficulty_label(nil), do: "—"
+  defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
+  defp difficulty_label(_), do: "—"
+
+  defp difficulty_badge_class(nil), do: "badge-ghost"
+  defp difficulty_badge_class(0), do: "badge-success"
+  defp difficulty_badge_class(1), do: "badge-info"
+  defp difficulty_badge_class(2), do: "badge-secondary"
+  defp difficulty_badge_class(3), do: "badge-warning"
+  defp difficulty_badge_class(4), do: "badge-error"
+  defp difficulty_badge_class(_), do: "badge-ghost"
 
   # Canonical audit-action mapping (matches AuditLogLive + doctrine).
   defp action_badge_class(:create), do: "badge badge-success"

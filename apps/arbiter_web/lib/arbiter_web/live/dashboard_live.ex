@@ -598,6 +598,18 @@ defmodule ArbiterWeb.DashboardLive do
   defp status_badge_class(:closed), do: "badge badge-ghost"
   defp status_badge_class(_), do: "badge"
 
+  defp difficulty_label(nil), do: "—"
+  defp difficulty_label(d) when is_integer(d) and d in 0..4, do: "D#{d}"
+  defp difficulty_label(_), do: "—"
+
+  defp difficulty_badge_class(nil), do: "badge-ghost"
+  defp difficulty_badge_class(0), do: "badge-success"
+  defp difficulty_badge_class(1), do: "badge-info"
+  defp difficulty_badge_class(2), do: "badge-secondary"
+  defp difficulty_badge_class(3), do: "badge-warning"
+  defp difficulty_badge_class(4), do: "badge-error"
+  defp difficulty_badge_class(_), do: "badge-ghost"
+
   defp polecat_status_class(:idle), do: "badge-ghost"
   defp polecat_status_class(:running), do: "badge-info"
   defp polecat_status_class(:awaiting), do: "badge-warning"
@@ -1039,6 +1051,12 @@ defmodule ArbiterWeb.DashboardLive do
                       if(b.priority == 1, do: "badge-error", else: "badge-ghost")
                     ]}>
                       P{b.priority}
+                    </span>
+                    <span class={[
+                      "badge badge-sm font-mono shrink-0",
+                      difficulty_badge_class(b.difficulty)
+                    ]}>
+                      {difficulty_label(b.difficulty)}
                     </span>
                     <.link navigate={~p"/beads/#{b.id}"} class="min-w-0 flex-1 group">
                       <div class="flex items-center gap-2">
