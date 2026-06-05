@@ -137,8 +137,10 @@ defmodule ArbiterCli.Cmd.Start do
   redirect to a log file and a backgrounding `&` means the shell returns
   immediately while `mix phx.server` keeps running, reparented to init.
 
-  Returns `{:phoenix, :ok, log_path}`. The spawned server inherits this
-  process's environment (so `GITHUB_TOKEN` and friends carry through). Shared
+  Returns `{:phoenix, :ok, log_path}`. If `.arbiter.env` exists in the project
+  root it is sourced (via `set -a` so all assignments are automatically
+  exported) before Phoenix launches, ensuring secrets like `GITHUB_TOKEN` reach
+  the server even when they were not pre-exported in the invoking shell. Shared
   with `arb restart` so the two have one definition of "start Phoenix".
   """
   @spec start_phoenix(String.t()) :: {:phoenix, :ok, String.t()}
@@ -146,7 +148,13 @@ defmodule ArbiterCli.Cmd.Start do
     log = phoenix_log_path()
     log_text("Starting Phoenix (mix phx.server)… logging to #{log}")
 
-    script = "nohup mix phx.server > '#{log}' 2>&1 < /dev/null &"
+    # Source .arbiter.env if present, using `set -a` so every assignment is
+    # automatically exported into Phoenix's environment. The check is in the
+    # shell script (not Elixir) so it runs at the moment the process is
+    # spawned rather than at the moment `arb start` is invoked.
+    script =
+      "if [ -f .arbiter.env ]; then set -a; . ./.arbiter.env; set +a; fi; " <>
+        "nohup mix phx.server > '#{log}' 2>&1 < /dev/null &"
 
     case run_cmd("sh", ["-c", script], cd: root, stderr_to_stdout: true) do
       {_out, 0} ->

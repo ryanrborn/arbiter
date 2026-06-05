@@ -72,6 +72,28 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert script =~ "mix phx.server"
     end
 
+    test "script sources .arbiter.env with set -a so all vars are exported" do
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+        if cmd == "sh", do: stub_get("/api/workspaces", @green)
+        {"", 0}
+      end)
+
+      {_out, _err, code} = capture(fn -> Start.run([]) end)
+
+      assert code == 0
+      assert_received {:cmd, "sh", ["-c", script]}
+      # Shell-level conditional so it's always present in the script string.
+      assert script =~ ".arbiter.env"
+      assert script =~ "set -a"
+      assert script =~ "mix phx.server"
+    end
+
     test "--json lists the postgres and phoenix actions" do
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
       Process.put(:bd2_sleep, fn _ms -> :ok end)
