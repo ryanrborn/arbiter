@@ -39,6 +39,10 @@ defmodule Arbiter.Beads.Workspace do
             "repo" => "myrepo",
             "credentials_ref" => "env:GITHUB_TOKEN"
           }
+        },
+        "tribunal" => %{
+          "max_rounds" => 2                    # optional integer ≥ 1; caps the difficulty
+                                               # default (min wins). See tribunal_max_rounds/1.
         }
       }
 
@@ -260,6 +264,35 @@ defmodule Arbiter.Beads.Workspace do
 
       _ ->
         2
+    end
+  end
+
+  @doc """
+  Optional workspace cap on the Tribunal's revise-and-rediscuss round count,
+  from `config["tribunal"]["max_rounds"]`.
+
+  When set, this cap is applied as `min(difficulty_default, workspace_cap)` so
+  it can only tighten the difficulty-derived default — never loosen it beyond
+  what the difficulty allows. Returns `nil` when not configured, letting the
+  difficulty default apply uncapped.
+
+  Accepts a positive integer or the stringified integer that round-trips through
+  JSON config.
+  """
+  @spec tribunal_max_rounds(t()) :: pos_integer() | nil
+  def tribunal_max_rounds(workspace) do
+    case get_in(workspace.config || %{}, ["tribunal", "max_rounds"]) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 end

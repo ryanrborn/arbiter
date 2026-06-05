@@ -1691,25 +1691,52 @@ defmodule Arbiter.Polecat do
     _ -> false
   end
 
-  # Resolve the revise-and-rediscuss round cap (config["review"]["rounds"],
-  # default 2) for the Tribunal. An explicit meta override (`:review_rounds`)
-  # wins — used by tests and advanced callers; otherwise read the workspace
-  # config. Returns nil to let the Tribunal apply its own default when neither is
-  # available. See bd-3jm700.
+  # Resolve the revise-and-rediscuss round cap for the Tribunal.
+  #
+  # Resolution order:
+  #   1. An explicit meta `:review_rounds` override (tests / advanced callers).
+  #   2. `min(difficulty_default, workspace_cap)` — the difficulty-derived default
+  #      (bd-a5k6wb) optionally tightened by `config["tribunal"]["max_rounds"]`.
+  #   3. Falls back to `nil` to let the Tribunal apply its built-in D2 default.
+  #
+  # The bead's difficulty drives the default; the workspace cap can only tighten
+  # it (min), never loosen it beyond the difficulty-appropriate ceiling.
   defp resolve_review_rounds(%State{meta: meta} = state) do
     case meta && Map.get(meta, :review_rounds) do
       n when is_integer(n) and n > 0 ->
         n
 
       _ ->
+        difficulty = bead_difficulty(state.bead_id)
+        difficulty_default = Arbiter.Polecat.Tribunal.rounds_for_difficulty(difficulty)
+
         case state.workspace_id && Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
-          {:ok, ws} -> Arbiter.Beads.Workspace.review_rounds(ws)
-          _ -> nil
+          {:ok, ws} ->
+            case Arbiter.Beads.Workspace.tribunal_max_rounds(ws) do
+              nil -> difficulty_default
+              cap -> min(difficulty_default, cap)
+            end
+
+          _ ->
+            difficulty_default
         end
     end
   rescue
     _ -> nil
   end
+
+  # Load the bead's difficulty integer (0..4) from the DB. Returns nil on any
+  # error so the Tribunal falls back to its D2 default rather than crashing.
+  defp bead_difficulty(bead_id) when is_binary(bead_id) do
+    case Ash.get(Arbiter.Beads.Issue, bead_id) do
+      {:ok, %Arbiter.Beads.Issue{difficulty: d}} -> d
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp bead_difficulty(_), do: nil
 
   # Park at :awaiting_tribunal and spawn the reviewer. The branch + merge title
   # are stashed in meta so tribunal_verdict/2 can fire the same merge path on

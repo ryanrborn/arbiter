@@ -1166,6 +1166,121 @@ defmodule Arbiter.Polecat.TribunalTest do
     pid
   end
 
+  # ---- difficulty-derived round cap (bd-a5k6wb) ----------------------------
+
+  describe "rounds_for_difficulty/1" do
+    test "D0 and D1 beads get a 2-round cap" do
+      assert Tribunal.rounds_for_difficulty(0) == 2
+      assert Tribunal.rounds_for_difficulty(1) == 2
+    end
+
+    test "D2 (moderate) and nil get the 3-round default" do
+      assert Tribunal.rounds_for_difficulty(2) == 3
+      assert Tribunal.rounds_for_difficulty(nil) == 3
+    end
+
+    test "D3 and D4 beads get a 4-round cap" do
+      assert Tribunal.rounds_for_difficulty(3) == 4
+      assert Tribunal.rounds_for_difficulty(4) == 4
+    end
+  end
+
+  describe "difficulty-derived and workspace-cap round resolution" do
+    # A D0 bead has a 2-round default. With the @rounds fixture (reject first,
+    # approve second), a 2-round cap means one reject + one revise → approval.
+    # Because only 2 rounds are allowed and the second approves, the bead merges.
+    test "D0 bead escalates after 2 rounds (difficulty default applies)",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws, %{difficulty: 0})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{bead.id}",
+            review_required: true,
+            worktree_path: repo,
+            # @rounds rejects round 1, approves round 2 — within a D0 cap of 2.
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Round 1 rejects → revise → round 2 approves → merge.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 1
+    end
+
+    # A D3 bead has a 4-round default. A workspace with max_rounds: 2 caps it at
+    # min(4, 2) = 2. The @rounds fixture rejects first then emits REQUEST_CHANGES
+    # on all later passes, so after 2 rounds it escalates — proving the workspace
+    # cap was applied rather than the difficulty default of 4.
+    test "workspace cap overrides difficulty default (min wins)",
+         %{repo: repo} do
+      {:ok, ws_capped} =
+        Ash.create(Workspace, %{
+          name: "capped-ws-#{System.unique_integer([:positive])}",
+          prefix: "cp",
+          config: %{
+            "review" => %{"required" => true},
+            "tribunal" => %{"max_rounds" => 2}
+          }
+        })
+
+      bead = new_bead(ws_capped, %{difficulty: 3})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws_capped.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{bead.id}",
+            review_required: true,
+            worktree_path: repo,
+            # @rounds always REQUEST_CHANGES — the cap determines when to escalate.
+            review_command: [@rounds, "REQUEST_CHANGES"],
+            revise_command: [@revise],
+            review_timeout_ms: 5_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # The workspace cap of 2 is less than the D3 difficulty default of 4.
+      # After 2 rounds of rejections the Tribunal escalates — not 4.
+      wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 10_000)
+      assert merge_commit_count(repo) == 0
+      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+
+      escalation_body = Polecat.state(pid).meta.tribunal_findings
+      # The escalation payload names both rounds, proving it ran exactly 2.
+      assert escalation_body =~ "Round 1"
+      assert escalation_body =~ "Round 2"
+      # It should NOT mention Round 3 — the cap held at 2.
+      refute escalation_body =~ "Round 3"
+    end
+  end
+
   defp safe_stop(pid) do
     if Process.alive?(pid), do: GenServer.stop(pid, :normal)
   catch
