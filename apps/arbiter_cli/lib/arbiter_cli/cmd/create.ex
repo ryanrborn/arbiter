@@ -55,6 +55,9 @@ defmodule ArbiterCli.Cmd.Create do
       shared tracker; anyone can pick it up via `arb claim <ref>`. The workspace
       must have a tracker configured. Mutually exclusive with `--no-tracker` /
       `--local-only` (opposite intent).
+      Honored: `--title`, `--description`, `--priority`, `--type`, `--assignee`.
+      Not honored (warning emitted): `--difficulty`, `--deps`, `--vanguard`,
+      `--tracker-ref`, `--target-branch`, `--labels`.
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
@@ -120,9 +123,30 @@ defmodule ArbiterCli.Cmd.Create do
   defp run_ticket_only(opts, title, mode) do
     workspace_id = Workspace.id_or_halt()
 
+    ignored =
+      [
+        {"--difficulty", opts[:difficulty]},
+        {"--deps", opts[:deps]},
+        {"--vanguard", opts[:vanguard]},
+        {"--tracker-ref", opts[:tracker_ref]},
+        {"--target-branch", opts[:target_branch]},
+        {"--labels", opts[:labels]}
+      ]
+      |> Enum.filter(fn {_flag, val} -> not is_nil(val) end)
+      |> Enum.map(fn {flag, _val} -> flag end)
+
+    if ignored != [] and mode == :text do
+      IO.puts(
+        :stderr,
+        "arb: warning: --ticket-only ignores #{Enum.join(ignored, ", ")} (no local bead is created)."
+      )
+    end
+
     payload =
       %{"title" => title}
       |> maybe_put("description", opts[:description])
+      |> maybe_put("priority", opts[:priority])
+      |> maybe_put("issue_type", opts[:type])
       |> maybe_put("assignee", opts[:assignee])
 
     ticket =
