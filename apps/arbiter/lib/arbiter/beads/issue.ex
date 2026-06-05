@@ -145,6 +145,7 @@ defmodule Arbiter.Beads.Issue do
     update :close do
       require_atomic? false
       argument :reason, :string
+      argument :close_upstream, :boolean, default: false
 
       change {Arbiter.Beads.Issue.Changes.GuardStatus, action: :close}
       change set_attribute(:status, :closed)
@@ -156,8 +157,10 @@ defmodule Arbiter.Beads.Issue do
       change {Arbiter.Beads.Issue.Changes.StopPolecat, []}
       change {Arbiter.Beads.Issue.Changes.CleanupWorktree, []}
 
-      # Propagate the close to the linked external tracker (closes the GitHub
-      # issue, etc.). Best-effort: a sync failure never fails the local close.
+      # Propagate the close to the linked external tracker only when
+      # close_upstream: true is explicitly passed. Default is to leave the
+      # upstream issue open (e.g. bead abandoned, ceded, or pruned).
+      # Best-effort: a sync failure never fails the local close.
       change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
       # After closing, check whether any system-managed convoy this issue belongs
