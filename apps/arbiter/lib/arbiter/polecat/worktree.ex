@@ -267,6 +267,50 @@ defmodule Arbiter.Polecat.Worktree do
     end
   end
 
+  @typedoc """
+  Completion-readiness verdict from `completion_state/2`.
+
+    * `:ready` — the worktree is clean AND the branch has commits ahead of base.
+    * `:uncommitted` — the worktree has staged/unstaged/untracked changes (the
+      "acolyte edited but forgot to commit" case bd-ofql8k targets).
+    * `:no_commits` — the worktree is clean but the branch has no commits
+      ahead of base (the "acolyte signalled done without doing any work" case).
+  """
+  @type completion :: :ready | :uncommitted | :no_commits
+
+  @doc """
+  Snapshot the worktree's completion-readiness against `base_ref` (default
+  `"main"`): is it safe to hand off to the review gate / merger?
+
+  Returns:
+
+    * `{:ok, :ready}` — clean tree AND ≥1 commit ahead of `base_ref`.
+    * `{:ok, :uncommitted}` — the worktree has uncommitted changes; the
+      review gate / merger must NOT see it (the per-bead branch HEAD does
+      not yet include those edits, so they're invisible to `git diff
+      base..HEAD`). This is the bd-ofql8k root cause.
+    * `{:ok, :no_commits}` — clean tree but the branch has no commits
+      ahead of `base_ref`. Either no work was done, or commits landed
+      somewhere else.
+    * `{:error, reason}` — git couldn't be queried.
+
+  `:uncommitted` wins over `:no_commits` when both apply: an edited-but-
+  uncommitted worktree is the actionable signal ("commit it"), and the
+  absence of commits is a downstream consequence of that.
+  """
+  @spec completion_state(path(), String.t()) ::
+          {:ok, completion()} | {:error, error_reason()}
+  def completion_state(path, base_ref \\ "main") when is_binary(path) do
+    with {:ok, dirty?} <- has_uncommitted?(path),
+         {:ok, ahead?} <- has_commits_ahead?(path, base_ref) do
+      cond do
+        dirty? -> {:ok, :uncommitted}
+        not ahead? -> {:ok, :no_commits}
+        true -> {:ok, :ready}
+      end
+    end
+  end
+
   @doc """
   Push the worktree at `path` to a remote.
 
