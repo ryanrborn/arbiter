@@ -34,12 +34,12 @@ defmodule ArbiterCli.AliasResolver do
   dispatching to nothing.
   """
 
-  @known_verbs ~w(init show create close reopen list update dep ready doctor start restart install-service where help sling review prime polecat inbox notify message msg claim sync usage convoy config)
+  @known_verbs ~w(init show create close reopen list update dep ready doctor start restart install-service where help sling review prime polecat inbox notify message msg claim sync usage convoy config warships)
 
   # Noun-vernacular keys that also name a command verb. Lets a renamed noun
   # double as a verb alias — e.g. when `vernacular["batch"] == "Vanguard"`,
   # `arb vanguard` resolves to `arb convoy`. Keyed: noun key => canonical verb.
-  @noun_verb_aliases %{"batch" => "convoy"}
+  @noun_verb_aliases %{"batch" => "convoy", "rig" => "warships"}
 
   @doc "The set of built-in verbs that arb dispatches to."
   @spec known_verbs() :: [String.t()]
