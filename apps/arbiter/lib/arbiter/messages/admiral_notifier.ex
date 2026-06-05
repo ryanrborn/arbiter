@@ -205,13 +205,24 @@ defmodule Arbiter.Messages.AdmiralNotifier do
         "Rig: #{rig(snapshot)}",
         exit_line(reason),
         activity_line(snapshot),
-        reason.remediation && "Remediation: #{reason.remediation}"
+        reason.remediation && "Remediation: #{reason.remediation}",
+        resume_hint(event, bead_id)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
 
     {subject, body}
   end
+
+  # bd-auma3z: a stopped acolyte's outpost (its worktree + committed/uncommitted
+  # progress) is preserved, so the operator can continue rather than re-slinging
+  # from scratch. Offer the resume verb right in the escalation. Only for
+  # `:acolyte_stopped` — a `:preflight_failed` refusal happens before any work,
+  # so there is no outpost to resume.
+  defp resume_hint(:acolyte_stopped, bead_id),
+    do: "Resume: run `arb resume #{bead_id}` to continue from the preserved outpost."
+
+  defp resume_hint(_event, _bead_id), do: nil
 
   defp rig(%{rig: rig}) when is_binary(rig) and rig != "", do: rig
   defp rig(_), do: "unknown"
