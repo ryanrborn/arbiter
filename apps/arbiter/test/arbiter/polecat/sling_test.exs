@@ -513,6 +513,38 @@ defmodule Arbiter.Polecat.SlingTest do
       assert result.worktree_path == nil
     end
 
+    test "attaches to existing branch when re-slinging a reopened bead", %{repo: repo, ws: ws} do
+      # Reproduces bd-4tta5n: bead is slung once (branch created), the worktree
+      # is cleaned up but the branch remains, then the bead is reopened and
+      # re-slung. Worktree.create fails with "already exists"; sling must fall
+      # back to Worktree.attach and succeed.
+      {:ok, bead} =
+        Ash.create(Issue, %{title: "re-sling after review", workspace_id: ws.id})
+
+      # First sling — provisions the worktree, creating the branch locally.
+      {:ok, first} = Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+      assert is_binary(first.worktree_path)
+      branch = Arbiter.Polecat.BranchNamer.derive(bead)
+
+      # Simulate Driver cleanup: remove the worktree directory but leave the
+      # branch (Worktree.cleanup removes the worktree, not the branch).
+      Arbiter.Polecat.Worktree.cleanup(first.worktree_path)
+      refute File.dir?(first.worktree_path)
+
+      # Confirm the branch still exists in the repo.
+      {branches, 0} = System.cmd("git", ["-C", repo, "branch", "--list", branch])
+      assert String.contains?(branches, branch)
+
+      # Reopen bead so it can be re-slung.
+      {:ok, bead} = Ash.update(bead, %{status: :open})
+
+      # Second sling — branch already exists; must attach instead of creating.
+      assert {:ok, second} = Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+      assert is_binary(second.worktree_path)
+      assert File.dir?(second.worktree_path)
+      assert {:ok, ^branch} = Arbiter.Polecat.Worktree.current_branch(second.worktree_path)
+    end
+
     test "worktree starts from upstream tip even when the rig's local base is stale",
          %{repo: repo, remote: remote, tmp: tmp, ws: ws} do
       # Reproduces the 2026-06-04 incident: a second clone advances origin/main;
