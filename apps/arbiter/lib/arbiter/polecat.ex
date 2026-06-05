@@ -802,7 +802,16 @@ defmodule Arbiter.Polecat do
       # Mark the polecat claude-driven so views can show the live activity
       # signal (mirrored below) instead of a frozen workflow step — the
       # claude-driven Driver never ticks the Machine. See bd-c919xj.
-      meta = Map.put(state.meta || %{}, :claude_session, true)
+      #
+      # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
+      # the acolyte with a nudge prompt when arb-done arrives with uncommitted
+      # work, without round-tripping through the workspace-aware Sling builder
+      # that does not know how to swap the prompt mid-session.
+      meta =
+        (state.meta || %{})
+        |> Map.put(:claude_session, true)
+        |> Map.put(:claude_spawn, port_args)
+
       new_state = %State{state | claude_sessions: sessions, meta: meta}
       new_state = sync_session_meta(new_state, port)
 
@@ -969,15 +978,401 @@ defmodule Arbiter.Polecat do
         complete_now(state, :claude_done)
 
       branch ->
-        if review_required?(state) do
-          # Standing order: don't merge unreviewed work. Park at :awaiting_tribunal
-          # and let a distinct reviewer acolyte judge the diff first. The merge
-          # fires only on tribunal_verdict/2 :approve.
-          enter_tribunal(state, branch)
-        else
-          merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
+        # bd-ofql8k: before routing to the Tribunal (which diffs the per-bead
+        # branch's COMMITTED history) or the merger, check that the worktree is
+        # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
+        # target. The repeated failure mode this guards against: the acolyte
+        # edits files correctly but never `git commit`s them; HEAD stays at the
+        # base branch with the work sitting uncommitted in the worktree; the
+        # reviewer diffs `base..HEAD`, sees empty, and concludes "no code
+        # exists" — sitting on the uncommitted changes and ignoring them.
+        case commit_gate(state) do
+          :ok ->
+            route_completion(state, branch)
+
+          {:gate, reason} ->
+            handle_commit_gate(state, branch, reason)
         end
     end
+  end
+
+  defp route_completion(%State{meta: meta} = state, branch) do
+    if review_required?(state) do
+      # Standing order: don't merge unreviewed work. Park at :awaiting_tribunal
+      # and let a distinct reviewer acolyte judge the diff first. The merge
+      # fires only on tribunal_verdict/2 :approve.
+      enter_tribunal(state, branch)
+    else
+      merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
+    end
+  end
+
+  # bd-ofql8k commit gate. Returns `:ok` to proceed, or `{:gate, :uncommitted |
+  # :no_commits}` to divert. We only gate when:
+  #
+  #   * a worktree is configured and exists on disk, AND
+  #   * the worktree is actually checked out on the per-bead branch.
+  #
+  # The branch check exists because some test setups (notably TribunalTest)
+  # reuse the rig itself as the "worktree" with `worktree_path: repo` and a
+  # feature branch that was created on the rig but left checked-out elsewhere.
+  # In that case the worktree's HEAD is some other branch (usually `main`) and
+  # `git rev-list main..HEAD` is meaningless — gating on it would manufacture
+  # false `:no_commits` trips. Production worktrees provisioned via
+  # `Worktree.create/3` are always checked out on the per-bead branch, so the
+  # gate fires there as intended.
+  #
+  # ad-hoc runs without a provisioned worktree (no `:worktree_path` in meta)
+  # fall through to the legacy path. git failures fail open: a transient git
+  # hiccup must not strand a real completion.
+  defp commit_gate(%State{meta: meta}) do
+    worktree = meta && Map.get(meta, :worktree_path)
+    target = (meta && Map.get(meta, :target_branch)) || "main"
+    expected = meta && Map.get(meta, :branch)
+
+    cond do
+      is_binary(worktree) and File.dir?(worktree) and
+          worktree_on_branch?(worktree, expected) ->
+        case Arbiter.Polecat.Worktree.completion_state(worktree, target) do
+          {:ok, :ready} -> :ok
+          {:ok, :uncommitted} -> {:gate, :uncommitted}
+          {:ok, :no_commits} -> {:gate, :no_commits}
+          {:error, _} -> :ok
+        end
+
+      true ->
+        :ok
+    end
+  end
+
+  defp worktree_on_branch?(_path, nil), do: false
+  defp worktree_on_branch?(_path, ""), do: false
+
+  defp worktree_on_branch?(path, expected) when is_binary(expected) do
+    case Arbiter.Polecat.Worktree.current_branch(path) do
+      {:ok, ^expected} -> true
+      _ -> false
+    end
+  end
+
+  # The acolyte signalled done but the worktree isn't in a reviewable state.
+  # First try a single bounded "send-back" nudge — relaunch the acolyte with a
+  # short prompt telling it exactly what's missing (commit + push, or "you
+  # printed `arb done` without making any commits") so the same mind that did
+  # the work can fix the omission. Cap is `meta[:commit_nudge_cap]`, default 1;
+  # tests pass 0 to assert the structural gate without the retry layer.
+  #
+  # If nothing usable is captured to relaunch with, OR the cap is exhausted, we
+  # fail_now WITHOUT routing to the Tribunal: a stale, empty `base..HEAD` diff
+  # must not reach a reviewer who will report "no work" while the work is right
+  # there in the worktree.
+  defp handle_commit_gate(%State{meta: meta} = state, _branch, reason) do
+    cap = (meta && Map.get(meta, :commit_nudge_cap)) || 1
+    attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
+
+    cond do
+      attempts >= cap ->
+        park_commit_gate(state, reason, :cap_exhausted)
+
+      true ->
+        case respawn_with_commit_nudge(state, reason) do
+          {:ok, new_state} ->
+            new_state
+
+          {:error, why} ->
+            park_commit_gate(state, reason, {:respawn_failed, why})
+        end
+    end
+  end
+
+  # Build a nudge prompt + port_args from the stashed claude_spawn and relaunch
+  # a fresh claude session in the same worktree. The mailbox/nudge prompt is
+  # short and direct: it names the gate-trip reason and the exact action
+  # required, then asks the acolyte to print `arb done` again only after the
+  # commit lands.
+  #
+  # The stashed argv must be the streaming `claude` invocation built by
+  # `Arbiter.Polecat.ClaudeSession.default_claude_argv/1` (a `sh -c 'exec "$@"
+  # < /dev/null' sh claude --print <prompt> ...`) for the prompt-swap to work.
+  # When the argv is a test fixture (`claude_command:` opt) we re-run the same
+  # argv so a fixture-based test exercises the gate-retry-then-fail cycle
+  # without us second-guessing what the fixture does.
+  defp respawn_with_commit_nudge(%State{meta: meta} = state, reason) do
+    spawn_args = meta && Map.get(meta, :claude_spawn)
+    nudge = commit_nudge_prompt(state, reason)
+
+    with %{} = port_args <- spawn_args || :no_spawn_args,
+         {:ok, new_args} <- inject_nudge_argv(port_args, nudge),
+         {:ok, port} <- safe_open_port(new_args) do
+      next_attempts = ((meta && Map.get(meta, :commit_nudge_attempts)) || 0) + 1
+
+      Logger.info(
+        "Polecat: bd-ofql8k commit gate tripped (#{reason}) for bead=#{state.bead_id}; " <>
+          "relaunching acolyte with nudge (attempt #{next_attempts}/#{commit_nudge_cap(meta)})"
+      )
+
+      session_config = %{
+        bead_id: state.bead_id,
+        topic: "polecat:" <> state.bead_id,
+        line_cap: Arbiter.Polecat.ClaudeSession.line_cap(),
+        done_regex: Arbiter.Polecat.ClaudeSession.done_regex()
+      }
+
+      session =
+        session_config
+        |> Map.put(:port, port)
+        |> Map.put(:output_lines, [])
+        |> Map.put(:line_buf, "")
+        |> Map.put(:exit_status, nil)
+        |> Map.put(:exited_at, nil)
+        |> Map.put(:activity, "starting")
+        |> Map.put(:activity_at, DateTime.utc_now())
+        |> Map.put(:output_log, open_output_log(state))
+
+      new_meta =
+        meta
+        |> Map.put(:commit_nudge_attempts, next_attempts)
+        |> Map.put(:claude_spawn, new_args)
+
+      sessions = Map.put(state.claude_sessions, port, session)
+
+      {:ok,
+       %State{
+         state
+         | claude_sessions: sessions,
+           meta: new_meta,
+           status: :running,
+           step_started_at: DateTime.utc_now()
+       }}
+    else
+      :no_spawn_args -> {:error, :no_spawn_args}
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  defp commit_nudge_cap(meta), do: (meta && Map.get(meta, :commit_nudge_cap)) || 1
+
+  defp safe_open_port(port_args) do
+    {:ok, Arbiter.Polecat.ClaudeSession.open_port(port_args)}
+  rescue
+    e -> {:error, {:port_open_failed, Exception.message(e)}}
+  end
+
+  # Swap the prompt in a stashed argv. Real claude argv from
+  # `default_claude_argv/1` looks like:
+  #
+  #   ["sh", "-c", "exec \"$@\" < /dev/null", "sh", <claude>, "--print", <prompt>, ...]
+  #
+  # We locate `--print` and replace the following element. If no `--print` slot
+  # is present (test fixtures, custom commands) we accept the argv unchanged
+  # and rely on the fixture to honor a re-run; the cap then bounds how many
+  # times we try.
+  defp inject_nudge_argv(%{argv: argv} = port_args, nudge) when is_list(argv) do
+    new_argv =
+      case Enum.find_index(argv, &(&1 == "--print")) do
+        nil ->
+          argv
+
+        idx when idx + 1 < length(argv) ->
+          List.replace_at(argv, idx + 1, nudge)
+
+        _ ->
+          argv
+      end
+
+    {:ok, %{port_args | argv: new_argv}}
+  end
+
+  defp inject_nudge_argv(_port_args, _nudge), do: {:error, :missing_argv}
+
+  defp commit_nudge_prompt(%State{bead_id: bead_id, meta: meta}, :uncommitted) do
+    branch = (meta && Map.get(meta, :branch)) || "(your branch)"
+
+    """
+    bd-ofql8k commit gate: you printed `arb done` for bead #{bead_id}, but the
+    worktree on branch `#{branch}` has uncommitted changes (staged, unstaged,
+    or untracked). The review gate diffs `base..HEAD` — committed history
+    only — so without commits your work is invisible and the reviewer would
+    report "no code exists" while sitting on your edits.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. `git status` to see what is uncommitted.
+      2. `git add -A`
+      3. `git commit -m "<a short message describing the work>"`
+      4. (`git push -u origin #{branch}` is OPTIONAL — the arbiter pushes /
+         opens the MR for you on merge.)
+
+    Do not redo the work — just commit what is already on disk. If a hunk in
+    the diff looks half-finished or wrong, finish it first, then commit.
+    """
+  end
+
+  defp commit_nudge_prompt(%State{bead_id: bead_id, meta: meta}, :no_commits) do
+    branch = (meta && Map.get(meta, :branch)) || "(your branch)"
+    target = (meta && Map.get(meta, :target_branch)) || "main"
+
+    """
+    bd-ofql8k commit gate: you printed `arb done` for bead #{bead_id}, but
+    branch `#{branch}` has no commits ahead of `#{target}`. Either no work
+    was done, or your edits landed on a different branch. The review gate
+    cannot proceed with a zero-commit branch.
+
+    Inspect what happened:
+
+      git status
+      git log --oneline #{target}..HEAD
+      git diff #{target}..HEAD
+
+    If work IS on disk but uncommitted, commit it on `#{branch}`:
+
+      git add -A
+      git commit -m "<a short message>"
+
+    If you skipped the work, do it now and commit. Then print `arb done`
+    again on its own line.
+    """
+  end
+
+  # Final park: record on the bead, escalate to the Admiral, fail the polecat.
+  # We deliberately do NOT auto-commit (per bd-ofql8k: "Prefer send-back/retry
+  # over a blind auto-commit (so half-work/junk is not committed)") — an
+  # uncommitted worktree at gate-cap is escalated for human / dispatcher
+  # judgement, not silently buried.
+  defp park_commit_gate(%State{} = state, reason, why) do
+    {failure_reason, subject} = commit_gate_failure_metadata(reason)
+    summary = commit_gate_summary(state, reason, why)
+
+    record_commit_gate_note(state, reason, why, summary)
+    escalate_commit_gate(state, subject, summary)
+
+    meta =
+      (state.meta || %{})
+      |> Map.put(:commit_gate_reason, reason)
+      |> Map.put(:commit_gate_detail, why)
+
+    fail_now(%State{state | meta: meta}, failure_reason)
+  end
+
+  defp commit_gate_failure_metadata(:uncommitted),
+    do: {:uncommitted_at_completion, "Acolyte signalled done with uncommitted work"}
+
+  defp commit_gate_failure_metadata(:no_commits),
+    do: {:no_commits_at_completion, "Acolyte signalled done with no commits on branch"}
+
+  defp commit_gate_summary(%State{bead_id: bead_id, meta: meta}, reason, why) do
+    branch = (meta && Map.get(meta, :branch)) || "(unknown)"
+    target = (meta && Map.get(meta, :target_branch)) || "main"
+    worktree = (meta && Map.get(meta, :worktree_path)) || "(unknown)"
+    attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
+    cap = commit_nudge_cap(meta)
+    status = commit_gate_git_status(worktree)
+
+    reason_blurb =
+      case reason do
+        :uncommitted ->
+          "the worktree has uncommitted changes (staged/unstaged/untracked) " <>
+            "but no commits made it onto branch `#{branch}`. The review gate " <>
+            "would diff `#{target}..HEAD`, see empty, and falsely report 'no work'."
+
+        :no_commits ->
+          "branch `#{branch}` has zero commits ahead of `#{target}`. Either " <>
+            "the acolyte did no work, or its edits landed elsewhere."
+      end
+
+    detail_blurb =
+      case why do
+        :cap_exhausted ->
+          "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
+            "the worktree is still in the failed state."
+
+        {:respawn_failed, sub} ->
+          "Could not relaunch the acolyte for a send-back nudge: #{inspect(sub)}."
+
+        other ->
+          "Detail: #{inspect(other)}."
+      end
+
+    """
+    bd-ofql8k commit gate tripped for bead #{bead_id}: #{reason_blurb}
+
+    #{detail_blurb}
+
+    Worktree: #{worktree}
+    Branch: #{branch} → #{target}
+
+    git status (--porcelain):
+    #{status}
+    """
+    |> String.trim()
+  end
+
+  defp commit_gate_git_status(path) when is_binary(path) do
+    case System.cmd("git", ["-C", path, "status", "--porcelain"], stderr_to_stdout: true) do
+      {"", 0} -> "  (clean)"
+      {out, 0} -> indent(out)
+      {out, _} -> "  (could not run git status: " <> String.trim(out) <> ")"
+    end
+  rescue
+    _ -> "  (git status unavailable)"
+  end
+
+  defp commit_gate_git_status(_), do: "  (no worktree path)"
+
+  defp indent(text) do
+    text
+    |> String.trim_trailing()
+    |> String.split("\n")
+    |> Enum.map(&("  " <> &1))
+    |> Enum.join("\n")
+  end
+
+  defp record_commit_gate_note(%State{bead_id: bead_id}, _reason, _why, summary) do
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601()
+    block = "## Commit gate tripped (#{stamp})\n\n#{summary}"
+
+    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+      notes =
+        [bead.notes, block]
+        |> Enum.reject(&(&1 in [nil, ""]))
+        |> Enum.join("\n\n")
+
+      case Ash.update(bead, %{notes: notes}, action: :update) do
+        {:ok, _} -> :ok
+        {:error, reason} -> log_commit_gate_warning(bead_id, reason)
+      end
+    end
+
+    :ok
+  rescue
+    e -> log_commit_gate_warning(bead_id, e)
+  end
+
+  defp escalate_commit_gate(%State{workspace_id: ws_id, bead_id: bead_id}, subject, summary)
+       when is_binary(ws_id) do
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: bead_id,
+      workspace_id: ws_id,
+      directive_ref: bead_id,
+      subject: "Commit gate: #{subject} (#{bead_id})",
+      body: summary
+    })
+
+    :ok
+  rescue
+    e -> log_commit_gate_warning(bead_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_commit_gate(_state, _subject, _summary), do: :ok
+
+  defp log_commit_gate_warning(bead_id, reason) do
+    Logger.warning("Polecat: commit-gate escalation swallowed for bead=#{bead_id}: #{inspect(reason)}")
+    :error
   end
 
   # The shared "integrate this branch" path: open the MR / run the merge, or fail

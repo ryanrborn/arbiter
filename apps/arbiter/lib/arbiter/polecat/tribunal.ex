@@ -665,6 +665,12 @@ defmodule Arbiter.Polecat.Tribunal do
     ```
     #{current_diff(state)}
     ```
+
+    ## Worktree status (uncommitted changes, if any)
+
+    ```
+    #{worktree_status(state)}
+    ```
     """
     |> String.trim()
   end
@@ -697,6 +703,27 @@ defmodule Arbiter.Polecat.Tribunal do
   end
 
   defp current_diff(_state), do: "(diff unavailable — no worktree)"
+
+  # bd-ofql8k defense-in-depth: an empty `base..HEAD` diff is NOT the same as
+  # "no work" — the acolyte may have edited files and forgotten to commit. Pair
+  # the diff with `git status --porcelain` so the escalation payload makes the
+  # uncommitted state visible and the recipient (the reviewer prompt, Darth
+  # Gnosis, the operator) can recognize it as "work present but uncommitted"
+  # rather than the misdiagnosis the Polecat's commit gate already guards
+  # against. The gate is the primary defense; this is the backstop.
+  defp worktree_status(%{worktree_path: wt}) when is_binary(wt) do
+    case System.cmd("git", ["-C", wt, "status", "--porcelain"], stderr_to_stdout: true) do
+      {"", 0} -> "(clean — no uncommitted changes)"
+      {out, 0} -> cap(out, 4_000)
+      {out, _} -> "(could not run git status)\n" <> cap(out, 2_000)
+    end
+  rescue
+    _ -> "(status unavailable)"
+  catch
+    :exit, _ -> "(status unavailable)"
+  end
+
+  defp worktree_status(_state), do: "(status unavailable — no worktree)"
 
   # ---- acolyte spawning ---------------------------------------------------
 
@@ -998,6 +1025,13 @@ defmodule Arbiter.Polecat.Tribunal do
 
     Judge the change against the acceptance criteria AND for correctness,
     regressions, and obvious defects.
+
+    NOTE (bd-ofql8k): if `git diff #{state.target_branch}...HEAD` looks empty,
+    also run `git status` BEFORE concluding "no code exists". An empty
+    `base..HEAD` plus a non-empty `git status` means the implementer edited
+    files but forgot to commit — the work is in the worktree, just not in
+    history. In that case REQUEST_CHANGES with a finding that names the
+    uncommitted files and asks for a commit, rather than reporting "no work."
 
     *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
     no `mix run`. Running a second app instance is hazardous. You review the diff
