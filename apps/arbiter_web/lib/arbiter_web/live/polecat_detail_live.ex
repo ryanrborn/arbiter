@@ -20,6 +20,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Warden
   alias Arbiter.Polecats.Run
+  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Vernacular
   alias Arbiter.Workflows.MachineState
   require Ash.Query
@@ -163,6 +164,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
     |> refresh_machine_state()
     |> refresh_mailbox()
     |> refresh_latest_run()
+    |> refresh_usage()
   end
 
   # Most-recent Run row for this bead, if any. Used to surface a link from
@@ -182,6 +184,24 @@ defmodule ArbiterWeb.PolecatDetailLive do
       end
 
     assign(socket, :latest_run, run)
+  end
+
+  # Latest usage event(s) for this bead — used to surface cost/tokens on the
+  # detail page. Queries by bead_id, ordered newest-first, capped at 5 rows
+  # (one per recent session: work + optional review). Best-effort — nil on error.
+  defp refresh_usage(socket) do
+    events =
+      try do
+        UsageEvent
+        |> Ash.Query.filter(bead_id == ^socket.assigns.bead_id)
+        |> Ash.Query.sort(occurred_at: :desc)
+        |> Ash.Query.limit(5)
+        |> Ash.read!()
+      rescue
+        _ -> []
+      end
+
+    assign(socket, :usage_events, events)
   end
 
   # Unread mailbox-family messages (mailbox / direction / flag) addressed to
@@ -522,6 +542,141 @@ defmodule ArbiterWeb.PolecatDetailLive do
               </div>
             </div>
           </section>
+
+          <%!-- ── Execution context ─────────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-4 gap-4">
+              <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                <.icon name="hero-cpu-chip" class="size-4" /> Execution context
+              </h2>
+              <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+                <dt class="font-medium text-base-content/60">Provider:</dt>
+                <dd>
+                  <code class="badge badge-ghost badge-sm font-mono">
+                    {execution_provider(@snapshot)}
+                  </code>
+                </dd>
+                <dt class="font-medium text-base-content/60">Model:</dt>
+                <dd>
+                  <%= if m = execution_model(@snapshot) do %>
+                    <code class="font-mono text-xs">{m}</code>
+                  <% else %>
+                    <span class="text-base-content/40 italic text-xs">unknown</span>
+                  <% end %>
+                </dd>
+                <%= if thinking = execution_thinking(@snapshot) do %>
+                  <dt class="font-medium text-base-content/60">Reasoning effort:</dt>
+                  <dd><code class="badge badge-ghost badge-sm font-mono">{thinking}</code></dd>
+                <% end %>
+                <%= if tier = execution_model_tier(@snapshot) do %>
+                  <dt class="font-medium text-base-content/60">Model tier:</dt>
+                  <dd><code class="badge badge-ghost badge-sm font-mono">{tier}</code></dd>
+                <% end %>
+                <%= for event <- @usage_events, event.step == :work do %>
+                  <%= if cost = event.cost_usd do %>
+                    <dt class="font-medium text-base-content/60">Run cost:</dt>
+                    <dd class="font-mono text-xs">${:erlang.float_to_binary(cost, decimals: 4)}</dd>
+                  <% end %>
+                  <%= if tokens_in = event.tokens_in do %>
+                    <dt class="font-medium text-base-content/60">Tokens:</dt>
+                    <dd class="font-mono text-xs">
+                      {tokens_in} in / {event.tokens_out || "?"} out
+                      <%= if (event.cache_read_tokens || 0) > 0 do %>
+                        · {event.cache_read_tokens} cached
+                      <% end %>
+                    </dd>
+                  <% end %>
+                <% end %>
+              </dl>
+            </div>
+          </section>
+
+          <%!-- ── Assigned bead summary ─────────────────────────────── --%>
+          <%= if @bead do %>
+            <section class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-4 gap-3">
+                <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                  <.icon name="hero-bookmark" class="size-4" />
+                  {String.capitalize(@issue_label)}: {@bead.title}
+                </h2>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-sm">
+                  <%= if @bead.target_branch do %>
+                    <dt class="font-medium text-base-content/60">Target branch:</dt>
+                    <dd><code class="font-mono text-xs">{@bead.target_branch}</code></dd>
+                  <% end %>
+                  <%= if @bead.difficulty do %>
+                    <dt class="font-medium text-base-content/60">Difficulty:</dt>
+                    <dd>
+                      <span class="badge badge-ghost badge-sm font-mono">
+                        D{@bead.difficulty}
+                      </span>
+                    </dd>
+                  <% end %>
+                  <%= if @bead.priority do %>
+                    <dt class="font-medium text-base-content/60">Priority:</dt>
+                    <dd>
+                      <span class="badge badge-ghost badge-sm font-mono">
+                        P{@bead.priority}
+                      </span>
+                    </dd>
+                  <% end %>
+                  <%= if @bead.issue_type do %>
+                    <dt class="font-medium text-base-content/60">Type:</dt>
+                    <dd>
+                      <span class="badge badge-ghost badge-sm">
+                        {@bead.issue_type}
+                      </span>
+                    </dd>
+                  <% end %>
+                  <%= if tracker_display(@bead) do %>
+                    <dt class="font-medium text-base-content/60">Tracker:</dt>
+                    <dd class="font-mono text-xs">{tracker_display(@bead)}</dd>
+                  <% end %>
+                </dl>
+              </div>
+            </section>
+          <% end %>
+
+          <%!-- ── Polecat metadata ───────────────────────────────────── --%>
+          <%= if meta_has_details?(@snapshot.meta) do %>
+            <section class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-4 gap-3">
+                <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
+                  <.icon name="hero-information-circle" class="size-4" /> Metadata
+                </h2>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-sm">
+                  <%= if role = Map.get(@snapshot.meta || %{}, :role) do %>
+                    <dt class="font-medium text-base-content/60">Role:</dt>
+                    <dd><span class="badge badge-ghost badge-sm">{role}</span></dd>
+                  <% end %>
+                  <%= if Map.get(@snapshot.meta || %{}, :review_required) do %>
+                    <dt class="font-medium text-base-content/60">Review gate:</dt>
+                    <dd><span class="badge badge-warning badge-sm">required</span></dd>
+                  <% end %>
+                  <%= if path = Map.get(@snapshot.meta || %{}, :worktree_path) do %>
+                    <dt class="font-medium text-base-content/60">Outpost:</dt>
+                    <dd class="font-mono text-xs break-all">{path}</dd>
+                  <% end %>
+                  <%= if branch = Map.get(@snapshot.meta || %{}, :branch) do %>
+                    <dt class="font-medium text-base-content/60">Branch:</dt>
+                    <dd><code class="font-mono text-xs">{branch}</code></dd>
+                  <% end %>
+                  <%= if @snapshot.step_started_at do %>
+                    <dt class="font-medium text-base-content/60">Step started:</dt>
+                    <dd class="font-mono text-xs tabular-nums">
+                      {format_ts(@snapshot.step_started_at)}
+                    </dd>
+                  <% end %>
+                  <%= if reason = Map.get(@snapshot.meta || %{}, :stop_reason) do %>
+                    <dt class="font-medium text-base-content/60">Stop reason:</dt>
+                    <dd class="text-error text-xs font-mono">
+                      {Map.get(reason, :summary) || inspect(reason)}
+                    </dd>
+                  <% end %>
+                </dl>
+              </div>
+            </section>
+          <% end %>
 
           <%= if @snapshot.mr_ref do %>
             <section class="card bg-base-200 p-4 mb-4" id="merge-review">
@@ -926,4 +1081,56 @@ defmodule ArbiterWeb.PolecatDetailLive do
   defp kind_border_class(:direction), do: "border-l-warning"
   defp kind_border_class(:flag), do: "border-l-accent"
   defp kind_border_class(_), do: "border-l-base-300"
+
+  # ---- execution context helpers ----------------------------------------
+
+  # Provider: prefer the ACTUAL model provider synced from session (set once
+  # the Claude init event arrives), then fall back to the routing config
+  # stamped at spawn time (set before spawn via Polecat.report).
+  defp execution_provider(%{meta: meta}) when is_map(meta) do
+    Map.get(meta, :provider) ||
+      get_in(meta, [:routing_config, :provider]) ||
+      "claude"
+  end
+
+  defp execution_provider(_), do: "claude"
+
+  # Model: prefer the ACTUAL model from the running session (synced from the
+  # Claude streaming init event — exact concrete model name), then fall back to
+  # the configured model from the routing decision.
+  defp execution_model(%{meta: meta}) when is_map(meta) do
+    Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
+  end
+
+  defp execution_model(_), do: nil
+
+  defp execution_thinking(%{meta: meta}) when is_map(meta) do
+    get_in(meta, [:routing_config, :thinking])
+  end
+
+  defp execution_thinking(_), do: nil
+
+  defp execution_model_tier(%{meta: meta}) when is_map(meta) do
+    get_in(meta, [:routing_config, :model_tier])
+  end
+
+  defp execution_model_tier(_), do: nil
+
+  # Tracker ref display: "jira:ABC-123", "github:42", etc.
+  defp tracker_display(%Issue{tracker_type: type, tracker_ref: ref})
+       when not is_nil(ref) and ref != "" and type not in [nil, :none] do
+    "#{type}:#{ref}"
+  end
+
+  defp tracker_display(_), do: nil
+
+  # Whether the meta map has any details worth showing in the metadata section.
+  defp meta_has_details?(nil), do: false
+
+  defp meta_has_details?(meta) when is_map(meta) do
+    Enum.any?(
+      [:role, :review_required, :worktree_path, :branch, :stop_reason],
+      &Map.has_key?(meta, &1)
+    )
+  end
 end
