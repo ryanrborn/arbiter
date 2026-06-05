@@ -69,12 +69,7 @@ defmodule Arbiter.Polecat.ResumeContext do
     finishing. Its work is preserved here — DO NOT start over or redo steps that
     are already done. Read the state below, verify it, and continue from there.
 
-    ## Work already committed (git log #{base_branch}..HEAD)
-    #{commits_block(worktree_path, base_branch)}
-
-    ## Uncommitted work-in-progress in the outpost
-    #{uncommitted_block(worktree_path)}
-
+    #{work_so_far(worktree_path, base_branch)}
     Continue from where the prior acolyte left off: finish the remaining work,
     commit it on this branch, and complete the bead as usual. If commits or
     uncommitted changes above already satisfy part of the acceptance, do not
@@ -82,6 +77,32 @@ defmodule Arbiter.Polecat.ResumeContext do
 
     ─────────────────────────────────────────────────────────────────────────
 
+    """
+  end
+
+  @doc """
+  Render just the git-state "work so far" briefing — the commits made since the
+  branch was cut plus any uncommitted work-in-progress — as a Markdown block,
+  WITHOUT the surrounding resume framing.
+
+  Split out of `build/3` so callers other than the `arb resume` path can reuse
+  the same git-derived continuity briefing. The Tribunal's revise-and-rediscuss
+  loop (bd-1na62i, Stage 3) prepends it to a revise-round implementer: between
+  review rounds the prior round's fixes are committed on the branch (and any
+  stragglers sit uncommitted), and the fresh implementer mind needs that picture
+  to *continue the thread* rather than re-derive it from a raw diff. This is the
+  provider-agnostic same-mind-continuity approximation Stage 3 settled on — git
+  state, not a Claude/Gemini session-resume id.
+  """
+  @spec work_so_far(String.t(), String.t()) :: String.t()
+  def work_so_far(worktree_path, base_branch)
+      when is_binary(worktree_path) and is_binary(base_branch) do
+    """
+    ## Work already committed (git log #{base_branch}..HEAD)
+    #{commits_block(worktree_path, base_branch)}
+
+    ## Uncommitted work-in-progress in the outpost
+    #{uncommitted_block(worktree_path)}
     """
   end
 

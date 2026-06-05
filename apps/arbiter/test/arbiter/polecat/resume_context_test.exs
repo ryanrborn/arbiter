@@ -74,4 +74,24 @@ defmodule Arbiter.Polecat.ResumeContextTest do
     assert {:ok, prefix} = ResumeContext.build(bead, repo, "main")
     assert prefix =~ "diff truncated"
   end
+
+  # `work_so_far/2` is the reusable git-state body shared with the Tribunal's
+  # revise loop (bd-1na62i). It returns just the committed/uncommitted blocks,
+  # WITHOUT the "RESUMING work" framing that wraps it in `build/3`.
+  test "work_so_far/2 renders the git-state blocks without the resume framing",
+       %{repo: repo} do
+    File.write!(Path.join(repo, "feature.ex"), "defmodule F, do: nil\n")
+    git!(repo, ["add", "feature.ex"])
+    git!(repo, ["commit", "-q", "-m", "add the feature scaffold"])
+    File.write!(Path.join(repo, "README.md"), "base\nWIP\n")
+
+    briefing = ResumeContext.work_so_far(repo, "main")
+
+    assert briefing =~ "Work already committed"
+    assert briefing =~ "add the feature scaffold"
+    assert briefing =~ "Uncommitted work-in-progress"
+    assert briefing =~ "WIP"
+    # The resume-specific framing belongs to build/3, not the shared body.
+    refute briefing =~ "RESUMING work on bead"
+  end
 end
