@@ -705,6 +705,24 @@ defmodule Arbiter.Polecat.SlingTest do
       refute work =~ "reviewer polecat"
     end
 
+    test "review prompt uses pr_ref when set, not tracker_ref (issue vs PR number fix)",
+         %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{
+          title: "pr ref takes precedence",
+          workspace_id: ws.id,
+          tracker_type: "github",
+          tracker_ref: "93"
+        })
+
+      {:ok, bead} = Ash.update(bead, %{pr_ref: "123"}, action: :update)
+
+      prompt = Arbiter.Polecat.Sling.prompt_for_bead(bead, review: true)
+
+      assert prompt =~ "github:123"
+      refute prompt =~ "github:93"
+    end
+
     test "review with start_claude: true uses the rig path as cwd when no worktree",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})

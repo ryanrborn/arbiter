@@ -357,10 +357,9 @@ defmodule Arbiter.Workflows.Refinery do
                 opened_at: DateTime.utc_now()
               )
 
-            # Record PR number on the bead via tracker_ref if it doesn't already
-            # have one. Best-effort: failure to update the bead doesn't fail the
-            # whole enqueue.
-            _ = maybe_record_tracker_ref(bead, pr_number)
+            # Record PR number on the bead's pr_ref field. Best-effort: failure
+            # to update the bead doesn't fail the whole enqueue.
+            _ = maybe_record_pr_ref(bead, pr_number)
 
             {:ok, %{state | items: [item | state.items]}}
 
@@ -683,13 +682,8 @@ defmodule Arbiter.Workflows.Refinery do
 
   defp repo_for(state, _item), do: state.repo
 
-  defp maybe_record_tracker_ref(%Issue{tracker_ref: ref}, _pr_number)
-       when is_binary(ref) and ref != "" do
-    :ok
-  end
-
-  defp maybe_record_tracker_ref(%Issue{} = bead, pr_number) do
-    case Ash.update(bead, %{tracker_ref: to_string(pr_number)}, action: :update) do
+  defp maybe_record_pr_ref(%Issue{} = bead, pr_number) do
+    case Ash.update(bead, %{pr_ref: to_string(pr_number)}, action: :update) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end

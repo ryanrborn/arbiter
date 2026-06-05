@@ -582,12 +582,18 @@ defmodule Arbiter.Polecat.Sling do
 
   defp review_prompt(%Issue{} = bead) do
     tracker_line =
-      case bead.tracker_ref do
-        ref when is_binary(ref) and ref != "" ->
-          "Tracker ref (PR/MR to review): #{bead.tracker_type}:#{ref}\n\n"
+      case bead.pr_ref do
+        pr when is_binary(pr) and pr != "" ->
+          "Tracker ref (PR/MR to review): #{bead.tracker_type}:#{pr}\n\n"
 
         _ ->
-          ""
+          case bead.tracker_ref do
+            ref when is_binary(ref) and ref != "" ->
+              "Tracker ref (PR/MR to review): #{bead.tracker_type}:#{ref}\n\n"
+
+            _ ->
+              ""
+          end
       end
 
     """
