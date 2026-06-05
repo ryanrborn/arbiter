@@ -1018,6 +1018,8 @@ defmodule Arbiter.Polecat do
           |> maybe_put(:activity, new_activity)
           |> maybe_put(:activity_at, Map.get(session, :activity_at))
           |> maybe_put(:exited_at, session.exited_at)
+          |> maybe_put(:model, get_in(session, [:usage, :model]))
+          |> maybe_put(:provider, Map.get(session, :provider))
 
         new_state = %State{state | meta: meta}
 
