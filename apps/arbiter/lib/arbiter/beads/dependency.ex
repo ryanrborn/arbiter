@@ -25,7 +25,7 @@ defmodule Arbiter.Beads.Dependency do
     declared twice with the same type.
   * `from_issue_id != to_issue_id` — a bead cannot depend on itself.
   * Both FKs (`from_issue_id`, `to_issue_id`) must reference real `Issue` rows.
-    Postgres enforces this via FK constraints; deleting a referenced issue is
+    SQLite enforces this via FK constraints; deleting a referenced issue is
     restricted (matches Issue→Workspace policy).
 
   ## Not audited
@@ -129,7 +129,7 @@ defmodule Arbiter.Beads.Dependency do
   end
 
   identities do
-    # Enforced as a Postgres UNIQUE index on (from_issue_id, to_issue_id, type).
+    # Enforced as a UNIQUE index on (from_issue_id, to_issue_id, type).
     # Prevents duplicate edges of the same type between the same pair.
     identity :unique_edge, [:from_issue_id, :to_issue_id, :type]
   end

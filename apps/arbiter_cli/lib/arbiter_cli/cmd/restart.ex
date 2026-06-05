@@ -23,9 +23,9 @@ defmodule ArbiterCli.Cmd.Restart do
     4. **Wait for green.** Poll `arb doctor` until every check passes (or the
        timeout elapses), then print the status report.
 
-  Postgres is assumed already up — this restarts only Phoenix. If the whole
-  stack is down, use `arb start` instead (which also boots Postgres); restart
-  will still happily start Phoenix when nothing is running.
+  This restarts only Phoenix. If the stack is not running at all, use
+  `arb start` instead; restart will still happily start Phoenix when nothing
+  is running.
 
   ## Exit codes
 
