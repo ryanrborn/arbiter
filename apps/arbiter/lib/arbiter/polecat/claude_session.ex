@@ -158,7 +158,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
         exec: exec,
         argv: argv,
         cd: worktree_path,
-        env: env_pairs(opts)
+        env: env_pairs(opts, bead_id)
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -736,10 +736,23 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # workspace-less Tribunal path) we default to the isolated CLAUDE_CONFIG_DIR
   # so even those spawns don't inherit the operator's ~/.claude. In the test
   # env config isolation is disabled, so this resolves to [] there.
-  defp env_pairs(opts) do
-    case Keyword.fetch(opts, :env) do
-      {:ok, list} when is_list(list) -> list
-      _ -> Arbiter.Agents.Claude.ConfigDir.env()
+  #
+  # bd-crqku8: always inject ARB_ACOLYTE_BEAD_ID so any `arb restart/update/
+  # start` invoked from inside the acolyte session can detect it and refuse,
+  # preventing an acolyte from bouncing the live orchestrating server.
+  defp env_pairs(opts, bead_id) do
+    base =
+      case Keyword.fetch(opts, :env) do
+        {:ok, list} when is_list(list) -> list
+        _ -> Arbiter.Agents.Claude.ConfigDir.env()
+      end
+
+    case bead_id do
+      id when is_binary(id) and id != "" ->
+        base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
+
+      _ ->
+        base
     end
   end
 end

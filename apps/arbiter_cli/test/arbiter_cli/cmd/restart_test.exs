@@ -420,6 +420,41 @@ defmodule ArbiterCli.Cmd.RestartTest do
     end
   end
 
+  describe "acolyte-session guard (bd-crqku8)" do
+    test "refuses to restart when ARB_ACOLYTE_BEAD_ID is set" do
+      System.put_env("ARB_ACOLYTE_BEAD_ID", "bd-test-acolyte")
+      on_exit(fn -> System.delete_env("ARB_ACOLYTE_BEAD_ID") end)
+
+      {_out, err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 1
+      assert err =~ "acolyte session"
+      assert err =~ "bd-test-acolyte"
+    end
+
+    test "proceeds normally when ARB_ACOLYTE_BEAD_ID is not set" do
+      System.delete_env("ARB_ACOLYTE_BEAD_ID")
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+      ])
+
+      Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
+        case cmd do
+          "lsof" -> {"", 1}
+          "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
+          _ -> {"", 0}
+        end
+      end)
+
+      {out, _err, code} = capture(fn -> Restart.run([]) end)
+
+      assert code == 0
+      assert out =~ "Arbiter Phoenix restarted"
+    end
+  end
+
   describe "port resolution" do
     test "honors a custom ARB_HOST port" do
       System.put_env("ARB_HOST", "http://127.0.0.1:5005")
