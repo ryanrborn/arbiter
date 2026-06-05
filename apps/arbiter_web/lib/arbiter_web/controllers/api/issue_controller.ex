@@ -131,8 +131,11 @@ defmodule ArbiterWeb.Api.IssueController do
   defp check_local_dedup(%{"title" => title, "workspace_id" => workspace_id})
        when is_binary(title) and is_binary(workspace_id) do
     norm = normalize_title(title)
-    filters = [status: :open, workspace_id: workspace_id]
-    query = Ash.Query.do_filter(Ash.Query.new(Issue), filters)
+
+    query =
+      Issue
+      |> Ash.Query.new()
+      |> Ash.Query.filter(status in [:open, :in_progress] and workspace_id == ^workspace_id)
 
     case Ash.read(query) do
       {:ok, issues} ->

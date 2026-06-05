@@ -367,7 +367,8 @@ defmodule Arbiter.Trackers.GitHub do
   @spec search_by_title(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
   def search_by_title(title) when is_binary(title) do
     with {:ok, cfg} <- Config.resolve() do
-      query = "#{title} in:title repo:#{cfg.owner}/#{cfg.repo} is:issue is:open"
+      escaped_title = String.replace(title, "\"", "\\\"")
+      query = "\"#{escaped_title}\" in:title repo:#{cfg.owner}/#{cfg.repo} is:issue is:open"
 
       case request(cfg, :get, "/search/issues", params: [q: query, per_page: 25]) do
         {:ok, %Req.Response{status: status, body: %{"items" => items}}}
