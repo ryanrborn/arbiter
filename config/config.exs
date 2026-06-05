@@ -20,15 +20,14 @@ config :ash,
   read_action_after_action_hooks_in_order?: true,
   bulk_actions_default_to_errors?: true,
   transaction_rollback_on_error?: true,
-  redact_sensitive_values_in_errors?: true,
-  known_types: [AshPostgres.Timestamptz, AshPostgres.TimestamptzUsec]
+  redact_sensitive_values_in_errors?: true
 
 config :spark,
   formatter: [
     remove_parens?: true,
     "Ash.Resource": [
       section_order: [
-        :postgres,
+        :sqlite,
         :resource,
         :code_interface,
         :actions,
@@ -117,6 +116,11 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+# Force exqlite to compile from source on RHEL8/glibc<2.33 systems; the
+# precompiled NIF requires glibc 2.33 which is not available on Amazon Linux 2
+# or RHEL 8. This has no cost on systems that already have a compatible binary.
+config :exqlite, force_build: true
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

@@ -1,14 +1,12 @@
 import Config
 
 if config_env() == :prod do
-  database_url =
-    System.get_env("DATABASE_URL") ||
-      raise """
-      environment variable DATABASE_URL is missing.
-      For example: ecto://USER:PASS@HOST/DATABASE
-      """
+  database_path =
+    System.get_env("DATABASE_PATH") ||
+      Path.join(System.user_home!(), ".arbiter/arbiter.sqlite3")
 
   config :arbiter, Arbiter.Repo,
-    url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
+    database: database_path,
+    journal_mode: :wal,
+    busy_timeout: 5000
 end

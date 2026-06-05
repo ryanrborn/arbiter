@@ -1,6 +1,6 @@
 defmodule Arbiter.Beads.StatusBackfill do
   @moduledoc """
-  Reconcile bead statuses in Postgres against git history on a branch.
+  Reconcile bead statuses in the database against git history on a branch.
 
   The cutover postmortem flagged that bead statuses in the original Dolt
   source drifted out of sync during late-Phase implementation: the Mayor
@@ -25,7 +25,7 @@ defmodule Arbiter.Beads.StatusBackfill do
     still be proposed for closure. Operator inspection of the proposals
     list is the safety net for this.
   - Reopen beads. The reconciliation is one-directional (open → closed).
-    A bead that's `:closed` in Postgres but has no `feat(<id>)` commit
+    A bead that's `:closed` in the database but has no `feat(<id>)` commit
     is left closed.
   """
 

@@ -40,12 +40,12 @@ defmodule Arbiter.MixProject do
       {:sourceror, "~> 1.8", only: [:dev, :test]},
       {:ash_phoenix, "~> 2.0"},
       {:ash_paper_trail, "~> 0.5"},
-      {:ash_postgres, "~> 2.0"},
+      {:ash_sqlite, "~> 0.2"},
       {:ash, "~> 3.0"},
       {:dns_cluster, "~> 0.2.0"},
       {:phoenix_pubsub, "~> 2.1"},
       {:ecto_sql, "~> 3.13"},
-      {:postgrex, ">= 0.0.0"},
+      {:ecto_sqlite3, "~> 0.17"},
       {:jason, "~> 1.2"},
 
       # Periodic / cron-style scheduling (replaces gt's daemon convoy patrol etc.)

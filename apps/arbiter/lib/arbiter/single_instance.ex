@@ -1,54 +1,49 @@
 defmodule Arbiter.SingleInstance do
   @moduledoc """
-  Single-instance gate backed by a Postgres session advisory lock.
+  Single-instance guard for boot reconciliation.
 
-  Only one Arbiter instance per database may perform *destructive* boot
-  reconciliation — the orphan-run sweep in `Arbiter.Polecats.Reconciler`, which
-  keys liveness off the LOCAL process registry. A second instance booting
-  against the same DB has an empty registry, so without a gate it would see the
-  primary instance's live `:running` runs as orphans and mark them `:failed`,
-  corrupting active work (observed live 2026-06-02, bd-9rouwh / bd-igu12c).
+  Replaces the former Postgres session-advisory-lock with a two-layer guard:
 
-  This GenServer opens a *dedicated* Postgrex connection — separate from the
-  `Arbiter.Repo` pool — and holds `pg_try_advisory_lock/1` on it for its entire
-  lifetime. The first instance to boot against a given DB acquires the lock and
-  is the "primary"; any concurrent or later duplicate boot (an acolyte running
-  `mix phx.server` / `iex -S mix` / `mix run` while the real server is up) finds
-  the lock held and is a "secondary". `primary?/0` reports the verdict, and the
-  boot reconcile task consults it before sweeping.
+  1. **In-process layer**: an ETS table prevents two `SingleInstance` GenServers
+     within the same Erlang VM from both thinking they're primary. This covers
+     duplicate `iex -S mix` or test scenarios.
+  2. **Cross-process layer**: a PID-file in the data directory
+     (`~/.arbiter/arbiter.pid`) prevents two separate OS processes from both
+     claiming primary. A stale file (left by a crash) is detected by checking
+     whether the recorded OS PID is still alive.
 
-  Because the lock is *session*-scoped to the dedicated connection, Postgres
-  releases it the instant this process (and its connection) dies — so a genuine
-  crash-restart of the single canonical server re-acquires it and crash recovery
-  proceeds normally. That is the key distinction from a transaction-scoped lock,
-  which a later-booting duplicate would acquire freely once the primary's boot
-  sweep had committed.
+  SQLite serialises writes itself, so the guard is "lightweight" compared to
+  the former Postgres advisory lock — it exists solely to prevent a second
+  concurrent server from sweeping the primary's live `:running` polecat runs
+  as orphans during boot reconciliation.
 
-  We considered the bead's other options — gating on HTTP endpoint ownership
-  (awkward: this core app boots, and the reconcile task runs, *before*
-  `ArbiterWeb.Endpoint` ever attempts to bind its port) and gating on boot type
-  (a second `mix phx.server` is still a "server" boot, so it wouldn't be
-  excluded). The advisory lock is the one mechanism that covers every duplicate
-  boot regardless of cross-app ordering or boot kind.
+  The lock is automatically released (file removed + ETS entry deleted) on a
+  clean shutdown. A hard kill leaves a stale PID file; the next boot detects
+  the stale PID via the liveness check.
 
-  Relates to bd-6k8519 (the reconciler) and bd-9rouwh (this gate).
+  ## Test API
+
+  Accepts `:name`, `:lock_file` (overrides the default lock-file path), and
+  `:lock_key` (integer, maps to `/tmp/arbiter_lock_{key}.pid` — for unit tests
+  that need multiple competing guards without touching real data directories).
+
+  Relates to bd-9rouwh (the original gate) and bd-tbslcb (this SQLite migration).
   """
 
   use GenServer
 
   require Logger
 
-  # Arbitrary but stable 64-bit advisory-lock key. Advisory locks live in a
-  # per-database namespace shared only with other code that picks the same key,
-  # and nothing else in Arbiter takes advisory locks — so a single fixed
-  # constant is enough to identify "the Arbiter boot-reconcile instance lock".
-  @lock_key 4_848_000_001
+  @lock_file_name "arbiter.pid"
+  @ets_table :arbiter_single_instance_locks
 
   @doc """
   Start the single-instance guard.
 
-  Accepts `:name` (defaults to this module) and `:lock_key` (defaults to the
-  canonical key — overridable so a test can stand up two competing guards).
+  Options:
+    * `:name` — registered name (defaults to `__MODULE__`)
+    * `:lock_file` — override the lock-file path (primarily for tests)
+    * `:lock_key` — integer key; maps to a temp-dir lock file (for tests)
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -72,102 +67,142 @@ defmodule Arbiter.SingleInstance do
 
   @impl true
   def init(opts) do
-    # Trap exits so a supervisor shutdown runs terminate/2 (releasing the lock)
-    # and so we observe the dedicated connection dying.
     Process.flag(:trap_exit, true)
-    lock_key = Keyword.get(opts, :lock_key, @lock_key)
-
-    case Postgrex.start_link(connection_opts()) do
-      {:ok, conn} ->
-        {:ok, %{conn: conn, lock_key: lock_key, primary?: acquire(conn, lock_key)}}
-
-      {:error, reason} ->
-        Logger.warning(
-          "SingleInstance: could not open lock connection (#{inspect(reason)}); " <>
-            "running as SECONDARY (boot reconciliation disabled)"
-        )
-
-        {:ok, %{conn: nil, lock_key: lock_key, primary?: false}}
-    end
+    ensure_ets_table()
+    lock_file = resolve_lock_file(opts)
+    primary? = try_acquire(lock_file)
+    {:ok, %{lock_file: lock_file, primary?: primary?}}
   end
 
   @impl true
   def handle_call(:primary?, _from, state), do: {:reply, state.primary?, state}
 
   @impl true
-  # The dedicated connection died — we can no longer vouch for the lock. Stop so
-  # the supervisor restarts us and we re-attempt acquisition cleanly.
-  def handle_info({:EXIT, conn, reason}, %{conn: conn} = state) do
-    {:stop, {:lock_connection_down, reason}, state}
-  end
-
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
-  # Closing the dedicated connection ends its Postgres session, which releases
-  # the advisory lock — so the next instance to boot can claim it. This runs on
-  # a normal/supervisor shutdown; an abnormal crash or VM death drops the
-  # connection (and thus the lock) just the same.
-  def terminate(_reason, %{conn: conn}) when is_pid(conn) do
-    if Process.alive?(conn), do: GenServer.stop(conn, :normal, 1_000)
+  def terminate(_reason, %{lock_file: lock_file, primary?: true}) do
+    :ets.delete(@ets_table, lock_file)
+    File.rm(lock_file)
     :ok
   rescue
     _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   def terminate(_reason, _state), do: :ok
 
-  # Try to take the session advisory lock on the dedicated connection. A `true`
-  # row means we own it (primary); `false` means another instance holds it
-  # (secondary); any error fails safe to secondary so a flaky lock query can
-  # never authorize the destructive sweep.
-  defp acquire(conn, lock_key) do
-    case Postgrex.query(conn, "SELECT pg_try_advisory_lock($1)", [lock_key]) do
-      {:ok, %{rows: [[true]]}} ->
-        Logger.info("SingleInstance: acquired advisory lock; this is the PRIMARY instance")
-        true
+  # ---- private ----------------------------------------------------------------
 
-      {:ok, %{rows: [[false]]}} ->
+  defp try_acquire(lock_file) do
+    my_os_pid = os_pid()
+
+    # In-process guard: prevent two GenServers in the same Erlang VM from both
+    # claiming the same lock file (covers tests and duplicate iex boots).
+    case :ets.insert_new(@ets_table, {lock_file, self()}) do
+      false ->
         Logger.warning(
-          "SingleInstance: advisory lock held by another instance; running as SECONDARY " <>
+          "SingleInstance: in-process lock already held; running as SECONDARY " <>
             "(boot reconciliation disabled)"
         )
 
         false
 
+      true ->
+        case File.read(lock_file) do
+          {:ok, existing} ->
+            existing_pid = String.trim(existing)
+
+            if pid_alive?(existing_pid) do
+              # Cross-process: another OS process holds the file. Remove our
+              # ETS entry (we won't own the file) and report secondary.
+              :ets.delete(@ets_table, lock_file)
+
+              Logger.warning(
+                "SingleInstance: lock held by PID #{existing_pid}; running as SECONDARY " <>
+                  "(boot reconciliation disabled)"
+              )
+
+              false
+            else
+              # Stale file from a dead process — claim it.
+              write_lock(lock_file, my_os_pid)
+            end
+
+          {:error, :enoent} ->
+            write_lock(lock_file, my_os_pid)
+
+          {:error, reason} ->
+            :ets.delete(@ets_table, lock_file)
+
+            Logger.warning(
+              "SingleInstance: could not read lock file (#{reason}); running as SECONDARY " <>
+                "(boot reconciliation disabled)"
+            )
+
+            false
+        end
+    end
+  end
+
+  defp write_lock(lock_file, pid_str) do
+    File.mkdir_p!(Path.dirname(lock_file))
+
+    case File.write(lock_file, pid_str) do
+      :ok ->
+        Logger.info(
+          "SingleInstance: acquired lock file #{lock_file}; this is the PRIMARY instance"
+        )
+
+        true
+
       {:error, reason} ->
+        :ets.delete(@ets_table, lock_file)
+
         Logger.warning(
-          "SingleInstance: advisory-lock query failed (#{inspect(reason)}); " <>
-            "running as SECONDARY (boot reconciliation disabled)"
+          "SingleInstance: could not write lock file (#{reason}); running as SECONDARY " <>
+            "(boot reconciliation disabled)"
         )
 
         false
     end
   end
 
-  # The Repo's runtime config, already normalised (any `:url` is parsed into
-  # discrete host/credential fields by `Ecto.Repo.config/0`), pared down to the
-  # keys Postgrex accepts. A single connection is all the lock needs.
-  defp connection_opts do
-    Arbiter.Repo.config()
-    |> Keyword.take([
-      :hostname,
-      :port,
-      :username,
-      :password,
-      :database,
-      :socket_dir,
-      :socket,
-      :ssl,
-      :ssl_opts,
-      :parameters,
-      # :socket_options carries [:inet6] on IPv6-only hosts (Fly.io et al.);
-      # dropping it would make the lock connection try IPv4, fail, and silently
-      # disable crash recovery on the real primary. (Tribunal finding, bd-9rouwh.)
-      :socket_options
-    ])
-    |> Keyword.put(:pool_size, 1)
+  defp pid_alive?(pid_str) do
+    case :os.type() do
+      {:unix, _} ->
+        case System.cmd("kill", ["-0", pid_str], stderr_to_stdout: true) do
+          {_, 0} -> true
+          _ -> false
+        end
+
+      _ ->
+        true
+    end
+  end
+
+  defp os_pid, do: :os.getpid() |> to_string()
+
+  defp resolve_lock_file(opts) do
+    cond do
+      file = Keyword.get(opts, :lock_file) ->
+        file
+
+      key = Keyword.get(opts, :lock_key) ->
+        Path.join(System.tmp_dir!(), "arbiter_lock_#{key}.pid")
+
+      true ->
+        data_dir = Application.get_env(:arbiter, :data_dir, Path.expand("~/.arbiter"))
+        Path.join(data_dir, @lock_file_name)
+    end
+  end
+
+  defp ensure_ets_table do
+    if :ets.info(@ets_table) == :undefined do
+      :ets.new(@ets_table, [:named_table, :public, :set])
+    end
+  rescue
+    ArgumentError ->
+      # Race: another process already created the table
+      :ok
   end
 end

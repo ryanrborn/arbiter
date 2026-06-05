@@ -13,9 +13,9 @@ defmodule Arbiter.Settings do
 
   use Ash.Resource,
     domain: Arbiter.Beads,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
-  postgres do
+  sqlite do
     table "global_settings"
     repo Arbiter.Repo
   end

@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.StartTest do
 
   setup do
     # Make project-root resolution deterministic: with ARB_HOME set we never
-    # walk the filesystem looking for compose.yml. The commands themselves are
+    # walk the filesystem looking for mix.exs. The commands themselves are
     # stubbed (see :bd2_cmd_runner), so the path need not actually exist.
     System.put_env("ARB_HOME", "/tmp/arbiter-start-test")
     on_exit(fn -> System.delete_env("ARB_HOME") end)
@@ -46,7 +46,7 @@ defmodule ArbiterCli.Cmd.StartTest do
   end
 
   describe "cold start" do
-    test "brings Postgres + Phoenix up, waits for green, exits 0" do
+    test "brings Phoenix up, waits for green, exits 0" do
       # Start unreachable; flip to green once Phoenix is "started".
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
       Process.put(:bd2_sleep, fn _ms -> :ok end)
@@ -66,10 +66,9 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert out =~ "Arbiter stack is up"
       assert out =~ "[ ok ] phoenix reachable"
 
-      # Both stack components were started, in order.
-      assert_received {:cmd, "docker", ["compose", "up", "-d"]}
       assert_received {:cmd, "sh", ["-c", script]}
       assert script =~ "mix phx.server"
+      refute_received {:cmd, "docker", _}
     end
 
     test "script sources .arbiter.env with set -a so all vars are exported" do
@@ -94,7 +93,7 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert script =~ "mix phx.server"
     end
 
-    test "--json lists the postgres and phoenix actions" do
+    test "--json lists the phoenix action" do
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
       Process.put(:bd2_sleep, fn _ms -> :ok end)
 
@@ -111,8 +110,8 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert payload["ok"] == true
 
       components = Enum.map(payload["actions"], & &1["component"])
-      assert "postgres" in components
       assert "phoenix" in components
+      refute "postgres" in components
     end
 
     test "spawns Phoenix with cd set to the project root when .run-server.sh is absent" do
@@ -169,21 +168,6 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert code == 1
       assert out =~ "did not come up within 1s"
       assert out =~ "[fail] phoenix reachable"
-    end
-
-    test "aborts with exit 1 when docker is missing" do
-      stub_transport_error(:get, "/api/workspaces", :econnrefused)
-      Process.put(:bd2_sleep, fn _ms -> :ok end)
-
-      # Mirror System.cmd/3 raising :enoent when the executable isn't found.
-      Process.put(:bd2_cmd_runner, fn "docker", _args, _opts ->
-        raise ErlangError, original: :enoent
-      end)
-
-      {_out, err, code} = capture(fn -> Start.run([]) end)
-
-      assert code == 1
-      assert err =~ "could not run docker"
     end
   end
 

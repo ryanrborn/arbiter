@@ -9,9 +9,9 @@ defmodule Arbiter.Beads.ConvoyMembership do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Beads,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
-  postgres do
+  sqlite do
     table "convoy_memberships"
     repo Arbiter.Repo
 

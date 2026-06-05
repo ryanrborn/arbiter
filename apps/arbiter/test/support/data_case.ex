@@ -8,10 +8,10 @@ defmodule Arbiter.DataCase do
 
   Finally, if the test case interacts with the database,
   we enable the SQL sandbox, so changes done to the database
-  are reverted at the end of every test. If you are using
-  PostgreSQL, you can even run database tests asynchronously
-  by setting `use Arbiter.DataCase, async: true`, although
-  this option is not recommended for other databases.
+  are reverted at the end of every test. SQLite with WAL mode
+  supports concurrent readers, but the sandbox serializes writes;
+  `async: true` is safe for read-only tests but may produce
+  contention warnings under heavy parallel write load.
   """
 
   use ExUnit.CaseTemplate

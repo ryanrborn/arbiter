@@ -1,7 +1,6 @@
 defmodule Arbiter.SingleInstanceTest do
-  # async: false — each guard opens its own (non-sandbox) Postgrex connection
-  # and takes a real Postgres advisory lock on the test DB. Per-test unique lock
-  # keys keep these from colliding with each other or anything else.
+  # async: false — each guard claims an ETS slot and writes a PID file under a
+  # per-test lock_key temp path. Unique lock keys keep tests from colliding.
   use ExUnit.Case, async: false
 
   alias Arbiter.SingleInstance

@@ -34,12 +34,12 @@ defmodule Arbiter.Beads.Convoy do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Beads,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   @lifecycles ~w(system_managed owned)a
   @statuses ~w(open closed)a
 
-  postgres do
+  sqlite do
     table "convoys"
     repo Arbiter.Repo
 
@@ -129,11 +129,15 @@ defmodule Arbiter.Beads.Convoy do
     end
   end
 
-  aggregates do
-    count :total_issues, :issues
+  calculations do
+    # SQLite does not support inline aggregates on many-to-many relationships
+    # (ash_sqlite 0.2.x). These batch-load memberships and count in Elixir.
+    calculate :total_issues, :integer, Arbiter.Beads.Convoy.Calcs.TotalIssues do
+      public? true
+    end
 
-    count :closed_issues, :issues do
-      filter expr(status == :closed)
+    calculate :closed_issues, :integer, Arbiter.Beads.Convoy.Calcs.ClosedIssues do
+      public? true
     end
   end
 
