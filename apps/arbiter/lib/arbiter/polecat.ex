@@ -91,6 +91,7 @@ defmodule Arbiter.Polecat do
   @typedoc "Lifecycle status — distinct from `Issue.status`."
   @type status ::
           :idle
+          | :resuming
           | :running
           | :awaiting
           | :awaiting_tribunal
@@ -168,7 +169,11 @@ defmodule Arbiter.Polecat do
   # states (:awaiting_tribunal/:awaiting_review) and terminal states
   # (:completed/:failed) are excluded: there the subprocess SHOULD exit and the
   # next stage (Tribunal/Warden) owns the outcome, not the dead port.
-  @live_statuses [:idle, :running, :awaiting]
+  # `:resuming` is the initial status of a polecat re-attached to a preserved
+  # outpost via `arb resume` (bd-auma3z). It's live — a subprocess that exits
+  # before the resumed agent gets going is still a stop worth detecting — and it
+  # advances to `:running` on the first step, exactly like `:idle`.
+  @live_statuses [:idle, :resuming, :running, :awaiting]
 
   # Grace after a subprocess exit before we classify+escalate a stop. This drains
   # any in-flight `arb done` message that the port's exit_status raced ahead of
@@ -406,6 +411,7 @@ defmodule Arbiter.Polecat do
   def init(opts) do
     now = DateTime.utc_now()
     bead_id = Keyword.fetch!(opts, :bead_id)
+    meta = Keyword.get(opts, :meta, %{})
 
     state = %State{
       bead_id: bead_id,
@@ -413,10 +419,10 @@ defmodule Arbiter.Polecat do
       workspace_id: Keyword.get(opts, :workspace_id),
       rig: Keyword.fetch!(opts, :rig),
       current_step: :idle,
-      status: :idle,
+      status: initial_status(meta),
       started_at: now,
       step_started_at: nil,
-      meta: Keyword.get(opts, :meta, %{}),
+      meta: meta,
       run_id: nil
     }
 
@@ -426,6 +432,14 @@ defmodule Arbiter.Polecat do
 
     {:ok, state}
   end
+
+  # A polecat re-attached to a preserved outpost via `arb resume` (bd-auma3z)
+  # boots into `:resuming` rather than `:idle`, so the dashboard/CLI can tell a
+  # resumed run apart from a fresh dispatch. It advances to `:running` on the
+  # first step exactly like `:idle` does.
+  defp initial_status(%{resume: true}), do: :resuming
+  defp initial_status(%{"resume" => true}), do: :resuming
+  defp initial_status(_), do: :idle
 
   @doc """
   Broadcast a `{:polecat_lifecycle, event, snapshot}` message on the `"polecats"`
@@ -510,7 +524,11 @@ defmodule Arbiter.Polecat do
       workspace_id: state.workspace_id,
       status: :running,
       started_at: state.started_at,
-      output_lines: []
+      output_lines: [],
+      # bd-auma3z: when this polecat was resumed (re-attached to a preserved
+      # outpost), link the new run to the prior one so the stopped→resumed
+      # lineage is traceable and metrics don't read it as two unrelated runs.
+      resumed_from_run_id: resumed_from_run_id(state.meta)
     }
 
     case Ash.create(Arbiter.Polecats.Run, attrs) do
@@ -526,6 +544,11 @@ defmodule Arbiter.Polecat do
       log_run_warning("create", state.bead_id, e)
       state
   end
+
+  defp resumed_from_run_id(meta) when is_map(meta),
+    do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")
+
+  defp resumed_from_run_id(_), do: nil
 
   # Best-effort: stamp the terminal status / output / exit fields onto the
   # Run row created at init. No-op (with a debug breadcrumb) when run_id is
@@ -698,7 +721,8 @@ defmodule Arbiter.Polecat do
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
 
-  def handle_call({:advance, step}, _from, %State{status: :idle} = state) do
+  def handle_call({:advance, step}, _from, %State{status: status} = state)
+      when status in [:idle, :resuming] do
     new_state = %State{
       state
       | current_step: step,

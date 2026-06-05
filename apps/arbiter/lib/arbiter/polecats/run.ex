@@ -53,7 +53,8 @@ defmodule Arbiter.Polecats.Run do
         :completed_at,
         :exit_code,
         :output_lines,
-        :failure_reason
+        :failure_reason,
+        :resumed_from_run_id
       ])
     end
 
@@ -130,6 +131,17 @@ defmodule Arbiter.Polecats.Run do
     attribute :failure_reason, :string do
       public?(true)
       constraints(max_length: 2000)
+    end
+
+    attribute :resumed_from_run_id, :uuid do
+      public?(true)
+
+      description(
+        "The prior run this run resumed from (bd-auma3z). Nullable; set only " <>
+          "when an acolyte was resumed via `arb resume` rather than slung fresh, " <>
+          "so the lineage of a stopped→resumed bead is traceable and metrics " <>
+          "don't double-count a single bead's work as two unrelated runs."
+      )
     end
 
     create_timestamp(:inserted_at)

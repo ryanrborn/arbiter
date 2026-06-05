@@ -611,6 +611,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp difficulty_badge_class(_), do: "badge-ghost"
 
   defp polecat_status_class(:idle), do: "badge-ghost"
+  defp polecat_status_class(:resuming), do: "badge-info"
   defp polecat_status_class(:running), do: "badge-info"
   defp polecat_status_class(:awaiting), do: "badge-warning"
   defp polecat_status_class(:awaiting_tribunal), do: "badge-warning"
@@ -620,6 +621,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp polecat_status_class(_), do: ""
 
   defp polecat_status_label(:idle), do: "Idle"
+  defp polecat_status_label(:resuming), do: "Resuming"
   defp polecat_status_label(:running), do: "Running"
   defp polecat_status_label(:awaiting), do: "Awaiting"
   defp polecat_status_label(:awaiting_tribunal), do: "In tribunal"

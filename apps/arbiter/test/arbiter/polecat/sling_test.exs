@@ -4,6 +4,19 @@ defmodule Arbiter.Polecat.SlingTest do
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecats.Run
+  require Ash.Query
+
+  # The most recent polecat_run for a bead — used by the resume tests to assert
+  # run lineage (resumed_from_run_id) and terminal status.
+  defp latest_run(bead_id) do
+    Run
+    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  end
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "sling-test-ws", prefix: "st"})
@@ -799,6 +812,144 @@ defmodule Arbiter.Polecat.SlingTest do
       prompt = Sling.prompt_for_bead(bead, [])
 
       refute prompt =~ "--qa-notes"
+    end
+  end
+
+  describe "resume/2 (bd-auma3z)" do
+    @env_key :rig_paths
+
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "sling-resume-#{:erlang.unique_integer([:positive])}")
+      repo = Path.join(tmp, "source")
+      File.mkdir_p!(repo)
+
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      worktree_root = Path.join(tmp, "worktrees")
+      File.mkdir_p!(worktree_root)
+
+      prior_wt_root = Application.get_env(:arbiter, :worktree_root)
+      prior_rig_paths = Application.get_env(:arbiter, @env_key)
+
+      Application.put_env(:arbiter, :worktree_root, worktree_root)
+      Application.put_env(:arbiter, @env_key, %{"rs/rig" => repo})
+
+      on_exit(fn ->
+        if prior_wt_root,
+          do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
+          else: Application.delete_env(:arbiter, :worktree_root)
+
+        if prior_rig_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_rig_paths),
+          else: Application.delete_env(:arbiter, @env_key)
+
+        File.rm_rf!(tmp)
+      end)
+
+      %{repo: repo, worktree_root: worktree_root}
+    end
+
+    # Sling a bead, provisioning its worktree, then simulate a mid-work stop:
+    # the polecat fails (lingers in :failed, registered) with the outpost left
+    # on disk — exactly the state `arb resume` is built to recover from.
+    defp stop_acolyte_with_outpost(bead_id) do
+      {:ok, first} = Sling.sling(bead_id, rig: "rs/rig", start_driver: false)
+      assert is_binary(first.worktree_path)
+      :ok = Polecat.fail(first.polecat_pid, :token_exhausted)
+      first
+    end
+
+    test "reuses the outpost, links the new run, and boots into :resuming", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "resume work", workspace_id: ws.id})
+      first = stop_acolyte_with_outpost(bead.id)
+
+      prior_run = latest_run(bead.id)
+      assert prior_run.status == :failed
+
+      {:ok, result} =
+        Sling.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
+
+      # Same outpost, fresh polecat.
+      assert result.worktree_path == first.worktree_path
+      assert result.polecat_pid != first.polecat_pid
+
+      snap = Polecat.state(result.polecat_pid)
+      assert snap.meta[:resume] == true
+      # The polecat advanced :resuming -> :running when the claude session started.
+      assert snap.status == :running
+
+      # The new run is linked to the prior one.
+      new_run = latest_run(bead.id)
+      assert new_run.id != prior_run.id
+      assert new_run.resumed_from_run_id == prior_run.id
+    end
+
+    test "the resumed acolyte's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
+      {:ok, bead} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
+      first = stop_acolyte_with_outpost(bead.id)
+
+      # Commit some "prior work" into the outpost so the briefing has content.
+      wt = first.worktree_path
+      File.write!(Path.join(wt, "progress.ex"), "defmodule P, do: nil\n")
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "progress.ex"])
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "did half the work"])
+      _ = repo
+
+      # The outpost was cut from main, so the briefing diffs against main.
+      {:ok, prefix} = Arbiter.Polecat.ResumeContext.build(bead, wt, "main")
+
+      assert prefix =~ "did half the work"
+      assert prefix =~ "RESUMING work on bead #{bead.id}"
+    end
+
+    test "refuses when there is no preserved outpost", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no outpost", workspace_id: ws.id})
+      first = stop_acolyte_with_outpost(bead.id)
+
+      # Tear the outpost down — nothing left to resume.
+      Arbiter.Polecat.Worktree.cleanup(first.worktree_path)
+      refute File.dir?(first.worktree_path)
+
+      assert {:error, :no_outpost} = Sling.resume(bead.id, start_driver: false)
+    end
+
+    test "refuses to resume a closed bead", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "closed resume", workspace_id: ws.id})
+      _ = stop_acolyte_with_outpost(bead.id)
+      {:ok, _} = Ash.update(bead, %{}, action: :close)
+
+      assert {:error, {:bead_closed, _}} = Sling.resume(bead.id, start_driver: false)
+    end
+
+    test "refuses while an acolyte is still actively working", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
+      # Sling but DON'T stop — the polecat is live (:idle/:running), not stopped.
+      {:ok, _live} = Sling.sling(bead.id, rig: "rs/rig", start_driver: false)
+
+      assert {:error, {:acolyte_active, _status}} =
+               Sling.resume(bead.id, start_driver: false)
+    end
+
+    test "inherits the rig from the prior run when omitted", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "rig inherit", workspace_id: ws.id})
+      _ = stop_acolyte_with_outpost(bead.id)
+
+      # No rig passed — must inherit "rs/rig" from the prior run record.
+      {:ok, result} =
+        Sling.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
+
+      assert is_binary(result.worktree_path)
     end
   end
 

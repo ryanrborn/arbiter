@@ -509,7 +509,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
                       <.icon name="hero-archive-box" class="size-4" /> Run history
                     </.link>
                   <% end %>
-                  <%= if @snapshot.status in [:idle, :running, :awaiting, :awaiting_tribunal, :awaiting_review] do %>
+                  <%= if @snapshot.status in [:idle, :resuming, :running, :awaiting, :awaiting_tribunal, :awaiting_review] do %>
                     <button
                       phx-click="stop"
                       data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
@@ -779,6 +779,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   end
 
   defp status_class(:idle), do: "badge-ghost"
+  defp status_class(:resuming), do: "badge-info"
   defp status_class(:running), do: "badge-info"
   defp status_class(:awaiting), do: "badge-warning"
   defp status_class(:awaiting_tribunal), do: "badge-warning"
@@ -788,6 +789,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   defp status_class(_), do: ""
 
   defp status_label(:idle), do: "Idle"
+  defp status_label(:resuming), do: "Resuming"
   defp status_label(:running), do: "Running"
   defp status_label(:awaiting), do: "Awaiting"
   defp status_label(:awaiting_tribunal), do: "In tribunal"

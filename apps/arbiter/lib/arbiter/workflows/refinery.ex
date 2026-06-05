@@ -319,6 +319,15 @@ defmodule Arbiter.Workflows.Refinery do
             state = close_bead_and_finalize(state, item)
             {:ok, state}
 
+          existing_pr_number(bead) ->
+            # bd-auma3z: the bead already has an open PR (e.g. a prior acolyte
+            # opened one before it stopped, and was then resumed). Adopt that PR
+            # into the queue and poll it to completion rather than calling
+            # `pr_open` again — that would create a DUPLICATE PR for the same
+            # branch. The resumed acolyte's work lands on the same branch the PR
+            # already tracks.
+            adopt_existing_pr(state, bead, strategy)
+
           true ->
             open_pr_for(state, bead, strategy)
         end
@@ -326,6 +335,40 @@ defmodule Arbiter.Workflows.Refinery do
       {:error, _} = err ->
         {err, state}
     end
+  end
+
+  # The bead's recorded PR number, if any — set by `maybe_record_pr_ref/2` when
+  # a PR was opened. Parsed from the string `pr_ref` field. nil/blank/non-numeric
+  # means no open PR to adopt.
+  defp existing_pr_number(%Issue{pr_ref: ref}) when is_binary(ref) and ref != "" do
+    case Integer.parse(ref) do
+      {n, _} when n > 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp existing_pr_number(_), do: nil
+
+  # Adopt a bead's already-open PR into the merge queue without opening a new
+  # one (bd-auma3z no-duplicate-PR guard). Slots it in at `:awaiting_approval`
+  # so the normal poll loop drives it the rest of the way, exactly as if we'd
+  # just opened it.
+  defp adopt_existing_pr(state, bead, strategy) do
+    pr_number = existing_pr_number(bead)
+
+    Logger.info(
+      "Refinery: bead #{bead.id} already has PR ##{pr_number}; adopting it " <>
+        "instead of opening a duplicate"
+    )
+
+    item =
+      new_item(bead.id, strategy,
+        pr_number: pr_number,
+        status: :awaiting_approval,
+        opened_at: DateTime.utc_now()
+      )
+
+    {:ok, %{state | items: [item | state.items]}}
   end
 
   defp open_pr_for(state, bead, strategy) do
