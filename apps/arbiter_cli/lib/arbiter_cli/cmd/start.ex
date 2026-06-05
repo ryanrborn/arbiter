@@ -36,7 +36,7 @@ defmodule ArbiterCli.Cmd.Start do
       (Docker, project root) was missing.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Restart}
   alias ArbiterCli.Output
 
   @switches [json: :boolean, timeout: :integer]
@@ -50,6 +50,8 @@ defmodule ArbiterCli.Cmd.Start do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
     mode = if opts[:json], do: :json, else: :text
     timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
+
+    Restart.guard_acolyte_session!()
 
     if Doctor.reachable?() do
       already_running(mode)
@@ -163,8 +165,7 @@ defmodule ArbiterCli.Cmd.Start do
       if File.exists?(run_server_sh) do
         log_text("Starting Phoenix (#{run_server_sh})… logging to #{log}")
         # Run via `sh script` so no executable bit is required on the file.
-        {"nohup sh '#{run_server_sh}' > '#{log}' 2>&1 < /dev/null &",
-         [stderr_to_stdout: true]}
+        {"nohup sh '#{run_server_sh}' > '#{log}' 2>&1 < /dev/null &", [stderr_to_stdout: true]}
       else
         log_text("Starting Phoenix (mix phx.server)… logging to #{log}")
         # Source .arbiter.env if present so secrets reach Phoenix's env.

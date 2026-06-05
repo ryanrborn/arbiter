@@ -68,6 +68,9 @@ defmodule Arbiter.Application do
   #     that died mid-run. Runs once after Repo + Polecat.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
   #     fail the live instance's running runs.
+  #   * reconcile_open_prs: find :in_progress beads with a pr_ref but no live
+  #     polecat — the server was killed between `arb done` and the Warden being
+  #     established. Escalates each to Admiral. bd-crqku8.
   #   * refinery: eagerly start one Refinery per existing workspace once the
   #     tree is up, so a cold boot misses no `:polecat_done` events.
   #
@@ -85,9 +88,9 @@ defmodule Arbiter.Application do
       Supervisor.child_spec(
         {Task,
          fn ->
-           Arbiter.Polecats.Reconciler.reconcile_orphaned_runs(
-             primary?: Arbiter.SingleInstance.primary?()
-           )
+           primary? = Arbiter.SingleInstance.primary?()
+           Arbiter.Polecats.Reconciler.reconcile_orphaned_runs(primary?: primary?)
+           Arbiter.Polecats.Reconciler.reconcile_open_pr_beads(primary?: primary?)
          end},
         id: :reconcile_boot_task,
         restart: :temporary

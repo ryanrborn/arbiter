@@ -33,6 +33,8 @@ defmodule Arbiter.Polecats.Reconciler do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Beads.Issue
+  alias Arbiter.Messages.Message
   alias Arbiter.Polecat
   alias Arbiter.Polecats.Run
 
@@ -88,6 +90,87 @@ defmodule Arbiter.Polecats.Reconciler do
     e ->
       Logger.warning("Polecats.Reconciler: sweep failed: #{Exception.message(e)}")
       {:error, e}
+  end
+
+  @doc """
+  Find `:in_progress` Issues with a `pr_ref` but no live polecat, and escalate
+  each to Admiral as an addressed `:escalation` mailbox message.
+
+  This covers the specific failure mode where the server is killed between the
+  implementer finishing (`arb done` → PR opened, `pr_ref` written to the Issue)
+  and the Tribunal/Warden hand-off being established. After a reboot the polecat
+  process no longer exists, so the Warden that would merge the PR was never
+  spawned. The Issue is stuck `:in_progress` with an open PR and no driver.
+
+  Returns `{:ok, count}` or `{:error, reason}`.
+
+  ## Options
+
+    * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+      When `false`, skips and returns `{:ok, :skipped}`.
+  """
+  @spec reconcile_open_pr_beads(keyword()) ::
+          {:ok, non_neg_integer() | :skipped} | {:error, term()}
+  def reconcile_open_pr_beads(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      do_reconcile_open_pr_beads()
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  defp do_reconcile_open_pr_beads do
+    stuck =
+      Issue
+      |> Ash.Query.filter(status == :in_progress and not is_nil(pr_ref))
+      |> Ash.read!()
+      |> Enum.reject(&live_polecat_for_issue?/1)
+
+    escalated = Enum.count(stuck, &escalate_stuck_issue/1)
+
+    if escalated > 0 do
+      Logger.warning(
+        "Polecats.Reconciler: found #{escalated} in_progress bead(s) with open PR but no live polecat — escalated to Admiral"
+      )
+    end
+
+    {:ok, escalated}
+  rescue
+    e ->
+      Logger.warning("Polecats.Reconciler: open-PR bead sweep failed: #{Exception.message(e)}")
+
+      {:error, e}
+  end
+
+  defp live_polecat_for_issue?(%Issue{id: bead_id}), do: not is_nil(Polecat.whereis(bead_id))
+
+  defp escalate_stuck_issue(%Issue{id: bead_id, pr_ref: pr_ref, workspace_id: workspace_id}) do
+    subject = "#{bead_id} stuck — PR ##{pr_ref} open but no live polecat"
+
+    body =
+      "Bead #{bead_id} has an open PR (#{pr_ref}) but no live polecat to drive the merge.\n" <>
+        "The server was likely restarted between `arb done` and the Warden being established.\n" <>
+        "Action: verify the PR is ready to merge, then run `arb sling #{bead_id}` to re-drive " <>
+        "or manually merge and close the bead."
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: "system",
+      workspace_id: workspace_id,
+      directive_ref: bead_id,
+      subject: subject,
+      body: body
+    })
+
+    true
+  rescue
+    e ->
+      Logger.warning(
+        "Polecats.Reconciler: failed to escalate stuck bead #{bead_id}: #{Exception.message(e)}"
+      )
+
+      false
   end
 
   # A run is live iff a polecat GenServer is registered for its bead_id. After a
