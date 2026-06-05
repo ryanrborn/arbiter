@@ -46,7 +46,9 @@ defmodule Arbiter.Trackers.Tracker do
         title: "Wire the thing",
         description: "...",        # optional, Markdown
         assignee: "alice",         # optional, tracker-specific login
-        status: :open              # optional, default :open
+        status: :open,             # optional, default :open
+        priority: 2,               # optional, integer 0..4 (bead priority scale)
+        issue_type: "bug"          # optional, free-form type string
       }
 
   ## `list_open` shape
@@ -91,7 +93,9 @@ defmodule Arbiter.Trackers.Tracker do
           required(:title) => String.t(),
           optional(:description) => String.t(),
           optional(:assignee) => String.t() | nil,
-          optional(:status) => status
+          optional(:status) => status,
+          optional(:priority) => non_neg_integer() | nil,
+          optional(:issue_type) => String.t() | nil
         }
 
   @callback fetch(ref) :: {:ok, map()} | {:error, term()}

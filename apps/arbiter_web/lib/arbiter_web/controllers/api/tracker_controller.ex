@@ -86,6 +86,8 @@ defmodule ArbiterWeb.Api.TrackerController do
     |> put_if_present(:title, params["title"])
     |> put_if_present(:description, params["description"])
     |> put_if_present(:assignee, params["assignee"])
+    |> put_if_present(:priority, params["priority"])
+    |> put_if_present(:issue_type, params["issue_type"])
   end
 
   defp put_if_present(map, _key, nil), do: map
