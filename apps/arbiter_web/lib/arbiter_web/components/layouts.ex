@@ -77,6 +77,11 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
+            <.link navigate={~p"/usage"} class={nav_class(@current_path, "/usage")}>
+              Usage
+            </.link>
+          </li>
+          <li>
             <.link
               navigate={~p"/settings/vernacular"}
               class={nav_class(@current_path, "/settings/vernacular")}

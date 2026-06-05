@@ -39,6 +39,7 @@ defmodule ArbiterWeb.Router do
       live("/settings/branding", GlobalBrandingLive)
       live("/workspace/:id/settings/vernacular", WorkspaceVernacularLive)
       live("/audit", AuditLogLive)
+      live("/usage", UsageLive)
 
       # Entity index pages (list everything, filterable + paged) and their
       # detail pages. Literal segments are declared before the dynamic
