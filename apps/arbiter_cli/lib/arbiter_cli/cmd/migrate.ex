@@ -38,10 +38,14 @@ defmodule ArbiterCli.Cmd.Migrate do
   end
 
   defp parse_migration_output(output) do
-    output
-    |> String.trim()
-    |> Jason.decode()
-    |> case do
+    # mix arbiter.migrate emits Logger lines before the JSON summary line.
+    # Scan for the first line that looks like a JSON object.
+    json_line =
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.find(&String.starts_with?(&1, "{"))
+
+    case json_line && Jason.decode(json_line) do
       {:ok, %{"migrations_applied" => count, "status" => "ok"}} ->
         {:ok, count}
 
