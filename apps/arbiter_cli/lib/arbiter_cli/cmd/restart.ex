@@ -84,26 +84,64 @@ defmodule ArbiterCli.Cmd.Restart do
   the stack to go green.
 
   Returns `{result, actions, was_running}` where `result` is `:ok` or
-  `:timeout`, `actions` is the `[{:phoenix_stop, _, _}, {:phoenix, :ok, _}]`
-  list, and `was_running` records whether the API was reachable before the
-  bounce. Shared with `arb update`, which runs a `git pull` first and then
-  reuses this to load the freshly-merged code — so the two commands have one
-  definition of "bounce Phoenix".
+  `:timeout`, `actions` is the action list, and `was_running` records whether
+  the API was reachable before the bounce. Shared with `arb update`, which runs
+  a `git pull` first and then reuses this to load the freshly-merged code.
+
+  When the `arbiter.service` systemd user unit is present, delegates the
+  restart to `systemctl --user restart` instead of the SIGTERM/start dance so
+  systemd remains the authoritative process supervisor.
   """
   @spec perform(String.t(), non_neg_integer()) :: {:ok | :timeout, list(), boolean()}
   def perform(root, timeout_ms) do
-    port = api_port()
     was_running = Doctor.reachable?()
 
-    stop_action = stop_phoenix(port)
-    start_action = Start.start_phoenix(root)
-
-    actions = [stop_action, start_action]
+    actions =
+      if systemd_managed?() do
+        [restart_via_systemd()]
+      else
+        port = api_port()
+        [stop_phoenix(port), Start.start_phoenix(root)]
+      end
 
     case Start.wait_until_green(Start.attempts_for(timeout_ms)) do
       :ok -> {:ok, actions, was_running}
       :timeout -> {:timeout, actions, was_running}
     end
+  end
+
+  # Returns true when the arbiter.service systemd user unit is present (active
+  # or not). Uses `systemctl --user cat` as a probe — exit 0 means the unit
+  # file is known to systemd regardless of its current state.
+  defp systemd_managed? do
+    case run_cmd("systemctl", ["--user", "cat", "arbiter.service"], stderr_to_stdout: true) do
+      {_out, 0} -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  # Delegate the full stop+start cycle to systemd. Returns an action tuple.
+  defp restart_via_systemd do
+    Start.log_text("Restarting via systemd (systemctl --user restart arbiter.service)…")
+
+    case run_cmd("systemctl", ["--user", "restart", "arbiter.service"], stderr_to_stdout: true) do
+      {_out, 0} ->
+        {:systemd_restart, :ok, nil}
+
+      {out, code} ->
+        Output.die(
+          "systemctl --user restart arbiter.service failed (exit #{code})",
+          "Output:\n" <> String.trim_trailing(out)
+        )
+    end
+  rescue
+    e in ErlangError ->
+      Output.die(
+        "could not run systemctl: #{inspect(e.original)}",
+        "Ensure systemctl is on your PATH."
+      )
   end
 
   # ---- stop --------------------------------------------------------------
@@ -368,11 +406,21 @@ defmodule ArbiterCli.Cmd.Restart do
   end
 
   defp stop_summary(actions) do
-    case List.keyfind(actions, :phoenix_stop, 0) do
-      {:phoenix_stop, :not_running, _} -> "No running server found — started a fresh one.\n"
-      {:phoenix_stop, :stopped, _} -> "Stopped the previous server (SIGTERM).\n"
-      {:phoenix_stop, :killed, _} -> "Force-stopped the previous server (SIGKILL).\n"
-      _ -> ""
+    cond do
+      List.keyfind(actions, :systemd_restart, 0) ->
+        "Restarted via systemd (systemctl --user restart arbiter.service).\n"
+
+      match?({:phoenix_stop, :not_running, _}, List.keyfind(actions, :phoenix_stop, 0)) ->
+        "No running server found — started a fresh one.\n"
+
+      match?({:phoenix_stop, :stopped, _}, List.keyfind(actions, :phoenix_stop, 0)) ->
+        "Stopped the previous server (SIGTERM).\n"
+
+      match?({:phoenix_stop, :killed, _}, List.keyfind(actions, :phoenix_stop, 0)) ->
+        "Force-stopped the previous server (SIGKILL).\n"
+
+      true ->
+        ""
     end
   end
 
