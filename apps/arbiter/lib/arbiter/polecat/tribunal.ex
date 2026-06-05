@@ -56,6 +56,26 @@ defmodule Arbiter.Polecat.Tribunal do
   The reviewer must be a DIFFERENT mind than the author at every round, and each
   implementer revision is a fresh mind too.
 
+  ## Reviewer commit gate and HEAD-SHA anchoring (bd-1mksks)
+
+  Before spawning the reviewer (both on first review and on each re-review after a
+  revise round), the Tribunal verifies that the branch has at least one commit
+  ahead of the target branch. If it does not, the Tribunal escalates immediately as
+  `REQUEST_CHANGES` rather than spawning a reviewer that would see an empty diff and
+  conclude "no work was done." This is a second layer of defence on top of the
+  polecat commit gate (bd-ofql8k): the polecat gate fires for the initial
+  implementer, but the revise-round implementer polecat has no `worktree_path` in
+  its meta and therefore bypasses the polecat gate.
+
+  The current HEAD SHA is captured at reviewer-spawn time and embedded in the
+  review prompt so the reviewer can verify it is on the correct commit before
+  diffing. After each revise round, the Tribunal checks whether HEAD advanced (new
+  commits → reviewer sees an updated diff) or stayed the same (implementer only
+  rebutted → reviewer evaluates the rebuttal). The observation is recorded in the
+  in-memory thread (and therefore in the escalation payload and the re-review
+  prompt) but is NOT persisted to the durable mailbox — it is Tribunal
+  bookkeeping, not part of the implementer↔reviewer conversation.
+
   ## Stage 3 — same-mind continuity (bd-1na62i)
 
   Literal session resume (`claude --resume <id>`) was dropped: session ids are
@@ -276,7 +296,13 @@ defmodule Arbiter.Polecat.Tribunal do
       current_id: nil,
       reviewer_pid: nil,
       lines: [],
-      reported?: false
+      reported?: false,
+      # The short HEAD SHA of the branch at the time the current reviewer was
+      # spawned. Set by handle_continue(:spawn_reviewer) and updated by
+      # finish_revise/1 after each revise round. Used to:
+      #   1. prove which commit the reviewer saw (surfaces in the prompt and thread)
+      #   2. detect whether the revise implementer actually committed new changes
+      head_sha: nil
     }
 
     Process.monitor(author)
@@ -285,21 +311,45 @@ defmodule Arbiter.Polecat.Tribunal do
 
   @impl true
   def handle_continue(:spawn_reviewer, state) do
-    case launch_acolyte(state, state.review_id, :reviewer, review_prompt(state), state.command) do
-      {:ok, state} ->
-        {:noreply, state}
-
+    # bd-1mksks: verify that commits exist on the branch BEFORE spawning the
+    # reviewer. The polecat commit gate (bd-ofql8k) already guards the initial
+    # dispatch, but this check is a second layer of defence that also covers the
+    # revise-loop case (the revise implementer's polecat has no worktree_path in
+    # meta, so its commit gate does not fire). If we spawned a reviewer over a
+    # zero-commit branch it would see an empty diff and report "no work" — the
+    # bug this bead fixes.
+    case reviewer_commit_check(state) do
       {:error, reason} ->
-        Logger.warning(
-          "Tribunal: failed to spawn reviewer for bead=#{state.bead_id}: #{inspect(reason)}"
-        )
+        Logger.warning("Tribunal: branch has no commits for bead=#{state.bead_id}: #{reason}")
 
-        report(
-          state,
-          {:request_changes, "Tribunal could not spawn a reviewer: #{inspect(reason)}"}
-        )
-
+        report(state, {:request_changes, reason})
         {:stop, :normal, %{state | reported?: true}}
+
+      {:ok, head_sha} ->
+        state = %{state | head_sha: head_sha}
+
+        case launch_acolyte(
+               state,
+               state.review_id,
+               :reviewer,
+               review_prompt(state),
+               state.command
+             ) do
+          {:ok, state} ->
+            {:noreply, state}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Tribunal: failed to spawn reviewer for bead=#{state.bead_id}: #{inspect(reason)}"
+            )
+
+            report(
+              state,
+              {:request_changes, "Tribunal could not spawn a reviewer: #{inspect(reason)}"}
+            )
+
+            {:stop, :normal, %{state | reported?: true}}
+        end
     end
   end
 
@@ -513,10 +563,17 @@ defmodule Arbiter.Polecat.Tribunal do
 
     state = record_thread(state, :implementer, "Round #{state.round} response", response)
 
+    # bd-1mksks: detect whether the revise implementer committed new changes.
+    # If HEAD is unchanged from when the reviewer last ran, the implementer's
+    # round was a rebuttal only (no code change). Record this in the thread so
+    # the re-reviewer knows it is evaluating a rebuttal, not new code. If HEAD
+    # advanced, record the new commit so the re-reviewer can verify it too.
+    {state, new_head_sha} = note_head_change(state)
+
     # The implementer's subprocess has exited; stop its polecat so it can't linger.
     stop_acolyte(state)
 
-    next = %{state | round: state.round + 1, phase: :reviewing}
+    next = %{state | round: state.round + 1, phase: :reviewing, head_sha: new_head_sha}
     review_id = reviewer_round_id(next.review_id, next.round)
 
     case launch_acolyte(next, review_id, :reviewer, rereview_prompt(next), next.command) do
@@ -533,6 +590,49 @@ defmodule Arbiter.Polecat.Tribunal do
           )
 
         {:done, finish(next, {:request_changes, escalation_payload(next)})}
+    end
+  end
+
+  # bd-1mksks: compare HEAD SHA before and after a revise round to detect whether
+  # the implementer committed new changes. Appends a system entry to the in-memory
+  # thread (for the escalation payload / re-review prompt context) but does NOT
+  # persist it to the durable mailbox — HEAD-change notes are internal Tribunal
+  # bookkeeping, not part of the implementer↔reviewer conversation. Returns
+  # {updated_state, new_head_sha}.
+  defp note_head_change(state) do
+    new_sha = current_head_sha(state)
+    old_sha = state.head_sha
+
+    cond do
+      is_nil(new_sha) or is_nil(old_sha) ->
+        # No worktree or git unavailable — pass through without a note.
+        {state, new_sha}
+
+      new_sha == old_sha ->
+        entry = %{
+          round: state.round,
+          role: :system,
+          subject:
+            "Round #{state.round} — HEAD unchanged after revise (rebuttal only, no new commits)",
+          body:
+            "HEAD remained at #{new_sha} after the revise round. " <>
+              "The implementer's response was a rebuttal, not a code change. " <>
+              "The re-reviewer evaluates the rebuttal argument; the diff is the same as the previous round."
+        }
+
+        {%{state | thread: state.thread ++ [entry]}, new_sha}
+
+      true ->
+        entry = %{
+          round: state.round,
+          role: :system,
+          subject: "Round #{state.round} — implementer committed new changes",
+          body:
+            "HEAD advanced from #{old_sha} to #{new_sha} during the revise round. " <>
+              "The re-reviewer sees the updated diff."
+        }
+
+        {%{state | thread: state.thread ++ [entry]}, new_sha}
     end
   end
 
@@ -739,6 +839,76 @@ defmodule Arbiter.Polecat.Tribunal do
   end
 
   defp worktree_status(_state), do: "(status unavailable — no worktree)"
+
+  # ---- pre-spawn commit check (bd-1mksks) ---------------------------------
+
+  # Verify that the branch under review has commits ahead of target_branch
+  # before spawning the reviewer. Returns {:ok, head_sha_or_nil} when safe
+  # to proceed, {:error, human_message} when the reviewer would see an empty
+  # diff.
+  #
+  # This is a second layer of defence on top of the polecat commit gate
+  # (bd-ofql8k). It covers two cases the polecat gate misses:
+  #   (B) the revise-round implementer polecat has no worktree_path in meta,
+  #       so the polecat commit gate does not fire for revise rounds; and
+  #   (C) the Tribunal is started in an ad-hoc configuration without going
+  #       through the normal polecat dispatch path.
+  #
+  # When worktree_path is nil or git fails, the check is skipped (fail-open):
+  # a transient git hiccup must not strand a legitimate review.
+  defp reviewer_commit_check(%{worktree_path: wt, branch: branch, target_branch: target})
+       when is_binary(wt) do
+    # Mirror the polecat commit gate's branch guard (bd-ofql8k): only check
+    # for commits when the worktree is actually checked out on the per-bead
+    # branch. Some test setups and ad-hoc runs reuse the rig repo as the
+    # "worktree" with HEAD on `main`; in that case `rev-list main..HEAD` is
+    # meaningless (always 0) and the check would manufacture a false positive.
+    # Production worktrees provisioned via Worktree.create/3 are always on the
+    # per-bead branch, so the gate fires correctly in production.
+    case Arbiter.Polecat.Worktree.current_branch(wt) do
+      {:ok, ^branch} ->
+        # Worktree IS on the expected branch — verify commits exist.
+        # has_commits_ahead?/2 is fail-open: git errors resolve to {:ok, true},
+        # so {:ok, false} is the only genuine "no commits" result.
+        case Arbiter.Polecat.Worktree.has_commits_ahead?(wt, target) do
+          {:ok, true} ->
+            {:ok, current_head_sha_in(wt)}
+
+          {:ok, false} ->
+            {:error,
+             "Branch `#{branch}` has no commits ahead of `#{target}`. " <>
+               "The reviewer would see an empty diff and report 'no work'. " <>
+               "The implementer must commit before the review gate can proceed. " <>
+               "Run `git log --oneline #{target}..HEAD` in the worktree to diagnose."}
+        end
+
+      _ ->
+        # Worktree is on a different branch (or current_branch failed). Skip
+        # the commit check — a HEAD mismatch is not "no work done".
+        {:ok, current_head_sha_in(wt)}
+    end
+  end
+
+  defp reviewer_commit_check(_state), do: {:ok, nil}
+
+  # Return the short HEAD SHA for the worktree at `path`, or nil on any error.
+  defp current_head_sha_in(path) when is_binary(path) do
+    case System.cmd("git", ["-C", path, "rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+      {sha, 0} -> String.trim(sha)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  # Resolve the current HEAD SHA from state.worktree_path. Used by
+  # note_head_change/1 to detect whether the revise implementer committed.
+  defp current_head_sha(%{worktree_path: wt}) when is_binary(wt),
+    do: current_head_sha_in(wt)
+
+  defp current_head_sha(_state), do: nil
 
   # ---- acolyte spawning ---------------------------------------------------
 
@@ -1033,6 +1203,7 @@ defmodule Arbiter.Polecat.Tribunal do
     #{bead.acceptance}
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
+    #{head_sha_instruction(state)}
     Review ONLY the diff. Inspect it with, e.g.:
 
         git diff #{state.target_branch}...HEAD
@@ -1190,6 +1361,29 @@ defmodule Arbiter.Polecat.Tribunal do
   end
 
   defp work_so_far_briefing(_state), do: ""
+
+  # bd-1mksks: embed the verified HEAD SHA into the review prompt so the
+  # reviewer can confirm it is on the correct commit before running `git diff`.
+  # When no SHA is available (no worktree, or git failed at spawn time), the
+  # instruction is omitted — the review proceeds without the explicit anchor.
+  defp head_sha_instruction(%{head_sha: sha, branch: branch, target_branch: target})
+       when is_binary(sha) do
+    """
+    The Tribunal verified before dispatching this review that branch `#{branch}`
+    has commits ahead of `#{target}`. The implementer's HEAD at dispatch time was
+    commit `#{sha}`. Before running `git diff`, confirm you are on the correct
+    commit:
+
+        git log --oneline -1
+        # Expected: #{sha} <commit message>
+
+    If `git log --oneline -1` shows a different commit than `#{sha}`, stop and
+    report REQUEST_CHANGES noting the HEAD mismatch — do not review the wrong diff.
+
+    """
+  end
+
+  defp head_sha_instruction(_state), do: ""
 
   @doc """
   Build the reviewer's re-review prompt for round >= 2: the base review prompt,
