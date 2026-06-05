@@ -52,6 +52,26 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
+            <.link navigate={~p"/beads"} class={nav_class(@current_path, "/beads")}>
+              {cap_plural(Arbiter.Vernacular.label(:issue))}
+            </.link>
+          </li>
+          <li>
+            <.link navigate={~p"/convoys"} class={nav_class(@current_path, "/convoys")}>
+              {cap_plural(Arbiter.Vernacular.label(:batch))}
+            </.link>
+          </li>
+          <li>
+            <.link navigate={~p"/polecats"} class={nav_class(@current_path, "/polecats")}>
+              {cap_plural(Arbiter.Vernacular.label(:worker))}
+            </.link>
+          </li>
+          <li>
+            <.link navigate={~p"/crucible"} class={nav_class(@current_path, "/crucible")}>
+              {cap_plural(Arbiter.Vernacular.label(:merge_queue))}
+            </.link>
+          </li>
+          <li>
             <.link navigate={~p"/audit"} class={nav_class(@current_path, "/audit")}>
               Audit log
             </.link>
