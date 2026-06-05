@@ -57,7 +57,10 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -73,7 +76,10 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
@@ -104,6 +110,8 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", _} -> Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
       end)
 
