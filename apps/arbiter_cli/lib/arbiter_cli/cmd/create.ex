@@ -89,6 +89,7 @@ defmodule ArbiterCli.Cmd.Create do
     no_bead: :boolean,
     unclaimed: :boolean,
     vanguard: :string,
+    force: :boolean,
     json: :boolean
   ]
 
@@ -103,7 +104,9 @@ defmodule ArbiterCli.Cmd.Create do
         many -> Enum.join(many, " ")
       end
 
-    ticket_only? = opts[:ticket_only] == true or opts[:no_bead] == true or opts[:unclaimed] == true
+    ticket_only? =
+      opts[:ticket_only] == true or opts[:no_bead] == true or opts[:unclaimed] == true
+
     skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
 
     if ticket_only? and skip_upstream? do
@@ -160,6 +163,7 @@ defmodule ArbiterCli.Cmd.Create do
 
   defp run_bead_create(opts, _rest, title, skip_upstream?, mode) do
     workspace_id = Workspace.id_or_halt()
+    force? = opts[:force] == true
 
     validate_difficulty!(opts[:difficulty])
 
@@ -173,6 +177,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("tracker_ref", opts[:tracker_ref])
       |> maybe_put("target_branch", opts[:target_branch])
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
+      |> maybe_put_flag("force", force?)
 
     if opts[:labels] && mode == :text do
       IO.puts(

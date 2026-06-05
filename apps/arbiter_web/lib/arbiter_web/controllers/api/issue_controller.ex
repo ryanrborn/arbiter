@@ -17,8 +17,9 @@ defmodule ArbiterWeb.Api.IssueController do
   use ArbiterWeb, :controller
 
   alias Arbiter.Beads.Issue
+  require Ash.Query
 
-  action_fallback ArbiterWeb.Api.FallbackController
+  action_fallback(ArbiterWeb.Api.FallbackController)
 
   @atom_fields ~w(status issue_type tracker_type)a
   @filter_fields ~w(status priority difficulty issue_type assignee workspace_id)a
@@ -56,27 +57,120 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def create(conn, params) do
+    force? = params["force"] == true
+
     attrs =
       params
-      |> Map.drop(["id"])
+      |> Map.drop(["id", "force"])
       |> coerce_atoms(@atom_fields)
 
-    case Ash.create(Issue, attrs) do
-      {:ok, issue} ->
-        case Arbiter.Beads.Issue.Changes.CreateUpstream.last_error() do
-          nil ->
-            conn
-            |> put_status(:created)
-            |> render(:show, issue: issue)
+    with :ok <- dedup_check(attrs, force?) do
+      case Ash.create(Issue, attrs) do
+        {:ok, issue} ->
+          case Arbiter.Beads.Issue.Changes.CreateUpstream.last_error() do
+            nil ->
+              conn
+              |> put_status(:created)
+              |> render(:show, issue: issue)
 
-          err ->
-            upstream_failure_response(conn, issue.id, err)
-        end
+            err ->
+              upstream_failure_response(conn, issue.id, err)
+          end
 
-      {:error, _} = err ->
-        err
+        {:error, _} = err ->
+          err
+      end
+    else
+      {:local_dup, matches} ->
+        ids = Enum.map_join(matches, ", ", & &1.id)
+
+        conn
+        |> put_status(409)
+        |> json(%{
+          "error" => %{
+            "type" => "duplicate_bead",
+            "message" =>
+              "an open bead with this title already exists (#{ids}); use --force to proceed anyway",
+            "details" => %{
+              "matches" =>
+                Enum.map(matches, fn i ->
+                  %{"id" => i.id, "title" => i.title, "status" => to_string(i.status)}
+                end)
+            }
+          }
+        })
+
+      {:tracker_dup, matches} ->
+        urls = Enum.map_join(matches, ", ", &Map.get(&1, :url, ""))
+
+        conn
+        |> put_status(409)
+        |> json(%{
+          "error" => %{
+            "type" => "duplicate_tracker_issue",
+            "message" =>
+              "an open tracker issue with this title already exists (#{urls}); use --force to proceed anyway",
+            "details" => %{
+              "matches" =>
+                Enum.map(matches, fn m ->
+                  %{"ref" => m[:ref], "title" => m[:title], "url" => m[:url]}
+                end)
+            }
+          }
+        })
     end
   end
+
+  defp dedup_check(_attrs, true), do: :ok
+
+  defp dedup_check(attrs, false) do
+    with :ok <- check_local_dedup(attrs) do
+      check_tracker_dedup(attrs)
+    end
+  end
+
+  defp check_local_dedup(%{"title" => title, "workspace_id" => workspace_id})
+       when is_binary(title) and is_binary(workspace_id) do
+    norm = normalize_title(title)
+
+    query =
+      Issue
+      |> Ash.Query.new()
+      |> Ash.Query.filter(status in [:open, :in_progress] and workspace_id == ^workspace_id)
+
+    case Ash.read(query) do
+      {:ok, issues} ->
+        matches = Enum.filter(issues, &(normalize_title(&1.title) == norm))
+        if matches == [], do: :ok, else: {:local_dup, matches}
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp check_local_dedup(_attrs), do: :ok
+
+  defp check_tracker_dedup(%{"skip_upstream_create" => true}), do: :ok
+  defp check_tracker_dedup(%{"tracker_ref" => ref}) when is_binary(ref) and ref != "", do: :ok
+
+  defp check_tracker_dedup(%{"title" => title, "workspace_id" => workspace_id})
+       when is_binary(title) and is_binary(workspace_id) do
+    case Ash.get(Arbiter.Beads.Workspace, workspace_id) do
+      {:ok, workspace} ->
+        case Arbiter.Trackers.search_by_title_for_workspace(workspace, title) do
+          {:ok, []} -> :ok
+          {:ok, matches} -> {:tracker_dup, matches}
+          _ -> :ok
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  defp check_tracker_dedup(_attrs), do: :ok
+
+  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
 
   # The bead was created locally but the upstream create (or write-back of
   # the returned ref) failed. We return 502 Bad Gateway so the CLI exits
