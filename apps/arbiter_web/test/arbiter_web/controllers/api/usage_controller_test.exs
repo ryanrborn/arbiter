@@ -96,5 +96,30 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       data = json_response(conn, 200)["data"]
       assert Enum.all?(data, &(&1["bead_id"] == "bd-only"))
     end
+
+    test "bead_id filter includes tribunal reviewer events (#review suffix)", %{conn: conn} do
+      _ = insert_event!(%{bead_id: "bd-trib", step: :work, cost_usd: 0.1})
+      _ = insert_event!(%{bead_id: "bd-trib#review", step: :review, cost_usd: 0.2})
+      _ = insert_event!(%{bead_id: "bd-trib#review#r2", step: :review, cost_usd: 0.3})
+      _ = insert_event!(%{bead_id: "bd-unrelated", cost_usd: 0.9})
+
+      conn = get(conn, ~p"/api/usage/events", %{bead_id: "bd-trib", workspace_id: @ws})
+      data = json_response(conn, 200)["data"]
+      returned_ids = Enum.map(data, & &1["bead_id"]) |> Enum.sort()
+      assert returned_ids == ["bd-trib", "bd-trib#review", "bd-trib#review#r2"]
+    end
+
+    test "bead_id filter with --step review returns only reviewer events", %{conn: conn} do
+      _ = insert_event!(%{bead_id: "bd-trib2", step: :work, cost_usd: 0.1})
+      _ = insert_event!(%{bead_id: "bd-trib2#review", step: :review, cost_usd: 0.2})
+
+      conn =
+        get(conn, ~p"/api/usage/events", %{bead_id: "bd-trib2", step: "review", workspace_id: @ws})
+
+      data = json_response(conn, 200)["data"]
+      assert length(data) == 1
+      assert hd(data)["bead_id"] == "bd-trib2#review"
+      assert hd(data)["step"] == "review"
+    end
   end
 end

@@ -833,9 +833,11 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert escalation.body =~ "Implementer → Reviewer"
       assert escalation.body =~ "Current diff"
 
-      # The same transcript is on the bead notes (visible via arb show).
+      # The same transcript is on the bead notes (visible via arb show), including
+      # the round count so operators can see it ran the full 2-round cap.
       {:ok, reloaded} = Ash.get(Issue, bead.id)
       assert reloaded.notes =~ "REQUEST_CHANGES"
+      assert reloaded.notes =~ "rounds: 2"
 
       # The full thread persisted as durable mailbox rows: r1 findings, r1
       # response, r2 findings — three :flag entries, oldest first.

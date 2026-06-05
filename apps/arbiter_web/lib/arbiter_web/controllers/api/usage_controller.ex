@@ -119,7 +119,10 @@ defmodule ArbiterWeb.Api.UsageController do
 
   defp filter_eq(query, _field, value) when value in [nil, ""], do: query
   defp filter_eq(query, :workspace_id, v), do: Ash.Query.filter(query, workspace_id == ^v)
-  defp filter_eq(query, :bead_id, v), do: Ash.Query.filter(query, bead_id == ^v)
+  defp filter_eq(query, :bead_id, v) do
+    prefix = v <> "#%"
+    Ash.Query.filter(query, bead_id == ^v or like(bead_id, ^prefix))
+  end
   defp filter_eq(query, :step, v), do: Ash.Query.filter(query, step == ^v)
 
   defp filter_since(query, nil), do: query
