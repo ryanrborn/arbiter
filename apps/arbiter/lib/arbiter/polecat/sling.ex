@@ -729,6 +729,15 @@ defmodule Arbiter.Polecat.Sling do
         agent_opts = agent_opts_from_choice(choice) ++ [security: policy]
         prompt = prompt_for_bead(bead, opts)
 
+        routing_config = %{
+          provider: Atom.to_string(choice.type),
+          model: Keyword.get(agent_opts, :model),
+          model_tier: Keyword.get(agent_opts, :model_tier),
+          thinking: Keyword.get(agent_opts, :thinking)
+        }
+
+        Polecat.report(polecat_pid, :routing_config, routing_config)
+
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
