@@ -164,6 +164,30 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     end
   end
 
+  describe "POST /api/polecats/:bead_id/resume" do
+    test "returns 404 for an unknown bead_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/polecats/no-such-bead/resume", %{})
+      assert json_response(conn, 404)
+    end
+
+    test "a bead with no prior run nor rig can't be resumed (400)", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
+
+      conn = post(conn, ~p"/api/polecats/#{bead.id}/resume", %{})
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "rig"
+    end
+
+    test "a closed bead can't be resumed (400)", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "closed", workspace_id: ws.id})
+      {:ok, _} = Ash.update(bead, %{}, action: :close)
+
+      conn = post(conn, ~p"/api/polecats/#{bead.id}/resume", %{"rig" => "test/rig"})
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "closed"
+    end
+  end
+
   describe "POST /api/polecats/review" do
     test "dispatches a review-only polecat: no worktree, CodeReview workflow attached",
          %{conn: conn, ws: ws} do

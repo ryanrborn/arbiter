@@ -181,6 +181,42 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
+  describe "enqueue/2 no-duplicate-PR guard (bd-auma3z)" do
+    # Any non-"direct" strategy takes the PR path; "github" is the valid
+    # adapter-named strategy the Workspace config accepts.
+    @tag workspace_config: %{"merge" => %{"strategy" => "github"}}
+    test "adopts an existing open PR instead of opening a duplicate", %{
+      workspace: ws,
+      bead: bead
+    } do
+      # Simulate a resumed bead whose prior acolyte already opened PR #55.
+      {:ok, bead} = Ash.update(bead, %{pr_ref: "55"}, action: :update)
+
+      test_pid = self()
+
+      stub(fn conn ->
+        if conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") do
+          send(test_pid, :pr_open_called)
+        end
+
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 999})
+      end)
+
+      {_pid, name} = start_refinery(ws)
+      assert :ok = Refinery.enqueue(name, bead.id)
+
+      # No pr_open call — the existing PR was adopted, not duplicated.
+      refute_received :pr_open_called
+
+      %{items: [item]} = Refinery.state(name)
+      assert item.pr_number == 55
+      assert item.status == :awaiting_approval
+
+      # The bead's pr_ref is unchanged (still the original PR, no overwrite).
+      assert Ash.get!(Issue, bead.id).pr_ref == "55"
+    end
+  end
+
   describe "enqueue/2 PR remote-link on the upstream tracker" do
     @jira_env "GTE_REFINERY_JIRA_TOKEN"
     @ws_pr_jira %{
