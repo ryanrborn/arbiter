@@ -135,8 +135,11 @@ defmodule Arbiter.Polecat.WardenTest do
 
       wait_until(fn ->
         meta = Polecat.state(pid).meta
+        status = Map.get(meta, :last_merger_status)
 
-        Map.get(meta, :last_merger_status) == %{status: :open, approved: false} and
+        is_map(status) and
+          Map.get(status, :status) == :open and
+          Map.get(status, :approved) == false and
           match?(%DateTime{}, Map.get(meta, :last_checked_at))
       end)
     end

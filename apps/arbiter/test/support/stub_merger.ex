@@ -76,12 +76,14 @@ defmodule Arbiter.Test.StubMerger do
   def get(ref) do
     ensure_started()
 
+    defaults = %{status: :open, approved: false, ci_clean: false, conflicting: false}
+
     result =
       Agent.get_and_update(@name, fn s ->
         case Map.get(s.gets, ref, []) do
-          [only] -> {only, s}
-          [head | rest] -> {head, put_in(s, [:gets, ref], rest)}
-          [] -> {%{status: :open, approved: false}, s}
+          [only] -> {Map.merge(defaults, only), s}
+          [head | rest] -> {Map.merge(defaults, head), put_in(s, [:gets, ref], rest)}
+          [] -> {defaults, s}
         end
       end)
 

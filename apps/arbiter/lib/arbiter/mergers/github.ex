@@ -147,6 +147,9 @@ defmodule Arbiter.Mergers.Github do
          ref: mr_ref,
          status: pr_status(pr),
          approved: approved?(reviews),
+         ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
+         conflicting:
+           Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
          url: Map.get(pr, "html_url") || ""
        }}
     end
@@ -450,8 +453,12 @@ defmodule Arbiter.Mergers.Github do
           _ -> :invalid
         end
 
-      _ ->
-        :invalid
+      [num_str] ->
+        # Bare integer string — backward compat with old Refinery pr_ref storage ("42").
+        case parse_pos_int(num_str) do
+          {:ok, n} -> {:bare, n}
+          :error -> :invalid
+        end
     end
   end
 

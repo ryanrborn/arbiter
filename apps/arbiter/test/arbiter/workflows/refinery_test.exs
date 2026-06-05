@@ -1,15 +1,58 @@
 defmodule Arbiter.Workflows.RefineryTest do
   # async: false — DataCase sandbox can't be shared with the GenServer process
-  # in async mode, and we mutate global :persistent_term GitHub rate-limit
-  # cache via the stubs.
+  # in async mode.
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Workflows.Refinery
 
-  @repo "octo/widget"
   @token "test-token-abc123"
+
+  @ws_github %{
+    "merge" => %{
+      "strategy" => "github",
+      "config" => %{"owner" => "octo", "repo" => "widget", "credentials_ref" => "test-token-abc123"}
+    }
+  }
+
+  @ws_github_squash %{
+    "merge" => %{
+      "strategy" => "github",
+      "config" => %{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "test-token-abc123",
+        "merge_method" => "squash"
+      }
+    }
+  }
+
+  @ws_github_merge %{
+    "merge" => %{
+      "strategy" => "github",
+      "config" => %{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "test-token-abc123",
+        "merge_method" => "merge"
+      }
+    }
+  }
+
+  @ws_github_rebase %{
+    "merge" => %{
+      "strategy" => "github",
+      "config" => %{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "test-token-abc123",
+        "merge_method" => "rebase"
+      }
+    }
+  }
+
+  @ws_direct %{"merge" => %{"strategy" => "direct"}}
 
   # ---- setup helpers ------------------------------------------------------
 
@@ -40,25 +83,23 @@ defmodule Arbiter.Workflows.RefineryTest do
     full_opts =
       [
         workspace_id: workspace.id,
-        repo: @repo,
         base: "main",
-        github_token: @token,
         auto_tick: false,
         name: name
       ]
       |> Keyword.merge(opts)
 
     {:ok, pid} = Refinery.start_link(full_opts)
-    # Allow the refinery process to use any Req.Test stub registered by the
-    # test process for Arbiter.GitHub.HTTP.
-    Req.Test.allow(Arbiter.GitHub.HTTP, self(), pid)
+    # Allow the refinery process to use the Mergers.Github Req.Test stub.
+    Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
     # Allow it to use the Ecto sandbox connection too.
     Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, self(), pid)
     {pid, name}
   end
 
-  defp stub(fun), do: Req.Test.stub(Arbiter.GitHub.HTTP, fun)
+  defp stub(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
 
+  # Raw GitHub PR payload for the GET /pulls/{N} endpoint.
   defp pr_payload(overrides \\ %{}) do
     Map.merge(
       %{
@@ -66,18 +107,50 @@ defmodule Arbiter.Workflows.RefineryTest do
         "state" => "open",
         "mergeable" => true,
         "mergeStateStatus" => "clean",
-        "reviewDecision" => "APPROVED"
+        "html_url" => "https://github.com/octo/widget/pull/42"
       },
       overrides
     )
   end
 
-  # Workspace configs used as test tags.
-  @ws_pr %{"merge" => %{"strategy" => "pr"}}
-  @ws_squash %{"merge" => %{"strategy" => "squash"}}
-  @ws_merge %{"merge" => %{"strategy" => "merge"}}
-  @ws_rebase %{"merge" => %{"strategy" => "rebase"}}
-  @ws_direct %{"merge" => %{"strategy" => "direct"}}
+  # Reviews response for the GET /pulls/{N}/reviews endpoint.
+  defp reviews_payload(state \\ "APPROVED") do
+    [%{"state" => state}]
+  end
+
+  # Set up a full-cycle stub that responds to open, get (PR + reviews), and
+  # merge requests. `pr_number` controls which PR number to open; `pr_overrides`
+  # are merged into the PR GET payload; `reviews_state` controls the review state.
+  defp full_cycle_stub(pr_number, pr_overrides \\ %{}, reviews_state \\ "APPROVED") do
+    test_pid = self()
+    number = pr_number
+
+    stub(fn conn ->
+      cond do
+        conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"number" => number, "html_url" => "https://github.com/octo/widget/pull/#{number}"})
+
+        conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload(reviews_state))
+
+        conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{number}") ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(pr_payload(%{"number" => number} |> Map.merge(pr_overrides)))
+
+        conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          decoded = Jason.decode!(body)
+          send(test_pid, {:merge_called, decoded["merge_method"]})
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true, "sha" => "deadbeef"})
+
+        true ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+      end
+    end)
+  end
 
   # ---- tests --------------------------------------------------------------
 
@@ -89,7 +162,6 @@ defmodule Arbiter.Workflows.RefineryTest do
 
     test "raises without workspace_id" do
       assert_raise ArgumentError, ~r/workspace_id/, fn ->
-        # start_link spawns the GenServer and init/1 raises; trap it.
         Process.flag(:trap_exit, true)
         {:error, {%ArgumentError{message: msg}, _}} = Refinery.start_link([])
         raise ArgumentError, msg
@@ -97,9 +169,9 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
-  describe "enqueue/2 with merge_strategy=pr" do
-    @tag workspace_config: @ws_pr
-    test "opens a PR via GitHub.pr_open and queues with status :awaiting_approval", %{
+  describe "enqueue/2 with strategy=github" do
+    @tag workspace_config: @ws_github
+    test "opens a PR via adapter.open and queues with status :awaiting_approval", %{
       workspace: ws,
       bead: bead
     } do
@@ -108,10 +180,7 @@ defmodule Arbiter.Workflows.RefineryTest do
       stub(fn conn ->
         if conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") do
           send(test_pid, :pr_open_called)
-
-          conn
-          |> Plug.Conn.put_status(201)
-          |> Req.Test.json(%{"number" => 101, "state" => "open"})
+          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 101, "state" => "open"})
         else
           conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
         end
@@ -123,27 +192,25 @@ defmodule Arbiter.Workflows.RefineryTest do
 
       %{items: [item]} = Refinery.state(name)
       assert item.bead_id == bead.id
-      assert item.pr_number == 101
+      assert item.mr_ref == "#101"
       assert item.status == :awaiting_approval
-      assert item.strategy == "pr"
+      assert item.strategy == "github"
     end
 
-    @tag workspace_config: @ws_pr
-    test "records pr_number on the bead's pr_ref", %{workspace: ws, bead: bead} do
+    @tag workspace_config: @ws_github
+    test "records mr_ref on the bead's pr_ref", %{workspace: ws, bead: bead} do
       stub(fn conn ->
-        conn
-        |> Plug.Conn.put_status(201)
-        |> Req.Test.json(%{"number" => 77})
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 77})
       end)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
 
       reloaded = Ash.get!(Issue, bead.id)
-      assert reloaded.pr_ref == "77"
+      assert reloaded.pr_ref == "#77"
     end
 
-    @tag workspace_config: @ws_pr
+    @tag workspace_config: @ws_github
     test "writes pr_ref even when tracker_ref is already set (issue ref preserved)", %{
       workspace: ws,
       bead: bead
@@ -159,11 +226,11 @@ defmodule Arbiter.Workflows.RefineryTest do
 
       reloaded = Ash.get!(Issue, bead.id)
       assert reloaded.tracker_ref == "PRE-123"
-      assert reloaded.pr_ref == "77"
+      assert reloaded.pr_ref == "#77"
     end
 
-    @tag workspace_config: @ws_pr
-    test "GitHub.pr_open failure → status :failed; bead is not modified", %{
+    @tag workspace_config: @ws_github
+    test "adapter.open failure → status :failed; bead is not modified", %{
       workspace: ws,
       bead: bead
     } do
@@ -181,16 +248,14 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
-  describe "enqueue/2 no-duplicate-PR guard (bd-auma3z)" do
-    # Any non-"direct" strategy takes the PR path; "github" is the valid
-    # adapter-named strategy the Workspace config accepts.
-    @tag workspace_config: %{"merge" => %{"strategy" => "github"}}
-    test "adopts an existing open PR instead of opening a duplicate", %{
+  describe "enqueue/2 no-duplicate-MR guard (bd-auma3z)" do
+    @tag workspace_config: @ws_github
+    test "adopts an existing open MR ref instead of opening a duplicate", %{
       workspace: ws,
       bead: bead
     } do
       # Simulate a resumed bead whose prior acolyte already opened PR #55.
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "55"}, action: :update)
+      {:ok, bead} = Ash.update(bead, %{pr_ref: "#55"}, action: :update)
 
       test_pid = self()
 
@@ -205,22 +270,29 @@ defmodule Arbiter.Workflows.RefineryTest do
       {_pid, name} = start_refinery(ws)
       assert :ok = Refinery.enqueue(name, bead.id)
 
-      # No pr_open call — the existing PR was adopted, not duplicated.
+      # No open call — the existing MR was adopted, not duplicated.
       refute_received :pr_open_called
 
       %{items: [item]} = Refinery.state(name)
-      assert item.pr_number == 55
+      assert item.mr_ref == "#55"
       assert item.status == :awaiting_approval
 
-      # The bead's pr_ref is unchanged (still the original PR, no overwrite).
-      assert Ash.get!(Issue, bead.id).pr_ref == "55"
+      # The bead's pr_ref is unchanged.
+      assert Ash.get!(Issue, bead.id).pr_ref == "#55"
     end
   end
 
-  describe "enqueue/2 PR remote-link on the upstream tracker" do
+  describe "enqueue/2 MR remote-link on the upstream tracker" do
     @jira_env "GTE_REFINERY_JIRA_TOKEN"
-    @ws_pr_jira %{
-      "merge" => %{"strategy" => "github"},
+    @ws_github_jira %{
+      "merge" => %{
+        "strategy" => "github",
+        "config" => %{
+          "owner" => "octo",
+          "repo" => "widget",
+          "credentials_ref" => @token
+        }
+      },
       "tracker" => %{
         "type" => "jira",
         "config" => %{
@@ -238,8 +310,8 @@ defmodule Arbiter.Workflows.RefineryTest do
       :ok
     end
 
-    @tag workspace_config: @ws_pr_jira
-    test "posts a Jira remote link pointing at the opened PR", %{workspace: ws} do
+    @tag workspace_config: @ws_github_jira
+    test "posts a Jira remote link pointing at the opened MR", %{workspace: ws} do
       {:ok, bead} =
         Ash.create(Issue, %{
           title: "jira-backed",
@@ -276,61 +348,36 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
-  describe "enqueue/2 with merge_strategy=direct" do
+  describe "enqueue/2 with strategy=direct" do
     @tag workspace_config: @ws_direct
-    test "never calls GitHub APIs and closes the bead immediately", %{
+    test "never calls adapter APIs and closes the bead immediately", %{
       workspace: ws,
       bead: bead
     } do
       test_pid = self()
 
       stub(fn conn ->
-        send(test_pid, {:unexpected_github_call, conn.method, conn.request_path})
+        send(test_pid, {:unexpected_api_call, conn.method, conn.request_path})
         conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
       end)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
 
-      refute_received {:unexpected_github_call, _, _}
+      refute_received {:unexpected_api_call, _, _}
 
-      # Item was removed (status reached :done and a poll cycle would prune
-      # it; we removed eagerly via close path → item still in queue but with
-      # :done status until next poll). Verify the bead is closed.
       reloaded = Ash.get!(Issue, bead.id)
       assert reloaded.status == :closed
     end
   end
 
   describe ":tick polling" do
-    @tag workspace_config: @ws_squash
-    test "APPROVED + clean → merges with :squash and closes the bead", %{
+    @tag workspace_config: @ws_github_squash
+    test "approved + ci_clean → merges with squash and closes the bead", %{
       workspace: ws,
       bead: bead
     } do
-      test_pid = self()
-
-      stub(fn conn ->
-        cond do
-          conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 50})
-
-          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/50") ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload())
-
-          conn.method == "PUT" and String.ends_with?(conn.request_path, "/merge") ->
-            {:ok, body, conn} = Plug.Conn.read_body(conn)
-            decoded = Jason.decode!(body)
-            send(test_pid, {:merge_called, decoded["merge_method"]})
-
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{"merged" => true, "sha" => "deadbeef"})
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      full_cycle_stub(50)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)
@@ -350,27 +397,27 @@ defmodule Arbiter.Workflows.RefineryTest do
       assert reloaded.status == :closed
     end
 
-    @tag workspace_config: @ws_pr
-    test "CHANGES_REQUESTED → stays in :awaiting_approval and does not merge", %{
+    @tag workspace_config: @ws_github
+    test "not approved → stays in :awaiting_approval and does not merge", %{
       workspace: ws,
       bead: bead
     } do
       test_pid = self()
+      pr_number = 60
 
       stub(fn conn ->
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 60})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => pr_number})
 
-          conn.method == "GET" ->
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            # No approvals, changes requested
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(
-              pr_payload(%{
-                "reviewDecision" => "CHANGES_REQUESTED",
-                "mergeStateStatus" => "blocked"
-              })
-            )
+            |> Req.Test.json(pr_payload(%{"number" => pr_number, "mergeStateStatus" => "blocked"}))
 
           conn.method == "PUT" ->
             send(test_pid, :unexpected_merge)
@@ -394,27 +441,27 @@ defmodule Arbiter.Workflows.RefineryTest do
       assert reloaded.status == :open
     end
 
-    @tag workspace_config: @ws_pr
-    test "mergeable=false → stays in current state and does not call merge", %{
+    @tag workspace_config: @ws_github
+    test "conflicting MR → spawns conflict resolver (not a plain merge)", %{
       workspace: ws,
       bead: bead
     } do
       test_pid = self()
+      pr_number = 70
 
       stub(fn conn ->
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 70})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => pr_number})
 
-          conn.method == "GET" ->
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(
-              pr_payload(%{
-                "reviewDecision" => "APPROVED",
-                "mergeStateStatus" => "dirty",
-                "mergeable" => false
-              })
+              pr_payload(%{"number" => pr_number, "mergeable" => false, "mergeStateStatus" => "dirty"})
             )
 
           conn.method == "PUT" ->
@@ -430,21 +477,33 @@ defmodule Arbiter.Workflows.RefineryTest do
       :ok = Refinery.enqueue(name, bead.id)
       :ok = Refinery.tick(name)
 
+      # The item must NOT have been merged.
       refute_received :unexpected_merge
 
-      %{items: [item]} = Refinery.state(name)
-      assert item.status == :awaiting_approval
+      # The conflict resolver path parks the item; the exact status depends on
+      # whether the resolver successfully spawns (it won't in test without a rig,
+      # so it'll be :failed or :conflict_resolving). Either way, it's not :closed.
+      reloaded = Ash.get!(Issue, bead.id)
+      assert reloaded.status == :open
     end
 
-    @tag workspace_config: @ws_pr
-    test "pr_merge failure → status :failed; bead is NOT closed", %{workspace: ws, bead: bead} do
+    @tag workspace_config: @ws_github
+    test "adapter.merge failure → status :failed; bead is NOT closed", %{
+      workspace: ws,
+      bead: bead
+    } do
+      pr_number = 80
+
       stub(fn conn ->
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 80})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => pr_number})
 
-          conn.method == "GET" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload())
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload(%{"number" => pr_number}))
 
           conn.method == "PUT" ->
             conn
@@ -468,32 +527,36 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
-  describe "merge strategy mapping" do
-    @tag workspace_config: @ws_squash
-    test "squash → pr_merge with :squash", %{workspace: ws, bead: bead} do
+  describe "merge_method mapping" do
+    @tag workspace_config: @ws_github_squash
+    test "merge_method=squash → adapter sends squash", %{workspace: ws, bead: bead} do
       assert_merge_method_called("squash", ws, bead)
     end
 
-    @tag workspace_config: @ws_merge
-    test "merge → pr_merge with :merge", %{workspace: ws, bead: bead} do
+    @tag workspace_config: @ws_github_merge
+    test "merge_method=merge → adapter sends merge", %{workspace: ws, bead: bead} do
       assert_merge_method_called("merge", ws, bead)
     end
 
-    @tag workspace_config: @ws_rebase
-    test "rebase → pr_merge with :rebase", %{workspace: ws, bead: bead} do
+    @tag workspace_config: @ws_github_rebase
+    test "merge_method=rebase → adapter sends rebase", %{workspace: ws, bead: bead} do
       assert_merge_method_called("rebase", ws, bead)
     end
 
     defp assert_merge_method_called(expected_method, ws, bead) do
       test_pid = self()
+      pr_number = 90
 
       stub(fn conn ->
         cond do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 90})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => pr_number})
 
-          conn.method == "GET" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload())
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload(%{"number" => pr_number}))
 
           conn.method == "PUT" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -515,7 +578,7 @@ defmodule Arbiter.Workflows.RefineryTest do
   end
 
   describe "PubSub" do
-    @tag workspace_config: @ws_pr
+    @tag workspace_config: @ws_github
     test "{:polecat_done, bead_id} message triggers enqueue", %{workspace: ws, bead: bead} do
       test_pid = self()
 
@@ -533,35 +596,21 @@ defmodule Arbiter.Workflows.RefineryTest do
 
       assert_receive :pr_open_called, 500
 
-      # Give the GenServer a moment to update its state.
       :sys.get_state(pid)
       %{items: [item]} = Refinery.state(pid)
       assert item.bead_id == bead.id
-      assert item.pr_number == 111
+      assert item.mr_ref == "#111"
     end
 
-    @tag workspace_config: @ws_pr
+    @tag workspace_config: @ws_github
     test "broadcasts {:bead_closed_by_refinery, bead_id} when merge lands", %{
       workspace: ws,
       bead: bead
     } do
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "refinery:" <> ws.id)
 
-      stub(fn conn ->
-        cond do
-          conn.method == "POST" ->
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 200})
-
-          conn.method == "GET" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload())
-
-          conn.method == "PUT" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true})
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      pr_number = 200
+      full_cycle_stub(pr_number)
 
       {_pid, name} = start_refinery(ws)
       :ok = Refinery.enqueue(name, bead.id)

@@ -101,11 +101,17 @@ defmodule Arbiter.Mergers.Gitlab do
          {:ok, iid} <- iid_from_ref(mr_ref) do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          merge_status = Map.get(body, "merge_status", "")
+
           {:ok,
            %{
              ref: ref_for(iid),
              status: map_state(Map.get(body, "state")),
              approved: approved?(body),
+             ci_clean: merge_status == "can_be_merged",
+             conflicting:
+               Map.get(body, "has_conflicts", false) == true or
+                 merge_status == "cannot_be_merged",
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
            }}
 
