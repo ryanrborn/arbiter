@@ -825,7 +825,7 @@ defmodule Arbiter.Polecat.Tribunal do
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
-            {:ok, base ++ [command: argv, env: env]}
+            {:ok, base ++ [command: argv, env: env, provider: adapter.provider()]}
 
           {:error, reason} ->
             {:error, reason}
