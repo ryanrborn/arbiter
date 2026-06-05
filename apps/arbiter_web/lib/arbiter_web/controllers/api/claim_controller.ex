@@ -36,6 +36,17 @@ defmodule ArbiterWeb.Api.ClaimController do
       {:error, :tracker_not_github} ->
         {:error, {:invalid_request, "workspace tracker is not github"}}
 
+      {:error, {:already_claimed, body}} ->
+        conn
+        |> put_status(:conflict)
+        |> json(%{
+          error: %{
+            type: "already_claimed",
+            message: "this issue has already been claimed by another Arbiter installation",
+            details: %{comment: body}
+          }
+        })
+
       {:error, {:not_assigned, login}} ->
         conn
         |> put_status(:forbidden)
