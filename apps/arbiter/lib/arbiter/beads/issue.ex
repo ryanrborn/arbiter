@@ -123,6 +123,7 @@ defmodule Arbiter.Beads.Issue do
         :assignee,
         :tracker_type,
         :tracker_ref,
+        :pr_ref,
         :target_branch
       ]
 
@@ -302,6 +303,12 @@ defmodule Arbiter.Beads.Issue do
       public? true
       constraints max_length: 255, trim?: true
       description "External tracker's ID for this bead (e.g. \"VR-17585\" for Jira)."
+    end
+
+    attribute :pr_ref, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+      description "PR/MR number opened for this bead (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
     end
 
     attribute :target_branch, :string do
