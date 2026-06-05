@@ -59,11 +59,9 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert reason =~ "tracker.type is \"github\""
     end
 
-    test "safety_check/1 flags github merge missing owner/repo" do
-      assert {:unsafe, [reason]} =
+    test "safety_check/1 accepts github merge with no owner or repo (both per-rig derivable)" do
+      assert :ok =
                Config.safety_check(%{"merge" => %{"strategy" => "github"}})
-
-      assert reason =~ "merge.config.owner is missing"
     end
 
     test "safety_check/1 accepts a fully populated config" do
@@ -72,7 +70,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
                  "tracker" => %{"type" => "github", "config" => %{"owner" => "x"}},
                  "merge" => %{
                    "strategy" => "github",
-                   "config" => %{"owner" => "x", "repo" => "y"}
+                   "config" => %{"owner" => "x"}
                  }
                })
     end

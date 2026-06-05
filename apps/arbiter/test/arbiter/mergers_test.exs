@@ -43,6 +43,26 @@ defmodule Arbiter.MergersTest do
       assert Mergers.prepare(nil) == :ok
     end
 
+    test "seeds Github.Config without owner/repo — per-rig derivation shape (bd-a53kv2)" do
+      ws = %Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{
+              "credentials_ref" => "env:#{@github_env}"
+            }
+          }
+        }
+      }
+
+      assert Mergers.prepare(ws) == :ok
+
+      assert {:ok, cfg} = Mergers.Github.Config.resolve()
+      assert cfg.owner == nil
+      assert cfg.repo == nil
+      assert cfg.token == "test-gh-prepare-token"
+    end
+
     test "seeds Github.Config from a :github-strategy workspace (bd-a1qqne regression)" do
       ws = %Workspace{
         config: %{
