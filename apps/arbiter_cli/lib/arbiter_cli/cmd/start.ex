@@ -2,30 +2,28 @@ defmodule ArbiterCli.Cmd.Start do
   @moduledoc """
   `arb start [--timeout SECONDS] [--json]` — boot the Arbiter stack if it's down.
 
-  A convenience for the common "I just want to work" moment: bring the local
-  development stack up without remembering the two-step dance (`docker compose
-  up -d` then `mix phx.server`).
+  A convenience for the common "I just want to work" moment: start Phoenix
+  without remembering the exact invocation.
 
   What it does:
 
     1. **No-op if already running.** Detected via the doctor reachability
        check (`GET /api/workspaces` against `ARB_HOST`). If Phoenix answers,
        the stack is up — print status and exit 0 without touching anything.
-    2. **Ensure Postgres.** Run `docker compose up -d` from the project root.
-       Idempotent: a no-op when the container is already healthy.
-    3. **Start Phoenix.** Spawn `mix phx.server` detached (via `nohup`, output
+    2. **Start Phoenix.** Spawn `mix phx.server` detached (via `nohup`, output
        redirected to a log file) so it outlives this short-lived CLI process.
-    4. **Wait for green.** Poll `arb doctor` until every check passes (or the
+    3. **Wait for green.** Poll `arb doctor` until every check passes (or the
        timeout elapses), then print the status report.
 
   ## Project root
 
-  Postgres and Phoenix are started from the umbrella root (where `compose.yml`
-  and `mix.exs` live). It's resolved, in order:
+  Phoenix is started from the umbrella root (where `mix.exs` lives). It's
+  resolved, in order:
 
     1. `ARB_HOME` — explicit override.
     2. The umbrella inferred from the running escript's path (build-tree only).
-    3. A walk up from the current directory looking for `compose.yml`.
+    3. The path recorded by `arb install-service` at `~/.config/arbiter/home`.
+    4. A walk up from the current directory looking for `mix.exs`.
 
   If none resolve, the command errors with a hint to set `ARB_HOME`.
 
@@ -90,46 +88,17 @@ defmodule ArbiterCli.Cmd.Start do
 
         :error ->
           Output.die(
-            "could not locate the Arbiter project root (no compose.yml found)",
+            "could not locate the Arbiter project root (no mix.exs found walking up from cwd)",
             "Set ARB_HOME to your Arbiter checkout, or run `arb start` from inside it."
           )
       end
 
-    actions = []
-
-    actions = actions ++ [ensure_postgres(root)]
-    actions = actions ++ [start_phoenix(root)]
+    actions = [start_phoenix(root)]
 
     case wait_until_green(attempts_for(timeout_ms)) do
       :ok -> emit_started(mode, actions, true, timeout_ms)
       :timeout -> emit_timeout(mode, actions, timeout_ms)
     end
-  end
-
-  # ---- postgres ----------------------------------------------------------
-
-  # `docker compose up -d` is idempotent — a no-op when the container is
-  # already up — so we run it unconditionally on the cold path.
-  defp ensure_postgres(root) do
-    log_text("Ensuring Postgres is up (docker compose up -d)…")
-
-    case run_cmd("docker", ["compose", "up", "-d"], cd: root, stderr_to_stdout: true) do
-      {_out, 0} ->
-        {:postgres, :ok, nil}
-
-      {out, code} ->
-        Output.die(
-          "docker compose up -d failed (exit #{code})",
-          "Is the Docker daemon running? Output:\n" <> String.trim_trailing(out)
-        )
-    end
-  rescue
-    e in ErlangError ->
-      # System.cmd raises when the executable isn't found (:enoent).
-      Output.die(
-        "could not run docker: #{inspect(e.original)}",
-        "Install Docker and ensure `docker` is on your PATH."
-      )
   end
 
   # ---- phoenix -----------------------------------------------------------
@@ -293,7 +262,7 @@ defmodule ArbiterCli.Cmd.Start do
        path ends with `/apps/arbiter_cli/arb`).
     3. The path recorded by `arb install-service` at `~/.config/arbiter/home`
        (written on first install so commands work from any cwd after that).
-    4. A walk up from the current directory looking for `compose.yml`.
+    4. A walk up from the current directory looking for `mix.exs`.
 
   Returns `{:ok, dir}` or `:error`.
   """
@@ -309,7 +278,7 @@ defmodule ArbiterCli.Cmd.Start do
       dir = recorded_home() ->
         {:ok, dir}
 
-      dir = walk_up_for_compose(File.cwd!()) ->
+      dir = walk_up_for_mix(File.cwd!()) ->
         {:ok, dir}
 
       true ->
@@ -372,19 +341,19 @@ defmodule ArbiterCli.Cmd.Start do
     end
   end
 
-  defp walk_up_for_compose(dir) do
+  defp walk_up_for_mix(dir) do
     parent = Path.dirname(dir)
 
     cond do
-      File.exists?(Path.join(dir, "compose.yml")) ->
+      File.exists?(Path.join(dir, "mix.exs")) ->
         dir
 
-      # Reached the filesystem root without finding compose.yml.
+      # Reached the filesystem root without finding mix.exs.
       parent == dir ->
         nil
 
       true ->
-        walk_up_for_compose(parent)
+        walk_up_for_mix(parent)
     end
   end
 

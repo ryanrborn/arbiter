@@ -40,11 +40,11 @@ defmodule Arbiter.Workflows.MachineState do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Workflows,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   @statuses ~w(idle running paused completed failed)a
 
-  postgres do
+  sqlite do
     table "workflow_machine_states"
     repo Arbiter.Repo
   end

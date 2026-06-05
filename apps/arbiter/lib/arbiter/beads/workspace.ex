@@ -54,12 +54,12 @@ defmodule Arbiter.Beads.Workspace do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Beads,
-    data_layer: AshPostgres.DataLayer
+    data_layer: AshSqlite.DataLayer
 
   @valid_tracker_types ~w(none jira shortcut linear github)
   @valid_merger_strategies ~w(direct gitlab github)
 
-  postgres do
+  sqlite do
     table "workspaces"
     repo Arbiter.Repo
   end
