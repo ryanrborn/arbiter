@@ -198,7 +198,31 @@ defmodule Arbiter.Trackers do
   workspace has a real tracker before attempting an outbound create.
   """
   @spec workspace_type(Arbiter.Beads.Workspace.t()) :: atom()
-  def workspace_type(%Arbiter.Beads.Workspace{} = workspace), do: workspace_tracker_type(workspace)
+  def workspace_type(%Arbiter.Beads.Workspace{} = workspace),
+    do: workspace_tracker_type(workspace)
+
+  @doc """
+  Searches open issues in the workspace's configured tracker for issues whose
+  title matches `title` (case-insensitive exact match).
+
+  Used by `arb create` to detect upstream duplicates before creating a new
+  bead. Adapters that do not implement `search_by_title/1` — or workspaces
+  without a tracker — return `{:error, :not_supported}`, which callers should
+  treat as "skip check".
+  """
+  @spec search_by_title_for_workspace(Arbiter.Beads.Workspace.t(), String.t()) ::
+          {:ok, [map()]} | {:error, :not_supported} | {:error, term()}
+  def search_by_title_for_workspace(%Arbiter.Beads.Workspace{} = workspace, title)
+      when is_binary(title) do
+    type = workspace_tracker_type(workspace)
+    adapter = adapter_for_workspace_type(type)
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :search_by_title, 1) do
+      with_workspace(type, workspace, fn -> adapter.search_by_title(title) end)
+    else
+      {:error, :not_supported}
+    end
+  end
 
   defp workspace_tracker_type(%Arbiter.Beads.Workspace{config: config}) do
     case get_in(config || %{}, ["tracker", "type"]) do

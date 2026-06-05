@@ -357,6 +357,55 @@ defmodule Arbiter.Trackers.GitHub do
   end
 
   @doc """
+  Searches open issues in the workspace's repo for issues whose title matches
+  `title` (case-insensitive, trimmed exact match).
+
+  Uses the GitHub Search API. Returns the list of matching issue summaries.
+  Returns `{:ok, []}` when no matches are found. API errors return
+  `{:error, %Error{}}`.
+  """
+  @spec search_by_title(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
+  def search_by_title(title) when is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      escaped_title = String.replace(title, "\"", "\\\"")
+      query = "\"#{escaped_title}\" in:title repo:#{cfg.owner}/#{cfg.repo} is:issue is:open"
+
+      case request(cfg, :get, "/search/issues", params: [q: query, per_page: 25]) do
+        {:ok, %Req.Response{status: status, body: %{"items" => items}}}
+        when status in 200..299 ->
+          norm = normalize_title(title)
+
+          matches =
+            items
+            |> Enum.reject(&Map.has_key?(&1, "pull_request"))
+            |> Enum.filter(fn item ->
+              normalize_title(Map.get(item, "title", "")) == norm
+            end)
+            |> Enum.map(fn item ->
+              %{
+                ref: to_string(item["number"]),
+                title: item["title"],
+                url: item["html_url"]
+              }
+            end)
+
+          {:ok, matches}
+
+        {:ok, %Req.Response{status: status}} when status in 200..299 ->
+          {:ok, []}
+
+        {:ok, %Req.Response{status: status, body: body}} ->
+          {:error, http_error(status, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
+
+  @doc """
   Add a login as an assignee to a GitHub issue. Non-fatal: callers should
   treat errors as soft failures (assignment requires collaborator access).
   """
