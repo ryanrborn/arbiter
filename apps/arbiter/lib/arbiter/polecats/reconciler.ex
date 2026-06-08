@@ -150,7 +150,7 @@ defmodule Arbiter.Polecats.Reconciler do
     body =
       "Bead #{bead_id} has an open PR (#{pr_ref}) but no live polecat to drive the merge.\n" <>
         "The server was likely restarted between `arb done` and the Warden being established.\n" <>
-        "Action: verify the PR is ready to merge, then run `arb sling #{bead_id}` to re-drive " <>
+        "Action: verify the PR is ready to merge, then run `arb issue dispatch #{bead_id}` to re-drive " <>
         "or manually merge and close the bead."
 
     Message.send_mail(%{

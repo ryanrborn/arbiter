@@ -17,11 +17,29 @@ defmodule ArbiterWeb.Api.ConvoyController do
 
   use ArbiterWeb, :controller
 
+  require Ash.Query
+
   alias Arbiter.Beads.{Convoy, ConvoyMembership}
 
   action_fallback ArbiterWeb.Api.FallbackController
 
   @load [:memberships, :total_issues, :closed_issues]
+
+  def index(conn, params) do
+    query =
+      case params["workspace_id"] do
+        ws when is_binary(ws) and ws != "" ->
+          Ash.Query.filter(Convoy, workspace_id == ^ws)
+
+        _ ->
+          Convoy
+      end
+
+    case Ash.read(query, load: @load) do
+      {:ok, convoys} -> render(conn, :index, convoys: convoys)
+      {:error, _} = err -> err
+    end
+  end
 
   def create(conn, params) do
     attrs = coerce_lifecycle(params)

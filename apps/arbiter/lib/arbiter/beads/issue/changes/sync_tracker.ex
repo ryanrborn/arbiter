@@ -82,7 +82,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
           "SyncTracker: gated transition BLOCKED for bead=#{issue.id} " <>
             "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{message} " <>
             "Skipping the forward transition. Populate qa_notes + deployment_notes " <>
-            "on the bead (e.g. `arb update #{issue.id} --qa-notes ... --deployment-notes ...`) " <>
+            "on the bead (e.g. `arb issue update #{issue.id} --qa-notes ... --deployment-notes ...`) " <>
             "and re-run the sync."
         )
 

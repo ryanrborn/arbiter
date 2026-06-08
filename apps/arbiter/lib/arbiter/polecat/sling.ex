@@ -936,7 +936,7 @@ defmodule Arbiter.Polecat.Sling do
   # work includes producing the gated completion notes the tracker requires
   # before it will transition the ticket forward. We make this an explicit,
   # non-optional step in the acolyte's prompt and tell it exactly how to
-  # persist the notes on the bead (`arb update`), so the downstream
+  # persist the notes on the bead (`arb issue update`), so the downstream
   # tracker-sync has the fields to push. Untracked beads get nothing extra.
   defp completion_notes_step(%Issue{tracker_type: :none}), do: ""
 
@@ -949,7 +949,7 @@ defmodule Arbiter.Polecat.Sling do
     MUST produce its completion notes and persist them on the bead — the
     tracker gates the ticket's forward transition until both are filled:
 
-        arb update #{id} \\
+        arb issue update #{id} \\
           --qa-notes "What QA should verify: the user-facing behaviour to
                       exercise, edge cases, and how to confirm the fix." \\
           --deployment-notes "Rollout considerations: DB migrations, feature

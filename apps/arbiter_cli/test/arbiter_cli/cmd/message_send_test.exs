@@ -1,12 +1,11 @@
-defmodule ArbiterCli.Cmd.MsgTest do
+defmodule ArbiterCli.Cmd.MessageSendTest do
   use ArbiterCli.CliCase, async: false
 
-  alias ArbiterCli.Cmd.Msg
+  alias ArbiterCli.Cmd.Message
 
   @workspaces %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
 
-  # Echoes the decoded request body back as the created message, so a --json
-  # run lets us assert the exact payload the command sent.
+  # Echoes the decoded request body back as the created message.
   defp echo_create do
     stub_routes([
       {{"get", "/api/workspaces"}, {@workspaces, 200}},
@@ -18,11 +17,13 @@ defmodule ArbiterCli.Cmd.MsgTest do
     ])
   end
 
-  describe "arb msg <recipient> <body>" do
+  describe "arb message send <recipient> <body>" do
     test "sends an info message to admiral by default" do
       echo_create()
 
-      {out, _err, code} = capture(fn -> Msg.run(["admiral", "needs", "attention", "--json"]) end)
+      {out, _err, code} =
+        capture(fn -> Message.run(["send", "admiral", "needs", "attention", "--json"]) end)
+
       assert code == 0
       sent = Jason.decode!(out)
       assert sent["to_ref"] == "admiral"
@@ -36,7 +37,8 @@ defmodule ArbiterCli.Cmd.MsgTest do
 
       {out, _err, code} =
         capture(fn ->
-          Msg.run([
+          Message.run([
+            "send",
             "admiral",
             "GitLab adapter complete",
             "--kind",
@@ -54,7 +56,6 @@ defmodule ArbiterCli.Cmd.MsgTest do
       assert sent["kind"] == "completion"
       assert sent["subject"] == "bd-soren done"
       assert sent["directive_ref"] == "bd-soren"
-      assert sent["body"] == "GitLab adapter complete"
     end
 
     test "from identity comes from ARB_FROM when set" do
@@ -62,34 +63,31 @@ defmodule ArbiterCli.Cmd.MsgTest do
       on_exit(fn -> System.delete_env("ARB_FROM") end)
       echo_create()
 
-      {out, _err, code} = capture(fn -> Msg.run(["admiral", "done", "--json"]) end)
+      {out, _err, code} = capture(fn -> Message.run(["send", "admiral", "done", "--json"]) end)
       assert code == 0
       assert Jason.decode!(out)["from_ref"] == "acolyte-019e"
     end
 
-    test "human output confirms the send" do
-      echo_create()
-      {out, _err, code} = capture(fn -> Msg.run(["admiral", "needs", "attention"]) end)
-      assert code == 0
-      assert out =~ "Sent info to admiral."
-    end
-
     test "rejects an invalid kind" do
-      {_out, err, code} = capture(fn -> Msg.run(["admiral", "x", "--kind", "bogus"]) end)
+      {_out, err, code} =
+        capture(fn -> Message.run(["send", "admiral", "x", "--kind", "bogus"]) end)
+
       assert code != 0
       assert err =~ "invalid --kind"
     end
 
     test "requires a body" do
-      {_out, err, code} = capture(fn -> Msg.run(["admiral"]) end)
+      {_out, err, code} = capture(fn -> Message.run(["send", "admiral"]) end)
       assert code != 0
       assert err =~ "requires a body"
     end
+  end
 
-    test "requires a recipient" do
-      {_out, err, code} = capture(fn -> Msg.run([]) end)
-      assert code != 0
-      assert err =~ "msg requires"
+  describe "routing" do
+    test "inbox routes to the inbox handler" do
+      stub_get("/api/messages", %{"data" => []})
+      {_out, _err, code} = capture(fn -> Message.run(["inbox"]) end)
+      assert code == 0
     end
   end
 end

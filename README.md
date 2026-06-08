@@ -125,20 +125,65 @@ Restart the server after editing `dev.exs`.
 
 ## Quick reference
 
+The CLI uses an `arb <resource> <verb>` grammar. The resources are neutral
+base terms — `issue`, `worker`, `batch`, `repo` — and themed vocabularies
+(the Sith "polecat", "bead", "convoy", "warship", "sling", …) layer on top as
+aliases.
+
 ```
-arb prime               # mission briefing — run at the start of any session
-arb list                # list all Directives
-arb ready               # Directives ready to be worked (deps closed)
-arb show <id>           # detail on one Directive
-arb create              # create a new Directive
-arb sling <id> [ship]   # dispatch an Acolyte to work a Directive
-arb polecat list        # list running Acolytes
-arb doctor              # health-check the stack
-arb start               # boot Postgres + Phoenix if down
-arb install-service     # install a systemd unit so the stack starts at boot
+arb prime                    # mission briefing — run at the start of a session
+arb issue list               # list all issues
+arb issue ready              # issues ready to be worked (deps closed)
+arb issue show <id>          # detail on one issue
+arb issue create <title>     # create a new issue
+arb issue dispatch <id> [rig]# dispatch a worker to an issue
+arb worker list              # list running workers
+arb worker log <id>          # full durable transcript of a worker's run
+arb batch list               # list batches in the active workspace
+arb repo list                # registered repos (rigs)
+arb workspace list           # configured workspaces
+arb server doctor            # health-check the stack
+arb server start             # boot SQLite-backed Phoenix if down
+arb server deploy            # pull main → migrate → rebuild CLI → restart
+arb install service          # systemd unit so the stack starts at boot
 ```
 
-All commands accept `--help` and `--json`. The CLI keeps the literal
-verb names (`polecat`, `sling`, …) stable while prose and dashboard
-output render the active workspace's vernacular (Acolyte, Strike Force,
-etc. — see `apps/arbiter/lib/arbiter/vernacular.ex`).
+All commands accept `--help` and `--json`.
+
+### Vernacular aliases
+
+The active workspace's vernacular maps a themed label onto each canonical
+resource, and the themed label resolves automatically. The default (Sith)
+vocabulary gives:
+
+| canonical  | default label | example                                        |
+|------------|---------------|------------------------------------------------|
+| `worker`   | `polecat`     | `arb polecat list` → `arb worker list`         |
+| `issue`    | `bead`        | `arb bead show <id>` → `arb issue show <id>`    |
+| `batch`    | `convoy`      | `arb convoy create …` → `arb batch create …`    |
+| `repo`     | `warship`     | `arb warship list` → `arb repo list`            |
+| `dispatch` | `sling`       | `arb sling <id>` → `arb issue dispatch <id>`    |
+
+Pre-`<resource> <verb>` flat commands (`arb list`, `arb sling`, `arb update`,
+…) still run — they print a one-line note pointing at the new form.
+
+#### The `sith` preset
+
+The full Sith lexicon is shipped as a named preset for prose and dashboards.
+Apply it to the global vernacular (`PUT /api/settings/vernacular`, or the
+dashboard's vernacular editor) to theme everything on top of the resource
+aliases above:
+
+```json
+{
+  "coordinator": "Admiral",    "worker": "Acolyte",
+  "issue": "Directive",        "batch": "Strike Force",
+  "repo": "Warship",           "dispatch": "Sling",
+  "merge_queue": "Reclamation","monitor": "Inquisitor",
+  "watchdog": "Grand Moff",    "epic": "Campaign"
+}
+```
+
+Any installation can opt into its own lexicon the same way; the canonical
+resource names never change. See `arb help vernacular` and
+`apps/arbiter/lib/arbiter/vernacular.ex`.
