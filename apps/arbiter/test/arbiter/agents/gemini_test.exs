@@ -59,10 +59,10 @@ defmodule Arbiter.Agents.GeminiTest do
       File.chmod!(agy_stub, 0o755)
       File.chmod!(gemini_stub, 0o755)
 
-      # Default policy is :auto — skip-permissions flag is NOT included.
+      # Default policy is :bypass — skip-permissions flag IS included.
       assert {:ok, argv} = Gemini.default_argv("the prompt", [])
       assert ["sh", "-c", _exec, "sh", ^agy_stub, "-p", "the prompt" | rest] = argv
-      refute "--dangerously-skip-permissions" in rest
+      assert "--dangerously-skip-permissions" in rest
       refute "--skip-trust" in rest
     end
 
@@ -84,11 +84,11 @@ defmodule Arbiter.Agents.GeminiTest do
       File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
       File.chmod!(gemini_stub, 0o755)
 
-      # Default policy is :auto — skip-trust is NOT included.
+      # Default policy is :bypass — skip-trust IS included.
       assert {:ok, argv} = Gemini.default_argv("the prompt", [])
       assert ["sh", "-c", _exec, "sh", ^gemini_stub, "-p", "the prompt" | rest] = argv
-      refute "--skip-trust" in rest
-      refute "-y" in rest
+      assert "--skip-trust" in rest
+      assert "-y" in rest
       refute "--dangerously-skip-permissions" in rest
     end
 

@@ -38,6 +38,12 @@ defmodule Arbiter.DataCase do
   def setup_sandbox(tags) do
     pid = Ecto.Adapters.SQL.Sandbox.start_owner!(Arbiter.Repo, shared: not tags[:async])
     on_exit(fn -> Ecto.Adapters.SQL.Sandbox.stop_owner(pid) end)
+
+    # Pre-seed the Settings singleton so tests that call Settings.get() always
+    # find an existing row and skip the INSERT. Without this, concurrent tests
+    # can race on the read-then-create pattern and hit "Database busy" when
+    # multiple connections contend for the SQLite write lock.
+    Arbiter.Settings.get()
   end
 
   @doc """

@@ -33,7 +33,7 @@ defmodule ArbiterWeb.Api.ClaimController do
         bead: IssueJSON.data(bead)
       })
     else
-      {:error, :tracker_not_github} ->
+      {:error, :tracker_not_supported} ->
         {:error, {:invalid_request, "workspace tracker is not github"}}
 
       {:error, {:already_claimed, body}} ->

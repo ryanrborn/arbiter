@@ -129,7 +129,7 @@ defmodule Arbiter.Polecats.ReconcilerTest do
     ws
   end
 
-  defp create_issue(workspace_id, attrs \\ %{}) do
+  defp create_issue(workspace_id, attrs) do
     {create_attrs, update_attrs} = Map.split(attrs, [:status, :pr_ref])
 
     base = %{

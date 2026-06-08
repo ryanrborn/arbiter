@@ -21,6 +21,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
 
   defp init_rig(dir) do
     repo = Path.join(dir, "rig")
+    bare = Path.join(dir, "origin.git")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "rig@example.com"], repo)
@@ -29,6 +30,10 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     File.write!(Path.join(repo, "README.md"), "seed\n")
     {_, 0} = git(["add", "README.md"], repo)
     {_, 0} = git(["commit", "-q", "-m", "seed"], repo)
+    # Clone into a bare repo so the worktree code can fetch origin/main.
+    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
+    {_, 0} = git(["remote", "add", "origin", bare], repo)
+    {_, 0} = git(["fetch", "-q", "origin"], repo)
     repo
   end
 
@@ -93,10 +98,12 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
       if Process.alive?(result.polecat_pid), do: GenServer.stop(result.polecat_pid, :normal)
     end)
 
-    # The acolyte commits on the branch, prints "arb done"; the polecat opens the
-    # MR (Direct merges synchronously) and the Warden completes it.
+    # Wait for the whole path: acolyte done → Direct merge → bead closes.
+    # We use the bead's DB status (not polecat in-memory state) because the
+    # StopPolecat after-action kills the polecat process right after close_bead
+    # returns — checking Polecat.state/1 would raise if we arrive slightly late.
     wait_until(fn ->
-      match?(%{status: :completed}, Polecat.state(result.polecat_pid))
+      match?({:ok, %Issue{status: :closed}}, Ash.get(Issue, bead.id))
     end)
 
     # main now carries a real merge commit (two parents) — not a fast-forward.
@@ -106,11 +113,6 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     # ...and the acolyte's work landed on main via that merge.
     {tree, 0} = git(["ls-tree", "--name-only", "main"], repo)
     assert tree =~ "acolyte_work.txt"
-
-    # The bead closes only after the merge.
-    wait_until(fn ->
-      match?({:ok, %Issue{status: :closed}}, Ash.get(Issue, bead.id))
-    end)
   end
 
   test "a merge failure surfaces as a failure_reason and does NOT complete the polecat",

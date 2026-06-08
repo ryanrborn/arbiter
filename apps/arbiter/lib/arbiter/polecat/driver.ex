@@ -227,6 +227,8 @@ defmodule Arbiter.Polecat.Driver do
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   catch
+    # Machine process is gone — normalize to the same reason the :DOWN handler produces.
+    :exit, {:noproc, _} -> {:error, :machine_died}
     :exit, reason -> {:error, {:exit, reason}}
   end
 

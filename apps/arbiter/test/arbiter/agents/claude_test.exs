@@ -120,20 +120,20 @@ defmodule Arbiter.Agents.ClaudeTest do
       refute "opus" in argv
     end
 
-    test ":thinking emits --reasoning-effort for low/medium/high", %{stub: _stub} do
+    test ":thinking emits --effort for low/medium/high", %{stub: _stub} do
       for level <- ["low", "medium", "high"] do
         {:ok, argv} = Claude.default_argv("the prompt", thinking: level)
-        assert "--reasoning-effort" in argv
+        assert "--effort" in argv
         assert level in argv
       end
     end
 
-    test ":thinking 'none' / nil emits no reasoning-effort flag" do
+    test ":thinking 'none' / nil emits no effort flag" do
       {:ok, argv1} = Claude.default_argv("the prompt", thinking: "none")
-      refute "--reasoning-effort" in argv1
+      refute "--effort" in argv1
 
       {:ok, argv2} = Claude.default_argv("the prompt", thinking: nil)
-      refute "--reasoning-effort" in argv2
+      refute "--effort" in argv2
     end
 
     test ":thinking argv can be overridden per-workspace via thinking_argv config" do
@@ -146,15 +146,15 @@ defmodule Arbiter.Agents.ClaudeTest do
       {:ok, argv} = Claude.default_argv("the prompt", thinking: "high")
       assert "--max-thinking-tokens" in argv
       assert "16384" in argv
-      refute "--reasoning-effort" in argv
+      refute "--effort" in argv
     end
 
     test "bakes in the install-default security posture when no :security opt given" do
       assert {:ok, argv} = Claude.default_argv("the prompt", [])
-      # safe-by-default: auto mode + a generated --settings deny document.
-      assert "--permission-mode" in argv
-      assert "auto" in argv
+      # safe-by-default: bypass mode (headless-safe) + --settings deny document.
+      assert "--dangerously-skip-permissions" in argv
       assert "--settings" in argv
+      refute "--permission-mode" in argv
 
       json = settings_json(argv)
       deny = get_in(json, ["permissions", "deny"])
@@ -174,7 +174,7 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert "Bash(docker:*)" in settings_json(argv)["permissions"]["deny"]
     end
 
-    test "bypass mode emits --dangerously-skip-permissions and no --settings" do
+    test "bypass mode emits --dangerously-skip-permissions with --settings deny list" do
       policy =
         Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
           "permissions" => %{"mode" => "bypass"}
@@ -182,7 +182,7 @@ defmodule Arbiter.Agents.ClaudeTest do
 
       assert {:ok, argv} = Claude.default_argv("the prompt", security: policy)
       assert "--dangerously-skip-permissions" in argv
-      refute "--settings" in argv
+      assert "--settings" in argv
       refute "--permission-mode" in argv
     end
   end
