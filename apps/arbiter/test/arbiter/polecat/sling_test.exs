@@ -804,7 +804,7 @@ defmodule Arbiter.Polecat.SlingTest do
       assert prompt =~ "backed by an external tracker"
       assert prompt =~ "--qa-notes"
       assert prompt =~ "--deployment-notes"
-      assert prompt =~ "arb update #{bead.id}"
+      assert prompt =~ "arb issue update #{bead.id}"
     end
 
     test "untracked beads get no completion-notes step", %{ws: ws} do
