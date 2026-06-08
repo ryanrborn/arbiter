@@ -133,6 +133,7 @@ defmodule Arbiter.Workflows.Refinery do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Mergers
+  alias Arbiter.Polecat.Worktree
   alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
@@ -171,6 +172,7 @@ defmodule Arbiter.Workflows.Refinery do
       :auto_tick,
       :pubsub_topic,
       :conflict_resolver,
+      :worktree_module,
       items: []
     ]
   end
@@ -255,6 +257,7 @@ defmodule Arbiter.Workflows.Refinery do
             Arbiter.Workflows.Refinery.ConflictResolver
           )
         ),
+      worktree_module: Keyword.get(opts, :worktree_module, Worktree),
       items: []
     }
 
@@ -375,28 +378,42 @@ defmodule Arbiter.Workflows.Refinery do
     title = bead.title
     description = bead.description || ""
 
-    case state.adapter.open(branch, title, description, %{target_branch: base}) do
-      {:ok, mr_ref} when is_binary(mr_ref) ->
-        item =
-          new_item(bead.id, strategy,
-            mr_ref: mr_ref,
-            status: :awaiting_approval,
-            opened_at: DateTime.utc_now()
-          )
+    worktree_path = state.worktree_module.worktree_path(branch)
 
-        # Record MR ref on the bead's pr_ref field. Best-effort: failure
-        # to update the bead doesn't fail the whole enqueue.
-        _ = maybe_record_mr_ref(bead, mr_ref)
+    with {:ok, _} <- push_worktree_branch(state.worktree_module, worktree_path, branch),
+         {:ok, mr_ref} when is_binary(mr_ref) <-
+           state.adapter.open(branch, title, description, %{target_branch: base}) do
+      item =
+        new_item(bead.id, strategy,
+          mr_ref: mr_ref,
+          status: :awaiting_approval,
+          opened_at: DateTime.utc_now()
+        )
 
-        # Link the MR back onto the upstream tracker ticket. Best-effort and
-        # tracker-agnostic — a no-op for trackers without remote links.
-        _ = maybe_link_mr_to_tracker(bead, state.adapter, mr_ref)
+      # Record MR ref on the bead's pr_ref field. Best-effort: failure
+      # to update the bead doesn't fail the whole enqueue.
+      _ = maybe_record_mr_ref(bead, mr_ref)
 
-        {:ok, %{state | items: [item | state.items]}}
+      # Link the MR back onto the upstream tracker ticket. Best-effort and
+      # tracker-agnostic — a no-op for trackers without remote links.
+      _ = maybe_link_mr_to_tracker(bead, state.adapter, mr_ref)
+
+      {:ok, %{state | items: [item | state.items]}}
+    else
+      {:error, {:push_failed, _} = reason} ->
+        item = new_item(bead.id, strategy, status: :failed, last_error: reason)
+        {{:error, reason}, %{state | items: [item | state.items]}}
 
       {:error, reason} ->
         item = new_item(bead.id, strategy, status: :failed, last_error: reason)
         {{:error, reason}, %{state | items: [item | state.items]}}
+    end
+  end
+
+  defp push_worktree_branch(worktree_module, worktree_path, branch) do
+    case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do
+      {:ok, _} = ok -> ok
+      {:error, reason} -> {:error, {:push_failed, reason}}
     end
   end
 

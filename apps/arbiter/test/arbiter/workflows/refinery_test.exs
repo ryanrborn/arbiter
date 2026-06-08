@@ -7,6 +7,17 @@ defmodule Arbiter.Workflows.RefineryTest do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Workflows.Refinery
 
+  # Stub worktree module used in tests — avoids real filesystem git calls.
+  defmodule FakeWorktree do
+    def worktree_path(branch), do: "/fake/worktrees/#{branch}"
+    def push(_path, _opts), do: {:ok, ""}
+  end
+
+  defmodule FailingWorktree do
+    def worktree_path(branch), do: "/fake/worktrees/#{branch}"
+    def push(_path, _opts), do: {:error, {:git_failed, "fatal: repository not found"}}
+  end
+
   @token "test-token-abc123"
 
   @ws_github %{
@@ -85,7 +96,8 @@ defmodule Arbiter.Workflows.RefineryTest do
         workspace_id: workspace.id,
         base: "main",
         auto_tick: false,
-        name: name
+        name: name,
+        worktree_module: FakeWorktree
       ]
       |> Keyword.merge(opts)
 
@@ -243,6 +255,32 @@ defmodule Arbiter.Workflows.RefineryTest do
 
       %{items: [item]} = Refinery.state(name)
       assert item.status == :failed
+      reloaded = Ash.get!(Issue, bead.id)
+      assert reloaded.status == :open
+    end
+
+    @tag workspace_config: @ws_github
+    test "push failure → status :failed with {:push_failed, reason}; adapter.open never called",
+         %{workspace: ws, bead: bead} do
+      test_pid = self()
+
+      stub(fn conn ->
+        if conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") do
+          send(test_pid, :pr_open_called)
+        end
+
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 1})
+      end)
+
+      {_pid, name} = start_refinery(ws, worktree_module: FailingWorktree)
+      {:error, {:push_failed, _reason}} = Refinery.enqueue(name, bead.id)
+
+      refute_received :pr_open_called
+
+      %{items: [item]} = Refinery.state(name)
+      assert item.status == :failed
+      assert match?({:push_failed, _}, item.last_error)
+
       reloaded = Ash.get!(Issue, bead.id)
       assert reloaded.status == :open
     end
