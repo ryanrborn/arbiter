@@ -216,7 +216,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
                  reason
                )
 
-      assert only_escalation(ws).body =~ "arb resume #{bead_id}"
+      assert only_escalation(ws).body =~ "arb worker resume #{bead_id}"
     end
 
     test "names the kill signal when present" do

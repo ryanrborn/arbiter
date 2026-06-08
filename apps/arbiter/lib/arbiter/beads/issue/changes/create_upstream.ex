@@ -160,7 +160,7 @@ defmodule Arbiter.Beads.Issue.Changes.CreateUpstream do
           reason: reason,
           message:
             "created upstream issue #{ref} but failed to link it to bead #{issue.id}; " <>
-              "re-link with `arb update #{issue.id} --tracker-ref #{ref}`"
+              "re-link with `arb issue update #{issue.id} --tracker-ref #{ref}`"
         })
 
         {:ok, issue}

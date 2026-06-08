@@ -78,6 +78,7 @@ defmodule ArbiterWeb.Router do
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
     # Convoys
+    get("/convoys", ConvoyController, :index)
     post("/convoys", ConvoyController, :create)
     get("/convoys/:id", ConvoyController, :show)
     post("/convoys/:id/close", ConvoyController, :close)
