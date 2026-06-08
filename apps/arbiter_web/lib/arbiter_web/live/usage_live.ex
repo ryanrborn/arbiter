@@ -30,6 +30,8 @@ defmodule ArbiterWeb.UsageLive do
      socket
      |> assign(:by, :day)
      |> assign(:since_days, 30)
+     |> assign(:by_options, @by_options)
+     |> assign(:since_options, @since_options)
      |> load_data()}
   end
 

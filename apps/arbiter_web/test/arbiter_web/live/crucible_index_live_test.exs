@@ -16,6 +16,12 @@ defmodule ArbiterWeb.CrucibleIndexLiveTest.QueueMerger do
   def request_review(_ref, _reviewers), do: :ok
   @impl true
   def link_for(_ref), do: "https://example.test/mr/77"
+  @impl true
+  def get_diff(_ref, _opts), do: {:ok, ""}
+  @impl true
+  def post_inline_comment(_ref, _finding, _opts), do: :ok
+  @impl true
+  def submit_review(_ref, _verdict, _body, _opts), do: :ok
 end
 
 defmodule ArbiterWeb.CrucibleIndexLiveTest do

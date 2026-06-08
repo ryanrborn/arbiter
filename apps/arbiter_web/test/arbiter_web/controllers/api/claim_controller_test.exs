@@ -127,6 +127,9 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
     test "force=true bypasses the assignment check", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
           {"GET", _} ->
             Req.Test.json(conn, issue_payload(%{"assignees" => []}))
 

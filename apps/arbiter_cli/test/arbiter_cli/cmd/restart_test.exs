@@ -13,7 +13,14 @@ defmodule ArbiterCli.Cmd.RestartTest do
     System.put_env("ARB_HOME", "/tmp/arbiter-restart-test")
     # Default port path — keep ARB_HOST off the default so api_port/0 parses 4848.
     System.delete_env("ARB_HOST")
-    on_exit(fn -> System.delete_env("ARB_HOME") end)
+    # Clear the acolyte guard so tests aren't blocked when run inside an acolyte session.
+    # The acolyte-session guard tests set this themselves.
+    prior_acolyte_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
+    System.delete_env("ARB_ACOLYTE_BEAD_ID")
+    on_exit(fn ->
+      System.delete_env("ARB_HOME")
+      if prior_acolyte_id, do: System.put_env("ARB_ACOLYTE_BEAD_ID", prior_acolyte_id)
+    end)
     Process.put(:bd2_sleep, fn _ms -> :ok end)
     # TCP port check seam: default to "port is free" so wait_port_free returns
     # immediately in tests without opening real sockets.
@@ -26,6 +33,8 @@ defmodule ArbiterCli.Cmd.RestartTest do
   #     then reports none (port freed);
   #   * makes the API reachable+green once Phoenix ("sh") is started.
   # Records every invocation to the test pid as {:cmd, cmd, args}.
+  # systemctl returns non-zero so systemd_managed?/0 is false — tests exercise
+  # the lsof/kill path rather than the systemd delegation path.
   defp stub_lifecycle(pids) do
     test_pid = self()
 
@@ -33,6 +42,9 @@ defmodule ArbiterCli.Cmd.RestartTest do
       send(test_pid, {:cmd, cmd, args})
 
       case cmd do
+        "systemctl" ->
+          {"", 1}
+
         "lsof" ->
           if Process.get(:terminated), do: {"", 1}, else: {Enum.join(pids, "\n") <> "\n", 0}
 
@@ -105,6 +117,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" -> {"", 1}
           # No listener on the port.
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
@@ -138,6 +151,9 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args})
 
         case {cmd, args} do
+          {"systemctl", _} ->
+            {"", 1}
+
           {"kill", ["-KILL" | _]} ->
             Process.put(:killed, true)
             {"", 0}
@@ -176,6 +192,9 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args})
 
         case cmd do
+          "systemctl" ->
+            {"", 1}
+
           "lsof" ->
             raise ErlangError, original: :enoent
 
@@ -215,6 +234,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args})
 
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> raise ErlangError, original: :enoent
           "ss" -> raise ErlangError, original: :enoent
           "pgrep" -> {"9999\n", 0}
@@ -240,6 +260,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> raise ErlangError, original: :enoent
           "ss" -> {"", 1}
           "pgrep" -> {"", 1}
@@ -265,6 +286,9 @@ defmodule ArbiterCli.Cmd.RestartTest do
       # Stop succeeds (port_free? returns true), but the started server never goes reachable.
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" ->
+            {"", 1}
+
           "lsof" ->
             if Process.get(:terminated), do: {"", 1}, else: {"7\n", 0}
 
@@ -313,6 +337,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -333,6 +358,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -350,6 +376,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -376,6 +403,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args, opts})
 
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -406,6 +434,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
         send(test_pid, {:cmd, cmd, args, opts})
 
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}
@@ -442,6 +471,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
         case cmd do
+          "systemctl" -> {"", 1}
           "lsof" -> {"", 1}
           "sh" -> stub_get("/api/workspaces", @green) && {"", 0}
           _ -> {"", 0}

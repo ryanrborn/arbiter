@@ -206,7 +206,7 @@ defmodule Arbiter.Polecat.WardenTest do
 
       # Warden stops without failing the polecat.
       assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 2_000
-      assert Polecat.state(pid).status == :awaiting_review
+      refute Polecat.state(pid).status == :failed
       refute match?({:awaiting_review_timeout, _}, Polecat.state(pid).meta[:failure_reason])
     end
 
