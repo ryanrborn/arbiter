@@ -27,6 +27,29 @@ defmodule ArbiterWeb.Api.ConvoyControllerTest do
     end
   end
 
+  describe "GET /api/convoys" do
+    test "lists convoys scoped to a workspace", %{conn: conn, ws: ws} do
+      {:ok, _other_ws} = Ash.create(Workspace, %{name: "cv-other-ws", prefix: "cvo"})
+      {:ok, c1} = Ash.create(Convoy, %{title: "one", workspace_id: ws.id})
+      {:ok, c2} = Ash.create(Convoy, %{title: "two", workspace_id: ws.id})
+
+      conn = get(conn, ~p"/api/convoys?workspace_id=#{ws.id}")
+
+      body = json_response(conn, 200)
+      ids = Enum.map(body["data"], & &1["id"])
+      assert Enum.sort(ids) == Enum.sort([c1.id, c2.id])
+    end
+
+    test "lists all convoys when no workspace filter is given", %{conn: conn, ws: ws} do
+      {:ok, _c} = Ash.create(Convoy, %{title: "one", workspace_id: ws.id})
+
+      conn = get(conn, ~p"/api/convoys")
+      body = json_response(conn, 200)
+      assert is_list(body["data"])
+      assert length(body["data"]) >= 1
+    end
+  end
+
   describe "GET /api/convoys/:id" do
     test "returns the convoy with member ids + aggregates", %{conn: conn, ws: ws} do
       {:ok, c} = Ash.create(Convoy, %{title: "x", workspace_id: ws.id})

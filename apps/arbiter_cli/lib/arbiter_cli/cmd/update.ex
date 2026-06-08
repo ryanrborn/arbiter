@@ -96,6 +96,14 @@ defmodule ArbiterCli.Cmd.Update do
     end
   end
 
+  @doc "Deploy mode (no issue id). Used by `arb server deploy`."
+  @spec deploy([String.t()]) :: :ok | no_return()
+  def deploy(argv), do: do_deploy(argv)
+
+  @doc "Issue-edit mode (requires an issue id). Used by `arb issue update <id>`."
+  @spec edit_issue([String.t()]) :: :ok | no_return()
+  def edit_issue(argv), do: do_edit_issue(argv)
+
   # A bare verb, or one whose first token is a flag, is a deploy. The moment a
   # positional appears (the issue id) it's an edit — see the moduledoc.
   defp deploy_invocation?([]), do: true
@@ -103,7 +111,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   # ---- deploy mode -------------------------------------------------------
 
-  defp deploy(argv) do
+  defp do_deploy(argv) do
     {opts, _rest, invalid} = OptionParser.parse(argv, strict: @deploy_switches)
 
     if invalid != [] do
@@ -530,7 +538,7 @@ defmodule ArbiterCli.Cmd.Update do
 
   # ---- issue-edit mode ---------------------------------------------------
 
-  defp edit_issue(argv) do
+  defp do_edit_issue(argv) do
     {opts, rest, _invalid} = OptionParser.parse(argv, switches: @edit_switches)
     mode = if opts[:json], do: :json, else: :text
 

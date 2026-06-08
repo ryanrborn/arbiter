@@ -54,7 +54,7 @@ defmodule ArbiterWeb.Api.PolecatController do
              {:invalid_request,
               "no rigs configured — add at least one rig to your workspace config " <>
                 "(rig_paths) or application env (:arbiter, :rig_paths), " <>
-                "or pass a rig explicitly: `arb sling #{bead_id} <rig>`",
+                "or pass a rig explicitly: `arb issue dispatch #{bead_id} <rig>`",
               %{bead_id: bead_id}}}
 
           {:error, {:rig_not_found, rig}} ->
@@ -68,7 +68,7 @@ defmodule ArbiterWeb.Api.PolecatController do
             {:error,
              {:invalid_request,
               "multiple rigs available (#{Enum.join(rigs, ", ")}) — specify one: " <>
-                "`arb sling #{bead_id} <rig>`",
+                "`arb issue dispatch #{bead_id} <rig>`",
               %{bead_id: bead_id, available_rigs: rigs}}}
 
           {:error, reason} ->
@@ -148,7 +148,7 @@ defmodule ArbiterWeb.Api.PolecatController do
       {:error, :rig_unknown} ->
         {:error,
          {:invalid_request,
-          "could not resolve the rig for this bead; pass it explicitly: `arb resume <bead> <rig>`",
+          "could not resolve the rig for this bead; pass it explicitly: `arb worker resume <bead> <rig>`",
           %{bead_id: bead_id}}}
 
       {:error, {:acolyte_active, status}} ->

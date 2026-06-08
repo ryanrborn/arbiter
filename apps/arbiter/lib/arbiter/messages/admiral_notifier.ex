@@ -220,7 +220,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   # `:acolyte_stopped` — a `:preflight_failed` refusal happens before any work,
   # so there is no outpost to resume.
   defp resume_hint(:acolyte_stopped, bead_id),
-    do: "Resume: run `arb resume #{bead_id}` to continue from the preserved outpost."
+    do: "Resume: run `arb worker resume #{bead_id}` to continue from the preserved outpost."
 
   defp resume_hint(_event, _bead_id), do: nil
 

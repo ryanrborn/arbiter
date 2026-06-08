@@ -1,32 +1,43 @@
 defmodule ArbiterCli.AliasResolver do
   @moduledoc """
-  Resolves user-typed CLI verbs against built-in subcommands + the active
-  workspace's vernacular aliases.
+  Resolves the user-typed first token (a **resource** or top-level command)
+  against the canonical command surface + the active workspace's vernacular
+  aliases.
+
+  The CLI uses an `arb <resource> <verb>` grammar (e.g. `arb issue list`,
+  `arb worker stop`). The resources are neutral base terms — `issue`,
+  `worker`, `batch`, `repo` — and themed vocabularies (the Sith "polecat",
+  "bead", "convoy", "warship", "sling", …) are layered on top as *aliases*.
+  This module resolves that first token to its canonical form.
 
   Lookup order:
 
     1. If `verb` is in `known_verbs/0`, return it as-is. (Fast path; no HTTP.)
-    2. Otherwise, fetch the active workspace's vernacular and build a
-       case-insensitive alias map (see `verb_aliases/0`). If `verb` matches
-       an alias, return the canonical it maps to (provided that canonical is
-       itself a known verb).
+    2. Otherwise, build a case-insensitive alias map (see `verb_aliases/0`)
+       from the built-in default vernacular merged with the active
+       workspace's vernacular, and look the token up. If it matches an alias,
+       return the canonical it maps to (provided that canonical is itself a
+       known verb).
     3. If neither, return `{:unknown, suggestions}` — a list of close-by
        known/alias verbs ranked by string distance.
 
   ## Alias sources
 
-  The alias map is built from two parts of the workspace vernacular, both
-  matched case-insensitively against the typed verb:
+  The alias map is built from three layers, all matched case-insensitively
+  against the typed token, later layers winning on conflict:
 
+    * **Default vernacular** — the built-in `@default_vernacular` map below,
+      which gives every install the Sith resource names (`polecat`, `bead`,
+      `convoy`, `warship`, `sling`) out of the box even when the server is
+      unreachable. Derived the same way as label aliases.
+    * **Derived label aliases** — any vernacular entry from the server whose
+      KEY is itself a known resource/verb is treated as a command alias from
+      its label. So `vernacular["worker"] == "polecat"` makes `arb polecat`
+      an alias for `arb worker`, and `vernacular["dispatch"] == "sling"`
+      makes `arb sling` an alias for `arb dispatch`. This is what lets the
+      command surface honor the vernacular without a hardcoded branch.
     * **Explicit aliases** — `vernacular["aliases"]`, an
-      `alias_term => canonical_verb` map.
-    * **Derived label aliases** — any vernacular entry whose KEY is itself a
-      known verb is treated as a command alias from its label. So
-      `vernacular["sling"] == "Dispatch"` makes `arb dispatch` an alias for
-      `arb sling`. This is what lets the command verb honor the vernacular
-      without a second hardcoded branch.
-
-  Explicit aliases win over derived ones on conflict.
+      `alias_term => canonical_verb` map. Highest precedence.
 
   The "alias must resolve to a known verb" check (step 2) prevents a
   misconfigured workspace from sending users to a non-existent command.
@@ -34,48 +45,63 @@ defmodule ArbiterCli.AliasResolver do
   dispatching to nothing.
   """
 
-  @known_verbs ~w(init show create close reopen list update dep ready doctor start restart install-service install-cli version where help sling resume review prime polecat inbox notify message msg claim sync usage convoy config warships)
+  # The canonical command surface: resources, plus the flat meta commands that
+  # carry no resource ambiguity, plus `dispatch` (the top-level shortcut for
+  # `issue dispatch`, which the Sith label "sling" aliases to).
+  @known_verbs ~w(issue worker batch repo dep config server workspace message usage install dispatch prime where init help version)
 
-  # Noun-vernacular keys that also name a command verb. Lets a renamed noun
-  # double as a verb alias — e.g. when `vernacular["batch"] == "Vanguard"`,
-  # `arb vanguard` resolves to `arb convoy`. Keyed: noun key => canonical verb.
-  @noun_verb_aliases %{"batch" => "convoy", "rig" => "warships"}
+  # Built-in default vernacular: the Sith resource names every install starts
+  # with. Keys are canonical resources/verbs; values are their themed labels.
+  # Derived into aliases so `arb polecat`/`arb bead`/`arb convoy`/`arb warship`/
+  # `arb sling` resolve even offline. A live workspace vernacular overrides these.
+  @default_vernacular %{
+    "worker" => "polecat",
+    "issue" => "bead",
+    "batch" => "convoy",
+    "repo" => "warship",
+    "dispatch" => "sling"
+  }
 
-  @doc "The set of built-in verbs that arb dispatches to."
+  @doc "The set of canonical resources/commands that arb dispatches to."
   @spec known_verbs() :: [String.t()]
   def known_verbs, do: @known_verbs
+
+  @doc "The built-in default vernacular (canonical => themed label)."
+  @spec default_vernacular() :: %{String.t() => String.t()}
+  def default_vernacular, do: @default_vernacular
+
+  @doc "The alias map (themed label => canonical) derived from the built-in defaults alone."
+  @spec default_aliases() :: %{String.t() => String.t()}
+  def default_aliases, do: alias_map(@default_vernacular)
 
   @typedoc "Result of resolution: a canonical verb or an `:unknown` with suggestions."
   @type t :: {:ok, String.t()} | {:unknown, [String.t()]}
 
   @spec resolve(String.t()) :: t
   def resolve(verb) when is_binary(verb) do
-    cond do
-      verb in @known_verbs ->
-        {:ok, verb}
-
-      true ->
-        case vernacular_for_active_workspace() do
-          {:ok, vernacular} -> resolve_via_aliases(verb, alias_map(vernacular))
-          # Workspace lookup failed — treat as no aliases configured. Suggest
-          # against built-ins only.
-          {:error, _} -> {:unknown, suggest(verb, @known_verbs)}
-        end
+    if verb in @known_verbs do
+      {:ok, verb}
+    else
+      resolve_via_aliases(verb, verb_aliases())
     end
   end
 
   @doc """
-  The active workspace's command-verb aliases: a case-insensitive map of
-  `alias_term => canonical_verb` (keys lowercased). Combines explicit
-  `vernacular["aliases"]` config with aliases derived from vernacular labels
-  whose key is itself a known verb (e.g. `sling => "Dispatch"` yields
-  `"dispatch" => "sling"`). Returns `%{}` when the workspace can't be reached.
+  The active command-verb aliases: a case-insensitive map of
+  `alias_term => canonical_verb` (keys lowercased). Combines the built-in
+  default vernacular, aliases derived from the server's vernacular labels
+  whose key is itself a known verb (e.g. `worker => "polecat"` yields
+  `"polecat" => "worker"`), and explicit `vernacular["aliases"]` config.
+  Falls back to the default-derived aliases alone when the workspace can't be
+  reached, so themed resource names keep resolving offline.
   """
   @spec verb_aliases() :: %{String.t() => String.t()}
   def verb_aliases do
+    base = alias_map(@default_vernacular)
+
     case vernacular_for_active_workspace() do
-      {:ok, vernacular} -> alias_map(vernacular)
-      {:error, _} -> %{}
+      {:ok, vernacular} -> Map.merge(base, alias_map(vernacular))
+      {:error, _} -> base
     end
   end
 
@@ -90,11 +116,10 @@ defmodule ArbiterCli.AliasResolver do
     end
   end
 
-  # Build the combined alias map from a workspace's vernacular. Derived aliases
+  # Build the combined alias map from a vernacular map. Derived label aliases
   # come first so explicit `aliases` config wins on conflict.
   defp alias_map(vernacular) when is_map(vernacular) do
     derived_label_aliases(vernacular)
-    |> Map.merge(derived_noun_aliases(vernacular))
     |> Map.merge(explicit_aliases(vernacular))
   end
 
@@ -121,18 +146,6 @@ defmodule ArbiterCli.AliasResolver do
         String.downcase(label) != key,
         into: %{} do
       {String.downcase(label), key}
-    end
-  end
-
-  # A renamed noun (e.g. "batch" -> "Vanguard") aliases the verb that operates
-  # on it (`convoy`). See `@noun_verb_aliases`.
-  defp derived_noun_aliases(vernacular) do
-    for {noun_key, verb} <- @noun_verb_aliases,
-        label = Map.get(vernacular, noun_key),
-        is_binary(label),
-        String.downcase(label) != verb,
-        into: %{} do
-      {String.downcase(label), verb}
     end
   end
 
