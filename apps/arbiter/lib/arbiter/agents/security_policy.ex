@@ -198,10 +198,10 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
     alt_mode =
       case get_in(config, ["security", "mode"]) do
-        m when is_binary(m) or is_atom(m) -> m
+        m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> m
         _ ->
           case get_in(config, ["agent", "config", "security_mode"]) do
-            m when is_binary(m) or is_atom(m) -> m
+            m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> m
             _ -> nil
           end
       end

@@ -100,7 +100,7 @@ defmodule Arbiter.Workflows.RefineryTest do
   defp stub(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
 
   # Raw GitHub PR payload for the GET /pulls/{N} endpoint.
-  defp pr_payload(overrides \\ %{}) do
+  defp pr_payload(overrides) do
     Map.merge(
       %{
         "number" => 42,
@@ -114,7 +114,7 @@ defmodule Arbiter.Workflows.RefineryTest do
   end
 
   # Reviews response for the GET /pulls/{N}/reviews endpoint.
-  defp reviews_payload(state \\ "APPROVED") do
+  defp reviews_payload(state) do
     [%{"state" => state}]
   end
 
