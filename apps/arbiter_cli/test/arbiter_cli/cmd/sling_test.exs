@@ -26,7 +26,7 @@ defmodule ArbiterCli.Cmd.SlingTest do
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017"]) end)
       assert code == 0
-      assert out =~ "Slung:"
+      assert out =~ "Sling:"
       assert out =~ "gte-017 — sling cmd"
       assert out =~ "in_progress"
       assert out =~ "#PID<0.123.0>"
@@ -43,7 +43,7 @@ defmodule ArbiterCli.Cmd.SlingTest do
         capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "verus_server"]) end)
 
       assert code == 0
-      assert out =~ "Slung:"
+      assert out =~ "Sling:"
     end
 
     test "--json mode emits JSON" do
