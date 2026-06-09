@@ -675,8 +675,17 @@ defmodule Arbiter.Polecat.Tribunal do
 
     retry_id = reprompt_bead_id(state.review_id, state.attempt)
 
+    # A content-free REQUEST_CHANGES is a malformed verdict — the reviewer did
+    # not produce a legitimate review result for this round. Extend the round cap
+    # by 1 so the re-prompt's real findings can still reach the implementer: the
+    # empty verdict must not rob the bead of a revision opportunity (bd-79goxj).
+    # Only extend when the Tribunal has a revise loop (max_rounds > 1): a
+    # single-pass setup (max_rounds == 1) has no revise loop by design and the
+    # extension would incorrectly trigger enter_revise for that configuration.
+    max_ext = if reason == :empty_findings and state.max_rounds > 1, do: 1, else: 0
+
     case launch_acolyte(
-           %{state | retries_left: budget - 1},
+           %{state | retries_left: budget - 1, max_rounds: state.max_rounds + max_ext},
            retry_id,
            :reviewer,
            verdict_reprompt_prompt(state, reason),

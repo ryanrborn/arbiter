@@ -34,6 +34,7 @@ defmodule Arbiter.Polecat.TribunalTest do
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
   @empty_findings Path.expand("../../fixtures/review_empty_findings.sh", __DIR__)
   @rounds Path.expand("../../fixtures/review_rounds.sh", __DIR__)
+  @rounds_empty_mid Path.expand("../../fixtures/review_rounds_empty_mid.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
@@ -717,6 +718,58 @@ defmodule Arbiter.Polecat.TribunalTest do
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 0
       assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
+    end
+
+    # bd-79goxj: an empty-findings REQUEST_CHANGES in the last allowed round must
+    # not consume that round. The re-prompt's real findings must reach the
+    # implementer via enter_revise. Without the fix: handle_reject sees
+    # round == max_rounds and escalates immediately (the implementer never gets to
+    # address those findings). With the fix: max_rounds is extended by 1 when the
+    # empty-findings re-prompt fires, so enter_revise runs, the implementer
+    # addresses the findings, and the round-3 reviewer can approve → merge.
+    test "empty-findings verdict does not consume the round cap — implementer gets to revise",
+         %{repo: repo, ws: ws} do
+      bead = new_bead(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Polecat.start(
+          bead_id: bead.id,
+          rig: "trib/rig",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{bead.id}",
+            review_required: true,
+            # 2-round cap: round 1 real reject → revise → round 2 empty verdict
+            # (malformed) → re-prompt real findings → (fix) round 3 reviewer.
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds_empty_mid, "APPROVE"],
+            revise_command: [@revise],
+            review_timeout_ms: 10_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Polecat.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # With the fix: round 2 empty-findings extends the cap to 3 so
+      # enter_revise fires, the implementer addresses the re-prompt findings, and
+      # the round-3 reviewer approves → merge.
+      wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 12_000)
+      assert merge_commit_count(repo) == 1
+
+      # A round-2 implementer ran, proving the findings DID reach it.
+      review_id = Tribunal.reviewer_bead_id(bead.id)
+      runs = Ash.read!(Arbiter.Polecats.Run)
+
+      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl2")),
+             "expected a round-2 implementer run (findings reached the implementer)"
     end
   end
 
