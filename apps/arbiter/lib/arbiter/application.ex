@@ -38,6 +38,7 @@ defmodule Arbiter.Application do
       {DNSCluster, query: Application.get_env(:arbiter, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Arbiter.PubSub},
       Arbiter.Agents.ProviderPool,
+      Arbiter.Agents.CredentialWarden,
       {Registry, keys: :unique, name: Arbiter.Polecat.Registry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Polecat.Supervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Polecat.WardenSupervisor},
