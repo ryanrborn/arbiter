@@ -48,11 +48,11 @@ defmodule Arbiter.Beads.Issue do
   @tracker_types ~w(none jira shortcut linear github)a
 
   sqlite do
-    table("issues")
-    repo(Arbiter.Repo)
+    table "issues"
+    repo Arbiter.Repo
 
     references do
-      reference(:workspace, on_delete: :restrict)
+      reference :workspace, on_delete: :restrict
     end
   end
 
@@ -64,12 +64,12 @@ defmodule Arbiter.Beads.Issue do
   end
 
   actions do
-    defaults([:read, :destroy])
+    defaults [:read, :destroy]
 
     create :create do
-      primary?(true)
+      primary? true
 
-      accept([
+      accept [
         :title,
         :description,
         :acceptance,
@@ -84,34 +84,32 @@ defmodule Arbiter.Beads.Issue do
         :tracker_ref,
         :target_branch,
         :workspace_id
-      ])
+      ]
 
       # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
       # CreateUpstream hook skips the outbound-create call even when the
       # workspace has a tracker configured.
-      argument(:skip_upstream_create, :boolean, default: false)
+      argument :skip_upstream_create, :boolean, default: false
 
-      change({Arbiter.Beads.Issue.Changes.GenerateId, []})
-      change({Arbiter.Beads.Issue.Changes.InheritTrackerType, []})
+      change {Arbiter.Beads.Issue.Changes.GenerateId, []}
+      change {Arbiter.Beads.Issue.Changes.InheritTrackerType, []}
 
-      change(
-        after_action(fn _, issue, _ ->
-          Arbiter.Beads.Issue.broadcast_lifecycle(:created, issue)
-          {:ok, issue}
-        end)
-      )
+      change after_action(fn _, issue, _ ->
+               Arbiter.Beads.Issue.broadcast_lifecycle(:created, issue)
+               {:ok, issue}
+             end)
 
       # Mirror the new bead into the workspace's configured tracker. Runs in
       # after_transaction so the bead is committed first — an upstream
       # failure surfaces as `{:error, %{kind: :upstream_create_failed, ...}}`
       # to the caller but leaves the bead intact.
-      change({Arbiter.Beads.Issue.Changes.CreateUpstream, []})
+      change {Arbiter.Beads.Issue.Changes.CreateUpstream, []}
     end
 
     update :update do
-      primary?(true)
+      primary? true
 
-      accept([
+      accept [
         :title,
         :description,
         :acceptance,
@@ -127,52 +125,50 @@ defmodule Arbiter.Beads.Issue do
         :tracker_ref,
         :pr_ref,
         :target_branch
-      ])
+      ]
 
-      require_atomic?(false)
+      require_atomic? false
 
       # Allow open ⇄ in_progress, but block transitions involving :closed via :update
-      change({Arbiter.Beads.Issue.Changes.GuardStatus, action: :update})
+      change {Arbiter.Beads.Issue.Changes.GuardStatus, action: :update}
 
       # Propagate an open ⇄ in_progress status change to the linked external
       # tracker. Best-effort; no-op when status didn't change or no tracker.
-      change({Arbiter.Beads.Issue.Changes.SyncTracker, []})
+      change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
-      change(
-        after_action(fn _, issue, _ ->
-          Arbiter.Beads.Issue.broadcast_lifecycle(:updated, issue)
-          {:ok, issue}
-        end)
-      )
+      change after_action(fn _, issue, _ ->
+               Arbiter.Beads.Issue.broadcast_lifecycle(:updated, issue)
+               {:ok, issue}
+             end)
     end
 
     update :close do
-      require_atomic?(false)
-      argument(:reason, :string)
-      argument(:close_upstream, :boolean, default: false)
+      require_atomic? false
+      argument :reason, :string
+      argument :close_upstream, :boolean, default: false
 
-      change({Arbiter.Beads.Issue.Changes.GuardStatus, action: :close})
-      change(set_attribute(:status, :closed))
-      change(set_attribute(:closed_at, &DateTime.utc_now/0))
+      change {Arbiter.Beads.Issue.Changes.GuardStatus, action: :close}
+      change set_attribute(:status, :closed)
+      change set_attribute(:closed_at, &DateTime.utc_now/0)
 
       # Best-effort teardown: stop the bead's polecat (if any) and remove
       # its worktree (if clean). Failures never fail the :close itself.
       # Runs for every :close path — CLI, Driver, Refinery.
-      change({Arbiter.Beads.Issue.Changes.StopPolecat, []})
-      change({Arbiter.Beads.Issue.Changes.CleanupWorktree, []})
+      change {Arbiter.Beads.Issue.Changes.StopPolecat, []}
+      change {Arbiter.Beads.Issue.Changes.CleanupWorktree, []}
 
       # Propagate the close to the linked external tracker only when
       # close_upstream: true is explicitly passed. Default is to leave the
       # upstream issue open (e.g. bead abandoned, ceded, or pruned).
       # Best-effort: a sync failure never fails the local close.
-      change({Arbiter.Beads.Issue.Changes.SyncTracker, []})
+      change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
       # After closing, check whether any system-managed convoy this issue belongs
       # to should auto-close, then broadcast the closure. Both run via
       # after_transaction (post-commit) rather than after_action (pre-commit),
       # so LiveView queries from separate DB connections see the committed state
       # and the dashboard updates correctly when a directive is completed.
-      change(fn changeset, _context ->
+      change fn changeset, _context ->
         Ash.Changeset.after_transaction(changeset, fn
           _changeset, {:ok, issue} ->
             Arbiter.Beads.Convoy.maybe_auto_close_for_issue(issue)
@@ -182,26 +178,24 @@ defmodule Arbiter.Beads.Issue do
           _changeset, error ->
             error
         end)
-      end)
+      end
     end
 
     update :reopen do
-      require_atomic?(false)
+      require_atomic? false
 
-      change({Arbiter.Beads.Issue.Changes.GuardStatus, action: :reopen})
-      change(set_attribute(:status, :open))
-      change(set_attribute(:closed_at, nil))
+      change {Arbiter.Beads.Issue.Changes.GuardStatus, action: :reopen}
+      change set_attribute(:status, :open)
+      change set_attribute(:closed_at, nil)
 
       # Propagate the reopen to the linked external tracker (reopens the GitHub
       # issue, etc.). Best-effort: a sync failure never fails the local reopen.
-      change({Arbiter.Beads.Issue.Changes.SyncTracker, []})
+      change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
-      change(
-        after_action(fn _, issue, _ ->
-          Arbiter.Beads.Issue.broadcast_lifecycle(:reopened, issue)
-          {:ok, issue}
-        end)
-      )
+      change after_action(fn _, issue, _ ->
+               Arbiter.Beads.Issue.broadcast_lifecycle(:reopened, issue)
+               {:ok, issue}
+             end)
     end
   end
 
@@ -216,9 +210,9 @@ defmodule Arbiter.Beads.Issue do
 
   attributes do
     attribute :id, :string do
-      primary_key?(true)
-      allow_nil?(false)
-      public?(true)
+      primary_key? true
+      allow_nil? false
+      public? true
       # Pattern allows uppercase to accommodate phase markers (gte-P1),
       # Verus-style mixed-case IDs from the Dolt import, AND legacy IDs
       # with underscores or multiple hyphens (e.g. `ac-access_control-refinery`,
@@ -226,65 +220,65 @@ defmodule Arbiter.Beads.Issue do
       # AshPaperTrail's Version row creation rejects those IDs and any
       # close/update on a legacy bead fails. Newly generated IDs are
       # still tidy lowercase prefix-shortid (see Changes.GenerateId).
-      constraints(match: ~r/^[a-z][a-zA-Z0-9]*-[a-zA-Z0-9_-]+$/)
+      constraints match: ~r/^[a-z][a-zA-Z0-9]*-[a-zA-Z0-9_-]+$/
     end
 
     attribute :title, :string do
-      allow_nil?(false)
-      public?(true)
-      constraints(min_length: 1, max_length: 500, trim?: true)
+      allow_nil? false
+      public? true
+      constraints min_length: 1, max_length: 500, trim?: true
     end
 
     attribute :description, :string do
-      public?(true)
-      default("")
-      description("Markdown.")
+      public? true
+      default ""
+      description "Markdown."
     end
 
     attribute :acceptance, :string do
-      public?(true)
-      default("")
-      description("Markdown.")
+      public? true
+      default ""
+      description "Markdown."
     end
 
     attribute :notes, :string do
-      public?(true)
-      default("")
-      description("Markdown.")
+      public? true
+      default ""
+      description "Markdown."
     end
 
     attribute :qa_notes, :string do
-      public?(true)
-      default("")
-      description("Markdown. Synced to Jira's QA Testing Notes custom field via Tracker.Jira.")
+      public? true
+      default ""
+      description "Markdown. Synced to Jira's QA Testing Notes custom field via Tracker.Jira."
     end
 
     attribute :deployment_notes, :string do
-      public?(true)
-      default("")
-      description("Markdown. Synced to Jira's Deployment Notes custom field via Tracker.Jira.")
+      public? true
+      default ""
+      description "Markdown. Synced to Jira's Deployment Notes custom field via Tracker.Jira."
     end
 
     attribute :status, :atom do
-      allow_nil?(false)
-      public?(true)
-      default(:open)
-      constraints(one_of: @statuses)
+      allow_nil? false
+      public? true
+      default :open
+      constraints one_of: @statuses
     end
 
     attribute :priority, :integer do
-      allow_nil?(false)
-      public?(true)
-      default(2)
-      constraints(min: 0, max: 4)
-      description("0 = P0 (highest), 4 = P4 (lowest). Default 2 (P2).")
+      allow_nil? false
+      public? true
+      default 2
+      constraints min: 0, max: 4
+      description "0 = P0 (highest), 4 = P4 (lowest). Default 2 (P2)."
     end
 
     attribute :difficulty, :integer do
-      public?(true)
-      constraints(min: 0, max: 4)
+      public? true
+      constraints min: 0, max: 4
 
-      description("""
+      description """
       How hard the task is (0..4 / D0..D4). Orthogonal to :priority.
       Drives provider-agnostic model/thinking routing via
       `Arbiter.Agents.Routing.ByDifficulty`. Nullable; routing treats
@@ -295,79 +289,77 @@ defmodule Arbiter.Beads.Issue do
       D2 Moderate — multi-file or some design choice (default).
       D3 Hard     — cross-cutting, non-obvious design, correctness-critical.
       D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
-      """)
+      """
     end
 
     attribute :issue_type, :atom do
-      allow_nil?(false)
-      public?(true)
-      default(:task)
-      constraints(one_of: @issue_types)
+      allow_nil? false
+      public? true
+      default :task
+      constraints one_of: @issue_types
     end
 
     attribute :assignee, :string do
-      public?(true)
-      constraints(max_length: 255, trim?: true)
+      public? true
+      constraints max_length: 255, trim?: true
     end
 
     attribute :tracker_type, :atom do
-      allow_nil?(false)
-      public?(true)
-      default(:none)
-      constraints(one_of: @tracker_types)
+      allow_nil? false
+      public? true
+      default :none
+      constraints one_of: @tracker_types
     end
 
     attribute :tracker_ref, :string do
-      public?(true)
-      constraints(max_length: 255, trim?: true)
-      description("External tracker's ID for this bead (e.g. \"VR-17585\" for Jira).")
+      public? true
+      constraints max_length: 255, trim?: true
+      description "External tracker's ID for this bead (e.g. \"VR-17585\" for Jira)."
     end
 
     attribute :pr_ref, :string do
-      public?(true)
-      constraints(max_length: 255, trim?: true)
+      public? true
+      constraints max_length: 255, trim?: true
 
-      description(
-        "PR/MR number opened for this bead (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
-      )
+      description "PR/MR number opened for this bead (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
     end
 
     attribute :target_branch, :string do
-      public?(true)
-      constraints(max_length: 255, trim?: true)
+      public? true
+      constraints max_length: 255, trim?: true
 
-      description("""
+      description """
       The branch this bead's work is based on AND the PR merge target.
       Nullable; when unset the effective target is resolved from the rig's
       default, then the workspace's `merge.base`, then `"main"`.
-      """)
+      """
     end
 
     attribute :closed_at, :utc_datetime_usec do
-      public?(true)
+      public? true
     end
 
-    create_timestamp(:created_at)
-    update_timestamp(:updated_at)
+    create_timestamp :created_at
+    update_timestamp :updated_at
   end
 
   relationships do
     belongs_to :workspace, Arbiter.Beads.Workspace do
-      allow_nil?(false)
-      public?(true)
-      attribute_writable?(true)
+      allow_nil? false
+      public? true
+      attribute_writable? true
     end
 
     has_many :convoy_memberships, Arbiter.Beads.ConvoyMembership do
-      destination_attribute(:issue_id)
-      public?(true)
+      destination_attribute :issue_id
+      public? true
     end
 
     many_to_many :convoys, Arbiter.Beads.Convoy do
-      through(Arbiter.Beads.ConvoyMembership)
-      source_attribute_on_join_resource(:issue_id)
-      destination_attribute_on_join_resource(:convoy_id)
-      public?(true)
+      through Arbiter.Beads.ConvoyMembership
+      source_attribute_on_join_resource :issue_id
+      destination_attribute_on_join_resource :convoy_id
+      public? true
     end
   end
 

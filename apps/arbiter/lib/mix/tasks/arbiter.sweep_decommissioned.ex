@@ -32,7 +32,10 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
         Mix.shell().info("No matching beads — sweep is a no-op.")
 
       opts[:apply] == true ->
-        Mix.shell().info("Closing #{length(proposals)} bead(s) across #{count_categories(proposals)} categories:\n")
+        Mix.shell().info(
+          "Closing #{length(proposals)} bead(s) across #{count_categories(proposals)} categories:\n"
+        )
+
         print_table(proposals)
         {closed, errors} = DecommissionSweep.apply!(proposals)
         Mix.shell().info("\nClosed #{length(closed)} bead(s).")
@@ -46,7 +49,10 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
         end
 
       true ->
-        Mix.shell().info("Would close #{length(proposals)} bead(s) across #{count_categories(proposals)} categories:\n")
+        Mix.shell().info(
+          "Would close #{length(proposals)} bead(s) across #{count_categories(proposals)} categories:\n"
+        )
+
         print_table(proposals)
         Mix.shell().info("\nDry-run only. Re-run with --apply to commit.")
     end

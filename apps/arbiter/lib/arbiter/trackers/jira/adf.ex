@@ -157,7 +157,9 @@ defmodule Arbiter.Trackers.Jira.ADF do
         parse_blocks(remaining, [bullet_list(items) | acc])
 
       ordered_line?(line) ->
-        {items, remaining} = take_list(rest, [ordered_text(line)], &ordered_line?/1, &ordered_text/1)
+        {items, remaining} =
+          take_list(rest, [ordered_text(line)], &ordered_line?/1, &ordered_text/1)
+
         parse_blocks(remaining, [ordered_list(items) | acc])
 
       true ->

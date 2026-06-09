@@ -19,13 +19,13 @@ defmodule ArbiterCli.Version do
 
   # Resolve and track the ref file that HEAD points to (e.g. refs/heads/main).
   @git_ref_path (case File.read(@git_head_path) do
-    {:ok, "ref: " <> ref} ->
-      candidate = Path.join(@git_dir, String.trim(ref))
-      if File.exists?(candidate), do: candidate, else: nil
+                   {:ok, "ref: " <> ref} ->
+                     candidate = Path.join(@git_dir, String.trim(ref))
+                     if File.exists?(candidate), do: candidate, else: nil
 
-    _ ->
-      nil
-  end)
+                   _ ->
+                     nil
+                 end)
 
   if @git_ref_path do
     @external_resource @git_ref_path

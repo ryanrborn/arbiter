@@ -95,6 +95,7 @@ defmodule Arbiter.Workflows.MachineState do
     attribute :bead_id, :string do
       allow_nil? false
       public? true
+
       description "Issue id this machine is bound to. Not an Ash relationship to avoid coupling the Workflows domain to Beads — the Machine reads beads at runtime when needed."
     end
 
@@ -108,6 +109,7 @@ defmodule Arbiter.Workflows.MachineState do
       allow_nil? false
       public? true
       default "__pending__"
+
       description "Atom name of the step that will be executed by the next advance/1. Stored as a string; converted via String.to_existing_atom/1 after the workflow module is loaded."
     end
 

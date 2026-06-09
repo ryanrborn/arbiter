@@ -16,6 +16,6 @@ defmodule Arbiter.Polecats do
   use Ash.Domain
 
   resources do
-    resource(Arbiter.Polecats.Run)
+    resource Arbiter.Polecats.Run
   end
 end

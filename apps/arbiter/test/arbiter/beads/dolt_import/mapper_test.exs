@@ -4,8 +4,8 @@ defmodule Arbiter.Beads.DoltImport.MapperTest do
   alias Arbiter.Beads.DoltImport.Mapper
 
   describe "map_status/1" do
-    test ~s("open" → :open), do: assert Mapper.map_status("open") == :open
-    test ~s("closed" → :closed), do: assert Mapper.map_status("closed") == :closed
+    test ~s("open" → :open), do: assert(Mapper.map_status("open") == :open)
+    test ~s("closed" → :closed), do: assert(Mapper.map_status("closed") == :closed)
 
     test ~s(anything else → :in_progress) do
       assert Mapper.map_status("hooked") == :in_progress
@@ -33,7 +33,7 @@ defmodule Arbiter.Beads.DoltImport.MapperTest do
 
   describe "parse_priority/1" do
     test "valid ints in 0..4 pass through" do
-      for p <- 0..4, do: assert Mapper.parse_priority(p) == p
+      for p <- 0..4, do: assert(Mapper.parse_priority(p) == p)
     end
 
     test "above 4 clamps to 4" do
@@ -138,7 +138,9 @@ defmodule Arbiter.Beads.DoltImport.MapperTest do
           "design" => "design notes"
         })
 
-      assert result == "main text\n\n## Design\n\n design notes" |> String.replace(" design", "design")
+      assert result ==
+               "main text\n\n## Design\n\n design notes" |> String.replace(" design", "design")
+
       assert String.contains?(result, "main text")
       assert String.contains?(result, "## Design")
       assert String.contains?(result, "design notes")

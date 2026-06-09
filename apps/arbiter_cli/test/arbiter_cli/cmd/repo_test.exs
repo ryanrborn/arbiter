@@ -5,8 +5,20 @@ defmodule ArbiterCli.Cmd.RepoTest do
 
   @rigs %{
     "data" => [
-      %{"name" => "arbiter", "source" => "default", "path" => "/dev/arbiter", "polecats" => 1, "worktrees" => 2},
-      %{"name" => "other", "source" => "(app)", "path" => "/dev/other", "polecats" => 0, "worktrees" => 0}
+      %{
+        "name" => "arbiter",
+        "source" => "default",
+        "path" => "/dev/arbiter",
+        "polecats" => 1,
+        "worktrees" => 2
+      },
+      %{
+        "name" => "other",
+        "source" => "(app)",
+        "path" => "/dev/other",
+        "polecats" => 0,
+        "worktrees" => 0
+      }
     ]
   }
 

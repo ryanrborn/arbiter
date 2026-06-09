@@ -276,8 +276,11 @@ defmodule ArbiterCli.Cmd.CreateTest do
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
         {{"post", "/api/workspaces/ws-1/tracker/tickets"},
-         {%{"ref" => "77", "url" => "https://github.com/o/r/issues/77", "tracker_type" => "github"},
-          201}}
+         {%{
+            "ref" => "77",
+            "url" => "https://github.com/o/r/issues/77",
+            "tracker_type" => "github"
+          }, 201}}
       ])
 
       {out, _err, exit_code} = capture(fn -> Create.run(["No-bead title", "--no-bead"]) end)
@@ -290,8 +293,11 @@ defmodule ArbiterCli.Cmd.CreateTest do
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
         {{"post", "/api/workspaces/ws-1/tracker/tickets"},
-         {%{"ref" => "55", "url" => "https://github.com/o/r/issues/55", "tracker_type" => "github"},
-          201}}
+         {%{
+            "ref" => "55",
+            "url" => "https://github.com/o/r/issues/55",
+            "tracker_type" => "github"
+          }, 201}}
       ])
 
       {out, _err, exit_code} = capture(fn -> Create.run(["Unclaimed", "--unclaimed"]) end)
@@ -304,8 +310,11 @@ defmodule ArbiterCli.Cmd.CreateTest do
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
         {{"post", "/api/workspaces/ws-1/tracker/tickets"},
-         {%{"ref" => "42", "url" => "https://github.com/o/r/issues/42", "tracker_type" => "github"},
-          201}}
+         {%{
+            "ref" => "42",
+            "url" => "https://github.com/o/r/issues/42",
+            "tracker_type" => "github"
+          }, 201}}
       ])
 
       {out, _err, exit_code} =

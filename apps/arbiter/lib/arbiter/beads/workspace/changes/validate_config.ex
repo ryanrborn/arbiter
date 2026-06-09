@@ -118,22 +118,33 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     end)
     |> then(fn cs ->
       case Map.get(merge, "warden_max_polls") do
-        nil -> cs
-        n when is_integer(n) and n > 0 -> cs
-        "infinity" -> cs
+        nil ->
+          cs
+
+        n when is_integer(n) and n > 0 ->
+          cs
+
+        "infinity" ->
+          cs
+
         s when is_binary(s) ->
           case Integer.parse(s) do
-            {n, ""} when n > 0 -> cs
+            {n, ""} when n > 0 ->
+              cs
+
             _ ->
               Changeset.add_error(cs,
                 field: :config,
-                message: "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
+                message:
+                  "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
               )
           end
+
         other ->
           Changeset.add_error(cs,
             field: :config,
-            message: "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
+            message:
+              "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
           )
       end
     end)
@@ -228,8 +239,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
         other ->
           Changeset.add_error(cs,
             field: :config,
-            message:
-              "#{label}.type must be a string or list of strings; got: #{inspect(other)}"
+            message: "#{label}.type must be a string or list of strings; got: #{inspect(other)}"
           )
       end
     end)
@@ -290,16 +300,14 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
           _ ->
             Changeset.add_error(changeset,
               field: :config,
-              message:
-                "tribunal.max_rounds must be a positive integer; got: #{inspect(s)}"
+              message: "tribunal.max_rounds must be a positive integer; got: #{inspect(s)}"
             )
         end
 
       other ->
         Changeset.add_error(changeset,
           field: :config,
-          message:
-            "tribunal.max_rounds must be a positive integer; got: #{inspect(other)}"
+          message: "tribunal.max_rounds must be a positive integer; got: #{inspect(other)}"
         )
     end
   end

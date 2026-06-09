@@ -10,7 +10,10 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   setup do
     {:ok, ws} =
-      Ash.create(Workspace, %{name: "prpatrol-#{System.unique_integer([:positive])}", prefix: "pp"})
+      Ash.create(Workspace, %{
+        name: "prpatrol-#{System.unique_integer([:positive])}",
+        prefix: "pp"
+      })
 
     # `:github_http_stub` is set globally in config/test.exs; don't touch it.
     # GITHUB_TOKEN is what GitHub.fetch_token!/1 checks; PRPatrol calls
@@ -60,7 +63,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — no actionable PRs" do
-    test "empty PR list → no beads created", %{ws: ws } do
+    test "empty PR list → no beads created", %{ws: ws} do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
       end)
@@ -72,7 +75,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert beads_for_repo() == []
     end
 
-    test "PR with all-APPROVED reviews → no bead", %{ws: ws } do
+    test "PR with all-APPROVED reviews → no bead", %{ws: ws} do
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
@@ -97,7 +100,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — actionable PRs" do
-    test "CHANGES_REQUESTED → 1 bead created, polecat spawned", %{ws: ws } do
+    test "CHANGES_REQUESTED → 1 bead created, polecat spawned", %{ws: ws} do
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
@@ -156,7 +159,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
 
     test "closed follow-up bead does not block re-dispatch on a new CHANGES_REQUESTED",
-         %{ws: ws } do
+         %{ws: ws} do
       # Bead exists but is closed → dedup must not skip the dispatch.
       {:ok, old} =
         Ash.create(Issue, %{
@@ -194,7 +197,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "periodic ticking" do
-    test "the :tick message reschedules itself", %{ws: ws } do
+    test "the :tick message reschedules itself", %{ws: ws} do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
       end)
@@ -210,7 +213,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — error handling" do
-    test "GitHub list API failure → bumps tick counter, does not crash", %{ws: ws } do
+    test "GitHub list API failure → bumps tick counter, does not crash", %{ws: ws} do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"error" => "boom"})
       end)

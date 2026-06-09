@@ -239,7 +239,10 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
     Enum.reduce(rows, 0, fn row, acc ->
       status = row["status"] |> Mapper.map_status() |> Atom.to_string()
       closed_at = Mapper.parse_dt(row["closed_at"])
-      updated_at = Mapper.parse_dt(row["updated_at"]) || DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      updated_at =
+        Mapper.parse_dt(row["updated_at"]) ||
+          DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
       {n, _} =
         Arbiter.Repo.query!(

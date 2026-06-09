@@ -162,11 +162,18 @@ defmodule Arbiter.Beads.ClaimTest do
     test "is idempotent — returns existing bead instead of duplicating", %{github_ws: ws} do
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
-          {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload())
+
           {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
           {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
@@ -194,11 +201,18 @@ defmodule Arbiter.Beads.ClaimTest do
     test "force: true bypasses the assignment check", %{github_ws: ws} do
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
-          {"GET", _} -> Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload(%{"assignees" => []}))
+
           {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
           {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
@@ -210,11 +224,18 @@ defmodule Arbiter.Beads.ClaimTest do
     test "accepts decorated refs like '#43' and 'gh-43' and a full URL", %{github_ws: ws} do
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/user"} -> Req.Test.json(conn, %{"login" => @viewer})
-          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} -> Req.Test.json(conn, [])
-          {"GET", _} -> Req.Test.json(conn, issue_payload())
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload())
+
           {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
           {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
         end
@@ -403,7 +424,17 @@ defmodule Arbiter.Beads.ClaimTest do
 
           {"GET", "/rest/api/3/issue/TEST-43"} ->
             other = %{"accountId" => "someone-else-id"}
-            Req.Test.json(conn, jira_issue_payload(%{"fields" => %{"assignee" => other, "summary" => "Wire up the thing", "status" => %{"statusCategory" => %{"key" => "new"}}}}))
+
+            Req.Test.json(
+              conn,
+              jira_issue_payload(%{
+                "fields" => %{
+                  "assignee" => other,
+                  "summary" => "Wire up the thing",
+                  "status" => %{"statusCategory" => %{"key" => "new"}}
+                }
+              })
+            )
         end
       end)
 

@@ -4,7 +4,9 @@ defmodule Arbiter.Beads.StatusBackfillTest do
   alias Arbiter.Beads.{Issue, StatusBackfill, Workspace}
 
   setup do
-    {:ok, ws} = Ash.create(Workspace, %{name: "sb-#{System.unique_integer([:positive])}", prefix: "sb"})
+    {:ok, ws} =
+      Ash.create(Workspace, %{name: "sb-#{System.unique_integer([:positive])}", prefix: "sb"})
+
     {:ok, ws: ws}
   end
 
@@ -33,9 +35,7 @@ defmodule Arbiter.Beads.StatusBackfillTest do
       {:ok, _} = Ash.update(bead, %{}, action: :close)
 
       assert [] =
-               StatusBackfill.proposals(
-                 git_log_lines: ["abc|feat(#{bead.id}): done"]
-               )
+               StatusBackfill.proposals(git_log_lines: ["abc|feat(#{bead.id}): done"])
     end
 
     test "skips docs/fix/test commits — only feat() counts as shipped evidence",
@@ -66,9 +66,7 @@ defmodule Arbiter.Beads.StatusBackfillTest do
 
     test "ignores feat() commits for beads that don't exist", %{ws: _ws} do
       assert [] =
-               StatusBackfill.proposals(
-                 git_log_lines: ["abc|feat(sb-no-such-bead): orphan"]
-               )
+               StatusBackfill.proposals(git_log_lines: ["abc|feat(sb-no-such-bead): orphan"])
     end
 
     test "handles malformed log lines gracefully" do

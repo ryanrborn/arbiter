@@ -258,7 +258,9 @@ defmodule Arbiter.Polecat.Driver do
         |> then(fn a -> if close_upstream, do: Map.put(a, :close_upstream, true), else: a end)
 
       case Ash.update(bead, attrs, action: :close) do
-        {:ok, _} -> :ok
+        {:ok, _} ->
+          :ok
+
         {:error, err} ->
           Logger.warning("Polecat.Driver: failed to close bead #{bead_id}: #{inspect(err)}")
           :error

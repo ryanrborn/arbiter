@@ -2,7 +2,11 @@ import Config
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true
 
 config :arbiter, Arbiter.Repo,
-  database: Path.join(System.tmp_dir!(), "arbiter_test#{System.get_env("MIX_TEST_PARTITION", "")}.sqlite3"),
+  database:
+    Path.join(
+      System.tmp_dir!(),
+      "arbiter_test#{System.get_env("MIX_TEST_PARTITION", "")}.sqlite3"
+    ),
   journal_mode: :wal,
   busy_timeout: 5000,
   pool: Ecto.Adapters.SQL.Sandbox,

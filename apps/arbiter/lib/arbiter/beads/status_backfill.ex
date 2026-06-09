@@ -74,7 +74,8 @@ defmodule Arbiter.Beads.StatusBackfill do
   @spec apply!([proposal()]) :: {[String.t()], [{String.t(), term()}]}
   def apply!(proposals) when is_list(proposals) do
     Enum.reduce(proposals, {[], []}, fn p, {ok, errs} ->
-      reason = "Auto-closed by StatusBackfill (commit #{String.slice(p.commit_sha, 0, 7)}: #{p.commit_subject})"
+      reason =
+        "Auto-closed by StatusBackfill (commit #{String.slice(p.commit_sha, 0, 7)}: #{p.commit_subject})"
 
       case close_bead(p.bead_id, reason) do
         :ok -> {[p.bead_id | ok], errs}

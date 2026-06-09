@@ -67,8 +67,7 @@ defmodule ArbiterWeb.Api.TrackerController do
 
         {:error, :not_supported} ->
           {:error,
-           {:invalid_request,
-            "tracker #{tracker_type} does not support outbound ticket creation"}}
+           {:invalid_request, "tracker #{tracker_type} does not support outbound ticket creation"}}
 
         {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
           tracker_error_response(conn, err)

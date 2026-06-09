@@ -142,8 +142,7 @@ defmodule ArbiterWeb.UsageLive do
             <.icon name="hero-banknotes" class="size-6 text-base-content/70" /> Usage &amp; Spend
           </h1>
           <p class="text-sm text-base-content/60 mt-1">
-            Token cost ledger — per-session spend rolled up from
-            <code class="text-xs">Arbiter.Usage.Event</code>.
+            Token cost ledger — per-session spend rolled up from <code class="text-xs">Arbiter.Usage.Event</code>.
             Multiple rows per bead expose rework spend (re-slings).
           </p>
         </div>
@@ -299,14 +298,20 @@ defmodule ArbiterWeb.UsageLive do
                       {format_usd(@grand_cost)}
                     </td>
                     <td class="text-right font-mono tabular-nums text-xs">
-                      {format_tokens(Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) end))}
+                      {format_tokens(
+                        Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) end)
+                      )}
                     </td>
                     <td class="text-right font-mono tabular-nums text-xs">
-                      {format_tokens(Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.tokens_out || 0) end))}
+                      {format_tokens(
+                        Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.tokens_out || 0) end)
+                      )}
                     </td>
                     <td class="text-right text-xs">{sum_rows(@main_rollup)}</td>
                     <td class="text-right font-mono tabular-nums text-xs">
-                      {format_duration(Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.duration_ms || 0) end))}
+                      {format_duration(
+                        Enum.reduce(@main_rollup, 0, fn r, acc -> acc + (r.duration_ms || 0) end)
+                      )}
                     </td>
                   </tr>
                 </tfoot>
@@ -321,8 +326,7 @@ defmodule ArbiterWeb.UsageLive do
           <section class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
               <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-trophy" class="size-5 text-base-content/70" />
-                Top beads by cost
+                <.icon name="hero-trophy" class="size-5 text-base-content/70" /> Top beads by cost
                 <span class="badge badge-ghost badge-sm font-normal">
                   top {length(@top_beads)}
                 </span>
@@ -370,11 +374,13 @@ defmodule ArbiterWeb.UsageLive do
           <section class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
               <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-arrow-path" class={[
-                  "size-5",
-                  if(@rework_beads == [], do: "text-base-content/40", else: "text-warning")
-                ]} />
-                Rework signal
+                <.icon
+                  name="hero-arrow-path"
+                  class={[
+                    "size-5",
+                    if(@rework_beads == [], do: "text-base-content/40", else: "text-warning")
+                  ]}
+                /> Rework signal
                 <span class="text-sm font-normal text-base-content/50">
                   — re-slung beads
                 </span>

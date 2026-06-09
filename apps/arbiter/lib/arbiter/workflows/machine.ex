@@ -283,8 +283,7 @@ defmodule Arbiter.Workflows.Machine do
         {:keep_state, data, [{:reply, from, :ok}]}
 
       _ ->
-        {:keep_state, data,
-         [{:reply, from, {:error, {:invalid_transition, status, :paused}}}]}
+        {:keep_state, data, [{:reply, from, {:error, {:invalid_transition, status, :paused}}}]}
     end
   end
 
@@ -304,8 +303,7 @@ defmodule Arbiter.Workflows.Machine do
   end
 
   def handle_event({:call, from}, :resume, status, %Data{} = data) do
-    {:keep_state, data,
-     [{:reply, from, {:error, {:invalid_transition, status, :running}}}]}
+    {:keep_state, data, [{:reply, from, {:error, {:invalid_transition, status, :running}}}]}
   end
 
   # ---- transition logic --------------------------------------------------
@@ -333,7 +331,13 @@ defmodule Arbiter.Workflows.Machine do
           {:ok, new_state} when is_map(new_state) ->
             new_completed = data.completed_steps ++ [step]
             next_step = next_step(mod.steps(), step)
-            new_data = %Data{data | state: new_state, completed_steps: new_completed, current_step: next_step}
+
+            new_data = %Data{
+              data
+              | state: new_state,
+                completed_steps: new_completed,
+                current_step: next_step
+            }
 
             case persist(new_data, advance_status(next_step), nil) do
               :ok ->
@@ -381,7 +385,11 @@ defmodule Arbiter.Workflows.Machine do
         # Even DB write failed; reply with original failure reason — operator
         # gets the workflow error, DB error goes to logs.
         require Logger
-        Logger.error("WorkflowMachine #{data.id}: failed to persist :failed status: #{inspect(err)}")
+
+        Logger.error(
+          "WorkflowMachine #{data.id}: failed to persist :failed status: #{inspect(err)}"
+        )
+
         {:keep_state, data, [{:reply, from, {:error, reason}}]}
     end
   end
