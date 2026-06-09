@@ -1057,6 +1057,35 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert prompt =~ "fix it"
       assert prompt =~ "the directive"
     end
+
+    test "clean_findings/1 strips sentinel lines and arb done markers from findings", %{ws: ws} do
+      bead = new_bead(ws, %{description: "the directive"})
+
+      state = %{
+        bead_id: bead.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1
+      }
+
+      # Findings contain both the REQUEST_CHANGES sentinel and an arb done marker
+      findings = "VERDICT: REQUEST_CHANGES\n1. fix it\narb done"
+      prompt = Tribunal.revise_prompt(state, findings)
+
+      # The prompt has the template instructions containing 'arb done' at the end,
+      # but the findings section itself must be clean.
+      findings_section =
+        prompt
+        |> String.split("Reviewer findings (round 1):")
+        |> Enum.at(1)
+        |> String.split("For EACH finding")
+        |> Enum.at(0)
+
+      refute findings_section =~ "VERDICT: REQUEST_CHANGES"
+      refute findings_section =~ "arb done"
+      assert findings_section =~ "1. fix it"
+    end
   end
 
   # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------
