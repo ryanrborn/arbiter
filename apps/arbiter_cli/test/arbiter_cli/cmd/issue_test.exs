@@ -23,13 +23,19 @@ defmodule ArbiterCli.Cmd.IssueTest do
     test "update routes to issue-edit mode (requires an id)" do
       stub_patch("/api/issues/bd-1", %{"id" => "bd-1", "title" => "T", "priority" => 2})
 
-      {out, _err, code} = capture(fn -> Issue.run(["update", "bd-1", "--priority", "2", "--json"]) end)
+      {out, _err, code} =
+        capture(fn -> Issue.run(["update", "bd-1", "--priority", "2", "--json"]) end)
+
       assert code == 0
       assert out =~ "bd-1"
     end
 
     test "dispatch routes to the sling endpoint" do
-      stub_post("/api/polecats/sling", %{"bead" => %{"id" => "bd-1"}, "polecat" => %{}, "machine" => %{}})
+      stub_post("/api/polecats/sling", %{
+        "bead" => %{"id" => "bd-1"},
+        "polecat" => %{},
+        "machine" => %{}
+      })
 
       {out, _err, code} = capture(fn -> Issue.run(["dispatch", "bd-1", "--json"]) end)
       assert code == 0

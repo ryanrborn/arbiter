@@ -55,7 +55,9 @@ defmodule ArbiterCli.Cmd.Server do
     IO.puts(Jason.encode!(%{migrations_applied: count, status: "ok"}))
   end
 
-  defp emit_migrate(0, :text), do: IO.puts("Database schema already current (no migrations to apply).")
+  defp emit_migrate(0, :text),
+    do: IO.puts("Database schema already current (no migrations to apply).")
+
   defp emit_migrate(count, :text), do: IO.puts("Applied #{count} migration(s).")
 
   defp usage_hint do

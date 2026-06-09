@@ -380,10 +380,14 @@ defmodule Arbiter.Mergers.Gitlab do
   # depending on whether the caller was the original approver. Treat any
   # non-2xx that isn't a hard auth/transport failure as "best-effort" —
   # the summary note is the real signal of `:request_changes`.
-  defp handle_unapprove({:ok, %Req.Response{status: status}}) when status in 200..299, do: {:ok, :unapproved}
+  defp handle_unapprove({:ok, %Req.Response{status: status}}) when status in 200..299,
+    do: {:ok, :unapproved}
+
   defp handle_unapprove({:ok, %Req.Response{status: 404}}), do: {:ok, :not_previously_approved}
+
   defp handle_unapprove({:ok, %Req.Response{status: status, body: body}}),
     do: {:error, http_error(status, body)}
+
   defp handle_unapprove({:error, exception}), do: {:error, transport_error(exception)}
 
   # GitLab returns 401/403/422 when prevent_author_approval is enabled and the

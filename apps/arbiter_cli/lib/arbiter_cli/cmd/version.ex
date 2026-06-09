@@ -54,7 +54,10 @@ defmodule ArbiterCli.Cmd.Version do
 
         if sha_mismatch?(cli.sha, server["sha"]) do
           IO.puts("")
-          IO.puts("WARNING: CLI and server are on different builds — rebuild the escript and/or redeploy the server")
+
+          IO.puts(
+            "WARNING: CLI and server are on different builds — rebuild the escript and/or redeploy the server"
+          )
         end
 
       {:error, :unreachable} ->

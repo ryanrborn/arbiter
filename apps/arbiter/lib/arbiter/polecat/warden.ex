@@ -178,7 +178,8 @@ defmodule Arbiter.Polecat.Warden do
         # tests) but default to true when the gate has approved.
         auto_merge = Keyword.get(opts, :auto_merge, via_tribunal)
 
-        default_max_polls = if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
+        default_max_polls =
+          if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
 
         state = %{
           bead_id: bead_id,

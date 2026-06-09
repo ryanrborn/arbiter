@@ -36,19 +36,20 @@ defmodule Arbiter.TrackersTest do
 
   describe "delegating wrappers (against Tracker.None)" do
     setup do
-      {:ok,
-       issue: %Issue{tracker_type: :none, tracker_ref: "anything"}}
+      {:ok, issue: %Issue{tracker_type: :none, tracker_ref: "anything"}}
     end
 
-    test "fetch/1 delegates", %{issue: i}, do: assert(Trackers.fetch(i) == {:ok, %{}})
+    test("fetch/1 delegates", %{issue: i}, do: assert(Trackers.fetch(i) == {:ok, %{}}))
 
-    test "transition/2 delegates", %{issue: i},
+    test("transition/2 delegates", %{issue: i},
       do: assert(Trackers.transition(i, :closed) == :ok)
+    )
 
-    test "update_fields/2 delegates", %{issue: i},
+    test("update_fields/2 delegates", %{issue: i},
       do: assert(Trackers.update_fields(i, %{title: "x"}) == :ok)
+    )
 
-    test "link_for/1 delegates", %{issue: i}, do: assert(Trackers.link_for(i) == "")
+    test("link_for/1 delegates", %{issue: i}, do: assert(Trackers.link_for(i) == ""))
 
     test "list_transitions/1 delegates", %{issue: i} do
       assert {:ok, statuses} = Trackers.list_transitions(i)
