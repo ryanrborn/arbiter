@@ -11,7 +11,7 @@ defmodule Arbiter.Beads.Issue.Changes.InheritTrackerType do
 
   alias Ash.Changeset
 
-  @valid ~w(none jira linear github)
+  @valid ~w(none jira shortcut linear github)
 
   @impl true
   def change(changeset, _opts, _context) do
