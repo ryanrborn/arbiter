@@ -23,7 +23,11 @@ defmodule Arbiter.Workflows.RefineryTest do
   @ws_github %{
     "merge" => %{
       "strategy" => "github",
-      "config" => %{"owner" => "octo", "repo" => "widget", "credentials_ref" => "test-token-abc123"}
+      "config" => %{
+        "owner" => "octo",
+        "repo" => "widget",
+        "credentials_ref" => "test-token-abc123"
+      }
     }
   }
 
@@ -142,7 +146,10 @@ defmodule Arbiter.Workflows.RefineryTest do
         conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
           conn
           |> Plug.Conn.put_status(201)
-          |> Req.Test.json(%{"number" => number, "html_url" => "https://github.com/octo/widget/pull/#{number}"})
+          |> Req.Test.json(%{
+            "number" => number,
+            "html_url" => "https://github.com/octo/widget/pull/#{number}"
+          })
 
         conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
           conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews_payload(reviews_state))
@@ -156,7 +163,10 @@ defmodule Arbiter.Workflows.RefineryTest do
           {:ok, body, conn} = Plug.Conn.read_body(conn)
           decoded = Jason.decode!(body)
           send(test_pid, {:merge_called, decoded["merge_method"]})
-          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true, "sha" => "deadbeef"})
+
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{"merged" => true, "sha" => "deadbeef"})
 
         true ->
           conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
@@ -192,7 +202,10 @@ defmodule Arbiter.Workflows.RefineryTest do
       stub(fn conn ->
         if conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") do
           send(test_pid, :pr_open_called)
-          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 101, "state" => "open"})
+
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"number" => 101, "state" => "open"})
         else
           conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
         end
@@ -450,12 +463,16 @@ defmodule Arbiter.Workflows.RefineryTest do
 
           conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
             # No approvals, changes requested
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
 
           conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(pr_payload(%{"number" => pr_number, "mergeStateStatus" => "blocked"}))
+            |> Req.Test.json(
+              pr_payload(%{"number" => pr_number, "mergeStateStatus" => "blocked"})
+            )
 
           conn.method == "PUT" ->
             send(test_pid, :unexpected_merge)
@@ -499,7 +516,11 @@ defmodule Arbiter.Workflows.RefineryTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(
-              pr_payload(%{"number" => pr_number, "mergeable" => false, "mergeStateStatus" => "dirty"})
+              pr_payload(%{
+                "number" => pr_number,
+                "mergeable" => false,
+                "mergeStateStatus" => "dirty"
+              })
             )
 
           conn.method == "PUT" ->
@@ -541,7 +562,9 @@ defmodule Arbiter.Workflows.RefineryTest do
             conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
 
           conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload(%{"number" => pr_number}))
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => pr_number}))
 
           conn.method == "PUT" ->
             conn
@@ -594,7 +617,9 @@ defmodule Arbiter.Workflows.RefineryTest do
             conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
 
           conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr_payload(%{"number" => pr_number}))
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => pr_number}))
 
           conn.method == "PUT" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)

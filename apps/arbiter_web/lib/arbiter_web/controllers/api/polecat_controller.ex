@@ -61,8 +61,7 @@ defmodule ArbiterWeb.Api.PolecatController do
             {:error,
              {:invalid_request,
               "rig #{inspect(rig)} is not in :rig_paths — check your workspace config or " <>
-                "application env (:arbiter, :rig_paths)",
-              %{bead_id: bead_id, rig: rig}}}
+                "application env (:arbiter, :rig_paths)", %{bead_id: bead_id, rig: rig}}}
 
           {:error, {:ambiguous_rig, rigs}} ->
             {:error,

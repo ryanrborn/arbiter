@@ -260,6 +260,7 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
       send(:self_review_test_pid, {:comment_fallback, mr_ref, body})
       :ok
     end
+
     @impl true
     def request_review(_, _), do: :ok
     @impl true

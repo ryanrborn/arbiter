@@ -172,7 +172,9 @@ defmodule Arbiter.Beads.WorkspaceTest do
       assert {:error, %Ash.Error.Invalid{} = err} =
                Ash.create(Workspace, %{name: "agent-bad-list", config: config})
 
-      assert err |> Exception.message() |> String.contains?("agent.type list contains invalid types")
+      assert err
+             |> Exception.message()
+             |> String.contains?("agent.type list contains invalid types")
     end
 
     test "rejects agent.type as a non-string non-list" do

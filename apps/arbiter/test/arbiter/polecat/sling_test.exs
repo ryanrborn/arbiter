@@ -91,6 +91,7 @@ defmodule Arbiter.Polecat.SlingTest do
     setup do
       prior = Application.get_env(:arbiter, :rig_paths)
       Application.put_env(:arbiter, :rig_paths, %{"test/rig" => "/tmp"})
+
       on_exit(fn ->
         if prior,
           do: Application.put_env(:arbiter, :rig_paths, prior),

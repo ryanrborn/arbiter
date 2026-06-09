@@ -23,11 +23,26 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
     end
 
     test "Daemon role definitions" do
-      assert DecommissionSweep.daemon_role?(%Issue{title: "Refinery for access_control - processes merge queue."})
-      assert DecommissionSweep.daemon_role?(%Issue{title: "Witness for auth_server - monitors polecat health."})
-      assert DecommissionSweep.daemon_role?(%Issue{title: "Crew worker ryan in auth_server - human-managed workspace."})
-      assert DecommissionSweep.daemon_role?(%Issue{title: "Deacon (daemon beacon) - receives mechanical heartbeats."})
-      assert DecommissionSweep.daemon_role?(%Issue{title: "Mayor - global coordinator, handles escalations."})
+      assert DecommissionSweep.daemon_role?(%Issue{
+               title: "Refinery for access_control - processes merge queue."
+             })
+
+      assert DecommissionSweep.daemon_role?(%Issue{
+               title: "Witness for auth_server - monitors polecat health."
+             })
+
+      assert DecommissionSweep.daemon_role?(%Issue{
+               title: "Crew worker ryan in auth_server - human-managed workspace."
+             })
+
+      assert DecommissionSweep.daemon_role?(%Issue{
+               title: "Deacon (daemon beacon) - receives mechanical heartbeats."
+             })
+
+      assert DecommissionSweep.daemon_role?(%Issue{
+               title: "Mayor - global coordinator, handles escalations."
+             })
+
       refute DecommissionSweep.daemon_role?(%Issue{title: "Refinery merge queue (gte-023)"})
     end
 
@@ -50,10 +65,22 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
     end
 
     test "GT-system bug or task" do
-      assert DecommissionSweep.gt_system?(%Issue{title: "gt convoy close [--force] is a silent no-op"})
-      assert DecommissionSweep.gt_system?(%Issue{title: "GT polecat work formula should produce names"})
-      assert DecommissionSweep.gt_system?(%Issue{title: "GT: server rig refinery should default to PR"})
-      assert DecommissionSweep.gt_system?(%Issue{title: "[HIGH] Dolt: server unreachable around 15:01"})
+      assert DecommissionSweep.gt_system?(%Issue{
+               title: "gt convoy close [--force] is a silent no-op"
+             })
+
+      assert DecommissionSweep.gt_system?(%Issue{
+               title: "GT polecat work formula should produce names"
+             })
+
+      assert DecommissionSweep.gt_system?(%Issue{
+               title: "GT: server rig refinery should default to PR"
+             })
+
+      assert DecommissionSweep.gt_system?(%Issue{
+               title: "[HIGH] Dolt: server unreachable around 15:01"
+             })
+
       refute DecommissionSweep.gt_system?(%Issue{title: "gte-elixir port: do thing"})
     end
 
@@ -64,8 +91,14 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
     end
 
     test "Escalation replies" do
-      assert DecommissionSweep.escalation_reply?(%Issue{title: "Re: ESCALATION: VR-17575 base branch"})
-      assert DecommissionSweep.escalation_reply?(%Issue{title: "Re: REFINERY BLOCKED: PR-only repo"})
+      assert DecommissionSweep.escalation_reply?(%Issue{
+               title: "Re: ESCALATION: VR-17575 base branch"
+             })
+
+      assert DecommissionSweep.escalation_reply?(%Issue{
+               title: "Re: REFINERY BLOCKED: PR-only repo"
+             })
+
       refute DecommissionSweep.escalation_reply?(%Issue{title: "ESCALATION raised"})
     end
 

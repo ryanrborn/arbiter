@@ -112,7 +112,9 @@ defmodule Arbiter.Polecat.Tribunal do
   demands the sentinel). Only if that pass *also* yields no parseable verdict
   does the Tribunal report `:no_verdict` and let the author escalate as
   inconclusive. The number of re-prompts is capped (default 1) via the
-  `:verdict_retries` opt and is a Tribunal-lifetime budget (shared across rounds).
+  `:verdict_retries` opt and is a **per-round budget** — it resets at the start
+  of each new revise round so that a reprompt used in round N does not prevent a
+  reprompt in round N+1.
 
   A timed-out or unspawnable reviewer is a different failure (a hung/crashed
   mind, not a forgotten sentinel) and still escalates directly without a
@@ -306,6 +308,9 @@ defmodule Arbiter.Polecat.Tribunal do
       revise_command: Keyword.get(opts, :revise_command),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
       retries_left: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
+      # Stored so finish_revise/1 can reset retries_left at the start of each
+      # new round — the retry budget is per-round, not Tribunal-lifetime.
+      initial_retries: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
       max_rounds: max(Keyword.get(opts, :rounds, @default_rounds), 1),
       # phase: :reviewing while a reviewer pass is in flight, :revising while an
       # implementer addresses findings between rounds.
@@ -513,6 +518,24 @@ defmodule Arbiter.Polecat.Tribunal do
     String.length(body) >= @min_findings_chars
   end
 
+  # Strip the `VERDICT: REQUEST_CHANGES` sentinel line (always the first line in
+  # `findings`, per `findings_from/2`) and any `arb done` markers from the
+  # reviewer's findings before embedding them in the implementer's revise prompt.
+  # The raw findings (including sentinels) are preserved in the durable thread and
+  # re-review prompt for the reviewer's continuity; the implementer only needs the
+  # actionable content. Leaving `arb done` in the prompt risks the model treating
+  # it as an instruction to stop rather than as reviewer output (bd-79goxj).
+  defp clean_findings(findings) when is_binary(findings) do
+    findings
+    |> String.split("\n")
+    # The first line is always `VERDICT: REQUEST_CHANGES` — drop it; the
+    # implementer prompt already states the reviewer requested changes.
+    |> Enum.drop(1)
+    |> Enum.reject(fn line -> Regex.match?(~r/^\s*arb done\s*$/i, line) end)
+    |> Enum.join("\n")
+    |> String.trim()
+  end
+
   # A REQUEST_CHANGES verdict with the round budget exhausted: record the final
   # findings into the thread, then escalate to Darth Gnosis with the FULL
   # transcript + unresolved findings + current diff.
@@ -598,7 +621,16 @@ defmodule Arbiter.Polecat.Tribunal do
     # The implementer's subprocess has exited; stop its polecat so it can't linger.
     stop_acolyte(state)
 
-    next = %{state | round: state.round + 1, phase: :reviewing, head_sha: new_head_sha}
+    # Reset the per-round retry budget so a reprompt used in this round does not
+    # prevent a reprompt in the next round (bug bd-79goxj).
+    next = %{
+      state
+      | round: state.round + 1,
+        phase: :reviewing,
+        head_sha: new_head_sha,
+        retries_left: state.initial_retries
+    }
+
     review_id = reviewer_round_id(next.review_id, next.round)
 
     case launch_acolyte(next, review_id, :reviewer, rereview_prompt(next), next.command) do
@@ -675,8 +707,17 @@ defmodule Arbiter.Polecat.Tribunal do
 
     retry_id = reprompt_bead_id(state.review_id, state.attempt)
 
+    # A content-free REQUEST_CHANGES is a malformed verdict — the reviewer did
+    # not produce a legitimate review result for this round. Extend the round cap
+    # by 1 so the re-prompt's real findings can still reach the implementer: the
+    # empty verdict must not rob the bead of a revision opportunity (bd-79goxj).
+    # Only extend when the Tribunal has a revise loop (max_rounds > 1): a
+    # single-pass setup (max_rounds == 1) has no revise loop by design and the
+    # extension would incorrectly trigger enter_revise for that configuration.
+    max_ext = if reason == :empty_findings and state.max_rounds > 1, do: 1, else: 0
+
     case launch_acolyte(
-           %{state | retries_left: budget - 1},
+           %{state | retries_left: budget - 1, max_rounds: state.max_rounds + max_ext},
            retry_id,
            :reviewer,
            verdict_reprompt_prompt(state, reason),
@@ -1341,7 +1382,7 @@ defmodule Arbiter.Polecat.Tribunal do
     #{bead.acceptance}
     #{work_so_far_briefing(state)}
     Reviewer findings (round #{state.round}):
-    #{findings}
+    #{clean_findings(findings)}
 
     For EACH finding, do ONE of:
       * FIX it — edit the code on branch `#{state.branch}` and COMMIT the change

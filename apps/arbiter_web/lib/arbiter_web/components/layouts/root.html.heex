@@ -4,7 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
-    <.live_title default={Arbiter.Branding.get(:name)} suffix={" · " <> Arbiter.Branding.get(:name)}>
+    <.live_title
+      default={Arbiter.Branding.get(:name)}
+      suffix={" · " <> Arbiter.Branding.get(:name)}
+    >
       {assigns[:page_title]}
     </.live_title>
     <link rel="icon" href={Arbiter.Branding.get(:favicon)} sizes="any" />

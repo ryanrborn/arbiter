@@ -14,25 +14,34 @@ defmodule Mix.Tasks.Arbiter.Migrate do
     repos = Application.fetch_env!(:arbiter, :ecto_repos)
 
     # Run migrations and collect counts
-    total_applied = Enum.reduce(repos, 0, fn repo, acc ->
-      {_ok, versions, _started} = Ecto.Migrator.with_repo(repo, fn r ->
-        Ecto.Migrator.run(r, :up, all: true)
+    total_applied =
+      Enum.reduce(repos, 0, fn repo, acc ->
+        {_ok, versions, _started} =
+          Ecto.Migrator.with_repo(repo, fn r ->
+            Ecto.Migrator.run(r, :up, all: true)
+          end)
+
+        acc + length(versions)
       end)
-      acc + length(versions)
-    end)
 
     # Output JSON result for the CLI to parse
-    IO.puts(Jason.encode!(%{
-      "migrations_applied" => total_applied,
-      "status" => "ok"
-    }))
+    IO.puts(
+      Jason.encode!(%{
+        "migrations_applied" => total_applied,
+        "status" => "ok"
+      })
+    )
   rescue
     err ->
       IO.puts(:stderr, "Migration failed: #{inspect(err)}")
-      IO.puts(Jason.encode!(%{
-        "error" => inspect(err),
-        "status" => "failed"
-      }))
+
+      IO.puts(
+        Jason.encode!(%{
+          "error" => inspect(err),
+          "status" => "failed"
+        })
+      )
+
       exit(1)
   end
 end
