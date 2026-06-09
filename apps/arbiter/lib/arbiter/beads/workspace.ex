@@ -209,14 +209,20 @@ defmodule Arbiter.Beads.Workspace do
   @spec warden_max_polls(t()) :: pos_integer() | :infinity | nil
   def warden_max_polls(workspace) do
     case get_in(workspace.config || %{}, ["merge", "warden_max_polls"]) do
-      n when is_integer(n) and n > 0 -> n
-      "infinity" -> :infinity
+      n when is_integer(n) and n > 0 ->
+        n
+
+      "infinity" ->
+        :infinity
+
       s when is_binary(s) ->
         case Integer.parse(s) do
           {n, ""} when n > 0 -> n
           _ -> nil
         end
-      _ -> nil
+
+      _ ->
+        nil
     end
   end
 

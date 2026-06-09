@@ -12,10 +12,18 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   def run(argv) do
     case argv do
-      ["list" | rest] -> list(rest)
-      ["ls" | rest] -> list(rest)
-      ["show" | rest] -> show(rest)
-      [] -> Output.die("workspace requires a subcommand", "verbs: list, show")
+      ["list" | rest] ->
+        list(rest)
+
+      ["ls" | rest] ->
+        list(rest)
+
+      ["show" | rest] ->
+        show(rest)
+
+      [] ->
+        Output.die("workspace requires a subcommand", "verbs: list, show")
+
       [unknown | _] ->
         Output.die("unknown workspace subcommand: #{unknown}", "verbs: list, show")
     end

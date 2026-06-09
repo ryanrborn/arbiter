@@ -164,7 +164,10 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
         conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
           conn
           |> Plug.Conn.put_status(201)
-          |> Req.Test.json(%{"number" => n, "html_url" => "https://github.com/octo/widget/pull/#{n}"})
+          |> Req.Test.json(%{
+            "number" => n,
+            "html_url" => "https://github.com/octo/widget/pull/#{n}"
+          })
 
         conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
           conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
@@ -278,7 +281,10 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
           conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") ->
             conn
             |> Plug.Conn.put_status(201)
-            |> Req.Test.json(%{"number" => 903, "html_url" => "https://github.com/octo/widget/pull/903"})
+            |> Req.Test.json(%{
+              "number" => 903,
+              "html_url" => "https://github.com/octo/widget/pull/903"
+            })
 
           conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
@@ -468,7 +474,6 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
   # documented test escape) but still exercise the worktree-attach +
   # polecat-spawn pair where the two Major round-2 defects lived.
   describe "ConflictResolver.resolve/1 (production path)" do
-
     setup do
       tmp =
         Path.join(
