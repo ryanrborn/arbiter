@@ -131,6 +131,27 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def preflight_failed(snapshot, %StopReason{} = reason),
     do: escalate(:preflight_failed, snapshot, reason)
 
+  @doc """
+  Escalate a proactively-detected credential expiry to the Admiral (bd-5wchp1).
+
+  Fired by `Arbiter.Agents.CredentialWarden` when a periodic liveness probe
+  detects that credentials are expired *before* any acolyte has been dispatched
+  or failed. Unlike `acolyte_stopped/2` and `preflight_failed/2`, this has no
+  associated bead — it names the adapter that failed instead.
+
+  `snapshot` must contain `:workspace_id`; `adapter` is the module whose probe
+  failed. Same addressed `:escalation` shape as the other escalations.
+  Best-effort, returns `:ok`.
+  """
+  @spec credential_expired(%{workspace_id: String.t()}, module(), StopReason.t()) :: :ok
+  def credential_expired(%{workspace_id: ws_id} = snapshot, adapter, %StopReason{} = reason)
+      when is_binary(ws_id) and is_atom(adapter) do
+    snapshot_with_adapter = Map.put(snapshot, :adapter, adapter)
+    escalate(:credential_expired, snapshot_with_adapter, reason)
+  end
+
+  def credential_expired(_snapshot, _adapter, _reason), do: :ok
+
   # ---- core ---------------------------------------------------------------
 
   # A notification must be scoped to a workspace (Message.workspace_id is
@@ -178,6 +199,26 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   end
 
   defp escalate(_event, _snapshot, _reason), do: :ok
+
+  defp escalation_payload(:credential_expired, snapshot, %StopReason{} = reason) do
+    adapter = Map.get(snapshot, :adapter)
+    adapter_label = if adapter, do: inspect(adapter), else: "agent"
+    short_name = if adapter, do: adapter |> Module.split() |> List.last(), else: "Agent"
+
+    subject = "#{short_name} credentials expired — proactive detection"
+
+    body =
+      [
+        "Proactive credential probe: #{adapter_label} failed authentication.",
+        reason.summary,
+        reason.remediation && "Remediation: #{reason.remediation}",
+        "Note: new acolyte dispatches for this adapter are suspended until credentials are restored."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    {subject, body}
+  end
 
   defp escalation_payload(event, %{bead_id: bead_id} = snapshot, %StopReason{} = reason) do
     verb =

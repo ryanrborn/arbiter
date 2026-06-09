@@ -1066,6 +1066,10 @@ defmodule Arbiter.Polecat do
   # Admiral escalation naming the bead + cause + remediation. Distinct from
   # fail_now/2's generic "exit code N" notification: the StopReason carries the
   # actionable classification (auth expiry, credit exhaustion, kill, …).
+  #
+  # bd-5wchp1: when the stop category is :auth_expired, also notify the
+  # CredentialWarden so it records the expiry and blocks future dispatches
+  # immediately, without waiting for the next periodic probe.
   defp fail_stopped(%State{} = state, session) do
     exit_status = Map.get(session, :exit_status)
     output_lines = Enum.reverse(Map.get(session, :output_lines, []))
@@ -1074,6 +1078,10 @@ defmodule Arbiter.Polecat do
     Logger.warning(
       "Polecat: acolyte for bead=#{state.bead_id} stopped — #{Arbiter.Polecat.StopReason.label(reason)}"
     )
+
+    if reason.category == :auth_expired do
+      notify_credential_warden(state, reason)
+    end
 
     meta =
       state.meta
@@ -1085,6 +1093,26 @@ defmodule Arbiter.Polecat do
     Arbiter.Messages.AdmiralNotifier.acolyte_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
     new_state
+  end
+
+  # Resolve the agent adapter from the polecat's routing config (set by Sling
+  # via Polecat.report/3) and notify the CredentialWarden. Best-effort —
+  # missing routing info or an unknown provider just skips the notification.
+  defp notify_credential_warden(%State{meta: meta}, reason) do
+    provider = meta && (Map.get(meta, :routing_config) || %{}) |> Map.get(:provider)
+
+    adapter =
+      if is_binary(provider) do
+        try do
+          Arbiter.Agents.adapters()[String.to_existing_atom(provider)]
+        rescue
+          _ -> nil
+        end
+      end
+
+    if is_atom(adapter) and not is_nil(adapter) do
+      Arbiter.Agents.CredentialWarden.mark_expired(adapter, reason)
+    end
   end
 
   defp exit_grace_ms do
