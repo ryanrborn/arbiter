@@ -61,6 +61,7 @@ defmodule Arbiter.Polecat.Sling do
   alias Arbiter.Polecat.ClaudeSession
   alias Arbiter.Polecat.Driver
   alias Arbiter.Polecat.ResumeContext
+  alias Arbiter.Polecat.StopReason
   alias Arbiter.Polecat.Worktree
   alias Arbiter.Polecats.Run
   alias Arbiter.Workflows.CodeReview
@@ -655,19 +656,41 @@ defmodule Arbiter.Polecat.Sling do
     workspace = load_workspace(bead)
     :ok = Agents.prepare(workspace, :agent)
     adapter = preflight_adapter(bead, workspace, opts)
-    probe_opts = preflight_opts(opts)
 
-    case Preflight.check(adapter, probe_opts) do
-      :ok ->
-        :ok
+    # bd-5wchp1: if the CredentialWarden already knows this adapter's creds are
+    # expired, refuse immediately without re-running the expensive probe. The
+    # guard is skipped when the warden isn't running (returns false by default).
+    if Arbiter.Agents.CredentialWarden.expired?(adapter) do
+      reason = known_expired_stop_reason()
+      AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
+      {:error, {:auth_check_failed, reason}}
+    else
+      probe_opts = preflight_opts(opts)
 
-      :skipped ->
-        :ok
+      case Preflight.check(adapter, probe_opts) do
+        :ok ->
+          :ok
 
-      {:error, reason} ->
-        AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
-        {:error, {:auth_check_failed, reason}}
+        :skipped ->
+          :ok
+
+        {:error, reason} ->
+          AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
+          {:error, {:auth_check_failed, reason}}
+      end
     end
+  end
+
+  defp known_expired_stop_reason do
+    %StopReason{
+      category: :auth_expired,
+      summary: "credentials known-expired (CredentialWarden flagged expiry)",
+      remediation:
+        "Re-authenticate the agent CLI (Claude: `claude` login; Gemini: refresh GEMINI_API_KEY), " <>
+          "then re-sling. Check `arb inbox` for the original expiry escalation.",
+      exit_status: nil,
+      signal: nil
+    }
   end
 
   # Resolve the workspace's worker adapter so we probe the CLI that will

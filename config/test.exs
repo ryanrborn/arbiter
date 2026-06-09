@@ -42,3 +42,7 @@ config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 config :phoenix_live_view, enable_expensive_runtime_checks: true
 config :phoenix, sort_verified_routes_query_params: true
+
+# Disable the CredentialWarden's periodic probes in test — there's no real agent
+# CLI to call, and we test the warden's logic via direct GenServer calls.
+config :arbiter, :credential_warden, enabled: false
