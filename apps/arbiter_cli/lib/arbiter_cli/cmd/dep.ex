@@ -9,16 +9,20 @@ defmodule ArbiterCli.Cmd.Dep do
   alias ArbiterCli.{Client, Output}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      rest = Output.drop_json(argv)
 
-    case rest do
-      ["add", from, type, to | _] -> add(from, type, to, mode)
-      ["add" | _] -> Output.die("dep add requires: <from> <type> <to>")
-      ["rm" | rest] -> rm(rest, mode)
-      ["remove" | rest] -> rm(rest, mode)
-      [] -> Output.die("dep requires a subcommand: `add` or `rm`")
-      [unknown | _] -> Output.die("unknown dep subcommand: #{unknown}")
+      case rest do
+        ["add", from, type, to | _] -> add(from, type, to, mode)
+        ["add" | _] -> Output.die("dep add requires: <from> <type> <to>")
+        ["rm" | rest] -> rm(rest, mode)
+        ["remove" | rest] -> rm(rest, mode)
+        [] -> Output.die("dep requires a subcommand: `add` or `rm`")
+        [unknown | _] -> Output.die("unknown dep subcommand: #{unknown}")
+      end
     end
   end
 

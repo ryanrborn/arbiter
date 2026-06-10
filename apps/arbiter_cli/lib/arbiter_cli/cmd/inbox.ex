@@ -37,16 +37,20 @@ defmodule ArbiterCli.Cmd.Inbox do
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)
 
   def run(argv) do
-    mode = Output.mode(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
 
-    case Output.drop_json(argv) do
-      [] -> admiral_inbox(true, mode)
-      ["--all"] -> admiral_inbox(false, mode)
-      ["read", id] -> read_one(id, mode)
-      ["read"] -> Output.die("inbox read requires a message id: `arb inbox read <id>`")
-      ["clear"] -> clear(mode)
-      [bead_id] -> bead_inbox(bead_id, mode)
-      _ -> Output.die("inbox: unrecognized arguments. See `arb help`.")
+      case Output.drop_json(argv) do
+        [] -> admiral_inbox(true, mode)
+        ["--all"] -> admiral_inbox(false, mode)
+        ["read", id] -> read_one(id, mode)
+        ["read"] -> Output.die("inbox read requires a message id: `arb inbox read <id>`")
+        ["clear"] -> clear(mode)
+        [bead_id] -> bead_inbox(bead_id, mode)
+        _ -> Output.die("inbox: unrecognized arguments. See `arb help`.")
+      end
     end
   end
 

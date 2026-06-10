@@ -20,18 +20,22 @@ defmodule ArbiterCli.Cmd.Convoy do
   alias ArbiterCli.{Client, Output, Workspace}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      rest = Output.drop_json(argv)
 
-    case rest do
-      ["create" | rest] -> create(rest, mode)
-      ["add" | rest] -> add(rest, mode)
-      ["rm" | rest] -> rm(rest, mode)
-      ["remove" | rest] -> rm(rest, mode)
-      ["show" | rest] -> show(rest, mode)
-      ["close" | rest] -> close(rest, mode)
-      [] -> Output.die("convoy requires a subcommand: create, add, rm, show, or close")
-      [unknown | _] -> Output.die("unknown convoy subcommand: #{unknown}")
+      case rest do
+        ["create" | rest] -> create(rest, mode)
+        ["add" | rest] -> add(rest, mode)
+        ["rm" | rest] -> rm(rest, mode)
+        ["remove" | rest] -> rm(rest, mode)
+        ["show" | rest] -> show(rest, mode)
+        ["close" | rest] -> close(rest, mode)
+        [] -> Output.die("convoy requires a subcommand: create, add, rm, show, or close")
+        [unknown | _] -> Output.die("unknown convoy subcommand: #{unknown}")
+      end
     end
   end
 

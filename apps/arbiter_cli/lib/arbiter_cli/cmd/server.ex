@@ -33,23 +33,27 @@ defmodule ArbiterCli.Cmd.Server do
   # `arb server migrate` — run migrations standalone (the deploy step in
   # isolation). Resolves the project root the same way `arb server deploy` does.
   defp migrate(argv) do
-    mode = Output.mode(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts("Run Arbiter's database migrations explicitly, outside the boot process.")
+    else
+      mode = Output.mode(argv)
 
-    root =
-      case Cmd.Start.project_root() do
-        {:ok, dir} ->
-          dir
+      root =
+        case Cmd.Start.project_root() do
+          {:ok, dir} ->
+            dir
 
-        :error ->
-          Output.die(
-            "could not locate the Arbiter project root (no compose.yml found)",
-            "Set ARB_HOME to your Arbiter checkout, or run `arb server migrate` from inside it."
-          )
+          :error ->
+            Output.die(
+              "could not locate the Arbiter project root (no compose.yml found)",
+              "Set ARB_HOME to your Arbiter checkout, or run `arb server migrate` from inside it."
+            )
+        end
+
+      case Cmd.Migrate.run(root) do
+        {:ok, count} -> emit_migrate(count, mode)
+        {:error, err} -> Output.die("Database migration failed", err)
       end
-
-    case Cmd.Migrate.run(root) do
-      {:ok, count} -> emit_migrate(count, mode)
-      {:error, err} -> Output.die("Database migration failed", err)
     end
   end
 

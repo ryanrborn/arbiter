@@ -9,13 +9,17 @@ defmodule ArbiterCli.Cmd.Show do
   alias ArbiterCli.{Client, Output}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      rest = Output.drop_json(argv)
 
-    case rest do
-      [id] -> show(id, mode)
-      [] -> Output.die("show requires an issue id (e.g. `arb show gte-006`)")
-      _ -> Output.die("show takes exactly one argument: the issue id")
+      case rest do
+        [id] -> show(id, mode)
+        [] -> Output.die("show requires an issue id (e.g. `arb show gte-006`)")
+        _ -> Output.die("show takes exactly one argument: the issue id")
+      end
     end
   end
 

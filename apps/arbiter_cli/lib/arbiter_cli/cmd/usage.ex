@@ -29,12 +29,16 @@ defmodule ArbiterCli.Cmd.Usage do
   @default_event_limit 50
 
   def run(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      rest = Output.drop_json(argv)
 
-    case rest do
-      ["events" | tail] -> events(tail, mode)
-      _ -> summarize(rest, mode)
+      case rest do
+        ["events" | tail] -> events(tail, mode)
+        _ -> summarize(rest, mode)
+      end
     end
   end
 

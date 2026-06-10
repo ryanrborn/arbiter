@@ -89,10 +89,14 @@ defmodule ArbiterCli.Cmd.Update do
   @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
   def run(argv) do
-    if deploy_invocation?(argv) do
-      deploy(argv)
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
     else
-      edit_issue(argv)
+      if deploy_invocation?(argv) do
+        deploy(argv)
+      else
+        edit_issue(argv)
+      end
     end
   end
 
