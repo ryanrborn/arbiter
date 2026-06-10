@@ -62,10 +62,12 @@ defmodule Arbiter.Mergers.Gitlab do
   def open(branch, title, description, opts)
       when is_binary(branch) and is_binary(title) and is_binary(description) and is_map(opts) do
     with {:ok, cfg} <- Config.resolve() do
+      target_branch = Map.get(opts, :target_branch) || cfg.default_target_branch
+
       payload =
         %{
           "source_branch" => branch,
-          "target_branch" => Map.get(opts, :target_branch) || cfg.default_target_branch,
+          "target_branch" => target_branch,
           "title" => title,
           "description" => description
         }
@@ -85,6 +87,13 @@ defmodule Arbiter.Mergers.Gitlab do
              message: "merge-request response missing integer \"iid\"",
              raw: body
            }}
+
+        {:ok, %Req.Response{status: 422, body: body}} ->
+          if duplicate_mr_error?(body) do
+            adopt_existing_mr(cfg, branch, target_branch)
+          else
+            {:error, http_error(422, body)}
+          end
 
         {:ok, %Req.Response{status: status, body: body}} ->
           {:error, http_error(status, body)}
@@ -347,6 +356,68 @@ defmodule Arbiter.Mergers.Gitlab do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # ---- Internals: duplicate-MR adoption ------------------------------------
+
+  # GitLab returns 422 with a message list containing "another open merge
+  # request already exists for this source branch" when the acolyte created
+  # the MR itself (via `glab mr create`) before the merger fired. Match
+  # case-insensitively against the canonical substring.
+  defp duplicate_mr_error?(%{"message" => messages}) when is_list(messages) do
+    Enum.any?(messages, fn
+      msg when is_binary(msg) ->
+        msg |> String.downcase() |> String.contains?("open merge request already exists")
+
+      _ ->
+        false
+    end)
+  end
+
+  defp duplicate_mr_error?(%{"message" => msg}) when is_binary(msg) do
+    msg |> String.downcase() |> String.contains?("open merge request already exists")
+  end
+
+  defp duplicate_mr_error?(_), do: false
+
+  # When the branch already has an open MR, look it up and return its ref so
+  # the merger can adopt it instead of failing.
+  defp adopt_existing_mr(cfg, branch, target_branch) do
+    params = [state: "opened", source_branch: branch, target_branch: target_branch]
+
+    case request(cfg, :get, "/merge_requests", params: params) do
+      {:ok, %Req.Response{status: status, body: [%{"iid" => iid} | _]}}
+      when status in 200..299 and is_integer(iid) ->
+        Logger.info(
+          "GitLab merger: adopting existing open MR !#{iid} for branch #{inspect(branch)}"
+        )
+
+        {:ok, ref_for(iid)}
+
+      {:ok, %Req.Response{status: status, body: []}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :conflict,
+           status: 422,
+           message: "another open merge request already exists but none found in listing",
+           raw: []
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "unexpected response shape when listing open merge requests",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
 
   # ---- Internals: response shaping ----------------------------------------
 
