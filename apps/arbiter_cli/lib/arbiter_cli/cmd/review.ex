@@ -33,29 +33,33 @@ defmodule ArbiterCli.Cmd.Review do
   @switches [json: :boolean, rig: :string, model: :string]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    bead_id =
-      case rest do
-        [id] ->
-          id
+      bead_id =
+        case rest do
+          [id] ->
+            id
 
-        [] ->
-          Output.die("review requires a bead id (e.g. `arb review bd-4b39bf`)")
+          [] ->
+            Output.die("review requires a bead id (e.g. `arb review bd-4b39bf`)")
 
-        _ ->
-          Output.die("review takes a single positional argument: <bead-id>")
+          _ ->
+            Output.die("review takes a single positional argument: <bead-id>")
+        end
+
+      body =
+        %{"bead_id" => bead_id}
+        |> maybe_put("rig", opts[:rig])
+        |> maybe_put("model", opts[:model])
+
+      case Client.post("/api/polecats/review", body) do
+        {:ok, payload} -> emit(payload, mode)
+        {:error, err} -> Output.die(err)
       end
-
-    body =
-      %{"bead_id" => bead_id}
-      |> maybe_put("rig", opts[:rig])
-      |> maybe_put("model", opts[:model])
-
-    case Client.post("/api/polecats/review", body) do
-      {:ok, payload} -> emit(payload, mode)
-      {:error, err} -> Output.die(err)
     end
   end
 

@@ -23,27 +23,31 @@ defmodule ArbiterCli.Cmd.InstallCli do
   @switches [json: :boolean]
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    root =
-      case Start.project_root() do
-        {:ok, dir} ->
-          dir
+      root =
+        case Start.project_root() do
+          {:ok, dir} ->
+            dir
 
-        :error ->
-          Output.die(
-            "could not locate the Arbiter project root (no compose.yml found)",
-            "Set ARB_HOME to your Arbiter checkout, or run `arb install-cli` from inside it."
-          )
+          :error ->
+            Output.die(
+              "could not locate the Arbiter project root (no compose.yml found)",
+              "Set ARB_HOME to your Arbiter checkout, or run `arb install-cli` from inside it."
+            )
+        end
+
+      case build_and_install_cli(root) do
+        :ok ->
+          emit_success(mode, root)
+
+        {:error, msg} ->
+          Output.die("install-cli failed", msg)
       end
-
-    case build_and_install_cli(root) do
-      :ok ->
-        emit_success(mode, root)
-
-      {:error, msg} ->
-        Output.die("install-cli failed", msg)
     end
   end
 

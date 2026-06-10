@@ -94,32 +94,36 @@ defmodule ArbiterCli.Cmd.Create do
   ]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    title =
-      case rest do
-        [t] -> t
-        [] -> Output.die("create requires a title argument")
-        many -> Enum.join(many, " ")
+      title =
+        case rest do
+          [t] -> t
+          [] -> Output.die("create requires a title argument")
+          many -> Enum.join(many, " ")
+        end
+
+      ticket_only? =
+        opts[:ticket_only] == true or opts[:no_bead] == true or opts[:unclaimed] == true
+
+      skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
+
+      if ticket_only? and skip_upstream? do
+        Output.die(
+          "--ticket-only and --no-tracker/--local-only are mutually exclusive: " <>
+            "--ticket-only creates ONLY the tracker ticket, while --no-tracker skips the tracker entirely"
+        )
       end
 
-    ticket_only? =
-      opts[:ticket_only] == true or opts[:no_bead] == true or opts[:unclaimed] == true
-
-    skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
-
-    if ticket_only? and skip_upstream? do
-      Output.die(
-        "--ticket-only and --no-tracker/--local-only are mutually exclusive: " <>
-          "--ticket-only creates ONLY the tracker ticket, while --no-tracker skips the tracker entirely"
-      )
-    end
-
-    if ticket_only? do
-      run_ticket_only(opts, title, mode)
-    else
-      run_bead_create(opts, rest, title, skip_upstream?, mode)
+      if ticket_only? do
+        run_ticket_only(opts, title, mode)
+      else
+        run_bead_create(opts, rest, title, skip_upstream?, mode)
+      end
     end
   end
 

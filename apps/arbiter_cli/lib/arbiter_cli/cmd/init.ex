@@ -85,34 +85,38 @@ defmodule ArbiterCli.Cmd.Init do
   @switches [force: :boolean, json: :boolean]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    force = opts[:force] || false
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      force = opts[:force] || false
 
-    dir =
-      case rest do
-        [d | _] -> Path.expand(d)
-        [] -> File.cwd!()
+      dir =
+        case rest do
+          [d | _] -> Path.expand(d)
+          [] -> File.cwd!()
+        end
+
+      assigns = build_assigns()
+
+      results =
+        [
+          {"AGENTS.md", render_agents_md(assigns)},
+          {"ARBITER_OPERATOR.md", render_operator_guide(assigns)},
+          {"AGENTS.local.md", render_agents_local(assigns)},
+          {".gitignore", render_gitignore(assigns)},
+          {"memory/MEMORY.md", render_memory_md(assigns)},
+          {"notes/README.md", render_notes_readme(assigns)}
+        ]
+        |> Enum.map(fn {rel, contents} ->
+          {rel, scaffold_file(Path.join(dir, rel), contents, force)}
+        end)
+
+      case mode do
+        :json -> emit_json(dir, assigns, results)
+        :text -> emit_text(dir, assigns, results)
       end
-
-    assigns = build_assigns()
-
-    results =
-      [
-        {"AGENTS.md", render_agents_md(assigns)},
-        {"ARBITER_OPERATOR.md", render_operator_guide(assigns)},
-        {"AGENTS.local.md", render_agents_local(assigns)},
-        {".gitignore", render_gitignore(assigns)},
-        {"memory/MEMORY.md", render_memory_md(assigns)},
-        {"notes/README.md", render_notes_readme(assigns)}
-      ]
-      |> Enum.map(fn {rel, contents} ->
-        {rel, scaffold_file(Path.join(dir, rel), contents, force)}
-      end)
-
-    case mode do
-      :json -> emit_json(dir, assigns, results)
-      :text -> emit_text(dir, assigns, results)
     end
   end
 

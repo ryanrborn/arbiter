@@ -13,19 +13,23 @@ defmodule ArbiterCli.Cmd.Reopen do
   @switches [json: :boolean]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    id =
-      case rest do
-        [id] -> id
-        [] -> Output.die("reopen requires an issue id")
-        _ -> Output.die("reopen takes exactly one positional argument: the issue id")
+      id =
+        case rest do
+          [id] -> id
+          [] -> Output.die("reopen requires an issue id")
+          _ -> Output.die("reopen takes exactly one positional argument: the issue id")
+        end
+
+      case Client.post("/api/issues/" <> id <> "/reopen", %{}) do
+        {:ok, issue} -> Output.emit_issue(issue, mode)
+        {:error, err} -> Output.die(friendly_error(id, err))
       end
-
-    case Client.post("/api/issues/" <> id <> "/reopen", %{}) do
-      {:ok, issue} -> Output.emit_issue(issue, mode)
-      {:error, err} -> Output.die(friendly_error(id, err))
     end
   end
 

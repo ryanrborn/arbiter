@@ -11,40 +11,44 @@ defmodule ArbiterCli.Cmd.Warships do
   @switches [json: :boolean]
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    case Client.get("/api/rigs") do
-      {:ok, %{"data" => rigs}} ->
-        case mode do
-          :json ->
-            IO.puts(Jason.encode!(%{data: rigs}))
+      case Client.get("/api/rigs") do
+        {:ok, %{"data" => rigs}} ->
+          case mode do
+            :json ->
+              IO.puts(Jason.encode!(%{data: rigs}))
 
-          :text ->
-            if rigs == [] do
-              IO.puts("(no warships registered)")
-            else
-              fmt = "~-24s ~-8s ~s~n"
-              :io.format(fmt, ["NAME", "SOURCE", "PATH"])
+            :text ->
+              if rigs == [] do
+                IO.puts("(no warships registered)")
+              else
+                fmt = "~-24s ~-8s ~s~n"
+                :io.format(fmt, ["NAME", "SOURCE", "PATH"])
 
-              :io.format(fmt, [
-                String.duplicate("-", 24),
-                String.duplicate("-", 8),
-                String.duplicate("-", 40)
-              ])
-
-              Enum.each(rigs, fn rig ->
                 :io.format(fmt, [
-                  rig["name"] || "",
-                  rig["source"] || "",
-                  rig["path"] || ""
+                  String.duplicate("-", 24),
+                  String.duplicate("-", 8),
+                  String.duplicate("-", 40)
                 ])
-              end)
-            end
-        end
 
-      {:error, err} ->
-        Output.die(err)
+                Enum.each(rigs, fn rig ->
+                  :io.format(fmt, [
+                    rig["name"] || "",
+                    rig["source"] || "",
+                    rig["path"] || ""
+                  ])
+                end)
+              end
+          end
+
+        {:error, err} ->
+          Output.die(err)
+      end
     end
   end
 end

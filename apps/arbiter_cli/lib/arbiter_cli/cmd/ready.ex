@@ -17,15 +17,19 @@ defmodule ArbiterCli.Cmd.Ready do
   @switches [json: :boolean, all: :boolean]
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    params = ready_params(opts)
+      params = ready_params(opts)
 
-    case Client.get("/api/issues/ready", params) do
-      {:ok, %{"data" => issues}} -> Output.emit_issue_list(issues, mode)
-      {:ok, other} -> Output.emit_issue_list(List.wrap(other), mode)
-      {:error, err} -> Output.die(err)
+      case Client.get("/api/issues/ready", params) do
+        {:ok, %{"data" => issues}} -> Output.emit_issue_list(issues, mode)
+        {:ok, other} -> Output.emit_issue_list(List.wrap(other), mode)
+        {:error, err} -> Output.die(err)
+      end
     end
   end
 

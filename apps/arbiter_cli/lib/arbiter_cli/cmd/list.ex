@@ -34,32 +34,36 @@ defmodule ArbiterCli.Cmd.List do
   ]
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-
-    if opts[:labels] && mode == :text do
-      IO.puts(
-        :stderr,
-        "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
-      )
-    end
-
-    params =
-      []
-      |> put_if(:status, opts[:status])
-      |> put_if(:issue_type, opts[:type])
-      |> put_if(:priority, opts[:priority])
-      |> put_if(:assignee, opts[:assignee])
-      |> put_if(:workspace_id, opts[:workspace_id])
-
-    with {:ok, beads} <- fetch_beads(params) do
-      if opts[:tracker] do
-        emit_with_tracker(beads, mode)
-      else
-        Output.emit_issue_list(beads, mode)
-      end
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
     else
-      {:error, err} -> Output.die(err)
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+
+      if opts[:labels] && mode == :text do
+        IO.puts(
+          :stderr,
+          "arb: warning: --labels is accepted for interface parity but the Issue resource has no labels field (ignored)."
+        )
+      end
+
+      params =
+        []
+        |> put_if(:status, opts[:status])
+        |> put_if(:issue_type, opts[:type])
+        |> put_if(:priority, opts[:priority])
+        |> put_if(:assignee, opts[:assignee])
+        |> put_if(:workspace_id, opts[:workspace_id])
+
+      with {:ok, beads} <- fetch_beads(params) do
+        if opts[:tracker] do
+          emit_with_tracker(beads, mode)
+        else
+          Output.emit_issue_list(beads, mode)
+        end
+      else
+        {:error, err} -> Output.die(err)
+      end
     end
   end
 

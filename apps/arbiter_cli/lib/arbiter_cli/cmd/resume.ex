@@ -29,26 +29,30 @@ defmodule ArbiterCli.Cmd.Resume do
   @switches [json: :boolean, model: :string]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    model = opts[:model]
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      model = opts[:model]
 
-    {bead_id, rig} =
-      case rest do
-        [id] -> {id, nil}
-        [id, rig] -> {id, rig}
-        [] -> Output.die("resume requires a bead id (e.g. `arb resume bd-auma3z`)")
-        _ -> Output.die("resume takes at most two positional arguments: <bead-id> [<rig>]")
+      {bead_id, rig} =
+        case rest do
+          [id] -> {id, nil}
+          [id, rig] -> {id, rig}
+          [] -> Output.die("resume requires a bead id (e.g. `arb resume bd-auma3z`)")
+          _ -> Output.die("resume takes at most two positional arguments: <bead-id> [<rig>]")
+        end
+
+      body =
+        %{}
+        |> maybe_put("rig", rig)
+        |> maybe_put("model", model)
+
+      case Client.post("/api/polecats/#{bead_id}/resume", body) do
+        {:ok, payload} -> emit(payload, mode)
+        {:error, err} -> Output.die(err)
       end
-
-    body =
-      %{}
-      |> maybe_put("rig", rig)
-      |> maybe_put("model", model)
-
-    case Client.post("/api/polecats/#{bead_id}/resume", body) do
-      {:ok, payload} -> emit(payload, mode)
-      {:error, err} -> Output.die(err)
     end
   end
 

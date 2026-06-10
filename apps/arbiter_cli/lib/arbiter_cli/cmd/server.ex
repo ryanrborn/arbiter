@@ -23,6 +23,8 @@ defmodule ArbiterCli.Cmd.Server do
       ["migrate" | rest] -> migrate(rest)
       ["doctor" | rest] -> Cmd.Doctor.run(rest)
       ["version" | rest] -> Cmd.Version.run(rest)
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("server requires a subcommand", usage_hint())
       [unknown | _] -> Output.die("unknown server subcommand: #{unknown}", usage_hint())
     end

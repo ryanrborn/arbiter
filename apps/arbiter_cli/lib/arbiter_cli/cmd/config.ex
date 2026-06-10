@@ -52,17 +52,21 @@ defmodule ArbiterCli.Cmd.Config do
   @switches [workspace: :string, force: :boolean, json: :boolean]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    workspace_opt = opts[:workspace]
-    force = opts[:force] || false
+    if "--help" in argv or "-h" in argv do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      workspace_opt = opts[:workspace]
+      force = opts[:force] || false
 
-    case rest do
-      ["get" | rest] -> get(rest, workspace_opt, mode)
-      ["set" | rest] -> set(rest, workspace_opt, force, mode)
-      ["unset" | rest] -> unset(rest, workspace_opt, force, mode)
-      [] -> Output.die("config requires a subcommand: get, set, or unset")
-      [unknown | _] -> Output.die("unknown config subcommand: #{unknown}")
+      case rest do
+        ["get" | rest] -> get(rest, workspace_opt, mode)
+        ["set" | rest] -> set(rest, workspace_opt, force, mode)
+        ["unset" | rest] -> unset(rest, workspace_opt, force, mode)
+        [] -> Output.die("config requires a subcommand: get, set, or unset")
+        [unknown | _] -> Output.die("unknown config subcommand: #{unknown}")
+      end
     end
   end
 
