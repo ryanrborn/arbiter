@@ -91,6 +91,72 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :validation_failed, status: 422}} =
                Gitlab.open("nope", "t", "d", %{})
     end
+
+    test "422 'already exists': adopts the existing open MR" do
+      stub(fn conn ->
+        case conn.method do
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => [
+                "Another open merge request already exists for this source branch: feature/bd-4i8z1r"
+              ]
+            })
+
+          "GET" ->
+            assert conn.request_path == base_path()
+            assert conn.query_string =~ "state=opened"
+            assert conn.query_string =~ "source_branch="
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"iid" => @iid, "state" => "opened"}])
+        end
+      end)
+
+      assert {:ok, @ref} = Gitlab.open("feature/bd-4i8z1r", "Fix something", "body", %{})
+    end
+
+    test "422 'already exists' but listing returns empty: returns conflict error" do
+      stub(fn conn ->
+        case conn.method do
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => ["Another open merge request already exists for this source branch"]
+            })
+
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([])
+        end
+      end)
+
+      assert {:error, %Error{kind: :conflict}} = Gitlab.open("feature/x", "t", "d", %{})
+    end
+
+    test "422 'already exists' with message as string instead of list: adopts existing MR" do
+      stub(fn conn ->
+        case conn.method do
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "Another open merge request already exists for this source branch"
+            })
+
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"iid" => @iid, "state" => "opened"}])
+        end
+      end)
+
+      assert {:ok, @ref} = Gitlab.open("feature/x", "t", "d", %{})
+    end
   end
 
   describe "get/1" do
