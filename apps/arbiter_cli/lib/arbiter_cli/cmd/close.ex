@@ -11,30 +11,34 @@ defmodule ArbiterCli.Cmd.Close do
   @switches [reason: :string, json: :boolean]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    id =
-      case rest do
-        [id] -> id
-        [] -> Output.die("close requires an issue id")
-        _ -> Output.die("close takes exactly one positional argument: the issue id")
+      id =
+        case rest do
+          [id] -> id
+          [] -> Output.die("close requires an issue id")
+          _ -> Output.die("close takes exactly one positional argument: the issue id")
+        end
+
+      close_upstream =
+        case Client.get("/api/issues/" <> id) do
+          {:ok, issue} -> tracker_linked?(issue)
+          {:error, _} -> false
+        end
+
+      body =
+        %{}
+        |> then(fn b -> if opts[:reason], do: Map.put(b, "reason", opts[:reason]), else: b end)
+        |> then(fn b -> if close_upstream, do: Map.put(b, "close_upstream", true), else: b end)
+
+      case Client.post("/api/issues/" <> id <> "/close", body) do
+        {:ok, issue} -> Output.emit_issue(issue, mode)
+        {:error, err} -> Output.die(err)
       end
-
-    close_upstream =
-      case Client.get("/api/issues/" <> id) do
-        {:ok, issue} -> tracker_linked?(issue)
-        {:error, _} -> false
-      end
-
-    body =
-      %{}
-      |> then(fn b -> if opts[:reason], do: Map.put(b, "reason", opts[:reason]), else: b end)
-      |> then(fn b -> if close_upstream, do: Map.put(b, "close_upstream", true), else: b end)
-
-    case Client.post("/api/issues/" <> id <> "/close", body) do
-      {:ok, issue} -> Output.emit_issue(issue, mode)
-      {:error, err} -> Output.die(err)
     end
   end
 

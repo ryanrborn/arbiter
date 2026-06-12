@@ -26,6 +26,8 @@ defmodule ArbiterCli.Cmd.Batch do
       ["remove" | rest] -> Cmd.Convoy.run(["remove" | rest])
       ["rm" | rest] -> Cmd.Convoy.run(["rm" | rest])
       ["close" | rest] -> Cmd.Convoy.run(["close" | rest])
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("batch requires a subcommand", usage_hint())
       [unknown | _] -> Output.die("unknown batch subcommand: #{unknown}", usage_hint())
     end

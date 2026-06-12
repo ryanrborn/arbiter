@@ -38,6 +38,8 @@ defmodule ArbiterCli.Cmd.Issue do
       ["sync" | rest] -> Cmd.Sync.run(rest)
       ["ready" | rest] -> Cmd.Ready.run(rest)
       ["dispatch" | rest] -> Cmd.Sling.run(rest)
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("issue requires a subcommand", usage_hint())
       [unknown | _] -> Output.die("unknown issue subcommand: #{unknown}", usage_hint())
     end

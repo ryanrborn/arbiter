@@ -75,17 +75,21 @@ defmodule ArbiterCli.Cmd.InstallService do
   @systemd_timeout_s 300
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    scope = if opts[:system], do: :system, else: :user
-    force = opts[:force] || false
-
-    if opts[:uninstall] do
-      uninstall(scope, mode)
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
     else
-      Restart.guard_acolyte_session!()
-      Restart.guard_active_polecats!(force)
-      install(scope, mode)
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      scope = if opts[:system], do: :system, else: :user
+      force = opts[:force] || false
+
+      if opts[:uninstall] do
+        uninstall(scope, mode)
+      else
+        Restart.guard_acolyte_session!()
+        Restart.guard_active_polecats!(force)
+        install(scope, mode)
+      end
     end
   end
 

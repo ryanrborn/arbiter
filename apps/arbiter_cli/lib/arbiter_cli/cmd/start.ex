@@ -45,16 +45,20 @@ defmodule ArbiterCli.Cmd.Start do
   @poll_interval_ms 500
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
-
-    Restart.guard_acolyte_session!()
-
-    if Doctor.reachable?() do
-      already_running(mode)
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
     else
-      cold_start(mode, timeout_ms)
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
+
+      Restart.guard_acolyte_session!()
+
+      if Doctor.reachable?() do
+        already_running(mode)
+      else
+        cold_start(mode, timeout_ms)
+      end
     end
   end
 

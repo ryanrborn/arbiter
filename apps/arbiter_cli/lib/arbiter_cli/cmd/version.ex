@@ -11,13 +11,17 @@ defmodule ArbiterCli.Cmd.Version do
   alias ArbiterCli.{Client, Output}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    cli_info = cli_version()
-    server_result = fetch_server_version()
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      cli_info = cli_version()
+      server_result = fetch_server_version()
 
-    case mode do
-      :json -> emit_json(cli_info, server_result)
-      :text -> emit_text(cli_info, server_result)
+      case mode do
+        :json -> emit_json(cli_info, server_result)
+        :text -> emit_text(cli_info, server_result)
+      end
     end
   end
 

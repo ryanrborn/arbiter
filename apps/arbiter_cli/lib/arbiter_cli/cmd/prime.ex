@@ -49,12 +49,16 @@ defmodule ArbiterCli.Cmd.Prime do
   alias ArbiterCli.{Client, Output, Workspace}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    sections = gather()
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      sections = gather()
 
-    case mode do
-      :json -> IO.puts(Jason.encode!(to_json(sections)))
-      :text -> emit_text(sections)
+      case mode do
+        :json -> IO.puts(Jason.encode!(to_json(sections)))
+        :text -> emit_text(sections)
+      end
     end
   end
 

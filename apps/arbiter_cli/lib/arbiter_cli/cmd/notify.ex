@@ -16,16 +16,20 @@ defmodule ArbiterCli.Cmd.Notify do
   @default_limit 20
 
   def run(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      rest = Output.drop_json(argv)
 
-    {opts, _rest, _invalid} = OptionParser.parse(rest, strict: [limit: :integer])
-    limit = opts[:limit] || @default_limit
+      {opts, _rest, _invalid} = OptionParser.parse(rest, strict: [limit: :integer])
+      limit = opts[:limit] || @default_limit
 
-    case Client.get("/api/messages", kind: "notification", limit: limit) do
-      {:ok, %{"data" => list}} -> emit(list, mode)
-      {:ok, _} -> emit([], mode)
-      {:error, err} -> Output.die(err)
+      case Client.get("/api/messages", kind: "notification", limit: limit) do
+        {:ok, %{"data" => list}} -> emit(list, mode)
+        {:ok, _} -> emit([], mode)
+        {:error, err} -> Output.die(err)
+      end
     end
   end
 

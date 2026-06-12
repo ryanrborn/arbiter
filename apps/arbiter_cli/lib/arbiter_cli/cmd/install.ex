@@ -15,6 +15,8 @@ defmodule ArbiterCli.Cmd.Install do
     case argv do
       ["cli" | rest] -> Cmd.InstallCli.run(rest)
       ["service" | rest] -> Cmd.InstallService.run(rest)
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("install requires a target", "targets: cli, service")
       [unknown | _] -> Output.die("unknown install target: #{unknown}", "targets: cli, service")
     end

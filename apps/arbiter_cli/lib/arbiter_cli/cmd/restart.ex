@@ -52,30 +52,34 @@ defmodule ArbiterCli.Cmd.Restart do
   @default_port 4848
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
-    force = opts[:force] || false
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      timeout_ms = max(1, opts[:timeout] || @default_timeout_s) * 1000
+      force = opts[:force] || false
 
-    guard_acolyte_session!()
+      guard_acolyte_session!()
 
-    root =
-      case Start.project_root() do
-        {:ok, dir} ->
-          dir
+      root =
+        case Start.project_root() do
+          {:ok, dir} ->
+            dir
 
-        :error ->
-          Output.die(
-            "could not locate the Arbiter project root (no compose.yml found)",
-            "Set ARB_HOME to your Arbiter checkout, or run `arb restart` from inside it."
-          )
+          :error ->
+            Output.die(
+              "could not locate the Arbiter project root (no compose.yml found)",
+              "Set ARB_HOME to your Arbiter checkout, or run `arb restart` from inside it."
+            )
+        end
+
+      guard_active_polecats!(force)
+
+      case perform(root, timeout_ms) do
+        {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
+        {:timeout, actions, _was_running} -> emit_timeout(mode, actions, timeout_ms)
       end
-
-    guard_active_polecats!(force)
-
-    case perform(root, timeout_ms) do
-      {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
-      {:timeout, actions, _was_running} -> emit_timeout(mode, actions, timeout_ms)
     end
   end
 

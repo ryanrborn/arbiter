@@ -21,6 +21,12 @@ defmodule ArbiterCli.Cmd.Workspace do
       ["show" | rest] ->
         show(rest)
 
+      ["--help" | _] ->
+        IO.puts(@moduledoc)
+
+      ["-h" | _] ->
+        IO.puts(@moduledoc)
+
       [] ->
         Output.die("workspace requires a subcommand", "verbs: list, show")
 

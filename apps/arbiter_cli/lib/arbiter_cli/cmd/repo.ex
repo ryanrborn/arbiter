@@ -17,6 +17,8 @@ defmodule ArbiterCli.Cmd.Repo do
       ["list" | rest] -> Cmd.Warships.run(rest)
       ["ls" | rest] -> Cmd.Warships.run(rest)
       ["show" | rest] -> show(rest)
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("repo requires a subcommand", "verbs: list, show")
       [unknown | _] -> Output.die("unknown repo subcommand: #{unknown}", "verbs: list, show")
     end
