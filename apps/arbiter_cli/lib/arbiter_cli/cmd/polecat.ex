@@ -21,20 +21,24 @@ defmodule ArbiterCli.Cmd.Polecat do
   alias ArbiterCli.{Client, Output, Vernacular}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    rest = Output.drop_json(argv)
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      rest = Output.drop_json(argv)
 
-    case rest do
-      ["list" | _] -> list(mode)
-      ["ls" | _] -> list(mode)
-      ["show", bead_id | _] -> show(bead_id, mode)
-      ["show" | _] -> Output.die("polecat show requires: <bead-id>")
-      ["log", bead_id | _] -> log(bead_id, mode)
-      ["log" | _] -> Output.die("polecat log requires: <bead-id>")
-      ["stop", bead_id | _] -> stop(bead_id, mode)
-      ["stop" | _] -> Output.die("polecat stop requires: <bead-id>")
-      [] -> Output.die("polecat requires a subcommand: `list`, `show`, `log`, or `stop`")
-      [unknown | _] -> Output.die("unknown polecat subcommand: #{unknown}")
+      case rest do
+        ["list" | _] -> list(mode)
+        ["ls" | _] -> list(mode)
+        ["show", bead_id | _] -> show(bead_id, mode)
+        ["show" | _] -> Output.die("polecat show requires: <bead-id>")
+        ["log", bead_id | _] -> log(bead_id, mode)
+        ["log" | _] -> Output.die("polecat log requires: <bead-id>")
+        ["stop", bead_id | _] -> stop(bead_id, mode)
+        ["stop" | _] -> Output.die("polecat stop requires: <bead-id>")
+        [] -> Output.die("polecat requires a subcommand: `list`, `show`, `log`, or `stop`")
+        [unknown | _] -> Output.die("unknown polecat subcommand: #{unknown}")
+      end
     end
   end
 

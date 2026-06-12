@@ -31,28 +31,32 @@ defmodule ArbiterCli.Cmd.Claim do
   ]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
 
-    ref =
-      case rest do
-        [r] -> r
-        [] -> Output.die("claim requires an issue number (e.g. `arb claim 43`)")
-        _ -> Output.die("claim takes a single positional argument: <issue#>")
+      ref =
+        case rest do
+          [r] -> r
+          [] -> Output.die("claim requires an issue number (e.g. `arb claim 43`)")
+          _ -> Output.die("claim takes a single positional argument: <issue#>")
+        end
+
+      workspace_id = Workspace.id_or_halt()
+
+      validate_difficulty!(opts[:difficulty])
+
+      body =
+        %{"ref" => ref}
+        |> maybe_put("force", opts[:force])
+        |> maybe_put("difficulty", opts[:difficulty])
+
+      case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
+        {:ok, payload} -> emit(payload, opts[:rig], mode)
+        {:error, err} -> Output.die(err)
       end
-
-    workspace_id = Workspace.id_or_halt()
-
-    validate_difficulty!(opts[:difficulty])
-
-    body =
-      %{"ref" => ref}
-      |> maybe_put("force", opts[:force])
-      |> maybe_put("difficulty", opts[:difficulty])
-
-    case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
-      {:ok, payload} -> emit(payload, opts[:rig], mode)
-      {:error, err} -> Output.die(err)
     end
   end
 

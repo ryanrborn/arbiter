@@ -30,6 +30,8 @@ defmodule ArbiterCli.Cmd.Worker do
       ["stop" | _] -> Cmd.Polecat.run(argv)
       ["resume" | rest] -> Cmd.Resume.run(rest)
       ["review" | rest] -> Cmd.Review.run(rest)
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("worker requires a subcommand", usage_hint())
       [unknown | _] -> Output.die("unknown worker subcommand: #{unknown}", usage_hint())
     end

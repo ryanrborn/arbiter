@@ -19,22 +19,26 @@ defmodule ArbiterCli.Cmd.Sync do
   @switches [dry: :boolean, json: :boolean]
 
   def run(argv) do
-    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    dry? = opts[:dry] || false
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      dry? = opts[:dry] || false
 
-    workspace_id = Workspace.id_or_halt()
+      workspace_id = Workspace.id_or_halt()
 
-    request =
-      if dry? do
-        Client.get("/api/workspaces/#{workspace_id}/sync/plan")
-      else
-        Client.post("/api/workspaces/#{workspace_id}/sync", %{})
+      request =
+        if dry? do
+          Client.get("/api/workspaces/#{workspace_id}/sync/plan")
+        else
+          Client.post("/api/workspaces/#{workspace_id}/sync", %{})
+        end
+
+      case request do
+        {:ok, payload} -> emit(payload, dry?, mode)
+        {:error, err} -> Output.die(err)
       end
-
-    case request do
-      {:ok, payload} -> emit(payload, dry?, mode)
-      {:error, err} -> Output.die(err)
     end
   end
 
