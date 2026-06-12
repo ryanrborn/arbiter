@@ -34,6 +34,10 @@ defmodule ArbiterCli.Cmd.Batch do
   end
 
   defp list(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_list(argv)
+  end
+
+  defp do_list(argv) do
     mode = Output.mode(argv)
     workspace_id = Workspace.id_or_halt()
 

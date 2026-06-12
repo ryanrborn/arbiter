@@ -40,6 +40,10 @@ defmodule ArbiterCli.Cmd.Message do
   # ---- send (was `arb msg`) ----------------------------------------------
 
   defp send(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_send(argv)
+  end
+
+  defp do_send(argv) do
     mode = Output.mode(argv)
     rest = Output.drop_json(argv)
 

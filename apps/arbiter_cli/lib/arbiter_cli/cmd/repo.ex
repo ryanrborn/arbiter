@@ -25,6 +25,10 @@ defmodule ArbiterCli.Cmd.Repo do
   end
 
   defp show(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_show(argv)
+  end
+
+  defp do_show(argv) do
     mode = Output.mode(argv)
     rest = Output.drop_json(argv)
 
