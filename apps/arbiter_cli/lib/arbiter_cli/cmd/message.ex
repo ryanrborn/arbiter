@@ -28,6 +28,8 @@ defmodule ArbiterCli.Cmd.Message do
       ["inbox" | rest] -> Cmd.Inbox.run(rest)
       ["notify" | rest] -> Cmd.Notify.run(rest)
       ["send" | rest] -> send(rest)
+      ["--help" | _] -> IO.puts(@moduledoc)
+      ["-h" | _] -> IO.puts(@moduledoc)
       # Shorthand: `arb message <bead-id> <text>` → an Admiral direction.
       [bead_id | [_ | _] = rest] -> direction(bead_id, rest)
       [_bead_id] -> Output.die("message requires text: `arb message <bead-id> <text>`")

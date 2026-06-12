@@ -32,28 +32,32 @@ defmodule ArbiterCli.Cmd.Sling do
   @switches [json: :boolean, with_claude: :boolean, model: :string]
 
   def run(argv) do
-    {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
-    mode = if opts[:json], do: :json, else: :text
-    with_claude = opts[:with_claude] || false
-    model = opts[:model]
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+      mode = if opts[:json], do: :json, else: :text
+      with_claude = opts[:with_claude] || false
+      model = opts[:model]
 
-    {bead_id, rig} =
-      case rest do
-        [id] -> {id, nil}
-        [id, rig] -> {id, rig}
-        [] -> Output.die("sling requires an issue id (e.g. `arb sling gte-006`)")
-        _ -> Output.die("sling takes at most two positional arguments: <bead-id> [<rig>]")
+      {bead_id, rig} =
+        case rest do
+          [id] -> {id, nil}
+          [id, rig] -> {id, rig}
+          [] -> Output.die("sling requires an issue id (e.g. `arb sling gte-006`)")
+          _ -> Output.die("sling takes at most two positional arguments: <bead-id> [<rig>]")
+        end
+
+      body =
+        %{"bead_id" => bead_id}
+        |> maybe_put("rig", rig)
+        |> maybe_put("with_claude", if(with_claude, do: true, else: nil))
+        |> maybe_put("model", model)
+
+      case Client.post("/api/polecats/sling", body) do
+        {:ok, payload} -> emit(payload, mode)
+        {:error, err} -> Output.die(err)
       end
-
-    body =
-      %{"bead_id" => bead_id}
-      |> maybe_put("rig", rig)
-      |> maybe_put("with_claude", if(with_claude, do: true, else: nil))
-      |> maybe_put("model", model)
-
-    case Client.post("/api/polecats/sling", body) do
-      {:ok, payload} -> emit(payload, mode)
-      {:error, err} -> Output.die(err)
     end
   end
 

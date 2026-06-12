@@ -14,16 +14,20 @@ defmodule ArbiterCli.Cmd.Doctor do
   alias ArbiterCli.{Client, Output, Workspace}
 
   def run(argv) do
-    mode = Output.mode(argv)
-    results = checks()
+    if Output.help?(argv) do
+      IO.puts(@moduledoc)
+    else
+      mode = Output.mode(argv)
+      results = checks()
 
-    case mode do
-      :json -> emit_json(results)
-      :text -> emit_text(results)
-    end
+      case mode do
+        :json -> emit_json(results)
+        :text -> emit_text(results)
+      end
 
-    if Enum.any?(results, fn r -> r.status == :fail end) do
-      Output.halt(1)
+      if Enum.any?(results, fn r -> r.status == :fail end) do
+        Output.halt(1)
+      end
     end
   end
 
