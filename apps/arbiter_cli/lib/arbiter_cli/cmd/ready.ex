@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.Ready do
   @switches [json: :boolean, all: :boolean]
 
   def run(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
       {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)

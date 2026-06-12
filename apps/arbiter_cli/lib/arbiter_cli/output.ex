@@ -42,6 +42,10 @@ defmodule ArbiterCli.Output do
     if "--json" in argv, do: :json, else: :text
   end
 
+  @doc "Returns true if `--help` or `-h` is present in argv."
+  @spec help?([String.t()]) :: boolean()
+  def help?(argv), do: "--help" in argv or "-h" in argv
+
   # Removes `--json` from an argv list so command-specific OptionParser calls
   # don't trip on it.
   @spec drop_json([String.t()]) :: [String.t()]

@@ -37,7 +37,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)
 
   def run(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
       mode = Output.mode(argv)

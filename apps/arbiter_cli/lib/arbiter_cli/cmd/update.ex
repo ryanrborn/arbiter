@@ -89,7 +89,7 @@ defmodule ArbiterCli.Cmd.Update do
   @deploy_switches [json: :boolean, timeout: :integer, force: :boolean]
 
   def run(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
       if deploy_invocation?(argv) do
@@ -102,11 +102,15 @@ defmodule ArbiterCli.Cmd.Update do
 
   @doc "Deploy mode (no issue id). Used by `arb server deploy`."
   @spec deploy([String.t()]) :: :ok | no_return()
-  def deploy(argv), do: do_deploy(argv)
+  def deploy(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_deploy(argv)
+  end
 
   @doc "Issue-edit mode (requires an issue id). Used by `arb issue update <id>`."
   @spec edit_issue([String.t()]) :: :ok | no_return()
-  def edit_issue(argv), do: do_edit_issue(argv)
+  def edit_issue(argv) do
+    if Output.help?(argv), do: IO.puts(@moduledoc), else: do_edit_issue(argv)
+  end
 
   # A bare verb, or one whose first token is a flag, is a deploy. The moment a
   # positional appears (the issue id) it's an edit — see the moduledoc.

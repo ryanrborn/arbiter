@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.Review do
   @switches [json: :boolean, rig: :string, model: :string]
 
   def run(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
       {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)

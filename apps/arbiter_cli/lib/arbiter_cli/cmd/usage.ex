@@ -29,7 +29,7 @@ defmodule ArbiterCli.Cmd.Usage do
   @default_event_limit 50
 
   def run(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
       mode = Output.mode(argv)

@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.Server do
   # `arb server migrate` — run migrations standalone (the deploy step in
   # isolation). Resolves the project root the same way `arb server deploy` does.
   defp migrate(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts("Run Arbiter's database migrations explicitly, outside the boot process.")
     else
       mode = Output.mode(argv)

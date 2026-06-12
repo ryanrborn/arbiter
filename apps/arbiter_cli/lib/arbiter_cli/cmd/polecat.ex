@@ -21,7 +21,7 @@ defmodule ArbiterCli.Cmd.Polecat do
   alias ArbiterCli.{Client, Output, Vernacular}
 
   def run(argv) do
-    if "--help" in argv or "-h" in argv do
+    if Output.help?(argv) do
       IO.puts(@moduledoc)
     else
       mode = Output.mode(argv)
