@@ -203,6 +203,78 @@ defmodule Arbiter.Mergers.GitlabTest do
 
       assert {:error, %Error{kind: :not_found, status: 404}} = Gitlab.get(@ref)
     end
+
+    test "includes pipeline status from the /pipelines endpoint" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => 1, "status" => "failed"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :failed}} = Gitlab.get(@ref)
+    end
+
+    test "pipeline is :success when the latest pipeline succeeded" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => 2, "status" => "success"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :success}} = Gitlab.get(@ref)
+    end
+
+    test "pipeline is :running when the latest pipeline is running" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => 3, "status" => "running"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :running}} = Gitlab.get(@ref)
+    end
+
+    test "pipeline is nil when no pipelines exist" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok, %{pipeline: nil}} = Gitlab.get(@ref)
+    end
   end
 
   describe "merge/1" do

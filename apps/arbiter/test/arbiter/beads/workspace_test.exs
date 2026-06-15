@@ -478,4 +478,22 @@ defmodule Arbiter.Beads.WorkspaceTest do
                })
     end
   end
+
+  describe "watch_pipeline?/1" do
+    test "true when config[merge][watch_pipeline] is boolean true" do
+      ws = %Workspace{config: %{"merge" => %{"watch_pipeline" => true}}}
+      assert Workspace.watch_pipeline?(ws) == true
+    end
+
+    test "true when stored as the string \"true\" (JSON round-trip)" do
+      ws = %Workspace{config: %{"merge" => %{"watch_pipeline" => "true"}}}
+      assert Workspace.watch_pipeline?(ws) == true
+    end
+
+    test "defaults to false when unset or falsey" do
+      assert Workspace.watch_pipeline?(%Workspace{config: %{}}) == false
+      assert Workspace.watch_pipeline?(%Workspace{config: %{"merge" => %{}}}) == false
+      assert Workspace.watch_pipeline?(%Workspace{config: %{"merge" => %{"watch_pipeline" => false}}}) == false
+    end
+  end
 end

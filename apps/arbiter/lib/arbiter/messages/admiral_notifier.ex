@@ -84,6 +84,26 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def awaiting_review(snapshot), do: post(:awaiting_review, snapshot)
 
   @doc """
+  Post a `:pipeline_failed` notification. Best-effort, returns `:ok`. Fired by
+  `Arbiter.Polecat.Warden` when a CI pipeline fails and `watch_pipeline` is
+  enabled. The bead is NOT failed — a human may force-merge or rerun.
+  """
+  @spec pipeline_failed(snapshot(), String.t() | nil) :: :ok
+  def pipeline_failed(snapshot, mr_ref \\ nil) do
+    snapshot =
+      case mr_ref do
+        nil ->
+          snapshot
+
+        ref when is_binary(ref) ->
+          meta = Map.put(Map.get(snapshot, :meta, %{}) || %{}, :mr_ref, ref)
+          Map.put(snapshot, :meta, meta)
+      end
+
+    post(:pipeline_failed, snapshot)
+  end
+
+  @doc """
   Post the `:awaiting_review_stuck` watchdog notification. Best-effort, returns
   `:ok`. Fired by `Arbiter.Polecat.Warden` when a polecat has been parked at
   `:awaiting_review` past its poll cap without a terminal MR outcome — so a
@@ -311,6 +331,18 @@ defmodule Arbiter.Messages.AdmiralNotifier do
       case mr_ref(snapshot) do
         nil -> "#{title} — awaiting review"
         ref -> "#{title} opened MR #{ref} — awaiting review"
+      end
+    end)
+  end
+
+  defp build(:pipeline_failed, %{bead_id: bead_id} = snapshot) do
+    base(bead_id, snapshot, "CI pipeline failed", fn title ->
+      case mr_ref(snapshot) do
+        nil ->
+          "#{title} — CI pipeline failed (parked; human action required)"
+
+        ref ->
+          "#{title} MR #{ref} — CI pipeline failed (parked; human action required)"
       end
     end)
   end
