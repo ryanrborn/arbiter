@@ -103,6 +103,7 @@ defmodule Arbiter.Polecat.Sling do
 
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
+         :ok <- ensure_not_awaiting_review(bead_id),
          {:ok, opts} <- maybe_resolve_rig_for_real_work(bead, opts),
          :ok <- maybe_preflight(bead, opts),
          {:ok, bead} <- transition_to_in_progress(bead),
@@ -308,6 +309,23 @@ defmodule Arbiter.Polecat.Sling do
 
   defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:bead_closed, id}}
   defp ensure_not_closed(_bead), do: :ok
+
+  # Guard against re-slinging a bead whose polecat is already parked at
+  # :awaiting_review with an active Warden. A second sling in this state
+  # would attach a new machine/driver to the live polecat, disrupting the
+  # Warden's PID watch and preventing the auto-close on MR merge.
+  defp ensure_not_awaiting_review(bead_id) do
+    case Polecat.whereis(bead_id) do
+      nil ->
+        :ok
+
+      pid ->
+        case safe_polecat_status(pid) do
+          :awaiting_review -> {:error, {:bead_awaiting_review, bead_id}}
+          _ -> :ok
+        end
+    end
+  end
 
   defp transition_to_in_progress(%Issue{status: :in_progress} = bead), do: {:ok, bead}
 
