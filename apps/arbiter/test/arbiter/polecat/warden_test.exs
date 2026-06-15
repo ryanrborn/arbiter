@@ -292,5 +292,37 @@ defmodule Arbiter.Polecat.WardenTest do
                adapter: StubMerger
              ) == :ignore
     end
+
+    # bd-91rnwq: DynamicSupervisor.start_child propagates :ignore from
+    # Warden.init directly (not wrapped in {:error, ...}). The unhandled :ignore
+    # in start_warden/3's case clause was the root cause of the CaseClauseError
+    # that crashed the polecat after a successful MR creation.
+    test "start/1 via DynamicSupervisor returns :ignore when polecat is already gone" do
+      assert Warden.start(
+               bead_id: "gone-ds",
+               polecat: "no-such-bead",
+               mr_ref: "!ignore-ds",
+               adapter: StubMerger,
+               workspace: nil
+             ) == :ignore
+    end
+  end
+
+  describe "open_mr resilience (bd-91rnwq)" do
+    test "Polecat.open_mr/5 transitions to :awaiting_review on successful MR creation" do
+      # Regression guard: open_mr must always reach :awaiting_review when
+      # safe_open succeeds, regardless of what start_warden does internally.
+      # Before the fix, a CaseClauseError in start_warden propagated uncaught
+      # through handle_call and crashed the polecat, orphaning the MR.
+      {pid, _bead_id} = running_polecat()
+      StubMerger.next_open_ref("!oom1")
+      StubMerger.queue_get("!oom1", [%{status: :open, approved: false}])
+
+      {:ok, mr_ref} = Polecat.open_mr(pid, "feature/x", "Fix it", "", %{adapter: StubMerger, workspace: nil})
+
+      assert mr_ref == "!oom1"
+      assert Polecat.state(pid).status == :awaiting_review
+      assert Polecat.state(pid).mr_ref == "!oom1"
+    end
   end
 end
