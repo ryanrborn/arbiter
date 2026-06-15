@@ -142,11 +142,15 @@ defmodule Arbiter.Mergers.Github do
          {:ok, reviews} <-
            request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", [])
            |> handle_json() do
+      head_sha = get_in(pr, ["head", "sha"])
+      pipeline = fetch_pipeline_status(cfg, owner, repo, head_sha)
+
       {:ok,
        %{
          ref: mr_ref,
          status: pr_status(pr),
          approved: approved?(reviews),
+         pipeline: pipeline,
          ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
          conflicting:
            Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
@@ -373,6 +377,44 @@ defmodule Arbiter.Mergers.Github do
   end
 
   defp approved?(_), do: false
+
+  # Fetch CI status via the check-runs API for the head commit SHA.
+  # Returns nil when the SHA is absent or no check-runs exist (no CI configured)
+  # or the request fails (best-effort — a transient API error must not block the
+  # MR poll).
+  defp fetch_pipeline_status(_cfg, _owner, _repo, nil), do: nil
+  defp fetch_pipeline_status(_cfg, _owner, _repo, ""), do: nil
+
+  defp fetch_pipeline_status(cfg, owner, repo, sha) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs", [])
+         |> handle_json() do
+      {:ok, %{"check_runs" => [_ | _] = runs}} ->
+        map_check_run_status(runs)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp map_check_run_status(runs) do
+    conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
+    statuses = Enum.map(runs, &Map.get(&1, "status"))
+
+    cond do
+      Enum.any?(conclusions, &(&1 in ["failure", "timed_out", "action_required", "cancelled"])) ->
+        :failed
+
+      Enum.all?(statuses, &(&1 == "completed")) and
+          Enum.all?(conclusions, &(&1 == "success")) ->
+        :success
+
+      Enum.any?(statuses, &(&1 in ["in_progress", "queued", "waiting", "requested", "pending"])) ->
+        :running
+
+      true ->
+        :pending
+    end
+  end
 
   # ---- Internals: target / ref resolution ----------------------------------
 

@@ -249,6 +249,26 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
+  Whether the Warden should watch CI pipeline status alongside MR state, from
+  `config["merge"]["watch_pipeline"]`.
+
+  When `true`, the Warden escalates to the Admiral when a pipeline fails, but
+  does NOT fail the bead — a human may force-merge or rerun. Defaults to
+  `false` so installs without CI are unaffected.
+
+  Accepts both a real boolean and the string `"true"`/`"false"` that
+  round-trip through JSON workspace config.
+  """
+  @spec watch_pipeline?(t()) :: boolean()
+  def watch_pipeline?(workspace) do
+    case get_in(workspace.config || %{}, ["merge", "watch_pipeline"]) do
+      true -> true
+      "true" -> true
+      _ -> false
+    end
+  end
+
+  @doc """
   The maximum number of revise-and-re-review rounds the Tribunal runs before
   escalating, from `config["review"]["rounds"]`. Defaults to `2`.
 

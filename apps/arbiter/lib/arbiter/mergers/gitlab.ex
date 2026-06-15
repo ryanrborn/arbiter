@@ -111,12 +111,14 @@ defmodule Arbiter.Mergers.Gitlab do
       case request(cfg, :get, "/merge_requests/#{iid}", []) do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
+          pipeline = fetch_pipeline_status(cfg, iid)
 
           {:ok,
            %{
              ref: ref_for(iid),
              status: map_state(Map.get(body, "state")),
              approved: approved?(body),
+             pipeline: pipeline,
              ci_clean: merge_status == "can_be_merged",
              conflicting:
                Map.get(body, "has_conflicts", false) == true or
@@ -431,6 +433,25 @@ defmodule Arbiter.Mergers.Gitlab do
   # otherwise. Treat absence as "not approved".
   defp approved?(%{"approved" => approved}) when is_boolean(approved), do: approved
   defp approved?(_), do: false
+
+  # Fetch the latest pipeline for the MR and map its status to a domain atom.
+  # Returns nil when there are no pipelines (no CI configured) or the request
+  # fails (best-effort — a transient API error must not block the MR poll).
+  defp fetch_pipeline_status(cfg, iid) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 1]) do
+      {:ok, %Req.Response{status: status, body: [latest | _]}} when status in 200..299 ->
+        map_pipeline_status(Map.get(latest, "status"))
+
+      _ ->
+        nil
+    end
+  end
+
+  defp map_pipeline_status("success"), do: :success
+  defp map_pipeline_status("failed"), do: :failed
+  defp map_pipeline_status("canceled"), do: :failed
+  defp map_pipeline_status("running"), do: :running
+  defp map_pipeline_status(_), do: :pending
 
   defp handle_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
 
