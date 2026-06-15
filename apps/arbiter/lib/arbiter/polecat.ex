@@ -2069,7 +2069,34 @@ defmodule Arbiter.Polecat do
                   |> Map.put(:merger_url, merger_url)
             }
 
-            start_warden(new_state, workspace, opts)
+            # Guard: MR already exists on the forge. Warden startup failure must
+            # NOT prevent the polecat from parking at :awaiting_review — the MR
+            # is real and must not be discarded. If the Warden can't start for
+            # any reason, escalate to the Admiral so the MR is not silently
+            # orphaned while the polecat parks indefinitely.
+            warden_ok? =
+              try do
+                start_warden(new_state, workspace, opts) == :ok
+              rescue
+                e ->
+                  Logger.warning(
+                    "Polecat.open_mr: Warden startup raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+                  )
+
+                  false
+              catch
+                :exit, reason ->
+                  Logger.warning(
+                    "Polecat.open_mr: Warden startup exit for bead=#{state.bead_id}: #{inspect(reason)}"
+                  )
+
+                  false
+              end
+
+            unless warden_ok? do
+              escalate_warden_failure(new_state)
+            end
+
             {:ok, mr_ref, new_state}
 
           {:error, reason} ->
@@ -2157,6 +2184,17 @@ defmodule Arbiter.Polecat do
   # workspace's auto_merge setting is irrelevant in that case — a Tribunal
   # APPROVE is the merge-now signal.
   defp start_warden(%State{} = state, workspace, opts) do
+    # Test escape hatch: :warden_start_error in opts simulates a Warden startup
+    # failure without needing a real error condition, mirroring :review_spawn for
+    # the Tribunal. Production callers never set this key.
+    if Map.get(opts, :warden_start_error) do
+      :error
+    else
+      do_start_warden(state, workspace, opts)
+    end
+  end
+
+  defp do_start_warden(%State{} = state, workspace, opts) do
     via_tribunal = Map.get(opts, :via_tribunal, false)
 
     auto_merge =
@@ -2184,6 +2222,13 @@ defmodule Arbiter.Polecat do
       {:ok, _pid} ->
         :ok
 
+      # DynamicSupervisor.start_child/2 admits :ignore per its typespec; today
+      # Warden.init/1 returns :ignore when polecat_pid is not a pid (defensive
+      # path). Treat as a no-op: the MR is already created and the Warden is
+      # simply not needed (matches pattern in start_refinery.ex).
+      :ignore ->
+        :ok
+
       {:error, reason} ->
         Logger.warning(
           "Polecat.open_mr: failed to start Warden for bead=#{state.bead_id}: #{inspect(reason)}"
@@ -2192,6 +2237,53 @@ defmodule Arbiter.Polecat do
         :error
     end
   end
+
+  # An MR was opened but the Warden failed to start. The polecat stays at
+  # :awaiting_review (the MR is real and must not be discarded), but the Admiral
+  # is escalated so the orphaned MR can be resolved manually rather than hanging
+  # indefinitely with no watcher.
+  defp escalate_warden_failure(
+         %State{workspace_id: ws_id, bead_id: bead_id, mr_ref: mr_ref, merger_url: merger_url}
+       )
+       when is_binary(ws_id) do
+    mr_info =
+      case merger_url do
+        url when is_binary(url) and url != "" -> "#{mr_ref} (#{url})"
+        _ -> to_string(mr_ref)
+      end
+
+    Logger.warning(
+      "Polecat.open_mr: Warden failed to start for bead=#{bead_id} — MR #{mr_ref} orphaned; escalating"
+    )
+
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: bead_id,
+      workspace_id: ws_id,
+      directive_ref: bead_id,
+      subject: "Warden startup failed: #{bead_id} MR orphaned",
+      body:
+        "The Warden process failed to start after MR #{mr_info} was opened for bead #{bead_id}. " <>
+          "The MR exists on the forge but has no Warden watching it — " <>
+          "manual completion or failure is required once the MR resolves.\n\n" <>
+          "To complete: Polecat.complete(#{inspect(bead_id)}, :merged)\n" <>
+          "To fail:     Polecat.fail(#{inspect(bead_id)}, :warden_lost)"
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Polecat: Warden-failure escalation swallowed for bead=#{bead_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_warden_failure(_state), do: :ok
 
   defp workspace_auto_merge?(%Arbiter.Beads.Workspace{} = ws),
     do: Arbiter.Beads.Workspace.auto_merge?(ws)
