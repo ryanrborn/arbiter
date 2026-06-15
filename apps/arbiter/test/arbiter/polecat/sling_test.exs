@@ -79,6 +79,34 @@ defmodule Arbiter.Polecat.SlingTest do
 
       assert {:error, {:bead_closed, _}} = Sling.sling(bead.id)
     end
+
+    test "beads already awaiting review cannot be re-slung (bd-appwsh)", %{ws: ws} do
+      alias Arbiter.Test.StubMerger
+
+      StubMerger.reset()
+      {:ok, bead} = Ash.create(Issue, %{title: "awaiting-review guard", workspace_id: ws.id})
+
+      # Boot a polecat and park it at :awaiting_review via open_mr/5 with a
+      # stub merger. Use a far-future Warden interval so the auto-started Warden
+      # does not poll or transition the polecat during the assertion window.
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "arbiter")
+      :ok = Polecat.advance(pid, :implement)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      StubMerger.next_open_ref("!test")
+
+      open_opts = %{
+        adapter: StubMerger,
+        workspace: nil,
+        interval_ms: 1_000_000,
+        initial_delay_ms: 1_000_000
+      }
+
+      assert {:ok, "!test"} = Polecat.open_mr(pid, "feature/guard", "Guard", "", open_opts)
+      assert Polecat.state(pid).status == :awaiting_review
+
+      assert {:error, {:bead_awaiting_review, _}} = Sling.sling(bead.id, start_driver: false)
+    end
   end
 
   describe "pre-flight auth check (bd-awi4nw)" do

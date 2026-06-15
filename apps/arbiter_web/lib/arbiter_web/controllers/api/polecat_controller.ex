@@ -106,6 +106,12 @@ defmodule ArbiterWeb.Api.PolecatController do
             {:error,
              {:invalid_request, "bead is closed; reopen it before reviewing", %{bead_id: bead_id}}}
 
+          {:error, {:bead_awaiting_review, _}} ->
+            {:error,
+             {:invalid_request,
+              "bead is already awaiting review; a Warden is active and will close it on MR merge",
+              %{bead_id: bead_id}}}
+
           {:error, reason} ->
             {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}
         end
