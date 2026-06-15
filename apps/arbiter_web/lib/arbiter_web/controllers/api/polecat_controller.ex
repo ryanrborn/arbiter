@@ -49,6 +49,12 @@ defmodule ArbiterWeb.Api.PolecatController do
             {:error,
              {:invalid_request, "bead is closed; reopen it before slinging", %{bead_id: bead_id}}}
 
+          {:error, {:bead_awaiting_review, _}} ->
+            {:error,
+             {:invalid_request,
+              "bead is already awaiting review; the Warden will close it on MR merge",
+              %{bead_id: bead_id}}}
+
           {:error, :no_rig_configured} ->
             {:error,
              {:invalid_request,
