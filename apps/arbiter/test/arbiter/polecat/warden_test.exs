@@ -225,6 +225,53 @@ defmodule Arbiter.Polecat.WardenTest do
     end
   end
 
+  describe "pipeline watching (watch_pipeline: true)" do
+    test "does not escalate when watch_pipeline is false (default)" do
+      {pid, bead_id} = running_polecat()
+      # Pipeline is :failed but watch_pipeline not set — polecat should just
+      # keep polling and eventually complete (not escalate or fail early).
+      StubMerger.queue_get("!p1", [
+        %{status: :open, approved: false, pipeline: :failed},
+        %{status: :merged}
+      ])
+
+      start_warden(pid, bead_id, "!p1", [])
+
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      # The key assertion: with watch_pipeline off, a :failed pipeline must not
+      # fail the polecat — it should still complete when the MR merges.
+      assert Polecat.state(pid).status == :completed
+    end
+
+    test "stays parked when pipeline is :failed and watch_pipeline is true" do
+      {pid, bead_id} = running_polecat()
+      # First two polls: pipeline :failed, MR still open — should stay parked.
+      # Third poll: MR merged — should complete.
+      StubMerger.queue_get("!p2", [
+        %{status: :open, approved: false, pipeline: :failed},
+        %{status: :open, approved: false, pipeline: :failed},
+        %{status: :merged}
+      ])
+
+      start_warden(pid, bead_id, "!p2", watch_pipeline: true)
+
+      # Wait until merged — the pipeline failure must not have failed the bead.
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      assert Polecat.state(pid).status == :completed
+      assert Polecat.state(pid).meta[:failure_reason] == nil
+    end
+
+    test "pipeline :success does not affect normal MR flow" do
+      {pid, bead_id} = running_polecat()
+      StubMerger.queue_get("!p3", [%{status: :merged, pipeline: :success}])
+
+      start_warden(pid, bead_id, "!p3", watch_pipeline: true)
+
+      wait_until(fn -> Polecat.state(pid).status == :completed end)
+      assert Polecat.state(pid).status == :completed
+    end
+  end
+
   describe "lifecycle" do
     test "stops when the watched polecat dies" do
       {pid, bead_id} = running_polecat()

@@ -73,6 +73,7 @@ defmodule Arbiter.Polecat.Warden do
           | {:interval_ms, non_neg_integer()}
           | {:initial_delay_ms, non_neg_integer()}
           | {:max_polls, non_neg_integer()}
+          | {:watch_pipeline, boolean()}
 
   @type opts :: [opt()]
 
@@ -181,6 +182,12 @@ defmodule Arbiter.Polecat.Warden do
         default_max_polls =
           if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
 
+        watch_pipeline =
+          case Keyword.get(opts, :watch_pipeline) do
+            flag when is_boolean(flag) -> flag
+            _ -> watch_pipeline_from_workspace(workspace)
+          end
+
         state = %{
           bead_id: bead_id,
           polecat_pid: polecat_pid,
@@ -191,7 +198,9 @@ defmodule Arbiter.Polecat.Warden do
           via_tribunal: via_tribunal,
           interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
           max_polls: Keyword.get(opts, :max_polls, default_max_polls),
-          poll_count: 0
+          poll_count: 0,
+          watch_pipeline: watch_pipeline,
+          last_pipeline: nil
         }
 
         Process.monitor(polecat_pid)
@@ -205,6 +214,7 @@ defmodule Arbiter.Polecat.Warden do
     case safe_get(state) do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
+        state = maybe_escalate_pipeline(state, result)
         apply_outcome(effective_outcome(state, result), result, state)
 
       {:error, reason} ->
@@ -291,6 +301,42 @@ defmodule Arbiter.Polecat.Warden do
       Polecat.record_merger_status(state.polecat_pid, result)
     end)
   end
+
+  # When watch_pipeline is enabled, escalate to the Admiral on the first poll
+  # that reports a failed pipeline. Stay parked — a human may force-merge or
+  # rerun. Only escalates once per failure sequence (tracks last_pipeline to
+  # suppress repeated alerts on consecutive :failed polls).
+  defp maybe_escalate_pipeline(%{watch_pipeline: false} = state, _result), do: state
+
+  defp maybe_escalate_pipeline(state, result) do
+    current_pipeline = Map.get(result, :pipeline)
+
+    if current_pipeline == :failed and state.last_pipeline != :failed do
+      Logger.warning(
+        "Polecat.Warden: CI pipeline failed for bead=#{state.bead_id} mr=#{state.mr_ref}; " <>
+          "escalating to Admiral, staying parked"
+      )
+
+      safe(fn ->
+        snap =
+          case safe_snapshot(state.polecat_pid) do
+            %{} = s -> s
+            _ -> %{bead_id: state.bead_id, workspace_id: nil}
+          end
+
+        Arbiter.Messages.AdmiralNotifier.pipeline_failed(snap, state.mr_ref)
+      end)
+    end
+
+    %{state | last_pipeline: current_pipeline}
+  end
+
+  defp watch_pipeline_from_workspace(nil), do: false
+
+  defp watch_pipeline_from_workspace(%Arbiter.Beads.Workspace{} = ws),
+    do: Arbiter.Beads.Workspace.watch_pipeline?(ws)
+
+  defp watch_pipeline_from_workspace(_), do: false
 
   # Watchdog: bd-66ey1o / bd-akr4il. After `:max_polls` consecutive non-terminal
   # polls, escalate to the Admiral and either:

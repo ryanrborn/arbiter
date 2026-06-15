@@ -289,6 +289,125 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:error, %Error{kind: :not_found, status: 404}} = Github.get(@ref)
     end
+
+    test "includes pipeline status from check-runs when all pass" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "head" => %{"sha" => "abc123"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/abc123/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"status" => "completed", "conclusion" => "success"},
+                %{"status" => "completed", "conclusion" => "success"}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %{pipeline: :success}} = Github.get(@ref)
+    end
+
+    test "pipeline is :failed when any check-run has a failure conclusion" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "head" => %{"sha" => "def456"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/def456/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"status" => "completed", "conclusion" => "success"},
+                %{"status" => "completed", "conclusion" => "failure"}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %{pipeline: :failed}} = Github.get(@ref)
+    end
+
+    test "pipeline is :running when any check-run is in_progress" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "head" => %{"sha" => "ghi789"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/ghi789/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"status" => "completed", "conclusion" => "success"},
+                %{"status" => "in_progress", "conclusion" => nil}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %{pipeline: :running}} = Github.get(@ref)
+    end
+
+    test "pipeline is nil when no check-runs exist" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "head" => %{"sha" => "jkl012"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/jkl012/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"check_runs" => []})
+        end
+      end)
+
+      assert {:ok, %{pipeline: nil}} = Github.get(@ref)
+    end
   end
 
   describe "merge/1" do
