@@ -2069,7 +2069,23 @@ defmodule Arbiter.Polecat do
                   |> Map.put(:merger_url, merger_url)
             }
 
-            start_warden(new_state, workspace, opts)
+            # Guard: MR already exists on the forge. If Warden startup raises
+            # or returns :ignore, log and continue — the polecat must still
+            # transition to :awaiting_review so the MR is not orphaned.
+            try do
+              start_warden(new_state, workspace, opts)
+            rescue
+              e ->
+                Logger.warning(
+                  "Polecat.open_mr: Warden startup raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+                )
+            catch
+              :exit, reason ->
+                Logger.warning(
+                  "Polecat.open_mr: Warden startup exit for bead=#{state.bead_id}: #{inspect(reason)}"
+                )
+            end
+
             {:ok, mr_ref, new_state}
 
           {:error, reason} ->
@@ -2182,6 +2198,13 @@ defmodule Arbiter.Polecat do
 
     case Arbiter.Polecat.Warden.start(warden_opts) do
       {:ok, _pid} ->
+        :ok
+
+      # DynamicSupervisor.start_child/2 admits :ignore per its typespec; today
+      # Warden.init/1 returns :ignore when polecat_pid is not a pid (defensive
+      # path). Treat as a no-op: the MR is already created and the Warden is
+      # simply not needed (matches pattern in start_refinery.ex).
+      :ignore ->
         :ok
 
       {:error, reason} ->
