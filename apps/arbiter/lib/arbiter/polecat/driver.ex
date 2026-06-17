@@ -140,9 +140,19 @@ defmodule Arbiter.Polecat.Driver do
   end
 
   def handle_info(:check_polecat, %{ticks: t, max_ticks: m} = state) when t >= m do
-    Logger.warning(
-      "Polecat.Driver (claude_driven) hit max_ticks=#{m} for bead=#{state.bead_id}; stopping"
-    )
+    # Even at max_ticks, close a completed polecat rather than leaving the bead
+    # stranded. This handles the race where the Warden calls Polecat.complete
+    # in the same window the Driver's tick budget expires (bd-d1jp4r).
+    case safe_polecat_state(state.polecat_pid) do
+      %{status: :completed} = polecat_state ->
+        close_bead(state.bead_id, should_close_upstream(polecat_state))
+        maybe_cleanup_worktree(state)
+
+      _ ->
+        Logger.warning(
+          "Polecat.Driver (claude_driven) hit max_ticks=#{m} for bead=#{state.bead_id}; stopping"
+        )
+    end
 
     {:stop, :normal, state}
   end
@@ -162,17 +172,22 @@ defmodule Arbiter.Polecat.Driver do
 
         {:stop, :normal, state}
 
-      %{status: status}
-      when status in [:idle, :running, :awaiting, :awaiting_tribunal, :awaiting_review] ->
-        # :awaiting_tribunal means the acolyte finished and a review gate is
-        # running a distinct reviewer over the diff; the Tribunal will report a
-        # verdict that either merges (→ :awaiting_review) or parks (→ :failed).
-        # :awaiting_review means the merger opened an MR (Direct merges
-        # immediately and parks here until its Warden's first poll). In both the
-        # terminal transition is owned elsewhere, so we keep waiting — the next
-        # status will be :completed or :failed.
+      %{status: status} when status in [:idle, :running, :awaiting] ->
+        # Active states — Claude is working; count against the tick budget.
         Process.send_after(self(), :check_polecat, state.interval_ms)
         {:noreply, %{state | ticks: state.ticks + 1}}
+
+      %{status: status} when status in [:awaiting_tribunal, :awaiting_review] ->
+        # :awaiting_tribunal — a distinct reviewer acolyte (Tribunal) is
+        # evaluating the diff; it will report a verdict that merges or parks.
+        # :awaiting_review — the Warden is polling the forge for merge/approval;
+        # it drives the terminal transition, not the Driver.
+        # Neither state is "Claude stuck" — they're externally owned handoffs.
+        # Don't burn tick budget here: the Warden (bd-d1jp4r) and Tribunal each
+        # have their own watchdogs; the Driver just needs to stay alive until
+        # Polecat.complete fires.
+        Process.send_after(self(), :check_polecat, state.interval_ms)
+        {:noreply, state}
 
       nil ->
         # Polecat snapshot unavailable (process likely dead) — the :DOWN

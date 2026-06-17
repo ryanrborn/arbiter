@@ -588,6 +588,75 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
+  # bd-d1jp4r: when the Warden merges a PR before the Refinery processes the
+  # {:polecat_done, bead_id} event, advance_status must close the bead on the
+  # first tick rather than stalling at :awaiting_approval forever. This happens
+  # because a merged GitHub PR returns status: :merged but no GitHub review
+  # (the Tribunal approved in-process), so approved: false and ci_clean: false.
+  describe "already-merged MR (bd-d1jp4r)" do
+    @tag workspace_config: @ws_github
+    test "tick closes the bead when the polled PR is already merged", %{
+      workspace: ws,
+      bead: bead
+    } do
+      pr_number = 91
+      test_pid = self()
+
+      # Simulate a bead whose Warden already merged the PR: the pr_ref is set
+      # on the bead and the GitHub API returns merged: true with no reviews.
+      {:ok, bead} = Ash.update(bead, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            # No GitHub reviews — Tribunal approved in-process only.
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(
+              pr_payload(%{
+                "number" => pr_number,
+                "state" => "closed",
+                "merged" => true,
+                "merged_at" => "2026-06-17T20:59:45Z",
+                "mergeStateStatus" => "UNKNOWN"
+              })
+            )
+
+          conn.method == "PUT" ->
+            send(test_pid, :unexpected_merge_call)
+            conn |> Plug.Conn.put_status(405) |> Req.Test.json(%{"message" => "already merged"})
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      {_pid, name} = start_refinery(ws)
+
+      # adopt_existing_mr enqueues without opening (bead already has pr_ref).
+      :ok = Refinery.enqueue(name, bead.id)
+
+      %{items: [item]} = Refinery.state(name)
+      assert item.status == :awaiting_approval
+      assert item.mr_ref == "##{pr_number}"
+
+      # On tick: adapter.get returns status: :merged → close bead, no merge API call.
+      :ok = Refinery.tick(name)
+
+      refute_received :unexpected_merge_call, "adapter.merge should NOT be called for already-merged PR"
+
+      # Item is removed (poll_all prunes :done items).
+      %{items: items} = Refinery.state(name)
+      assert items == []
+
+      reloaded = Ash.get!(Issue, bead.id)
+      assert reloaded.status == :closed
+    end
+  end
+
   describe "merge_method mapping" do
     @tag workspace_config: @ws_github_squash
     test "merge_method=squash → adapter sends squash", %{workspace: ws, bead: bead} do
