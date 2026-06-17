@@ -29,6 +29,12 @@ config :arbiter, :auto_start_refineries, false
 # dir of their own.
 config :arbiter, :acolyte_isolate_config, false
 
+# Arbiter.MCP (bd-dem49g): the server stays enabled (Plug tests exercise it), but
+# per-spawn `.mcp.json` injection into worktrees is off by default so existing
+# Sling tests don't write config files or mint tokens. Tests that exercise
+# injection flip `inject_config: true` themselves.
+config :arbiter, Arbiter.MCP, inject_config: false
+
 # Durable per-run transcript root, isolated under tmp so the suite never
 # writes into a real data dir. Tests that assert on transcripts override this
 # per-test with a unique tmp dir.

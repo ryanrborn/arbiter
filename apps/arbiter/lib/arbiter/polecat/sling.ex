@@ -770,6 +770,11 @@ defmodule Arbiter.Polecat.Sling do
             {:error, :missing_worktree}
 
           path when is_binary(path) ->
+            # Inject the per-spawn MCP config (.mcp.json) into the worktree so
+            # the agent can read its bead / mailbox and write completion notes
+            # as typed tool calls. Best-effort: never blocks the spawn.
+            _ = maybe_write_mcp_config(bead, path, opts)
+
             with {:ok, session_opts} <-
                    build_agent_session_opts(bead, polecat_pid, path, opts),
                  {:ok, port} <- ClaudeSession.start(session_opts) do
@@ -907,6 +912,37 @@ defmodule Arbiter.Polecat.Sling do
       []
     end
   end
+
+  # Write the per-spawn Arbiter.MCP config into the worktree (bd-dem49g). Mints a
+  # narrow `:polecat`-tier scope token bound to this bead/rig/workspace and hands
+  # it to the agent-specific config adapter (Phase 1: Claude `.mcp.json`). The
+  # token *is* the polecat's capability — it can only read/progress its own bead.
+  #
+  # Gated by `Arbiter.MCP.inject_config?/0` (off in test by default) and fully
+  # best-effort: a missing signing secret or write failure is logged and swallowed
+  # so MCP config never blocks a sling.
+  defp maybe_write_mcp_config(%Issue{} = bead, worktree_path, opts) do
+    if Arbiter.MCP.inject_config?() do
+      token = Arbiter.MCP.Scope.mint_polecat(bead, Keyword.get(opts, :rig))
+
+      Arbiter.MCP.AgentConfig.write(mcp_provider(opts), worktree_path,
+        mcp_url: Arbiter.MCP.server_url(),
+        scope_token: token,
+        server_name: Arbiter.MCP.server_name()
+      )
+    else
+      :ok
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Arbiter.Polecat.Sling: MCP config injection failed: #{inspect(e)}")
+      :ok
+  end
+
+  # Phase 1 ships only the Claude config adapter; Gemini/Codex (Phase 3) will
+  # resolve from the routed agent type here.
+  defp mcp_provider(_opts), do: :claude
 
   defp load_workspace(%Issue{workspace_id: nil}), do: nil
 

@@ -133,6 +133,14 @@ defmodule ArbiterWeb.Router do
     post("/polecats/:bead_id/stop", PolecatController, :stop)
   end
 
+  # Arbiter.MCP — the in-process Model Context Protocol server for agent
+  # sessions. A single JSON-RPC-over-Streamable-HTTP endpoint; capability is the
+  # per-spawn scope token in the Authorization header, decoded in the plug. Not
+  # piped through `:api` so the plug owns content negotiation and auth itself.
+  scope "/mcp" do
+    forward("/", ArbiterWeb.MCP.Plug)
+  end
+
   # Enable LiveDashboard in development
   if Application.compile_env(:arbiter_web, :dev_routes) do
     # If you want to use the LiveDashboard in production, you should put
