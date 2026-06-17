@@ -79,6 +79,7 @@ defmodule Arbiter.Polecat.Sling do
           claude_command: [String.t()] | nil,
           cleanup_worktree: boolean(),
           model: String.t() | nil,
+          agent_type: atom() | nil,
           review: boolean(),
           security: map() | nil,
           security_mode: String.t() | atom() | nil,
@@ -712,12 +713,20 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Resolve the workspace's worker adapter so we probe the CLI that will
-  # actually be slung. A test `:agent_adapter` override wins (lets a test point
-  # the probe at a stub adapter without a workspace).
+  # actually be slung. Resolution order:
+  #   1. `:agent_adapter` test override — lets tests stub the adapter.
+  #   2. `:agent_type` explicit override — probe the forced provider.
+  #   3. Workspace default — `Agents.for_workspace` reads `agent.type`.
   defp preflight_adapter(_bead, workspace, opts) do
     case Keyword.get(opts, :agent_adapter) do
-      mod when is_atom(mod) and not is_nil(mod) -> mod
-      _ -> Agents.for_workspace(workspace)
+      mod when is_atom(mod) and not is_nil(mod) ->
+        mod
+
+      _ ->
+        case Keyword.get(opts, :agent_type) do
+          type when is_atom(type) and not is_nil(type) -> Agents.for_type(type)
+          _ -> Agents.for_workspace(workspace)
+        end
     end
   end
 
@@ -826,6 +835,7 @@ defmodule Arbiter.Polecat.Sling do
           bead
           |> Routing.choose(workspace, %{})
           |> apply_model_override(Keyword.get(opts, :model))
+          |> apply_agent_type_override(Keyword.get(opts, :agent_type))
 
         adapter = Agents.for_type(choice.type)
 
@@ -882,6 +892,17 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   defp apply_model_override(choice, _), do: choice
+
+  # A `:agent_type` opt on `Sling.sling/2` is an explicit per-dispatch provider
+  # override — the workspace may default to :claude but the caller wants :gemini
+  # (or vice versa). Splatting the type onto the routed choice lets it win over
+  # both the workspace default and any routing rule while keeping the rest of the
+  # routing config (model tier, thinking, etc.) intact.
+  defp apply_agent_type_override(choice, type) when is_atom(type) and not is_nil(type) do
+    %{choice | type: type}
+  end
+
+  defp apply_agent_type_override(choice, _), do: choice
 
   # Optional per-dispatch (per-bead) security override. Accepts a raw map under
   # the `:security` sling opt (same shape as `workspace.config["agent"]["security"]`)
