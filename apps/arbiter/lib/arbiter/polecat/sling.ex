@@ -932,7 +932,7 @@ defmodule Arbiter.Polecat.Sling do
           depth: Keyword.get(opts, :depth, 0)
         )
 
-      Arbiter.MCP.AgentConfig.write(mcp_provider(opts), worktree_path,
+      Arbiter.MCP.AgentConfig.write(resolve_mcp_provider(bead, opts), worktree_path,
         mcp_url: Arbiter.MCP.server_url(),
         scope_token: token,
         server_name: Arbiter.MCP.server_name()
@@ -947,9 +947,19 @@ defmodule Arbiter.Polecat.Sling do
       :ok
   end
 
-  # Phase 1 ships only the Claude config adapter; Gemini/Codex (Phase 3) will
-  # resolve from the routed agent type here.
-  defp mcp_provider(_opts), do: :claude
+  # Phase 3: resolve from the bead's workspace agent type. Falls back to
+  # :claude on any error so a misconfigured workspace never blocks a sling.
+  defp resolve_mcp_provider(%Issue{} = bead, opts) do
+    adapter =
+      case Keyword.get(opts, :agent_adapter) do
+        mod when is_atom(mod) and not is_nil(mod) -> mod
+        _ -> Agents.for_workspace(load_workspace(bead))
+      end
+
+    String.to_existing_atom(adapter.provider())
+  rescue
+    _ -> :claude
+  end
 
   defp load_workspace(%Issue{workspace_id: nil}), do: nil
 

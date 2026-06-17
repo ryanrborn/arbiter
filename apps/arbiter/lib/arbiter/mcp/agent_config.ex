@@ -19,8 +19,12 @@ defmodule Arbiter.MCP.AgentConfig do
 
   @callback write_mcp_config(worktree :: Path.t(), opts :: keyword()) :: :ok | {:error, term()}
 
-  # Provider atom → adapter module. Phase 1: Claude only.
-  @adapters %{claude: Arbiter.MCP.AgentConfig.Claude}
+  # Provider atom → adapter module. Phase 1: Claude. Phase 3: Gemini, Codex.
+  @adapters %{
+    claude: Arbiter.MCP.AgentConfig.Claude,
+    gemini: Arbiter.MCP.AgentConfig.Gemini,
+    codex: Arbiter.MCP.AgentConfig.Codex
+  }
 
   @doc """
   Write the MCP config for `provider` into `worktree`. Returns `:ok` (including
