@@ -17,11 +17,25 @@ defmodule Arbiter.MCP.CatalogTest do
       assert "workspace_show" in names
       assert "convoy_status" in names
       refute "bead_ready" in names
+
+      # Phase 2 mutating tools are coordinator-only; never visible to a polecat.
+      for tool <- ~w(bead_create bead_update bead_close dep_add dep_remove convoy_create
+                     convoy_add_member convoy_close convoy_list polecat_sling polecat_message
+                     usage_summarize) do
+        refute tool in names
+      end
     end
 
-    test "the coordinator tier sees every tool" do
+    test "the coordinator tier sees every tool, including the Phase 2 mutating tools" do
       names = @coordinator |> Catalog.visible() |> Enum.map(& &1.name)
       assert "bead_ready" in names
+
+      for tool <- ~w(bead_create bead_update bead_close dep_add dep_remove convoy_create
+                     convoy_add_member convoy_close convoy_list polecat_sling polecat_message
+                     usage_summarize) do
+        assert tool in names
+      end
+
       assert length(names) == length(Catalog.all())
     end
 

@@ -3,12 +3,17 @@ defmodule Arbiter.MCP.ToolsTest do
 
   alias Arbiter.Beads.Convoy
   alias Arbiter.Beads.ConvoyMembership
+  alias Arbiter.Beads.Dependency
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
+  alias Arbiter.MCP
   alias Arbiter.MCP.Catalog
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.Messages.Message
+  alias Arbiter.Polecat
+
+  require Ash.Query
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-tools-ws", prefix: "mcp"})
@@ -151,6 +156,253 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:error, {:unauthorized, _}} =
                Tools.bead_update_progress(ctx.polecat, %{"id" => other.id, "notes" => "x"})
+    end
+  end
+
+  # ---- Phase 2: coordinator-only mutating tools --------------------------
+
+  describe "bead_create/2" do
+    test "a coordinator creates a bead forced into its own workspace", ctx do
+      assert {:ok, data} =
+               Tools.bead_create(ctx.coordinator, %{
+                 "title" => "new work",
+                 "priority" => 1,
+                 "issue_type" => "bug"
+               })
+
+      assert data.title == "new work"
+      assert data.priority == 1
+      assert data.issue_type == "bug"
+      assert data.status == "open"
+      assert data.workspace_id == ctx.ws.id
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.ws.id
+    end
+
+    test "requires a title", ctx do
+      assert {:error, {:invalid, _}} = Tools.bead_create(ctx.coordinator, %{"priority" => 1})
+    end
+
+    test "rejects an unknown enum value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.bead_create(ctx.coordinator, %{"title" => "x", "issue_type" => "nope"})
+
+      assert msg =~ "issue_type"
+    end
+  end
+
+  describe "bead_update/2" do
+    test "a coordinator updates fields on a bead in its workspace", ctx do
+      assert {:ok, data} =
+               Tools.bead_update(ctx.coordinator, %{
+                 "id" => ctx.bead.id,
+                 "status" => "in_progress",
+                 "priority" => 0
+               })
+
+      assert data.status == "in_progress"
+      assert data.priority == 0
+    end
+
+    test "cannot close a bead through bead_update (closed status rejected)", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.bead_update(ctx.coordinator, %{"id" => ctx.bead.id, "status" => "closed"})
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.bead.id)
+      assert reloaded.status == :open
+    end
+
+    test "requires at least one field to update", ctx do
+      assert {:error, {:invalid, _}} = Tools.bead_update(ctx.coordinator, %{"id" => ctx.bead.id})
+    end
+
+    test "cannot update a bead in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bu-other", prefix: "buo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.bead_update(ctx.coordinator, %{"id" => foreign.id, "notes" => "x"})
+    end
+  end
+
+  describe "bead_close/2" do
+    test "a coordinator closes a bead in its workspace", ctx do
+      assert {:ok, data} =
+               Tools.bead_close(ctx.coordinator, %{"id" => ctx.bead.id, "reason" => "done"})
+
+      assert data.status == "closed"
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.bead.id)
+      assert reloaded.status == :closed
+    end
+  end
+
+  describe "dep_add/2 + dep_remove/2" do
+    setup ctx do
+      {:ok, other} = Ash.create(Issue, %{title: "blocker", workspace_id: ctx.ws.id})
+      {:ok, other: other}
+    end
+
+    test "adds and removes a dependency edge between beads in the workspace", ctx do
+      assert {:ok, dep} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.bead.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "depends_on"
+               })
+
+      assert dep.from_issue_id == ctx.bead.id
+      assert dep.to_issue_id == ctx.other.id
+      assert dep.type == "depends_on"
+
+      assert {:ok, %{removed: 1}} =
+               Tools.dep_remove(ctx.coordinator, %{
+                 "from_issue_id" => ctx.bead.id,
+                 "to_issue_id" => ctx.other.id
+               })
+
+      assert Dependency |> Ash.read!() |> Enum.empty?()
+    end
+
+    test "rejects an unknown dependency type", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.bead.id,
+                 "to_issue_id" => ctx.other.id,
+                 "type" => "nonsense"
+               })
+    end
+
+    test "cannot point an edge at a bead in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "dep-other", prefix: "dpo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => ctx.bead.id,
+                 "to_issue_id" => foreign.id,
+                 "type" => "blocks"
+               })
+    end
+
+    test "dep_remove is idempotent (absent edge → removed: 0)", ctx do
+      assert {:ok, %{removed: 0}} =
+               Tools.dep_remove(ctx.coordinator, %{
+                 "from_issue_id" => ctx.bead.id,
+                 "to_issue_id" => ctx.other.id
+               })
+    end
+  end
+
+  describe "convoy_create/2 + convoy_add_member/2 + convoy_close/2 + convoy_list/2" do
+    test "create, attach a member, list, and close a convoy", ctx do
+      assert {:ok, convoy} =
+               Tools.convoy_create(ctx.coordinator, %{
+                 "title" => "release",
+                 "lifecycle" => "owned"
+               })
+
+      assert convoy.title == "release"
+      assert convoy.lifecycle == "owned"
+      assert convoy.total_issues == 0
+
+      assert {:ok, with_member} =
+               Tools.convoy_add_member(ctx.coordinator, %{
+                 "id" => convoy.id,
+                 "issue_id" => ctx.bead.id
+               })
+
+      assert with_member.total_issues == 1
+
+      assert {:ok, %{convoys: convoys}} = Tools.convoy_list(ctx.coordinator, %{})
+      assert Enum.any?(convoys, &(&1.id == convoy.id))
+
+      assert {:ok, closed} = Tools.convoy_close(ctx.coordinator, %{"id" => convoy.id})
+      assert closed.status == "closed"
+    end
+
+    test "convoy_list does not leak convoys from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "cv-other", prefix: "cvo"})
+      {:ok, _foreign} = Ash.create(Convoy, %{title: "foreign cv", workspace_id: other_ws.id})
+
+      assert {:ok, %{convoys: convoys}} = Tools.convoy_list(ctx.coordinator, %{})
+      refute Enum.any?(convoys, &(&1.title == "foreign cv"))
+    end
+  end
+
+  describe "polecat_message/2" do
+    test "a coordinator messages a bead's mailbox, scoped to its workspace", ctx do
+      assert {:ok, msg} =
+               Tools.polecat_message(ctx.coordinator, %{
+                 "bead_id" => ctx.bead.id,
+                 "body" => "pick this up next"
+               })
+
+      assert msg.kind == "direction"
+      assert msg.to_ref == ctx.bead.id
+
+      # It lands in the bead's inbox.
+      [inbox_msg] = Message.inbox(ctx.bead.id, workspace_id: ctx.ws.id)
+      assert inbox_msg.body == "pick this up next"
+    end
+
+    test "requires a recipient and a body", ctx do
+      assert {:error, {:invalid, _}} =
+               Tools.polecat_message(ctx.coordinator, %{"bead_id" => ctx.bead.id})
+    end
+  end
+
+  describe "usage_summarize/2" do
+    test "requires a valid `by` grouping", ctx do
+      assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{})
+      assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{"by" => "nope"})
+    end
+
+    test "returns rollups for a valid grouping (empty ledger → no rows)", ctx do
+      assert {:ok, %{by: "bead", rollups: rollups, count: 0}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "bead"})
+
+      assert rollups == []
+    end
+  end
+
+  describe "polecat_sling/2 (sling-recursion guardrail, §4.3)" do
+    test "refuses a coordinator scope without can_sling", ctx do
+      no_sling = %{ctx.coordinator | can_sling: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.polecat_sling(no_sling, %{"bead_id" => ctx.bead.id})
+    end
+
+    test "refuses once the depth limit is reached", ctx do
+      at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.polecat_sling(at_limit, %{"bead_id" => ctx.bead.id})
+
+      assert msg =~ "depth"
+    end
+
+    test "cannot sling a bead in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "sl-other", prefix: "slo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.polecat_sling(ctx.coordinator, %{"bead_id" => foreign.id})
+    end
+
+    test "parks the bead in_progress and reports the child depth", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "to sling", workspace_id: ctx.ws.id})
+
+      assert {:ok, data} =
+               Tools.polecat_sling(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
+
+      assert data.bead.status == "in_progress"
+      assert data.claude_started == false
+      assert data.depth == ctx.coordinator.depth + 1
+
+      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
     end
   end
 
