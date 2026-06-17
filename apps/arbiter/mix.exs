@@ -48,6 +48,11 @@ defmodule Arbiter.MixProject do
       {:ecto_sqlite3, "~> 0.17"},
       {:jason, "~> 1.2"},
 
+      # Signed, expiring scope tokens for the Arbiter.MCP server (bd-dem49g).
+      # Same primitive Phoenix.Token wraps; depended on directly so the domain
+      # app mints/verifies tokens without reaching into the web layer.
+      {:plug_crypto, "~> 2.0"},
+
       # Periodic / cron-style scheduling (replaces gt's daemon convoy patrol etc.)
       {:quantum, "~> 3.5"},
 
