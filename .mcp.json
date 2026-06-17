@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "arbiter": {
+      "headers": {
+        "Authorization": "Bearer SFMyNTY.g2gDdAAAAAZ3BWRlcHRoYQB3DHdvcmtzcGFjZV9pZG0AAAAkMDE5ZWE5MjItZWU2Ny03YTI1LWFjN2UtNjU4Y2FlY2M0NGJldwdiZWFkX2lkbQAAAAliZC03enQ3dXh3A3JpZ20AAAAHYXJiaXRlcncEdGllcncHcG9sZWNhdHcJY2FuX3NsaW5ndwVmYWxzZW4GAPc6m9eeAWIAAVGA.AaYHktzMEv5Rzv7spP9d_CUOzjPucnjrCt1DFkaShPE"
+      },
+      "type": "http",
+      "url": "http://127.0.0.1:4848/mcp"
+    }
+  }
+}
