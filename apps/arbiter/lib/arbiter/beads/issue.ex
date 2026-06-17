@@ -136,6 +136,10 @@ defmodule Arbiter.Beads.Issue do
       # tracker. Best-effort; no-op when status didn't change or no tracker.
       change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
+      # Propagate title/description changes to the linked external tracker.
+      # Best-effort; no-op when neither field changed or no tracker.
+      change {Arbiter.Beads.Issue.Changes.SyncFields, []}
+
       change after_action(fn _, issue, _ ->
                Arbiter.Beads.Issue.broadcast_lifecycle(:updated, issue)
                {:ok, issue}

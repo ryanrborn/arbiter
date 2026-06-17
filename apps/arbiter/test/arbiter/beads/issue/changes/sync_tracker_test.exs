@@ -365,22 +365,45 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
       assert payload["labels"] == ["in progress"]
     end
 
-    test "a non-status :update does NOT call the adapter" do
-      forwarding_stub()
+    test "a pure status-only :update (no field changes) does NOT call the adapter for field sync" do
+      test_pid = self()
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "open", "labels" => []})
+
+          "PATCH" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            send(test_pid, {:status_patch, decoded})
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36})
+        end
+      end)
+
       ws = github_workspace()
 
       {:ok, issue} =
         Ash.create(Issue, %{
-          title: "title-edit-only",
+          title: "status-only-update",
           tracker_type: :github,
           tracker_ref: @ref,
           workspace_id: ws.id
         })
 
-      assert {:ok, _updated} = Ash.update(issue, %{title: "new title"}, action: :update)
+      assert {:ok, updated} = Ash.update(issue, %{status: :in_progress}, action: :update)
+      assert updated.status == :in_progress
 
-      refute_receive {:github, _, _}
-      refute_receive {:github, _, _, _}
+      # SyncTracker fires for the status change; no separate field-sync PATCH for title/description.
+      assert_receive {:status_patch, payload}
+      assert Map.has_key?(payload, "state")
+      refute Map.has_key?(payload, "title")
+      refute Map.has_key?(payload, "body")
     end
   end
 
