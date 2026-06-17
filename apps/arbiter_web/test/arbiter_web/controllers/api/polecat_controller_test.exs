@@ -130,15 +130,20 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
   end
 
   describe "POST /api/polecats/sling" do
-    # Regression: a dry sling (no `with_claude`) used to start a Driver in
-    # workflow mode, which raced the no-op `Work` workflow to completion and
-    # closed the bead in ~500ms without any work being done. A bare sling must
-    # now park the bead in `:in_progress` for a hand to attach.
-    test "dry sling (no with_claude) parks the bead and does NOT close it",
+    # --no-agent preserves the manual-attach path: the bead parks in
+    # `:in_progress` with no Driver, so the no-op Work workflow never races
+    # to a bogus `:closed`. Regression against the old dry-sling footgun.
+    test "--no-agent parks the bead and does NOT close it",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "dry-sling-me", workspace_id: ws.id})
 
-      conn = post(conn, ~p"/api/polecats/sling", %{"bead_id" => bead.id, "rig" => "test/rig"})
+      conn =
+        post(conn, ~p"/api/polecats/sling", %{
+          "bead_id" => bead.id,
+          "rig" => "test/rig",
+          "no_agent" => true
+        })
+
       body = json_response(conn, 201)
 
       assert body["bead"]["id"] == bead.id
