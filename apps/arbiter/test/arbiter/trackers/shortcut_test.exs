@@ -244,6 +244,57 @@ defmodule Arbiter.Trackers.ShortcutTest do
     end
   end
 
+  describe "add_remote_link/3" do
+    test "POSTs an external link with the url and description" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/api/v3/stories/#{@ref}/external_links"
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert decoded["url"] == "https://github.com/example/pr/42"
+        assert decoded["description"] == "PR 42 (bead bd-12345)"
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => "link-1", "url" => "https://github.com/example/pr/42"})
+      end)
+
+      assert :ok =
+               Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42 (bead bd-12345)")
+    end
+
+    test "404: returns {:error, %Error{kind: :not_found}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"message" => "Story not found."})
+      end)
+
+      assert {:error, %Error{kind: :not_found, status: 404}} =
+               Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42")
+    end
+
+    test "401: returns {:error, %Error{kind: :unauthenticated}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"message" => "Unauthorized"})
+      end)
+
+      assert {:error, %Error{kind: :unauthenticated, status: 401}} =
+               Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42")
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} =
+               Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42")
+    end
+  end
+
   describe "link_for/1" do
     test "builds the app.shortcut.com story URL" do
       assert Shortcut.link_for(@ref) == "https://app.shortcut.com/story/#{@ref}"
