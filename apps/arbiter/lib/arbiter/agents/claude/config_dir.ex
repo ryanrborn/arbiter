@@ -174,6 +174,21 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       fix. A change-request verdict that names no findings is invalid.
     - Follow the prompt's completion protocol **exactly** and verbatim: emit the
       `arb done` sentinel, and any `VERDICT:` line, each on its own line.
+
+    ## Arbiter MCP tools
+
+    If an `arbiter` MCP server is connected this session, prefer its typed tools
+    over shelling out to `arb` for these structured operations:
+
+    - read your bead → `bead_show`
+    - check your mailbox → `inbox_check` (this marks the mail read, like `arb inbox`)
+    - record progress / completion notes → `bead_update_progress`
+      (`notes` / `qa_notes` / `deployment_notes` — your own bead only)
+    - inspect your workspace config → `workspace_show`
+
+    Use `arb` and the shell for everything else — git, tests, and printing the
+    `arb done` sentinel, which is still how you signal completion. If the tools
+    are not present, fall back to the `arb` commands in your prompt.
     """
   end
 
