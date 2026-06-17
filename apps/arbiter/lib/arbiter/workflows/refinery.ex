@@ -468,6 +468,15 @@ defmodule Arbiter.Workflows.Refinery do
         restored = restore_after_resolution(state, item)
         advance_status(state, restored, mr_state)
 
+      # MR was already merged externally (e.g. the Warden merged it for a
+      # Tribunal-approved bead before the Refinery processed the polecat_done
+      # event). Close the bead directly without re-attempting adapter.merge/1
+      # — that call would fail on an already-closed PR. bd-d1jp4r.
+      mr_state.status == :merged ->
+        item = %{item | status: :done}
+        state = close_bead_and_finalize(state, item)
+        {item, state}
+
       item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->
         try_merge(state, %{item | status: :ready_to_merge})
 
