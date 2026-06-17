@@ -246,6 +246,98 @@ defmodule Arbiter.Polecat.DriverTest do
       {:ok, reloaded} = Ash.get(Issue, bead.id)
       assert reloaded.status == :in_progress
     end
+
+    # bd-d1jp4r: ticks must not consume budget while the polecat is parked at
+    # :awaiting_review (Warden) or :awaiting_tribunal (Tribunal). A long acolyte
+    # run + review gate was exhausting the 30-minute tick budget before the
+    # Warden called Polecat.complete, leaving the bead stranded at :in_progress.
+    test "does not count ticks while polecat is :awaiting_review", %{ws: ws} do
+      alias Arbiter.Test.StubMerger
+      StubMerger.reset()
+
+      {:ok, bead} = Ash.create(Issue, %{title: "cd-ar-freeze", workspace_id: ws.id})
+
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(bead, %{status: :in_progress})
+
+      # max_ticks: 2 — would expire after 2 cycles in :running, but should NOT
+      # expire while the polecat is parked at :awaiting_review.
+      {:ok, driver_pid} =
+        Driver.start(
+          bead_id: bead.id,
+          polecat_pid: polecat_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          max_ticks: 2,
+          claude_driven: true
+        )
+
+      # Advance polecat to :running then open an MR to park it at :awaiting_review.
+      # The StubMerger opens synchronously and the Warden polls on a long interval
+      # so it won't call Polecat.complete during this test.
+      :ok = Polecat.advance(polecat_pid, :running)
+
+      {:ok, _mr_ref} =
+        Polecat.open_mr(polecat_pid, "my-branch", "title", "body", %{
+          adapter: StubMerger,
+          interval_ms: 100_000,
+          max_polls: :infinity
+        })
+
+      # Let the driver run several more cycles while status is :awaiting_review.
+      # With the fix, ticks don't increment here, so max_ticks: 2 won't fire.
+      Process.sleep(60)
+      assert Process.alive?(driver_pid), "driver should still be alive (ticks frozen at :awaiting_review)"
+
+      # Now simulate the Warden calling Polecat.complete.
+      :ok = Polecat.complete(polecat_pid, :merged)
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      # Bead must be closed — driver noticed :completed and closed it.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :closed
+    end
+
+    # bd-d1jp4r: driver must close the bead even when max_ticks fires at the
+    # exact moment the polecat transitions to :completed (the Warden race).
+    test "closes the bead at max_ticks if polecat is already :completed", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "cd-maxtick-done", workspace_id: ws.id})
+
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(bead, %{status: :in_progress})
+
+      # Complete the polecat BEFORE the driver even starts — simulates the Warden
+      # completing the polecat in the same moment max_ticks fires.
+      :ok = Polecat.advance(polecat_pid, :running)
+      :ok = Polecat.complete(polecat_pid, :merged)
+
+      # Start the driver with max_ticks: 0 so it fires the max_ticks guard on
+      # the very first check_polecat message.
+      {:ok, driver_pid} =
+        Driver.start(
+          bead_id: bead.id,
+          polecat_pid: polecat_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          max_ticks: 0,
+          claude_driven: true
+        )
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      # Even though max_ticks was hit, bead must be closed because polecat was :completed.
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :closed
+    end
   end
 
   describe "cleanup_worktree opt" do
