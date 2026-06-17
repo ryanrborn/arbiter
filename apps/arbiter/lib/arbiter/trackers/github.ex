@@ -108,6 +108,26 @@ defmodule Arbiter.Trackers.GitHub do
   end
 
   @impl true
+  def add_remote_link(ref, url, title)
+      when is_binary(ref) and is_binary(url) and is_binary(title) do
+    with {:ok, _cfg} <- Config.resolve() do
+      case list_comments(ref) do
+        {:ok, comments} ->
+          case Enum.find(comments, &String.contains?(&1["body"] || "", url)) do
+            nil ->
+              post_remote_link_comment(ref, url, title)
+
+            _existing ->
+              :ok
+          end
+
+        {:error, _} ->
+          post_remote_link_comment(ref, url, title)
+      end
+    end
+  end
+
+  @impl true
   def parse_ref(s) when is_binary(s) do
     cond do
       String.starts_with?(s, "github:") ->
@@ -394,6 +414,11 @@ defmodule Arbiter.Trackers.GitHub do
       path = "/repos/#{cfg.owner}/#{cfg.repo}/issues/#{ref}/comments"
       request(cfg, :post, path, json: %{"body" => body}) |> expect_ok()
     end
+  end
+
+  defp post_remote_link_comment(ref, url, title) when is_binary(ref) and is_binary(url) and is_binary(title) do
+    body = "**Remote Link:** [#{title}](#{url})"
+    post_comment(ref, body)
   end
 
   @doc """

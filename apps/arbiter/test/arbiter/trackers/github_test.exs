@@ -767,4 +767,104 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:error, %Error{kind: :config_missing}} = GitHub.search_by_title("test")
     end
   end
+
+  describe "add_remote_link/3" do
+    test "POSTs a comment with the PR link when no prior comment exists" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123 (bead bd-12345)"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, [])
+
+          {"POST", _} ->
+            assert conn.request_path == "#{issue_path()}/comments"
+
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert String.contains?(decoded["body"], url)
+            assert String.contains?(decoded["body"], title)
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 1, "body" => decoded["body"]})
+        end
+      end)
+
+      assert :ok = GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "skips posting when a comment with the same URL already exists (idempotent)" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123 (bead bd-12345)"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, [
+              %{"id" => 1, "body" => "**Remote Link:** [PR 123 (bead bd-12345)](#{url})"}
+            ])
+
+          {"POST", _} ->
+            flunk("must not POST when comment with this URL already exists")
+        end
+      end)
+
+      assert :ok = GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "returns :ok even if comment list fetch fails (graceful degradation)" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "server error"})
+
+          {"POST", _} ->
+            assert conn.request_path == "#{issue_path()}/comments"
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 1})
+        end
+      end)
+
+      assert :ok = GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "returns error when comment post fails" do
+      url = "https://github.com/#{@owner}/#{@repo}/pull/123"
+      title = "PR 123"
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", _} ->
+            Req.Test.json(conn, [])
+
+          {"POST", _} ->
+            conn
+            |> Plug.Conn.put_status(403)
+            |> Req.Test.json(%{"message" => "Forbidden"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :forbidden, status: 403}} =
+               GitHub.add_remote_link(@ref, url, title)
+    end
+
+    test "returns error when config is missing" do
+      Config.clear()
+
+      url = "https://github.com/owner/repo/pull/123"
+      title = "PR 123"
+
+      assert {:error, %Error{kind: :config_missing}} =
+               GitHub.add_remote_link(@ref, url, title)
+    end
+  end
 end
