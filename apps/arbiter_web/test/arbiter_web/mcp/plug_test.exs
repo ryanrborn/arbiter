@@ -136,6 +136,57 @@ defmodule ArbiterWeb.MCP.PlugTest do
     end
   end
 
+  describe "Phase 2 coordinator mutations" do
+    test "a coordinator creates a bead end-to-end via tools/call", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "bead_create",
+            "arguments" => %{"title" => "via mcp", "priority" => 1}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["title"] == "via mcp"
+      assert result["structuredContent"]["workspace_id"] == ctx.ws.id
+    end
+
+    test "a polecat cannot call a coordinator-only mutating tool", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.polecat_token,
+          req("tools/call", %{
+            "name" => "bead_create",
+            "arguments" => %{"title" => "nope"}
+          })
+        )
+
+      assert json_response(conn, 200)["error"]["code"] == -32_003
+    end
+
+    test "polecat_sling without can_sling is a JSON-RPC not-permitted error", ctx do
+      no_sling = Scope.mint_coordinator(ctx.ws.id, can_sling: false)
+
+      conn =
+        rpc(
+          ctx.conn,
+          no_sling,
+          req("tools/call", %{
+            "name" => "polecat_sling",
+            "arguments" => %{"bead_id" => ctx.bead.id}
+          })
+        )
+
+      body = json_response(conn, 200)
+      assert body["error"]["code"] == -32_003
+      assert body["error"]["message"] =~ "can_sling"
+    end
+  end
+
   describe "protocol edges" do
     test "an unknown method is method-not-found", ctx do
       conn = rpc(ctx.conn, ctx.polecat_token, req("frobnicate"))

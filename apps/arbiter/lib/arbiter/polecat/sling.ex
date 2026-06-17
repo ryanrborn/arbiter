@@ -84,7 +84,8 @@ defmodule Arbiter.Polecat.Sling do
           security_mode: String.t() | atom() | nil,
           preflight: boolean(),
           probe_command: [String.t()] | nil,
-          agent_adapter: module() | nil
+          agent_adapter: module() | nil,
+          depth: non_neg_integer()
         ]
 
   @type sling_result :: %{
@@ -923,7 +924,13 @@ defmodule Arbiter.Polecat.Sling do
   # so MCP config never blocks a sling.
   defp maybe_write_mcp_config(%Issue{} = bead, worktree_path, opts) do
     if Arbiter.MCP.inject_config?() do
-      token = Arbiter.MCP.Scope.mint_polecat(bead, Keyword.get(opts, :rig))
+      # `:depth` carries the sling-recursion depth (Phase 2 guardrail): a polecat
+      # slung *by a coordinator* via `polecat_sling` is minted one level deeper, so
+      # a chain of dispatches is tracked. Defaults to 0 for a plain operator sling.
+      token =
+        Arbiter.MCP.Scope.mint_polecat(bead, Keyword.get(opts, :rig),
+          depth: Keyword.get(opts, :depth, 0)
+        )
 
       Arbiter.MCP.AgentConfig.write(mcp_provider(opts), worktree_path,
         mcp_url: Arbiter.MCP.server_url(),
