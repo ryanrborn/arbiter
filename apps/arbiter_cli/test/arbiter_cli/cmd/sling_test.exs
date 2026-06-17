@@ -122,5 +122,43 @@ defmodule ArbiterCli.Cmd.SlingTest do
       assert_receive {:body, body}
       refute Map.has_key?(body, "model")
     end
+
+    test "--with-gemini sends with_gemini: true in the POST body" do
+      stub_sling_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "--with-gemini"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["with_gemini"] == true
+      refute Map.has_key?(body, "with_claude")
+      refute Map.has_key?(body, "no_agent")
+    end
+
+    test "--no-agent sends no_agent: true in the POST body" do
+      stub_sling_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "--no-agent"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["no_agent"] == true
+      refute Map.has_key?(body, "with_claude")
+      refute Map.has_key?(body, "with_gemini")
+    end
+
+    test "bare sling (no worker flag) sends no worker key — server uses workspace agent.type" do
+      stub_sling_capture()
+
+      {_out, _err, code} = capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      refute Map.has_key?(body, "with_claude")
+      refute Map.has_key?(body, "with_gemini")
+      refute Map.has_key?(body, "no_agent")
+    end
   end
 end
