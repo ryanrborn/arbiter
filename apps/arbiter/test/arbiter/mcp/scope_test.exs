@@ -20,6 +20,11 @@ defmodule Arbiter.MCP.ScopeTest do
       token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"})
       assert {:ok, %Scope{rig: nil}} = Scope.from_token(token)
     end
+
+    test "carries a depth claim (the Phase 2 sling-recursion guardrail)" do
+      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard", depth: 2)
+      assert {:ok, %Scope{depth: 2}} = Scope.from_token(token)
+    end
   end
 
   describe "mint_coordinator/2 + from_token/1" do

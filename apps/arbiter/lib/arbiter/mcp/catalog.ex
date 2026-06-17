@@ -20,6 +20,23 @@ defmodule Arbiter.MCP.Catalog do
   | `inbox_check` | polecat, coordinator | `Messages.inbox/2` + `mark_read` |
   | `workspace_show` | polecat, coordinator | `Ash.get(Workspace, id)` |
   | `bead_update_progress` | polecat, coordinator | `Ash.update(issue, …, action: :update)` |
+
+  ## Phase 2 catalog (coordinator-only mutating tools)
+
+  | Tool | Tiers | Backs onto |
+  |---|---|---|
+  | `bead_create` | coordinator | `Ash.create(Issue, …)` |
+  | `bead_update` | coordinator | `Ash.update(issue, …, action: :update)` |
+  | `bead_close` | coordinator | `Ash.update(issue, …, action: :close)` |
+  | `dep_add` | coordinator | `Ash.create(Dependency, …)` |
+  | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
+  | `convoy_list` | coordinator | `Ash.read(Convoy)` + calcs |
+  | `convoy_create` | coordinator | `Ash.create(Convoy, …)` |
+  | `convoy_add_member` | coordinator | `ConvoyMembership.:add` |
+  | `convoy_close` | coordinator | `Ash.update(convoy, …, action: :close)` |
+  | `polecat_sling` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` |
+  | `polecat_message` | coordinator | `Messages.send_mail/1` |
+  | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   """
 
   alias Arbiter.MCP.Scope
@@ -44,6 +61,7 @@ defmodule Arbiter.MCP.Catalog do
           | {:tool_error, String.t()}
 
   @both [:polecat, :coordinator]
+  @coordinator [:coordinator]
 
   @tools [
     %{
@@ -139,6 +157,255 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.bead_update_progress/2
+    },
+
+    # ---- Phase 2: coordinator-only mutating tools ----
+    %{
+      name: "bead_create",
+      tiers: @coordinator,
+      description:
+        "Create a bead in the workspace. `title` is required; optional `description`, " <>
+          "`acceptance`, `priority`, `difficulty`, `issue_type`, `assignee`, `tracker_type`, …. " <>
+          "The bead is always created in the coordinator's own workspace.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "title" => %{"type" => "string", "description" => "Bead title (required)."},
+          "description" => %{"type" => "string", "description" => "Markdown body."},
+          "acceptance" => %{"type" => "string", "description" => "Markdown acceptance criteria."},
+          "notes" => %{"type" => "string"},
+          "qa_notes" => %{"type" => "string"},
+          "deployment_notes" => %{"type" => "string"},
+          "priority" => %{
+            "type" => "integer",
+            "description" => "0 (P0, highest) .. 4 (P4, lowest). Default 2."
+          },
+          "difficulty" => %{"type" => "integer", "description" => "0 (D0) .. 4 (D4)."},
+          "issue_type" => %{
+            "type" => "string",
+            "description" => "task | bug | feature | epic | chore | decision."
+          },
+          "assignee" => %{"type" => "string"},
+          "tracker_type" => %{
+            "type" => "string",
+            "description" => "none | jira | shortcut | linear | github."
+          },
+          "tracker_ref" => %{"type" => "string"},
+          "target_branch" => %{"type" => "string"}
+        },
+        "required" => ["title"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.bead_create/2
+    },
+    %{
+      name: "bead_update",
+      tiers: @coordinator,
+      description:
+        "Update a bead in the workspace (status / priority / title / …). To close a bead use " <>
+          "`bead_close`; the `closed` status is rejected here.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Bead id (required)."},
+          "title" => %{"type" => "string"},
+          "description" => %{"type" => "string"},
+          "acceptance" => %{"type" => "string"},
+          "notes" => %{"type" => "string"},
+          "qa_notes" => %{"type" => "string"},
+          "deployment_notes" => %{"type" => "string"},
+          "status" => %{"type" => "string", "description" => "open | in_progress."},
+          "priority" => %{"type" => "integer"},
+          "difficulty" => %{"type" => "integer"},
+          "issue_type" => %{"type" => "string"},
+          "assignee" => %{"type" => "string"},
+          "tracker_type" => %{"type" => "string"},
+          "tracker_ref" => %{"type" => "string"},
+          "pr_ref" => %{"type" => "string"},
+          "target_branch" => %{"type" => "string"}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.bead_update/2
+    },
+    %{
+      name: "bead_close",
+      tiers: @coordinator,
+      description:
+        "Close a bead in the workspace. Optional `reason`; `close_upstream: true` also closes the " <>
+          "linked external tracker issue.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Bead id (required)."},
+          "reason" => %{"type" => "string"},
+          "close_upstream" => %{
+            "type" => "boolean",
+            "description" => "Also close the linked tracker issue (default false)."
+          }
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.bead_close/2
+    },
+    %{
+      name: "dep_add",
+      tiers: @coordinator,
+      description:
+        "Add a dependency edge between two beads in the workspace. `type` is one of blocks, " <>
+          "depends_on, relates_to, discovered_from, parent_of.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "from_issue_id" => %{"type" => "string", "description" => "The dependent bead."},
+          "to_issue_id" => %{"type" => "string", "description" => "The dependency target."},
+          "type" => %{"type" => "string", "description" => "Edge type (required)."},
+          "notes" => %{"type" => "string"},
+          "created_by" => %{"type" => "string"}
+        },
+        "required" => ["from_issue_id", "to_issue_id", "type"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.dep_add/2
+    },
+    %{
+      name: "dep_remove",
+      tiers: @coordinator,
+      description:
+        "Remove dependency edges between two beads in the workspace. Omit `type` to remove every " <>
+          "edge between the pair. Idempotent.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "from_issue_id" => %{"type" => "string"},
+          "to_issue_id" => %{"type" => "string"},
+          "type" => %{
+            "type" => "string",
+            "description" => "Optional edge type to narrow removal."
+          }
+        },
+        "required" => ["from_issue_id", "to_issue_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.dep_remove/2
+    },
+    %{
+      name: "convoy_list",
+      tiers: @coordinator,
+      description: "List the convoys in the workspace, with open/closed member counts.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.convoy_list/2
+    },
+    %{
+      name: "convoy_create",
+      tiers: @coordinator,
+      description:
+        "Create a convoy in the workspace. `title` is required; `lifecycle` is system_managed " <>
+          "(default) or owned.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "title" => %{"type" => "string", "description" => "Convoy title (required)."},
+          "lifecycle" => %{"type" => "string", "description" => "system_managed | owned."}
+        },
+        "required" => ["title"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.convoy_create/2
+    },
+    %{
+      name: "convoy_add_member",
+      tiers: @coordinator,
+      description: "Attach a bead to a convoy (idempotent). Both must be in the workspace.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Convoy id (required)."},
+          "issue_id" => %{"type" => "string", "description" => "Bead id to attach (required)."}
+        },
+        "required" => ["id", "issue_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.convoy_add_member/2
+    },
+    %{
+      name: "convoy_close",
+      tiers: @coordinator,
+      description: "Close a convoy in the workspace. Optional `reason`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Convoy id (required)."},
+          "reason" => %{"type" => "string"}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.convoy_close/2
+    },
+    %{
+      name: "polecat_sling",
+      tiers: @coordinator,
+      description:
+        "Dispatch a polecat to work a bead in the workspace. Requires a `can_sling` coordinator " <>
+          "token and is depth-limited (the sling-recursion guardrail). Without `with_claude` the " <>
+          "bead parks in_progress; with it, a worker session is started.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "bead_id" => %{"type" => "string", "description" => "Bead to sling (required)."},
+          "rig" => %{"type" => "string", "description" => "Rig to run in (optional)."},
+          "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
+          "with_claude" => %{
+            "type" => "boolean",
+            "description" => "Start a real worker session (default false → park the bead)."
+          }
+        },
+        "required" => ["bead_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.polecat_sling/2
+    },
+    %{
+      name: "polecat_message",
+      tiers: @coordinator,
+      description:
+        "Send a direction to a bead's mailbox (the coordinator-side replacement for " <>
+          "`arb message <bead> <text>`). Scoped to the coordinator's workspace.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "bead_id" => %{"type" => "string", "description" => "Recipient bead id (required)."},
+          "body" => %{"type" => "string", "description" => "Message body (required)."},
+          "subject" => %{"type" => "string"}
+        },
+        "required" => ["bead_id", "body"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.polecat_message/2
+    },
+    %{
+      name: "usage_summarize",
+      tiers: @coordinator,
+      description:
+        "Roll up the token/cost usage ledger for the workspace. `by` is required (day, bead, " <>
+          "campaign, workspace, rig, model, step, provider); optional `since` (ISO-8601) and `limit`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "by" => %{"type" => "string", "description" => "Grouping dimension (required)."},
+          "since" => %{
+            "type" => "string",
+            "description" => "ISO-8601 datetime lower bound (optional)."
+          },
+          "limit" => %{"type" => "integer", "description" => "Cap the returned rows (optional)."}
+        },
+        "required" => ["by"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.usage_summarize/2
     }
   ]
 
