@@ -102,6 +102,28 @@ defmodule Arbiter.Trackers.Shortcut do
   end
 
   @impl true
+  def add_remote_link(ref, url, title)
+      when is_binary(ref) and is_binary(url) and is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      payload = %{
+        "url" => url,
+        "description" => title
+      }
+
+      case request(cfg, :post, "/stories/#{ref}/external_links", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
   def link_for(ref) when is_binary(ref), do: "https://app.shortcut.com/story/#{ref}"
 
   @impl true
