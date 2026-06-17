@@ -25,4 +25,7 @@ erl_crash.dump
 # Local Claude Code agent config.
 .claude/
 
+# Per-spawn Arbiter.MCP client config — written into each acolyte worktree by
+# Arbiter.MCP.AgentConfig with a bearer scope token baked in. Never commit it.
+.mcp.json
 
