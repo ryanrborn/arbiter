@@ -290,7 +290,9 @@ defmodule Arbiter.Polecat.DriverTest do
       # Let the driver run several more cycles while status is :awaiting_review.
       # With the fix, ticks don't increment here, so max_ticks: 2 won't fire.
       Process.sleep(60)
-      assert Process.alive?(driver_pid), "driver should still be alive (ticks frozen at :awaiting_review)"
+
+      assert Process.alive?(driver_pid),
+             "driver should still be alive (ticks frozen at :awaiting_review)"
 
       # Now simulate the Warden calling Polecat.complete.
       :ok = Polecat.complete(polecat_pid, :merged)

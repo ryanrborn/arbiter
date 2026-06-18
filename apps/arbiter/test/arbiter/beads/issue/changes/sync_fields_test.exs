@@ -228,7 +228,9 @@ defmodule Arbiter.Beads.Issue.Changes.SyncFieldsTest do
           workspace_id: ws.id
         })
 
-      assert {:ok, updated} = Ash.update(issue, %{title: "renamed despite error"}, action: :update)
+      assert {:ok, updated} =
+               Ash.update(issue, %{title: "renamed despite error"}, action: :update)
+
       assert updated.title == "renamed despite error"
     end
   end
