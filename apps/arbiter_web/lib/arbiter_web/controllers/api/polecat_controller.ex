@@ -29,7 +29,6 @@ defmodule ArbiterWeb.Api.PolecatController do
   alias Arbiter.Polecat.OutputLog
   alias Arbiter.Polecat.Sling
   alias Arbiter.Polecats.Run
-  alias Arbiter.Usage.Event
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -181,23 +180,8 @@ defmodule ArbiterWeb.Api.PolecatController do
   def index(conn, _params) do
     children = Polecat.list_children()
     bead_ids = Enum.map(children, & &1.bead_id)
-    costs = bead_costs_usd(bead_ids)
+    costs = Arbiter.Polecat.Stats.bead_costs_usd(bead_ids)
     render(conn, :index, children: children, costs: costs)
-  end
-
-  defp bead_costs_usd([]), do: %{}
-
-  defp bead_costs_usd(bead_ids) when is_list(bead_ids) do
-    Event
-    |> Ash.Query.filter(bead_id in ^bead_ids)
-    |> Ash.read!()
-    |> Enum.group_by(& &1.bead_id)
-    |> Map.new(fn {id, events} ->
-      total = Enum.reduce(events, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
-      {id, total}
-    end)
-  rescue
-    _ -> %{}
   end
 
   def show(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do

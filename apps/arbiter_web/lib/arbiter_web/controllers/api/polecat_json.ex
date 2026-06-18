@@ -37,26 +37,12 @@ defmodule ArbiterWeb.Api.PolecatJSON do
             mr_ref: Map.get(snap, :mr_ref),
             merger_url: Map.get(snap, :merger_url),
             pid: inspect(snap.pid),
-            model: short_model_name(model_id),
+            model: Arbiter.Polecat.Stats.short_model_name(model_id),
             cost_usd: Map.get(costs, snap.bead_id, 0.0)
           }
         end)
     }
   end
-
-  defp short_model_name(nil), do: nil
-
-  defp short_model_name(model) when is_binary(model) do
-    cond do
-      String.contains?(model, "opus") -> "Opus"
-      String.contains?(model, "sonnet") -> "Sonnet"
-      String.contains?(model, "haiku") -> "Haiku"
-      String.contains?(model, "fable") -> "Fable"
-      true -> model
-    end
-  end
-
-  defp short_model_name(_), do: nil
 
   def show(%{snapshot: snap}) do
     meta = Map.get(snap, :meta, %{})
