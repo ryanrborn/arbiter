@@ -416,7 +416,8 @@ defmodule Arbiter.Trackers.GitHub do
     end
   end
 
-  defp post_remote_link_comment(ref, url, title) when is_binary(ref) and is_binary(url) and is_binary(title) do
+  defp post_remote_link_comment(ref, url, title)
+       when is_binary(ref) and is_binary(url) and is_binary(title) do
     body = "**Remote Link:** [#{title}](#{url})"
     post_comment(ref, body)
   end

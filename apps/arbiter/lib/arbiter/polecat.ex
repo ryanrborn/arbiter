@@ -2242,9 +2242,12 @@ defmodule Arbiter.Polecat do
   # :awaiting_review (the MR is real and must not be discarded), but the Admiral
   # is escalated so the orphaned MR can be resolved manually rather than hanging
   # indefinitely with no watcher.
-  defp escalate_warden_failure(
-         %State{workspace_id: ws_id, bead_id: bead_id, mr_ref: mr_ref, merger_url: merger_url}
-       )
+  defp escalate_warden_failure(%State{
+         workspace_id: ws_id,
+         bead_id: bead_id,
+         mr_ref: mr_ref,
+         merger_url: merger_url
+       })
        when is_binary(ws_id) do
     mr_info =
       case merger_url do

@@ -42,12 +42,13 @@ defmodule ArbiterCli.Cmd.CloseTest do
   test "auto-sets close_upstream when directive has a tracker_ref" do
     stub_routes([
       {{"get", "/api/issues/bd-001"}, {issue_fixture("github", "123"), 200}},
-      {{"post", "/api/issues/bd-001/close"}, fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        parsed = Jason.decode!(body)
-        assert parsed["close_upstream"] == true
-        conn |> Plug.Conn.put_status(200) |> Req.Test.json(@closed_issue)
-      end}
+      {{"post", "/api/issues/bd-001/close"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         parsed = Jason.decode!(body)
+         assert parsed["close_upstream"] == true
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(@closed_issue)
+       end}
     ])
 
     {_out, _err, exit_code} = capture(fn -> Close.run(["bd-001"]) end)
@@ -57,12 +58,13 @@ defmodule ArbiterCli.Cmd.CloseTest do
   test "does not set close_upstream when tracker_type is none" do
     stub_routes([
       {{"get", "/api/issues/bd-001"}, {issue_fixture("none", nil), 200}},
-      {{"post", "/api/issues/bd-001/close"}, fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        parsed = Jason.decode!(body)
-        refute Map.has_key?(parsed, "close_upstream")
-        conn |> Plug.Conn.put_status(200) |> Req.Test.json(@closed_issue)
-      end}
+      {{"post", "/api/issues/bd-001/close"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         parsed = Jason.decode!(body)
+         refute Map.has_key?(parsed, "close_upstream")
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(@closed_issue)
+       end}
     ])
 
     {_out, _err, exit_code} = capture(fn -> Close.run(["bd-001"]) end)
@@ -72,12 +74,13 @@ defmodule ArbiterCli.Cmd.CloseTest do
   test "does not set close_upstream when tracker_ref is absent" do
     stub_routes([
       {{"get", "/api/issues/bd-001"}, {issue_fixture("github", nil), 200}},
-      {{"post", "/api/issues/bd-001/close"}, fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        parsed = Jason.decode!(body)
-        refute Map.has_key?(parsed, "close_upstream")
-        conn |> Plug.Conn.put_status(200) |> Req.Test.json(@closed_issue)
-      end}
+      {{"post", "/api/issues/bd-001/close"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         parsed = Jason.decode!(body)
+         refute Map.has_key?(parsed, "close_upstream")
+         conn |> Plug.Conn.put_status(200) |> Req.Test.json(@closed_issue)
+       end}
     ])
 
     {_out, _err, exit_code} = capture(fn -> Close.run(["bd-001"]) end)

@@ -76,7 +76,13 @@ defmodule Arbiter.Test.StubMerger do
   def get(ref) do
     ensure_started()
 
-    defaults = %{status: :open, approved: false, ci_clean: false, conflicting: false, pipeline: nil}
+    defaults = %{
+      status: :open,
+      approved: false,
+      ci_clean: false,
+      conflicting: false,
+      pipeline: nil
+    }
 
     result =
       Agent.get_and_update(@name, fn s ->
