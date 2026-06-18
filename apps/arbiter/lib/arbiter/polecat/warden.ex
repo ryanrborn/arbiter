@@ -200,7 +200,11 @@ defmodule Arbiter.Polecat.Warden do
           max_polls: Keyword.get(opts, :max_polls, default_max_polls),
           poll_count: 0,
           watch_pipeline: watch_pipeline,
-          last_pipeline: nil
+          last_pipeline: nil,
+          # Fired once when an approved MR is parked without auto-merge, so the
+          # external tracker moves to its "approved, awaiting merge" status
+          # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
+          pending_merge_synced: false
         }
 
         Process.monitor(polecat_pid)
@@ -286,13 +290,39 @@ defmodule Arbiter.Polecat.Warden do
     end
   end
 
+  defp apply_outcome(:approved, _result, %{pending_merge_synced: false} = state) do
+    # Approved but auto_merge is off: the review passed yet we can't merge yet
+    # (other releases in-flight). Move the external tracker to its parked-but-
+    # approved status (Jira VR -> Pending Merge) once, then keep polling for a
+    # human merge. (bd-c4cfuv)
+    sync_tracker_pending_merge(state)
+    reschedule(%{state | pending_merge_synced: true})
+  end
+
   defp apply_outcome(:approved, _result, state) do
-    # Approved but auto_merge is off: park until a human merges. The next poll
-    # will see :merged and complete.
+    # Already synced to Pending Merge; just keep polling. The next poll that
+    # sees :merged will complete.
     reschedule(state)
   end
 
   defp apply_outcome(:pending, _result, state), do: reschedule(state)
+
+  # Fire the approved-but-parked tracker hook. Best-effort + loud-on-failure
+  # inside `Arbiter.Trackers.Sync`; an unreadable bead just skips.
+  defp sync_tracker_pending_merge(state) do
+    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, state.bead_id) do
+      Arbiter.Trackers.Sync.lifecycle(bead, :approved_unmerged)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug(
+        "Polecat.Warden: pending-merge tracker sync raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
 
   # ---- internals ----------------------------------------------------------
 

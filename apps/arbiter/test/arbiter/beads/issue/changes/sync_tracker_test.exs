@@ -424,7 +424,9 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
                 "project_key" => "VR",
                 "credentials_ref" => "env:#{@jira_env}",
                 "email" => "tester@example.com",
-                "status_map" => %{"closed" => "Code Merged"},
+                # closed -> target STATUS "Code Complete" (reached single-hop
+                # via the "Code Merged" transition whose `to` lands there).
+                "status_map" => %{"closed" => "Code Complete"},
                 "field_ids" => %{
                   "qa_notes" => "customfield_10184",
                   "deployment_notes" => "customfield_10185"
@@ -458,7 +460,11 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTrackerTest do
 
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{"transitions" => [%{"id" => "31", "name" => "Code Merged"}]})
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{"id" => "31", "name" => "Code Merged", "to" => %{"name" => "Code Complete"}}
+              ]
+            })
 
           {"GET", _} ->
             # Issue fetch for verify_and_close: return a closed issue.
