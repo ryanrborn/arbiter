@@ -54,6 +54,17 @@ defmodule ArbiterCli.Cmd.InstallCli do
   defp build_and_install_cli(root) do
     cli_dir = Path.join(root, "apps/arbiter_cli")
 
+    if not File.dir?(cli_dir) do
+      {:error,
+       "CLI source directory not found: #{cli_dir}\n" <>
+         "  hint: resolved root (#{root}) is not an Arbiter checkout — " <>
+         "set ARB_HOME to your checkout or run `arb install-cli` from inside it"}
+    else
+      build_escript(cli_dir)
+    end
+  end
+
+  defp build_escript(cli_dir) do
     Start.log_text("Building CLI escript (mix escript.build)…")
 
     case Start.run_cmd("mix", ["escript.build"], cd: cli_dir, stderr_to_stdout: true) do
