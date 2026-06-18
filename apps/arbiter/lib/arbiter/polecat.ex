@@ -649,7 +649,11 @@ defmodule Arbiter.Polecat do
         true -> :work
       end
 
-    model = Map.get(usage, :model)
+    # Model: prefer the value the CLI stream reported (Claude's `init` event)
+    # over the model threaded onto the session at spawn time — the latter is the
+    # pre-resolved id we stamp for adapters (Gemini/agy) whose stream carries no
+    # model. Either way a non-Claude run lands a concrete model id.
+    model = Map.get(usage, :model) || Map.get(session, :model)
 
     # Provider: prefer the explicitly-set provider (passed in session opts for
     # non-Claude adapters like Gemini/agy, which have no stream-json init event
@@ -1025,7 +1029,7 @@ defmodule Arbiter.Polecat do
           |> maybe_put(:activity, new_activity)
           |> maybe_put(:activity_at, Map.get(session, :activity_at))
           |> maybe_put(:exited_at, session.exited_at)
-          |> maybe_put(:model, get_in(session, [:usage, :model]))
+          |> maybe_put(:model, get_in(session, [:usage, :model]) || Map.get(session, :model))
           |> maybe_put(:provider, Map.get(session, :provider))
 
         new_state = %State{state | meta: meta}

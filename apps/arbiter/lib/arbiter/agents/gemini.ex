@@ -12,6 +12,11 @@ defmodule Arbiter.Agents.Gemini do
 
   @done_regex ~r/\barb done\b/
 
+  # The gemini-cli's own default model (`DEFAULT_GEMINI_MODEL`) — what the CLI
+  # runs when we pass no `--model`. Used only to stamp the usage ledger /
+  # dashboards via `resolved_model/1`; dispatch behaviour is unchanged.
+  @default_model "gemini-2.5-pro"
+
   @impl true
   def provider, do: "gemini"
 
@@ -104,6 +109,20 @@ defmodule Arbiter.Agents.Gemini do
   def usage_attrs(session) do
     Map.get(session, :usage, %{})
     |> Map.put(:provider, provider())
+  end
+
+  # The gemini / agy CLI emits no stream-json `init` event the polecat can read
+  # the model from (unlike Claude), so we resolve it up front for the ledger /
+  # dashboards. Mirrors `resolve_model/1` (explicit `:model` → tier → workspace
+  # `active_model`) but adds a concrete terminal fallback: when nothing is
+  # configured the CLI defaults to `gemini-2.5-pro` (`DEFAULT_GEMINI_MODEL` in
+  # the gemini-cli), so recording that is accurate even though we pass no
+  # `--model` flag in that case.
+  @impl true
+  def resolved_model(opts \\ []) do
+    # resolve_model/1 already chains explicit → tier → workspace active_model;
+    # @default_model is the terminal fallback (the gemini-cli's own default).
+    resolve_model(opts) || @default_model
   end
 
   # ---- Internals ---------------------------------------------------------

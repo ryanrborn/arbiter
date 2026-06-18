@@ -269,10 +269,16 @@ defmodule Arbiter.Polecat.SlingTest do
     # `argv_file` and exits 0. Used to verify the spawn argv assembled by the
     # adapter path (Agents.Claude.default_argv) — `--model <name>` is the bit
     # Phase A specifically wires up.
-    defp stub_claude_on_path(tmp, argv_file) do
+    defp stub_claude_on_path(tmp, argv_file), do: stub_named_on_path(tmp, "claude", argv_file)
+
+    # Build a `<name>`-named shim on PATH that writes its argv (one per line) to
+    # `argv_file` and exits 0. Generalizes `stub_claude_on_path` so a forced
+    # provider (e.g. `agy`/`gemini`) can be intercepted the same way — its stub
+    # dir is prepended to PATH so it wins over any real binary installed there.
+    defp stub_named_on_path(tmp, name, argv_file) do
       stub_dir = Path.join(tmp, "stub-bin")
       File.mkdir_p!(stub_dir)
-      stub = Path.join(stub_dir, "claude")
+      stub = Path.join(stub_dir, name)
 
       File.write!(stub, """
       #!/bin/sh
@@ -283,9 +289,12 @@ defmodule Arbiter.Polecat.SlingTest do
       File.chmod!(stub, 0o755)
 
       old_path = System.get_env("PATH") || ""
-      System.put_env("PATH", "#{stub_dir}:#{old_path}")
 
-      on_exit(fn -> System.put_env("PATH", old_path) end)
+      # Only prepend the stub dir once even if several shims share it.
+      unless String.starts_with?(old_path, "#{stub_dir}:") do
+        System.put_env("PATH", "#{stub_dir}:#{old_path}")
+        on_exit(fn -> System.put_env("PATH", old_path) end)
+      end
 
       :ok
     end
@@ -573,6 +582,54 @@ defmodule Arbiter.Polecat.SlingTest do
       assert "--model" in args
       assert "opus" in args
       refute "sonnet" in args
+    end
+
+    test "agent_type: :gemini dispatches the Gemini adapter, not Claude",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      gemini_file = Path.join(tmp, "gemini-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "agy", gemini_file)
+
+      repo = seed_repo!(tmp, "gem-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gwt"))
+      Application.put_env(:arbiter, :rig_paths, %{"g/rig" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :rig_paths)
+      end)
+
+      # Workspace defaults to Claude — the forced provider must win over it.
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"type" => "claude"}}
+        })
+
+      {:ok, bead} = Ash.create(Issue, %{title: "gemini bead", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "g/rig",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :gemini,
+          # WORK-spawn argv assertion — skip the auth pre-flight probe (bd-awi4nw)
+          # so its probe doesn't also write to the stub argv files.
+          preflight: false
+        )
+
+      wait_until(fn -> File.exists?(gemini_file) end)
+      gemini_args = File.read!(gemini_file) |> String.split("\n", trim: true)
+      assert "-p" in gemini_args
+      # The Gemini adapter ran — and Claude did not.
+      refute File.exists?(claude_file)
+
+      # The polecat's routing config records the gemini provider + a model id.
+      snap = Polecat.state(result.polecat_pid)
+      routing = snap.meta[:routing_config]
+      assert routing.provider == "gemini"
+      assert routing.model =~ "gemini"
     end
 
     test "ByPriority routing picks --model from `routing.rules[Pn]`",

@@ -422,8 +422,9 @@ defmodule Arbiter.MCP.Tools do
        — cheap insurance against a misconfigured coordinator fan-out.
 
   The slung polecat's own scope token is minted one level deeper (`depth + 1`),
-  so a chain of dispatches is tracked. Without `with_claude` the bead simply
-  parks `:in_progress` (no agent spawned); with it, a worker session is started.
+  so a chain of dispatches is tracked. With a `provider` (`"claude"` | `"gemini"`,
+  or the deprecated `with_claude: true` alias) a worker session is started;
+  without one the bead simply parks `:in_progress` (no agent spawned).
   Backs onto `Arbiter.Polecat.Sling.sling/2`.
   """
   @spec polecat_sling(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -970,14 +971,39 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # Map `polecat_sling` arguments onto `Sling.sling/2` opts, mirroring the REST
-  # `POST /api/polecats/sling` contract: `with_claude` dispatches a real worker
-  # session, otherwise the bead parks `:in_progress` (no Driver).
+  # `POST /api/polecats/sling` contract: a `provider` dispatches a real worker
+  # session (forcing that agent via `agent_type`); the deprecated `with_claude`
+  # boolean is still honored as an alias for `provider: "claude"`; otherwise the
+  # bead parks `:in_progress` (no Driver).
   defp sling_opts(scope, args) do
     base = dispatch_opts(scope, args)
 
-    case Map.get(args, "with_claude") do
-      v when v in [true, "true"] -> Keyword.put(base, :start_claude, true)
-      _ -> Keyword.put(base, :start_driver, false)
+    case sling_provider(args) do
+      nil ->
+        Keyword.put(base, :start_driver, false)
+
+      type when is_atom(type) ->
+        base |> Keyword.put(:start_claude, true) |> Keyword.put(:agent_type, type)
+    end
+  end
+
+  # Resolve the worker provider from `polecat_sling` args. Prefers the explicit
+  # `provider` field (`"claude"` | `"gemini"`), falling back to the deprecated
+  # `with_claude: true` alias. Returns `nil` when neither selects a worker — the
+  # bead then parks in_progress.
+  defp sling_provider(args) do
+    case Map.get(args, "provider") do
+      "claude" ->
+        :claude
+
+      "gemini" ->
+        :gemini
+
+      _ ->
+        case Map.get(args, "with_claude") do
+          v when v in [true, "true"] -> :claude
+          _ -> nil
+        end
     end
   end
 
@@ -1160,13 +1186,19 @@ defmodule Arbiter.MCP.Tools do
 
   defp serialize_polecat_summary(snap) do
     meta = Map.get(snap, :meta, %{}) || %{}
+    routing = Map.get(meta, :routing_config) || %{}
 
     %{
       bead_id: snap.bead_id,
       status: to_str(snap.status),
       rig: snap.rig,
       started_at: iso(snap.started_at),
-      activity: Map.get(meta, :activity)
+      activity: Map.get(meta, :activity),
+      # Provider/model: prefer the values synced from the live session, falling
+      # back to the routing config stamped at spawn time. Lets a coordinator see
+      # which agent (claude/gemini) and model each polecat is running.
+      provider: Map.get(meta, :provider) || Map.get(routing, :provider),
+      model: Map.get(meta, :model) || Map.get(routing, :model)
     }
   end
 

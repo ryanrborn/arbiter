@@ -810,11 +810,14 @@ defmodule Arbiter.Polecat.Sling do
         workspace = load_workspace(bead)
         :ok = Agents.prepare(workspace, :agent)
 
+        # Order matters: apply the provider (agent_type) override *first* so it
+        # can strip the routed, provider-specific model, then let an explicit
+        # `--model` override win on top of the resolved provider.
         choice =
           bead
           |> Routing.choose(workspace, %{})
-          |> apply_model_override(Keyword.get(opts, :model))
           |> apply_agent_type_override(Keyword.get(opts, :agent_type))
+          |> apply_model_override(Keyword.get(opts, :model))
 
         adapter = Agents.for_type(choice.type)
 
@@ -827,9 +830,18 @@ defmodule Arbiter.Polecat.Sling do
         agent_opts = agent_opts_from_choice(choice) ++ [security: policy]
         prompt = prompt_for_bead(bead, opts)
 
+        provider = Atom.to_string(choice.type)
+
+        # Resolve the concrete model up front so providers whose CLI emits no
+        # `init` event (e.g. Gemini) still land a model id on the polecat / usage
+        # ledger. Falls back to the routed model for adapters that don't
+        # implement `resolved_model/1`.
+        resolved_model =
+          resolved_model_for(adapter, agent_opts) || Keyword.get(agent_opts, :model)
+
         routing_config = %{
-          provider: Atom.to_string(choice.type),
-          model: Keyword.get(agent_opts, :model),
+          provider: provider,
+          model: resolved_model,
           model_tier: Keyword.get(agent_opts, :model_tier),
           thinking: Keyword.get(agent_opts, :thinking)
         }
@@ -839,7 +851,11 @@ defmodule Arbiter.Polecat.Sling do
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
-            {:ok, base ++ [command: argv, env: env]}
+            # Thread provider + resolved model onto the session so the usage
+            # ledger and dashboards attribute the run correctly even when the
+            # CLI stream carries no model/provider (bd-guegdl).
+            session_meta = [provider: provider, model: resolved_model]
+            {:ok, base ++ [command: argv, env: env] ++ session_meta}
 
           {:error, reason} ->
             {:error, reason}
@@ -875,10 +891,19 @@ defmodule Arbiter.Polecat.Sling do
   # A `:agent_type` opt on `Sling.sling/2` is an explicit per-dispatch provider
   # override — the workspace may default to :claude but the caller wants :gemini
   # (or vice versa). Splatting the type onto the routed choice lets it win over
-  # both the workspace default and any routing rule while keeping the rest of the
-  # routing config (model tier, thinking, etc.) intact.
+  # both the workspace default and any routing rule.
+  #
+  # When the override switches to a *different* provider than the one the
+  # routing policy chose, the routed `"model"` is provider-specific (e.g. a
+  # Claude `"sonnet"`) and meaningless to the new adapter, so we drop it — the
+  # new adapter resolves its own default. The abstract `model_tier` / `thinking`
+  # knobs are provider-agnostic and stay. An explicit `--model` override is
+  # re-applied after this step (see build_agent_session_opts) and still wins.
+  defp apply_agent_type_override(%{type: type} = choice, type), do: choice
+
   defp apply_agent_type_override(choice, type) when is_atom(type) and not is_nil(type) do
-    %{choice | type: type}
+    config = Map.drop(choice.config || %{}, ["model"])
+    %{choice | type: type, config: config}
   end
 
   defp apply_agent_type_override(choice, _), do: choice
@@ -910,6 +935,16 @@ defmodule Arbiter.Polecat.Sling do
       adapter.spawn_env(agent_opts)
     else
       []
+    end
+  end
+
+  # The concrete model the adapter will dispatch with, if it can name one ahead
+  # of the stream (optional `resolved_model/1` callback). Returns nil for
+  # adapters that don't implement it (e.g. Claude, whose model arrives in the
+  # stream-json `init` event) — the caller then falls back to the routed model.
+  defp resolved_model_for(adapter, agent_opts) do
+    if function_exported?(adapter, :resolved_model, 1) do
+      adapter.resolved_model(agent_opts)
     end
   end
 
@@ -953,13 +988,26 @@ defmodule Arbiter.Polecat.Sling do
       :ok
   end
 
-  # Phase 3: resolve from the bead's workspace agent type. Falls back to
-  # :claude on any error so a misconfigured workspace never blocks a sling.
+  # Resolve which agent-config adapter to inject (.mcp.json vs .gemini/settings.json
+  # vs .codex/config.toml). Resolution mirrors `preflight_adapter/3` so a sling that
+  # forces a provider (`--provider gemini` / `agent_type: :gemini`) writes *that*
+  # provider's config rather than the workspace default:
+  #   1. `:agent_adapter` test override.
+  #   2. `:agent_type` explicit provider override.
+  #   3. Workspace default via `Agents.for_workspace`.
+  # Falls back to :claude on any error so a misconfigured workspace never blocks a
+  # sling.
   defp resolve_mcp_provider(%Issue{} = bead, opts) do
     adapter =
       case Keyword.get(opts, :agent_adapter) do
-        mod when is_atom(mod) and not is_nil(mod) -> mod
-        _ -> Agents.for_workspace(load_workspace(bead))
+        mod when is_atom(mod) and not is_nil(mod) ->
+          mod
+
+        _ ->
+          case Keyword.get(opts, :agent_type) do
+            type when is_atom(type) and not is_nil(type) -> Agents.for_type(type)
+            _ -> Agents.for_workspace(load_workspace(bead))
+          end
       end
 
     String.to_existing_atom(adapter.provider())

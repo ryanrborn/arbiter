@@ -100,6 +100,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
           | {:topic, String.t() | nil}
           | {:owner, pid()}
           | {:env, [{String.t(), String.t() | false}]}
+          | {:provider, String.t() | nil}
+          | {:model, String.t() | nil}
 
   @type opts :: [opt()]
 
@@ -151,7 +153,10 @@ defmodule Arbiter.Polecat.ClaudeSession do
         topic: topic,
         line_cap: @line_cap,
         done_regex: @done_regex,
-        provider: Keyword.get(opts, :provider)
+        provider: Keyword.get(opts, :provider),
+        # Pre-resolved model id for adapters whose stream carries none (Gemini).
+        # Claude omits this and learns the model from its `init` event instead.
+        model: Keyword.get(opts, :model)
       }
 
       port_args = %{

@@ -159,6 +159,53 @@ defmodule ArbiterCli.Cmd.SlingTest do
       refute Map.has_key?(body, "with_claude")
       refute Map.has_key?(body, "with_gemini")
       refute Map.has_key?(body, "no_agent")
+      refute Map.has_key?(body, "provider")
+    end
+
+    test "--provider gemini sends provider: gemini in the POST body" do
+      stub_sling_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "--provider", "gemini"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["provider"] == "gemini"
+      refute Map.has_key?(body, "with_claude")
+      refute Map.has_key?(body, "with_gemini")
+    end
+
+    test "--provider claude sends provider: claude in the POST body" do
+      stub_sling_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "--provider", "claude"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["provider"] == "claude"
+    end
+
+    test "--provider takes precedence over the deprecated --with-gemini alias" do
+      stub_sling_capture()
+
+      {_out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Sling.run(["gte-017", "--provider", "claude", "--with-gemini"])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["provider"] == "claude"
+      refute Map.has_key?(body, "with_gemini")
+    end
+
+    test "an unknown --provider value dies with a usage hint" do
+      {_out, err, code} =
+        capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "--provider", "llama"]) end)
+
+      assert code != 0
+      assert err =~ "--provider must be one of"
     end
   end
 end
