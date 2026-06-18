@@ -49,6 +49,44 @@ defmodule Arbiter.Polecat.SlingTest do
       assert Polecat.whereis(bead.id) == second.polecat_pid
     end
 
+    # bd-d70whv: resling a failed polecat must start a fresh polecat rather than
+    # reusing the stale :failed one. Previously, start_polecat/3 returned the
+    # existing pid on {:already_started, pid} regardless of status, and the
+    # :failed status caused the "arb done" FSM guard to silently no-op.
+    test "resling a :failed polecat starts a fresh :idle polecat (bd-d70whv)", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "resling failed", workspace_id: ws.id})
+
+      {:ok, first} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      first_pid = first.polecat_pid
+
+      :ok = Polecat.fail(first_pid, :credentials_expired)
+      assert Polecat.state(first_pid).status == :failed
+
+      # Re-sling: must evict the stale polecat and start a new one.
+      {:ok, second} = Sling.sling(bead.id, rig: "r", start_driver: false)
+
+      assert second.polecat_pid != first_pid
+      refute Process.alive?(first_pid)
+      assert Polecat.state(second.polecat_pid).status == :idle
+    end
+
+    test "resling a :completed polecat also starts fresh (bd-d70whv)", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "resling completed", workspace_id: ws.id})
+
+      {:ok, first} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      first_pid = first.polecat_pid
+
+      :ok = Polecat.advance(first_pid, :work)
+      :ok = Polecat.complete(first_pid, :done)
+      assert Polecat.state(first_pid).status == :completed
+
+      {:ok, second} = Sling.sling(bead.id, rig: "r", start_driver: false)
+
+      assert second.polecat_pid != first_pid
+      refute Process.alive?(first_pid)
+      assert Polecat.state(second.polecat_pid).status == :idle
+    end
+
     test "starts a Driver by default and drives bead to :closed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "drive me", workspace_id: ws.id})
 
