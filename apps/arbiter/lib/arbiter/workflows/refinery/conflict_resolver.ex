@@ -43,6 +43,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   """
 
   alias Arbiter.Beads.Issue
+  alias Arbiter.Beads.RigConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
@@ -224,10 +225,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   defp workspace_rig_path(_workspace, nil), do: nil
 
   defp workspace_rig_path(%Workspace{config: %{} = config}, rig) when is_binary(rig) do
-    case get_in(config, ["rig_paths", rig]) do
-      path when is_binary(path) and path != "" -> path
-      _ -> nil
-    end
+    RigConfig.rig_path_from_config(get_in(config, ["rig_paths", rig]))
   end
 
   defp workspace_rig_path(_, _), do: nil
@@ -237,7 +235,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
       %{} = paths ->
         paths
         |> Map.values()
-        |> Enum.find(fn v -> is_binary(v) and v != "" end)
+        |> Enum.find_value(&RigConfig.rig_path_from_config/1)
 
       _ ->
         nil
@@ -249,10 +247,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   defp application_rig_path(nil), do: nil
 
   defp application_rig_path(rig) when is_binary(rig) do
-    case Map.get(Application.get_env(:arbiter, :rig_paths, %{}), rig) do
-      path when is_binary(path) and path != "" -> path
-      _ -> nil
-    end
+    RigConfig.rig_path_from_config(Map.get(Application.get_env(:arbiter, :rig_paths, %{}), rig))
   end
 
   defp first_application_rig_path do
@@ -260,7 +255,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
       %{} = paths ->
         paths
         |> Map.values()
-        |> Enum.find(fn v -> is_binary(v) and v != "" end)
+        |> Enum.find_value(&RigConfig.rig_path_from_config/1)
 
       _ ->
         nil

@@ -41,6 +41,7 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Beads.Convoy
   alias Arbiter.Beads.Issue
+  alias Arbiter.Beads.RigConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
@@ -558,7 +559,9 @@ defmodule ArbiterWeb.DashboardLive do
     app_paths =
       :arbiter
       |> Application.get_env(:rig_paths, %{})
-      |> Map.new(fn {name, path} -> {name, %{path: path, source: "(app)"}} end)
+      |> Map.new(fn {name, raw} ->
+        {name, %{path: RigConfig.rig_path_from_config(raw), source: "(app)"}}
+      end)
 
     workspaces
     |> Enum.reduce(app_paths, fn ws, acc ->
@@ -568,8 +571,8 @@ defmodule ArbiterWeb.DashboardLive do
           _ -> %{}
         end
 
-      Enum.reduce(ws_rig_paths, acc, fn {name, path}, acc ->
-        Map.put(acc, name, %{path: path, source: ws.name})
+      Enum.reduce(ws_rig_paths, acc, fn {name, raw}, acc ->
+        Map.put(acc, name, %{path: RigConfig.rig_path_from_config(raw), source: ws.name})
       end)
     end)
   end

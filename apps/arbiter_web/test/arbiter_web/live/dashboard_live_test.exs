@@ -172,6 +172,29 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "dashboard-test-rig"
     end
 
+    test "renders without error when a workspace rig_paths entry is in object form",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-bkkvbe: a `rig_paths` value of
+      # `%{"path" => ..., "target_branch" => ...}` crashed refresh_rigs/1 with
+      # a CaseClauseError because the path was stored unnormalized.
+      {:ok, _ws2} =
+        Ash.update(ws, %{
+          config: %{
+            "rig_paths" => %{
+              "object-form-rig" => %{
+                "path" => "/tmp/object-form-rig",
+                "target_branch" => "integration/dolphin"
+              }
+            }
+          }
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "rigs-section"
+      assert html =~ "object-form-rig"
+      assert html =~ "/tmp/object-form-rig"
+    end
+
     test "surfaces a polecat using an unconfigured rig under (unconfigured)",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "weird-rig", workspace_id: ws.id})
