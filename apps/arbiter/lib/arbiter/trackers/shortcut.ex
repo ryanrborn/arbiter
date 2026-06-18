@@ -201,6 +201,37 @@ defmodule Arbiter.Trackers.Shortcut do
 
   # ---- Tracker behaviour: claim callbacks ------------------------------------
 
+  @ownership_marker "Arbiter installation:"
+
+  @impl true
+  def check_prior_claim(ref) when is_binary(ref) do
+    case list_comments(ref) do
+      {:ok, comments} ->
+        case Enum.find(comments, &String.contains?(&1["text"] || "", @ownership_marker)) do
+          nil -> :ok
+          %{"text" => body} -> {:error, {:already_claimed, body}}
+        end
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
+  @impl true
+  def signal_claim(ref, bead_id, %{
+        workspace_name: name,
+        workspace_prefix: prefix,
+        current_user: member_id,
+        host: host
+      }) do
+    body =
+      "Claimed as #{bead_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+
+    post_comment(ref, body)
+    assign_user(ref, member_id)
+    :ok
+  end
+
   @impl true
   def current_user do
     with {:ok, cfg} <- Config.resolve(),
@@ -292,6 +323,61 @@ defmodule Arbiter.Trackers.Shortcut do
       assignees: assignees(story),
       raw: story
     }
+  end
+
+  # ---- Internals: claim helpers -------------------------------------------
+
+  defp list_comments(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :get, "/stories/#{ref}/comments", []) do
+        {:ok, %Req.Response{status: status_code, body: list}}
+        when status_code in 200..299 and is_list(list) ->
+          {:ok, list}
+
+        {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "comments response was not a list",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp post_comment(ref, text) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :post, "/stories/#{ref}/comments", json: %{"text" => text}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 -> :ok
+        {:ok, %Req.Response{status: status_code, body: body}} -> {:error, http_error(status_code, body)}
+        {:error, exception} -> {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp assign_user(ref, member_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      current_ids =
+        case request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+          {:ok, %{"owner_ids" => ids}} when is_list(ids) -> ids
+          _ -> []
+        end
+
+      new_ids = Enum.uniq([member_id | current_ids])
+
+      case request(cfg, :put, "/stories/#{ref}", json: %{"owner_ids" => new_ids}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 -> :ok
+        {:ok, %Req.Response{status: status_code, body: body}} -> {:error, http_error(status_code, body)}
+        {:error, exception} -> {:error, transport_error(exception)}
+      end
+    end
   end
 
   # ---- Internals: workflows / states --------------------------------------

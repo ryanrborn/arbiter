@@ -373,6 +373,137 @@ defmodule Arbiter.Trackers.ShortcutTest do
     end
   end
 
+  describe "check_prior_claim/1" do
+    test "returns :ok when no comments contain the ownership marker" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/api/v3/stories/#{@ref}/comments"
+
+        Req.Test.json(conn, [
+          %{"id" => 1, "text" => "Just a regular comment"},
+          %{"id" => 2, "text" => "Another comment"}
+        ])
+      end)
+
+      assert :ok = Shortcut.check_prior_claim(@ref)
+    end
+
+    test "returns {:error, {:already_claimed, body}} when ownership marker found" do
+      marker_comment = "Claimed as bd-abc123 by my-ws (mw). Arbiter installation: some-host."
+
+      stub(fn conn ->
+        Req.Test.json(conn, [
+          %{"id" => 1, "text" => "Normal comment"},
+          %{"id" => 2, "text" => marker_comment}
+        ])
+      end)
+
+      assert {:error, {:already_claimed, ^marker_comment}} =
+               Shortcut.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments endpoint errors (non-fatal)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal error"})
+      end)
+
+      assert :ok = Shortcut.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments list is empty" do
+      stub(fn conn ->
+        Req.Test.json(conn, [])
+      end)
+
+      assert :ok = Shortcut.check_prior_claim(@ref)
+    end
+  end
+
+  describe "signal_claim/3" do
+    test "posts ownership comment and assigns the user" do
+      calls = Agent.start_link(fn -> [] end) |> elem(1)
+
+      stub(fn conn ->
+        Agent.update(calls, &[{conn.method, conn.request_path} | &1])
+
+        case {conn.method, conn.request_path} do
+          {"POST", "/api/v3/stories/" <> _ = path} ->
+            assert String.ends_with?(path, "/comments")
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["text"] =~ "bd-abc123"
+            assert decoded["text"] =~ "my-ws"
+            assert decoded["text"] =~ "Arbiter installation:"
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 99})
+
+          {"GET", "/api/v3/stories/" <> ref} ->
+            Req.Test.json(conn, %{"id" => String.to_integer(ref), "owner_ids" => ["existing-user"]})
+
+          {"PUT", "/api/v3/stories/" <> _} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert "member-uuid-999" in decoded["owner_ids"]
+            assert "existing-user" in decoded["owner_ids"]
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234})
+        end
+      end)
+
+      context = %{
+        bead_id: "bd-abc123",
+        workspace_name: "my-ws",
+        workspace_prefix: "mw",
+        current_user: "member-uuid-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = Shortcut.signal_claim(@ref, "bd-abc123", context)
+
+      recorded = Agent.get(calls, & &1) |> Enum.reverse()
+      assert {"POST", "/api/v3/stories/#{@ref}/comments"} in recorded
+      assert {"GET", "/api/v3/stories/#{@ref}"} in recorded
+      assert {"PUT", "/api/v3/stories/#{@ref}"} in recorded
+
+      Agent.stop(calls)
+    end
+
+    test "returns :ok even when comment POST fails" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", _} ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "error"})
+
+          {"GET", _} ->
+            Req.Test.json(conn, %{"id" => 1234, "owner_ids" => []})
+
+          {"PUT", _} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234})
+        end
+      end)
+
+      context = %{
+        bead_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "member-uuid-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = Shortcut.signal_claim(@ref, "bd-abc123", context)
+    end
+  end
+
   describe "Trackers integration" do
     test "Trackers.for_type(:shortcut) resolves to this adapter (no raise)" do
       assert Arbiter.Trackers.for_type(:shortcut) == Shortcut
