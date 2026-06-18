@@ -18,25 +18,54 @@ defmodule Arbiter.Agents.Gemini.Config do
           raw: map()
         }
 
-  # Default tier → concrete Gemini model. Overridable per-workspace via
-  # `agent.config["tier_models"]` (string keys). The values are short
-  # model identifiers the agy / gemini CLI accept via `--model`.
+  # Default tier → concrete Gemini model. Used when only a tier is known
+  # (no thinking level). Overridable per-workspace via
+  # `agent.config["tier_models"]` (string keys).
   @default_tier_models %{
     "economy" => "gemini-2.5-flash-lite",
     "standard" => "gemini-2.5-flash",
     "premium" => "gemini-2.5-pro"
   }
 
-  # Default thinking → CLI argv tokens. Gemini's thinking knob varies per
-  # CLI fork (agy vs gemini), so the default leaves the argv empty and
-  # exposes the level via env var (`GEMINI_THINKING_LEVEL`) — workspaces
-  # can override per-level argv with `agent.config["thinking_argv"]` (e.g.
-  # `--thinking-budget 8192`) once they pin a CLI surface.
+  # Combined tier+thinking → agy model name. `agy` encodes both in the
+  # model string (e.g. "Gemini 3.1 Pro (High)"), so there is no separate
+  # thinking flag — the two knobs resolve together. Overridable per-workspace
+  # via `agent.config["combined_models"]` using the same "tier/thinking" keys.
+  #
+  # Pro has no Medium tier; premium/medium rounds down to Pro (Low).
+  # xhigh and max both cap at High (highest available).
+  @default_combined_models %{
+    "economy/none" => "Gemini 3.5 Flash (Low)",
+    "economy/low" => "Gemini 3.5 Flash (Low)",
+    "economy/medium" => "Gemini 3.5 Flash (Medium)",
+    "economy/high" => "Gemini 3.5 Flash (High)",
+    "economy/xhigh" => "Gemini 3.5 Flash (High)",
+    "economy/max" => "Gemini 3.5 Flash (High)",
+    "standard/none" => "Gemini 3.5 Flash (Low)",
+    "standard/low" => "Gemini 3.5 Flash (Low)",
+    "standard/medium" => "Gemini 3.5 Flash (Medium)",
+    "standard/high" => "Gemini 3.5 Flash (High)",
+    "standard/xhigh" => "Gemini 3.5 Flash (High)",
+    "standard/max" => "Gemini 3.5 Flash (High)",
+    "premium/none" => "Gemini 3.1 Pro (Low)",
+    "premium/low" => "Gemini 3.1 Pro (Low)",
+    "premium/medium" => "Gemini 3.1 Pro (Low)",
+    "premium/high" => "Gemini 3.1 Pro (High)",
+    "premium/xhigh" => "Gemini 3.1 Pro (High)",
+    "premium/max" => "Gemini 3.1 Pro (High)"
+  }
+
+  # Default thinking → CLI argv tokens. `agy` has no dedicated thinking
+  # flag (it's encoded in the model name), so all levels are empty here.
+  # Workspaces that pin a different CLI fork can override per-level argv
+  # via `agent.config["thinking_argv"]`.
   @default_thinking_argv %{
     "none" => [],
     "low" => [],
     "medium" => [],
-    "high" => []
+    "high" => [],
+    "xhigh" => [],
+    "max" => []
   }
 
   @doc """
@@ -147,12 +176,40 @@ defmodule Arbiter.Agents.Gemini.Config do
   def model_for_tier(_), do: nil
 
   @doc """
+  Resolve a combined `model_tier` + `thinking` pair to a concrete model
+  name for the `agy` CLI, which encodes both in the model string (e.g.
+  `"Gemini 3.1 Pro (High)"`). Returns `nil` when the combination is
+  unknown — callers should fall back to `model_for_tier/1`.
+
+  Workspace config can override the mapping under
+  `agent.config["combined_models"]` using `"tier/thinking"` string keys.
+  """
+  @spec model_for_tier_and_thinking(String.t() | nil, String.t() | nil) :: String.t() | nil
+  def model_for_tier_and_thinking(nil, _), do: nil
+  def model_for_tier_and_thinking(_, nil), do: nil
+  def model_for_tier_and_thinking("", _), do: nil
+  def model_for_tier_and_thinking(_, ""), do: nil
+
+  def model_for_tier_and_thinking(tier, thinking) when is_binary(tier) and is_binary(thinking) do
+    {:ok, cfg} = resolve()
+    overrides = stringy_map(Map.get(cfg.raw, "combined_models"))
+    key = "#{tier}/#{thinking}"
+
+    case Map.get(overrides, key) || Map.get(@default_combined_models, key) do
+      m when is_binary(m) and m != "" -> m
+      _ -> nil
+    end
+  end
+
+  def model_for_tier_and_thinking(_, _), do: nil
+
+  @doc """
   Resolve an abstract `thinking` level to a list of CLI argv tokens to
   append to the spawn command. The default mapping is empty for all
-  levels — Gemini's reasoning knob varies per CLI fork; the level is
-  surfaced via the `GEMINI_THINKING_LEVEL` env var instead (see
-  `thinking_env/1`) and the workspace can opt into CLI argv via
-  `agent.config["thinking_argv"]` once a flag is pinned.
+  levels — `agy` has no dedicated thinking flag (it is encoded in the
+  model name via `model_for_tier_and_thinking/2`). Workspaces that pin a
+  different CLI fork can override per-level argv via
+  `agent.config["thinking_argv"]`.
   """
   @spec thinking_argv(String.t() | nil) :: [String.t()]
   def thinking_argv(nil), do: []
@@ -182,7 +239,7 @@ defmodule Arbiter.Agents.Gemini.Config do
   def thinking_env(""), do: []
   def thinking_env("none"), do: []
 
-  def thinking_env(level) when level in ["low", "medium", "high"] do
+  def thinking_env(level) when level in ["low", "medium", "high", "xhigh", "max"] do
     [{"GEMINI_THINKING_LEVEL", level}]
   end
 
@@ -190,6 +247,9 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   @doc "Built-in default tier → model map (testing / introspection)."
   def default_tier_models, do: @default_tier_models
+
+  @doc "Built-in default combined tier/thinking → model map (testing / introspection)."
+  def default_combined_models, do: @default_combined_models
 
   @doc "Built-in default thinking → argv map (testing / introspection)."
   def default_thinking_argv, do: @default_thinking_argv
