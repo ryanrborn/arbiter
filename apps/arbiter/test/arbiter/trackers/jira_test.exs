@@ -17,10 +17,12 @@ defmodule Arbiter.Trackers.JiraTest do
       "project_key" => @project,
       "credentials_ref" => "env:#{@env_var}",
       "email" => "tester@example.com",
+      # status_map now maps bead lifecycle atoms -> target STATUS names (the
+      # adapter path-finds the transitions to reach them).
       "status_map" => %{
         "open" => "To Do",
         "in_progress" => "In Progress",
-        "closed" => "Approved and merged"
+        "closed" => "Done"
       },
       "field_ids" => %{
         "title" => "summary",
@@ -108,24 +110,30 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
-  describe "transition/2" do
-    test "looks up transitions, finds matching name, POSTs the id" do
+  describe "transition/2 (status-targeted)" do
+    test "single-hop fast path: takes the live transition whose `to` is the target status" do
       Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", "/rest/api/3/issue/" <> _} ->
+        case conn.method do
+          "GET" ->
+            assert String.ends_with?(conn.request_path, "/transitions")
+
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "transitions" => [
-                %{"id" => "11", "name" => "To Do"},
-                %{"id" => "21", "name" => "In Progress"},
-                %{"id" => "31", "name" => "Approved and merged"}
+                %{
+                  "id" => "111",
+                  "name" => "Approved and not merged",
+                  "to" => %{"name" => "Pending Merge"}
+                },
+                %{"id" => "61", "name" => "Approved and merged", "to" => %{"name" => "Done"}}
               ]
             })
 
-          {"POST", "/rest/api/3/issue/" <> _} ->
+          "POST" ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
-            assert Jason.decode!(body) == %{"transition" => %{"id" => "31"}}
+            # Matched by destination status ("Done"), not transition name.
+            assert Jason.decode!(body) == %{"transition" => %{"id" => "61"}}
 
             conn
             |> Plug.Conn.put_status(204)
@@ -136,14 +144,92 @@ defmodule Arbiter.Trackers.JiraTest do
       assert :ok = Jira.transition(@ref, :closed)
     end
 
-    test "returns {:error, :transition_not_found} when the bead status has no mapping" do
+    test "multi-hop: walks the configured graph, executing each hop in order" do
+      {:ok, agent} = Agent.start_link(fn -> "Backlog" end)
+      on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
+
       Config.put_active(%{
         "host" => @host,
         "project_key" => @project,
         "credentials_ref" => "env:#{@env_var}",
         "email" => "tester@example.com",
-        # Empty status_map (only inherits defaults). Override :closed to empty
-        # to force the not-found path.
+        "status_map" => %{"in_progress" => "In Progress"},
+        "transition_graph" => %{
+          "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
+          "To Do" => [%{"transition" => "Start work", "to" => "In Progress"}]
+        }
+      })
+
+      transitions_for = fn
+        "Backlog" -> [%{"id" => "141", "name" => "To do next", "to" => %{"name" => "To Do"}}]
+        "To Do" -> [%{"id" => "200", "name" => "Start work", "to" => %{"name" => "In Progress"}}]
+        _ -> []
+      end
+
+      advance = fn
+        "141" -> "To Do"
+        "200" -> "In Progress"
+      end
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        cur = Agent.get(agent, & &1)
+
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"transitions" => transitions_for.(cur)})
+
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"fields" => %{"status" => %{"name" => cur}}})
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            id = Jason.decode!(body)["transition"]["id"]
+            Agent.update(agent, fn _ -> advance.(id) end)
+
+            conn
+            |> Plug.Conn.put_status(204)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      # Backlog -> To Do -> In Progress (2 hops, neither reachable directly).
+      assert :ok = Jira.transition(@ref, :in_progress)
+      assert Agent.get(agent, & &1) == "In Progress"
+    end
+
+    test "no-ops (no POST) when the issue is already at the target status" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+
+        if String.ends_with?(conn.request_path, "/transitions") do
+          # No live transition lands on "Done" — forces the current-status check.
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "transitions" => [
+              %{"id" => "9", "name" => "Reopen", "to" => %{"name" => "In Progress"}}
+            ]
+          })
+        else
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "Done"}}})
+        end
+      end)
+
+      assert :ok = Jira.transition(@ref, :closed)
+    end
+
+    test "returns {:error, :status_unmapped} when the event has no target status mapped" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
         "status_map" => %{
           "open" => "To Do",
           "in_progress" => "In Progress",
@@ -151,27 +237,62 @@ defmodule Arbiter.Trackers.JiraTest do
         }
       })
 
-      assert {:error, %Error{kind: :transition_not_found}} = Jira.transition(@ref, :closed)
+      assert {:error, %Error{kind: :status_unmapped}} = Jira.transition(@ref, :closed)
     end
 
-    test "returns {:error, :transition_not_found} when the named transition is not available" do
+    test "returns {:error, :no_transition_path} when the target status is unreachable" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "status_map" => %{"closed" => "Nowhere"}
+      })
+
       stub(fn conn ->
         assert conn.method == "GET"
 
-        conn
-        |> Plug.Conn.put_status(200)
-        |> Req.Test.json(%{
-          "transitions" => [
-            %{"id" => "11", "name" => "To Do"},
-            %{"id" => "21", "name" => "In Progress"}
-          ]
-        })
+        if String.ends_with?(conn.request_path, "/transitions") do
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "transitions" => [
+              %{"id" => "1", "name" => "noop", "to" => %{"name" => "In Progress"}}
+            ]
+          })
+        else
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{"fields" => %{"status" => %{"name" => "In Progress"}}})
+        end
       end)
 
-      assert {:error, %Error{kind: :transition_not_found, message: msg}} =
-               Jira.transition(@ref, :closed)
+      assert {:error, %Error{kind: :no_transition_path}} = Jira.transition(@ref, :closed)
+    end
+  end
 
-      assert msg =~ "Approved and merged"
+  describe "plan_transition_path/3 (pure BFS)" do
+    @graph %{
+      "Backlog" => [
+        %{"transition" => "To do next", "to" => "To Do"},
+        %{"transition" => "Put on ice", "to" => "Backlog"}
+      ],
+      "To Do" => [%{"transition" => "Start work", "to" => "In Progress"}],
+      "In Progress" => [%{"transition" => "Pull request created", "to" => "In Code Review"}]
+    }
+
+    test "finds the shortest multi-hop path (Backlog -> To Do -> In Progress)" do
+      assert {:ok, ["To do next", "Start work"]} =
+               Jira.plan_transition_path(@graph, "Backlog", "In Progress")
+    end
+
+    test "returns an empty path when already at the target" do
+      assert {:ok, []} = Jira.plan_transition_path(@graph, "In Progress", "In Progress")
+    end
+
+    test "returns :no_transition_path when the target is unreachable" do
+      assert {:error, %Error{kind: :no_transition_path}} =
+               Jira.plan_transition_path(@graph, "Backlog", "Mars")
     end
   end
 
@@ -322,11 +443,11 @@ defmodule Arbiter.Trackers.JiraTest do
         |> Plug.Conn.put_status(200)
         |> Req.Test.json(%{
           "transitions" => [
-            %{"id" => "11", "name" => "To Do"},
-            %{"id" => "21", "name" => "In Progress"},
-            %{"id" => "31", "name" => "Approved and merged"},
-            # Names without a mapping in status_map are dropped.
-            %{"id" => "41", "name" => "Some Unmapped Status"}
+            %{"id" => "11", "name" => "start", "to" => %{"name" => "To Do"}},
+            %{"id" => "21", "name" => "go", "to" => %{"name" => "In Progress"}},
+            %{"id" => "31", "name" => "finish", "to" => %{"name" => "Done"}},
+            # Destinations without a mapping in status_map are dropped.
+            %{"id" => "41", "name" => "x", "to" => %{"name" => "Some Unmapped Status"}}
           ]
         })
       end)
@@ -336,6 +457,38 @@ defmodule Arbiter.Trackers.JiraTest do
       assert :in_progress in atoms
       assert :closed in atoms
       assert length(atoms) == 3
+    end
+  end
+
+  describe "add_comment/2" do
+    test "POSTs an ADF comment body to the issue comment endpoint" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/rest/api/3/issue/#{@ref}/comment"
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        # Markdown is ADF-encoded.
+        assert decoded["body"]["type"] == "doc"
+        assert decoded["body"]["version"] == 1
+        assert is_list(decoded["body"]["content"])
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => "10100"})
+      end)
+
+      assert :ok = Jira.add_comment(@ref, "Opened PR https://github.com/leo/x/pull/9")
+    end
+
+    test "propagates an HTTP error" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{"errorMessages" => ["Issue does not exist"]})
+      end)
+
+      assert {:error, %Error{kind: :not_found, status: 404}} = Jira.add_comment(@ref, "hi")
     end
   end
 
@@ -508,8 +661,14 @@ defmodule Arbiter.Trackers.JiraTest do
             "type" => "doc",
             "version" => 1,
             "content" => [
-              %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "First line."}]},
-              %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "Second line."}]}
+              %{
+                "type" => "paragraph",
+                "content" => [%{"type" => "text", "text" => "First line."}]
+              },
+              %{
+                "type" => "paragraph",
+                "content" => [%{"type" => "text", "text" => "Second line."}]
+              }
             ]
           }
         }
