@@ -14,6 +14,12 @@ defmodule Arbiter.Polecat do
       :idle              → :running           (advance/2 from :idle)
       :idle              → :failed            (fail/2 — "stillborn" polecat, e.g.
                                               machine died before any step ran)
+      :failed            → :running           (advance/2 — defense-in-depth: a re-slung
+                                              failed polecat is normally replaced by a
+                                              fresh one (sling.ex bd-d70whv), but if for
+                                              any reason the stale polecat is reused,
+                                              advance resets it to :running so arb-done
+                                              is processed instead of silently ignored)
       :running           → :awaiting          (await/2 — parked, generic external wait)
       :awaiting          → :running           (resume/1)
       :running           → :awaiting_tribunal (arb-done when review is required)
@@ -723,7 +729,7 @@ defmodule Arbiter.Polecat do
   def handle_call(:snapshot, _from, state), do: {:reply, snapshot(state), state}
 
   def handle_call({:advance, step}, _from, %State{status: status} = state)
-      when status in [:idle, :resuming] do
+      when status in [:idle, :resuming, :failed] do
     new_state = %State{
       state
       | current_step: step,
