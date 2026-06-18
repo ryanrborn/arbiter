@@ -55,6 +55,7 @@ defmodule Arbiter.Polecat.Sling do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Messages.AdmiralNotifier
   alias Arbiter.Beads.Issue
+  alias Arbiter.Beads.RigConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.BranchNamer
@@ -518,9 +519,7 @@ defmodule Arbiter.Polecat.Sling do
     end
   end
 
-  defp rig_path_from_config(p) when is_binary(p) and p != "", do: p
-  defp rig_path_from_config(%{"path" => p}) when is_binary(p) and p != "", do: p
-  defp rig_path_from_config(_), do: nil
+  defp rig_path_from_config(raw), do: RigConfig.rig_path_from_config(raw)
 
   defp application_rig_path(rig) do
     rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
