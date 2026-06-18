@@ -42,7 +42,14 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
 
       System.put_env("ARB_HOME", fake_root)
 
-      install_path = Path.join(System.user_home!(), ".local/bin/arb")
+      # Redirect the install destination into the temp checkout so the test never
+      # touches the operator's real ~/.local/bin/arb. System.user_home!/0 is fixed
+      # at VM start and ignores a runtime HOME change, so override the install path
+      # explicitly via ARB_INSTALL_BIN (honored by InstallCli).
+      install_path = Path.join(fake_root, ".local/bin/arb")
+      System.put_env("ARB_INSTALL_BIN", install_path)
+      on_exit(fn -> System.delete_env("ARB_INSTALL_BIN") end)
+
       # Write a fake escript so the copy step has a source file.
       escript_path = Path.join(cli_dir, "arb")
 
@@ -55,8 +62,6 @@ defmodule ArbiterCli.Cmd.InstallCliTest do
 
       assert code == 0
       assert out =~ install_path
-    after
-      File.rm(Path.join(System.user_home!(), ".local/bin/arb"))
     end
   end
 
