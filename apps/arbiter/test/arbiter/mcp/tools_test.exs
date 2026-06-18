@@ -331,15 +331,16 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "polecat_message/2" do
-    test "a coordinator messages a bead's mailbox, scoped to its workspace", ctx do
+  describe "message_send/2" do
+    test "a coordinator sends a direction to a bead's mailbox, scoped to its workspace", ctx do
       assert {:ok, msg} =
-               Tools.polecat_message(ctx.coordinator, %{
+               Tools.message_send(ctx.coordinator, %{
                  "bead_id" => ctx.bead.id,
                  "body" => "pick this up next"
                })
 
       assert msg.kind == "direction"
+      assert msg.from_ref == "coordinator"
       assert msg.to_ref == ctx.bead.id
 
       # It lands in the bead's inbox.
@@ -347,9 +348,198 @@ defmodule Arbiter.MCP.ToolsTest do
       assert inbox_msg.body == "pick this up next"
     end
 
+    test "a polecat raises a flag from its own bead to a sibling", ctx do
+      {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.polecat, %{
+                 "bead_id" => sibling.id,
+                 "body" => "heads up — the API shape changed"
+               })
+
+      # The sender identity is the polecat's own bead, set from the scope — not
+      # spoofable by the client.
+      assert msg.kind == "flag"
+      assert msg.from_ref == ctx.bead.id
+      assert msg.to_ref == sibling.id
+
+      [inbox_msg] = Message.inbox(sibling.id, workspace_id: ctx.ws.id)
+      assert inbox_msg.body == "heads up — the API shape changed"
+    end
+
     test "requires a recipient and a body", ctx do
       assert {:error, {:invalid, _}} =
-               Tools.polecat_message(ctx.coordinator, %{"bead_id" => ctx.bead.id})
+               Tools.message_send(ctx.coordinator, %{"bead_id" => ctx.bead.id})
+    end
+  end
+
+  describe "bead_reopen/2" do
+    test "a coordinator reopens a closed bead", ctx do
+      {:ok, _} = Ash.update(ctx.bead, %{reason: "done"}, action: :close)
+
+      assert {:ok, data} = Tools.bead_reopen(ctx.coordinator, %{"id" => ctx.bead.id})
+      assert data.status == "open"
+      assert is_nil(data.closed_at)
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.bead.id)
+      assert reloaded.status == :open
+    end
+
+    test "reopening a non-closed bead is rejected (FSM guard)", ctx do
+      assert {:error, {:invalid, _}} = Tools.bead_reopen(ctx.coordinator, %{"id" => ctx.bead.id})
+    end
+
+    test "cannot reopen a bead in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ro-other", prefix: "roo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.bead_reopen(ctx.coordinator, %{"id" => foreign.id})
+    end
+  end
+
+  describe "notify_list/2" do
+    test "lists recent notifications scoped to the workspace (both tiers)", ctx do
+      {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a polecat finished"})
+
+      assert {:ok, %{notifications: [n], count: 1}} = Tools.notify_list(ctx.coordinator, %{})
+      assert n.body == "a polecat finished"
+      assert n.kind == "notification"
+
+      # A polecat sees the same workspace feed.
+      assert {:ok, %{count: 1}} = Tools.notify_list(ctx.polecat, %{})
+    end
+
+    test "does not leak notifications from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "nf-other", prefix: "nfo"})
+      {:ok, _} = Message.notify(%{workspace_id: other_ws.id, body: "elsewhere"})
+      {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "here"})
+
+      assert {:ok, %{notifications: notifications}} = Tools.notify_list(ctx.coordinator, %{})
+      assert Enum.all?(notifications, &(&1.body == "here"))
+    end
+
+    test "honors a limit", ctx do
+      for i <- 1..3, do: Message.notify(%{workspace_id: ctx.ws.id, body: "n#{i}"})
+
+      assert {:ok, %{count: 2}} = Tools.notify_list(ctx.coordinator, %{"limit" => 2})
+    end
+  end
+
+  describe "tracker_claim/2 + tracker_sync/2 (tracker = none)" do
+    test "claim refuses when the workspace tracker does not support it", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.tracker_claim(ctx.coordinator, %{"ref" => "42"})
+
+      assert msg =~ "tracker"
+    end
+
+    test "claim requires a ref", ctx do
+      assert {:error, {:invalid, _}} = Tools.tracker_claim(ctx.coordinator, %{})
+    end
+
+    test "sync (dry) returns an empty plan for a none-tracker workspace", ctx do
+      assert {:ok, %{applied: false, actions: [], count: 0}} =
+               Tools.tracker_sync(ctx.coordinator, %{"dry" => true})
+    end
+
+    test "sync (apply) no-ops cleanly for a none-tracker workspace", ctx do
+      assert {:ok, %{applied: true, actions: [], results: []}} =
+               Tools.tracker_sync(ctx.coordinator, %{})
+    end
+  end
+
+  describe "workspace_list/2" do
+    test "enumerates workspaces with summary fields", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-other", prefix: "wlo"})
+
+      assert {:ok, %{workspaces: workspaces, count: count}} =
+               Tools.workspace_list(ctx.coordinator, %{})
+
+      assert count >= 2
+      entry = Enum.find(workspaces, &(&1.id == ctx.ws.id))
+      assert entry.name == "mcp-tools-ws"
+      assert entry.prefix == "mcp"
+      assert is_binary(entry.tracker_type)
+      assert Enum.any?(workspaces, &(&1.id == other_ws.id))
+
+      # Summary only — no config / security posture leaks through.
+      refute Map.has_key?(entry, :config)
+      refute Map.has_key?(entry, :security)
+    end
+  end
+
+  describe "polecat_resume/2 + polecat_review/2 (sling-recursion guardrail, §4.3)" do
+    test "resume refuses a coordinator scope without can_sling", ctx do
+      no_sling = %{ctx.coordinator | can_sling: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.polecat_resume(no_sling, %{"bead_id" => ctx.bead.id})
+    end
+
+    test "review refuses a coordinator scope without can_sling", ctx do
+      no_sling = %{ctx.coordinator | can_sling: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.polecat_review(no_sling, %{"bead_id" => ctx.bead.id})
+    end
+
+    test "resume refuses once the depth limit is reached", ctx do
+      at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
+
+      assert {:error, {:unauthorized, msg}} =
+               Tools.polecat_resume(at_limit, %{"bead_id" => ctx.bead.id})
+
+      assert msg =~ "depth"
+    end
+
+    test "review cannot target a bead in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rv-other", prefix: "rvo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.polecat_review(ctx.coordinator, %{"bead_id" => foreign.id})
+    end
+
+    test "resume surfaces the no-outpost error for a bead never slung", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "never slung", workspace_id: ctx.ws.id})
+
+      # can_sling + in-workspace + below depth, but no preserved worktree exists.
+      assert {:error, {:invalid, msg}} =
+               Tools.polecat_resume(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
+
+      assert msg =~ "outpost" or msg =~ "rig"
+    end
+  end
+
+  describe "polecat_stop/2" do
+    test "stops a running polecat in the workspace", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "stop target", workspace_id: ctx.ws.id})
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
+
+      assert {:ok, %{bead_id: bead_id, stopped: true}} =
+               Tools.polecat_stop(ctx.coordinator, %{"bead_id" => bead.id})
+
+      assert bead_id == bead.id
+    end
+
+    test "a bead with no live polecat is reported not-found", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "no polecat", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.polecat_stop(ctx.coordinator, %{"bead_id" => bead.id})
+    end
+
+    test "cannot stop a polecat for a bead in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "st-other", prefix: "sto"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      {:ok, pid} = Polecat.start(bead_id: foreign.id, rig: "test/rig", workspace_id: other_ws.id)
+      on_exit(fn -> Process.alive?(pid) && Polecat.stop(foreign.id, :normal) end)
+
+      assert {:error, {:not_found, _}} =
+               Tools.polecat_stop(ctx.coordinator, %{"bead_id" => foreign.id})
     end
   end
 
@@ -447,8 +637,8 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "filters by status", ctx do
-      {:ok, _} =
-        Ash.create(Issue, %{title: "closed bead", workspace_id: ctx.ws.id, status: :open})
+      # `:create` does not accept `:status` (and `:open` is the default anyway).
+      {:ok, _} = Ash.create(Issue, %{title: "another open bead", workspace_id: ctx.ws.id})
 
       assert {:ok, %{beads: open_beads}} = Tools.bead_list(ctx.coordinator, %{"status" => "open"})
       assert Enum.all?(open_beads, &(&1.status == "open"))
