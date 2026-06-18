@@ -832,16 +832,17 @@ defmodule Arbiter.Polecat.Sling do
 
         provider = Atom.to_string(choice.type)
 
-        # Resolve the concrete model up front so providers whose CLI emits no
-        # `init` event (e.g. Gemini) still land a model id on the polecat / usage
-        # ledger. Falls back to the routed model for adapters that don't
-        # implement `resolved_model/1`.
-        resolved_model =
-          resolved_model_for(adapter, agent_opts) || Keyword.get(agent_opts, :model)
+        # Concrete model the adapter will dispatch with, if it can name one ahead
+        # of the stream (Gemini, whose CLI emits no `init` event). nil for Claude,
+        # which learns the exact model from its stream-json `init` — we must NOT
+        # thread the routed tier alias ("sonnet") onto a Claude session, or the
+        # ledger would record the alias when the stream is the source of truth.
+        session_model = resolved_model_for(adapter, agent_opts)
 
         routing_config = %{
           provider: provider,
-          model: resolved_model,
+          # For live display the routed model is a fine pre-stream stand-in.
+          model: session_model || Keyword.get(agent_opts, :model),
           model_tier: Keyword.get(agent_opts, :model_tier),
           thinking: Keyword.get(agent_opts, :thinking)
         }
@@ -851,10 +852,11 @@ defmodule Arbiter.Polecat.Sling do
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
-            # Thread provider + resolved model onto the session so the usage
-            # ledger and dashboards attribute the run correctly even when the
-            # CLI stream carries no model/provider (bd-guegdl).
-            session_meta = [provider: provider, model: resolved_model]
+            # Thread provider (+ pre-resolved model, when the adapter has one)
+            # onto the session so the usage ledger and dashboards attribute the
+            # run correctly even when the CLI stream carries no model/provider
+            # (bd-guegdl).
+            session_meta = [provider: provider, model: session_model]
             {:ok, base ++ [command: argv, env: env] ++ session_meta}
 
           {:error, reason} ->

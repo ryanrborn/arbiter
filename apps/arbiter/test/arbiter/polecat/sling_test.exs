@@ -538,8 +538,7 @@ defmodule Arbiter.Polecat.SlingTest do
           preflight: false
         )
 
-      wait_until(fn -> File.exists?(argv_file) end)
-      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      args = wait_for_argv!(argv_file)
       assert "--model" in args
       assert "sonnet" in args
     end
@@ -577,8 +576,7 @@ defmodule Arbiter.Polecat.SlingTest do
           preflight: false
         )
 
-      wait_until(fn -> File.exists?(argv_file) end)
-      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      args = wait_for_argv!(argv_file)
       assert "--model" in args
       assert "opus" in args
       refute "sonnet" in args
@@ -619,8 +617,7 @@ defmodule Arbiter.Polecat.SlingTest do
           preflight: false
         )
 
-      wait_until(fn -> File.exists?(gemini_file) end)
-      gemini_args = File.read!(gemini_file) |> String.split("\n", trim: true)
+      gemini_args = wait_for_argv!(gemini_file)
       assert "-p" in gemini_args
       # The Gemini adapter ran — and Claude did not.
       refute File.exists?(claude_file)
@@ -670,10 +667,27 @@ defmodule Arbiter.Polecat.SlingTest do
           preflight: false
         )
 
-      wait_until(fn -> File.exists?(argv_file) end)
-      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      args = wait_for_argv!(argv_file)
       assert "--model" in args
       assert "haiku" in args
+    end
+  end
+
+  # Read a stub's captured argv once it has settled. The argv-recording shim
+  # appends one line per arg, so a bare `File.exists?` check can race a partial
+  # write and return only the first token. Wait until the file's contents stop
+  # changing across two polls, then split into the arg list.
+  defp wait_for_argv!(file) do
+    wait_until(fn -> File.exists?(file) end)
+    settle_argv(file, File.read!(file))
+  end
+
+  defp settle_argv(file, prev) do
+    Process.sleep(20)
+
+    case File.read!(file) do
+      ^prev -> String.split(prev, "\n", trim: true)
+      next -> settle_argv(file, next)
     end
   end
 
