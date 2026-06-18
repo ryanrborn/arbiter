@@ -2076,6 +2076,7 @@ defmodule Arbiter.Polecat do
             # through to open_mr_for/3, fails opening a second PR on the
             # already-merged branch, and the bead is never auto-closed.
             record_pr_ref_on_bead(state, mr_ref)
+            sync_tracker_pr_opened(state, mr_ref, merger_url)
 
             new_state = %State{
               state
@@ -2225,6 +2226,30 @@ defmodule Arbiter.Polecat do
   end
 
   defp record_pr_ref_on_bead(_state, _mr_ref), do: :ok
+
+  # PR-open: drive the bead's external tracker forward (e.g. Jira VR ->
+  # In Code Review) and attach the PR as a comment + remote link. The original
+  # incident (VR-17911) opened a PR but never transitioned the ticket and left
+  # 0 comments / no remote-link; this fires that hook. Best-effort and
+  # loud-on-failure inside `Arbiter.Trackers.Sync` — a missing/unreadable bead
+  # here just skips. (bd-c4cfuv)
+  defp sync_tracker_pr_opened(%State{bead_id: bead_id}, mr_ref, merger_url) do
+    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+      Arbiter.Trackers.Sync.lifecycle(bead, :pr_opened,
+        pr_url: merger_url,
+        pr_title: "PR #{mr_ref} (#{bead_id})"
+      )
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug(
+        "Polecat.open_mr: PR-open tracker sync raised for bead=#{bead_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
 
   # Spawn the Warden that polls for approval. auto_merge + poll interval come
   # from the workspace config (opts may override, primarily for tests).

@@ -172,6 +172,69 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   def credential_expired(_snapshot, _adapter, _reason), do: :ok
 
+  @doc """
+  Escalate a failed external-tracker sync to the Admiral (bd-c4cfuv).
+
+  Fired by `Arbiter.Trackers.Sync` / `Arbiter.Beads.Issue.Changes.SyncTracker`
+  when a lifecycle transition (sling → In Progress, PR-open → In Code Review,
+  merge → Done, …) can't be resolved or fails on the wire. The original
+  incident (VR-17911) was invisible precisely because such failures were
+  swallowed; this surfaces a `status_map`/workflow mismatch as an actionable
+  inbox item instead. Best-effort, returns `:ok`.
+
+  `snapshot` carries `:bead_id` + `:workspace_id` (and optionally
+  `:tracker_type` / `:tracker_ref`); `event` is the lifecycle atom; `reason` is
+  the adapter's error term.
+  """
+  @spec tracker_sync_failed(map(), atom(), term()) :: :ok
+  def tracker_sync_failed(%{workspace_id: ws_id} = snapshot, event, reason)
+      when is_binary(ws_id) do
+    bead_id = Map.get(snapshot, :bead_id, "system")
+    tracker = Map.get(snapshot, :tracker_type)
+    ref = Map.get(snapshot, :tracker_ref)
+
+    subject = "#{bead_id} tracker sync failed — #{event}"
+
+    body =
+      [
+        "Failed to sync #{title_for(bead_id)} to its external tracker on the " <>
+          "`#{event}` lifecycle event.",
+        tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
+        "Error: #{describe_reason(reason)}",
+        "This usually means the workspace `status_map` / `transition_graph` " <>
+          "doesn't match the tracker's real workflow. Reconcile the config " <>
+          "(see Arbiter.Trackers.Jira.Config) and re-run the sync."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: bead_id,
+      workspace_id: ws_id,
+      directive_ref: bead_id,
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.tracker_sync_failed/3 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def tracker_sync_failed(_snapshot, _event, _reason), do: :ok
+
+  defp describe_reason(%{__struct__: _, message: msg, kind: kind}) when is_binary(msg),
+    do: "#{msg} (#{kind})"
+
+  defp describe_reason(reason) when is_binary(reason), do: reason
+  defp describe_reason(reason), do: inspect(reason)
+
   # ---- core ---------------------------------------------------------------
 
   # A notification must be scoped to a workspace (Message.workspace_id is

@@ -35,9 +35,15 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
   Non-closing transitions (`open ⇄ in_progress`, reopen) never touch the
   custom fields.
 
-  Best-effort: a sync failure is logged and swallowed — the local transition
-  must succeed even when the external tracker is unreachable or misconfigured.
-  Mirrors the teardown pattern in `Arbiter.Beads.Issue.Changes.StopPolecat`.
+  ## Failure is loud, not swallowed
+
+  The local transition still always succeeds (a sync failure never rolls back
+  the bead). But the *sync* failure is no longer silent: the transition runs
+  through `Arbiter.Trackers.Sync.transition_event/2`, which logs loudly and
+  raises an Admiral Summons on a genuine failure (an unreachable mapped status,
+  an auth/5xx error). A tracker that simply doesn't model the event is skipped
+  quietly. This is the fix for VR-17911, whose In-Progress sync failed
+  invisibly because a `status_map` mismatch was swallowed (bd-c4cfuv).
   """
 
   use Ash.Resource.Change
@@ -46,6 +52,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
 
   alias Arbiter.Beads.Workspace
   alias Arbiter.Trackers
+  alias Arbiter.Trackers.Sync
 
   @impl true
   def change(changeset, _opts, _context) do
@@ -104,17 +111,10 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
   end
 
   defp do_transition(issue) do
-    case Trackers.transition(issue, issue.status) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning(
-          "SyncTracker: failed to sync bead=#{issue.id} " <>
-            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} " <>
-            "-> #{issue.status}: #{inspect(reason)}"
-        )
-    end
+    # Route through Sync so a genuine failure is loud + raises a Summons
+    # (the swallow-on-error that hid VR-17911 is gone). A benign "tracker
+    # doesn't model this status" is still skipped quietly.
+    Sync.transition_event(issue, issue.status)
 
     # For close transitions, verify the upstream issue is actually closed —
     # a silent no-op or a stale server can leave it open even after :ok.
