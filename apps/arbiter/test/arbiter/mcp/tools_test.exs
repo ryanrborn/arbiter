@@ -406,6 +406,100 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "polecat_list/2" do
+    test "returns an empty list when no polecats are running in the workspace", ctx do
+      assert {:ok, %{polecats: [], count: 0}} = Tools.polecat_list(ctx.coordinator, %{})
+    end
+
+    test "returns active polecats scoped to the coordinator's workspace", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "polecat-list target", workspace_id: ctx.ws.id})
+
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
+
+      assert {:ok, %{polecats: polecats, count: count}} = Tools.polecat_list(ctx.coordinator, %{})
+      assert count >= 1
+      assert Enum.any?(polecats, &(&1.bead_id == bead.id))
+
+      entry = Enum.find(polecats, &(&1.bead_id == bead.id))
+      assert is_binary(entry.rig)
+      assert is_binary(entry.status)
+      assert entry.rig == "test/rig"
+    end
+
+    test "does not include polecats from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})
+
+      {:ok, _pid} = Polecat.start(bead_id: foreign.id, rig: "test/rig", workspace_id: other_ws.id)
+      on_exit(fn -> Polecat.stop(foreign.id, :normal) end)
+
+      assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
+      refute Enum.any?(polecats, &(&1.bead_id == foreign.id))
+    end
+  end
+
+  describe "bead_list/2" do
+    test "lists all beads in the workspace with no filters", ctx do
+      assert {:ok, %{beads: beads, count: count}} = Tools.bead_list(ctx.coordinator, %{})
+      assert count >= 1
+      assert Enum.any?(beads, &(&1.id == ctx.bead.id))
+    end
+
+    test "filters by status", ctx do
+      {:ok, _} =
+        Ash.create(Issue, %{title: "closed bead", workspace_id: ctx.ws.id, status: :open})
+
+      assert {:ok, %{beads: open_beads}} = Tools.bead_list(ctx.coordinator, %{"status" => "open"})
+      assert Enum.all?(open_beads, &(&1.status == "open"))
+
+      assert {:ok, %{beads: closed_beads}} =
+               Tools.bead_list(ctx.coordinator, %{"status" => "closed"})
+
+      assert Enum.all?(closed_beads, &(&1.status == "closed"))
+    end
+
+    test "filters by issue_type", ctx do
+      {:ok, bug} =
+        Ash.create(Issue, %{title: "a bug", workspace_id: ctx.ws.id, issue_type: :bug})
+
+      assert {:ok, %{beads: bugs}} =
+               Tools.bead_list(ctx.coordinator, %{"issue_type" => "bug"})
+
+      assert Enum.all?(bugs, &(&1.issue_type == "bug"))
+      assert Enum.any?(bugs, &(&1.id == bug.id))
+    end
+
+    test "filters by priority", ctx do
+      {:ok, p0} = Ash.create(Issue, %{title: "urgent", workspace_id: ctx.ws.id, priority: 0})
+
+      assert {:ok, %{beads: p0_beads}} = Tools.bead_list(ctx.coordinator, %{"priority" => 0})
+      assert Enum.any?(p0_beads, &(&1.id == p0.id))
+    end
+
+    test "does not include beads from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bl-other", prefix: "blo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign bead", workspace_id: other_ws.id})
+
+      assert {:ok, %{beads: beads}} = Tools.bead_list(ctx.coordinator, %{})
+      refute Enum.any?(beads, &(&1.id == foreign.id))
+    end
+
+    test "rejects an invalid status value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.bead_list(ctx.coordinator, %{"status" => "bogus"})
+
+      assert msg =~ "status"
+    end
+
+    test "rejects an invalid issue_type value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.bead_list(ctx.coordinator, %{"issue_type" => "bogus"})
+
+      assert msg =~ "issue_type"
+    end
+  end
+
   describe "Catalog.call/3 dispatch" do
     test "routes an authorized call to its handler and returns structured data", ctx do
       assert {:ok, data} = Catalog.call(ctx.polecat, "bead_show", %{})
