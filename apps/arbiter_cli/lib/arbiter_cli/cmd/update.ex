@@ -40,10 +40,15 @@ defmodule ArbiterCli.Cmd.Update do
       arb update <id> [--priority N] [--append-notes text] [--status s]
                       [--description d] [--assignee a]
                       [--qa-notes text] [--deployment-notes text]
+                      [--pr-body text]
 
   `--qa-notes` / `--deployment-notes` set the gated completion-notes fields
   an acolyte produces for tracker-backed work (QA Testing Notes / Deployment
   Notes on the Jira ticket). They overwrite the field (unlike `--append-notes`).
+
+  `--pr-body` sets the acolyte-authored PR/MR description the Refinery opens
+  the bead's single canonical PR with (Summary / Test plan / References). It
+  overwrites the field.
 
   `--append-notes` appends the given string to the existing `notes` field
   (separated by two newlines). This requires fetching the issue first so we
@@ -79,6 +84,7 @@ defmodule ArbiterCli.Cmd.Update do
     notes: :string,
     qa_notes: :string,
     deployment_notes: :string,
+    pr_body: :string,
     status: :string,
     description: :string,
     title: :string,
@@ -574,6 +580,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("notes", opts[:notes])
       |> put_if("qa_notes", opts[:qa_notes])
       |> put_if("deployment_notes", opts[:deployment_notes])
+      |> put_if("pr_body", opts[:pr_body])
       |> put_if("status", opts[:status])
       |> put_if("description", opts[:description])
       |> put_if("title", opts[:title])

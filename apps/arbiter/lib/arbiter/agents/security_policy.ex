@@ -64,6 +64,9 @@ defmodule Arbiter.Agents.SecurityPolicy do
     * `:no_force_push`      — `git push --force` / `-f`.
     * `:no_secret_reads`    — reading `.env`, private keys, `~/.ssh`, cloud creds.
     * `:no_outside_writes`  — writing to sensitive paths outside the worktree.
+    * `:no_pr_create`       — opening a PR/MR from the worker (`gh pr create`,
+      `glab mr create`). The Refinery owns PR creation; a worker that opens its
+      own PR produces a duplicate on the wrong base (bd-53xrmi).
 
   Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
   recommended), but defaults non-empty. In `:bypass` mode they are
@@ -123,7 +126,8 @@ defmodule Arbiter.Agents.SecurityPolicy do
     :no_destructive_fs,
     :no_force_push,
     :no_secret_reads,
-    :no_outside_writes
+    :no_outside_writes,
+    :no_pr_create
   ]
 
   @doc "Valid `permissions.mode` atoms."

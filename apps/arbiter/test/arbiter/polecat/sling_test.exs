@@ -975,6 +975,33 @@ defmodule Arbiter.Polecat.SlingTest do
     end
   end
 
+  describe "work prompt PR body authoring (bd-53xrmi)" do
+    test "instructs the acolyte to author a pr_body and NOT open its own PR", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "author body", workspace_id: ws.id})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      # Authors the body and persists it via the CLI.
+      assert prompt =~ "--pr-body"
+      assert prompt =~ "arb issue update #{bead.id}"
+      assert prompt =~ "Summary"
+      assert prompt =~ "Test plan"
+
+      # No longer tells the worker to open a PR; explicitly forbids it.
+      refute prompt =~ "open a PR if appropriate"
+      assert prompt =~ "Do NOT open a pull request"
+      assert prompt =~ "gh pr create"
+    end
+
+    test "the PR-body step is present for untracked beads too", %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{title: "local body", workspace_id: ws.id, tracker_type: "none"})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+      assert prompt =~ "--pr-body"
+    end
+  end
+
   describe "resume/2 (bd-auma3z)" do
     @env_key :rig_paths
 

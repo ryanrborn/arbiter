@@ -1013,8 +1013,13 @@ defmodule Arbiter.Polecat.Sling do
 
     Your current directory is a fresh git worktree on a per-bead branch.
     Work the bead to completion: load context, design, implement, test,
-    commit on this branch, then push and open a PR if appropriate.
-    #{completion_notes_step(bead)}
+    commit on this branch, and push it.
+
+    Do NOT open a pull request yourself (no `gh pr create` / `glab mr
+    create`). The Refinery opens the single canonical PR for this bead, on
+    the correct base branch, using the body you author in the next step.
+    Opening your own PR creates a duplicate on the wrong base.
+    #{pr_body_step(bead)}#{completion_notes_step(bead)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{bead.id}
@@ -1029,6 +1034,35 @@ defmodule Arbiter.Polecat.Sling do
 
     on a line by itself, exactly. The polecat watches your stdout and
     will mark the bead complete when it sees that marker.
+    """
+  end
+
+  # The worker authors the PR/MR body and persists it on the bead; the
+  # Refinery (not the worker) opens the one canonical PR with it (bd-53xrmi).
+  # Authoring it *after* implementing is what makes it acolyte-quality — the
+  # Test plan reflects what actually passed, not what the spec hoped for. If
+  # the repo ships a PR template we fill it rather than discard it (GitHub
+  # injects the bare template only when the body is empty — the empty-body
+  # incident #3606). Persisted via `arb issue update --pr-body`, which the
+  # Refinery reads back as `pr_body`.
+  defp pr_body_step(%Issue{id: id}) do
+    """
+
+    Author the PR description and persist it on the bead — the Refinery opens
+    the PR with this exact body, so write it as the PR writeup, not a restatement
+    of the ticket. Do this AFTER the work is implemented and tested, so it
+    reflects what actually changed:
+
+      * **Summary** — what changed and why, in a few sentences.
+      * **Test plan** — the checks you ran, with checked boxes for what passed.
+      * **References** — the bead id (#{id}) and any linked ticket/PRs.
+
+    If the repo has a PR template (`.github/pull_request_template.md`), FILL it
+    rather than discard it. Persist the finished body verbatim:
+
+        arb issue update #{id} --pr-body "<the full PR body, Markdown>"
+
+    Do this before printing `arb done`.
     """
   end
 
