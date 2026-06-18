@@ -1,35 +1,44 @@
 defmodule ArbiterCli.Cmd.Sling do
   @moduledoc """
-  `arb sling <bead-id> [<rig>] [--with-claude] [--model <name>]` — spawn a
-  polecat to work on a bead.
+  `arb sling <bead-id> [<rig>] [--with-claude | --with-gemini | --no-agent] [--model <name>]`
+  — spawn a polecat to work on a bead.
 
   POSTs to `/api/polecats/sling`. The server transitions the bead to
   `:in_progress`, starts a polecat GenServer under
   `Arbiter.Polecat.Supervisor`, attaches `Arbiter.Workflows.Work` via
-  the WorkflowMachine, and (with `--with-claude`) spawns a Claude
-  subprocess in the polecat's worktree.
+  the WorkflowMachine, and spawns an agent subprocess in the worktree.
 
-  Without `--with-claude` there is no worker, so the bead simply **parks**
-  in `:in_progress` for a hand to attach — it is NOT auto-closed. (The
-  bookkeeping `Work` workflow is no-op placeholder steps; auto-closing a
-  bead nobody worked is never what you want.)
+  By default (no worker flag) the server reads the workspace's `agent.type`
+  config and spawns that agent. Use `--with-claude` or `--with-gemini` to
+  force a specific provider, or `--no-agent` to park the bead for a manual
+  attach instead.
 
   Flags:
-    --with-claude    spawn a real Claude subprocess in the worktree, which
-                     works the bead and closes it on completion (`arb done`).
-                     Requires a worktree (rig must be in
-                     `:arbiter, :rig_paths`) and the `claude` CLI on PATH.
-                     **This consumes Anthropic API credits.** Off by default.
+    --with-claude    explicitly spawn a Claude subprocess regardless of the
+                     workspace's `agent.type`. Requires the `claude` CLI on
+                     PATH. **Consumes Anthropic API credits.**
+    --with-gemini    explicitly spawn a Gemini subprocess regardless of the
+                     workspace's `agent.type`. Requires the `gemini` CLI on
+                     PATH. **Consumes Google API credits.**
+    --no-agent       dry sling — park the bead in `:in_progress` for a hand
+                     to attach, with no agent spawned. Preserves the old
+                     manual-attach path.
     --model <name>   one-shot override of the model the worker session runs
                      on (`haiku|sonnet|opus`). Takes precedence over the
                      workspace's `agent.config.model` and any routing rule
-                     for the bead. Only applied when `--with-claude` is set.
+                     for the bead.
     --json           emit JSON instead of human-readable text
   """
 
   alias ArbiterCli.{Client, Output, Vernacular}
 
-  @switches [json: :boolean, with_claude: :boolean, model: :string]
+  @switches [
+    json: :boolean,
+    with_claude: :boolean,
+    with_gemini: :boolean,
+    no_agent: :boolean,
+    model: :string
+  ]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -37,7 +46,6 @@ defmodule ArbiterCli.Cmd.Sling do
     else
       {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
       mode = if opts[:json], do: :json, else: :text
-      with_claude = opts[:with_claude] || false
       model = opts[:model]
 
       {bead_id, rig} =
@@ -48,10 +56,18 @@ defmodule ArbiterCli.Cmd.Sling do
           _ -> Output.die("sling takes at most two positional arguments: <bead-id> [<rig>]")
         end
 
+      worker =
+        cond do
+          opts[:with_claude] -> %{"with_claude" => true}
+          opts[:with_gemini] -> %{"with_gemini" => true}
+          opts[:no_agent] -> %{"no_agent" => true}
+          true -> %{}
+        end
+
       body =
         %{"bead_id" => bead_id}
+        |> Map.merge(worker)
         |> maybe_put("rig", rig)
-        |> maybe_put("with_claude", if(with_claude, do: true, else: nil))
         |> maybe_put("model", model)
 
       case Client.post("/api/polecats/sling", body) do
