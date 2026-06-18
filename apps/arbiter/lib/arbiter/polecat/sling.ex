@@ -771,10 +771,19 @@ defmodule Arbiter.Polecat.Sling do
             {:error, :missing_worktree}
 
           path when is_binary(path) ->
-            # Inject the per-spawn MCP config (.mcp.json) into the worktree so
-            # the agent can read its bead / mailbox and write completion notes
-            # as typed tool calls. Best-effort: never blocks the spawn.
-            _ = maybe_write_mcp_config(bead, path, opts)
+            # Inject the per-spawn MCP config (.mcp.json) into the *isolated*
+            # worktree so the agent can read its bead / mailbox and write
+            # completion notes as typed tool calls. Best-effort: never blocks
+            # the spawn.
+            #
+            # Pass `worktree_path`, NOT `path` (bd-dlv3no): a review dispatch has
+            # no worktree, so `path` falls back to the rig's shared checkout
+            # (`review_cwd/2`). Writing the token-bearing `.mcp.json` there leaks
+            # it into the canonical checkout the live server + operator share —
+            # the exact "acolyte leaks into the main worktree" class this fixes.
+            # With a nil worktree the helper is a no-op, so reviews never touch
+            # the rig's working tree.
+            _ = maybe_write_mcp_config(bead, worktree_path, opts)
 
             with {:ok, session_opts} <-
                    build_agent_session_opts(bead, polecat_pid, path, opts),
@@ -922,7 +931,14 @@ defmodule Arbiter.Polecat.Sling do
   # Gated by `Arbiter.MCP.inject_config?/0` (off in test by default) and fully
   # best-effort: a missing signing secret or write failure is logged and swallowed
   # so MCP config never blocks a sling.
-  defp maybe_write_mcp_config(%Issue{} = bead, worktree_path, opts) do
+  # No isolated worktree (e.g. a review dispatch running in the rig's shared
+  # checkout) → never write the token-bearing `.mcp.json`. Injecting it into the
+  # canonical checkout would leak the scope token into the working tree the live
+  # server and operator share (bd-dlv3no).
+  defp maybe_write_mcp_config(_bead, nil, _opts), do: :ok
+
+  defp maybe_write_mcp_config(%Issue{} = bead, worktree_path, opts)
+       when is_binary(worktree_path) do
     if Arbiter.MCP.inject_config?() do
       # `:depth` carries the sling-recursion depth (Phase 2 guardrail): a polecat
       # slung *by a coordinator* via `polecat_sling` is minted one level deeper, so

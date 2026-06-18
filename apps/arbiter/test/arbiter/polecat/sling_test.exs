@@ -252,6 +252,17 @@ defmodule Arbiter.Polecat.SlingTest do
       :ok
     end
 
+    # Flip the per-spawn `.mcp.json` injection on (config/test.exs disables it by
+    # default) and restore the prior config when the test ends. The signing
+    # secret falls back to the Phoenix endpoint's :secret_key_base, so no secret
+    # needs to be injected here.
+    defp enable_mcp_injection! do
+      prior = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior || [], :inject_config, true))
+      on_exit(fn -> Application.put_env(:arbiter, Arbiter.MCP, prior) end)
+      :ok
+    end
+
     defp seed_repo!(tmp, sub) do
       repo = Path.join(tmp, sub)
       File.mkdir_p!(repo)
@@ -311,6 +322,70 @@ defmodule Arbiter.Polecat.SlingTest do
 
       assert is_port(result.claude_port)
       assert is_binary(result.worktree_path)
+    end
+
+    # bd-dlv3no: a review dispatch has no per-bead worktree, so its Claude cwd
+    # falls back to the rig's shared checkout. The per-spawn MCP config carries a
+    # bearer scope token; writing `.mcp.json` into that canonical checkout leaks
+    # the token into the working tree the live server + operator share (the
+    # "acolyte leaks into the main worktree" class). The spawn must NOT touch the
+    # rig's working tree.
+    test "review dispatch does not write .mcp.json into the shared rig checkout",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "reviewrig")
+
+      Application.put_env(:arbiter, :rig_paths, %{"rv/rig" => repo})
+      enable_mcp_injection!()
+
+      on_exit(fn -> Application.delete_env(:arbiter, :rig_paths) end)
+
+      {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "rv/rig",
+          review: true,
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sleep", "2"]
+        )
+
+      # Review runs in the rig (no worktree) ...
+      assert result.worktree_path == nil
+      assert is_port(result.claude_port)
+      # ... and the token-bearing config never lands in that shared checkout.
+      refute File.exists?(Path.join(repo, ".mcp.json"))
+    end
+
+    # Counterpart: a normal work dispatch DOES get the MCP config — but only ever
+    # inside its own isolated worktree, never the rig.
+    test "work dispatch writes .mcp.json into its isolated worktree (not the rig)",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "workrig")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "work-wt"))
+      Application.put_env(:arbiter, :rig_paths, %{"work/rig" => repo})
+      enable_mcp_injection!()
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :rig_paths)
+      end)
+
+      {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "work/rig",
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      assert is_binary(result.worktree_path)
+      assert File.exists?(Path.join(result.worktree_path, ".mcp.json"))
+      refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
     test "start_claude: true with an unresolvable rig returns {:error, {:rig_not_found, rig}}",
