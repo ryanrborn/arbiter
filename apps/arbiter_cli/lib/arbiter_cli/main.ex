@@ -66,6 +66,9 @@ defmodule ArbiterCli.Main do
       arb install cli     [--json]
       arb install service [--system] [--uninstall] [--json]
 
+      arb mcp token mint  --tier coordinator [--workspace <id>] [--ttl <seconds>] [--json]
+      arb mcp token verify <token> [--json]
+
   ## Meta commands (no resource)
 
       arb prime                Mission briefing — run at the start of a session
@@ -205,6 +208,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("message", args), do: ArbiterCli.Cmd.Message.run(args)
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
+  defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
   # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`
   # (the Sith label "sling" aliases to it).
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
