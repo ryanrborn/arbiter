@@ -173,12 +173,93 @@ defmodule Arbiter.Trackers.Shortcut do
   end
 
   @impl true
-  def create(_attrs) do
-    # Outbound create not yet implemented for Shortcut — `arb create` on a
-    # Shortcut-configured workspace currently only creates the local bead.
-    # Wire this up when the Shortcut create path is needed.
-    {:error, :not_supported}
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs),
+         {:ok, workflows} <- list_workflows(cfg),
+         {:ok, state_id} <- resolve_initial_state(cfg, workflows, attrs),
+         {:ok, payload} <- build_create_payload(title, state_id, attrs) do
+      case request(cfg, :post, "/stories", json: payload) do
+        {:ok, %Req.Response{status: status_code, body: %{"id" => id}}}
+        when status_code in 200..299 and is_integer(id) ->
+          {:ok, Integer.to_string(id)}
+
+        {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "Shortcut create response missing \"id\"",
+             raw: body
+           }}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
   end
+
+  defp fetch_title(%{title: title}) when is_binary(title) and title != "", do: {:ok, title}
+  defp fetch_title(%{"title" => title}) when is_binary(title) and title != "", do: {:ok, title}
+
+  defp fetch_title(_),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "create requires a non-empty :title",
+         raw: nil
+       }}
+
+  defp resolve_initial_state(cfg, workflows, attrs) do
+    status = pluck(attrs, [:status, "status"]) || :open
+    target_name = Map.get(cfg.status_map, status)
+
+    case target_name do
+      name when is_binary(name) and name != "" ->
+        find_state_id(cfg, workflows, name)
+
+      _ ->
+        find_state_id(cfg, workflows, Map.get(cfg.status_map, :open, "Unstarted"))
+    end
+  end
+
+  defp build_create_payload(title, state_id, attrs) do
+    description = pluck(attrs, [:description, "description"])
+    assignee = pluck(attrs, [:assignee, "assignee"])
+
+    payload =
+      %{"name" => title, "workflow_state_id" => state_id}
+      |> maybe_put_description(description)
+      |> maybe_put_owner_ids(assignee)
+
+    {:ok, payload}
+  end
+
+  defp pluck(map, keys) do
+    Enum.find_value(keys, fn k ->
+      case Map.fetch(map, k) do
+        {:ok, v} -> v
+        :error -> nil
+      end
+    end)
+  end
+
+  defp maybe_put_description(payload, nil), do: payload
+  defp maybe_put_description(payload, ""), do: payload
+  defp maybe_put_description(payload, desc), do: Map.put(payload, "description", desc)
+
+  defp maybe_put_owner_ids(payload, nil), do: payload
+  defp maybe_put_owner_ids(payload, ""), do: payload
+
+  defp maybe_put_owner_ids(payload, id) when is_binary(id),
+    do: Map.put(payload, "owner_ids", [id])
+
+  defp maybe_put_owner_ids(payload, _), do: payload
 
   @impl true
   def list_transitions(ref) when is_binary(ref) do

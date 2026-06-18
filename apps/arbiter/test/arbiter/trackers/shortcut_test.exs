@@ -262,7 +262,11 @@ defmodule Arbiter.Trackers.ShortcutTest do
       end)
 
       assert :ok =
-               Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42 (bead bd-12345)")
+               Shortcut.add_remote_link(
+                 @ref,
+                 "https://github.com/example/pr/42",
+                 "PR 42 (bead bd-12345)"
+               )
     end
 
     test "404: returns {:error, %Error{kind: :not_found}}" do
@@ -328,6 +332,130 @@ defmodule Arbiter.Trackers.ShortcutTest do
     test "returns :error for non-string input" do
       assert Shortcut.parse_ref(nil) == :error
       assert Shortcut.parse_ref(42) == :error
+    end
+  end
+
+  describe "create/1" do
+    test "POSTs to /stories with name and workflow_state_id, returns the story id" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(workflows_payload())
+
+          {"POST", "/api/v3/stories"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+
+            assert decoded["name"] == "Fix the thing"
+            assert decoded["workflow_state_id"] == 500
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 9999, "name" => "Fix the thing"})
+        end
+      end)
+
+      assert {:ok, "9999"} = Shortcut.create(%{title: "Fix the thing"})
+    end
+
+    test "includes description and owner_ids when provided" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(workflows_payload())
+
+          {"POST", "/api/v3/stories"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+
+            assert decoded["description"] == "Some details"
+            assert decoded["owner_ids"] == ["member-uuid-abc"]
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 1111})
+        end
+      end)
+
+      assert {:ok, "1111"} =
+               Shortcut.create(%{
+                 title: "Fix the thing",
+                 description: "Some details",
+                 assignee: "member-uuid-abc"
+               })
+    end
+
+    test "resolves the initial workflow_state_id from the status attr" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(workflows_payload())
+
+          {"POST", "/api/v3/stories"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            assert Jason.decode!(body)["workflow_state_id"] == 501
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 2222})
+        end
+      end)
+
+      assert {:ok, "2222"} = Shortcut.create(%{title: "In-progress story", status: :in_progress})
+    end
+
+    test "returns {:error, :validation_failed} when title is missing" do
+      assert {:error, %Error{kind: :validation_failed, message: msg}} =
+               Shortcut.create(%{description: "no title here"})
+
+      assert msg =~ "title"
+    end
+
+    test "returns {:error, :validation_failed} when title is empty" do
+      assert {:error, %Error{kind: :validation_failed}} = Shortcut.create(%{title: ""})
+    end
+
+    test "returns {:error, :validation_failed} when the API response has no id" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"POST", "/api/v3/stories"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"name" => "no id"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :validation_failed}} = Shortcut.create(%{title: "x"})
+    end
+
+    test "422: returns {:error, %Error{kind: :validation_failed}}" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(workflows_payload())
+
+          {"POST", "/api/v3/stories"} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Unprocessable"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               Shortcut.create(%{title: "x"})
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = Shortcut.create(%{title: "x"})
     end
   end
 
