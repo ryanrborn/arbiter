@@ -1021,10 +1021,12 @@ defmodule Arbiter.Polecat.SlingTest do
 
       prompt = Sling.prompt_for_bead(bead, [])
 
+      # Notes persist via the MCP tool, never the arb escript (bd-53xrmi).
       assert prompt =~ "backed by an external tracker"
-      assert prompt =~ "--qa-notes"
-      assert prompt =~ "--deployment-notes"
-      assert prompt =~ "arb issue update #{bead.id}"
+      assert prompt =~ "bead_update_progress"
+      assert prompt =~ "qa_notes"
+      assert prompt =~ "deployment_notes"
+      refute prompt =~ "arb issue update"
     end
 
     test "untracked beads get no completion-notes step", %{ws: ws} do
@@ -1033,7 +1035,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
       prompt = Sling.prompt_for_bead(bead, [])
 
-      refute prompt =~ "--qa-notes"
+      refute prompt =~ "qa_notes"
       refute prompt =~ "backed by an external tracker"
     end
 
@@ -1049,7 +1051,37 @@ defmodule Arbiter.Polecat.SlingTest do
 
       prompt = Sling.prompt_for_bead(bead, [])
 
-      refute prompt =~ "--qa-notes"
+      refute prompt =~ "qa_notes"
+    end
+  end
+
+  describe "work prompt PR body authoring (bd-53xrmi)" do
+    test "instructs the acolyte to author a pr_body via MCP and NOT open its own PR",
+         %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "author body", workspace_id: ws.id})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      # Authors the body and persists it via the MCP tool, never the arb escript.
+      assert prompt =~ "bead_update_progress"
+      assert prompt =~ "pr_body"
+      assert prompt =~ "Summary"
+      assert prompt =~ "Test plan"
+      refute prompt =~ "arb issue update"
+
+      # No longer tells the worker to open a PR; explicitly forbids it.
+      refute prompt =~ "open a PR if appropriate"
+      assert prompt =~ "Do NOT open a pull request"
+      assert prompt =~ "gh pr create"
+    end
+
+    test "the PR-body step is present for untracked beads too", %{ws: ws} do
+      {:ok, bead} =
+        Ash.create(Issue, %{title: "local body", workspace_id: ws.id, tracker_type: "none"})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+      assert prompt =~ "pr_body"
+      assert prompt =~ "bead_update_progress"
     end
   end
 

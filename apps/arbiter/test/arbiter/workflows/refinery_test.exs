@@ -396,6 +396,97 @@ defmodule Arbiter.Workflows.RefineryTest do
     end
   end
 
+  describe "enqueue/2 PR body source (bd-53xrmi)" do
+    # Capture the `body` field of the POST /pulls payload and ACK with a PR.
+    defp capture_body_stub(test_pid) do
+      stub(fn conn ->
+        if conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") do
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:pr_body, Jason.decode!(body)["body"]})
+
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"number" => 101, "state" => "open"})
+        else
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+    end
+
+    @tag workspace_config: @ws_github
+    test "opens with the worker-authored pr_body when present", %{workspace: ws, bead: bead} do
+      worker_body = "## Summary\nDid the thing.\n\n## Test plan\n- [x] mix test"
+      {:ok, bead} = Ash.update(bead, %{pr_body: worker_body}, action: :update)
+      capture_body_stub(self())
+
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_body, ^worker_body}
+    end
+
+    @tag workspace_config: @ws_github
+    test "pr_body wins over the bead description", %{workspace: ws, bead: bead} do
+      {:ok, bead} =
+        Ash.update(bead, %{description: "ticket spec", pr_body: "real writeup"}, action: :update)
+
+      capture_body_stub(self())
+
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_body, "real writeup"}
+    end
+
+    @tag workspace_config: @ws_github
+    test "falls back to the bead description when no pr_body", %{workspace: ws, bead: bead} do
+      # setup creates the bead with description: "body" and no pr_body.
+      capture_body_stub(self())
+
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_body, "body"}
+    end
+
+    # Regression for #3606: an empty/blank description with no pr_body used to
+    # send "" as the PR body, and GitHub then injects the repo's bare PR
+    # template. The body must NEVER be empty — it falls back to a generated
+    # default that always carries the title.
+    @tag workspace_config: @ws_github
+    test "blank description + no pr_body → non-empty default body (not empty)", %{
+      workspace: ws,
+      bead: bead
+    } do
+      {:ok, bead} = Ash.update(bead, %{description: "", pr_body: ""}, action: :update)
+      capture_body_stub(self())
+
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_body, sent_body}
+      assert sent_body != ""
+      # default_body renders the title as a Markdown heading.
+      assert sent_body =~ "## merge me"
+    end
+
+    @tag workspace_config: @ws_github
+    test "whitespace-only pr_body is treated as absent (falls through)", %{
+      workspace: ws,
+      bead: bead
+    } do
+      {:ok, bead} =
+        Ash.update(bead, %{description: "the spec", pr_body: "   \n  "}, action: :update)
+
+      capture_body_stub(self())
+
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_body, "the spec"}
+    end
+  end
+
   describe "enqueue/2 no-duplicate-MR guard (bd-auma3z)" do
     @tag workspace_config: @ws_github
     test "adopts an existing open MR ref instead of opening a duplicate", %{

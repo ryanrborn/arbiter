@@ -124,6 +124,7 @@ defmodule Arbiter.Beads.Issue do
         :tracker_type,
         :tracker_ref,
         :pr_ref,
+        :pr_body,
         :target_branch
       ]
 
@@ -326,6 +327,19 @@ defmodule Arbiter.Beads.Issue do
       constraints max_length: 255, trim?: true
 
       description "PR/MR number opened for this bead (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
+    end
+
+    attribute :pr_body, :string do
+      public? true
+      default ""
+
+      description """
+      Markdown. The acolyte-authored PR/MR description, written at completion
+      (Summary / Test plan / References) reflecting the change that actually
+      landed — and filling the repo's PR template when one exists. The Refinery
+      opens the single canonical PR with this body, so the worker never opens
+      its own PR. Distinct from `description` (the originating ticket spec).
+      """
     end
 
     attribute :target_branch, :string do
