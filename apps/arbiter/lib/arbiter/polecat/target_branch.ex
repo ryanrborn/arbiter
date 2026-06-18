@@ -32,6 +32,7 @@ defmodule Arbiter.Polecat.TargetBranch do
   """
 
   alias Arbiter.Beads.Issue
+  alias Arbiter.Beads.RigConfig
   alias Arbiter.Beads.Workspace
 
   @type opt ::
@@ -73,8 +74,7 @@ defmodule Arbiter.Polecat.TargetBranch do
     end
   end
 
-  defp rig_target_from_config(%{"target_branch" => t}) when is_binary(t) and t != "", do: t
-  defp rig_target_from_config(_), do: nil
+  defp rig_target_from_config(raw), do: RigConfig.rig_target_from_config(raw)
 
   defp workspace_base_branch(%Issue{workspace_id: nil}), do: nil
 

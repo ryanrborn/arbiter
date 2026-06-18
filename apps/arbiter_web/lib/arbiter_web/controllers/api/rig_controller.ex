@@ -20,6 +20,7 @@ defmodule ArbiterWeb.Api.RigController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Beads.RigConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Worktree
@@ -73,7 +74,9 @@ defmodule ArbiterWeb.Api.RigController do
     app_paths =
       :arbiter
       |> Application.get_env(:rig_paths, %{})
-      |> Map.new(fn {name, path} -> {name, %{path: path, source: "(app)"}} end)
+      |> Map.new(fn {name, raw} ->
+        {name, %{path: RigConfig.rig_path_from_config(raw), source: "(app)"}}
+      end)
 
     Enum.reduce(workspaces, app_paths, fn ws, acc ->
       ws_rig_paths =
@@ -82,8 +85,8 @@ defmodule ArbiterWeb.Api.RigController do
           _ -> %{}
         end
 
-      Enum.reduce(ws_rig_paths, acc, fn {name, path}, acc ->
-        Map.put(acc, name, %{path: path, source: ws.name})
+      Enum.reduce(ws_rig_paths, acc, fn {name, raw}, acc ->
+        Map.put(acc, name, %{path: RigConfig.rig_path_from_config(raw), source: ws.name})
       end)
     end)
   end
