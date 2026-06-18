@@ -41,6 +41,7 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
     convoy_status
     inbox_check
     message_send
+    notify_list
     workspace_show
   )
 
