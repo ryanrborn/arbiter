@@ -40,6 +40,17 @@ defmodule Arbiter.Trackers.JiraTest do
 
   defp stub(fun), do: Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fun)
 
+  defp issue(key) do
+    %{
+      "key" => key,
+      "fields" => %{
+        "summary" => "Issue #{key}",
+        "assignee" => %{"accountId" => "account-123"},
+        "status" => %{"statusCategory" => %{"key" => "new"}}
+      }
+    }
+  end
+
   describe "fetch/1" do
     test "200: returns the parsed Jira issue map" do
       stub(fn conn ->
@@ -335,11 +346,24 @@ defmodule Arbiter.Trackers.JiraTest do
   end
 
   describe "list_open/1" do
-    test "returns issues matching the assignee (default: currentUser())" do
+    test "POSTs to /search/jql with a JSON body and returns matching issues" do
       stub(fn conn ->
-        assert conn.method == "GET"
-        assert conn.request_path == "/rest/api/3/search"
-        assert conn.query_string =~ "currentUser"
+        # Migrated off the removed GET /search (CHANGE-2046).
+        assert conn.method == "POST"
+        assert conn.request_path == "/rest/api/3/search/jql"
+
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+
+        assert body["jql"] =~ "currentUser()"
+        assert body["jql"] =~ "resolution = Unresolved"
+        assert body["maxResults"] == 100
+        # Fields are explicit — /search/jql returns only id/key otherwise.
+        assert "summary" in body["fields"]
+        assert "status" in body["fields"]
+        assert "assignee" in body["fields"]
+        # First page: no page token.
+        refute Map.has_key?(body, "nextPageToken")
 
         Req.Test.json(conn, %{
           "issues" => [
@@ -362,9 +386,34 @@ defmodule Arbiter.Trackers.JiraTest do
       assert summary.assignees == ["account-123"]
     end
 
+    test "follows nextPageToken pagination until exhausted" do
+      stub(fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        body = Jason.decode!(raw)
+
+        case body["nextPageToken"] do
+          nil ->
+            # Page 1 hands back a token for page 2.
+            Req.Test.json(conn, %{
+              "issues" => [issue("VR-1")],
+              "nextPageToken" => "tok-2"
+            })
+
+          "tok-2" ->
+            # Page 2 is the last page (no token).
+            Req.Test.json(conn, %{"issues" => [issue("VR-2")]})
+        end
+      end)
+
+      assert {:ok, [first, second]} = Jira.list_open([])
+      assert first.ref == "VR-1"
+      assert second.ref == "VR-2"
+    end
+
     test "accepts an explicit assignee id" do
       stub(fn conn ->
-        assert conn.query_string =~ "account-456"
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(raw)["jql"] =~ "account-456"
         Req.Test.json(conn, %{"issues" => []})
       end)
 
@@ -377,6 +426,107 @@ defmodule Arbiter.Trackers.JiraTest do
       end)
 
       assert {:ok, []} = Jira.list_open([])
+    end
+
+    test "propagates an HTTP error" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{"errorMessages" => ["Bad JQL"]})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 400}} = Jira.list_open([])
+    end
+  end
+
+  describe "create/1" do
+    test "POSTs /issue with project, issuetype, summary and ADF description; returns the key" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/rest/api/3/issue"
+
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        fields = Jason.decode!(raw)["fields"]
+
+        assert fields["project"] == %{"key" => @project}
+        assert fields["issuetype"] == %{"name" => "Bug"}
+        assert fields["summary"] == "Wire the thing"
+
+        # description is markdown -> ADF doc.
+        adf = fields["description"]
+        assert adf["type"] == "doc"
+        assert adf["version"] == 1
+        assert is_list(adf["content"])
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => "10042", "key" => "VR-999"})
+      end)
+
+      assert {:ok, "VR-999"} =
+               Jira.create(%{
+                 title: "Wire the thing",
+                 description: "Do the **thing**.",
+                 issue_type: "Bug"
+               })
+    end
+
+    test "defaults issuetype to Task when none is given" do
+      stub(fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(raw)["fields"]["issuetype"] == %{"name" => "Task"}
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"key" => "VR-1000"})
+      end)
+
+      assert {:ok, "VR-1000"} = Jira.create(%{title: "No type"})
+    end
+
+    test "requires a non-empty title" do
+      assert {:error, %Error{kind: :validation_failed}} = Jira.create(%{description: "no title"})
+    end
+
+    test "maps a validation error from Jira" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{"errorMessages" => ["issuetype is required"]})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 400}} =
+               Jira.create(%{title: "x"})
+    end
+  end
+
+  describe "extract_description/1" do
+    test "flattens an ADF document to plain text" do
+      issue = %{
+        "fields" => %{
+          "description" => %{
+            "type" => "doc",
+            "version" => 1,
+            "content" => [
+              %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "First line."}]},
+              %{"type" => "paragraph", "content" => [%{"type" => "text", "text" => "Second line."}]}
+            ]
+          }
+        }
+      }
+
+      assert Jira.extract_description(issue) == "First line.\n\nSecond line."
+    end
+
+    test "passes a plain-text description through" do
+      issue = %{"fields" => %{"description" => "just text"}}
+      assert Jira.extract_description(issue) == "just text"
+    end
+
+    test "returns empty string for nil or missing description" do
+      assert Jira.extract_description(%{"fields" => %{"description" => nil}}) == ""
+      assert Jira.extract_description(%{"fields" => %{}}) == ""
+      assert Jira.extract_description(%{}) == ""
     end
   end
 

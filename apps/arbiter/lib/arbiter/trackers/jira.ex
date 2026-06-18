@@ -182,13 +182,33 @@ defmodule Arbiter.Trackers.Jira do
 
       jql = "assignee = #{assignee_jql} AND resolution = Unresolved ORDER BY updated DESC"
 
-      case request(cfg, :get, "/search", params: [jql: jql, maxResults: 100]) do
-        {:ok, %Req.Response{status: status_code, body: %{"issues" => issues}}}
-        when status_code in 200..299 ->
-          {:ok, Enum.map(issues, &summarize_issue(&1, cfg))}
+      fetch_search_pages(cfg, jql, nil, [])
+    end
+  end
 
-        {:ok, %Req.Response{status: status_code, body: _body}} when status_code in 200..299 ->
-          {:ok, []}
+  # Jira requires an issue type on create; "Task" is present in every
+  # default Jira project scheme. Workspaces with a different scheme pass
+  # `:issue_type` through `arb create`.
+  @default_issue_type "Task"
+
+  @impl true
+  def create(attrs) when is_map(attrs) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, title} <- fetch_title(attrs),
+         {:ok, payload} <- build_create_payload(cfg, attrs, title) do
+      case request(cfg, :post, "/issue", json: payload) do
+        {:ok, %Req.Response{status: status_code, body: %{"key" => key}}}
+        when status_code in 200..299 and is_binary(key) ->
+          {:ok, key}
+
+        {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "Jira create response missing \"key\"",
+             raw: body
+           }}
 
         {:ok, %Req.Response{status: status_code, body: body}} ->
           {:error, http_error(status_code, body)}
@@ -197,14 +217,6 @@ defmodule Arbiter.Trackers.Jira do
           {:error, transport_error(exception)}
       end
     end
-  end
-
-  @impl true
-  def create(_attrs) do
-    # Outbound create not yet implemented for Jira — `arb create` on a
-    # Jira-configured workspace currently only creates the local bead. Wire
-    # this up when the Jira create path is needed (analogous to GitHub.create).
-    {:error, :not_supported}
   end
 
   @impl true
@@ -273,7 +285,39 @@ defmodule Arbiter.Trackers.Jira do
   def extract_title(_), do: "(no title)"
 
   @impl true
+  def extract_description(%{"fields" => %{"description" => description}}),
+    do: description_to_text(description)
+
   def extract_description(_), do: ""
+
+  # Jira v3 returns `description` as an ADF document (a map); legacy/v2
+  # payloads or plain-text fields come through as a string. We flatten ADF
+  # to plain text (block boundaries become blank lines) — good enough for
+  # mirroring the body into a bead; we don't attempt a full round-trip.
+  defp description_to_text(nil), do: ""
+  defp description_to_text(text) when is_binary(text), do: text
+
+  defp description_to_text(%{"type" => "doc", "content" => content}) when is_list(content) do
+    content
+    |> Enum.map(&adf_block_text/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n\n")
+  end
+
+  defp description_to_text(_), do: ""
+
+  defp adf_block_text(%{"content" => content}) when is_list(content),
+    do: content |> Enum.map(&adf_inline_text/1) |> Enum.join("")
+
+  defp adf_block_text(%{"text" => text}) when is_binary(text), do: text
+  defp adf_block_text(_), do: ""
+
+  defp adf_inline_text(%{"text" => text}) when is_binary(text), do: text
+
+  defp adf_inline_text(%{"content" => content}) when is_list(content),
+    do: content |> Enum.map(&adf_inline_text/1) |> Enum.join("")
+
+  defp adf_inline_text(_), do: ""
 
   # ---- Public helpers ------------------------------------------------------
 
@@ -296,6 +340,54 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   # ---- Internals: list_open -----------------------------------------------
+
+  # Atlassian removed the old `GET /search` (CHANGE-2046). The replacement
+  # `POST /search/jql` takes a JSON body and paginates with an opaque
+  # `nextPageToken` (the old `startAt`/`total`/`maxResults`-offset paging is
+  # gone). We follow the token until the response omits it, accumulating one
+  # page of summaries at a time. `fields` is explicit because the new
+  # endpoint returns only `id`/`key` by default — we ask for exactly what
+  # `summarize_issue/2` reads.
+  @search_fields ["summary", "status", "assignee"]
+  @search_page_size 100
+
+  defp fetch_search_pages(cfg, jql, next_token, acc) do
+    body =
+      %{
+        "jql" => jql,
+        "maxResults" => @search_page_size,
+        "fields" => @search_fields
+      }
+      |> maybe_put_token(next_token)
+
+    case request(cfg, :post, "/search/jql", json: body) do
+      {:ok, %Req.Response{status: status_code, body: %{"issues" => issues} = resp}}
+      when status_code in 200..299 and is_list(issues) ->
+        acc = [Enum.map(issues, &summarize_issue(&1, cfg)) | acc]
+
+        case resp["nextPageToken"] do
+          token when is_binary(token) and token != "" ->
+            fetch_search_pages(cfg, jql, token, acc)
+
+          _ ->
+            {:ok, acc |> Enum.reverse() |> Enum.concat()}
+        end
+
+      {:ok, %Req.Response{status: status_code, body: _body}} when status_code in 200..299 ->
+        {:ok, acc |> Enum.reverse() |> Enum.concat()}
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp maybe_put_token(body, token) when is_binary(token) and token != "",
+    do: Map.put(body, "nextPageToken", token)
+
+  defp maybe_put_token(body, _), do: body
 
   defp summarize_issue(%{"key" => key} = issue, cfg) do
     fields = Map.get(issue, "fields") || %{}
@@ -401,6 +493,57 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   defp encode_value(_atom_key, value), do: value
+
+  # ---- Internals: create --------------------------------------------------
+
+  defp fetch_title(%{title: title}) when is_binary(title) and title != "", do: {:ok, title}
+  defp fetch_title(%{"title" => title}) when is_binary(title) and title != "", do: {:ok, title}
+
+  defp fetch_title(_),
+    do:
+      {:error,
+       %Error{
+         kind: :validation_failed,
+         status: nil,
+         message: "create requires a non-empty :title",
+         raw: nil
+       }}
+
+  # Build the `POST /issue` body. `project` and `issuetype` are create-only
+  # required fields (not part of `field_ids`); `summary` / `description` and
+  # any other configured rich-text fields go through `translate_fields/2` so
+  # they pick up the workspace's field-id mapping and ADF encoding — exactly
+  # like `update_fields/2`.
+  defp build_create_payload(cfg, attrs, title) do
+    issue_type = pluck(attrs, [:issue_type, "issue_type"]) || @default_issue_type
+    description = pluck(attrs, [:description, "description"])
+
+    domain_fields =
+      %{title: title}
+      |> maybe_put(:description, description)
+
+    fields =
+      %{
+        "project" => %{"key" => cfg.project_key},
+        "issuetype" => %{"name" => issue_type}
+      }
+      |> Map.merge(translate_fields(cfg, domain_fields))
+
+    {:ok, %{"fields" => fields}}
+  end
+
+  defp pluck(map, keys) do
+    Enum.find_value(keys, fn k ->
+      case Map.fetch(map, k) do
+        {:ok, v} -> v
+        :error -> nil
+      end
+    end)
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, ""), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # ---- Internals: HTTP ----------------------------------------------------
 
