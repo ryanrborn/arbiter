@@ -35,12 +35,25 @@ defmodule Arbiter.Trackers.Jira do
   is supported (looks up `System.get_env/1`); a bare string is treated as
   a literal token.
 
-  ## Status mapping
+  ## Status mapping & path-finding
 
-  Bead-vocabulary atoms (`:open | :in_progress | :closed`) map to Jira
-  *transition names* (not status names — Jira's REST API moves issues by
-  invoking a transition). Defaults are conservative ("To Do", "In Progress",
-  "Done"); each workspace can override via `tracker.config.status_map`.
+  Bead lifecycle atoms (`:open | :in_progress | :closed`, plus the richer
+  `:pr_opened | :approved_unmerged | :merged`) map to a Jira target **status
+  name** (NOT a transition name) via `tracker.config.status_map`. Jira's REST
+  API moves issues by invoking transitions, so `transition/2` resolves a *path*
+  to the target:
+
+    * **Single-hop fast path** — if a live transition's `to` already equals the
+      target status, invoke it directly (no graph needed).
+    * **Multi-hop** — otherwise fetch the issue's current status and BFS the
+      configured `transition_graph` (e.g. Backlog → To Do → In Progress),
+      executing each hop and re-listing the available transitions between hops.
+
+  A lifecycle event with no `status_map` entry yields `:status_unmapped` (a
+  benign "this tracker doesn't model that" skip); a *mapped* target that can't
+  be reached yields `:no_transition_path` / `:transition_not_found`, which the
+  sync layer surfaces loudly. See `Arbiter.Trackers.Jira.Config` and
+  `Arbiter.Trackers.Sync`.
 
   ## Tests
 
@@ -69,20 +82,18 @@ defmodule Arbiter.Trackers.Jira do
   @impl true
   def transition(ref, status) when is_binary(ref) and is_atom(status) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, target_name} <- map_status(cfg, status),
-         {:ok, transitions} <- list_raw_transitions(cfg, ref),
-         {:ok, transition_id} <- find_transition_id(transitions, target_name) do
-      payload = %{"transition" => %{"id" => transition_id}}
+         {:ok, target_status} <- map_status(cfg, status),
+         {:ok, transitions} <- list_raw_transitions(cfg, ref) do
+      case direct_transition_id(transitions, target_status) do
+        {:ok, id} ->
+          # Single-hop fast path: a live transition lands directly on the
+          # target status (its `to` already equals the target).
+          post_transition(cfg, ref, id)
 
-      case request(cfg, :post, "/issue/#{ref}/transitions", json: payload) do
-        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
-          :ok
-
-        {:ok, %Req.Response{status: status_code, body: body}} ->
-          {:error, http_error(status_code, body)}
-
-        {:error, exception} ->
-          {:error, transport_error(exception)}
+        :none ->
+          # No direct edge — fetch the current status and walk the workflow
+          # graph (multi-hop, e.g. Backlog -> … -> In Progress).
+          resolve_multi_hop(cfg, ref, target_status)
       end
     end
   end
@@ -131,6 +142,25 @@ defmodule Arbiter.Trackers.Jira do
 
         {:ok, %Req.Response{status: status_code, body: body}} ->
           {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
+  def add_comment(ref, body) when is_binary(ref) and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve() do
+      # v3 comment endpoint takes the body as an ADF document.
+      payload = %{"body" => ADF.from_markdown(body)}
+
+      case request(cfg, :post, "/issue/#{ref}/comment", json: payload) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: resp_body}} ->
+          {:error, http_error(status_code, resp_body)}
 
         {:error, exception} ->
           {:error, transport_error(exception)}
@@ -223,13 +253,14 @@ defmodule Arbiter.Trackers.Jira do
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, jira_transitions} <- list_raw_transitions(cfg, ref) do
-      # Reverse-map Jira transition names to bead-status atoms via the
-      # workspace's status_map (which maps atom -> Jira name).
+      # status_map maps bead lifecycle atom -> target STATUS name. Reverse it
+      # and key each available transition by the status it lands on (`to`),
+      # falling back to the transition name for payloads without a `to`.
       reverse = Enum.into(cfg.status_map, %{}, fn {k, v} -> {v, k} end)
 
       atoms =
         jira_transitions
-        |> Enum.map(fn %{"name" => name} -> Map.get(reverse, name) end)
+        |> Enum.map(fn t -> Map.get(reverse, transition_target(t) || t["name"]) end)
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
 
@@ -427,6 +458,11 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
+  # status_map maps a bead lifecycle atom -> target STATUS name. A missing or
+  # blank entry is NOT an error here: it means "this tracker doesn't model that
+  # lifecycle event". Callers (e.g. `Arbiter.Trackers.Sync`) treat
+  # `:status_unmapped` as a benign skip, while a *mapped* status that can't be
+  # reached surfaces loudly.
   defp map_status(%{status_map: map}, status) do
     case Map.fetch(map, status) do
       {:ok, name} when is_binary(name) and name != "" ->
@@ -435,16 +471,111 @@ defmodule Arbiter.Trackers.Jira do
       _ ->
         {:error,
          %Error{
-           kind: :transition_not_found,
+           kind: :status_unmapped,
            status: nil,
-           message: "no Jira transition name mapped for bead status #{inspect(status)}",
+           message: "no Jira target status mapped for bead lifecycle event #{inspect(status)}",
            raw: nil
          }}
     end
   end
 
-  defp find_transition_id(transitions, target_name) do
-    case Enum.find(transitions, fn %{"name" => n} -> n == target_name end) do
+  # A live transition that lands directly on the target status (its `to`
+  # already equals the target). The common single-hop case — needs no graph.
+  defp direct_transition_id(transitions, target_status) do
+    case Enum.find(transitions, fn t -> transition_target(t) == target_status end) do
+      %{"id" => id} when is_binary(id) -> {:ok, id}
+      _ -> :none
+    end
+  end
+
+  defp transition_target(%{"to" => %{"name" => name}}) when is_binary(name), do: name
+  defp transition_target(_), do: nil
+
+  # No direct edge to the target — fetch the issue's current status and BFS the
+  # configured transition graph for a path, executing each hop in turn.
+  defp resolve_multi_hop(cfg, ref, target_status) do
+    with {:ok, current_status} <- current_status_name(cfg, ref) do
+      cond do
+        current_status == target_status ->
+          # Already there — nothing to do.
+          :ok
+
+        true ->
+          case plan_transition_path(cfg.transition_graph, current_status, target_status) do
+            {:ok, names} -> execute_path(cfg, ref, names)
+            {:error, _} = err -> err
+          end
+      end
+    end
+  end
+
+  @doc """
+  BFS over a transition graph for the shortest sequence of transition names
+  that moves an issue from `from` status to `to` status.
+
+  `graph` is `%{from_status => [%{"transition" => name, "to" => to_status}]}`.
+  Returns `{:ok, [transition_name, ...]}` (empty list when already there) or
+  `{:error, %Error{kind: :no_transition_path}}` when no path exists. Pure — the
+  graph is the only input, so multi-hop planning is testable without HTTP.
+  """
+  @spec plan_transition_path(map(), String.t(), String.t()) ::
+          {:ok, [String.t()]} | {:error, Error.t()}
+  def plan_transition_path(_graph, from, to) when from == to, do: {:ok, []}
+
+  def plan_transition_path(graph, from, to) when is_map(graph) do
+    bfs(graph, to, [{from, []}], MapSet.new([from]))
+  end
+
+  defp bfs(_graph, to, [], _visited) do
+    {:error,
+     %Error{
+       kind: :no_transition_path,
+       status: nil,
+       message: "no transition path to #{inspect(to)} in the configured workflow graph",
+       raw: nil
+     }}
+  end
+
+  defp bfs(graph, to, [{node, path} | rest], visited) do
+    edges = Map.get(graph, node, [])
+
+    case Enum.find(edges, fn e -> e["to"] == to end) do
+      %{"transition" => name} ->
+        {:ok, Enum.reverse([name | path])}
+
+      nil ->
+        {queue, visited} =
+          Enum.reduce(edges, {rest, visited}, fn %{"transition" => t, "to" => next}, {q, v} ->
+            if MapSet.member?(v, next) do
+              {q, v}
+            else
+              {q ++ [{next, [t | path]}], MapSet.put(v, next)}
+            end
+          end)
+
+        bfs(graph, to, queue, visited)
+    end
+  end
+
+  # Execute a planned path one hop at a time. Each hop re-lists the live
+  # transitions (the available set changes after every move), matches the
+  # planned transition by NAME, and POSTs it. A failed hop halts loudly.
+  defp execute_path(_cfg, _ref, []), do: :ok
+
+  defp execute_path(cfg, ref, names) do
+    Enum.reduce_while(names, :ok, fn name, _acc ->
+      with {:ok, transitions} <- list_raw_transitions(cfg, ref),
+           {:ok, id} <- find_transition_id(transitions, name),
+           :ok <- post_transition(cfg, ref, id) do
+        {:cont, :ok}
+      else
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp find_transition_id(transitions, name) do
+    case Enum.find(transitions, fn t -> t["name"] == name end) do
       %{"id" => id} when is_binary(id) ->
         {:ok, id}
 
@@ -454,10 +585,50 @@ defmodule Arbiter.Trackers.Jira do
            kind: :transition_not_found,
            status: nil,
            message:
-             "Jira transition #{inspect(target_name)} not available in current state; " <>
+             "Jira transition #{inspect(name)} not available in current state; " <>
                "available: #{inspect(Enum.map(transitions, & &1["name"]))}",
            raw: transitions
          }}
+    end
+  end
+
+  defp post_transition(cfg, ref, transition_id) do
+    payload = %{"transition" => %{"id" => transition_id}}
+
+    case request(cfg, :post, "/issue/#{ref}/transitions", json: payload) do
+      {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+        :ok
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp current_status_name(cfg, ref) do
+    case request(cfg, :get, "/issue/#{ref}", params: [fields: "status"]) do
+      {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
+        case get_in(body, ["fields", "status", "name"]) do
+          name when is_binary(name) and name != "" ->
+            {:ok, name}
+
+          _ ->
+            {:error,
+             %Error{
+               kind: :validation_failed,
+               status: status_code,
+               message: "issue #{ref} response missing fields.status.name",
+               raw: body
+             }}
+        end
+
+      {:ok, %Req.Response{status: status_code, body: body}} ->
+        {:error, http_error(status_code, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
     end
   end
 

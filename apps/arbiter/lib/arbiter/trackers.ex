@@ -133,6 +133,33 @@ defmodule Arbiter.Trackers do
     end
   end
 
+  @doc """
+  Post a comment on the bead's tracked item (typically the PR URL at PR-open).
+
+  Resolves the adapter from the bead's `tracker_type` and dispatches to its
+  optional `add_comment/2`. Adapters that don't implement it — or beads with no
+  `tracker_ref` — return `{:error, :not_supported}`, which callers treat as
+  "nothing to comment" rather than a hard failure. Callers must have seeded the
+  adapter's per-process config first (see `prepare/2`).
+  """
+  @spec add_comment(Issue.t(), String.t()) ::
+          :ok | {:error, :not_supported} | {:error, term()}
+  def add_comment(%Issue{tracker_ref: ref} = issue, body) when is_binary(body) do
+    cond do
+      not is_binary(ref) or ref == "" ->
+        {:error, :not_supported}
+
+      true ->
+        adapter = for_bead(issue)
+
+        if function_exported?(adapter, :add_comment, 2) do
+          adapter.add_comment(ref, body)
+        else
+          {:error, :not_supported}
+        end
+    end
+  end
+
   @spec list_transitions(Issue.t()) :: {:ok, [Tracker.status()]} | {:error, term()}
   def list_transitions(%Issue{tracker_ref: ref} = issue),
     do: for_bead(issue).list_transitions(ref)

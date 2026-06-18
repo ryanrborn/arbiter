@@ -81,8 +81,18 @@ defmodule Arbiter.Trackers.Tracker do
   @typedoc "Tracker-specific reference (Jira issue key, Linear node id, etc.)."
   @type ref :: String.t()
 
-  @typedoc "Bead-domain status atoms."
-  @type status :: :open | :in_progress | :closed
+  @typedoc """
+  Bead-domain status / lifecycle-event atoms passed to `transition/2`.
+
+  `:open | :in_progress | :closed` are the bead's own statuses. The remaining
+  atoms are richer lifecycle moments that don't map to a bead status but still
+  drive an external workflow (e.g. Jira's VR board): `:pr_opened` (PR opened
+  for review), `:approved_unmerged` (review approved but parked, not merged),
+  and `:merged` (PR merged). Adapters that don't model an event simply leave it
+  unmapped, and the sync layer skips it.
+  """
+  @type status ::
+          :open | :in_progress | :closed | :pr_opened | :approved_unmerged | :merged
 
   @typedoc "Normalized open-item summary used by `list_open/1`."
   @type summary :: %{
@@ -162,6 +172,16 @@ defmodule Arbiter.Trackers.Tracker do
               :ok | {:error, :not_supported} | {:error, term()}
 
   @doc """
+  Post a comment on the tracked item. `body` is Markdown; the adapter converts
+  to the tracker's native rich-text format (e.g. ADF for Jira).
+
+  Optional — adapters without a comment mechanism don't implement it, and
+  `Arbiter.Trackers.add_comment/2` returns `{:error, :not_supported}`.
+  """
+  @callback add_comment(ref, body :: String.t()) ::
+              :ok | {:error, :not_supported} | {:error, term()}
+
+  @doc """
   Check whether the ref has already been claimed by another Arbiter
   installation. Returns `:ok` if clear, or
   `{:error, {:already_claimed, comment_body}}` if a prior-ownership marker is
@@ -185,5 +205,5 @@ defmodule Arbiter.Trackers.Tracker do
   """
   @callback signal_claim(ref, bead_id :: String.t(), context :: map()) :: :ok
 
-  @optional_callbacks add_remote_link: 3, check_prior_claim: 1, signal_claim: 3
+  @optional_callbacks add_remote_link: 3, add_comment: 2, check_prior_claim: 1, signal_claim: 3
 end

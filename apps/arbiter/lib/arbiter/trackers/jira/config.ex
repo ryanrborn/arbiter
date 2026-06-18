@@ -19,13 +19,29 @@ defmodule Arbiter.Trackers.Jira.Config do
         "email" => "ryan.born@leotechnologies.com",
         # optional:
         "status_map" => %{
+          # Bead lifecycle event -> Jira target STATUS name (NOT a transition
+          # name). `Arbiter.Trackers.Jira.transition/2` resolves a path of
+          # transitions to reach the target status, walking the workflow graph
+          # for multi-hop moves (e.g. Backlog -> … -> In Progress).
           "open" => "To Do",
           "in_progress" => "In Progress",
-          # Bead status -> Jira *transition name*. "Code Merged" is the
-          # gated forward transition on LeoTech's VR (Verus) workflow — it
-          # moves the ticket to "Code Complete" and is blocked until the
+          "pr_opened" => "In Code Review",
+          "approved_unmerged" => "Pending Merge",
+          "merged" => "Code Complete",
+          # `:closed` targets the terminal status. On LeoTech's VR (Verus)
+          # workflow this is "Done"; the path runs In Code Review -> Code
+          # Complete -> Done, and the Code Complete hop is gated until the
           # "QA Testing Notes" and "Deployment Notes" custom fields are set.
-          "closed" => "Code Merged"
+          "closed" => "Done"
+        },
+        # Optional transition graph used for multi-hop path-finding. Keys are
+        # the *source* status name; each edge names the transition to invoke
+        # and the status it lands on. The single-hop fast path (a live
+        # transition whose `to` already equals the target) needs no graph —
+        # only multi-hop targets do. See `@default_transition_graph`.
+        "transition_graph" => %{
+          "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
+          "To Do" => [%{"transition" => "Start work", "to" => "In Progress"}]
         },
         "field_ids" => %{
           "title" => "summary",
@@ -48,10 +64,49 @@ defmodule Arbiter.Trackers.Jira.Config do
 
   @pdict_key {__MODULE__, :active_workspace_config}
 
+  # Bead lifecycle event -> Jira target STATUS name. The adapter path-finds a
+  # sequence of transitions to reach the target (see `Jira.transition/2`).
+  # Events with no entry here are treated as "this tracker doesn't model that
+  # state" and are skipped silently — only a *mapped* status that can't be
+  # reached fails loudly. Defaults are the conservative Jira-default status
+  # names; LeoTech's VR (Verus) workflow overrides them via workspace config.
   @default_status_map %{
     open: "To Do",
     in_progress: "In Progress",
+    pr_opened: "In Code Review",
+    approved_unmerged: "Pending Merge",
+    merged: "Code Complete",
     closed: "Done"
+  }
+
+  # Default multi-hop transition graph for LeoTech's VR (Verus) workflow,
+  # keyed by SOURCE status name. Each edge is the transition to invoke and the
+  # status it lands on. Only multi-hop targets need a graph entry — a target
+  # reachable by a single live transition is resolved directly from the
+  # `/transitions` response (its `to` field), no graph required.
+  #
+  # The verified edges (transition ids in parens) come from the VR workflow
+  # discovery in bd-c4cfuv:
+  #   Backlog --Pull request created--> n/a; Backlog --To do next--> To Do (141)
+  #   In Progress --Pull request created--> In Code Review (51)
+  #   In Code Review --Approved and merged--> Code Complete (61)
+  #   In Code Review --Approved and not merged--> Pending Merge (111)
+  #
+  # The "To Do -> In Progress" and "Code Complete -> Done" edges were not
+  # captured by the discovery pass; the names below are best-guess and should
+  # be confirmed against a live `/transitions` probe and overridden per
+  # workspace via `tracker.config.transition_graph` if they differ.
+  @default_transition_graph %{
+    "Backlog" => [%{"transition" => "To do next", "to" => "To Do"}],
+    "What's Next" => [%{"transition" => "To do next", "to" => "To Do"}],
+    "Groomed" => [%{"transition" => "To do next", "to" => "To Do"}],
+    "To Do" => [%{"transition" => "Start work", "to" => "In Progress"}],
+    "In Progress" => [%{"transition" => "Pull request created", "to" => "In Code Review"}],
+    "In Code Review" => [
+      %{"transition" => "Approved and merged", "to" => "Code Complete"},
+      %{"transition" => "Approved and not merged", "to" => "Pending Merge"}
+    ],
+    "Code Complete" => [%{"transition" => "Done", "to" => "Done"}]
   }
 
   # The QA / Deployment custom-field IDs default to LeoTech's verified VR
@@ -69,12 +124,15 @@ defmodule Arbiter.Trackers.Jira.Config do
     deployment_notes: "customfield_10185"
   }
 
+  @type transition_edge :: %{required(String.t()) => String.t()}
+
   @type config :: %{
           host: String.t(),
           project_key: String.t(),
           email: String.t() | nil,
           token: String.t(),
           status_map: %{atom() => String.t()},
+          transition_graph: %{String.t() => [transition_edge()]},
           field_ids: %{atom() => String.t()}
         }
 
@@ -131,6 +189,7 @@ defmodule Arbiter.Trackers.Jira.Config do
          email: stringy(Map.get(raw, "email")),
          token: token,
          status_map: status_map(raw),
+         transition_graph: transition_graph(raw),
          field_ids: field_ids(raw)
        }}
     end
@@ -211,10 +270,39 @@ defmodule Arbiter.Trackers.Jira.Config do
   defp status_map(raw) do
     user = Map.get(raw, "status_map") || %{}
 
-    Enum.into(@default_status_map, %{}, fn {atom_key, default} ->
-      {atom_key, Map.get(user, Atom.to_string(atom_key), default)}
-    end)
+    base =
+      Enum.into(@default_status_map, %{}, fn {atom_key, default} ->
+        {atom_key, Map.get(user, Atom.to_string(atom_key), default)}
+      end)
+
+    # Allow workspaces to map extra lifecycle events beyond the defaults.
+    extras =
+      for {k, v} <- user, is_binary(k), is_binary(v), into: %{} do
+        {String.to_atom(k), v}
+      end
+
+    Map.merge(base, extras)
   end
+
+  # The transition graph drives multi-hop path-finding. Workspaces may supply
+  # their own (string-keyed status -> list of %{"transition","to"} edges); the
+  # VR default is used when none is configured. A workspace that sets an empty
+  # map opts out of graph-based multi-hop (single-hop fast path still works).
+  defp transition_graph(raw) do
+    case Map.get(raw, "transition_graph") do
+      %{} = graph when map_size(graph) > 0 -> normalize_graph(graph)
+      _ -> @default_transition_graph
+    end
+  end
+
+  defp normalize_graph(graph) do
+    for {from, edges} <- graph, is_binary(from), is_list(edges), into: %{} do
+      {from, Enum.filter(edges, &valid_edge?/1)}
+    end
+  end
+
+  defp valid_edge?(%{"transition" => t, "to" => to}) when is_binary(t) and is_binary(to), do: true
+  defp valid_edge?(_), do: false
 
   defp field_ids(raw) do
     user = Map.get(raw, "field_ids") || %{}
