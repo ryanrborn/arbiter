@@ -96,7 +96,17 @@ defmodule ArbiterWeb.MCP.Plug do
   defp authenticate(conn) do
     case get_req_header(conn, "authorization") do
       ["Bearer " <> token] -> Scope.from_token(String.trim(token))
-      _ -> {:error, :missing}
+      _ -> authenticate_from_query(conn)
+    end
+  end
+
+  defp authenticate_from_query(conn) do
+    case conn.query_params do
+      %{"token" => token} when is_binary(token) and token != "" ->
+        Scope.from_token(token)
+
+      _ ->
+        {:error, :missing}
     end
   end
 
@@ -104,7 +114,7 @@ defmodule ArbiterWeb.MCP.Plug do
     message =
       case reason do
         :expired -> "Scope token expired"
-        :missing -> "Missing Authorization: Bearer <scope-token>"
+        :missing -> "Missing scope token (Authorization: Bearer <token> or ?token=<token>)"
         :forbidden -> "Coordinator scope required for the SSE stream"
         _ -> "Invalid scope token"
       end
