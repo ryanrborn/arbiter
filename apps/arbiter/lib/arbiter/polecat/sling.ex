@@ -1013,8 +1013,13 @@ defmodule Arbiter.Polecat.Sling do
 
     Your current directory is a fresh git worktree on a per-bead branch.
     Work the bead to completion: load context, design, implement, test,
-    commit on this branch, then push and open a PR if appropriate.
-    #{completion_notes_step(bead)}
+    commit on this branch, and push it.
+
+    Do NOT open a pull request yourself (no `gh pr create` / `glab mr
+    create`). The Refinery opens the single canonical PR for this bead, on
+    the correct base branch, using the body you author in the next step.
+    Opening your own PR creates a duplicate on the wrong base.
+    #{pr_body_step(bead)}#{completion_notes_step(bead)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{bead.id}
@@ -1032,32 +1037,69 @@ defmodule Arbiter.Polecat.Sling do
     """
   end
 
+  # The worker authors the PR/MR body and persists it on the bead; the
+  # Refinery (not the worker) opens the one canonical PR with it (bd-53xrmi).
+  # Authoring it *after* implementing is what makes it acolyte-quality — the
+  # Test plan reflects what actually passed, not what the spec hoped for. If
+  # the repo ships a PR template we fill it rather than discard it (GitHub
+  # injects the bare template only when the body is empty — the empty-body
+  # incident #3606). Persisted via the `bead_update_progress` MCP tool
+  # (`pr_body` field), which the Refinery reads back as `pr_body`. We use the
+  # MCP tool rather than the `arb` escript so completion never depends on
+  # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
+  defp pr_body_step(%Issue{id: id}) do
+    """
+
+    Author the PR description and persist it on the bead — the Refinery opens
+    the PR with this exact body, so write it as the PR writeup, not a restatement
+    of the ticket. Do this AFTER the work is implemented and tested, so it
+    reflects what actually changed:
+
+      * **Summary** — what changed and why, in a few sentences.
+      * **Test plan** — the checks you ran, with checked boxes for what passed.
+      * **References** — the bead id (#{id}) and any linked ticket/PRs.
+
+    If the repo has a PR template (`.github/pull_request_template.md`), FILL it
+    rather than discard it. Persist the finished body verbatim by calling the
+    `bead_update_progress` MCP tool with its `pr_body` argument set to the full
+    PR body (Markdown). Use the MCP tool, which is available in this session —
+    do NOT shell out to the `arb` CLI for this.
+
+    Do this before printing `arb done`.
+    """
+  end
+
   # For tracker-backed beads (an upstream Jira/etc. ticket), completing the
   # work includes producing the gated completion notes the tracker requires
   # before it will transition the ticket forward. We make this an explicit,
   # non-optional step in the acolyte's prompt and tell it exactly how to
-  # persist the notes on the bead (`arb issue update`), so the downstream
-  # tracker-sync has the fields to push. Untracked beads get nothing extra.
+  # persist the notes on the bead (the `bead_update_progress` MCP tool), so the
+  # downstream tracker-sync has the fields to push. We use the MCP tool rather
+  # than the `arb` escript so completion never depends on `~/.local/bin/arb`
+  # being present (it is transiently deleted by test runs — bd-53xrmi). Untracked
+  # beads get nothing extra.
   defp completion_notes_step(%Issue{tracker_type: :none}), do: ""
 
   defp completion_notes_step(%Issue{tracker_ref: ref}) when ref in [nil, ""], do: ""
 
-  defp completion_notes_step(%Issue{id: id}) do
+  defp completion_notes_step(%Issue{}) do
     """
 
     This bead is backed by an external tracker ticket. Before you finish, you
     MUST produce its completion notes and persist them on the bead — the
-    tracker gates the ticket's forward transition until both are filled:
+    tracker gates the ticket's forward transition until both are filled. Call
+    the `bead_update_progress` MCP tool (available in this session) with these
+    arguments:
 
-        arb issue update #{id} \\
-          --qa-notes "What QA should verify: the user-facing behaviour to
-                      exercise, edge cases, and how to confirm the fix." \\
-          --deployment-notes "Rollout considerations: DB migrations, feature
-                      flags, config/env changes, ordering, and any backout
-                      steps. Write 'None' only if there genuinely are none."
+      * `qa_notes` — What QA should verify: the user-facing behaviour to
+        exercise, edge cases, and how to confirm the fix.
+      * `deployment_notes` — Rollout considerations: DB migrations, feature
+        flags, config/env changes, ordering, and any backout steps. Write
+        'None' only if there genuinely are none.
 
-    Base the notes on the change you actually made. This is part of "done":
-    do it before printing `arb done`.
+    Use the MCP tool — do NOT shell out to the `arb` CLI for this. Base the
+    notes on the change you actually made. This is part of "done": do it before
+    printing `arb done`.
     """
   end
 

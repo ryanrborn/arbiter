@@ -31,6 +31,8 @@ defmodule ArbiterWeb.Api.IssueJSON do
       assignee: issue.assignee,
       tracker_type: to_string_atom(issue.tracker_type),
       tracker_ref: issue.tracker_ref,
+      pr_ref: issue.pr_ref,
+      pr_body: issue.pr_body,
       target_branch: issue.target_branch,
       workspace_id: issue.workspace_id,
       closed_at: iso(issue.closed_at),

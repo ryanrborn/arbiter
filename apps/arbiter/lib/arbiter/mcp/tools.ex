@@ -47,7 +47,7 @@ defmodule Arbiter.MCP.Tools do
 
   require Ash.Query
 
-  @progress_fields ~w(notes qa_notes deployment_notes)
+  @progress_fields ~w(notes qa_notes deployment_notes pr_body)
 
   # ---- bead_show ----------------------------------------------------------
 
@@ -133,10 +133,10 @@ defmodule Arbiter.MCP.Tools do
   # ---- bead_update_progress ----------------------------------------------
 
   @doc """
-  The polecat's one write: record `notes` / `qa_notes` / `deployment_notes` on
-  its own bead (the structured replacement for `arb issue update <id>
-  --qa-notes …`). It cannot flip status, reprioritize, or touch another bead.
-  Coordinator: the same narrow write against any bead in its workspace.
+  The polecat's one write: record `notes` / `qa_notes` / `deployment_notes` /
+  `pr_body` on its own bead (the structured replacement for `arb issue update
+  <id> --qa-notes …`). It cannot flip status, reprioritize, or touch another
+  bead. Coordinator: the same narrow write against any bead in its workspace.
   """
   @spec bead_update_progress(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_update_progress(%Scope{} = scope, args) do
@@ -1095,6 +1095,7 @@ defmodule Arbiter.MCP.Tools do
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
       pr_ref: i.pr_ref,
+      pr_body: i.pr_body,
       target_branch: i.target_branch,
       workspace_id: i.workspace_id,
       closed_at: iso(i.closed_at),

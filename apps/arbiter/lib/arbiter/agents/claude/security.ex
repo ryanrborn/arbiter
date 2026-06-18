@@ -176,6 +176,18 @@ defmodule Arbiter.Agents.Claude.Security do
     ]
   end
 
+  # Worker-opened PRs/MRs. The Refinery owns PR creation (bd-53xrmi); a worker
+  # that runs `gh pr create` opens a duplicate on the wrong base. This is a
+  # belt to the prompt change that removed the "open a PR" instruction — a
+  # regressed prompt still can't double-PR. A denied Bash command just returns
+  # an error to the agent (it reads it and moves on); it does not crash the run.
+  defp expand_category(:no_pr_create) do
+    [
+      "Bash(gh pr create:*)",
+      "Bash(glab mr create:*)"
+    ]
+  end
+
   defp expand_category(_unknown), do: []
 
   # When the policy cuts network, deny the agent's network-egress tools.
