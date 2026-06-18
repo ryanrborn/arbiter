@@ -147,14 +147,25 @@ defmodule Arbiter.Polecat.Driver do
       %{status: :completed} = polecat_state ->
         close_bead(state.bead_id, should_close_upstream(polecat_state))
         maybe_cleanup_worktree(state)
+        {:stop, :normal, state}
+
+      %{status: status} when status in [:awaiting_tribunal, :awaiting_review] ->
+        # bd-7b46wd: the tick budget was spent on active acolyte work, but the
+        # acolyte has since handed off to the Tribunal (review gate) or the
+        # Warden (merge poller). Both own the terminal transition and have
+        # their own watchdogs, so giving up here would strand a bead that is
+        # legitimately mid-merge. Keep waiting for :completed rather than
+        # stopping — same reasoning as the pre-max_ticks handler below.
+        Process.send_after(self(), :check_polecat, state.interval_ms)
+        {:noreply, state}
 
       _ ->
         Logger.warning(
           "Polecat.Driver (claude_driven) hit max_ticks=#{m} for bead=#{state.bead_id}; stopping"
         )
-    end
 
-    {:stop, :normal, state}
+        {:stop, :normal, state}
+    end
   end
 
   def handle_info(:check_polecat, state) do
