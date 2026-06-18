@@ -13,6 +13,9 @@ defmodule ArbiterWeb.Application do
 
     children = [
       ArbiterWeb.Telemetry,
+      # Routes Arbiter.MCP session ids → their open GET /mcp SSE streams so
+      # server-initiated messages reach the right client (ArbiterWeb.MCP.Session).
+      {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},
       # Start a worker by calling: ArbiterWeb.Worker.start_link(arg)
       # {ArbiterWeb.Worker, arg},
       # Start to serve requests, typically the last entry

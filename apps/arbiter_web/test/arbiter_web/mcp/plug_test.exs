@@ -208,13 +208,104 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert json_response(conn, 200)["result"] == %{}
     end
 
-    test "GET is not supported (405)", ctx do
+    test "a GET without Accept: text/event-stream is 405", ctx do
       conn =
         ctx.conn
-        |> put_req_header("authorization", "Bearer #{ctx.polecat_token}")
+        |> put_req_header("authorization", "Bearer #{ctx.coordinator_token}")
         |> get("/mcp")
 
       assert json_response(conn, 405)["error"]["type"] == "method_not_allowed"
+    end
+  end
+
+  describe "session id" do
+    test "initialize assigns an Mcp-Session-Id header", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("initialize", %{"protocolVersion" => "2025-03-26"})
+        )
+
+      assert [session_id] = get_resp_header(conn, "mcp-session-id")
+      assert is_binary(session_id) and session_id != ""
+    end
+
+    test "a non-initialize request does not assign a session id", ctx do
+      conn = rpc(ctx.conn, ctx.coordinator_token, req("tools/list"))
+      assert get_resp_header(conn, "mcp-session-id") == []
+    end
+  end
+
+  describe "GET SSE stream (Streamable HTTP)" do
+    # Open the SSE stream with a bearer token and an event-stream Accept header.
+    defp sse(conn, token) do
+      conn
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> put_req_header("accept", "text/event-stream")
+      |> get("/mcp")
+    end
+
+    test "a coordinator opens a 200 text/event-stream and gets an initial event", ctx do
+      conn = sse(ctx.conn, ctx.coordinator_token)
+
+      assert conn.status == 200
+
+      assert {"content-type", "text/event-stream" <> _} =
+               List.keyfind(conn.resp_headers, "content-type", 0)
+
+      assert [session_id] = get_resp_header(conn, "mcp-session-id")
+      assert conn.resp_body =~ "arbiter-mcp session=#{session_id}"
+    end
+
+    test "a polecat token is rejected on GET (401) — workspace isolation holds", ctx do
+      conn = sse(ctx.conn, ctx.polecat_token)
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+    end
+
+    test "an unauthenticated GET is 401", ctx do
+      conn =
+        ctx.conn
+        |> put_req_header("accept", "text/event-stream")
+        |> get("/mcp")
+
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+    end
+
+    test "the stream honors a client-supplied Mcp-Session-Id", ctx do
+      conn =
+        ctx.conn
+        |> put_req_header("authorization", "Bearer #{ctx.coordinator_token}")
+        |> put_req_header("accept", "text/event-stream")
+        |> put_req_header("mcp-session-id", "client-chosen-id")
+        |> get("/mcp")
+
+      assert get_resp_header(conn, "mcp-session-id") == ["client-chosen-id"]
+      assert conn.resp_body =~ "client-chosen-id"
+    end
+  end
+
+  describe "tools/list over an SSE-established session" do
+    test "returns the same coordinator catalog as a plain POST", ctx do
+      init =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("initialize", %{"protocolVersion" => "2025-03-26"})
+        )
+
+      assert [session_id] = get_resp_header(init, "mcp-session-id")
+
+      conn =
+        ctx.conn
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer #{ctx.coordinator_token}")
+        |> put_req_header("mcp-session-id", session_id)
+        |> post("/mcp", Jason.encode!(req("tools/list", %{}, 2)))
+
+      names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
+      assert "bead_ready" in names
+      assert "bead_show" in names
     end
   end
 end

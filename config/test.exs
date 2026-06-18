@@ -33,7 +33,11 @@ config :arbiter, :acolyte_isolate_config, false
 # per-spawn `.mcp.json` injection into worktrees is off by default so existing
 # Sling tests don't write config files or mint tokens. Tests that exercise
 # injection flip `inject_config: true` themselves.
-config :arbiter, Arbiter.MCP, inject_config: false
+#
+# `sse_max_lifetime_ms: 0` closes a GET /mcp SSE stream right after the initial
+# keepalive flush, so the synchronous test request returns instead of blocking
+# on the held-open stream (bd-3m4yop).
+config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
 
 # Durable per-run transcript root, isolated under tmp so the suite never
 # writes into a real data dir. Tests that assert on transcripts override this
