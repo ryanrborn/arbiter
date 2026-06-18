@@ -294,5 +294,40 @@ defmodule Arbiter.Polecat.CommitGateTest do
       # The gate did NOT record a trip when the worktree was ready.
       refute Map.has_key?(snap.meta, :commit_gate_reason)
     end
+
+    test "a review-only acolyte (reviewer) completes despite zero commits (bd-40j98i)",
+         %{repo: repo, ws: ws} do
+      # Reviewers operate in review-only mode (meta[:review_only] = true) and
+      # analyze diffs without authoring code. They make NO commits by design.
+      # Before this fix, they would be marked :failed with :no_commits_at_completion
+      # because the commit gate checked all polecats. The fix skips the gate for
+      # reviewers so they complete successfully.
+      bead = new_bead(ws)
+      path = provision_worktree(repo, "bd-gate/#{bead.id}")
+
+      pid =
+        start_polecat(bead, repo, path, %{
+          commit_nudge_cap: 0,
+          review_only: true
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Reviewer completes despite zero commits (the worktree was just created,
+      # no work was done). Before bd-40j98i, this would fail with
+      # :no_commits_at_completion. After the fix, review_only polecats bypass
+      # the gate and proceed directly.
+      wait_until(fn ->
+        snap = Polecat.state(pid)
+        snap.status in [:completed, :awaiting_review, :awaiting_tribunal]
+      end)
+
+      snap = Polecat.state(pid)
+      # The gate was SKIPPED because review_only=true, so the polecat must NOT
+      # be :failed with a commit_gate_reason.
+      refute snap.status == :failed
+      refute Map.has_key?(snap.meta, :commit_gate_reason)
+      refute snap.meta[:failure_reason] == :no_commits_at_completion
+    end
   end
 end

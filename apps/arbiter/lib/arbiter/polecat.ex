@@ -1143,20 +1143,27 @@ defmodule Arbiter.Polecat do
         complete_now(state, :claude_done)
 
       branch ->
-        # bd-ofql8k: before routing to the Tribunal (which diffs the per-bead
-        # branch's COMMITTED history) or the merger, check that the worktree is
-        # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
-        # target. The repeated failure mode this guards against: the acolyte
-        # edits files correctly but never `git commit`s them; HEAD stays at the
-        # base branch with the work sitting uncommitted in the worktree; the
-        # reviewer diffs `base..HEAD`, sees empty, and concludes "no code
-        # exists" — sitting on the uncommitted changes and ignoring them.
-        case commit_gate(state) do
-          :ok ->
-            route_completion(state, branch)
+        # Skip commit gate for review-only polecats (reviewers make no commits
+        # by design) — reviewers operate on a pre-existing branch and analyze
+        # diffs without authoring code.
+        if review_only?(meta) do
+          route_completion(state, branch)
+        else
+          # bd-ofql8k: before routing to the Tribunal (which diffs the per-bead
+          # branch's COMMITTED history) or the merger, check that the worktree is
+          # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
+          # target. The repeated failure mode this guards against: the acolyte
+          # edits files correctly but never `git commit`s them; HEAD stays at the
+          # base branch with the work sitting uncommitted in the worktree; the
+          # reviewer diffs `base..HEAD`, sees empty, and concludes "no code
+          # exists" — sitting on the uncommitted changes and ignoring them.
+          case commit_gate(state) do
+            :ok ->
+              route_completion(state, branch)
 
-          {:gate, reason} ->
-            handle_commit_gate(state, branch, reason)
+            {:gate, reason} ->
+              handle_commit_gate(state, branch, reason)
+          end
         end
     end
   end
