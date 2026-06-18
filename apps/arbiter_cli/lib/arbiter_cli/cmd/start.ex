@@ -292,10 +292,12 @@ defmodule ArbiterCli.Cmd.Start do
        if the other heuristics can't find it (e.g. when running from `$HOME`
        with an on-PATH escript install).
     2. The umbrella inferred from the running escript's path (build-tree only:
-       path ends with `/apps/arbiter_cli/arb`).
+       path ends with `/apps/arbiter_cli/arb` and that file exists).
     3. The path recorded by `arb install-service` at `~/.config/arbiter/home`
-       (written on first install so commands work from any cwd after that).
-    4. A walk up from the current directory looking for `mix.exs`.
+       (written on first install so commands work from any cwd after that;
+       validated as an umbrella root on each read so stale CI paths are skipped).
+    4. A walk up from the current directory looking for an umbrella root
+       (`mix.exs` + `apps/` directory, or `compose.yml`).
 
   Returns `{:ok, dir}` or `:error`.
   """
@@ -311,12 +313,19 @@ defmodule ArbiterCli.Cmd.Start do
       dir = recorded_home() ->
         {:ok, dir}
 
-      dir = walk_up_for_mix(File.cwd!()) ->
+      dir = walk_up_for_root(File.cwd!()) ->
         {:ok, dir}
 
       true ->
         :error
     end
+  end
+
+  @doc false
+  @spec is_umbrella_root?(String.t()) :: boolean()
+  def is_umbrella_root?(dir) do
+    (File.exists?(Path.join(dir, "mix.exs")) and File.dir?(Path.join(dir, "apps"))) or
+      File.exists?(Path.join(dir, "compose.yml"))
   end
 
   @doc """
@@ -340,14 +349,16 @@ defmodule ArbiterCli.Cmd.Start do
   end
 
   # Read back the home path written by `record_home/1`. Returns the expanded
-  # path when the file exists and is non-empty, nil otherwise.
+  # path when the file exists, is non-empty, and passes the umbrella check.
+  # The umbrella check (mix.exs + apps/ OR compose.yml) filters out stale
+  # build-time or CI temp dirs that happen to exist as plain directories.
   defp recorded_home do
     path = recorded_home_path()
 
     case File.read(path) do
       {:ok, home} when home not in ["", "\n"] ->
         expanded = home |> String.trim() |> Path.expand()
-        if File.dir?(expanded), do: expanded, else: nil
+        if is_umbrella_root?(expanded), do: expanded, else: nil
 
       _ ->
         nil
@@ -357,6 +368,11 @@ defmodule ArbiterCli.Cmd.Start do
   # The escript is built as `<umbrella>/apps/arbiter_cli/arb`; recover the
   # umbrella root when run from the build tree. An installed-on-PATH copy tells
   # us nothing useful, so decline. (Mirrors `Cmd.Init`.)
+  #
+  # Also requires File.exists? on the expanded path to prevent false positives
+  # when `arb` is invoked by short name from inside a path that happens to end
+  # with `/apps/arbiter_cli` — Path.expand would produce a matching suffix even
+  # though the escript isn't actually there.
   defp escript_umbrella do
     :escript.script_name()
     |> to_string()
@@ -369,24 +385,24 @@ defmodule ArbiterCli.Cmd.Start do
   end
 
   defp derive_umbrella(path) do
-    if String.ends_with?(path, "/apps/arbiter_cli/arb") do
+    if String.ends_with?(path, "/apps/arbiter_cli/arb") and File.exists?(path) do
       path |> Path.dirname() |> Path.dirname() |> Path.dirname()
     end
   end
 
-  defp walk_up_for_mix(dir) do
+  defp walk_up_for_root(dir) do
     parent = Path.dirname(dir)
 
     cond do
-      File.exists?(Path.join(dir, "mix.exs")) ->
+      is_umbrella_root?(dir) ->
         dir
 
-      # Reached the filesystem root without finding mix.exs.
+      # Reached the filesystem root without finding an umbrella.
       parent == dir ->
         nil
 
       true ->
-        walk_up_for_mix(parent)
+        walk_up_for_root(parent)
     end
   end
 

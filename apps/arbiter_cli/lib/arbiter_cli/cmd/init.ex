@@ -212,8 +212,10 @@ defmodule ArbiterCli.Cmd.Init do
   # The escript is built as `<umbrella>/apps/arbiter_cli/arb`. When run from
   # the build tree we can recover the umbrella root; an installed-on-PATH copy
   # tells us nothing useful, so we decline rather than guess.
+  # File.exists? guards against false positives when `arb` is a short PATH name
+  # invoked from a directory whose path ends with `/apps/arbiter_cli`.
   defp derive_umbrella(path) do
-    if String.ends_with?(path, "/apps/arbiter_cli/arb") do
+    if String.ends_with?(path, "/apps/arbiter_cli/arb") and File.exists?(path) do
       path |> Path.dirname() |> Path.dirname() |> Path.dirname()
     end
   end
