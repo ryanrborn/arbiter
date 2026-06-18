@@ -28,6 +28,13 @@ defmodule ArbiterWeb.MCP.PlugTest do
     |> post("/mcp", Jason.encode!(request))
   end
 
+  # POST a JSON-RPC request with a token in the query parameter.
+  defp rpc_with_query_token(conn, token, request) do
+    conn
+    |> put_req_header("content-type", "application/json")
+    |> post("/mcp?token=#{URI.encode_www_form(token)}", Jason.encode!(request))
+  end
+
   defp req(method, params \\ %{}, id \\ 1) do
     %{"jsonrpc" => "2.0", "id" => id, "method" => method, "params" => params}
   end
@@ -63,6 +70,35 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
     test "a garbage token is 401", ctx do
       conn = rpc(ctx.conn, "garbage", req("tools/list"))
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+    end
+
+    test "a valid token in the query parameter is accepted", ctx do
+      conn = rpc_with_query_token(ctx.conn, ctx.polecat_token, req("tools/list"))
+      assert json_response(conn, 200)["result"]["tools"] != nil
+    end
+
+    test "a garbage token in the query parameter is 401", ctx do
+      conn = rpc_with_query_token(ctx.conn, "garbage", req("tools/list"))
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
+    end
+
+    test "Authorization header takes precedence over query parameter", ctx do
+      conn =
+        ctx.conn
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer #{ctx.coordinator_token}")
+        |> post("/mcp?token=garbage", Jason.encode!(req("tools/list")))
+
+      assert json_response(conn, 200)["result"]["tools"] != nil
+    end
+
+    test "an empty query parameter is treated as missing", ctx do
+      conn =
+        ctx.conn
+        |> put_req_header("content-type", "application/json")
+        |> post("/mcp?token=", Jason.encode!(req("tools/list")))
+
       assert json_response(conn, 401)["error"]["type"] == "unauthorized"
     end
   end
@@ -246,6 +282,13 @@ defmodule ArbiterWeb.MCP.PlugTest do
       |> get("/mcp")
     end
 
+    # Open the SSE stream with a token in the query parameter.
+    defp sse_with_query_token(conn, token) do
+      conn
+      |> put_req_header("accept", "text/event-stream")
+      |> get("/mcp?token=#{URI.encode_www_form(token)}")
+    end
+
     test "a coordinator opens a 200 text/event-stream and gets an initial event", ctx do
       conn = sse(ctx.conn, ctx.coordinator_token)
 
@@ -282,6 +325,23 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
       assert get_resp_header(conn, "mcp-session-id") == ["client-chosen-id"]
       assert conn.resp_body =~ "client-chosen-id"
+    end
+
+    test "a coordinator token in the query parameter opens an SSE stream", ctx do
+      conn = sse_with_query_token(ctx.conn, ctx.coordinator_token)
+
+      assert conn.status == 200
+
+      assert {"content-type", "text/event-stream" <> _} =
+               List.keyfind(conn.resp_headers, "content-type", 0)
+
+      assert [session_id] = get_resp_header(conn, "mcp-session-id")
+      assert conn.resp_body =~ "arbiter-mcp session=#{session_id}"
+    end
+
+    test "a garbage token in the query parameter is 401 on SSE", ctx do
+      conn = sse_with_query_token(ctx.conn, "garbage")
+      assert json_response(conn, 401)["error"]["type"] == "unauthorized"
     end
   end
 
