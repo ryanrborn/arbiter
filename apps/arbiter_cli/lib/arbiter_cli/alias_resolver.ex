@@ -48,7 +48,7 @@ defmodule ArbiterCli.AliasResolver do
   # The canonical command surface: resources, plus the flat meta commands that
   # carry no resource ambiguity, plus `dispatch` (the top-level shortcut for
   # `issue dispatch`, which the Sith label "sling" aliases to).
-  @known_verbs ~w(issue worker batch repo dep config server workspace message usage install dispatch prime where init help version)
+  @known_verbs ~w(issue worker batch repo dep config server workspace message usage install mcp dispatch prime where init help version)
 
   # Built-in default vernacular: the Sith resource names every install starts
   # with. Keys are canonical resources/verbs; values are their themed labels.

@@ -114,6 +114,10 @@ defmodule ArbiterWeb.Router do
     post("/messages/:id/read", MessageController, :read)
     delete("/messages", MessageController, :clear)
 
+    # MCP token management (mint coordinator tokens, verify any token)
+    post("/mcp/tokens", McpController, :mint_token)
+    post("/mcp/tokens/verify", McpController, :verify_token)
+
     # Version stamp
     get("/version", VersionController, :show)
 

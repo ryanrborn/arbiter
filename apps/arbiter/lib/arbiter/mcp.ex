@@ -99,7 +99,12 @@ defmodule Arbiter.MCP do
   def verify(token, opts \\ [])
 
   def verify(token, opts) when is_binary(token) do
-    case Plug.Crypto.verify(secret(), @salt, token, Keyword.put_new(opts, :max_age, max_age())) do
+    # Do not add a default max_age — let Plug.Crypto use the value stored in the
+    # token at mint time. This allows coordinator tokens with long TTLs (e.g. 30
+    # days) to remain valid beyond the server's default max_age config. Callers
+    # may still pass an explicit max_age to tighten the window (e.g. tests use
+    # max_age: -1 to force expiry).
+    case Plug.Crypto.verify(secret(), @salt, token, opts) do
       {:ok, %{} = claims} -> {:ok, claims}
       {:ok, _other} -> {:error, :invalid}
       {:error, :expired} -> {:error, :expired}
