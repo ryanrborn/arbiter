@@ -493,7 +493,10 @@ defmodule Arbiter.Beads.WorkspaceTest do
     test "defaults to false when unset or falsey" do
       assert Workspace.watch_pipeline?(%Workspace{config: %{}}) == false
       assert Workspace.watch_pipeline?(%Workspace{config: %{"merge" => %{}}}) == false
-      assert Workspace.watch_pipeline?(%Workspace{config: %{"merge" => %{"watch_pipeline" => false}}}) == false
+
+      assert Workspace.watch_pipeline?(%Workspace{
+               config: %{"merge" => %{"watch_pipeline" => false}}
+             }) == false
     end
   end
 end

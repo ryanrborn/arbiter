@@ -21,10 +21,12 @@ defmodule Arbiter.Agents.CredentialWardenTest do
 
     merged = Keyword.merge(defaults, opts)
     # start_link uses name: nil → starts unnamed; we hold the pid directly.
-    {:ok, pid} = start_supervised(%{
-      id: make_ref(),
-      start: {CredentialWarden, :start_link, [merged]}
-    })
+    {:ok, pid} =
+      start_supervised(%{
+        id: make_ref(),
+        start: {CredentialWarden, :start_link, [merged]}
+      })
+
     pid
   end
 
