@@ -564,7 +564,7 @@ defmodule Arbiter.Beads.ClaimTest do
           {"GET", "/rest/api/3/myself"} ->
             Req.Test.json(conn, %{"accountId" => @jira_account_id})
 
-          {"GET", "/rest/api/3/search"} ->
+          {"POST", "/rest/api/3/search/jql"} ->
             Req.Test.json(conn, %{
               "issues" => [jira_issue_payload()]
             })
