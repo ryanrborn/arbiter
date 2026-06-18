@@ -79,6 +79,37 @@ defmodule ArbiterCli.Cmd.StartTest do
       refute_received {:cmd, "docker", _}
     end
 
+    test "runs mix compile before spawning Phoenix" do
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+
+      test_pid = self()
+      ordered = :ets.new(:cmd_order, [:ordered_set, :public])
+      counter = :counters.new(1, [])
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        n = :counters.get(counter, 1)
+        :counters.add(counter, 1, 1)
+        :ets.insert(ordered, {n, cmd, args})
+        send(test_pid, {:cmd, cmd, args})
+        if cmd == "sh", do: stub_get("/api/workspaces", @green)
+        {"", 0}
+      end)
+
+      {_out, _err, code} = capture(fn -> Start.run([]) end)
+
+      assert code == 0
+      # compile must have run before Phoenix
+      assert_received {:cmd, "mix", ["compile"]}
+      assert_received {:cmd, "sh", ["-c", _script]}
+
+      # compile is the first shelled-out command; phoenix start is second
+      [{compile_n, "mix", ["compile"]}, {phoenix_n, "sh", _}] =
+        :ets.tab2list(ordered) |> Enum.sort()
+
+      assert compile_n < phoenix_n
+    end
+
     test "script sources .arbiter.env with set -a so all vars are exported" do
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
       Process.put(:bd2_sleep, fn _ms -> :ok end)

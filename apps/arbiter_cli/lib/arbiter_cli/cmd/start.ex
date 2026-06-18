@@ -97,12 +97,41 @@ defmodule ArbiterCli.Cmd.Start do
           )
       end
 
-    actions = [start_phoenix(root)]
+    actions = [compile_project(root), start_phoenix(root)]
 
     case wait_until_green(attempts_for(timeout_ms)) do
       :ok -> emit_started(mode, actions, true, timeout_ms)
       :timeout -> emit_timeout(mode, actions, timeout_ms)
     end
+  end
+
+  # ---- compile -----------------------------------------------------------
+
+  # Run `mix compile` synchronously before launching Phoenix so that the
+  # health-check poll (`wait_until_green`) only measures actual server startup
+  # time, not recompilation. Without this, a post-`git pull` cold start can
+  # easily exceed the health-check timeout (compilation takes minutes on a cold
+  # beam cache) while Phoenix is still busy building .beam files in the
+  # background.
+  defp compile_project(root) do
+    log_text("Compiling Arbiter (mix compile)…")
+
+    case run_cmd("mix", ["compile"], cd: root, stderr_to_stdout: true) do
+      {_out, 0} ->
+        {:compile, :ok, root}
+
+      {out, code} ->
+        Output.die(
+          "mix compile failed (exit #{code})",
+          "Output:\n" <> String.trim_trailing(out)
+        )
+    end
+  rescue
+    e in ErlangError ->
+      Output.die(
+        "could not run mix compile: #{inspect(e.original)}",
+        "Ensure Elixir/`mix` is installed and on your PATH."
+      )
   end
 
   # ---- phoenix -----------------------------------------------------------

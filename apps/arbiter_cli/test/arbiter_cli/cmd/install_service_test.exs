@@ -207,5 +207,11 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       contents = InstallService.unit_contents(:user, "/srv/arbiter")
       assert contents =~ "Environment=MIX_HOME=#{mix_home}"
     end
+
+    test "includes Restart=on-failure and RestartSec so systemd auto-retries" do
+      contents = InstallService.unit_contents(:user, "/srv/arbiter")
+      assert contents =~ "Restart=on-failure"
+      assert contents =~ "RestartSec=10"
+    end
   end
 end

@@ -67,12 +67,15 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   @unit_name "arbiter.service"
 
-  # How long the service is allowed to spend coming up before systemd calls the
-  # start a failure. Generous: a cold `mix phx.server` may compile first. The
-  # inner `arb start --timeout` is set a touch lower so it reports its own
-  # timeout before systemd's harder cutoff fires.
-  @start_timeout_s 240
-  @systemd_timeout_s 300
+  # `arb start` now runs `mix compile` synchronously before launching Phoenix,
+  # so `--timeout` only covers the post-compilation health-check poll (Phoenix
+  # starts in seconds once the beam cache is warm). The systemd timeout must
+  # cover compile + startup: allow 15 min so even a from-scratch recompile
+  # doesn't cause a false failure. `Restart=on-failure` is a safety net so
+  # systemd auto-retries rather than requiring a manual kick if the timeout is
+  # still exceeded.
+  @start_timeout_s 120
+  @systemd_timeout_s 900
 
   def run(argv) do
     if Output.help?(argv) do
@@ -285,6 +288,8 @@ defmodule ArbiterCli.Cmd.InstallService do
     #{environment_lines(root)}
     ExecStart=#{arb} start --timeout #{@start_timeout_s}
     TimeoutStartSec=#{@systemd_timeout_s}
+    Restart=on-failure
+    RestartSec=10
 
     [Install]
     WantedBy=#{wanted_by}
