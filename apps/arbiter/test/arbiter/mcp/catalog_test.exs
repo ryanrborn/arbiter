@@ -21,7 +21,7 @@ defmodule Arbiter.MCP.CatalogTest do
       # Phase 2 mutating tools are coordinator-only; never visible to a polecat.
       for tool <- ~w(bead_create bead_update bead_close dep_add dep_remove convoy_create
                      convoy_add_member convoy_close convoy_list polecat_sling polecat_message
-                     usage_summarize) do
+                     polecat_list bead_list usage_summarize) do
         refute tool in names
       end
     end
@@ -32,7 +32,7 @@ defmodule Arbiter.MCP.CatalogTest do
 
       for tool <- ~w(bead_create bead_update bead_close dep_add dep_remove convoy_create
                      convoy_add_member convoy_close convoy_list polecat_sling polecat_message
-                     usage_summarize) do
+                     polecat_list bead_list usage_summarize) do
         assert tool in names
       end
 

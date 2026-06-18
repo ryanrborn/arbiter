@@ -36,6 +36,8 @@ defmodule Arbiter.MCP.Catalog do
   | `convoy_close` | coordinator | `Ash.update(convoy, …, action: :close)` |
   | `polecat_sling` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` |
   | `polecat_message` | coordinator | `Messages.send_mail/1` |
+  | `polecat_list` | coordinator | `Arbiter.Polecat.list_children/0` |
+  | `bead_list` | coordinator | `Ash.read(Issue, …)` with filters |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   """
 
@@ -385,6 +387,40 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.polecat_message/2
+    },
+    %{
+      name: "polecat_list",
+      tiers: @coordinator,
+      description: "List active polecats in the workspace: bead_id, status, rig, started_at, activity.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.polecat_list/2
+    },
+    %{
+      name: "bead_list",
+      tiers: @coordinator,
+      description:
+        "List beads in the workspace with optional filters. `status` (open | in_progress | closed), " <>
+          "`priority` (integer 0–4), and `issue_type` (task | bug | feature | epic | chore | decision) " <>
+          "are all optional. Returns matching beads in the coordinator's workspace.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "status" => %{
+            "type" => "string",
+            "description" => "Filter by status: open | in_progress | closed."
+          },
+          "priority" => %{
+            "type" => "integer",
+            "description" => "Filter by priority (0 = highest, 4 = lowest)."
+          },
+          "issue_type" => %{
+            "type" => "string",
+            "description" => "Filter by type: task | bug | feature | epic | chore | decision."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.bead_list/2
     },
     %{
       name: "usage_summarize",

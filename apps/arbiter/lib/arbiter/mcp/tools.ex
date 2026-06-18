@@ -388,6 +388,66 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- polecat_list -------------------------------------------------------
+
+  @doc """
+  List active polecats in the scope's workspace. Coordinator only. Backs onto
+  `Arbiter.Polecat.list_children/0`, filtered to the scope's workspace_id so a
+  coordinator never sees polecats running in other workspaces.
+  """
+  @spec polecat_list(Scope.t(), map()) :: {:ok, map()}
+  def polecat_list(%Scope{workspace_id: ws_id}, _args) do
+    polecats =
+      Arbiter.Polecat.list_children()
+      |> Enum.filter(&(&1.workspace_id == ws_id))
+      |> Enum.map(&serialize_polecat_summary/1)
+
+    {:ok, %{polecats: polecats, count: length(polecats)}}
+  end
+
+  # ---- bead_list ----------------------------------------------------------
+
+  @doc """
+  List beads in the scope's workspace with optional filters. Coordinator only.
+  Accepts optional `status`, `priority`, and `issue_type` filters. Always
+  scoped to the coordinator's workspace. Backs onto `Ash.read(Issue, ...)`.
+  """
+  @spec bead_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def bead_list(%Scope{workspace_id: ws_id}, args) do
+    with {:ok, status} <- optional_enum(args, "status", Issue.statuses()),
+         {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
+         {:ok, priority} <- optional_integer(args, "priority") do
+      query =
+        Issue
+        |> Ash.Query.filter(workspace_id == ^ws_id)
+        |> maybe_filter_status(status)
+        |> maybe_filter_issue_type(issue_type)
+        |> maybe_filter_priority(priority)
+
+      beads =
+        query
+        |> Ash.read!()
+        |> Enum.map(&serialize_bead_summary/1)
+
+      {:ok, %{beads: beads, count: length(beads)}}
+    end
+  end
+
+  defp maybe_filter_status(query, nil), do: query
+
+  defp maybe_filter_status(query, status),
+    do: Ash.Query.filter(query, status == ^status)
+
+  defp maybe_filter_issue_type(query, nil), do: query
+
+  defp maybe_filter_issue_type(query, issue_type),
+    do: Ash.Query.filter(query, issue_type == ^issue_type)
+
+  defp maybe_filter_priority(query, nil), do: query
+
+  defp maybe_filter_priority(query, priority),
+    do: Ash.Query.filter(query, priority == ^priority)
+
   # ---- usage_summarize ----------------------------------------------------
 
   @doc """
@@ -819,6 +879,18 @@ defmodule Arbiter.MCP.Tools do
       worktree_path: result.worktree_path,
       claude_started: not is_nil(result.claude_port),
       depth: depth
+    }
+  end
+
+  defp serialize_polecat_summary(snap) do
+    meta = Map.get(snap, :meta, %{}) || %{}
+
+    %{
+      bead_id: snap.bead_id,
+      status: to_str(snap.status),
+      rig: snap.rig,
+      started_at: iso(snap.started_at),
+      activity: Map.get(meta, :activity)
     }
   end
 
