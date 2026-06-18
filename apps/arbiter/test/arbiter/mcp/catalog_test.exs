@@ -7,34 +7,29 @@ defmodule Arbiter.MCP.CatalogTest do
   @polecat %Scope{tier: :polecat, workspace_id: "w", bead_id: "bd-1"}
   @coordinator %Scope{tier: :coordinator, workspace_id: "w"}
 
+  # The both-tier tools a polecat may also reach.
+  @both_tier ~w(bead_show inbox_check bead_update_progress workspace_show convoy_status
+                message_send notify_list)
+
+  # Coordinator-only tools; never visible to a polecat.
+  @coordinator_only ~w(bead_ready bead_create bead_update bead_close bead_reopen dep_add dep_remove
+                       convoy_create convoy_add_member convoy_close convoy_list polecat_sling
+                       polecat_resume polecat_review polecat_stop polecat_list bead_list
+                       tracker_claim tracker_sync workspace_list usage_summarize)
+
   describe "visible/1" do
-    test "the polecat tier cannot see coordinator-only tools" do
+    test "the polecat tier sees the both-tier tools but no coordinator-only tool" do
       names = @polecat |> Catalog.visible() |> Enum.map(& &1.name)
 
-      assert "bead_show" in names
-      assert "inbox_check" in names
-      assert "bead_update_progress" in names
-      assert "workspace_show" in names
-      assert "convoy_status" in names
-      refute "bead_ready" in names
-
-      # Phase 2 mutating tools are coordinator-only; never visible to a polecat.
-      for tool <- ~w(bead_create bead_update bead_close dep_add dep_remove convoy_create
-                     convoy_add_member convoy_close convoy_list polecat_sling polecat_message
-                     polecat_list bead_list usage_summarize) do
-        refute tool in names
-      end
+      for tool <- @both_tier, do: assert(tool in names)
+      for tool <- @coordinator_only, do: refute(tool in names)
     end
 
-    test "the coordinator tier sees every tool, including the Phase 2 mutating tools" do
+    test "the coordinator tier sees every tool, including the coordinator-only tools" do
       names = @coordinator |> Catalog.visible() |> Enum.map(& &1.name)
-      assert "bead_ready" in names
 
-      for tool <- ~w(bead_create bead_update bead_close dep_add dep_remove convoy_create
-                     convoy_add_member convoy_close convoy_list polecat_sling polecat_message
-                     polecat_list bead_list usage_summarize) do
-        assert tool in names
-      end
+      for tool <- @both_tier, do: assert(tool in names)
+      for tool <- @coordinator_only, do: assert(tool in names)
 
       assert length(names) == length(Catalog.all())
     end

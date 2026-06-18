@@ -6,9 +6,13 @@ defmodule Arbiter.MCP.Tools do
 
   Phase 1 ships the read tools plus the one narrowed polecat write
   (`bead_update_progress`); Phase 2 adds the coordinator-only mutating tools —
-  `bead_create` / `bead_update` / `bead_close`, `dep_add` / `dep_remove`, the
-  `convoy_*` family, `polecat_sling`, `polecat_message`, and `usage_summarize`
-  (see `docs/mcp-server-design.md` §8). `polecat_sling` carries the
+  `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_add` /
+  `dep_remove`, the `convoy_*` family, the `polecat_*` lifecycle family
+  (`polecat_sling` / `polecat_resume` / `polecat_review` / `polecat_stop` /
+  `polecat_list`), `message_send`, `notify_list`, the `tracker_*` bridge
+  (`tracker_claim` / `tracker_sync`), `workspace_list`, and `usage_summarize`
+  (see `docs/mcp-server-design.md` §8). The acolyte-dispatch tools
+  (`polecat_sling` / `polecat_resume` / `polecat_review`) carry the
   sling-recursion guardrail (`can_sling` + `depth`, §4.3).
 
   Handlers take `(scope, arguments)` where `scope` is an `Arbiter.MCP.Scope` and
@@ -27,6 +31,7 @@ defmodule Arbiter.MCP.Tools do
   """
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Beads.Claim
   alias Arbiter.Beads.Convoy
   alias Arbiter.Beads.ConvoyMembership
   alias Arbiter.Beads.Dependency
@@ -35,7 +40,9 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.MCP
   alias Arbiter.MCP.Scope
   alias Arbiter.Messages.Message
+  alias Arbiter.Polecat
   alias Arbiter.Polecat.Sling
+  alias Arbiter.Trackers
   alias Arbiter.Usage
 
   require Ash.Query
@@ -213,6 +220,26 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- bead_reopen --------------------------------------------------------
+
+  @doc """
+  Reopen a closed bead in the scope's workspace via the `:reopen` action (clears
+  `closed_at`, returns it to `:open` and the ready queue, and best-effort
+  reopens the linked tracker issue). Coordinator only. Reopening is the only
+  supported path out of `:closed` — the `:update` FSM rejects that transition —
+  so a non-closed bead is reported as an operational error.
+  """
+  @spec bead_reopen(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def bead_reopen(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_bead_id(scope, args),
+         {:ok, issue} <- fetch_bead(scope, id) do
+      case Ash.update(issue, %{}, action: :reopen) do
+        {:ok, reopened} -> {:ok, serialize_bead(reopened)}
+        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
+      end
+    end
+  end
+
   # ---- dep_add ------------------------------------------------------------
 
   @doc """
@@ -328,27 +355,28 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # ---- polecat_message ----------------------------------------------------
+  # ---- message_send -------------------------------------------------------
 
   @doc """
-  Send a direction to a bead's mailbox (the structured replacement for
-  `arb message <bead> <text>` from the coordinator side). Coordinator only.
-  `workspace_id` is forced to the scope's workspace so a coordinator can only
-  message within it. Backs onto `Messages.send_mail/1`.
+  Send a message to a bead's mailbox — the structured replacement for
+  `arb message <bead> <text>`. Available to **both** tiers, with the envelope
+  set from the scope so the sender identity cannot be spoofed:
+
+    * a **coordinator** sends a `:direction` from `"coordinator"` down to any
+      bead in its workspace;
+    * a **polecat** raises a `:flag` from its own bound bead to a sibling.
+
+  `workspace_id` is forced to the scope's workspace so a message can only ever be
+  created within it. Backs onto `Messages.send_mail/1`.
   """
-  @spec polecat_message(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_message(%Scope{workspace_id: ws_id}, args) do
+  @spec message_send(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def message_send(%Scope{} = scope, args) do
     with {:ok, to_ref} <- require_string(args, "bead_id"),
          {:ok, body} <- require_string(args, "body") do
       attrs =
-        %{
-          kind: :direction,
-          workspace_id: ws_id,
-          from_ref: "coordinator",
-          to_ref: to_ref,
-          directive_ref: to_ref,
-          body: body
-        }
+        scope
+        |> message_envelope(to_ref)
+        |> Map.put(:body, body)
         |> maybe_put(:subject, fetch_string(args, "subject"))
 
       case Message.send_mail(attrs) do
@@ -356,6 +384,29 @@ defmodule Arbiter.MCP.Tools do
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
+  end
+
+  # The sender identity + kind are derived from the scope, never the client: a
+  # coordinator directs (`from: "coordinator"`); a polecat flags from its own
+  # bound bead. Both are pinned to the scope's workspace.
+  defp message_envelope(%Scope{tier: :coordinator, workspace_id: ws_id}, to_ref) do
+    %{
+      kind: :direction,
+      workspace_id: ws_id,
+      from_ref: "coordinator",
+      to_ref: to_ref,
+      directive_ref: to_ref
+    }
+  end
+
+  defp message_envelope(%Scope{tier: :polecat, workspace_id: ws_id, bead_id: bead_id}, to_ref) do
+    %{
+      kind: :flag,
+      workspace_id: ws_id,
+      from_ref: bead_id,
+      to_ref: to_ref,
+      directive_ref: to_ref
+    }
   end
 
   # ---- polecat_sling ------------------------------------------------------
@@ -384,6 +435,77 @@ defmodule Arbiter.MCP.Tools do
       case Sling.sling(bead_id, sling_opts(scope, args)) do
         {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
+      end
+    end
+  end
+
+  # ---- polecat_resume -----------------------------------------------------
+
+  @doc """
+  Re-attach a fresh acolyte to a bead's **preserved outpost** worktree
+  (`arb resume`). Coordinator only, and — like `polecat_sling` — gated by the
+  sling-recursion guardrail (`can_sling` + `depth`): resume spawns a worker, so
+  the same recursion concerns apply. The child polecat's scope is minted one
+  level deeper. Backs onto `Arbiter.Polecat.Sling.resume/2`.
+  """
+  @spec polecat_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def polecat_resume(%Scope{} = scope, args) do
+    with :ok <- ensure_can_sling(scope),
+         :ok <- ensure_sling_depth(scope),
+         {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
+         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+      case Sling.resume(bead_id, dispatch_opts(scope, args)) do
+        {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
+        {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
+      end
+    end
+  end
+
+  # ---- polecat_review -----------------------------------------------------
+
+  @doc """
+  Dispatch a **review-only** acolyte against the PR/MR linked to a bead
+  (`arb review`): no worktree, no per-bead branch, no route through the
+  Crucible/merger. Coordinator only, and gated by the sling-recursion guardrail
+  (`can_sling` + `depth`) — a review dispatch spawns an agent. The child
+  polecat's scope is minted one level deeper. Backs onto
+  `Arbiter.Polecat.Sling.sling/2` with `review: true`.
+  """
+  @spec polecat_review(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def polecat_review(%Scope{} = scope, args) do
+    with :ok <- ensure_can_sling(scope),
+         :ok <- ensure_sling_depth(scope),
+         {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
+         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+      opts =
+        scope
+        |> dispatch_opts(args)
+        |> Keyword.put(:review, true)
+        |> review_claude_flag(args)
+
+      case Sling.sling(bead_id, opts) do
+        {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
+        {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
+      end
+    end
+  end
+
+  # ---- polecat_stop -------------------------------------------------------
+
+  @doc """
+  Stop the polecat currently working a bead (`arb polecat stop`). Coordinator
+  only. The bead is resolved through `fetch_bead`, so a coordinator can only
+  stop polecats for beads in its own workspace; a bead with no live polecat is
+  reported as not-found. Stopping is teardown — it never spawns — so it does not
+  require `can_sling`. Backs onto `Arbiter.Polecat.stop/2`.
+  """
+  @spec polecat_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def polecat_stop(%Scope{} = scope, args) do
+    with {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
+         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+      case Polecat.stop(bead_id, :normal) do
+        :ok -> {:ok, %{bead_id: bead_id, stopped: true}}
+        {:error, :not_found} -> {:error, {:not_found, "no running polecat for bead #{bead_id}"}}
       end
     end
   end
@@ -474,6 +596,99 @@ defmodule Arbiter.MCP.Tools do
           {:error, {:invalid, "usage_summarize failed: #{inspect(reason)}"}}
       end
     end
+  end
+
+  # ---- notify_list --------------------------------------------------------
+
+  @doc """
+  The most recent notifications (broadcast events: completions, milestones,
+  system events) for the scope's workspace. Available to both tiers and always
+  scoped to the bound workspace. Read-only — notifications are never consumed.
+  Optional `limit` (default 20). Backs onto `Messages.recent_notifications/2`.
+  """
+  @spec notify_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def notify_list(%Scope{workspace_id: ws_id}, args) do
+    with {:ok, limit} <- optional_integer(args, "limit") do
+      notifications =
+        (limit || 20)
+        |> Message.recent_notifications(workspace_id: ws_id)
+        |> Enum.map(&serialize_message/1)
+
+      {:ok, %{notifications: notifications, count: length(notifications)}}
+    end
+  end
+
+  # ---- tracker_claim ------------------------------------------------------
+
+  @doc """
+  Claim an external tracker issue into a bead (`arb claim`). Coordinator only.
+  Fetches the issue by `ref` via the workspace's tracker, verifies it is
+  assigned to the workspace user (the claim signal; skip with `force: true`),
+  and creates a linked bead. Idempotent — returns the existing bead if one
+  already references the issue. Backs onto `Arbiter.Beads.Claim.claim/3`.
+  """
+  @spec tracker_claim(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def tracker_claim(%Scope{workspace_id: ws_id}, args) do
+    with {:ok, ref} <- require_string(args, "ref"),
+         {:ok, force} <- fetch_bool(args, "force", false),
+         {:ok, workspace} <- fetch_workspace(ws_id) do
+      case Claim.claim(workspace, ref, force: force) do
+        {:ok, status, bead} -> {:ok, Map.put(serialize_bead(bead), :claim_status, to_str(status))}
+        {:error, reason} -> {:error, {:invalid, claim_error_message(reason)}}
+      end
+    end
+  end
+
+  # ---- tracker_sync -------------------------------------------------------
+
+  @doc """
+  Reconcile the workspace's beads against its external tracker (`arb sync`): open
+  assigned issues with no bead get a linked bead; open beads whose issue is
+  unassigned/closed get closed. Coordinator only. With `dry: true` the plan is
+  returned without acting. No-ops cleanly when the tracker does not support
+  reconciliation. Backs onto `Arbiter.Beads.Claim.plan/1` + `apply_plan/2`.
+  """
+  @spec tracker_sync(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def tracker_sync(%Scope{workspace_id: ws_id}, args) do
+    with {:ok, dry} <- fetch_bool(args, "dry", false),
+         {:ok, workspace} <- fetch_workspace(ws_id),
+         {:ok, plan} <- claim_plan(workspace) do
+      actions = Enum.map(plan, &serialize_claim_action/1)
+
+      if dry do
+        {:ok, %{applied: false, actions: actions, count: length(actions)}}
+      else
+        {:ok, results} = Claim.apply_plan(workspace, plan)
+
+        {:ok,
+         %{
+           applied: true,
+           actions: actions,
+           results: Enum.map(results, &serialize_claim_result/1),
+           count: length(actions)
+         }}
+      end
+    end
+  end
+
+  # ---- workspace_list -----------------------------------------------------
+
+  @doc """
+  List the configured workspaces (id, name, prefix, tracker type). Coordinator
+  only. This is a deliberate exception to the per-call workspace isolation every
+  other tool enforces: it is a read-only *enumeration* of non-sensitive summary
+  fields (no config, no security posture — those stay behind `workspace_show`
+  for the bound workspace), the discovery surface the operator/coordinator needs
+  to know which workspaces exist. Backs onto `Ash.read(Workspace)`.
+  """
+  @spec workspace_list(Scope.t(), map()) :: {:ok, map()}
+  def workspace_list(%Scope{}, _args) do
+    workspaces =
+      Workspace
+      |> Ash.read!()
+      |> Enum.map(&serialize_workspace_summary/1)
+
+    {:ok, %{workspaces: workspaces, count: length(workspaces)}}
   end
 
   # ---- shared resolution / fetch -----------------------------------------
@@ -745,19 +960,34 @@ defmodule Arbiter.MCP.Tools do
     if depth < max, do: :ok, else: {:error, {:unauthorized, "sling depth limit (#{max}) reached"}}
   end
 
-  # Map the tool's arguments onto `Sling.sling/2` opts, mirroring the REST
+  # The opts common to every acolyte-dispatch tool (sling / resume / review):
+  # the optional `rig` / `model` overrides plus the child scope depth, minted
+  # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
+  defp dispatch_opts(%Scope{depth: depth}, args) do
+    [depth: depth + 1]
+    |> maybe_put_kw(:rig, fetch_string(args, "rig"))
+    |> maybe_put_kw(:model, fetch_string(args, "model"))
+  end
+
+  # Map `polecat_sling` arguments onto `Sling.sling/2` opts, mirroring the REST
   # `POST /api/polecats/sling` contract: `with_claude` dispatches a real worker
-  # session, otherwise the bead parks `:in_progress` (no Driver). The child
-  # polecat's scope token is minted one level deeper (`depth + 1`).
-  defp sling_opts(%Scope{depth: depth}, args) do
-    base =
-      [depth: depth + 1]
-      |> maybe_put_kw(:rig, fetch_string(args, "rig"))
-      |> maybe_put_kw(:model, fetch_string(args, "model"))
+  # session, otherwise the bead parks `:in_progress` (no Driver).
+  defp sling_opts(scope, args) do
+    base = dispatch_opts(scope, args)
 
     case Map.get(args, "with_claude") do
       v when v in [true, "true"] -> Keyword.put(base, :start_claude, true)
       _ -> Keyword.put(base, :start_driver, false)
+    end
+  end
+
+  # `polecat_review` is claude-driven by default (a reviewer with no agent has
+  # nothing to do), mirroring `POST /api/polecats/review`. `with_claude: false`
+  # dispatches the review without spawning an agent (the test affordance).
+  defp review_claude_flag(opts, args) do
+    case Map.get(args, "with_claude") do
+      v when v in [false, "false"] -> Keyword.put(opts, :start_claude, false)
+      _ -> Keyword.put(opts, :start_claude, true)
     end
   end
 
@@ -772,6 +1002,16 @@ defmodule Arbiter.MCP.Tools do
 
   defp sling_error_message({:bead_awaiting_review, id}),
     do: "bead #{id} is already awaiting review"
+
+  # Resume-specific (`Sling.resume/2`).
+  defp sling_error_message(:no_outpost),
+    do: "no preserved outpost worktree for this bead — nothing to resume; sling it fresh instead"
+
+  defp sling_error_message(:rig_unknown),
+    do: "could not resolve the rig for this bead; pass `rig` explicitly"
+
+  defp sling_error_message({:acolyte_active, status}),
+    do: "an acolyte is still active for this bead (#{status}); stop it before resuming"
 
   defp sling_error_message(other), do: "sling failed: #{inspect(other)}"
 
@@ -790,6 +1030,42 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp reload_convoy(%Convoy{} = convoy), do: Ash.load!(convoy, [:total_issues, :closed_issues])
+
+  # The scope's own workspace, loaded for the tracker bridge tools.
+  defp fetch_workspace(ws_id) do
+    case Ash.get(Workspace, ws_id) do
+      {:ok, %Workspace{} = ws} -> {:ok, ws}
+      _ -> {:error, {:not_found, "workspace #{ws_id} not found"}}
+    end
+  end
+
+  # Wrap `Claim.plan/1` so an adapter/tracker error surfaces as a tool error
+  # rather than crashing the handler.
+  defp claim_plan(workspace) do
+    case Claim.plan(workspace) do
+      {:ok, plan} -> {:ok, plan}
+      {:error, reason} -> {:error, {:invalid, claim_error_message(reason)}}
+    end
+  end
+
+  defp claim_error_message(:tracker_not_supported),
+    do: "workspace tracker does not support claim/sync (e.g. tracker is `none`)"
+
+  defp claim_error_message({:not_assigned, who}),
+    do:
+      "issue is not assigned to the workspace user (#{inspect(who)}); pass force=true to override"
+
+  defp claim_error_message({:already_claimed, _body}),
+    do:
+      "this issue has already been claimed by another Arbiter installation (force=true to override)"
+
+  defp claim_error_message({:invalid_ref, raw}), do: "invalid issue ref: #{inspect(raw)}"
+
+  defp claim_error_message(%{__struct__: _} = err) do
+    if is_exception(err), do: Exception.message(err), else: inspect(err)
+  end
+
+  defp claim_error_message(other), do: inspect(other)
 
   defp fetch_string(args, key) when is_map(args) do
     case Map.get(args, key) do
@@ -917,6 +1193,34 @@ defmodule Arbiter.MCP.Tools do
       security: SecurityPolicy.summary(SecurityPolicy.resolve(ws))
     }
   end
+
+  # The non-sensitive summary `workspace_list` returns — id/name/prefix/tracker
+  # only, never config or security posture.
+  defp serialize_workspace_summary(%Workspace{} = ws) do
+    %{
+      id: ws.id,
+      name: ws.name,
+      prefix: ws.prefix,
+      tracker_type: to_str(Trackers.workspace_type(ws))
+    }
+  end
+
+  # The planned reconcile actions / per-action results from the tracker bridge,
+  # mirroring `ArbiterWeb.Api.ClaimController`'s shapes.
+  defp serialize_claim_action({:create, ref, summary}),
+    do: %{action: "create", ref: ref, title: summary[:title], html_url: summary[:html_url]}
+
+  defp serialize_claim_action({:close, bead_id, reason}),
+    do: %{action: "close", bead_id: bead_id, reason: reason}
+
+  defp serialize_claim_result({:created, bead}),
+    do: %{outcome: "created", bead: serialize_bead_summary(bead)}
+
+  defp serialize_claim_result({:closed, bead}),
+    do: %{outcome: "closed", bead: serialize_bead_summary(bead)}
+
+  defp serialize_claim_result({:error, action, reason}),
+    do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}
 
   defp calc(n) when is_integer(n), do: n
   defp calc(_), do: 0
