@@ -37,6 +37,8 @@ defmodule Arbiter.MCP do
   @default_max_depth 3
   @default_server_name "arbiter"
   @default_port 4848
+  @default_sse_keepalive_ms 15_000
+  @default_sse_max_lifetime_ms :infinity
 
   @doc "Whether the MCP server is enabled at all (default `true`)."
   @spec enabled?() :: boolean()
@@ -64,6 +66,23 @@ defmodule Arbiter.MCP do
   @doc "The `mcpServers` key written into `.mcp.json` (default `\"arbiter\"`)."
   @spec server_name() :: String.t()
   def server_name, do: config(:server_name, @default_server_name)
+
+  @doc """
+  Heartbeat interval, in ms, for an open `GET /mcp` SSE stream. A keepalive
+  comment is flushed after this much idle time so proxies and clients hold the
+  connection open (default 15s).
+  """
+  @spec sse_keepalive_ms() :: pos_integer()
+  def sse_keepalive_ms, do: config(:sse_keepalive_ms, @default_sse_keepalive_ms)
+
+  @doc """
+  Maximum lifetime, in ms, of an open `GET /mcp` SSE stream before the server
+  closes it (the client reconnects). `:infinity` keeps it open until the client
+  disconnects (default). Tests set a small value so the synchronous request
+  returns instead of blocking on the stream.
+  """
+  @spec sse_max_lifetime_ms() :: pos_integer() | :infinity
+  def sse_max_lifetime_ms, do: config(:sse_max_lifetime_ms, @default_sse_max_lifetime_ms)
 
   @doc "The server version reported in the MCP `initialize` handshake (`serverInfo`)."
   @spec server_version() :: String.t()
