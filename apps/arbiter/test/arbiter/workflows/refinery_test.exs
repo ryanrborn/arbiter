@@ -646,7 +646,8 @@ defmodule Arbiter.Workflows.RefineryTest do
       # On tick: adapter.get returns status: :merged → close bead, no merge API call.
       :ok = Refinery.tick(name)
 
-      refute_received :unexpected_merge_call, "adapter.merge should NOT be called for already-merged PR"
+      refute_received :unexpected_merge_call,
+                      "adapter.merge should NOT be called for already-merged PR"
 
       # Item is removed (poll_all prunes :done items).
       %{items: items} = Refinery.state(name)

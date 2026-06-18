@@ -318,7 +318,8 @@ defmodule Arbiter.Polecat.WardenTest do
       StubMerger.next_open_ref("!oom1")
       StubMerger.queue_get("!oom1", [%{status: :open, approved: false}])
 
-      {:ok, mr_ref} = Polecat.open_mr(pid, "feature/x", "Fix it", "", %{adapter: StubMerger, workspace: nil})
+      {:ok, mr_ref} =
+        Polecat.open_mr(pid, "feature/x", "Fix it", "", %{adapter: StubMerger, workspace: nil})
 
       assert mr_ref == "!oom1"
       assert Polecat.state(pid).status == :awaiting_review
