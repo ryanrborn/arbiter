@@ -259,26 +259,37 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   # Map request params onto `Sling.sling/2` opts.
   #
-  # Driver wiring is the important bit: the bookkeeping `Work` workflow is a
-  # handful of no-op placeholder steps, so a Driver in workflow mode walks it
-  # to completion in ~500ms and *closes the bead*. That's only ever correct
-  # when a real worker is doing the work and will signal completion itself.
-  #
-  #   * `with_claude` → a Claude subprocess does the work; start the Driver in
-  #     claude-driven mode (`start_claude: true` ⇒ it waits on the polecat
-  #     rather than ticking the workflow to closure).
-  #   * bare/dry sling → no worker. Park the bead in `:in_progress`
-  #     (`start_driver: false`) for a hand to attach, instead of racing the
-  #     no-op workflow to a bogus `:closed`.
+  # Worker resolution:
+  #   * `no_agent`    → dry sling: park the bead in `:in_progress` for a hand
+  #     to attach. The Driver is suppressed (`start_driver: false`) so the
+  #     no-op Work workflow doesn't race to a bogus `:closed`.
+  #   * `with_claude` → force Claude as the agent, regardless of workspace's
+  #     `agent.type`. `agent_type: :claude` overrides routing.
+  #   * `with_gemini` → force Gemini as the agent, overriding routing.
+  #   * none          → use the workspace's `agent.type` config (the default).
+  #     Resolves via `Agents.for_workspace` exactly as `--with-claude` used to,
+  #     but picks the provider the workspace is configured for.
   defp sling_opts(params) do
     base =
       [rig: params["rig"]]
       |> add_model_override(params["model"])
 
-    case truthy(params["with_claude"]) do
-      true -> base ++ [start_claude: true]
-      _ -> base ++ [start_driver: false]
-    end
+    worker_opts =
+      cond do
+        truthy(params["no_agent"]) == true ->
+          [start_driver: false]
+
+        truthy(params["with_claude"]) == true ->
+          [start_claude: true, agent_type: :claude]
+
+        truthy(params["with_gemini"]) == true ->
+          [start_claude: true, agent_type: :gemini]
+
+        true ->
+          [start_claude: true]
+      end
+
+    (base ++ worker_opts)
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 
