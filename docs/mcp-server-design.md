@@ -148,18 +148,44 @@ JSON. `R` = readable, `W` = writable.
 | `bead_create` | coordinator | W | `Ash.create(Issue, …)` |
 | `bead_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
 | `bead_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
+| `bead_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
 | `dep_add` / `dep_remove` | coordinator | W | `Ash.create/destroy(Dependency)` |
 | `convoy_status` | polecat (own), coordinator | R | `Ash.get(Convoy, id)` + calcs |
 | `convoy_list` / `convoy_create` / `convoy_add_member` / `convoy_close` | coordinator | R/W | `Convoy` actions / `ConvoyMembership.:add` |
 | `inbox_check` | polecat (own bead), coordinator | R | `Messages.inbox/2` + `mark_read` |
-| `message_send` | polecat, coordinator | W | `Messages.send_mail/1` (flag/direction) |
+| `notify_list` | polecat (own ws), coordinator | R | `Messages.recent_notifications/2` |
+| `message_send` | polecat, coordinator | W | `Messages.send_mail/1` — coordinator→direction, polecat→flag-to-sibling |
 | `polecat_list` | coordinator | R | `Ash.read(Polecats.Run)` / live snapshot |
-| `polecat_sling` | **coordinator only** | W | `Arbiter.Polecat.Sling.sling/2` |
-| `polecat_message` | coordinator | W | `Messages.send_mail/1` |
+| `polecat_sling` | **coordinator only** (`can_sling`) | W | `Arbiter.Polecat.Sling.sling/2` |
+| `polecat_resume` | **coordinator only** (`can_sling`) | W | `Arbiter.Polecat.Sling.resume/2` |
+| `polecat_review` | **coordinator only** (`can_sling`) | W | `Arbiter.Polecat.Sling.sling/2` (`review: true`) |
+| `polecat_stop` | coordinator | W | `Arbiter.Polecat.stop/2` |
+| `tracker_claim` | coordinator | W | `Arbiter.Beads.Claim.claim/3` |
+| `tracker_sync` | coordinator | W | `Arbiter.Beads.Claim.plan/1` + `apply_plan/2` |
 | `workspace_show` | polecat, coordinator | R | `Ash.get(Workspace, id)` (config/vernacular/security posture) |
+| `workspace_list` | coordinator | R | `Ash.read(Workspace)` — id/name/prefix/tracker only |
 | `usage_summarize` | coordinator | R | `Arbiter.Usage.summarize/1` |
 
 Notes:
+
+- **`message_send` is the single message tool, at both tiers.** Earlier drafts
+  of this table listed both `message_send` and a coordinator-only
+  `polecat_message`; the live build shipped only `polecat_message`. These are
+  reconciled to one tool, `message_send`, available to both tiers: a coordinator
+  sends a `:direction` from `"coordinator"`; a polecat raises a `:flag` from its
+  own bound bead to a sibling (the documented "flags to siblings" capability).
+  The sender identity is set from the scope, never the client, and pinned to the
+  scope's workspace.
+- **The acolyte-dispatch tools (`polecat_sling` / `polecat_resume` /
+  `polecat_review`) all carry the sling-recursion guardrail** (`can_sling` +
+  `depth`, §4.3) — each spawns a worker. `polecat_stop` is teardown only and
+  does not require `can_sling`.
+- **`workspace_list` is the one deliberate cross-workspace read.** Every other
+  tool filters to the scope's bound `workspace_id`; `workspace_list` is a
+  read-only enumeration of non-sensitive summary fields (id/name/prefix/tracker)
+  so a coordinator can discover which workspaces exist. Full config and security
+  posture stay behind `workspace_show`, which only ever returns the bound
+  workspace.
 
 - **`bead_update_progress` is the polecat's only write.** It is a narrowed
   alias over `Issue.:update` that accepts *only* `notes`, `qa_notes`,
@@ -171,6 +197,52 @@ Notes:
   regex on the agent's stdout (`ClaudeSession`, `~r/\barb done\b/` against
   assistant text only). It is not an Arbiter API call and does not become an MCP
   tool — the agent still prints the line.
+
+### 3.1 Explicitly out of scope (and why)
+
+The MCP server is the **agent-facing** surface: the structured domain
+operations an agent or coordinator legitimately performs from inside its loop.
+A large fraction of the `arb` CLI is **not** that — it is the *operator-on-the-
+box* surface — and is deliberately **not** exposed as MCP tools. Omitting them
+is a design decision, not an oversight:
+
+- **Host / runtime lifecycle — `start`, `restart`, `update` (deploy),
+  `install-cli`, `install-service`.** These manage the BEAM and the host the
+  server runs *in*. `restart`/`update` are active footguns over MCP: an agent
+  restarting the BEAM it is connected to is the `can_sling` recursion problem in
+  a worse form — it would tear down the very server (and session) issuing the
+  call. These belong to the operator with shell access, not to a tool behind the
+  server's own transport.
+- **Diagnostics — `doctor` / `server doctor`, `version`, `where`, `init`.**
+  Box-introspection and one-time scaffolding. They answer "is this install
+  healthy / where does it live / set it up", questions the operator asks from a
+  shell, not domain operations an agent performs. No agent workflow needs them,
+  and `where`/`version` would leak host layout for no benefit.
+- **Auth bootstrap — `mcp token mint` / `mcp token verify`.** A token tool
+  cannot live behind the token it issues: minting is the step that *grants* MCP
+  access, so it must run from the trusted operator context (the sling path mints
+  per-spawn; `arb mcp token` mints for operator tooling), never as a call an
+  already-connected — and therefore already-scoped — client can make. Exposing
+  it would let any coordinator token mint a broader one, collapsing the scope
+  model.
+- **Config mutation — `config get` / `set` / `unset`.** Blast radius: workspace
+  config drives trackers, vernacular, `rig_paths`, security posture. A bad `set`
+  clobbers all of it for every future dispatch. This is operator-only. If a
+  future autonomous coordinator genuinely needs it, it should be gated behind a
+  **new strict `operator` tier** (not `coordinator`), reusing the before/after
+  diff that `arb config set` already enforces — not bolted onto the existing
+  tiers.
+- **Aggregate UX — `prime`.** A convenience command that bundles several reads
+  into one human-oriented briefing. Reconstructable from the granular read tools
+  (`bead_show`, `inbox_check`, `convoy_status`, `notify_list`, …), so it adds a
+  second, divergent code path for no new capability. Agents compose the granular
+  tools instead.
+
+The throughline: MCP carries **domain** operations, gated by scope. **Host,
+lifecycle, auth-bootstrap, and config-mutation** operations are operator
+concerns — they either cannot safely live behind the server's own token, or
+have a blast radius that does not belong to an agent. They stay on the `arb`
+CLI, reached by an operator with shell access to the box.
 
 ## 4. Scope tokens, not code paths
 
@@ -327,9 +399,13 @@ Each phase is independently shippable.
   polecat token calling `bead_list`) is rejected with a JSON-RPC error.
 
 ### Phase 2 — mutating tools behind coordinator scope
-- `bead_create` / `bead_update` / `bead_close`, `dep_*`, `convoy_*`,
-  `polecat_sling`, `polecat_message`, `usage_summarize`.
-- Sling-recursion guardrail (`can_sling` + depth).
+- `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_*`,
+  `convoy_*`, the `polecat_*` lifecycle family (`polecat_sling` /
+  `polecat_resume` / `polecat_review` / `polecat_stop` / `polecat_list`),
+  `message_send`, `notify_list`, the `tracker_*` bridge (`tracker_claim` /
+  `tracker_sync`), `workspace_list`, `usage_summarize`.
+- Sling-recursion guardrail (`can_sling` + depth) on every acolyte-dispatch tool
+  (`polecat_sling` / `polecat_resume` / `polecat_review`).
 - Wire the operator's coordinator-scope client; evaluate retiring `arb` shell-out
   for it.
 

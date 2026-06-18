@@ -21,13 +21,14 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_show` | polecat, coordinator | `Ash.get(Workspace, id)` |
   | `bead_update_progress` | polecat, coordinator | `Ash.update(issue, …, action: :update)` |
 
-  ## Phase 2 catalog (coordinator-only mutating tools)
+  ## Phase 2 catalog (coordinator tools + the both-tier `message_send`)
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
   | `bead_create` | coordinator | `Ash.create(Issue, …)` |
   | `bead_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `bead_close` | coordinator | `Ash.update(issue, …, action: :close)` |
+  | `bead_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `dep_add` | coordinator | `Ash.create(Dependency, …)` |
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
   | `convoy_list` | coordinator | `Ash.read(Convoy)` + calcs |
@@ -35,9 +36,16 @@ defmodule Arbiter.MCP.Catalog do
   | `convoy_add_member` | coordinator | `ConvoyMembership.:add` |
   | `convoy_close` | coordinator | `Ash.update(convoy, …, action: :close)` |
   | `polecat_sling` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` |
-  | `polecat_message` | coordinator | `Messages.send_mail/1` |
+  | `polecat_resume` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.resume/2` |
+  | `polecat_review` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` (`review: true`) |
+  | `polecat_stop` | coordinator | `Arbiter.Polecat.stop/2` |
   | `polecat_list` | coordinator | `Arbiter.Polecat.list_children/0` |
+  | `message_send` | polecat, coordinator | `Messages.send_mail/1` (flag / direction) |
+  | `notify_list` | polecat, coordinator | `Messages.recent_notifications/2` |
   | `bead_list` | coordinator | `Ash.read(Issue, …)` with filters |
+  | `tracker_claim` | coordinator | `Arbiter.Beads.Claim.claim/3` |
+  | `tracker_sync` | coordinator | `Arbiter.Beads.Claim.plan/1` + `apply_plan/2` |
+  | `workspace_list` | coordinator | `Ash.read(Workspace)` (summary fields) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   """
 
@@ -253,6 +261,23 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.bead_close/2
     },
     %{
+      name: "bead_reopen",
+      tiers: @coordinator,
+      description:
+        "Reopen a closed bead (clears closed_at, returns it to the ready queue, and best-effort " <>
+          "reopens the linked tracker issue). The only supported path out of `closed` — `bead_update` " <>
+          "rejects that transition.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Bead id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.bead_reopen/2
+    },
+    %{
       name: "dep_add",
       tiers: @coordinator,
       description:
@@ -371,11 +396,79 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.polecat_sling/2
     },
     %{
-      name: "polecat_message",
+      name: "polecat_resume",
       tiers: @coordinator,
       description:
-        "Send a direction to a bead's mailbox (the coordinator-side replacement for " <>
-          "`arb message <bead> <text>`). Scoped to the coordinator's workspace.",
+        "Re-attach a fresh acolyte to a bead's preserved outpost worktree (`arb resume`), continuing " <>
+          "the stopped run rather than restarting. Requires a `can_sling` coordinator token and is " <>
+          "depth-limited (the sling-recursion guardrail).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "bead_id" => %{"type" => "string", "description" => "Bead to resume (required)."},
+          "rig" => %{
+            "type" => "string",
+            "description" => "Rig to run in (optional; inherited from the bead's last run)."
+          },
+          "model" => %{"type" => "string", "description" => "Per-dispatch model override."}
+        },
+        "required" => ["bead_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.polecat_resume/2
+    },
+    %{
+      name: "polecat_review",
+      tiers: @coordinator,
+      description:
+        "Dispatch a review-only acolyte against the PR/MR linked to a bead (`arb review`): no worktree, " <>
+          "no branch, no merge. Requires a `can_sling` coordinator token and is depth-limited. " <>
+          "Claude-driven by default; pass `with_claude: false` to dispatch without spawning an agent.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "bead_id" => %{"type" => "string", "description" => "Bead to review (required)."},
+          "rig" => %{
+            "type" => "string",
+            "description" => "Local checkout the reviewer runs in (needs `gh`/`git`)."
+          },
+          "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
+          "with_claude" => %{
+            "type" => "boolean",
+            "description" => "Spawn the reviewer agent (default true)."
+          }
+        },
+        "required" => ["bead_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.polecat_review/2
+    },
+    %{
+      name: "polecat_stop",
+      tiers: @coordinator,
+      description:
+        "Stop the polecat currently working a bead (`arb polecat stop`). Scoped to the coordinator's " <>
+          "workspace; a bead with no live polecat is reported not-found. Teardown only — does not sling.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "bead_id" => %{
+            "type" => "string",
+            "description" => "Bead whose polecat to stop (required)."
+          }
+        },
+        "required" => ["bead_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.polecat_stop/2
+    },
+    %{
+      name: "message_send",
+      tiers: @both,
+      description:
+        "Send a message to a bead's mailbox (the structured replacement for `arb message <bead> <text>`). " <>
+          "A coordinator sends a direction from `coordinator`; a polecat raises a flag from its own bead " <>
+          "to a sibling. The sender identity is set from the scope and pinned to its workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -386,12 +479,31 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["bead_id", "body"],
         "additionalProperties" => false
       },
-      handler: &Tools.polecat_message/2
+      handler: &Tools.message_send/2
+    },
+    %{
+      name: "notify_list",
+      tiers: @both,
+      description:
+        "List the most recent notifications (completions, milestones, system events) for the workspace. " <>
+          "Read-only; optional `limit` (default 20).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "limit" => %{
+            "type" => "integer",
+            "description" => "Max notifications to return (default 20)."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.notify_list/2
     },
     %{
       name: "polecat_list",
       tiers: @coordinator,
-      description: "List active polecats in the workspace: bead_id, status, rig, started_at, activity.",
+      description:
+        "List active polecats in the workspace: bead_id, status, rig, started_at, activity.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.polecat_list/2
     },
@@ -421,6 +533,59 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.bead_list/2
+    },
+    %{
+      name: "tracker_claim",
+      tiers: @coordinator,
+      description:
+        "Claim an external tracker issue into a bead (`arb claim <issue#>`). Verifies the issue is " <>
+          "assigned to the workspace user (skip with `force: true`) and creates a linked bead. " <>
+          "Idempotent — returns the existing bead if one already references the issue.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "ref" => %{
+            "type" => "string",
+            "description" => "Tracker issue ref / number (required)."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" => "Skip the assignment-as-claim check (default false)."
+          }
+        },
+        "required" => ["ref"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.tracker_claim/2
+    },
+    %{
+      name: "tracker_sync",
+      tiers: @coordinator,
+      description:
+        "Reconcile the workspace's beads against its external tracker (`arb sync`): bead assigned issues " <>
+          "with no bead, close beads whose issue is gone. `dry: true` returns the plan without acting. " <>
+          "No-ops cleanly when the tracker does not support reconciliation.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "dry" => %{
+            "type" => "boolean",
+            "description" => "Return the plan without applying it (default false)."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.tracker_sync/2
+    },
+    %{
+      name: "workspace_list",
+      tiers: @coordinator,
+      description:
+        "List the configured workspaces (id, name, prefix, tracker type) — the discovery surface for " <>
+          "which workspaces exist. Summary fields only; full config + security posture stay behind " <>
+          "`workspace_show` for the bound workspace.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.workspace_list/2
     },
     %{
       name: "usage_summarize",
