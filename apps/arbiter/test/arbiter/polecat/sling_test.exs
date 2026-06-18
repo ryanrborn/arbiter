@@ -426,6 +426,84 @@ defmodule Arbiter.Polecat.SlingTest do
       refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
+    test ".mcp.json is not tracked after being untracked from git",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "gitignore-check")
+
+      # Set up the repo to simulate the original issue: .mcp.json is listed in
+      # .gitignore, but we also add it to git (committing it before the ignore
+      # took effect). This mirrors the production state before the fix.
+      gitignore_path = Path.join(repo, ".gitignore")
+      File.write!(gitignore_path, ".mcp.json\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", ".gitignore"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add gitignore"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # Now add and commit .mcp.json (simulating the original bug state).
+      # In the real repo, this happened because .mcp.json was committed before
+      # the .gitignore entry existed. Use -f to force-add since it's in gitignore.
+      mcp_path = Path.join(repo, ".mcp.json")
+      File.write!(mcp_path, "{\"old\": \"token\"}\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "-f", ".mcp.json"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "commit mcp config"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # Verify the buggy state: .mcp.json is tracked despite being in .gitignore
+      {tracked_before, 0} = System.cmd("git", ["-C", repo, "ls-files"])
+      assert String.contains?(tracked_before, ".mcp.json"), "Setup: .mcp.json should be tracked in the test repo"
+
+      # Now apply the fix: untrack .mcp.json with git rm --cached
+      # This removes .mcp.json from git's index but leaves the file in the working tree
+      {_, 0} = System.cmd("git", ["-C", repo, "rm", "--cached", ".mcp.json"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "untrack .mcp.json"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      # Clean up: remove the file from the working tree so it won't show as untracked
+      # (In production, the worktree gets the gitignore and starts clean; here we simulate that)
+      File.rm!(mcp_path)
+
+      # Verify the fix: .mcp.json is no longer tracked and not in the working tree
+      {tracked_after, 0} = System.cmd("git", ["-C", repo, "ls-files"])
+      refute String.contains?(tracked_after, ".mcp.json"), "After fix: .mcp.json should be untracked"
+      refute File.exists?(mcp_path), "After fix: .mcp.json file should be removed from working tree"
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gic-wt"))
+      Application.put_env(:arbiter, :rig_paths, %{"gic/rig" => repo})
+      enable_mcp_injection!()
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :rig_paths)
+      end)
+
+      {:ok, bead} = Ash.create(Issue, %{title: "check ignore", workspace_id: ws.id})
+
+      {:ok, result} =
+        Sling.sling(bead.id,
+          rig: "gic/rig",
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      wt = result.worktree_path
+      assert is_binary(wt)
+
+      # .mcp.json was written into the worktree by the spawn
+      assert File.exists?(Path.join(wt, ".mcp.json"))
+
+      # Critical assertion: after the fix, .mcp.json must NOT be in git ls-files.
+      {wt_tracked, 0} = System.cmd("git", ["-C", wt, "ls-files"])
+      refute String.contains?(wt_tracked, ".mcp.json"),
+             "REGRESSION: .mcp.json is tracked in worktree. After the fix, it should be untracked and ignored."
+
+      # The worktree status must be clean. The injected .mcp.json is ignored,
+      # so it should not appear in git status.
+      {status_output, _status_code} = System.cmd("git", ["-C", wt, "status", "--porcelain"])
+      refute String.contains?(status_output, ".mcp.json"),
+             "REGRESSION: .mcp.json shows in git status. After the fix, the injected file must be ignored and clean."
+    end
+
     test "start_claude: true with an unresolvable rig returns {:error, {:rig_not_found, rig}}",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
