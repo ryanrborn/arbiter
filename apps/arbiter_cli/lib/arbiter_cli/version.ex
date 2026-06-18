@@ -13,7 +13,7 @@ defmodule ArbiterCli.Version do
   @app_version Mix.Project.config()[:version]
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
-  @git_dir Path.expand("../../../../..", __DIR__) |> Path.join(".git")
+  @git_dir Path.expand("../../../../", __DIR__) |> Path.join(".git")
   @git_head_path Path.join(@git_dir, "HEAD")
   @external_resource @git_head_path
 
