@@ -115,8 +115,11 @@ defmodule Arbiter.Workflows.Refinery do
     * `:workspace_id` (string, required) — the workspace this refinery serves.
     * `:name` — process name (default `__MODULE__`).
     * `:poll_interval_ms` — how often `:tick` fires (default 30_000).
-    * `:base` — override the base branch instead of reading it from
-      `workspace.config["merge"]`. Convenient for tests.
+    * `:base` — an explicit *queue-level* base override. It sits **below** a
+      bead's own `target_branch` and the per-rig default (so those still win),
+      but above the workspace `merge.base`. Defaults to `nil`, in which case the
+      base is resolved entirely from bead/rig/workspace config via
+      `Arbiter.Polecat.TargetBranch`. Convenient for tests.
     * `:auto_tick` — when `false` (default `true`), the periodic `:tick`
       timer is not scheduled. Tests use `false` and drive ticks via
       `tick/1` so they don't race with real time.
@@ -129,11 +132,14 @@ defmodule Arbiter.Workflows.Refinery do
   use GenServer
 
   require Logger
+  require Ash.Query
 
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Mergers
+  alias Arbiter.Polecat.TargetBranch
   alias Arbiter.Polecat.Worktree
+  alias Arbiter.Polecats.Run
   alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
@@ -155,6 +161,7 @@ defmodule Arbiter.Workflows.Refinery do
           mr_ref: String.t() | nil,
           status: status(),
           strategy: String.t(),
+          base: String.t() | nil,
           opened_at: DateTime.t() | nil,
           last_polled_at: DateTime.t() | nil,
           last_error: term() | nil,
@@ -243,7 +250,7 @@ defmodule Arbiter.Workflows.Refinery do
     state = %State{
       workspace_id: workspace_id,
       adapter: adapter,
-      base: Keyword.get(opts, :base, "main"),
+      base: Keyword.get(opts, :base),
       poll_interval_ms: poll_interval_ms,
       auto_tick: auto_tick,
       pubsub_topic: topic,
@@ -362,17 +369,44 @@ defmodule Arbiter.Workflows.Refinery do
       new_item(bead.id, strategy,
         mr_ref: mr_ref,
         status: :awaiting_approval,
+        base: resolve_base(state, bead),
         opened_at: DateTime.utc_now()
       )
 
     {:ok, %{state | items: [item | state.items]}}
   end
 
+  # Resolve the PR base for a bead via the shared resolver, identical to the
+  # chain `Arbiter.Polecat.Sling` uses for the worktree base, so the two can
+  # never diverge (bd-b6rzoc). `state.base` is threaded in as the queue-level
+  # `:workspace_base` — below the bead/rig config, never short-circuiting it.
+  defp resolve_base(%State{} = state, %Issue{} = bead) do
+    TargetBranch.resolve(bead,
+      workspace_base: state.base,
+      rig: resolve_bead_rig(bead)
+    )
+  end
+
+  # The rig the bead was actually worked in — drawn from its most recent
+  # polecat run, the same rig `Sling` cut the worktree with. nil when the bead
+  # has no run on record (e.g. a bead enqueued without ever being slung), in
+  # which case the per-rig default simply doesn't apply.
+  defp resolve_bead_rig(%Issue{id: bead_id}) do
+    Run
+    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read()
+    |> case do
+      {:ok, [%Run{rig: rig} | _]} when is_binary(rig) and rig != "" -> rig
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
   defp open_mr_for(state, bead, strategy) do
-    base =
-      state.base ||
-        bead_target_branch(bead) ||
-        strategy_for(bead.workspace, "merge", "base", "main") || "main"
+    base = resolve_base(state, bead)
 
     branch = strategy_for(bead.workspace, "merge", "branch_prefix", "") <> bead.id
     title = bead.title
@@ -387,6 +421,7 @@ defmodule Arbiter.Workflows.Refinery do
         new_item(bead.id, strategy,
           mr_ref: mr_ref,
           status: :awaiting_approval,
+          base: base,
           opened_at: DateTime.utc_now()
         )
 
@@ -520,10 +555,14 @@ defmodule Arbiter.Workflows.Refinery do
   defp spawn_conflict_resolver(state, item) do
     prior = item.prior_status || item.status
 
+    # Rebase onto the SAME branch the PR targets — the base resolved when the
+    # item was opened (bd-b6rzoc). Falls back to the queue-level base for items
+    # that predate the field; the resolver itself fills any remaining nil from
+    # workspace config.
     args = %{
       bead_id: item.bead_id,
       workspace_id: state.workspace_id,
-      target_branch: state.base,
+      target_branch: item.base || state.base,
       pr_ref: item.mr_ref
     }
 
@@ -662,6 +701,7 @@ defmodule Arbiter.Workflows.Refinery do
       mr_ref: nil,
       status: :opening,
       strategy: strategy,
+      base: nil,
       opened_at: nil,
       last_polled_at: nil,
       last_error: nil,
@@ -675,9 +715,6 @@ defmodule Arbiter.Workflows.Refinery do
   defp already_queued?(%State{items: items}, bead_id) do
     Enum.any?(items, fn i -> i.bead_id == bead_id and i.status not in [:done, :failed] end)
   end
-
-  defp bead_target_branch(%{target_branch: t}) when is_binary(t) and t != "", do: t
-  defp bead_target_branch(_), do: nil
 
   defp strategy_for(workspace, key1, key2, default) do
     case workspace && workspace.config do

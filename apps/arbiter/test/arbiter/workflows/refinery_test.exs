@@ -5,6 +5,8 @@ defmodule Arbiter.Workflows.RefineryTest do
 
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
+  alias Arbiter.Polecat.TargetBranch
+  alias Arbiter.Polecats.Run
   alias Arbiter.Workflows.Refinery
 
   # Stub worktree module used in tests — avoids real filesystem git calls.
@@ -296,6 +298,101 @@ defmodule Arbiter.Workflows.RefineryTest do
 
       reloaded = Ash.get!(Issue, bead.id)
       assert reloaded.status == :open
+    end
+  end
+
+  describe "enqueue/2 PR base resolution (bd-b6rzoc)" do
+    # GitHub workspace whose rig defaults to an integration branch (object form).
+    @ws_github_rig %{
+      "merge" => %{
+        "strategy" => "github",
+        "config" => %{
+          "owner" => "octo",
+          "repo" => "widget",
+          "credentials_ref" => "test-token-abc123"
+        }
+      },
+      "rig_paths" => %{
+        "dolphin/rig" => %{"path" => "/tmp", "target_branch" => "integration/dolphin"}
+      }
+    }
+
+    # Capture the `base` field of the POST /pulls payload and ACK with a PR.
+    defp capture_base_stub(test_pid) do
+      stub(fn conn ->
+        if conn.method == "POST" and String.ends_with?(conn.request_path, "/pulls") do
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          send(test_pid, {:pr_base, Jason.decode!(body)["base"]})
+
+          conn
+          |> Plug.Conn.put_status(201)
+          |> Req.Test.json(%{"number" => 101, "state" => "open"})
+        else
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+    end
+
+    defp record_run(bead, rig) do
+      {:ok, _run} =
+        Ash.create(Run, %{
+          bead_id: bead.id,
+          rig: rig,
+          workspace_id: bead.workspace_id,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      :ok
+    end
+
+    @tag workspace_config: @ws_github
+    test "per-bead target_branch wins even when the queue's state.base differs", %{
+      workspace: ws,
+      bead: bead
+    } do
+      {:ok, bead} = Ash.update(bead, %{target_branch: "dolphin"}, action: :update)
+      capture_base_stub(self())
+
+      # Queue base is "main" (start_refinery default) — the bead must still win.
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_base, "dolphin"}
+    end
+
+    @tag workspace_config: @ws_github_rig
+    test "rig-level target_branch sets the PR base AND matches the worktree base", %{
+      workspace: ws,
+      bead: bead
+    } do
+      # The bead was worked in dolphin/rig — recorded on its polecat run, exactly
+      # the rig Sling cut the worktree with.
+      :ok = record_run(bead, "dolphin/rig")
+      capture_base_stub(self())
+
+      {_pid, name} = start_refinery(ws)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_base, pr_base}
+      assert pr_base == "integration/dolphin"
+
+      # Invariant: the worktree base Sling would compute for this bead (same
+      # shared resolver, same rig) is identical to the PR base.
+      {:ok, bead} = Ash.load(bead, [:workspace])
+      worktree_base = TargetBranch.resolve(bead, rig: "dolphin/rig")
+      assert worktree_base == pr_base
+    end
+
+    @tag workspace_config: @ws_github
+    test "default-workspace bead with no overrides targets main", %{workspace: ws, bead: bead} do
+      capture_base_stub(self())
+
+      # No explicit queue base, no bead target, no rig default, no merge.base.
+      {_pid, name} = start_refinery(ws, base: nil)
+      :ok = Refinery.enqueue(name, bead.id)
+
+      assert_receive {:pr_base, "main"}
     end
   end
 
