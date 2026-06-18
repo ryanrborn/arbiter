@@ -2056,6 +2056,14 @@ defmodule Arbiter.Polecat do
           {:ok, mr_ref} ->
             merger_url = safe_link_for(adapter, mr_ref)
 
+            # bd-7b46wd: persist the PR/MR ref onto the bead so the workspace
+            # Refinery ADOPTS this PR (instead of opening a duplicate) when it
+            # later receives the {:polecat_done, bead_id} broadcast. Without
+            # this the Refinery's existing_mr_ref/1 is always nil, it falls
+            # through to open_mr_for/3, fails opening a second PR on the
+            # already-merged branch, and the bead is never auto-closed.
+            record_pr_ref_on_bead(state, mr_ref)
+
             new_state = %State{
               state
               | status: :awaiting_review,
@@ -2174,6 +2182,36 @@ defmodule Arbiter.Polecat do
   catch
     :exit, _ -> nil
   end
+
+  # Persist the opened MR/PR ref onto the bead's `pr_ref` (bd-7b46wd). This is
+  # the single signal the workspace Refinery reads (`existing_mr_ref/1`) to
+  # ADOPT an already-open PR rather than open a duplicate — without it the
+  # Warden-merged PR is invisible to the Refinery and the bead never closes.
+  # Mirrors `Arbiter.Workflows.Refinery.maybe_record_mr_ref/2`. Best-effort: a
+  # DB hiccup logs at debug and never fails the open.
+  defp record_pr_ref_on_bead(%State{bead_id: bead_id}, mr_ref)
+       when is_binary(mr_ref) and mr_ref != "" do
+    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id),
+         {:ok, _updated} <- Ash.update(bead, %{pr_ref: mr_ref}, action: :update) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.debug(
+          "Polecat.open_mr: failed to record pr_ref=#{mr_ref} for bead=#{bead_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.debug(
+        "Polecat.open_mr: pr_ref record raised for bead=#{bead_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp record_pr_ref_on_bead(_state, _mr_ref), do: :ok
 
   # Spawn the Warden that polls for approval. auto_merge + poll interval come
   # from the workspace config (opts may override, primarily for tests).

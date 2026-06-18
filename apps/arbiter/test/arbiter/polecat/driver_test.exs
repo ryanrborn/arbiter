@@ -340,6 +340,65 @@ defmodule Arbiter.Polecat.DriverTest do
       {:ok, reloaded} = Ash.get(Issue, bead.id)
       assert reloaded.status == :closed
     end
+
+    # bd-7b46wd: if the tick budget is exhausted by active acolyte work and the
+    # max_ticks guard fires while the polecat has *already handed off* to the
+    # Warden (:awaiting_review) or Tribunal (:awaiting_tribunal), the driver must
+    # NOT stop — those states are owned by watchdogs that will drive the polecat
+    # to terminal. Stopping here was stranding beads that were legitimately
+    # mid-merge, and the bd-d1jp4r fix only covered the already-:completed case.
+    test "keeps waiting at max_ticks while polecat is :awaiting_review, then closes", %{ws: ws} do
+      alias Arbiter.Test.StubMerger
+      StubMerger.reset()
+
+      {:ok, bead} = Ash.create(Issue, %{title: "cd-maxtick-awaiting", workspace_id: ws.id})
+
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(bead, %{status: :in_progress})
+
+      # Park the polecat at :awaiting_review with a Warden that won't poll during
+      # the test (long interval), so completion is driven explicitly below.
+      :ok = Polecat.advance(polecat_pid, :running)
+
+      {:ok, _mr_ref} =
+        Polecat.open_mr(polecat_pid, "my-branch", "title", "body", %{
+          adapter: StubMerger,
+          interval_ms: 100_000,
+          max_polls: :infinity
+        })
+
+      # max_ticks: 0 → the t >= m guard fires on the very first check. With the
+      # polecat at :awaiting_review the driver must reschedule, not stop.
+      {:ok, driver_pid} =
+        Driver.start(
+          bead_id: bead.id,
+          polecat_pid: polecat_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          max_ticks: 0,
+          claude_driven: true
+        )
+
+      Process.sleep(40)
+
+      assert Process.alive?(driver_pid),
+             "driver must keep waiting at max_ticks while polecat is externally owned"
+
+      {:ok, %Issue{status: :in_progress}} = Ash.get(Issue, bead.id)
+
+      # The Warden (here, us) completes the polecat — the driver's next guarded
+      # check must close the bead rather than stranding it.
+      :ok = Polecat.complete(polecat_pid, :merged)
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      assert reloaded.status == :closed
+    end
   end
 
   describe "cleanup_worktree opt" do
