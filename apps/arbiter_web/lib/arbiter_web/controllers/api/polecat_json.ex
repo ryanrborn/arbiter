@@ -18,11 +18,12 @@ defmodule ArbiterWeb.Api.PolecatJSON do
     }
   end
 
-  def index(%{children: children}) do
+  def index(%{children: children, costs: costs}) do
     %{
       data:
         Enum.map(children, fn snap ->
           meta = Map.get(snap, :meta, %{}) || %{}
+          model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
 
           %{
             bead_id: snap.bead_id,
@@ -35,11 +36,27 @@ defmodule ArbiterWeb.Api.PolecatJSON do
             started_at: snap.started_at,
             mr_ref: Map.get(snap, :mr_ref),
             merger_url: Map.get(snap, :merger_url),
-            pid: inspect(snap.pid)
+            pid: inspect(snap.pid),
+            model: short_model_name(model_id),
+            cost_usd: Map.get(costs, snap.bead_id, 0.0)
           }
         end)
     }
   end
+
+  defp short_model_name(nil), do: nil
+
+  defp short_model_name(model) when is_binary(model) do
+    cond do
+      String.contains?(model, "opus") -> "Opus"
+      String.contains?(model, "sonnet") -> "Sonnet"
+      String.contains?(model, "haiku") -> "Haiku"
+      String.contains?(model, "fable") -> "Fable"
+      true -> model
+    end
+  end
+
+  defp short_model_name(_), do: nil
 
   def show(%{snapshot: snap}) do
     meta = Map.get(snap, :meta, %{})

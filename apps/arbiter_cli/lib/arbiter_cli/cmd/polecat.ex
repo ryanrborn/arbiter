@@ -159,11 +159,18 @@ defmodule ArbiterCli.Cmd.Polecat do
           do: "activity=#{activity_label(p)}",
           else: "step=#{p["current_step"]}"
 
+      model_part = if p["model"], do: "  model=#{p["model"]}", else: ""
+      cost_part = format_cost(p["cost_usd"])
+
       IO.puts(
-        "  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}  started=#{p["started_at"]}"
+        "  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
       )
     end)
   end
+
+  defp format_cost(nil), do: ""
+  defp format_cost(cost) when cost <= 0, do: ""
+  defp format_cost(cost) when is_number(cost), do: "  cost=$#{Float.round(cost / 1, 4)}"
 
   # The JSON API exposes a claude-driven worker's live activity as a map
   # (%{"label", "kind", "since"}) or null; render its label, falling back to a
