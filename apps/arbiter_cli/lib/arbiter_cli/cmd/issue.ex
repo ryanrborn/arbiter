@@ -25,8 +25,24 @@ defmodule ArbiterCli.Cmd.Issue do
 
   alias ArbiterCli.Cmd
   alias ArbiterCli.Output
+  alias ArbiterCli.Workspace
 
   def run(argv) do
+    # A `--workspace <name>` flag anywhere in an `arb issue *` invocation
+    # overrides the active workspace, exactly as `ARB_WORKSPACE` does. We
+    # strip it here and seed the env so every subcommand below — each of
+    # which resolves the workspace through `ARB_WORKSPACE` — honors it
+    # uniformly, without each having to declare the switch itself.
+    argv =
+      case Workspace.take_flag(argv) do
+        {nil, rest} ->
+          rest
+
+        {name, rest} ->
+          System.put_env("ARB_WORKSPACE", name)
+          rest
+      end
+
     case argv do
       ["list" | rest] -> Cmd.List.run(rest)
       ["show" | rest] -> Cmd.Show.run(rest)
