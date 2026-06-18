@@ -346,9 +346,25 @@ defmodule Arbiter.Polecat.Sling do
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->
-        # Idempotency: a polecat for this bead already exists. That's fine;
-        # we'll attach a (possibly new) workflow to the existing process.
-        {:ok, pid}
+        # A polecat for this bead is already registered. If it ended in a
+        # terminal state (:failed / :completed) — the re-sling-a-failed-run
+        # scenario (bd-d70whv) — stop the stale process so the registry slot
+        # is freed, then start a fresh one. Without this, the new Claude
+        # session runs inside a :failed polecat and the "arb done" marker is
+        # silently dropped by the FSM guard that excludes :failed.
+        # A live polecat in a working state is left as-is.
+        case safe_polecat_status(pid) do
+          status when status in [:failed, :completed] ->
+            _ = Polecat.stop(pid, :normal)
+
+            case Polecat.start(bead_id: id, rig: rig, workspace_id: ws_id, meta: meta) do
+              {:ok, new_pid} -> {:ok, new_pid}
+              {:error, reason} -> {:error, {:polecat_start_failed, reason}}
+            end
+
+          _ ->
+            {:ok, pid}
+        end
 
       {:error, reason} ->
         {:error, {:polecat_start_failed, reason}}
