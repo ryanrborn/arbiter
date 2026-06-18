@@ -62,6 +62,7 @@ defmodule Arbiter.Polecat.Sling do
   alias Arbiter.Polecat.Driver
   alias Arbiter.Polecat.ResumeContext
   alias Arbiter.Polecat.StopReason
+  alias Arbiter.Polecat.TargetBranch
   alias Arbiter.Polecat.Worktree
   alias Arbiter.Polecats.Run
   alias Arbiter.Workflows.CodeReview
@@ -495,62 +496,15 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Resolve the integration branch — the branch the worktree is cut from and
-  # the one the completed branch merges back into. Both must agree, or a
-  # worktree cut from `develop` would try to merge into `main`.
-  #
-  # Resolution order:
-  #   1. Explicit `:base_branch` opt — kept as an escape hatch for callers
-  #      (and tests) that know better than the workspace config.
-  #   2. Bead's own `:target_branch` field — per-bead override.
-  #   3. Per-rig default in workspace config — the `rig_paths` map entry can
-  #      be a string (the path) or a `{"path" => ..., "target_branch" => ...}`
-  #      map for an integration branch shared by every bead worked in that rig.
-  #   4. Workspace merge config (`workspace.config["merge"]["base"]`) — the
-  #      same key the `Refinery` reads when opening PRs, so the worktree base
-  #      and the eventual PR base stay in lockstep.
-  #   5. `"main"` — the default integration branch.
+  # the one the completed branch merges back into. Delegates to the shared
+  # `Arbiter.Polecat.TargetBranch` resolver so the worktree base computed here
+  # and the PR base computed by the `Refinery` can never diverge (bd-b6rzoc).
   defp resolve_target_branch(%Issue{} = bead, opts) do
-    Keyword.get(opts, :base_branch) ||
-      bead_target_branch(bead) ||
-      workspace_rig_target(bead, Keyword.get(opts, :rig)) ||
-      workspace_base_branch(bead) ||
-      "main"
+    TargetBranch.resolve(bead,
+      base_branch: Keyword.get(opts, :base_branch),
+      rig: Keyword.get(opts, :rig)
+    )
   end
-
-  defp bead_target_branch(%Issue{target_branch: t}) when is_binary(t) and t != "", do: t
-  defp bead_target_branch(_), do: nil
-
-  defp workspace_base_branch(%Issue{workspace_id: nil}), do: nil
-
-  defp workspace_base_branch(%Issue{workspace_id: ws_id}) do
-    case load_workspace_config(ws_id) do
-      %{} = config ->
-        case get_in(config, ["merge", "base"]) do
-          base when is_binary(base) and base != "" -> base
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp workspace_rig_target(_bead, nil), do: nil
-
-  defp workspace_rig_target(%Issue{workspace_id: nil}, _rig), do: nil
-
-  defp workspace_rig_target(%Issue{workspace_id: ws_id}, rig) when is_binary(rig) do
-    case load_workspace_config(ws_id) do
-      %{} = config ->
-        rig_target_from_config(get_in(config, ["rig_paths", rig]))
-
-      _ ->
-        nil
-    end
-  end
-
-  defp rig_target_from_config(%{"target_branch" => t}) when is_binary(t) and t != "", do: t
-  defp rig_target_from_config(_), do: nil
 
   defp workspace_rig_path(nil, _rig), do: nil
 
