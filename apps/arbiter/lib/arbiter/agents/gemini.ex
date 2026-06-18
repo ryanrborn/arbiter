@@ -172,11 +172,19 @@ defmodule Arbiter.Agents.Gemini do
         m
 
       _ ->
-        case Keyword.get(opts, :model_tier) do
-          tier when is_binary(tier) and tier != "" ->
+        tier = Keyword.get(opts, :model_tier)
+        thinking = Keyword.get(opts, :thinking)
+
+        cond do
+          is_binary(tier) and tier != "" and is_binary(thinking) and thinking != "" ->
+            Config.model_for_tier_and_thinking(tier, thinking) ||
+              Config.model_for_tier(tier) ||
+              Config.active_model()
+
+          is_binary(tier) and tier != "" ->
             Config.model_for_tier(tier) || Config.active_model()
 
-          _ ->
+          true ->
             Config.active_model()
         end
     end
