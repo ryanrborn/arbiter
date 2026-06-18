@@ -85,5 +85,19 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
       refute Enum.any?(rules, &(&1 =~ "rm -rf"))
     end
+
+    # bd-53xrmi: the Refinery owns PR creation; a worker must not open its own
+    # PR (it lands a duplicate on the wrong base). The no_pr_create category is
+    # in the safe-default baseline, so it's denied by default.
+    test "the no_pr_create baseline denies gh pr create / glab mr create" do
+      rules = Security.deny_rules(policy())
+      assert "Bash(gh pr create:*)" in rules
+      assert "Bash(glab mr create:*)" in rules
+    end
+
+    test "opting out of safe_defaults also drops the PR-create deny" do
+      rules = Security.deny_rules(policy(%{"permissions" => %{"safe_defaults" => []}}))
+      refute Enum.any?(rules, &(&1 =~ "gh pr create"))
+    end
   end
 end

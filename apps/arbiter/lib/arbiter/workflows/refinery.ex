@@ -137,6 +137,7 @@ defmodule Arbiter.Workflows.Refinery do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Mergers
+  alias Arbiter.Polecat.PRTemplate
   alias Arbiter.Polecat.TargetBranch
   alias Arbiter.Polecat.Worktree
   alias Arbiter.Polecats.Run
@@ -410,7 +411,7 @@ defmodule Arbiter.Workflows.Refinery do
 
     branch = strategy_for(bead.workspace, "merge", "branch_prefix", "") <> bead.id
     title = bead.title
-    description = bead.description || ""
+    description = pr_description_for(bead)
 
     worktree_path = state.worktree_module.worktree_path(branch)
 
@@ -444,6 +445,40 @@ defmodule Arbiter.Workflows.Refinery do
         {{:error, reason}, %{state | items: [item | state.items]}}
     end
   end
+
+  # The PR/MR body the Refinery opens with. Precedence:
+  #
+  #   1. the worker-authored `pr_body` (bd-53xrmi) — Summary / Test plan /
+  #      References written *after* the change landed, filling the repo's PR
+  #      template when present. This is the canonical, acolyte-quality body.
+  #   2. the bead's originating `description` (the ticket spec) — a reasonable
+  #      stand-in when no worker body was produced (older beads, review-only).
+  #   3. `PRTemplate.default_body/1` — a minimal `## <title>` + description +
+  #      tracker-link body.
+  #
+  # The final fallback is what root-causes the empty-body incident (#3606):
+  # `bead.description || ""` returned `""` whenever the local bead's
+  # description was empty/nil (e.g. the spec lived only upstream), and GitHub
+  # injects the repo's bare PR template whenever the body is empty. `pr_body ||
+  # description || default_body` is *always* non-empty (default_body always
+  # carries the title), so the Refinery can never again open a bare-template PR.
+  # The bead is fetched fresh via `Ash.get/2` in `do_enqueue/2`, which selects
+  # all attributes — so `pr_body` and `description` are loaded, never silently
+  # nil from a partial select.
+  defp pr_description_for(%Issue{} = bead) do
+    present(bead.pr_body) || present(bead.description) || PRTemplate.default_body(bead)
+  end
+
+  # A string is "present" when it's a non-blank binary; nil/""/whitespace-only
+  # collapse to nil so the `||` chain falls through to the next source.
+  defp present(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      _ -> value
+    end
+  end
+
+  defp present(_), do: nil
 
   defp push_worktree_branch(worktree_module, worktree_path, branch) do
     case worktree_module.push(worktree_path, set_upstream: true, branch: branch) do

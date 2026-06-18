@@ -395,6 +395,20 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       conn = patch(conn, ~p"/api/issues/api-nope", %{title: "x"})
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
+
+    test "persists and serializes pr_body (bd-53xrmi)", %{conn: conn, ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "needs a body", workspace_id: ws.id})
+
+      conn =
+        patch(conn, ~p"/api/issues/#{issue.id}", %{
+          pr_body: "## Summary\nWorker-authored writeup."
+        })
+
+      body = json_response(conn, 200)
+      assert body["pr_body"] == "## Summary\nWorker-authored writeup."
+
+      assert Ash.get!(Issue, issue.id).pr_body == "## Summary\nWorker-authored writeup."
+    end
   end
 
   describe "POST /api/issues/:id/close" do

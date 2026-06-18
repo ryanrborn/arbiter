@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.Issue do
       arb issue update    <id> [--title ...] [--priority N] [--difficulty N]
                           [--status s] [--description d] [--assignee a]
                           [--append-notes text] [--qa-notes text]
-                          [--deployment-notes text]
+                          [--deployment-notes text] [--pr-body text]
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
       arb issue claim     <issue#> [--force] [--rig <rig>]

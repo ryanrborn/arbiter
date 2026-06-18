@@ -139,6 +139,16 @@ defmodule Arbiter.MCP.ToolsTest do
       assert reloaded.qa_notes == "verify the login flow"
     end
 
+    test "a polecat records pr_body on its own bead (bd-53xrmi)", ctx do
+      body = "## Summary\nWorker-authored.\n\n## Test plan\n- [x] mix test"
+
+      assert {:ok, data} = Tools.bead_update_progress(ctx.polecat, %{"pr_body" => body})
+      assert data.pr_body == body
+
+      {:ok, reloaded} = Ash.get(Issue, ctx.bead.id)
+      assert reloaded.pr_body == body
+    end
+
     test "ignores non-progress fields (cannot flip status)", ctx do
       assert {:ok, data} =
                Tools.bead_update_progress(ctx.polecat, %{"notes" => "wip", "status" => "closed"})

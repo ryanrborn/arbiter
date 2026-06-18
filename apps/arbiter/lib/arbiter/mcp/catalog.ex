@@ -147,9 +147,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "bead_update_progress",
       tiers: @both,
       description:
-        "Record progress / completion notes on a bead — `notes`, `qa_notes`, `deployment_notes` " <>
-          "only (the structured replacement for `arb issue update --qa-notes …`). A polecat may " <>
-          "only update its own bead and cannot change status or priority.",
+        "Record progress / completion notes on a bead — `notes`, `qa_notes`, `deployment_notes`, " <>
+          "`pr_body` only (the structured replacement for `arb issue update --qa-notes …`). A " <>
+          "polecat may only update its own bead and cannot change status or priority.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -162,6 +162,12 @@ defmodule Arbiter.MCP.Catalog do
           "deployment_notes" => %{
             "type" => "string",
             "description" => "Rollout / backout considerations."
+          },
+          "pr_body" => %{
+            "type" => "string",
+            "description" =>
+              "The acolyte-authored PR/MR description (Summary / Test plan / References) the " <>
+                "Refinery opens the bead's single canonical PR with."
           }
         },
         "additionalProperties" => false

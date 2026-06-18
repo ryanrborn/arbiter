@@ -68,6 +68,28 @@ defmodule ArbiterCli.Cmd.UpdateTest do
     assert exit_code == 0
   end
 
+  test "--pr-body is sent as the pr_body field (bd-53xrmi)" do
+    stub_routes([
+      {{"patch", "/api/issues/bd-001"},
+       fn conn ->
+         {:ok, body, conn} = Plug.Conn.read_body(conn)
+         decoded = Jason.decode!(body)
+         assert decoded["pr_body"] == "## Summary\nDid the thing."
+
+         conn
+         |> Plug.Conn.put_status(200)
+         |> Req.Test.json(%{"id" => "bd-001", "pr_body" => decoded["pr_body"]})
+       end}
+    ])
+
+    {_out, _err, exit_code} =
+      capture(fn ->
+        Update.run(["bd-001", "--pr-body", "## Summary\nDid the thing."])
+      end)
+
+    assert exit_code == 0
+  end
+
   test "no fields supplied → error" do
     {_out, err, exit_code} = capture(fn -> Update.run(["bd-001"]) end)
     assert exit_code == 1
