@@ -933,11 +933,34 @@ defmodule Arbiter.Polecat do
   # — nothing to do. Otherwise the subprocess is genuinely gone with the bead
   # unfinished: classify the cause from exit status + captured output and fail +
   # escalate to the Admiral (bd-awi4nw).
+  #
+  # bd-1pdyov: a stop check must consider the WHOLE run, not just the one port
+  # that closed. A single bead run can span multiple ClaudeSession ports — the
+  # commit-gate nudge (respawn_with_commit_nudge/2) opens a continuation session
+  # in the same worktree, and `arb resume` re-attaches a fresh one. When the
+  # primary session's port exits while a continuation is still mid-run, this
+  # check fires after the short grace and would falsely fail work the live
+  # continuation is about to finish. Two guards before failing:
+  #
+  #   1. another session is still live (its port hasn't exited) → the run isn't
+  #      over; no-op and let the live session drive the outcome.
+  #   2. the run already signalled `arb done` somewhere (primary OR continuation)
+  #      → prefer completion. Re-enter on_claude_done so the commit gate decides:
+  #      committed work routes to the Tribunal, uncommitted work still diverts.
   def handle_info({:__acolyte_stopped__, port}, %State{status: status} = state)
       when status in @live_statuses do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
-        {:noreply, fail_stopped(state, session)}
+        cond do
+          other_session_live?(state, port) ->
+            {:noreply, state}
+
+          run_signalled_done?(state) ->
+            {:noreply, on_claude_done(state)}
+
+          true ->
+            {:noreply, fail_stopped(state, session)}
+        end
 
       :error ->
         {:noreply, state}
@@ -961,12 +984,18 @@ defmodule Arbiter.Polecat do
     # acolyte has signalled done, the review gate (Tribunal) and then the merger
     # / Warden decide completion — not a repeated "arb done" on the author's
     # stdout. A late marker is ignored (handled by the catch-all clause below).
-    {:noreply, on_claude_done(state)}
+    #
+    # bd-1pdyov: stamp :done_seen so a later whole-run stop check (e.g. a primary
+    # port that exits after the commit gate diverted to a continuation) can tell
+    # the run signalled done and prefer completion over a false stop failure.
+    {:noreply, on_claude_done(mark_done_seen(state))}
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{} = state) do
-    # Already :completed or :failed — ignore duplicate signal.
-    {:noreply, state}
+    # Already :completed / :failed / awaiting a downstream gate — ignore the
+    # duplicate signal for transition purposes, but still record that the marker
+    # was seen (bd-1pdyov) so the whole-run check has a complete picture.
+    {:noreply, mark_done_seen(state)}
   end
 
   # The Tribunal (review gate) exited before delivering a verdict. Do NOT strand
@@ -1124,6 +1153,31 @@ defmodule Arbiter.Polecat do
   defp exit_grace_ms do
     Application.get_env(:arbiter, :polecat_exit_grace_ms, @exit_grace_ms)
   end
+
+  # bd-1pdyov: is a Claude session OTHER than the one that just exited still
+  # running? Its port has not yet reported an exit_status. A continuation /
+  # resume session opened by the commit-gate nudge (respawn_with_commit_nudge/2)
+  # is exactly this — the primary port exits while the continuation is mid-run.
+  # While one is live the bead run is not over, so a per-port stop check must
+  # not fail it.
+  defp other_session_live?(%State{claude_sessions: sessions}, exited_port) do
+    Enum.any?(sessions, fn {port, session} ->
+      port != exited_port and is_nil(Map.get(session, :exit_status))
+    end)
+  end
+
+  # bd-1pdyov: did any session in this run (primary or continuation/resume)
+  # signal `arb done`? Keys off the :done_seen flag stamped in the
+  # __claude_session_done__ handler, which fires ONLY for the assistant-scoped,
+  # word-bounded marker (claude_session.ex emits the done message exclusively for
+  # assistant text / the raw-line fallback, never for tool calls or tool
+  # results). Scanning the raw output buffer instead would re-admit the mid-task
+  # false positive the live detector guards against (an acolyte that cats/echoes
+  # "arb done"), so we deliberately rely on the already-scoped signal.
+  defp run_signalled_done?(%State{meta: meta}), do: Map.get(meta || %{}, :done_seen, false)
+
+  defp mark_done_seen(%State{meta: meta} = state),
+    do: %State{state | meta: Map.put(meta || %{}, :done_seen, true)}
 
   # Handle the acolyte's "arb done" marker. Before bd-7qq81g this closed the bead
   # directly, bypassing the merger entirely — branches never reached the target

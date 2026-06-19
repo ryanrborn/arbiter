@@ -195,4 +195,61 @@ defmodule Arbiter.Polecat.StopDetectionTest do
       refute Polecat.state(pid).status == :failed
     end
   end
+
+  describe "arb done in a resume/continuation session (bd-1pdyov)" do
+    test "a continuation session that prints arb done after the primary exits completes, not fails",
+         %{ws: ws} do
+      # Incident bd-53xrmi: the primary session ended (port exit, status 0)
+      # WITHOUT the marker — it spent its final turns cleaning a dirty .mcp.json
+      # — while a short continuation session (the commit-gate nudge respawn) was
+      # still mid-run. The primary's deferred stop-check fired during the grace
+      # window and falsely marked committed work :failed before the continuation
+      # printed `arb done`.
+      #
+      # Here we reproduce the SHAPE of that race with two real session ports on
+      # one polecat:
+      #   * primary  — exits 0 immediately, no marker.
+      #   * continuation — stays alive past the exit grace, then prints `arb done`.
+      # The whole-run stop check must see the continuation is still live, no-op,
+      # and let the continuation drive completion.
+      {pid, _bead} = start_polecat(ws)
+      :ok = Polecat.advance(pid, :claude)
+      cwd = tmp_dir!("sd-continuation")
+
+      # Primary: does its work and exits cleanly, never emitting the marker.
+      {:ok, _primary} =
+        Arbiter.Polecat.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "echo 'primary: tidied .mcp.json'; exit 0"]
+        )
+
+      # Continuation: outlives the @exit_grace_ms (500ms) window so the primary's
+      # deferred stop-check fires while this one is still running, then signals.
+      {:ok, _continuation} =
+        Arbiter.Polecat.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "sleep 1; echo 'arb done'"]
+        )
+
+      status =
+        eventually(
+          fn ->
+            case Polecat.state(pid).status do
+              :completed -> :completed
+              _ -> nil
+            end
+          end,
+          4_000
+        )
+
+      assert status == :completed
+      state = Polecat.state(pid)
+      refute state.status == :failed
+      # It completed via the marker, not by some other path: no stop reason was
+      # ever recorded.
+      refute Map.has_key?(state.meta, :stop_reason)
+    end
+  end
 end
