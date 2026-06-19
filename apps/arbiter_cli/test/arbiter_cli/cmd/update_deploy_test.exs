@@ -11,8 +11,8 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
   setup do
     System.put_env("ARB_HOME", "/tmp/arbiter-update-test")
     System.delete_env("ARB_HOST")
-    # Clear the acolyte guard env so deploy tests run even when executed
-    # from inside an acolyte session.
+    # Clear the worker guard env so deploy tests run even when executed
+    # from inside a worker session.
     System.delete_env("ARB_ACOLYTE_BEAD_ID")
     on_exit(fn -> System.delete_env("ARB_HOME") end)
     Process.put(:bd2_sleep, fn _ms -> :ok end)
@@ -221,7 +221,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
   end
 
   describe "active-work guard" do
-    test "refuses deploy when acolytes are actively working (no --force)" do
+    test "refuses deploy when workers are actively working (no --force)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/polecats"},
@@ -233,13 +233,13 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       {_out, err, code} = capture(fn -> Update.run([]) end)
 
       assert code == 1
-      assert err =~ "acolyte"
+      assert err =~ "worker"
       assert err =~ "bd-xyz"
       assert err =~ "--force"
       refute_received {:cmd, "git", ["pull", "--ff-only"]}
     end
 
-    test "--force deploys even with active acolytes" do
+    test "--force deploys even with active workers" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/polecats"},
@@ -254,7 +254,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       assert out =~ "Pulled 2 new commit(s)"
     end
 
-    test "proceeds normally when no acolytes are active" do
+    test "proceeds normally when no workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/polecats"}, {@no_polecats, 200}}

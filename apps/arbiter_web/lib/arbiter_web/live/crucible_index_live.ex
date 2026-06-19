@@ -16,7 +16,6 @@ defmodule ArbiterWeb.CrucibleIndexLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Warden
-  alias Arbiter.Vernacular
   alias ArbiterWeb.Paging
 
   @polecats_topic "polecats"
@@ -32,8 +31,8 @@ defmodule ArbiterWeb.CrucibleIndexLive do
      socket
      |> assign(:live, connected?(socket))
      |> assign(:now, DateTime.utc_now())
-     |> assign(:merge_queue_label, Vernacular.label(:merge_queue))
-     |> assign(:pr_label, Vernacular.label(:pr))}
+     |> assign(:merge_queue_label, "merge queue")
+     |> assign(:pr_label, "pull request")}
   end
 
   @impl true

@@ -13,7 +13,6 @@ defmodule ArbiterWeb.BeadDetailLive do
   alias Arbiter.Beads.Issue.Version
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
-  alias Arbiter.Vernacular
   require Ash.Query
 
   @beads_topic "beads"
@@ -30,10 +29,10 @@ defmodule ArbiterWeb.BeadDetailLive do
      socket
      |> assign(:bead_id, bead_id)
      |> assign(:live, connected?(socket))
-     |> assign(:issue_label, Vernacular.label(:issue))
-     |> assign(:worker_label, Vernacular.label(:worker))
-     |> assign(:workspace_label, Vernacular.label(:workspace))
-     |> assign(:rig_label, Vernacular.label(:rig))
+     |> assign(:issue_label, "issue")
+     |> assign(:worker_label, "worker")
+     |> assign(:workspace_label, "workspace")
+     |> assign(:rig_label, "repo")
      |> refresh_all()}
   end
 
@@ -322,7 +321,7 @@ defmodule ArbiterWeb.BeadDetailLive do
               </div>
             </section>
 
-            <%!-- Polecat (linked acolyte) --%>
+            <%!-- Polecat (linked worker) --%>
             <section class="card bg-base-200 border border-base-300 shadow-sm">
               <div class="card-body p-4 gap-4">
                 <div class="flex items-center justify-between gap-2">
@@ -573,7 +572,7 @@ defmodule ArbiterWeb.BeadDetailLive do
   defp polecat_status_class(:failed), do: "badge-error"
   defp polecat_status_class(_), do: ""
 
-  # Solid status dot color for the linked-acolyte panel (mirrors the badge palette).
+  # Solid status dot color for the linked-worker panel (mirrors the badge palette).
   defp status_dot_class(:running), do: "bg-info"
   defp status_dot_class(:awaiting), do: "bg-warning"
   defp status_dot_class(:completed), do: "bg-success"

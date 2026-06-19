@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.PolecatIndexLive do
   @moduledoc """
-  Index of every active acolyte (polecat) at `/polecats` — the "See all"
+  Index of every active worker (polecat) at `/polecats` — the "See all"
   target for the dashboard's active-workers section.
 
   Polecats are live GenServer state, not rows, so the listing comes from
@@ -14,7 +14,6 @@ defmodule ArbiterWeb.PolecatIndexLive do
 
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
-  alias Arbiter.Vernacular
   alias ArbiterWeb.Paging
 
   @polecats_topic "polecats"
@@ -36,8 +35,8 @@ defmodule ArbiterWeb.PolecatIndexLive do
      socket
      |> assign(:live, connected?(socket))
      |> assign(:now, DateTime.utc_now())
-     |> assign(:worker_label, Vernacular.label(:worker))
-     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:worker_label, "worker")
+     |> assign(:issue_label, "issue")
      |> assign(:filters, @filters)}
   end
 

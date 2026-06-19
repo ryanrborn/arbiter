@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     # Deterministic project root (no filesystem walk) and a tmp dir to write
     # units into so we never touch ~/.config or /etc.
     System.put_env("ARB_HOME", "/tmp/arbiter-install-test")
-    # Clear the acolyte guard so tests aren't blocked when run inside an acolyte session.
+    # Clear the worker guard so tests aren't blocked when run inside a worker session.
     prior_acolyte_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
     System.delete_env("ARB_ACOLYTE_BEAD_ID")
 

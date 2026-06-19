@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.Claim do
                    to track someone else's work).
     --difficulty N Task difficulty (0..4): D0 trivial · D1 easy · D2 medium ·
                    D3 hard · D4 very hard. Drives model tier and thinking
-                   budget routed to acolytes. (default: D2 on the server)
+                   budget routed to workers. (default: D2 on the server)
     --rig <rig>    Hint for a later `arb sling`. Recorded as a tip in the
                    command's text output — not persisted on the bead.
     --json         Emit JSON instead of human-readable text.

@@ -35,7 +35,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
 
     test "tells the user when no polecat is registered", %{conn: conn} do
       {:ok, _view, html} = live(conn, ~p"/polecats/no-such-bead")
-      assert html =~ "No polecat registered"
+      assert html =~ "No worker registered"
     end
 
     test "updates live when the polecat receives new output", %{conn: conn, ws: ws} do
@@ -81,7 +81,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
       {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
 
       {:ok, view, html} = live(conn, ~p"/polecats/#{bead.id}")
-      assert html =~ "Stop polecat"
+      assert html =~ "Stop worker"
 
       result = render_click(view, "stop")
 

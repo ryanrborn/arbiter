@@ -4,7 +4,7 @@ defmodule ArbiterWeb.DashboardLive do
 
     * Active polecats (name, current step, bead, runtime)
     * Recent beads (last 20 by `updated_at` desc)
-    * Merge queue / Crucibles — branches integrating via `Arbiter.Mergers`
+    * Merge queue — branches integrating via `Arbiter.Mergers`
       (Direct/GitLab/GitHub): the polecats parked at `:awaiting_review`, each
       with its open MR, approval status, and Warden poll activity. Live.
     * Admiral mailbox — unread mailbox-family messages addressed to the
@@ -49,13 +49,12 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Polecat.Warden
   alias Arbiter.Polecat.Worktree
   alias Arbiter.Polecats.Run
-  alias Arbiter.Vernacular
   require Ash.Query
 
   @beads_topic "beads"
   @polecats_topic "polecats"
 
-  # The coordinator's mailbox recipient — the `to_ref` acolytes address reports
+  # The coordinator's mailbox recipient — the `to_ref` workers address reports
   # *up* to (completions/failures/escalations/info). Matches `arb inbox` and
   # the `arb prime` Admiral Inbox section.
   @admiral_ref "admiral"
@@ -88,15 +87,15 @@ defmodule ArbiterWeb.DashboardLive do
      socket
      |> assign(:now, DateTime.utc_now())
      |> assign(:live, live?)
-     |> assign(:worker_label, Vernacular.label(:worker))
-     |> assign(:rig_label, Vernacular.label(:rig))
-     |> assign(:worktree_label, Vernacular.label(:worktree))
-     |> assign(:issue_label, Vernacular.label(:issue))
-     |> assign(:epic_label, Vernacular.label(:epic))
-     |> assign(:workspace_label, Vernacular.label(:workspace))
-     |> assign(:pr_label, Vernacular.label(:pr))
-     |> assign(:merge_queue_label, Vernacular.label(:merge_queue))
-     |> assign(:escalation_label, Vernacular.label(:escalation))
+     |> assign(:worker_label, "worker")
+     |> assign(:rig_label, "repo")
+     |> assign(:worktree_label, "worktree")
+     |> assign(:issue_label, "issue")
+     |> assign(:epic_label, "epic")
+     |> assign(:workspace_label, "workspace")
+     |> assign(:pr_label, "pull request")
+     |> assign(:merge_queue_label, "merge queue")
+     |> assign(:escalation_label, "escalation")
      |> refresh_workspaces()
      |> subscribe_messages(live?)
      |> refresh_notifications()
@@ -151,7 +150,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   @impl true
   # Acknowledge one Admiral-mailbox message: stamp read_at, drop it from the
-  # unread list. Mirrors `arb inbox read <id>` and the per-acolyte mailbox.
+  # unread list. Mirrors `arb inbox read <id>` and the per-worker mailbox.
   def handle_event("mark_read", %{"id" => id}, socket) do
     _ = Message.mark_read(id)
     {:noreply, refresh_admiral_inbox(socket)}
@@ -187,7 +186,7 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :polecats, polecats)
   end
 
-  # Resolve the acolyte permission mode (:auto | :strict | :bypass) for a
+  # Resolve the worker permission mode (:auto | :strict | :bypass) for a
   # polecat's workspace, so the dashboard can flag at a glance when a worker is
   # running under a non-default posture (e.g. :bypass, which skips all checks).
   # Falls back to the install-wide default when the workspace is unknown.
@@ -202,7 +201,7 @@ defmodule ArbiterWeb.DashboardLive do
     _ -> SecurityPolicy.default().permissions.mode
   end
 
-  # The merge queue (Crucibles): branches integrating via Arbiter.Mergers.
+  # The merge queue: branches integrating via Arbiter.Mergers.
   # Sourced live from polecats parked at :awaiting_review — each has an open MR
   # (mr_ref + clickable merger_url), the last Mergers.get/1 result the Warden
   # recorded (:last_merger_status), and when it was last polled. Ordered
@@ -674,7 +673,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp merger_type_label(:github), do: "GitHub"
   defp merger_type_label(other), do: other |> to_string() |> String.capitalize()
 
-  # Acolyte permission-mode badge: ghost for the safe default (auto), warning
+  # Worker permission-mode badge: ghost for the safe default (auto), warning
   # for strict (tighter, worth noticing), error for bypass (all checks off —
   # the operator should see that immediately).
   defp security_mode_label(:auto), do: "auto"
@@ -997,7 +996,7 @@ defmodule ArbiterWeb.DashboardLive do
                       <span
                         :if={Map.get(p, :security_mode)}
                         class={["badge badge-xs shrink-0", security_mode_class(p.security_mode)]}
-                        title={"acolyte permission mode: #{p.security_mode}"}
+                        title={"worker permission mode: #{p.security_mode}"}
                       >
                         {security_mode_label(p.security_mode)}
                       </span>
@@ -1218,7 +1217,7 @@ defmodule ArbiterWeb.DashboardLive do
             >
               <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
               <p class="mt-2 text-sm text-base-content/60">
-                Inbox clear. Acolyte completions, failures, and escalations addressed
+                Inbox clear. Worker completions, failures, and escalations addressed
                 to the Admiral land here in real time.
               </p>
             </div>
@@ -1474,7 +1473,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── H. Merge queue (Crucibles) ───────────────────────────── --%>
+        <%!-- ── H. Merge queue ───────────────────────────────────────── --%>
         <section id="merge-queue-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <div class="flex items-center justify-between gap-2">

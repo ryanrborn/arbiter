@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture: a reviewer (Tribunal) acolyte that emits `VERDICT: REQUEST_CHANGES`
+# Fixture: a reviewer (Tribunal) worker that emits `VERDICT: REQUEST_CHANGES`
 # with NO concrete findings on its first pass — the content-free verdict from
 # bd-3y2mda that stalls the gate. It then either supplies a proper verdict on the
 # Tribunal's re-prompt or keeps withholding findings.

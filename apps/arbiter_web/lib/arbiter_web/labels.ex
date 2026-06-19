@@ -1,9 +1,9 @@
 defmodule ArbiterWeb.Labels do
   @moduledoc """
-  Pluralization for vernacular labels, so headers read naturally regardless of
-  the configured vocabulary ("refinery" → "refineries", "watch" → "watches",
-  "bead" → "beads"). A naive `label <> "s"` breaks on trailing -y and sibilant
-  endings, which a polished surface shouldn't show.
+  Pluralization for labels, so headers read naturally regardless of the word
+  ("repo" → "repos", "watch" → "watches", "bead" → "beads"). A naive
+  `label <> "s"` breaks on trailing -y and sibilant endings, which a polished
+  surface shouldn't show.
 
   Imported into every view via `ArbiterWeb` so index/detail/dashboard pages
   share one implementation.

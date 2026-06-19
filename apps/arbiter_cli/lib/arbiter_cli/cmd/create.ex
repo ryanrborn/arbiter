@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.Create do
 
   Sets how hard the task is. Orthogonal to `--priority`: priority answers
   "how urgent?"; difficulty answers "how hard?" and drives the model +
-  thinking budget routed to acolytes that work the bead. Classify by the
+  thinking budget routed to workers that work the bead. Classify by the
   MAX over: scope (files/modules touched), design uncertainty, reasoning
   depth (mechanical vs concurrency/correctness), blast radius, breadth of
   context required.

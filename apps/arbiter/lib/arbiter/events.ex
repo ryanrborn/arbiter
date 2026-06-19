@@ -12,8 +12,8 @@ defmodule Arbiter.Events do
   |-----------------|--------------------------------------------------------|
   | `inbox`         | A message arrives in the coordinator's mailbox          |
   | `tribunal`      | A tribunal escalation requires Admiral ruling           |
-  | `polecat_failed`| An acolyte stops unexpectedly (status → failed)         |
-  | `polecat_done`  | An acolyte completes (status → completed)               |
+  | `polecat_failed`| An worker stops unexpectedly (status → failed)         |
+  | `polecat_done`  | An worker completes (status → completed)               |
   | `bead_state`    | Any bead FSM transition (noisier — opt-in only)         |
 
   ## Broadcast hooks

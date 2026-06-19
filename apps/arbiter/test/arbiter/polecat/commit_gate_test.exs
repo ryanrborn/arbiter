@@ -2,7 +2,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
   @moduledoc """
   Regression test for bd-ofql8k.
 
-  Root cause the gate addresses: the acolyte EDITS files in its worktree
+  Root cause the gate addresses: the worker EDITS files in its worktree
   correctly but never `git commit`s, so HEAD stays at the base branch with
   the work UNCOMMITTED in the worktree. Before this fix the Tribunal — which
   runs in the same worktree — diffed `git diff <base>..HEAD` (committed
@@ -11,7 +11,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
 
   The fix gates `Polecat.on_claude_done` on `Worktree.completion_state/2`:
   if the tree is dirty or has no commits ahead of the target, the polecat
-  either (a) relaunches the acolyte with a clear "you have uncommitted
+  either (a) relaunches the worker with a clear "you have uncommitted
   changes — commit + push" nudge, capped at `meta[:commit_nudge_cap]` (default
   1), or (b) fails + escalates with details when the cap is exhausted. The
   Tribunal is never reached in either case, so it can never falsely report
@@ -295,7 +295,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
       refute Map.has_key?(snap.meta, :commit_gate_reason)
     end
 
-    test "a review-only acolyte (reviewer) completes despite zero commits (bd-40j98i)",
+    test "a review-only worker (reviewer) completes despite zero commits (bd-40j98i)",
          %{repo: repo, ws: ws} do
       # Reviewers operate in review-only mode (meta[:review_only] = true) and
       # analyze diffs without authoring code. They make NO commits by design.

@@ -2,7 +2,7 @@ defmodule Arbiter.Usage do
   @moduledoc """
   Ash domain + aggregation API for the structured token/cost usage ledger.
 
-  Every Claude session — work acolyte or Tribunal reviewer — emits a final
+  Every Claude session — work worker or Tribunal reviewer — emits a final
   `result` event carrying tokens (input / output / cache), `total_cost_usd`,
   `duration_ms`, and model. The polecat captures that and inserts an
   `Arbiter.Usage.Event` row keyed by bead + step (`:work | :review`) +

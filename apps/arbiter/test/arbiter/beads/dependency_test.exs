@@ -46,11 +46,11 @@ defmodule Arbiter.Beads.DependencyTest do
           to_issue_id: b.id,
           type: :depends_on,
           notes: notes,
-          created_by: "mayor"
+          created_by: "coordinator"
         })
 
       assert dep.notes == notes
-      assert dep.created_by == "mayor"
+      assert dep.created_by == "coordinator"
     end
 
     test "accepts each of the 5 type enums", %{a: a, b: b, c: c} do

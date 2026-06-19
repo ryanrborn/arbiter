@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.RunIndexLive do
   @moduledoc """
-  Index of every acolyte run at `/polecats/history` — the "See all" target for
+  Index of every worker run at `/polecats/history` — the "See all" target for
   the dashboard's completed-workers section.
 
   Lists all persisted `Arbiter.Polecats.Run` records (the durable post-mortem
@@ -13,7 +13,6 @@ defmodule ArbiterWeb.RunIndexLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Polecats.Run
-  alias Arbiter.Vernacular
   alias ArbiterWeb.Paging
   require Ash.Query
 
@@ -33,8 +32,8 @@ defmodule ArbiterWeb.RunIndexLive do
     {:ok,
      socket
      |> assign(:live, connected?(socket))
-     |> assign(:worker_label, Vernacular.label(:worker))
-     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:worker_label, "worker")
+     |> assign(:issue_label, "issue")
      |> assign(:filters, @filters)}
   end
 

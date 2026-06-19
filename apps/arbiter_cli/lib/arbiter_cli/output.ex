@@ -12,7 +12,7 @@ defmodule ArbiterCli.Output do
   halt the VM with a non-zero status.
   """
 
-  alias ArbiterCli.{Client, Vernacular}
+  alias ArbiterCli.Client
 
   # ----- mode resolution -----
 
@@ -95,7 +95,7 @@ defmodule ArbiterCli.Output do
   def emit_workspace(ws, :json), do: IO.puts(Jason.encode!(ws))
 
   def emit_workspace(ws, :text) do
-    IO.puts("#{Vernacular.label(Vernacular.fetch(), "workspace")}: #{ws["name"]}")
+    IO.puts("workspace: #{ws["name"]}")
     IO.puts("  id:          #{ws["id"]}")
     IO.puts("  prefix:      #{ws["prefix"]}")
 
@@ -157,8 +157,6 @@ defmodule ArbiterCli.Output do
   """
   @spec format_issue_detail(map()) :: String.t()
   def format_issue_detail(issue) do
-    vern = Vernacular.fetch()
-
     header =
       [
         {"ID", issue["id"]},
@@ -170,7 +168,7 @@ defmodule ArbiterCli.Output do
         {"Progress", child_progress_label(issue)},
         {"Auto-close", auto_close_label(issue)},
         {"Assignee", issue["assignee"]},
-        {Vernacular.cap(vern, "workspace"), issue["workspace_id"]},
+        {"Workspace", issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
         {"Target", issue["target_branch"]},
         {"Created", issue["created_at"]},

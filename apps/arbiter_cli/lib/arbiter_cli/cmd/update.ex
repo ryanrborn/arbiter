@@ -43,10 +43,10 @@ defmodule ArbiterCli.Cmd.Update do
                       [--pr-body text]
 
   `--qa-notes` / `--deployment-notes` set the gated completion-notes fields
-  an acolyte produces for tracker-backed work (QA Testing Notes / Deployment
+  a worker produces for tracker-backed work (QA Testing Notes / Deployment
   Notes on the Jira ticket). They overwrite the field (unlike `--append-notes`).
 
-  `--pr-body` sets the acolyte-authored PR/MR description the Refinery opens
+  `--pr-body` sets the worker-authored PR/MR description the Refinery opens
   the bead's single canonical PR with (Summary / Test plan / References). It
   overwrites the field.
 
