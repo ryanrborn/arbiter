@@ -29,17 +29,17 @@ defmodule ArbiterWeb.Router do
 
       # Entity index pages (list everything, filterable + paged) and their
       # detail pages. Literal segments are declared before the dynamic
-      # `:bead_id`/`:id` catch-alls so e.g. `/polecats/history` isn't claimed
-      # as a polecat detail.
+      # `:bead_id`/`:id` catch-alls so e.g. `/workers/history` isn't claimed
+      # as a worker detail.
       live("/beads", BeadIndexLive)
       live("/beads/:id", BeadDetailLive)
 
       live("/merge_queue", MergeQueueIndexLive)
 
-      live("/polecats", PolecatIndexLive)
-      live("/polecats/history", RunIndexLive)
-      live("/polecats/history/:id", RunDetailLive)
-      live("/polecats/:bead_id", PolecatDetailLive)
+      live("/workers", WorkerIndexLive)
+      live("/workers/history", RunIndexLive)
+      live("/workers/history/:id", RunDetailLive)
+      live("/workers/:bead_id", WorkerDetailLive)
     end
   end
 
@@ -60,7 +60,7 @@ defmodule ArbiterWeb.Router do
     post("/dependencies", DependencyController, :create)
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
-    # Repos (repo/project checkouts polecats operate on)
+    # Repos (repo/project checkouts workers operate on)
     get("/repos", RepoController, :index)
 
     # Workspaces
@@ -95,16 +95,16 @@ defmodule ArbiterWeb.Router do
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)
 
-    # Polecats (workflow runner)
-    post("/polecats/dispatch", PolecatController, :dispatch)
-    post("/polecats/review", PolecatController, :review)
-    post("/polecats/:bead_id/resume", PolecatController, :resume)
-    get("/polecats/history", RunController, :index)
-    get("/polecats/history/:id", RunController, :show)
-    get("/polecats", PolecatController, :index)
-    get("/polecats/:bead_id", PolecatController, :show)
-    get("/polecats/:bead_id/log", PolecatController, :log)
-    post("/polecats/:bead_id/stop", PolecatController, :stop)
+    # Workers (workflow runner)
+    post("/workers/dispatch", WorkerController, :dispatch)
+    post("/workers/review", WorkerController, :review)
+    post("/workers/:bead_id/resume", WorkerController, :resume)
+    get("/workers/history", RunController, :index)
+    get("/workers/history/:id", RunController, :show)
+    get("/workers", WorkerController, :index)
+    get("/workers/:bead_id", WorkerController, :show)
+    get("/workers/:bead_id/log", WorkerController, :log)
+    post("/workers/:bead_id/stop", WorkerController, :stop)
   end
 
   # Server-push event stream — long-lived chunked HTTP connection for coordinator

@@ -10,9 +10,9 @@ defmodule ArbiterCli.Cmd.Resume do
   continues from where the stopped run left off instead of restarting from
   scratch.
 
-  POSTs to `/api/polecats/:bead_id/resume`. The server validates the bead has a
+  POSTs to `/api/workers/:bead_id/resume`. The server validates the bead has a
   preserved worktree and isn't being actively worked, stops the lingering
-  stopped polecat, and dispatchs a fresh claude-driven worker onto the existing
+  stopped worker, and dispatchs a fresh claude-driven worker onto the existing
   branch — reusing any already-open PR rather than opening a duplicate.
 
   The repo is optional: if omitted, it's inherited from the bead's most recent
@@ -49,7 +49,7 @@ defmodule ArbiterCli.Cmd.Resume do
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
 
-      case Client.post("/api/polecats/#{bead_id}/resume", body) do
+      case Client.post("/api/workers/#{bead_id}/resume", body) do
         {:ok, payload} -> emit(payload, mode)
         {:error, err} -> Output.die(err)
       end
@@ -63,13 +63,13 @@ defmodule ArbiterCli.Cmd.Resume do
 
   defp emit(payload, :text) do
     bead = payload["bead"] || %{}
-    polecat = payload["polecat"] || %{}
+    worker = payload["worker"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Resume:")
     IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
     IO.puts("  Status:   #{bead["status"]}")
-    IO.puts("  Worker:  #{polecat["pid"]}")
+    IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
     case payload["worktree_path"] do

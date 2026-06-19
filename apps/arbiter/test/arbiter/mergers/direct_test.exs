@@ -116,8 +116,8 @@ defmodule Arbiter.Mergers.DirectTest do
   # feature.txt on top of it. Leaves HEAD on main.
   defp build_repo(dir) do
     {_, 0} = git(dir, ["init", "-q"])
-    {_, 0} = git(dir, ["config", "user.email", "polecat@example.test"])
-    {_, 0} = git(dir, ["config", "user.name", "Polecat"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
     {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
 
     File.write!(Path.join(dir, "base.txt"), "base\n")
@@ -138,8 +138,8 @@ defmodule Arbiter.Mergers.DirectTest do
   # of shared.txt, so a `--no-ff` merge conflicts. Leaves HEAD on main.
   defp build_conflict_repo(dir) do
     {_, 0} = git(dir, ["init", "-q"])
-    {_, 0} = git(dir, ["config", "user.email", "polecat@example.test"])
-    {_, 0} = git(dir, ["config", "user.name", "Polecat"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
     {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
 
     File.write!(Path.join(dir, "shared.txt"), "original\n")

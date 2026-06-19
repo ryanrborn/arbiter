@@ -9,14 +9,14 @@ defmodule ArbiterCli.Cmd.RepoTest do
         "name" => "arbiter",
         "source" => "default",
         "path" => "/dev/arbiter",
-        "polecats" => 1,
+        "workers" => 1,
         "worktrees" => 2
       },
       %{
         "name" => "other",
         "source" => "(app)",
         "path" => "/dev/other",
-        "polecats" => 0,
+        "workers" => 0,
         "worktrees" => 0
       }
     ]

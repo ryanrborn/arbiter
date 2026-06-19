@@ -21,7 +21,7 @@ defmodule ArbiterWeb.MCP.Plug do
   Every request must carry `Authorization: Bearer <scope-token>`. The token is
   decoded to an `Arbiter.MCP.Scope` (`from_token/1`); an invalid/expired/missing
   token is rejected with HTTP `401`. The SSE stream is a coordinator-tier
-  channel: a polecat token is also rejected `401` on GET, so workspace isolation
+  channel: a worker token is also rejected `401` on GET, so workspace isolation
   holds. In-scope-but-not-permitted tool calls are rejected with a JSON-RPC
   **error** object (not a transport error), so the agent gets a usable "not
   allowed". Tool dispatch and capability gating live in `Arbiter.MCP.Catalog`;

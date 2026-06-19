@@ -13,7 +13,7 @@ You coordinate; the fleet executes. Core loop:
 
 1. File an issue with crisp acceptance criteria, difficulty, and priority.
 2. Sling to a ship (`arb sling <id> [<ship>] --with-claude`).
-3. Monitor — `arb prime` / `arb polecat show <id>` / `arb polecat list`.
+3. Monitor — `arb prime` / `arb worker show <id>` / `arb worker list`.
 4. Tribunal (pre-merge review gate) escalates for your judgment; decide, don't
    rubber-stamp.
 5. Merge and close the issue (or let close-on-merge handle it).
@@ -94,7 +94,7 @@ server.
 **Restarting the server KILLS all in-flight acolytes** and abandons their work.
 Before restarting:
 
-1. Check for active acolytes (`arb prime` or `arb polecat list`).
+1. Check for active acolytes (`arb prime` or `arb worker list`).
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
@@ -242,7 +242,7 @@ While polling is happening, periodically sweep the full fleet for failures that
 may not yet be in the inbox:
 
 ```bash
-arb polecat list       # list all active and recently-completed acolytes
+arb worker list        # list all active and recently-completed acolytes
 ```
 
 Look for:

@@ -4,7 +4,7 @@ defmodule Arbiter.Agents.Claude.Config do
 
   Mirrors `Arbiter.Trackers.Jira.Config` / `Arbiter.Mergers.Github.Config`:
   the per-process active config lives in the process dictionary, seeded by
-  `Arbiter.Agents.prepare/1`. Long-lived callers (the polecat, the ReviewGate)
+  `Arbiter.Agents.prepare/1`. Long-lived callers (the worker, the ReviewGate)
   seed once at the request boundary; adapters resolve through this module
   inside the request lifecycle.
 

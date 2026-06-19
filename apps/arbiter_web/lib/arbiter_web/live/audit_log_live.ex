@@ -20,7 +20,7 @@ defmodule ArbiterWeb.AuditLogLive do
 
     - Actor filter (paper_trail's default config doesn't track who; needs
       `belongs_to_actor :user, User` setup or a sidecar audit table).
-    - Polecat lifecycle events (no audit resource yet).
+    - Worker lifecycle events (no audit resource yet).
     - PR/merge events (gte-022/023 don't write to paper_trail).
 
   The acceptance criterion's "filter by actor=coordinator" is therefore

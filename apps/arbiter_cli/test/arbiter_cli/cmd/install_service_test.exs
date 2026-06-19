@@ -21,10 +21,10 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     Process.put(:bd2_arb_exe, "/opt/arbiter/apps/arbiter_cli/arb")
     # Quiet the progress chatter (same seam `arb start` uses).
     Process.put(:bd2_sleep, fn _ -> :ok end)
-    # The active-work guard calls GET /api/polecats. Simulate an unreachable
-    # server so the guard always proceeds (no active polecats can exist when
-    # the server is down). Tests that want active polecats override this.
-    stub_transport_error(:get, "/api/polecats", :econnrefused)
+    # The active-work guard calls GET /api/workers. Simulate an unreachable
+    # server so the guard always proceeds (no active workers can exist when
+    # the server is down). Tests that want active workers override this.
+    stub_transport_error(:get, "/api/workers", :econnrefused)
 
     on_exit(fn ->
       System.delete_env("ARB_HOME")

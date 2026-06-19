@@ -1,8 +1,8 @@
 defmodule ArbiterWeb.BeadDetailLive do
   @moduledoc """
   Per-bead detail view at `/beads/:id` — combines the resource record,
-  any active polecat, dependency edges, and recent audit-log versions
-  into one page. Re-renders on `:bead_lifecycle` and `:polecat_lifecycle`
+  any active worker, dependency edges, and recent audit-log versions
+  into one page. Re-renders on `:bead_lifecycle` and `:worker_lifecycle`
   events so the page stays current.
   """
 
@@ -12,17 +12,17 @@ defmodule ArbiterWeb.BeadDetailLive do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Issue.Version
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
   require Ash.Query
 
   @beads_topic "beads"
-  @polecats_topic "polecats"
+  @workers_topic "workers"
 
   @impl true
   def mount(%{"id" => bead_id}, _session, socket) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @beads_topic)
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, @polecats_topic)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
     end
 
     {:ok,
@@ -48,13 +48,13 @@ defmodule ArbiterWeb.BeadDetailLive do
   end
 
   def handle_info(
-        {:polecat_lifecycle, _event, %{bead_id: id}},
+        {:worker_lifecycle, _event, %{bead_id: id}},
         %{assigns: %{bead_id: id}} = socket
       ) do
-    {:noreply, refresh_polecat(socket)}
+    {:noreply, refresh_worker(socket)}
   end
 
-  def handle_info({:polecat_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
+  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
   def handle_info(_, socket), do: {:noreply, socket}
 
   # ---- data ----
@@ -63,7 +63,7 @@ defmodule ArbiterWeb.BeadDetailLive do
     socket
     |> refresh_bead()
     |> refresh_workspace()
-    |> refresh_polecat()
+    |> refresh_worker()
     |> refresh_deps()
     |> refresh_versions()
   end
@@ -85,18 +85,18 @@ defmodule ArbiterWeb.BeadDetailLive do
 
   defp refresh_workspace(socket), do: assign(socket, :workspace, nil)
 
-  defp refresh_polecat(socket) do
+  defp refresh_worker(socket) do
     snap =
-      case Polecat.whereis(socket.assigns.bead_id) do
+      case Worker.whereis(socket.assigns.bead_id) do
         nil -> nil
         pid -> safe_state(pid)
       end
 
-    assign(socket, :polecat, snap)
+    assign(socket, :worker, snap)
   end
 
   defp safe_state(pid) do
-    Polecat.state(pid)
+    Worker.state(pid)
   rescue
     _ -> nil
   catch
@@ -233,7 +233,7 @@ defmodule ArbiterWeb.BeadDetailLive do
         </div>
 
         <%= if @bead do %>
-          <%!-- ── A. Record + Polecat ─────────────────────────────────── --%>
+          <%!-- ── A. Record + Worker ─────────────────────────────────── --%>
           <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <%!-- Record --%>
             <section class="card bg-base-200 border border-base-300 shadow-sm lg:col-span-2">
@@ -321,7 +321,7 @@ defmodule ArbiterWeb.BeadDetailLive do
               </div>
             </section>
 
-            <%!-- Polecat (linked worker) --%>
+            <%!-- Worker (linked worker) --%>
             <section class="card bg-base-200 border border-base-300 shadow-sm">
               <div class="card-body p-4 gap-4">
                 <div class="flex items-center justify-between gap-2">
@@ -330,51 +330,51 @@ defmodule ArbiterWeb.BeadDetailLive do
                     {String.capitalize(@worker_label)}
                   </h2>
                   <.link
-                    :if={@polecat}
-                    navigate={~p"/polecats/#{@bead_id}"}
+                    :if={@worker}
+                    navigate={~p"/workers/#{@bead_id}"}
                     class="link link-hover text-sm text-info flex items-center gap-1"
                   >
                     view full output <.icon name="hero-arrow-right" class="size-3" />
                   </.link>
                 </div>
 
-                <%= if @polecat do %>
+                <%= if @worker do %>
                   <div class="rounded-box bg-base-100 border border-base-300 p-3 flex flex-col gap-3">
                     <div class="flex items-center justify-between gap-2">
                       <span class="flex items-center gap-2">
                         <span class="relative flex h-2.5 w-2.5 shrink-0">
                           <span
-                            :if={@polecat.status == :running}
+                            :if={@worker.status == :running}
                             class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-75"
                           >
                           </span>
                           <span class={[
                             "relative inline-flex h-2.5 w-2.5 rounded-full",
-                            status_dot_class(@polecat.status)
+                            status_dot_class(@worker.status)
                           ]}>
                           </span>
                         </span>
-                        <span class={["badge badge-sm", polecat_status_class(@polecat.status)]}>
-                          {@polecat.status}
+                        <span class={["badge badge-sm", worker_status_class(@worker.status)]}>
+                          {@worker.status}
                         </span>
                       </span>
                       <%= cond do %>
-                        <% Map.get(@polecat, :claude_session?) && @polecat.status in [:idle, :running] -> %>
+                        <% Map.get(@worker, :claude_session?) && @worker.status in [:idle, :running] -> %>
                           <span class="badge badge-primary badge-sm">
-                            {polecat_activity_label(@polecat)}
+                            {worker_activity_label(@worker)}
                           </span>
-                        <% Map.get(@polecat, :claude_session?) -> %>
+                        <% Map.get(@worker, :claude_session?) -> %>
                           <%!-- Run over: the adjacent status badge already says
                                what happened; don't show a frozen activity. --%>
                         <% true -> %>
                           <span class="badge badge-ghost badge-sm font-mono">
-                            {@polecat.current_step}
+                            {@worker.current_step}
                           </span>
                       <% end %>
                     </div>
                     <div class="flex items-center gap-1.5 text-xs text-base-content/60">
                       <.icon name="hero-clock" class="size-3.5" />
-                      <span>started {format_started(@polecat.started_at)}</span>
+                      <span>started {format_started(@worker.started_at)}</span>
                     </div>
                   </div>
                 <% else %>
@@ -565,12 +565,12 @@ defmodule ArbiterWeb.BeadDetailLive do
   defp status_badge_class(:closed), do: "badge-ghost"
   defp status_badge_class(_), do: ""
 
-  defp polecat_status_class(:idle), do: "badge-ghost"
-  defp polecat_status_class(:running), do: "badge-info"
-  defp polecat_status_class(:awaiting), do: "badge-warning"
-  defp polecat_status_class(:completed), do: "badge-success"
-  defp polecat_status_class(:failed), do: "badge-error"
-  defp polecat_status_class(_), do: ""
+  defp worker_status_class(:idle), do: "badge-ghost"
+  defp worker_status_class(:running), do: "badge-info"
+  defp worker_status_class(:awaiting), do: "badge-warning"
+  defp worker_status_class(:completed), do: "badge-success"
+  defp worker_status_class(:failed), do: "badge-error"
+  defp worker_status_class(_), do: ""
 
   # Solid status dot color for the linked-worker panel (mirrors the badge palette).
   defp status_dot_class(:running), do: "bg-info"
@@ -623,8 +623,8 @@ defmodule ArbiterWeb.BeadDetailLive do
   defp format_started(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
   defp format_started(other), do: to_string(other)
 
-  defp polecat_activity_label(polecat) do
-    case Map.get(polecat, :meta) do
+  defp worker_activity_label(worker) do
+    case Map.get(worker, :meta) do
       %{"activity" => %{"label" => label}} when is_binary(label) -> label
       %{activity: %{label: label}} when is_binary(label) -> label
       %{"activity" => label} when is_binary(label) -> label

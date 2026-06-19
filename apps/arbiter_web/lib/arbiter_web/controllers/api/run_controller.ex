@@ -1,21 +1,21 @@
 defmodule ArbiterWeb.Api.RunController do
   @moduledoc """
-  REST endpoints for `Arbiter.Polecats.Run` — the durable history of worker
-  runs (a polecat's lifecycle after the GenServer is gone).
+  REST endpoints for `Arbiter.Workers.Run` — the durable history of worker
+  runs (a worker's lifecycle after the GenServer is gone).
 
   Routes:
 
-    * `GET /api/polecats/history`      — :index (filters: workspace_id, status,
+    * `GET /api/workers/history`      — :index (filters: workspace_id, status,
                                           limit [default 20], before [ISO8601
                                           started_at cursor])
-    * `GET /api/polecats/history/:id`  — :show (single run with full output)
+    * `GET /api/workers/history/:id`  — :show (single run with full output)
 
   Newest first.
   """
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Workers.Run
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)

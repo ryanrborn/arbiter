@@ -4,7 +4,7 @@ defmodule Arbiter.Workflows.CodeReview.LocalMode do
 
   Local mode writes a structured Markdown file at
   `<worktree_path>/reviews/<sanitized-branch>.md`. The format mirrors the
-  Go GT polecat-reviewer convention: a header naming the branch + bead, a
+  Go GT worker-reviewer convention: a header naming the branch + bead, a
   pending verdict line that is rewritten in the `:verdict` step, and one
   section per finding ordered by severity.
 

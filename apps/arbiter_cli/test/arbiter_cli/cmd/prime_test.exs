@@ -3,10 +3,10 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
   alias ArbiterCli.Cmd.Prime
 
-  defp stub_all(workspaces, polecats, ready, admiral \\ []) do
+  defp stub_all(workspaces, workers, ready, admiral \\ []) do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => workspaces}, 200}},
-      {{"get", "/api/polecats"}, {%{"data" => polecats}, 200}},
+      {{"get", "/api/workers"}, {%{"data" => workers}, 200}},
       {{"get", "/api/issues/ready"}, {%{"data" => ready}, 200}},
       {{"get", "/api/messages"}, {%{"data" => admiral}, 200}}
     ])
@@ -85,7 +85,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "2 safe-default + 1 custom"
     end
 
-    test "empty polecats and ready beads render '(none)'" do
+    test "empty workers and ready beads render '(none)'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -177,7 +177,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "[ ] Never boot a second Arbiter instance — it sweeps live runs"
       assert out =~ "[ ] No merge to main without the ReviewGate review gate"
 
-      # Surfaced high: before the work list (polecats / ready beads).
+      # Surfaced high: before the work list (workers / ready beads).
       orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
       ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
       assert orders_at < ready_at
@@ -248,7 +248,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {:ok, decoded} = Jason.decode(String.trim(out))
       assert is_map(decoded)
       assert Map.has_key?(decoded, "workspace")
-      assert Map.has_key?(decoded, "polecats")
+      assert Map.has_key?(decoded, "workers")
       assert Map.has_key?(decoded, "ready")
       assert Map.has_key?(decoded, "admiral_inbox")
       assert Map.has_key?(decoded, "standing_orders")

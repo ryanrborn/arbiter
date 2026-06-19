@@ -1,5 +1,5 @@
 defmodule ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger do
-  @moduledoc "Stub merger that parks a polecat at :awaiting_review (see dashboard test)."
+  @moduledoc "Stub merger that parks a worker at :awaiting_review (see dashboard test)."
   @behaviour Arbiter.Mergers.Merger
 
   @impl true
@@ -31,10 +31,10 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
   alias ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger
   alias Arbiter.Beads.{Issue, Workspace}
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
 
   setup do
-    for snap <- Polecat.list_children(), do: Polecat.stop(snap.bead_id)
+    for snap <- Worker.list_children(), do: Worker.stop(snap.bead_id)
     Process.sleep(50)
 
     {:ok, ws} =
@@ -58,12 +58,12 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
     assert html =~ ~s(id="merge_queue-empty")
   end
 
-  test "an in-flight merge surfaces with its MR link and links to the polecat detail",
+  test "an in-flight merge surfaces with its MR link and links to the worker detail",
        %{conn: conn, ws: ws} do
     {:ok, bead} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-    {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
-    :ok = Polecat.advance(pid, :integrate)
-    {:ok, "!77"} = Polecat.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+    {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+    :ok = Worker.advance(pid, :integrate)
+    {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
 
     {:ok, _view, html} = live(conn, ~p"/merge_queue")
 
@@ -71,6 +71,6 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
     assert html =~ bead.id
     assert html =~ "!77"
     assert html =~ "https://example.test/mr/77"
-    assert html =~ ~s(href="/polecats/#{bead.id}")
+    assert html =~ ~s(href="/workers/#{bead.id}")
   end
 end

@@ -46,10 +46,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   alias Arbiter.Beads.RepoConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
-  alias Arbiter.Polecat
-  alias Arbiter.Polecat.BranchNamer
-  alias Arbiter.Polecat.ClaudeSession
-  alias Arbiter.Polecat.Worktree
+  alias Arbiter.Worker
+  alias Arbiter.Worker.BranchNamer
+  alias Arbiter.Worker.ClaudeSession
+  alias Arbiter.Worker.Worktree
 
   require Logger
 
@@ -71,7 +71,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         }
 
   @type resolve_result ::
-          {:ok, %{polecat_pid: pid(), worktree_path: String.t(), branch: String.t()}}
+          {:ok, %{worker_pid: pid(), worktree_path: String.t(), branch: String.t()}}
           | {:error, term()}
 
   @doc """
@@ -118,7 +118,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @optional_callbacks escalate_unresolved: 4, notify_resolution: 3
 
   @doc """
-  Default implementation of `resolve/1`. Spawns a real Polecat with a
+  Default implementation of `resolve/1`. Spawns a real Worker with a
   ClaudeSession running the resolver prompt inside a fresh worktree.
 
   Tests should pass a stub module via the MergeQueue's `:conflict_resolver`
@@ -130,11 +130,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     with {:ok, bead} <- load_bead(bead_id),
          {:ok, context} <- resolve_context(bead, args),
          {:ok, worktree_path} <- create_worktree(context),
-         {:ok, polecat_pid} <- start_polecat(bead, context, worktree_path),
-         {:ok, _port} <- maybe_start_claude(polecat_pid, worktree_path, context, args) do
+         {:ok, worker_pid} <- start_worker(bead, context, worktree_path),
+         {:ok, _port} <- maybe_start_claude(worker_pid, worktree_path, context, args) do
       {:ok,
        %{
-         polecat_pid: polecat_pid,
+         worker_pid: worker_pid,
          worktree_path: worktree_path,
          branch: context.branch
        }}
@@ -213,7 +213,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   defp workspace_base_branch(_), do: nil
 
-  # Repo path lookup mirrors `Arbiter.Polecat.Dispatch`: workspace config first,
+  # Repo path lookup mirrors `Arbiter.Worker.Dispatch`: workspace config first,
   # then application env. Without an explicit repo we take the first configured
   # repo path — the canonical "one repo per workspace" path covers every existing
   # merge queue target.
@@ -280,15 +280,15 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   defp resolve_repo_name(_), do: nil
 
-  # ---- worktree / polecat / claude wiring ---------------------------------
+  # ---- worktree / worker / claude wiring ---------------------------------
 
-  # Registry suffix the conflict-resolver polecat registers under. The original
-  # work polecat is still registered (and sitting `:completed`) when the
+  # Registry suffix the conflict-resolver worker registers under. The original
+  # work worker is still registered (and sitting `:completed`) when the
   # merge queue picks up the CONFLICTING signal — the registry key is keyed on
   # bead_id and the original is only torn down on bead `:close`. Spawning under
-  # `<bead_id>:conflict` gives the resolver its own slot so `Polecat.start`
+  # `<bead_id>:conflict` gives the resolver its own slot so `Worker.start`
   # doesn't return `:already_started` and we don't accidentally open a Claude
-  # session against the finished polecat.
+  # session against the finished worker.
   @resolver_registry_suffix ":conflict"
 
   # Attach a worktree to the (existing) PR branch — the branch already exists
@@ -305,7 +305,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  defp start_polecat(%Issue{} = bead, context, worktree_path) do
+  defp start_worker(%Issue{} = bead, context, worktree_path) do
     meta = %{
       role: :conflict_resolver,
       worktree_path: worktree_path,
@@ -323,7 +323,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       meta: meta
     ]
 
-    case Polecat.start(opts) do
+    case Worker.start(opts) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -335,14 +335,14 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
         {:error, {:resolver_already_running, pid}}
 
       {:error, reason} ->
-        {:error, {:polecat_start_failed, reason}}
+        {:error, {:worker_start_failed, reason}}
     end
   end
 
   # `:start_claude` defaults to `true` for production. Tests pass
   # `start_claude: false` (and a `:claude_command` argv) so they can verify
   # the resolver was invoked without spawning a real Claude subprocess.
-  defp maybe_start_claude(polecat_pid, worktree_path, context, args) do
+  defp maybe_start_claude(worker_pid, worktree_path, context, args) do
     case Map.get(args, :start_claude, true) do
       false ->
         {:ok, nil}
@@ -350,14 +350,14 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       true ->
         session_opts =
           [
-            owner: polecat_pid,
+            owner: worker_pid,
             worktree_path: worktree_path
           ]
           |> add_command_or_prompt(context, args)
 
         case ClaudeSession.start(session_opts) do
           {:ok, port} ->
-            _ = Polecat.advance(polecat_pid, :resolve_conflict)
+            _ = Worker.advance(worker_pid, :resolve_conflict)
             {:ok, port}
 
           {:error, reason} ->

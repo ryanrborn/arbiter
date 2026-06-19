@@ -4,15 +4,15 @@ defmodule Arbiter.MCP.Tools do
   Each handler calls Ash directly (the same actions the REST controllers and
   `arb` subcommands take) and returns plain, JSON-friendly maps.
 
-  Phase 1 ships the read tools plus the one narrowed polecat write
+  Phase 1 ships the read tools plus the one narrowed worker write
   (`bead_update_progress`); Phase 2 adds the coordinator-only mutating tools —
   `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_add` /
-  `dep_remove` (grouping/epics use a `parent_of` edge), the `polecat_*` lifecycle family
-  (`polecat_dispatch` / `polecat_resume` / `polecat_review` / `polecat_stop` /
-  `polecat_list`), `message_send`, `notify_list`, the `tracker_*` bridge
+  `dep_remove` (grouping/epics use a `parent_of` edge), the `worker_*` lifecycle family
+  (`worker_dispatch` / `worker_resume` / `worker_review` / `worker_stop` /
+  `worker_list`), `message_send`, `notify_list`, the `tracker_*` bridge
   (`tracker_claim` / `tracker_sync`), `workspace_list`, and `usage_summarize`
   (see `docs/mcp-server-design.md` §8). The worker-dispatch tools
-  (`polecat_dispatch` / `polecat_resume` / `polecat_review`) carry the
+  (`worker_dispatch` / `worker_resume` / `worker_review`) carry the
   dispatch-recursion guardrail (`can_dispatch` + `depth`, §4.3).
 
   Handlers take `(scope, arguments)` where `scope` is an `Arbiter.MCP.Scope` and
@@ -38,8 +38,8 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.MCP
   alias Arbiter.MCP.Scope
   alias Arbiter.Messages.Message
-  alias Arbiter.Polecat
-  alias Arbiter.Polecat.Dispatch
+  alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Trackers
   alias Arbiter.Usage
 
@@ -49,7 +49,7 @@ defmodule Arbiter.MCP.Tools do
 
   # ---- bead_show ----------------------------------------------------------
 
-  @doc "Read a single bead. Polecat: its own bead only. Coordinator: any in its workspace."
+  @doc "Read a single bead. Worker: its own bead only. Coordinator: any in its workspace."
   @spec bead_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_show(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
@@ -81,7 +81,7 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   The unread mailbox for a bead, marked read on read (the structured replacement
-  for `arb inbox <bead>`). Polecat: its own bead. Coordinator: the `bead_id`
+  for `arb inbox <bead>`). Worker: its own bead. Coordinator: the `bead_id`
   argument, within its workspace.
   """
   @spec inbox_check(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -105,7 +105,7 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   The unread Admiral escalation mailbox for the bound workspace, marked read on
   return — the structured replacement for `arb message inbox` / `arb inbox`.
-  Coordinator only; the polecat tier is denied at the catalog level.
+  Coordinator only; the worker tier is denied at the catalog level.
 
   Lists all unread messages where `to_ref == "admiral"` in the workspace and
   marks each one read, so the dashboard unread count drops to 0. Optional
@@ -135,7 +135,7 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   A workspace: config and the resolved worker security posture.
   Resolved from the optional `workspace` arg (name or id), else the scope's bound
-  workspace, else the installation default. A workspace-bound scope (polecat) can
+  workspace, else the installation default. A workspace-bound scope (worker) can
   only ever inspect its own workspace.
   """
   @spec workspace_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -151,7 +151,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- bead_update_progress ----------------------------------------------
 
   @doc """
-  The polecat's one write: record `notes` / `qa_notes` / `deployment_notes` /
+  The worker's one write: record `notes` / `qa_notes` / `deployment_notes` /
   `pr_body` on its own bead (the structured replacement for `arb issue update
   <id> --qa-notes …`). It cannot flip status, reprioritize, or touch another
   bead. Coordinator: the same narrow write against any bead in its workspace.
@@ -221,7 +221,7 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Close a bead in the scope's workspace via the `:close` action (sets status,
-  runs the polecat/worktree teardown, and optionally syncs the close upstream
+  runs the worker/worktree teardown, and optionally syncs the close upstream
   when `close_upstream: true`). Coordinator only.
   """
   @spec bead_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -315,9 +315,9 @@ defmodule Arbiter.MCP.Tools do
 
     * a **coordinator** sends a `:direction` from `"coordinator"` down to any
       bead in its workspace;
-    * a **polecat** raises a `:flag` from its own bound bead to a sibling.
+    * a **worker** raises a `:flag` from its own bound bead to a sibling.
 
-  `workspace_id` is pinned to the recipient bead's own workspace (a polecat to
+  `workspace_id` is pinned to the recipient bead's own workspace (a worker to
   its bound workspace), so a message can only ever be created alongside its
   recipient. Backs onto `Messages.send_mail/1`.
   """
@@ -339,11 +339,11 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # The workspace a message lands in. A polecat is pinned to its bound workspace.
+  # The workspace a message lands in. A worker is pinned to its bound workspace.
   # A coordinator infers it from the recipient bead itself (entity inference,
   # honoring an explicit `workspace` arg), which also validates the recipient
   # exists and is reachable by the scope.
-  defp message_workspace(%Scope{tier: :polecat, workspace_id: ws_id}, _args, _to_ref),
+  defp message_workspace(%Scope{tier: :worker, workspace_id: ws_id}, _args, _to_ref),
     do: {:ok, ws_id}
 
   defp message_workspace(%Scope{tier: :coordinator} = scope, args, to_ref) do
@@ -351,7 +351,7 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # The sender identity + kind are derived from the scope, never the client: a
-  # coordinator directs (`from: "coordinator"`); a polecat flags from its own
+  # coordinator directs (`from: "coordinator"`); a worker flags from its own
   # bound bead. Both are pinned to the resolved workspace.
   defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref) do
     %{
@@ -363,7 +363,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp message_envelope(%Scope{tier: :polecat, bead_id: bead_id}, ws_id, to_ref) do
+  defp message_envelope(%Scope{tier: :worker, bead_id: bead_id}, ws_id, to_ref) do
     %{
       kind: :flag,
       workspace_id: ws_id,
@@ -373,26 +373,26 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  # ---- polecat_dispatch ------------------------------------------------------
+  # ---- worker_dispatch ------------------------------------------------------
 
   @doc """
-  Dispatch a polecat to work a bead in the scope's workspace. **Coordinator only,
+  Dispatch a worker to work a bead in the scope's workspace. **Coordinator only,
   and the strongest-gated tool.** It enforces the dispatch-recursion guardrail
   (`docs/mcp-server-design.md` §4.3):
 
     1. The scope must carry `can_dispatch` — a coordinator minted without it (and
-       every polecat, which never carries it) is refused.
+       every worker, which never carries it) is refused.
     2. The scope's `depth` must be below the configured `Arbiter.MCP.max_depth/0`
        — cheap insurance against a misconfigured coordinator fan-out.
 
-  The slung polecat's own scope token is minted one level deeper (`depth + 1`),
+  The slung worker's own scope token is minted one level deeper (`depth + 1`),
   so a chain of dispatches is tracked. With a `provider` (`"claude"` | `"gemini"`,
   or the deprecated `with_claude: true` alias) a worker session is started;
   without one the bead simply parks `:in_progress` (no agent spawned).
-  Backs onto `Arbiter.Polecat.Dispatch.dispatch/2`.
+  Backs onto `Arbiter.Worker.Dispatch.dispatch/2`.
   """
-  @spec polecat_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_dispatch(%Scope{} = scope, args) do
+  @spec worker_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_dispatch(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
@@ -404,17 +404,17 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # ---- polecat_resume -----------------------------------------------------
+  # ---- worker_resume -----------------------------------------------------
 
   @doc """
   Re-attach a fresh worker to a bead's **preserved** worktree
-  (`arb resume`). Coordinator only, and — like `polecat_dispatch` — gated by the
+  (`arb resume`). Coordinator only, and — like `worker_dispatch` — gated by the
   dispatch-recursion guardrail (`can_dispatch` + `depth`): resume spawns a worker, so
-  the same recursion concerns apply. The child polecat's scope is minted one
-  level deeper. Backs onto `Arbiter.Polecat.Dispatch.resume/2`.
+  the same recursion concerns apply. The child worker's scope is minted one
+  level deeper. Backs onto `Arbiter.Worker.Dispatch.resume/2`.
   """
-  @spec polecat_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_resume(%Scope{} = scope, args) do
+  @spec worker_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_resume(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
@@ -426,18 +426,18 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # ---- polecat_review -----------------------------------------------------
+  # ---- worker_review -----------------------------------------------------
 
   @doc """
   Dispatch a **review-only** worker against the PR/MR linked to a bead
   (`arb review`): no worktree, no per-bead branch, no route through the
   merge queue/merger. Coordinator only, and gated by the dispatch-recursion guardrail
   (`can_dispatch` + `depth`) — a review dispatch spawns an agent. The child
-  polecat's scope is minted one level deeper. Backs onto
-  `Arbiter.Polecat.Dispatch.dispatch/2` with `review: true`.
+  worker's scope is minted one level deeper. Backs onto
+  `Arbiter.Worker.Dispatch.dispatch/2` with `review: true`.
   """
-  @spec polecat_review(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_review(%Scope{} = scope, args) do
+  @spec worker_review(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_review(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
@@ -455,47 +455,47 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # ---- polecat_stop -------------------------------------------------------
+  # ---- worker_stop -------------------------------------------------------
 
   @doc """
-  Stop the polecat currently working a bead (`arb polecat stop`). Coordinator
+  Stop the worker currently working a bead (`arb worker stop`). Coordinator
   only. The bead is resolved through `fetch_bead`, so a coordinator can only
-  stop polecats for beads in its own workspace; a bead with no live polecat is
+  stop workers for beads in its own workspace; a bead with no live worker is
   reported as not-found. Stopping is teardown — it never spawns — so it does not
-  require `can_dispatch`. Backs onto `Arbiter.Polecat.stop/2`.
+  require `can_dispatch`. Backs onto `Arbiter.Worker.stop/2`.
   """
-  @spec polecat_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_stop(%Scope{} = scope, args) do
+  @spec worker_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_stop(%Scope{} = scope, args) do
     with {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
          {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
-      case Polecat.stop(bead_id, :normal) do
+      case Worker.stop(bead_id, :normal) do
         :ok -> {:ok, %{bead_id: bead_id, stopped: true}}
-        {:error, :not_found} -> {:error, {:not_found, "no running polecat for bead #{bead_id}"}}
+        {:error, :not_found} -> {:error, {:not_found, "no running worker for bead #{bead_id}"}}
       end
     end
   end
 
-  # ---- polecat_list -------------------------------------------------------
+  # ---- worker_list -------------------------------------------------------
 
   @doc """
-  List active polecats in the scope's workspace. Coordinator only. Backs onto
-  `Arbiter.Polecat.list_children/0`, filtered to the scope's workspace_id so a
-  coordinator never sees polecats running in other workspaces.
+  List active workers in the scope's workspace. Coordinator only. Backs onto
+  `Arbiter.Worker.list_children/0`, filtered to the scope's workspace_id so a
+  coordinator never sees workers running in other workspaces.
   """
-  @spec polecat_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_list(%Scope{} = scope, args) do
+  @spec worker_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
       children =
-        Arbiter.Polecat.list_children()
+        Arbiter.Worker.list_children()
         |> Enum.filter(&(&1.workspace_id == ws_id))
 
       bead_ids = Enum.map(children, & &1.bead_id)
-      costs = Arbiter.Polecat.Stats.bead_costs_usd(bead_ids)
+      costs = Arbiter.Worker.Stats.bead_costs_usd(bead_ids)
 
-      polecats =
-        Enum.map(children, &serialize_polecat_summary(&1, Map.get(costs, &1.bead_id, 0.0)))
+      workers =
+        Enum.map(children, &serialize_worker_summary(&1, Map.get(costs, &1.bead_id, 0.0)))
 
-      {:ok, %{polecats: polecats, count: length(polecats)}}
+      {:ok, %{workers: workers, count: length(workers)}}
     end
   end
 
@@ -671,7 +671,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- shared resolution / fetch -----------------------------------------
 
   # Resolve + authorize the target bead id for this scope from the named arg
-  # (default "id"). Polecat: own bead only; coordinator: id required.
+  # (default "id"). Worker: own bead only; coordinator: id required.
   defp resolve_bead_id(scope, args, key \\ "id") do
     case Scope.own_bead(scope, fetch_string(args, key)) do
       {:ok, id} ->
@@ -726,7 +726,7 @@ defmodule Arbiter.MCP.Tools do
   # `nil` — meaning the caller is a workspace-agnostic coordinator that named no
   # workspace, so entity inference / the installation default applies downstream.
   #
-  # A scope bound to one workspace (every polecat; a legacy workspace-bound
+  # A scope bound to one workspace (every worker; a legacy workspace-bound
   # coordinator) may only ever resolve to its own workspace — naming a different
   # one is `{:error, {:unauthorized, …}}`.
   defp authorized_workspace(%Scope{} = scope, args) do
@@ -1030,8 +1030,8 @@ defmodule Arbiter.MCP.Tools do
     |> maybe_put_kw(:model, fetch_string(args, "model"))
   end
 
-  # Map `polecat_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the REST
-  # `POST /api/polecats/dispatch` contract: a `provider` dispatches a real worker
+  # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the REST
+  # `POST /api/workers/dispatch` contract: a `provider` dispatches a real worker
   # session (forcing that agent via `agent_type`); the deprecated `with_claude`
   # boolean is still honored as an alias for `provider: "claude"`; otherwise the
   # bead parks `:in_progress` (no Driver).
@@ -1047,7 +1047,7 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Resolve the worker provider from `polecat_dispatch` args. Prefers the explicit
+  # Resolve the worker provider from `worker_dispatch` args. Prefers the explicit
   # `provider` field (`"claude"` | `"gemini"`), falling back to the deprecated
   # `with_claude: true` alias. Returns `nil` when neither selects a worker — the
   # bead then parks in_progress.
@@ -1067,8 +1067,8 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # `polecat_review` is claude-driven by default (a reviewer with no agent has
-  # nothing to do), mirroring `POST /api/polecats/review`. `with_claude: false`
+  # `worker_review` is claude-driven by default (a reviewer with no agent has
+  # nothing to do), mirroring `POST /api/workers/review`. `with_claude: false`
   # dispatches the review without spawning an agent (the test affordance).
   defp review_claude_flag(opts, args) do
     case Map.get(args, "with_claude") do
@@ -1223,12 +1223,12 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # The dispatch result carries live pids/ports; render the JSON-safe subset (pids
-  # inspected to strings), mirroring `ArbiterWeb.Api.PolecatJSON.dispatch/1`. `depth`
-  # is the slung polecat's scope depth (parent + 1).
+  # inspected to strings), mirroring `ArbiterWeb.Api.WorkerJSON.dispatch/1`. `depth`
+  # is the slung worker's scope depth (parent + 1).
   defp serialize_dispatch(result, depth) do
     %{
       bead: serialize_bead(result.bead),
-      polecat: %{bead_id: result.bead.id, pid: inspect(result.polecat_pid)},
+      worker: %{bead_id: result.bead.id, pid: inspect(result.worker_pid)},
       machine: %{id: result.machine_id, pid: inspect(result.machine_pid)},
       worktree_path: result.worktree_path,
       claude_started: not is_nil(result.claude_port),
@@ -1236,7 +1236,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_polecat_summary(snap, cost_usd) do
+  defp serialize_worker_summary(snap, cost_usd) do
     meta = Map.get(snap, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
     model_id = Map.get(meta, :model) || Map.get(routing, :model)
@@ -1248,7 +1248,7 @@ defmodule Arbiter.MCP.Tools do
       started_at: iso(snap.started_at),
       activity: Map.get(meta, :activity),
       provider: Map.get(meta, :provider) || Map.get(routing, :provider),
-      model: Arbiter.Polecat.Stats.short_model_name(model_id),
+      model: Arbiter.Worker.Stats.short_model_name(model_id),
       cost_usd: cost_usd
     }
   end

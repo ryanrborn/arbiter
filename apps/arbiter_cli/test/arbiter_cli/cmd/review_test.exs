@@ -14,12 +14,12 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       assert code != 0
     end
 
-    test "happy path posts to /api/polecats/review and renders text" do
+    test "happy path posts to /api/workers/review and renders text" do
       stub_post(
-        "/api/polecats/review",
+        "/api/workers/review",
         %{
           "bead" => %{"id" => "bd-rev1", "title" => "review me", "status" => "in_progress"},
-          "polecat" => %{"bead_id" => "bd-rev1", "pid" => "#PID<0.123.0>"},
+          "worker" => %{"bead_id" => "bd-rev1", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
           "worktree_path" => nil,
           "claude_started" => true
@@ -35,9 +35,9 @@ defmodule ArbiterCli.Cmd.ReviewTest do
     end
 
     test "--json mode emits JSON" do
-      stub_post("/api/polecats/review", %{
+      stub_post("/api/workers/review", %{
         "bead" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
-        "polecat" => %{"bead_id" => "bd-rev1", "pid" => "x"},
+        "worker" => %{"bead_id" => "bd-rev1", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
@@ -55,7 +55,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
       Req.Test.stub(name, fn conn ->
         case {conn.method, conn.request_path} do
-          {"POST", "/api/polecats/review"} ->
+          {"POST", "/api/workers/review"} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
             send(parent, {:body, Jason.decode!(body)})
 
@@ -63,7 +63,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
               "bead" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
-              "polecat" => %{"bead_id" => "bd-rev1", "pid" => "x"},
+              "worker" => %{"bead_id" => "bd-rev1", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
 
@@ -86,7 +86,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
     test "404 propagates as die" do
       stub_post(
-        "/api/polecats/review",
+        "/api/workers/review",
         %{"error" => %{"type" => "not_found", "message" => "bead not found"}},
         404
       )

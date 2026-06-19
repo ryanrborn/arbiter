@@ -3,7 +3,7 @@ defmodule Arbiter.Test.StubMerger do
   In-memory `Arbiter.Mergers.Merger` adapter for tests.
 
   Backed by a single named `Agent` so it can be observed from a different
-  process than the one that configured it — the `Arbiter.Polecat.Watchdog`
+  process than the one that configured it — the `Arbiter.Worker.Watchdog`
   polls from its own process, so a process-dictionary stub wouldn't do.
 
   Usage:

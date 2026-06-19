@@ -2,10 +2,10 @@ defmodule ArbiterWeb.DashboardLive do
   @moduledoc """
   Dashboard LiveView at `/` — real-time view of:
 
-    * Active polecats (name, current step, bead, runtime)
+    * Active workers (name, current step, bead, runtime)
     * Recent beads (last 20 by `updated_at` desc)
     * Merge queue — branches integrating via `Arbiter.Mergers`
-      (Direct/GitLab/GitHub): the polecats parked at `:awaiting_review`, each
+      (Direct/GitLab/GitHub): the workers parked at `:awaiting_review`, each
       with its open MR, approval status, and Watchdog poll activity. Live.
     * Admiral mailbox — unread mailbox-family messages addressed to the
       coordinator (`to_ref "admiral"`): completions, failures, escalations,
@@ -23,8 +23,8 @@ defmodule ArbiterWeb.DashboardLive do
   Subscribed at mount:
     * `"beads"`     — `{:bead_lifecycle, event, issue}` from
                       `Arbiter.Beads.Issue.broadcast_lifecycle/2`.
-    * `"polecats"`  — `{:polecat_lifecycle, event, snapshot}` from
-                      `Arbiter.Polecat.broadcast_lifecycle/2`.
+    * `"workers"`  — `{:worker_lifecycle, event, snapshot}` from
+                      `Arbiter.Worker.broadcast_lifecycle/2`.
     * `"messages:<workspace_id>"` — `{:new_message, message}` from
                       `Arbiter.Messages.Message.broadcast_new/1` and
                       `{:message_read, message}` from
@@ -45,14 +45,14 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Beads.RepoConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
-  alias Arbiter.Polecat
-  alias Arbiter.Polecat.Watchdog
-  alias Arbiter.Polecat.Worktree
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
+  alias Arbiter.Worker.Worktree
+  alias Arbiter.Workers.Run
   require Ash.Query
 
   @beads_topic "beads"
-  @polecats_topic "polecats"
+  @workers_topic "workers"
 
   # The coordinator's mailbox recipient — the `to_ref` workers address reports
   # *up* to (completions/failures/escalations/info). Matches `arb inbox` and
@@ -77,7 +77,7 @@ defmodule ArbiterWeb.DashboardLive do
 
     if live? do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @beads_topic)
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, @polecats_topic)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       # Drives live elapsed counters (active workers) and relative timestamps
       # (notifications). Only reassigns :now — no DB reads in the tick handler.
       :timer.send_interval(1000, self(), :tick)
@@ -101,7 +101,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_notifications()
      |> refresh_admiral_inbox()
      |> refresh_rigs()
-     |> refresh_polecats()
+     |> refresh_workers()
      |> refresh_merge_queue()
      |> refresh_completed_runs()
      |> refresh_pending_reviews()
@@ -119,10 +119,10 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_workspaces()}
   end
 
-  def handle_info({:polecat_lifecycle, _event, _snapshot}, socket) do
+  def handle_info({:worker_lifecycle, _event, _snapshot}, socket) do
     {:noreply,
      socket
-     |> refresh_polecats()
+     |> refresh_workers()
      |> refresh_merge_queue()
      |> refresh_completed_runs()
      |> refresh_pending_reviews()
@@ -165,10 +165,10 @@ defmodule ArbiterWeb.DashboardLive do
 
   # ---- data ----
 
-  defp refresh_polecats(socket) do
-    polecats =
+  defp refresh_workers(socket) do
+    workers =
       try do
-        Polecat.list_children()
+        Worker.list_children()
       rescue
         _ -> []
       end
@@ -176,18 +176,18 @@ defmodule ArbiterWeb.DashboardLive do
     workspaces_by_id =
       socket.assigns[:workspaces_by_id] || index_workspaces(load_workspaces())
 
-    polecats =
-      Enum.map(polecats, fn p ->
+    workers =
+      Enum.map(workers, fn p ->
         p
         |> Map.put(:workspace_name, workspace_label(workspaces_by_id, p.workspace_id))
         |> Map.put(:security_mode, security_mode(workspaces_by_id, p.workspace_id))
       end)
 
-    assign(socket, :polecats, polecats)
+    assign(socket, :workers, workers)
   end
 
   # Resolve the worker permission mode (:auto | :strict | :bypass) for a
-  # polecat's workspace, so the dashboard can flag at a glance when a worker is
+  # worker's workspace, so the dashboard can flag at a glance when a worker is
   # running under a non-default posture (e.g. :bypass, which skips all checks).
   # Falls back to the install-wide default when the workspace is unknown.
   defp security_mode(_workspaces_by_id, nil), do: SecurityPolicy.default().permissions.mode
@@ -202,21 +202,21 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   # The merge queue: branches integrating via Arbiter.Mergers.
-  # Sourced live from polecats parked at :awaiting_review — each has an open MR
+  # Sourced live from workers parked at :awaiting_review — each has an open MR
   # (mr_ref + clickable merger_url), the last Mergers.get/1 result the Watchdog
   # recorded (:last_merger_status), and when it was last polled. Ordered
   # longest-waiting first so a stalled merge surfaces at the top of the queue.
   #
-  # The merger *type* (Direct/GitLab/GitHub) is resolved from the polecat's
+  # The merger *type* (Direct/GitLab/GitHub) is resolved from the worker's
   # workspace config rather than the snapshot — the resolved adapter module is
-  # internal to the polecat and not exposed on the snapshot.
+  # internal to the worker and not exposed on the snapshot.
   defp refresh_merge_queue(socket) do
     workspaces_by_id =
       socket.assigns[:workspaces_by_id] || index_workspaces(load_workspaces())
 
     merges =
       try do
-        Polecat.list_children()
+        Worker.list_children()
       rescue
         _ -> []
       end
@@ -241,7 +241,7 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   # Resolve the merger strategy atom (:direct | :gitlab | :github) for a
-  # polecat's workspace. Falls back to :direct (the Workspace default) when the
+  # worker's workspace. Falls back to :direct (the Workspace default) when the
   # workspace is unknown or unset.
   defp merger_type(_workspaces_by_id, nil), do: :direct
 
@@ -256,15 +256,15 @@ defmodule ArbiterWeb.DashboardLive do
 
   # ---- review_gate (review gate) ----
 
-  # Reviews in flight right now: author polecats parked at :awaiting_review_gate
+  # Reviews in flight right now: author workers parked at :awaiting_review_gate
   # while a distinct reviewer mind code-reviews their diff. Each is enriched
-  # with the live activity of its reviewer (a sibling `<bead>#review` polecat,
+  # with the live activity of its reviewer (a sibling `<bead>#review` worker,
   # matched via meta.reviews) so the operator can see what the review is doing,
   # not just that one is pending. Ordered longest-waiting first.
   defp refresh_pending_reviews(socket) do
     children =
       try do
-        Polecat.list_children()
+        Worker.list_children()
       rescue
         _ -> []
       end
@@ -455,7 +455,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp refresh_workspaces(socket) do
     workspaces = load_workspaces()
     issues_by_workspace = group_issues_by_workspace_and_status()
-    polecats_by_workspace = group_polecats_by_workspace()
+    workers_by_workspace = group_workers_by_workspace()
 
     stats =
       Enum.map(workspaces, fn ws ->
@@ -466,7 +466,7 @@ defmodule ArbiterWeb.DashboardLive do
           name: ws.name,
           prefix: ws.prefix,
           tracker_type: get_in(ws.config || %{}, ["tracker", "type"]) || "none",
-          polecats: Map.get(polecats_by_workspace, ws.id, 0),
+          workers: Map.get(workers_by_workspace, ws.id, 0),
           open: Map.get(issue_counts, :open, 0),
           in_progress: Map.get(issue_counts, :in_progress, 0),
           closed: Map.get(issue_counts, :closed, 0)
@@ -511,9 +511,9 @@ defmodule ArbiterWeb.DashboardLive do
     _ -> %{}
   end
 
-  defp group_polecats_by_workspace do
+  defp group_workers_by_workspace do
     try do
-      Polecat.list_children()
+      Worker.list_children()
     rescue
       _ -> []
     end
@@ -528,11 +528,11 @@ defmodule ArbiterWeb.DashboardLive do
     workspaces = socket.assigns[:workspaces_by_id] |> values_or_load()
 
     paths_by_repo = collect_repo_paths(workspaces)
-    polecats_by_repo = group_polecats_by_repo()
+    workers_by_repo = group_workers_by_repo()
 
     rigs =
       paths_by_repo
-      |> Map.merge(repos_from_polecats(polecats_by_repo, paths_by_repo))
+      |> Map.merge(repos_from_workers(workers_by_repo, paths_by_repo))
       |> Enum.map(fn {name, entry} ->
         path = entry.path
 
@@ -546,7 +546,7 @@ defmodule ArbiterWeb.DashboardLive do
           name: name,
           path: path,
           source: entry.source,
-          polecats: Map.get(polecats_by_repo, name, 0),
+          workers: Map.get(workers_by_repo, name, 0),
           worktrees: worktree_count
         }
       end)
@@ -584,9 +584,9 @@ defmodule ArbiterWeb.DashboardLive do
     end)
   end
 
-  defp group_polecats_by_repo do
+  defp group_workers_by_repo do
     try do
-      Polecat.list_children()
+      Worker.list_children()
     rescue
       _ -> []
     end
@@ -596,11 +596,11 @@ defmodule ArbiterWeb.DashboardLive do
     end)
   end
 
-  # A polecat can be running against a repo name that isn't in any
+  # A worker can be running against a repo name that isn't in any
   # `repo_paths` config (default-repo "unknown", a typo, or an inherited
   # legacy value). Surface those as well so the operator can see them.
-  defp repos_from_polecats(polecats_by_repo, configured) do
-    polecats_by_repo
+  defp repos_from_workers(workers_by_repo, configured) do
+    workers_by_repo
     |> Map.keys()
     |> Enum.reject(&Map.has_key?(configured, &1))
     |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)
@@ -639,29 +639,29 @@ defmodule ArbiterWeb.DashboardLive do
   defp difficulty_badge_class(4), do: "badge-error"
   defp difficulty_badge_class(_), do: "badge-ghost"
 
-  defp polecat_status_class(:idle), do: "badge-ghost"
-  defp polecat_status_class(:resuming), do: "badge-info"
-  defp polecat_status_class(:running), do: "badge-info"
-  defp polecat_status_class(:awaiting), do: "badge-warning"
-  defp polecat_status_class(:awaiting_review_gate), do: "badge-warning"
-  defp polecat_status_class(:awaiting_review), do: "badge-warning"
-  defp polecat_status_class(:completed), do: "badge-success"
-  defp polecat_status_class(:failed), do: "badge-error"
-  defp polecat_status_class(_), do: ""
+  defp worker_status_class(:idle), do: "badge-ghost"
+  defp worker_status_class(:resuming), do: "badge-info"
+  defp worker_status_class(:running), do: "badge-info"
+  defp worker_status_class(:awaiting), do: "badge-warning"
+  defp worker_status_class(:awaiting_review_gate), do: "badge-warning"
+  defp worker_status_class(:awaiting_review), do: "badge-warning"
+  defp worker_status_class(:completed), do: "badge-success"
+  defp worker_status_class(:failed), do: "badge-error"
+  defp worker_status_class(_), do: ""
 
-  defp polecat_status_label(:idle), do: "Idle"
-  defp polecat_status_label(:resuming), do: "Resuming"
-  defp polecat_status_label(:running), do: "Running"
-  defp polecat_status_label(:awaiting), do: "Awaiting"
-  defp polecat_status_label(:awaiting_review_gate), do: "In review_gate"
-  defp polecat_status_label(:awaiting_review), do: "Awaiting review"
-  defp polecat_status_label(:completed), do: "Completed"
-  defp polecat_status_label(:failed), do: "Failed"
+  defp worker_status_label(:idle), do: "Idle"
+  defp worker_status_label(:resuming), do: "Resuming"
+  defp worker_status_label(:running), do: "Running"
+  defp worker_status_label(:awaiting), do: "Awaiting"
+  defp worker_status_label(:awaiting_review_gate), do: "In review_gate"
+  defp worker_status_label(:awaiting_review), do: "Awaiting review"
+  defp worker_status_label(:completed), do: "Completed"
+  defp worker_status_label(:failed), do: "Failed"
 
-  defp polecat_status_label(other) when is_atom(other),
+  defp worker_status_label(other) when is_atom(other),
     do: other |> Atom.to_string() |> String.capitalize()
 
-  defp polecat_status_label(other), do: to_string(other)
+  defp worker_status_label(other), do: to_string(other)
 
   defp run_status_class(:completed), do: "badge-success"
   defp run_status_class(:failed), do: "badge-error"
@@ -716,7 +716,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   # Watchdog poll cadence, in seconds, for the merge-queue freshness line. The
   # per-workspace override isn't exposed on the snapshot, so we show the
-  # default — the same value the polecat detail view reports.
+  # default — the same value the worker detail view reports.
   defp poll_interval_seconds, do: div(Watchdog.default_interval_ms(), 1000)
 
   defp humanize_duration(%DateTime{} = started_at, %DateTime{} = ended_at) do
@@ -753,7 +753,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   defp relative_time(_, _), do: ""
 
-  # An MR/PR ref is not currently persisted on the polecat snapshot, so this
+  # An MR/PR ref is not currently persisted on the worker snapshot, so this
   # degrades to nil. When the dispatch flow starts stashing it in meta (under
   # :mr_ref or "mr_ref"), the awaiting-review link lights up automatically.
   defp mr_ref(%{meta: meta}) when is_map(meta) do
@@ -764,15 +764,15 @@ defmodule ArbiterWeb.DashboardLive do
 
   # Ordered worker lifecycle for the inline step indicator. :failed is handled
   # separately in the template (it doesn't belong on the happy-path track).
-  @polecat_flow [:idle, :running, :awaiting, :completed]
+  @worker_flow [:idle, :running, :awaiting, :completed]
 
-  defp polecat_flow, do: @polecat_flow
+  defp worker_flow, do: @worker_flow
 
   # Returns :done | :current | :todo for a step relative to the worker's
   # current status, so the template can color the inline step track.
   defp flow_state(step, status) do
-    step_idx = Enum.find_index(@polecat_flow, &(&1 == step))
-    status_idx = Enum.find_index(@polecat_flow, &(&1 == status))
+    step_idx = Enum.find_index(@worker_flow, &(&1 == step))
+    status_idx = Enum.find_index(@worker_flow, &(&1 == status))
 
     cond do
       is_nil(step_idx) or is_nil(status_idx) -> :todo
@@ -788,7 +788,7 @@ defmodule ArbiterWeb.DashboardLive do
     if String.length(body) > 80, do: String.slice(body, 0, 80) <> "…", else: body
   end
 
-  # A claude-driven polecat — a streaming Claude subprocess does the real work
+  # A claude-driven worker — a streaming Claude subprocess does the real work
   # and its workflow Machine is never ticked, so current_step sits frozen. Show
   # the live activity derived from the stream instead. See bd-c919xj.
   defp claude_session?(%{meta: meta}) when is_map(meta),
@@ -899,7 +899,7 @@ defmodule ArbiterWeb.DashboardLive do
               <.icon name="hero-cpu-chip" class="size-7" />
             </div>
             <div class="stat-title">Active {cap_plural(@worker_label)}</div>
-            <div class="stat-value text-info">{length(@polecats)}</div>
+            <div class="stat-value text-info">{length(@workers)}</div>
             <div class="stat-desc">running right now</div>
           </div>
 
@@ -941,13 +941,13 @@ defmodule ArbiterWeb.DashboardLive do
               <div class="flex items-center justify-between">
                 <h2 class="text-lg font-semibold flex items-center gap-2">
                   <.icon name="hero-bolt" class="size-5 text-info" />
-                  Active {cap_plural(@worker_label)} ({length(@polecats)})
+                  Active {cap_plural(@worker_label)} ({length(@workers)})
                 </h2>
-                <.see_all_link navigate={~p"/polecats"} />
+                <.see_all_link navigate={~p"/workers"} />
               </div>
 
               <div
-                :if={@polecats == []}
+                :if={@workers == []}
                 class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
               >
                 <.icon name="hero-moon" class="size-8 mx-auto text-base-content/30" />
@@ -960,14 +960,14 @@ defmodule ArbiterWeb.DashboardLive do
                 </p>
               </div>
 
-              <ul :if={@polecats != []} id="active-polecats" class="flex flex-col gap-3">
+              <ul :if={@workers != []} id="active-workers" class="flex flex-col gap-3">
                 <li
-                  :for={p <- @polecats}
+                  :for={p <- @workers}
                   class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-info/50"
                 >
                   <div class="flex items-center justify-between gap-2">
                     <.link
-                      navigate={~p"/polecats/#{p.bead_id}"}
+                      navigate={~p"/workers/#{p.bead_id}"}
                       class="flex items-center gap-2 min-w-0 group"
                     >
                       <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -1016,7 +1016,7 @@ defmodule ArbiterWeb.DashboardLive do
                   <%!-- Inline lifecycle track: idle → running → awaiting → completed --%>
                   <div class="flex items-center gap-1 mt-2.5">
                     <span
-                      :for={step <- polecat_flow()}
+                      :for={step <- worker_flow()}
                       class="flex items-center gap-1 flex-1 last:flex-none"
                     >
                       <span
@@ -1024,12 +1024,12 @@ defmodule ArbiterWeb.DashboardLive do
                           "h-1.5 flex-1 rounded-full transition-colors duration-300",
                           flow_bar_class(flow_state(step, p.status))
                         ]}
-                        title={polecat_status_label(step)}
+                        title={worker_status_label(step)}
                       >
                       </span>
                     </span>
-                    <span class={["badge badge-sm ml-1 shrink-0", polecat_status_class(p.status)]}>
-                      {polecat_status_label(p.status)}
+                    <span class={["badge badge-sm ml-1 shrink-0", worker_status_class(p.status)]}>
+                      {worker_status_label(p.status)}
                     </span>
                   </div>
 
@@ -1360,7 +1360,7 @@ defmodule ArbiterWeb.DashboardLive do
                   <div class="text-xs text-base-content/50 mt-0.5">tracker: {ws.tracker_type}</div>
                   <div class="flex flex-wrap items-center gap-1.5 mt-2.5 text-xs">
                     <span class="badge badge-sm badge-info" title={"Active #{plural(@worker_label)}"}>
-                      <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{ws.polecats}
+                      <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{ws.workers}
                     </span>
                     <span class="badge badge-sm badge-success" title={"Open #{plural(@issue_label)}"}>
                       {ws.open} open
@@ -1405,7 +1405,7 @@ defmodule ArbiterWeb.DashboardLive do
                   </div>
                   <div class="flex flex-wrap items-center gap-1.5 mt-2.5 text-xs">
                     <span class="badge badge-sm badge-info" title={"Active #{plural(@worker_label)}"}>
-                      <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{repo.polecats}
+                      <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{repo.workers}
                     </span>
                     <span class="badge badge-sm badge-ghost" title={cap_plural(@worktree_label)}>
                       {repo.worktrees} {plural(@worktree_label)}
@@ -1425,7 +1425,7 @@ defmodule ArbiterWeb.DashboardLive do
                 <.icon name="hero-check-circle" class="size-5 text-base-content/70" />
                 Completed {cap_plural(@worker_label)} ({length(@completed_runs)})
               </h2>
-              <.see_all_link navigate={~p"/polecats/history"} />
+              <.see_all_link navigate={~p"/workers/history"} />
             </div>
 
             <div
@@ -1453,7 +1453,7 @@ defmodule ArbiterWeb.DashboardLive do
                 <tbody>
                   <tr :for={r <- @completed_runs} class="hover:bg-base-300/40 transition-colors">
                     <td>
-                      <.link navigate={~p"/polecats/history/#{r.id}"} class="link link-hover">
+                      <.link navigate={~p"/workers/history/#{r.id}"} class="link link-hover">
                         <code class="text-xs">{r.bead_id}</code>
                       </.link>
                     </td>
@@ -1510,7 +1510,7 @@ defmodule ArbiterWeb.DashboardLive do
               >
                 <div class="flex items-center justify-between gap-2">
                   <.link
-                    navigate={~p"/polecats/#{m.bead_id}"}
+                    navigate={~p"/workers/#{m.bead_id}"}
                     class="flex items-center gap-2 min-w-0 group"
                   >
                     <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -1609,7 +1609,7 @@ defmodule ArbiterWeb.DashboardLive do
                 >
                   <div class="flex items-center justify-between gap-2">
                     <.link
-                      navigate={~p"/polecats/#{r.bead_id}"}
+                      navigate={~p"/workers/#{r.bead_id}"}
                       class="flex items-center gap-2 min-w-0 group"
                     >
                       <span class="relative flex h-2.5 w-2.5 shrink-0">

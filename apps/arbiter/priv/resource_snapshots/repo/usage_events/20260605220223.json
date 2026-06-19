@@ -144,7 +144,7 @@
       "default": "nil",
       "size": null,
       "type": "uuid",
-      "source": "polecat_run_id",
+      "source": "worker_run_id",
       "references": null,
       "allow_nil?": true,
       "primary_key?": false,

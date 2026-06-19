@@ -9,14 +9,14 @@ defmodule ArbiterWeb.MCP.PlugTest do
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-plug-ws", prefix: "mcpw"})
     {:ok, bead} = Ash.create(Issue, %{title: "plug bead", workspace_id: ws.id})
 
-    polecat_token = Scope.mint_polecat(bead, "shipyard")
+    worker_token = Scope.mint_worker(bead, "shipyard")
     coordinator_token = Scope.mint_coordinator(ws.id)
 
     {:ok,
      conn: conn,
      ws: ws,
      bead: bead,
-     polecat_token: polecat_token,
+     worker_token: worker_token,
      coordinator_token: coordinator_token}
   end
 
@@ -42,7 +42,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
   describe "initialize" do
     test "negotiates a protocol version and advertises the tools capability", ctx do
       conn =
-        rpc(ctx.conn, ctx.polecat_token, req("initialize", %{"protocolVersion" => "2025-06-18"}))
+        rpc(ctx.conn, ctx.worker_token, req("initialize", %{"protocolVersion" => "2025-06-18"}))
 
       assert %{"result" => result, "id" => 1, "jsonrpc" => "2.0"} = json_response(conn, 200)
       assert result["protocolVersion"] == "2025-06-18"
@@ -52,7 +52,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
     test "falls back to the latest supported version for an unknown one", ctx do
       conn =
-        rpc(ctx.conn, ctx.polecat_token, req("initialize", %{"protocolVersion" => "1999-01-01"}))
+        rpc(ctx.conn, ctx.worker_token, req("initialize", %{"protocolVersion" => "1999-01-01"}))
 
       assert json_response(conn, 200)["result"]["protocolVersion"] == "2025-06-18"
     end
@@ -74,7 +74,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
     end
 
     test "a valid token in the query parameter is accepted", ctx do
-      conn = rpc_with_query_token(ctx.conn, ctx.polecat_token, req("tools/list"))
+      conn = rpc_with_query_token(ctx.conn, ctx.worker_token, req("tools/list"))
       assert json_response(conn, 200)["result"]["tools"] != nil
     end
 
@@ -104,8 +104,8 @@ defmodule ArbiterWeb.MCP.PlugTest do
   end
 
   describe "tools/list" do
-    test "a polecat does not see coordinator-only tools", ctx do
-      conn = rpc(ctx.conn, ctx.polecat_token, req("tools/list"))
+    test "a worker does not see coordinator-only tools", ctx do
+      conn = rpc(ctx.conn, ctx.worker_token, req("tools/list"))
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
 
       assert "bead_show" in names
@@ -120,18 +120,18 @@ defmodule ArbiterWeb.MCP.PlugTest do
     end
 
     test "tools advertise an inputSchema (camelCase wire field)", ctx do
-      conn = rpc(ctx.conn, ctx.polecat_token, req("tools/list"))
+      conn = rpc(ctx.conn, ctx.worker_token, req("tools/list"))
       [tool | _] = json_response(conn, 200)["result"]["tools"]
       assert tool["inputSchema"]["type"] == "object"
     end
   end
 
   describe "tools/call" do
-    test "a polecat reads its own bead, returning structuredContent", ctx do
+    test "a worker reads its own bead, returning structuredContent", ctx do
       conn =
         rpc(
           ctx.conn,
-          ctx.polecat_token,
+          ctx.worker_token,
           req("tools/call", %{"name" => "bead_show", "arguments" => %{}})
         )
 
@@ -145,7 +145,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
       conn =
         rpc(
           ctx.conn,
-          ctx.polecat_token,
+          ctx.worker_token,
           req("tools/call", %{"name" => "bead_ready", "arguments" => %{}})
         )
 
@@ -190,11 +190,11 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert result["structuredContent"]["workspace_id"] == ctx.ws.id
     end
 
-    test "a polecat cannot call a coordinator-only mutating tool", ctx do
+    test "a worker cannot call a coordinator-only mutating tool", ctx do
       conn =
         rpc(
           ctx.conn,
-          ctx.polecat_token,
+          ctx.worker_token,
           req("tools/call", %{
             "name" => "bead_create",
             "arguments" => %{"title" => "nope"}
@@ -204,7 +204,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert json_response(conn, 200)["error"]["code"] == -32_003
     end
 
-    test "polecat_dispatch without can_dispatch is a JSON-RPC not-permitted error", ctx do
+    test "worker_dispatch without can_dispatch is a JSON-RPC not-permitted error", ctx do
       no_dispatch = Scope.mint_coordinator(ctx.ws.id, can_dispatch: false)
 
       conn =
@@ -212,7 +212,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           no_dispatch,
           req("tools/call", %{
-            "name" => "polecat_dispatch",
+            "name" => "worker_dispatch",
             "arguments" => %{"bead_id" => ctx.bead.id}
           })
         )
@@ -225,13 +225,13 @@ defmodule ArbiterWeb.MCP.PlugTest do
 
   describe "protocol edges" do
     test "an unknown method is method-not-found", ctx do
-      conn = rpc(ctx.conn, ctx.polecat_token, req("frobnicate"))
+      conn = rpc(ctx.conn, ctx.worker_token, req("frobnicate"))
       assert json_response(conn, 200)["error"]["code"] == -32_601
     end
 
     test "a notification (no id) is accepted with 202 and no body", ctx do
       conn =
-        rpc(ctx.conn, ctx.polecat_token, %{
+        rpc(ctx.conn, ctx.worker_token, %{
           "jsonrpc" => "2.0",
           "method" => "notifications/initialized"
         })
@@ -240,7 +240,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
     end
 
     test "ping returns an empty result", ctx do
-      conn = rpc(ctx.conn, ctx.polecat_token, req("ping"))
+      conn = rpc(ctx.conn, ctx.worker_token, req("ping"))
       assert json_response(conn, 200)["result"] == %{}
     end
 
@@ -301,8 +301,8 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert conn.resp_body =~ "arbiter-mcp session=#{session_id}"
     end
 
-    test "a polecat token is rejected on GET (401) — workspace isolation holds", ctx do
-      conn = sse(ctx.conn, ctx.polecat_token)
+    test "a worker token is rejected on GET (401) — workspace isolation holds", ctx do
+      conn = sse(ctx.conn, ctx.worker_token)
       assert json_response(conn, 401)["error"]["type"] == "unauthorized"
     end
 

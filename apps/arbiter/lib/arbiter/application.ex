@@ -39,9 +39,9 @@ defmodule Arbiter.Application do
       {Phoenix.PubSub, name: Arbiter.PubSub},
       Arbiter.Agents.ProviderPool,
       Arbiter.Agents.CredentialWatchdog,
-      {Registry, keys: :unique, name: Arbiter.Polecat.Registry},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Polecat.Supervisor},
-      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Polecat.WatchdogSupervisor},
+      {Registry, keys: :unique, name: Arbiter.Worker.Registry},
+      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.Supervisor},
+      {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Worker.WatchdogSupervisor},
       {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
       {Registry, keys: :unique, name: Arbiter.Workflows.MergeQueueRegistry},
@@ -65,15 +65,15 @@ defmodule Arbiter.Application do
   #     before reconcile/merge_queue so those run against the current schema. It is
   #     a one-shot worker (returns :ignore), not a Task, precisely so it BLOCKS
   #     the boot until the schema is current. See Arbiter.Boot.Migrator.
-  #   * reconcile: sweep orphaned :running polecat_runs left behind by a node
-  #     that died mid-run. Runs once after Repo + Polecat.Registry are online —
+  #   * reconcile: sweep orphaned :running worker_runs left behind by a node
+  #     that died mid-run. Runs once after Repo + Worker.Registry are online —
   #     but ONLY on the primary instance, so a transient/duplicate boot can't
   #     fail the live instance's running runs.
   #   * reconcile_open_prs: find :in_progress beads with a pr_ref but no live
-  #     polecat — the server was killed between `arb done` and the Watchdog being
+  #     worker — the server was killed between `arb done` and the Watchdog being
   #     established. Escalates each to Admiral. bd-crqku8.
   #   * merge_queue: eagerly start one MergeQueue per existing workspace once the
-  #     tree is up, so a cold boot misses no `:polecat_done` events.
+  #     tree is up, so a cold boot misses no `:worker_done` events.
   #
   # Gated off in test (auto_start?/0 is false) so the boot sweep doesn't race
   # the sandboxed connection and test code can drive the GenServers with its
@@ -90,8 +90,8 @@ defmodule Arbiter.Application do
         {Task,
          fn ->
            primary? = Arbiter.SingleInstance.primary?()
-           Arbiter.Polecats.Reconciler.reconcile_orphaned_runs(primary?: primary?)
-           Arbiter.Polecats.Reconciler.reconcile_open_pr_beads(primary?: primary?)
+           Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
+           Arbiter.Workers.Reconciler.reconcile_open_pr_beads(primary?: primary?)
          end},
         id: :reconcile_boot_task,
         restart: :temporary

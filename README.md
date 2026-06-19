@@ -2,7 +2,7 @@
 
 A local-first project coordination system. Track work as Directives
 (beads), group them into Strike Forces (convoys), and dispatch Acolyte
-(polecat) agents to work them — with a LiveView dashboard and a CLI
+(worker) agents to work them — with a LiveView dashboard and a CLI
 (`arb`) for interacting with everything.
 
 ## Prerequisites

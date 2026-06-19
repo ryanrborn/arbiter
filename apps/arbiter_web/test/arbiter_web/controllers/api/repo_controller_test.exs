@@ -17,7 +17,7 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
         assert Map.has_key?(repo, "name")
         assert Map.has_key?(repo, "path")
         assert Map.has_key?(repo, "source")
-        assert Map.has_key?(repo, "polecats")
+        assert Map.has_key?(repo, "workers")
         assert Map.has_key?(repo, "worktrees")
       end
     end
@@ -37,7 +37,7 @@ defmodule ArbiterWeb.Api.RepoControllerTest do
       assert alpha
       assert alpha["path"] == "/tmp/does-not-exist-alpha"
       assert alpha["source"] == "repo-ws"
-      assert is_integer(alpha["polecats"])
+      assert is_integer(alpha["workers"])
       assert is_integer(alpha["worktrees"])
     end
 

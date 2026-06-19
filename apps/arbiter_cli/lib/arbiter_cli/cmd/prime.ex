@@ -16,7 +16,7 @@ defmodule ArbiterCli.Cmd.Prime do
        for the full operator field guide.
     4. **Admiral Inbox** — up to 5 most recent unread messages addressed to
        the Admiral. Omitted entirely when there are none.
-    5. **Active polecats** — bead_id, status, current_step, runtime.
+    5. **Active workers** — bead_id, status, current_step, runtime.
     6. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
 
   ## Standing Orders are data, not code
@@ -64,7 +64,7 @@ defmodule ArbiterCli.Cmd.Prime do
       workspace: unwrap(sections.workspace),
       standing_orders: unwrap(sections.standing_orders),
       admiral_inbox: unwrap(sections.admiral_inbox),
-      polecats: unwrap(sections.polecats),
+      workers: unwrap(sections.workers),
       ready: unwrap(sections.ready),
       field_guide_pitfalls: field_guide_pitfalls()
     }
@@ -82,7 +82,7 @@ defmodule ArbiterCli.Cmd.Prime do
       workspace: workspace,
       standing_orders: gather_standing_orders(workspace),
       admiral_inbox: gather_admiral_inbox(),
-      polecats: gather_polecats(),
+      workers: gather_workers(),
       ready: gather_ready(workspace)
     }
   end
@@ -114,8 +114,8 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
-  defp gather_polecats do
-    case Client.get("/api/polecats") do
+  defp gather_workers do
+    case Client.get("/api/workers") do
       {:ok, %{"data" => list}} -> {:ok, list}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
@@ -147,7 +147,7 @@ defmodule ArbiterCli.Cmd.Prime do
     emit_field_guide_digest("issue", "worker", "repo")
     IO.puts("")
     maybe_emit_admiral_inbox(sections.admiral_inbox)
-    emit_polecats_section(sections.polecats, "worker")
+    emit_workers_section(sections.workers, "worker")
     IO.puts("")
     emit_ready_section(sections.ready, "issue")
   end
@@ -284,12 +284,12 @@ defmodule ArbiterCli.Cmd.Prime do
     ]
   end
 
-  defp emit_polecats_section({:ok, []}, worker) do
+  defp emit_workers_section({:ok, []}, worker) do
     IO.puts("== Active #{worker}s ==")
     IO.puts("  (none)")
   end
 
-  defp emit_polecats_section({:ok, list}, worker) do
+  defp emit_workers_section({:ok, list}, worker) do
     IO.puts("== Active #{worker}s (#{length(list)}) ==")
 
     Enum.each(list, fn p ->
@@ -304,7 +304,7 @@ defmodule ArbiterCli.Cmd.Prime do
     end)
   end
 
-  defp emit_polecats_section({:error, msg}, worker) do
+  defp emit_workers_section({:error, msg}, worker) do
     IO.puts("== Active #{worker}s ==")
     IO.puts("  (error: #{msg})")
   end

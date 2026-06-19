@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.RunControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Workers.Run
 
   @ws "ws-api-run"
 
@@ -22,7 +22,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
     run
   end
 
-  describe "GET /api/polecats/history" do
+  describe "GET /api/workers/history" do
     test "lists runs newest first, scoped to workspace and status", %{conn: conn} do
       now = DateTime.utc_now()
       older = DateTime.add(now, -10, :second)
@@ -33,7 +33,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       _ = insert_run!(%{bead_id: "bd-h3", started_at: newer, status: :failed})
       _ = insert_run!(%{bead_id: "bd-h4", started_at: newer, workspace_id: "other"})
 
-      conn = get(conn, ~p"/api/polecats/history", %{workspace_id: @ws, status: "completed"})
+      conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, status: "completed"})
       data = json_response(conn, 200)["data"]
       ids = Enum.map(data, & &1["bead_id"])
       assert ids == ["bd-h2", "bd-h1"]
@@ -50,7 +50,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
         })
       end
 
-      conn = get(conn, ~p"/api/polecats/history", %{workspace_id: @ws, limit: "2"})
+      conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, limit: "2"})
       assert length(json_response(conn, 200)["data"]) == 2
     end
 
@@ -59,7 +59,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       _ = insert_run!(%{bead_id: "bd-c2", started_at: ~U[2026-05-27 12:00:00.000000Z]})
 
       conn =
-        get(conn, ~p"/api/polecats/history", %{
+        get(conn, ~p"/api/workers/history", %{
           workspace_id: @ws,
           before: "2026-05-27T11:00:00Z"
         })
@@ -69,12 +69,12 @@ defmodule ArbiterWeb.Api.RunControllerTest do
     end
 
     test "invalid status returns 400", %{conn: conn} do
-      conn = get(conn, ~p"/api/polecats/history", %{status: "nope"})
+      conn = get(conn, ~p"/api/workers/history", %{status: "nope"})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
   end
 
-  describe "GET /api/polecats/history/:id" do
+  describe "GET /api/workers/history/:id" do
     test "returns the run with full output_lines", %{conn: conn} do
       run =
         insert_run!(%{
@@ -84,14 +84,14 @@ defmodule ArbiterWeb.Api.RunControllerTest do
           output_lines: ["one", "two", "three"]
         })
 
-      conn = get(conn, ~p"/api/polecats/history/#{run.id}")
+      conn = get(conn, ~p"/api/workers/history/#{run.id}")
       data = json_response(conn, 200)["data"]
       assert data["bead_id"] == "bd-show"
       assert data["output_lines"] == ["one", "two", "three"]
     end
 
     test "404 on unknown id", %{conn: conn} do
-      conn = get(conn, ~p"/api/polecats/history/00000000-0000-0000-0000-000000000000")
+      conn = get(conn, ~p"/api/workers/history/00000000-0000-0000-0000-000000000000")
       assert %{"error" => %{"type" => "not_found"}} = json_response(conn, 404)
     end
   end

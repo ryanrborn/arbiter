@@ -1,8 +1,8 @@
 import Config
 config :ash, policies: [show_policy_breakdowns?: true]
 
-# Repo → git-repo path mapping consumed by `Arbiter.Polecat.Dispatch` when it
-# provisions a worktree for a freshly-dispatched polecat. Beads dispatched with
+# Repo → git-repo path mapping consumed by `Arbiter.Worker.Dispatch` when it
+# provisions a worktree for a freshly-dispatched worker. Beads dispatched with
 # a repo string not in this map skip worktree provisioning entirely.
 # Repos can also be configured per-workspace via the dashboard
 # (Workspace → config["repo_paths"]) so you don't have to redeploy to add one.
@@ -10,8 +10,8 @@ config :arbiter, :repo_paths, %{}
 config :arbiter, :worktree_root, Path.expand("~/dev/arbiter-worktrees")
 
 # Root for durable, append-only per-run acolyte transcripts
-# (Arbiter.Polecat.OutputLog). One file per run: <root>/<run_id>.log.
-config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-polecat-logs")
+# (Arbiter.Worker.OutputLog). One file per run: <root>/<run_id>.log.
+config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-worker-logs")
 
 config :arbiter, Arbiter.Repo,
   database: Path.expand("~/dev/arbiter_dev.sqlite3"),

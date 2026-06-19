@@ -1,7 +1,7 @@
 defmodule Arbiter.Workflows.CodeReview do
   @moduledoc """
   Peer-review workflow (gte-021). The Elixir port of Go GT's
-  `mol-polecat-code-review` formula.
+  `mol-worker-code-review` formula.
 
   Reviews a PR/MR's diff against a bead's acceptance criteria and produces
   a verdict (`:approve` or `:request_changes`). Two modes:
@@ -56,24 +56,24 @@ defmodule Arbiter.Workflows.CodeReview do
 
   ## Forbidden actions
 
-  A reviewer polecat MUST NOT:
+  A reviewer worker MUST NOT:
 
-    * push code (no `Polecat.Worktree.push/2` call lives in this workflow)
+    * push code (no `Worker.Worktree.push/2` call lives in this workflow)
     * merge PRs (no `GitHub.pr_merge/4` / `Merger.merge/1` call lives here)
     * make non-comment mutations beyond inline comments + a single review
 
   These constraints are enforced **statically** (this module simply does
   not call those functions) and documented here.
 
-  After `:verdict` runs, control returns to the polecat which transitions
-  back to `:idle`. The workflow does not drive the polecat state directly.
+  After `:verdict` runs, control returns to the worker which transitions
+  back to `:idle`. The workflow does not drive the worker state directly.
   """
 
   use Arbiter.Workflow,
     steps: [:load_pr, :read_diff, :run_checks, :file_findings, :verdict]
 
   alias Arbiter.Mergers
-  alias Arbiter.Polecat.Worktree
+  alias Arbiter.Worker.Worktree
   alias Arbiter.Workflows.CodeReview.{Checks, LocalMode}
 
   step(:load_pr,

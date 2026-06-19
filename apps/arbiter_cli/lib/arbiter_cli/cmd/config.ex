@@ -283,12 +283,12 @@ defmodule ArbiterCli.Cmd.Config do
   defp check_repo_paths(reasons, config) do
     case Map.fetch(config, "repo_paths") do
       {:ok, m} when is_map(m) and map_size(m) == 0 ->
-        ["repo_paths is empty — polecat dispatch cannot resolve a working dir" | reasons]
+        ["repo_paths is empty — worker dispatch cannot resolve a working dir" | reasons]
 
       _ ->
         case Map.fetch(config, "rig_paths") do
           {:ok, m} when is_map(m) and map_size(m) == 0 ->
-            ["rig_paths is empty — polecat dispatch cannot resolve a working dir" | reasons]
+            ["rig_paths is empty — worker dispatch cannot resolve a working dir" | reasons]
 
           _ ->
             reasons

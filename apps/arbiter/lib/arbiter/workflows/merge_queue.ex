@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.MergeQueue do
   @moduledoc """
-  Per-workspace merge-queue GenServer. Picks up "polecat done" events,
+  Per-workspace merge-queue GenServer. Picks up "worker done" events,
   opens MRs/PRs (or merges directly per workspace config), polls them for
   approval + CI, merges with the configured strategy, and transitions
   beads to `:closed` when the merge lands.
@@ -10,10 +10,10 @@ defmodule Arbiter.Workflows.MergeQueue do
       start_link(workspace_id: ws.id)
         │
         ▼
-      subscribes to PubSub topic "polecat:done:" <> workspace_id
+      subscribes to PubSub topic "worker:done:" <> workspace_id
         │
         ▼
-      receives {:polecat_done, bead_id}
+      receives {:worker_done, bead_id}
         │
         ▼
       loads bead → resolves merge adapter → opens MR (or skips for :direct)
@@ -57,7 +57,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         │   adapter.get reports conflicting: true
         ▼
       :conflict_resolving — spawn `Arbiter.Workflows.MergeQueue.ConflictResolver`
-                            (a swappable behaviour, defaults to a Polecat +
+                            (a swappable behaviour, defaults to a Worker +
                             ClaudeSession running rebase + force-push)
         │   worker pushes resolved branch
         ▼
@@ -123,14 +123,14 @@ defmodule Arbiter.Workflows.MergeQueue do
     * `"gitlab"` — `Arbiter.Mergers.Gitlab` adapter (MR-based)
     * `"direct"` — `Arbiter.Mergers.Direct` adapter. **Never opens a
       MR/PR**. The bead is immediately transitioned to `:done` (and then
-      `:closed`). This is the "personal project" path; the polecat is
+      `:closed`). This is the "personal project" path; the worker is
       assumed to have already pushed + merged its branch out-of-band.
 
   ## PubSub topic
 
-  Subscribes to `"polecat:done:" <> workspace_id`. Per-workspace because
+  Subscribes to `"worker:done:" <> workspace_id`. Per-workspace because
   each MergeQueue process runs against exactly one workspace and shouldn't
-  see other workspaces' events. The polecat (or the orchestrator that
+  see other workspaces' events. The worker (or the orchestrator that
   drives it) is responsible for broadcasting to that topic when its
   workflow completes successfully.
 
@@ -154,18 +154,18 @@ defmodule Arbiter.Workflows.MergeQueue do
       bead's own `target_branch` and the per-repo default (so those still win),
       but above the workspace `merge.base`. Defaults to `nil`, in which case the
       base is resolved entirely from bead/repo/workspace config via
-      `Arbiter.Polecat.TargetBranch`. Convenient for tests.
+      `Arbiter.Worker.TargetBranch`. Convenient for tests.
     * `:auto_tick` — when `false` (default `true`), the periodic `:tick`
       timer is not scheduled. Tests use `false` and drive ticks via
       `tick/1` so they don't race with real time.
     * `:conflict_resolver` — module implementing the
       `Arbiter.Workflows.MergeQueue.ConflictResolver` behaviour. Defaults to
-      the real implementation (which spawns a Polecat + ClaudeSession);
+      the real implementation (which spawns a Worker + ClaudeSession);
       tests pass a stub.
     * `:revise_dispatcher` — module implementing the
       `Arbiter.Workflows.MergeQueue.ReviseDispatcher` behaviour (bd-95lsjb).
       Defaults to the real implementation (which resumes the bead's worktree
-      via `Arbiter.Polecat.Dispatch.resume/2`); tests pass a stub.
+      via `Arbiter.Worker.Dispatch.resume/2`); tests pass a stub.
   """
 
   use GenServer
@@ -176,10 +176,10 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Mergers
-  alias Arbiter.Polecat.PRTemplate
-  alias Arbiter.Polecat.TargetBranch
-  alias Arbiter.Polecat.Worktree
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Worker.PRTemplate
+  alias Arbiter.Worker.TargetBranch
+  alias Arbiter.Worker.Worktree
+  alias Arbiter.Workers.Run
   alias Arbiter.Trackers
 
   @default_poll_interval_ms 30_000
@@ -240,7 +240,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   @doc """
   Synchronously enqueue a bead for merging. Behaves the same as receiving
-  a `{:polecat_done, bead_id}` PubSub message. Returns `:ok` on enqueue
+  a `{:worker_done, bead_id}` PubSub message. Returns `:ok` on enqueue
   even if the actual MR open / merge hasn't happened yet (it runs inside
   the GenServer's `handle_call` though, so by the time this returns the
   initial state transition has been recorded).
@@ -279,9 +279,9 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms)
     auto_tick = Keyword.get(opts, :auto_tick, true)
-    topic = "polecat:done:" <> workspace_id
+    topic = "worker:done:" <> workspace_id
 
-    # Subscribe to polecat done events for this workspace.
+    # Subscribe to worker done events for this workspace.
     :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
 
     # Resolve adapter from workspace config. Defaults to Direct when the
@@ -341,7 +341,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   @impl true
-  def handle_info({:polecat_done, bead_id}, %State{} = state) when is_binary(bead_id) do
+  def handle_info({:worker_done, bead_id}, %State{} = state) when is_binary(bead_id) do
     {_reply, state} = do_enqueue(state, bead_id)
     {:noreply, state}
   end
@@ -376,7 +376,7 @@ defmodule Arbiter.Workflows.MergeQueue do
             {{:ok, :already_queued}, state}
 
           strategy == "direct" ->
-            # direct: never call MR/PR APIs. The polecat owned the push + merge;
+            # direct: never call MR/PR APIs. The worker owned the push + merge;
             # we just transition the bead. This is the explicit escape hatch
             # for personal projects that don't use the PR/MR workflow.
             item = new_item(bead_id, strategy, status: :done)
@@ -430,7 +430,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   # Resolve the PR base for a bead via the shared resolver, identical to the
-  # chain `Arbiter.Polecat.Dispatch` uses for the worktree base, so the two can
+  # chain `Arbiter.Worker.Dispatch` uses for the worktree base, so the two can
   # never diverge (bd-b6rzoc). `state.base` is threaded in as the queue-level
   # `:workspace_base` — below the bead/repo config, never short-circuiting it.
   defp resolve_base(%State{} = state, %Issue{} = bead) do
@@ -441,7 +441,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   # The repo the bead was actually worked in — drawn from its most recent
-  # polecat run, the same repo `Dispatch` cut the worktree with. nil when the bead
+  # worker run, the same repo `Dispatch` cut the worktree with. nil when the bead
   # has no run on record (e.g. a bead enqueued without ever being slung), in
   # which case the per-repo default simply doesn't apply.
   defp resolve_bead_repo(%Issue{id: bead_id}) do
@@ -600,7 +600,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         advance_status(state, %{item | status: :awaiting_approval}, mr_state)
 
       # MR was already merged externally (e.g. the Watchdog merged it for a
-      # ReviewGate-approved bead before the MergeQueue processed the polecat_done
+      # ReviewGate-approved bead before the MergeQueue processed the worker_done
       # event). Close the bead directly without re-attempting adapter.merge/1
       # — that call would fail on an already-closed PR. bd-d1jp4r. Checked
       # before the changes-requested branch so a merged PR never triggers a

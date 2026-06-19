@@ -14,12 +14,12 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       assert code != 0
     end
 
-    test "happy path posts to /api/polecats/:bead_id/resume and renders text" do
+    test "happy path posts to /api/workers/:bead_id/resume and renders text" do
       stub_post(
-        "/api/polecats/bd-auma3z/resume",
+        "/api/workers/bd-auma3z/resume",
         %{
           "bead" => %{"id" => "bd-auma3z", "title" => "resume cmd", "status" => "in_progress"},
-          "polecat" => %{"bead_id" => "bd-auma3z", "pid" => "#PID<0.123.0>"},
+          "worker" => %{"bead_id" => "bd-auma3z", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
           "worktree_path" => "/wt/feature-bd-auma3z",
           "claude_started" => true
@@ -35,9 +35,9 @@ defmodule ArbiterCli.Cmd.ResumeTest do
     end
 
     test "--json mode emits JSON" do
-      stub_post("/api/polecats/bd-1/resume", %{
+      stub_post("/api/workers/bd-1/resume", %{
         "bead" => %{"id" => "bd-1", "title" => "t", "status" => "in_progress"},
-        "polecat" => %{"bead_id" => "bd-1", "pid" => "x"},
+        "worker" => %{"bead_id" => "bd-1", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
@@ -49,7 +49,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
 
     test "error response propagates as die" do
       stub_post(
-        "/api/polecats/bd-x/resume",
+        "/api/workers/bd-x/resume",
         %{
           "error" => %{
             "type" => "invalid_request",
@@ -70,7 +70,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
 
       Req.Test.stub(name, fn conn ->
         case {conn.method, conn.request_path} do
-          {"POST", "/api/polecats/bd-9/resume"} ->
+          {"POST", "/api/workers/bd-9/resume"} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
             send(parent, {:body, Jason.decode!(body)})
 
@@ -78,7 +78,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
               "bead" => %{"id" => "bd-9", "title" => "t", "status" => "in_progress"},
-              "polecat" => %{"bead_id" => "bd-9", "pid" => "x"},
+              "worker" => %{"bead_id" => "bd-9", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
 

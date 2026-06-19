@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.PRPatrol do
   @moduledoc """
-  Per-repo GenServer that polls open PRs and dispatches follow-up polecats
+  Per-repo GenServer that polls open PRs and dispatches follow-up workers
   when reviews need attention. Replaces the Go GT `mol-pr-feedback-patrol`
   cron loop.
 
@@ -48,7 +48,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   alias Arbiter.Beads.Issue
   alias Arbiter.GitHub
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
   require Ash.Query
 
   @default_interval_ms 60_000
@@ -135,7 +135,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp maybe_dispatch(%{"number" => pr_number} = pr, state) do
     if actionable?(state.repo, pr_number) and not deduped?(pr_number) do
       bead = create_follow_up(pr, state)
-      _ = Polecat.start(bead_id: bead.id, repo: state.repo, workspace_id: state.workspace_id)
+      _ = Worker.start(bead_id: bead.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
     end
   end

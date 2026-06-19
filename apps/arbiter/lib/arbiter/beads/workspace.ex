@@ -172,8 +172,8 @@ defmodule Arbiter.Beads.Workspace do
   `config["merge"]["auto_merge"]`.
 
   When `true`, an approved (but not-yet-merged) MR is merged automatically by
-  the polecat's `Arbiter.Polecat.Watchdog` before the polecat completes. When
-  `false` (the default), the polecat parks at `:awaiting_review` until a human
+  the worker's `Arbiter.Worker.Watchdog` before the worker completes. When
+  `false` (the default), the worker parks at `:awaiting_review` until a human
   merges; the next poll then sees `:merged` and completes.
 
   Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
@@ -192,7 +192,7 @@ defmodule Arbiter.Beads.Workspace do
   Workspace-override for the Watchdog watchdog cap (`config["merge"]["watchdog_max_polls"]`).
 
   Returns a positive integer, `:infinity`, or `nil` when not configured (the
-  Watchdog then uses its mode-specific default: `Arbiter.Polecat.Watchdog.default_max_polls_auto/0`
+  Watchdog then uses its mode-specific default: `Arbiter.Worker.Watchdog.default_max_polls_auto/0`
   for `auto_merge: true` lanes, `:infinity` for `auto_merge: false` lanes).
 
   Accepts an integer, a stringified integer (round-trips through JSON), or the
@@ -222,7 +222,7 @@ defmodule Arbiter.Beads.Workspace do
   Whether a ReviewGate (second-worker code review) gates merges for this
   workspace, from `config["review"]["required"]`.
 
-  When `true`, the polecat parks at `:awaiting_review_gate` after the worker's
+  When `true`, the worker parks at `:awaiting_review_gate` after the worker's
   `arb done` and spawns a distinct reviewer worker; the branch merges only on
   an APPROVE verdict. When `false` (the **default**), completion routes straight
   to the merger as before — so enabling reviews never surprises an install that

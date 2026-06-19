@@ -5,7 +5,7 @@ defmodule Arbiter.Workflows.Machine do
   persisting progress to the DB on every transition so a crash + restart
   resumes at the same step.
 
-  Pair with `Arbiter.Polecat` for orchestration: the polecat owns the
+  Pair with `Arbiter.Worker` for orchestration: the worker owns the
   agent process (load → design → implement etc.), the machine owns the
   *workflow's* step transitions. They collaborate but neither owns the
   other.

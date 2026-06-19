@@ -13,7 +13,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
 
   ## Job scope
 
-  This reuses the `arb resume` path (`Arbiter.Polecat.Dispatch.resume/2`): it
+  This reuses the `arb resume` path (`Arbiter.Worker.Dispatch.resume/2`): it
   re-attaches a fresh worker to the bead's **preserved worktree** —
   the same branch the PR already tracks — briefed with the reviewer's feedback
   prepended to the standard work prompt. The worker addresses the feedback,
@@ -38,7 +38,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   """
 
   alias Arbiter.Mergers.Merger
-  alias Arbiter.Polecat.Dispatch
+  alias Arbiter.Worker.Dispatch
 
   require Logger
 
@@ -66,7 +66,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   Returns `{:ok, info}` once the worker is spawned (the revise runs
   asynchronously; the MergeQueue returns the item to `:awaiting_approval` to
   await re-review). Returns `{:error, reason}` when the worktree can't be
-  resumed (e.g. it was cleaned up, or a polecat is still actively working the
+  resumed (e.g. it was cleaned up, or a worker is still actively working the
   bead) — the MergeQueue parks the item `:failed` so it doesn't spin.
   """
   @callback dispatch(args :: dispatch_args()) :: dispatch_result()
@@ -75,7 +75,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
 
   @doc """
   Default implementation of `dispatch/1`. Delegates to
-  `Arbiter.Polecat.Dispatch.resume/2` with the review feedback rendered into a
+  `Arbiter.Worker.Dispatch.resume/2` with the review feedback rendered into a
   briefing that is prepended to the work prompt.
 
   Tests should pass a stub via the MergeQueue's `:revise_dispatcher` opt so they

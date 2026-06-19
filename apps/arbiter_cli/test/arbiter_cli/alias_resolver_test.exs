@@ -22,8 +22,11 @@ defmodule ArbiterCli.AliasResolverTest do
     end
 
     test "themed words are no longer aliased — they resolve as unknown" do
-      assert {:unknown, _} = AliasResolver.resolve("polecat")
       assert {:unknown, _} = AliasResolver.resolve("bead")
+    end
+
+    test "worker is now a real command — not a themed alias" do
+      assert {:ok, "worker"} = AliasResolver.resolve("worker")
     end
   end
 

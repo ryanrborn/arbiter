@@ -92,7 +92,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # Default invoker shells out to `claude --print <prompt> --output-format
   # text`. We're deliberately not streaming here — a one-shot synchronous
   # call is the right shape for "give me JSON back" use cases. The real
-  # streaming session lives in `Arbiter.Polecat.ClaudeSession`.
+  # streaming session lives in `Arbiter.Worker.ClaudeSession`.
   defp default_invoke(prompt, _state) do
     case System.find_executable("claude") do
       nil ->

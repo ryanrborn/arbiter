@@ -14,12 +14,12 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert code != 0
     end
 
-    test "happy path posts to /api/polecats/dispatch and renders text" do
+    test "happy path posts to /api/workers/dispatch and renders text" do
       stub_post(
-        "/api/polecats/dispatch",
+        "/api/workers/dispatch",
         %{
           "bead" => %{"id" => "gte-017", "title" => "dispatch cmd", "status" => "in_progress"},
-          "polecat" => %{"bead_id" => "gte-017", "pid" => "#PID<0.123.0>"},
+          "worker" => %{"bead_id" => "gte-017", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"}
         }
       )
@@ -33,9 +33,9 @@ defmodule ArbiterCli.Cmd.DispatchTest do
     end
 
     test "passes repo in body when provided" do
-      stub_post("/api/polecats/dispatch", %{
+      stub_post("/api/workers/dispatch", %{
         "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
-        "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
+        "worker" => %{"bead_id" => "gte-017", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
@@ -47,9 +47,9 @@ defmodule ArbiterCli.Cmd.DispatchTest do
     end
 
     test "--json mode emits JSON" do
-      stub_post("/api/polecats/dispatch", %{
+      stub_post("/api/workers/dispatch", %{
         "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
-        "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
+        "worker" => %{"bead_id" => "gte-017", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
@@ -59,7 +59,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert decoded["bead"]["id"] == "gte-017"
     end
 
-    # Stubs POST /api/polecats/dispatch, captures the request body, and forwards
+    # Stubs POST /api/workers/dispatch, captures the request body, and forwards
     # any other request as 500/JSON.
     defp stub_dispatch_capture do
       parent = self()
@@ -67,7 +67,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
 
       Req.Test.stub(name, fn conn ->
         case {conn.method, conn.request_path} do
-          {"POST", "/api/polecats/dispatch"} ->
+          {"POST", "/api/workers/dispatch"} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
             send(parent, {:body, Jason.decode!(body)})
 
@@ -75,7 +75,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
               "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
-              "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
+              "worker" => %{"bead_id" => "gte-017", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
 
@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
 
     test "404 propagates as die" do
       stub_post(
-        "/api/polecats/dispatch",
+        "/api/workers/dispatch",
         %{"error" => %{"type" => "not_found", "message" => "bead not found"}},
         404
       )

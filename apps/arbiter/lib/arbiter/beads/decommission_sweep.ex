@@ -15,7 +15,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
     * **Daemon role definition**: `MergeQueue for X`, `Witness for X`,
       `Crew worker N in X`, `mayor`/`deacon` titles. The GT identity
       beads for daemon roles per repo.
-    * **Polecat identity**: bead IDs matching `<prefix>-...-polecat-...`.
+    * **Worker identity**: bead IDs matching `<prefix>-...-worker-...`.
     * **Workflow definition**: bead IDs starting with `hq-wf-` or
       `vs-wfs-` — workflow step beads from GT's "molecule" system.
     * **GT-system bug or task**: title mentions the old `gt`/`GT` tooling.
@@ -96,7 +96,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
     {"HANDOFF", &__MODULE__.handoff?/1},
     {"Patrol cycle note", &__MODULE__.patrol_note?/1},
     {"Daemon role definition", &__MODULE__.daemon_role?/1},
-    {"Polecat identity", &__MODULE__.polecat_identity?/1},
+    {"Worker identity", &__MODULE__.worker_identity?/1},
     {"Workflow definition", &__MODULE__.workflow_def?/1},
     {"GT-system bug or task", &__MODULE__.gt_system?/1},
     {"Compaction report", &__MODULE__.compaction_report?/1},
@@ -151,13 +151,13 @@ defmodule Arbiter.Beads.DecommissionSweep do
   def daemon_role?(_), do: false
 
   @doc false
-  def polecat_identity?(%Issue{id: id, title: t}) when is_binary(id) and is_binary(t) do
-    # Bead ID like `vs-server-polecat-chrome` whose title duplicates the
-    # ID — these are old GT polecat identity records, not work items.
-    Regex.match?(~r/-polecat-/, id) and (id == t or t == "" or String.contains?(id, t))
+  def worker_identity?(%Issue{id: id, title: t}) when is_binary(id) and is_binary(t) do
+    # Bead ID like `vs-server-worker-chrome` whose title duplicates the
+    # ID — these are old GT worker identity records, not work items.
+    Regex.match?(~r/-worker-/, id) and (id == t or t == "" or String.contains?(id, t))
   end
 
-  def polecat_identity?(_), do: false
+  def worker_identity?(_), do: false
 
   @doc false
   def workflow_def?(%Issue{id: id}) when is_binary(id) do
@@ -172,7 +172,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
     # insensitive on the bare token "gt", but skip if it's clearly the
     # arbiter port (e.g. "arbiter", "gte-").
     cond do
-      String.starts_with?(t, "GT polecat ") -> true
+      String.starts_with?(t, "GT worker ") -> true
       String.starts_with?(t, "GT: ") -> true
       Regex.match?(~r/^gt /, t) -> true
       Regex.match?(~r/^\[HIGH\] Dolt:/, t) -> true

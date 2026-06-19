@@ -1,16 +1,16 @@
 defmodule ArbiterWeb.RunDetailLive do
   @moduledoc """
-  Detail view for a persisted `Arbiter.Polecats.Run` at
-  `/polecats/history/:id` — the post-mortem of a polecat after its GenServer
-  is gone. Renders the same output-lines pane as the live polecat detail
+  Detail view for a persisted `Arbiter.Workers.Run` at
+  `/workers/history/:id` — the post-mortem of a worker after its GenServer
+  is gone. Renders the same output-lines pane as the live worker detail
   view, but sourced from the persisted Run row rather than a live snapshot.
   """
 
   use ArbiterWeb, :live_view
 
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Polecat
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Worker
+  alias Arbiter.Workers.Run
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -32,13 +32,13 @@ defmodule ArbiterWeb.RunDetailLive do
         socket
         |> assign(:run, run)
         |> assign(:workspace, lookup_workspace(run.workspace_id))
-        |> assign(:live_polecat?, !is_nil(Polecat.whereis(run.bead_id)))
+        |> assign(:live_worker?, !is_nil(Worker.whereis(run.bead_id)))
 
       _ ->
         socket
         |> assign(:run, nil)
         |> assign(:workspace, nil)
-        |> assign(:live_polecat?, false)
+        |> assign(:live_worker?, false)
     end
   end
 
@@ -172,9 +172,9 @@ defmodule ArbiterWeb.RunDetailLive do
                 <% end %>
               </dl>
 
-              <div :if={@live_polecat?} class="rounded-box bg-info/10 border border-info/30 p-3">
+              <div :if={@live_worker?} class="rounded-box bg-info/10 border border-info/30 p-3">
                 <.link
-                  navigate={~p"/polecats/#{@run.bead_id}"}
+                  navigate={~p"/workers/#{@run.bead_id}"}
                   class="link link-primary text-sm flex items-center gap-1.5 w-fit"
                 >
                   <.icon name="hero-arrow-top-right-on-square" class="size-4" />

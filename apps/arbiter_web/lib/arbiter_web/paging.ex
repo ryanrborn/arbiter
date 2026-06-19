@@ -7,7 +7,7 @@ defmodule ArbiterWeb.Paging do
   one page at a time via `Ash.Query.offset/2` + `Ash.Query.limit/2`, plus a
   separate `Ash.count!/1` for the total so the pager can render page links.
 
-  In-memory collections (e.g. the live polecat snapshots, which are process
+  In-memory collections (e.g. the live worker snapshots, which are process
   state rather than rows) use `paginate_list/3`.
 
   Every read is wrapped so a transient data-layer error degrades to an empty

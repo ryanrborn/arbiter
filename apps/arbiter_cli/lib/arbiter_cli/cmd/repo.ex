@@ -58,7 +58,7 @@ defmodule ArbiterCli.Cmd.Repo do
     IO.puts("Repo:       #{repo["name"]}")
     IO.puts("Source:    #{repo["source"]}")
     IO.puts("Path:      #{repo["path"] || "(unknown)"}")
-    IO.puts("Workers:   #{repo["polecats"] || 0}")
+    IO.puts("Workers:   #{repo["workers"] || 0}")
     IO.puts("Worktrees: #{repo["worktrees"] || 0}")
   end
 end

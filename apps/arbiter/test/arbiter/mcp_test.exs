@@ -29,12 +29,12 @@ defmodule Arbiter.MCPTest do
     end
 
     test "a tampered token is invalid" do
-      token = MCP.mint(%{tier: :polecat, workspace_id: "w"})
+      token = MCP.mint(%{tier: :worker, workspace_id: "w"})
       assert {:error, :invalid} = MCP.verify(token <> "x")
     end
 
     test "max_age is enforced at verify time" do
-      token = MCP.mint(%{tier: :polecat, workspace_id: "w"})
+      token = MCP.mint(%{tier: :worker, workspace_id: "w"})
       assert {:error, :expired} = MCP.verify(token, max_age: -1)
     end
   end
