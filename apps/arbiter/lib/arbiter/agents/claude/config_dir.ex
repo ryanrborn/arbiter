@@ -1,20 +1,20 @@
 defmodule Arbiter.Agents.Claude.ConfigDir do
   @moduledoc """
-  An isolated `CLAUDE_CONFIG_DIR` for acolyte (worker / reviewer) runs.
+  An isolated `CLAUDE_CONFIG_DIR` for worker (implementer / reviewer) runs.
 
   ## Why
 
-  Acolytes are spawned with `claude --print` inside a worktree. By default the
+  Workers are spawned with `claude --print` inside a worktree. By default the
   child inherits the **host operator's** user-level config dir (`~/.claude`),
   which loads the operator's personal `~/.claude/CLAUDE.md`. On a developer
   install that file routinely carries personal memory — including, on this
-  install, a *roleplay persona*. That persona bleeds into the acolyte's output:
+  install, a *roleplay persona*. That persona bleeds into the worker's output:
   a REVIEWER once emitted `VERDICT: REQUEST_CHANGES` followed only by a
   theatrical flourish and **no actual findings**, stalling the gate and burning
   a full review pass. It is non-deterministic and silent (bd-3y2mda).
 
-  The fix is to run acolytes against a *clean*, Arbiter-owned config dir that
-  does **not** contain the operator's persona memory — so the acolyte's context
+  The fix is to run workers against a *clean*, Arbiter-owned config dir that
+  does **not** contain the operator's persona memory — so the worker's context
   is task-focused regardless of what the host operator keeps in `~/.claude`.
 
   ## How
@@ -22,7 +22,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   We point the spawn at a stable, Arbiter-managed directory via the
   `CLAUDE_CONFIG_DIR` env var (`Arbiter.Agents.Claude.spawn_env/1` and the
   Tribunal's reviewer/implementer spawns both consult `env/0`). The directory is
-  seeded **idempotently** on each spawn with the *minimum* a functioning acolyte
+  seeded **idempotently** on each spawn with the *minimum* a functioning worker
   needs — and nothing personal:
 
     * `.credentials.json` is **symlinked** from the operator's real config
@@ -32,25 +32,25 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       `Arbiter.Agents.SecurityPolicy.default/0` (via
       `Arbiter.Agents.Claude.Security`) — a hardened, non-empty-deny baseline.
       It is **never** symlinked from the operator's `~/.claude`, so the
-      acolyte does **not** inherit the operator's personal permission posture
+      worker does **not** inherit the operator's personal permission posture
       (historically `defaultMode: auto` with an *empty* deny list). This is
       the floor; workspace-aware spawns layer the per-domain policy on top via
       `claude --settings` (bd-9u10op).
-    * `CLAUDE.md` is **written by us** — a short, task-focused acolyte memory
+    * `CLAUDE.md` is **written by us** — a short, task-focused worker memory
       that also explicitly forbids roleplay/persona output. The operator's
       personal `CLAUDE.md` / `CLAUDE.local.md` are **never** linked, so they
       cannot load.
 
   Everything else the operator keeps in `~/.claude` (personal skills, agents,
-  plugins, project history, …) is intentionally absent: an acolyte should run on
-  a clean slate. The acolyte's own session state (history, projects) accumulates
+  plugins, project history, …) is intentionally absent: a worker should run on
+  a clean slate. The worker's own session state (history, projects) accumulates
   here, kept apart from the operator's.
 
   ## Safety / degradation
 
   `ensure/0` is best-effort and self-guarding. If the directory or its memory
   file can't be created it returns `:error` and the caller falls back to the
-  inherited (un-isolated) config — a working-but-persona acolyte beats a broken
+  inherited (un-isolated) config — a working-but-persona worker beats a broken
   one. A missing source credentials file is **not** fatal: the inherited
   `ANTHROPIC_API_KEY` (if any) still flows through, since we override only
   `CLAUDE_CONFIG_DIR`.
@@ -77,7 +77,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   @settings_filename "settings.json"
 
   @doc """
-  The env pairs to inject into an acolyte spawn: `[{"CLAUDE_CONFIG_DIR", dir}]`
+  The env pairs to inject into a worker spawn: `[{"CLAUDE_CONFIG_DIR", dir}]`
   when isolation is enabled and the dir is ready, `[]` otherwise (inherit the
   host config unchanged).
   """
@@ -110,7 +110,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
         {:error, reason} ->
           Logger.warning(
             "Arbiter.Agents.Claude.ConfigDir: could not prepare isolated config dir " <>
-              "#{inspect(path())} (#{inspect(reason)}); acolyte will inherit host config"
+              "#{inspect(path())} (#{inspect(reason)}); worker will inherit host config"
           )
 
           :error
@@ -127,7 +127,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
       :error
   end
 
-  @doc "Whether acolyte config isolation is enabled (default `true`)."
+  @doc "Whether worker config isolation is enabled (default `true`)."
   @spec enabled?() :: boolean()
   def enabled?, do: Application.get_env(:arbiter, :acolyte_isolate_config, true)
 
@@ -153,13 +153,13 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
     end
   end
 
-  @doc "The acolyte memory written into the isolated dir's `CLAUDE.md`."
+  @doc "The worker memory written into the isolated dir's `CLAUDE.md`."
   @spec acolyte_memory() :: String.t()
   def acolyte_memory do
     """
-    # Arbiter Acolyte — Operating Context
+    # Arbiter Worker — Operating Context
 
-    You are an autonomous **Arbiter acolyte**: a non-interactive worker spawned
+    You are an autonomous **Arbiter worker**: a non-interactive worker spawned
     via `claude --print` inside a git worktree. Your whole job is the task in the
     prompt you were handed — nothing else.
 
@@ -205,7 +205,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
     Path.join([base, "arbiter", "acolyte-claude"])
   end
 
-  # Always (re)write the clean acolyte memory so it can't drift from the source
+  # Always (re)write the clean worker memory so it can't drift from the source
   # of truth above. Returns :ok | {:error, reason}.
   defp write_memory(dir) do
     File.write(Path.join(dir, @memory_filename), acolyte_memory())
@@ -239,7 +239,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   end
 
   # Best-effort: link auth + settings from the operator's real config dir so the
-  # acolyte stays authenticated and permissioned. Each link is independent and
+  # worker stays authenticated and permissioned. Each link is independent and
   # non-fatal — a missing/uncopyable source just means that capability falls back
   # to whatever the inherited environment provides (e.g. ANTHROPIC_API_KEY).
   defp seed_links(dir) do

@@ -2,7 +2,7 @@ defmodule ArbiterCli.Cmd.Usage do
   @moduledoc """
   `arb usage` — surface the structured token / cost ledger.
 
-  Every Claude session (work acolyte or Tribunal reviewer) writes a usage row
+  Every Claude session (work worker or Tribunal reviewer) writes a usage row
   with tokens (in/out/cache), cost in USD, duration, model, and provider. This
   command rolls those rows up so you can answer "spend per campaign / per day
   / per workspace" — and, by counting `:work` rows per bead, see what got

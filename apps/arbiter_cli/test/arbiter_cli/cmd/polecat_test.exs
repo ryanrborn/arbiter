@@ -43,38 +43,28 @@ defmodule ArbiterCli.Cmd.PolecatTest do
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["show", "bd-003"]) end)
       assert exit_code == 0
-      assert out =~ "no live polecat"
+      assert out =~ "no live worker"
       assert out =~ "historical run"
       assert out =~ "Completed:  2026-05-20T19:05:00Z"
       assert out =~ "claude_crashed"
       assert out =~ "boom"
     end
 
-    test "honors the workspace vernacular for the worker/issue/rig labels" do
-      stub_routes([
-        {{"get", "/api/polecats/bd-004"},
-         {%{
-            "source" => "history",
-            "bead_id" => "bd-004",
-            "status" => "failed",
-            "rig" => "arbiter",
-            "started_at" => "2026-05-20T19:00:00Z",
-            "output_lines" => []
-          }, 200}},
-        {{"get", "/api/settings"},
-         {%{
-            "data" => %{
-              "vernacular" => %{"worker" => "acolyte", "issue" => "directive", "rig" => "ship"}
-            }
-          }, 200}}
-      ])
+    test "uses the plain worker/issue/repo labels" do
+      stub_get("/api/polecats/bd-004", %{
+        "source" => "history",
+        "bead_id" => "bd-004",
+        "status" => "failed",
+        "rig" => "arbiter",
+        "started_at" => "2026-05-20T19:00:00Z",
+        "output_lines" => []
+      })
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["show", "bd-004"]) end)
       assert exit_code == 0
-      assert out =~ "no live acolyte"
-      assert out =~ "Directive:"
-      assert out =~ "Ship:"
-      refute out =~ "no live polecat"
+      assert out =~ "no live worker"
+      assert out =~ "Issue:"
+      assert out =~ "Repo:"
     end
 
     test "--json forwards the full snapshot" do
@@ -106,7 +96,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["list"]) end)
       assert exit_code == 0
-      assert out =~ "Active polecats (1)"
+      assert out =~ "Active workers (1)"
       assert out =~ "bd-001"
       assert out =~ "status=running"
     end
@@ -116,7 +106,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["list"]) end)
       assert exit_code == 0
-      assert out =~ "no active polecats"
+      assert out =~ "no active workers"
     end
 
     test "ls is an alias for list" do
@@ -124,7 +114,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["ls"]) end)
       assert exit_code == 0
-      assert out =~ "no active polecats"
+      assert out =~ "no active workers"
     end
   end
 
@@ -134,7 +124,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
 
       {out, _err, exit_code} = capture(fn -> Polecat.run(["stop", "bd-003"]) end)
       assert exit_code == 0
-      assert out =~ "Stopped polecat"
+      assert out =~ "Stopped worker"
       assert out =~ "bd-003"
     end
 

@@ -1,12 +1,12 @@
 defmodule Arbiter.Polecat.Tribunal do
   @moduledoc """
-  The review gate ("Tribunal") that sits between an acolyte's `arb done` and the
-  merger. A standing order: an acolyte must not merge its own work — a separate
+  The review gate ("Tribunal") that sits between an worker's `arb done` and the
+  merger. A standing order: an worker must not merge its own work — a separate
   reviewer mind code-reviews the diff first.
 
   ## Where it fits
 
-  When an acolyte signals done (`arb done`), the author `Arbiter.Polecat` checks
+  When an worker signals done (`arb done`), the author `Arbiter.Polecat` checks
   whether its workspace requires review (`Workspace.review_required?/1`). If so it
   parks at `:awaiting_tribunal` and spawns a Tribunal **instead of** calling the
   merger. The Tribunal then runs the review — and, on a request-changes verdict,
@@ -20,7 +20,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   ## The reviewer
 
-  Each review pass spawns a **distinct** reviewer acolyte — a second
+  Each review pass spawns a **distinct** reviewer worker — a second
   `Arbiter.Polecat` with a `#review`-suffixed bead id and its own
   `Arbiter.Polecat.ClaudeSession`, running in the same worktree. A different
   process = a different Claude invocation = a different mind (no self-grading).
@@ -38,8 +38,8 @@ defmodule Arbiter.Polecat.Tribunal do
 
     1. The reviewer's structured findings are posted to the implementer **via the
        mailbox** (`Arbiter.Messages`, kind `:flag`, reviewer id → author bead id)
-       — a durable row, so the thread survives the acolytes that wrote it.
-    2. A **fresh implementer** acolyte (a new mind, same branch/worktree)
+       — a durable row, so the thread survives the workers that wrote it.
+    2. A **fresh implementer** worker (a new mind, same branch/worktree)
        addresses each finding: fix it (and commit) or rebut it with
        justification. Its transcript is captured and posted back over the mailbox
        (author bead id → reviewer id).
@@ -82,7 +82,7 @@ defmodule Arbiter.Polecat.Tribunal do
   transient, are invalidated by a billing pause or crash, and have no
   Gemini/agy equivalent — it violates the provider-agnostic constraint. Stage 3
   instead **approximates** continuity the way the `arb resume` path does
-  (bd-auma3z): each revise-round implementer is briefed with the outpost's git
+  (bd-auma3z): each revise-round implementer is briefed with the worktree's git
   state — commits since the branch cut plus uncommitted work-in-progress
   (`Arbiter.Polecat.ResumeContext.work_so_far/2`) — prepended to its revise
   prompt. Combined with the reviewer findings and the original directive (both
@@ -127,9 +127,9 @@ defmodule Arbiter.Polecat.Tribunal do
   entering the revise loop empty-handed. If the re-prompt still yields no findings
   it escalates as inconclusive; it is never silently merged.
 
-  ## Clean acolyte context (bd-3y2mda)
+  ## Clean worker context (bd-3y2mda)
 
-  Reviewer (and revise-implementer) acolytes are spawned with an isolated
+  Reviewer (and revise-implementer) workers are spawned with an isolated
   `CLAUDE_CONFIG_DIR` (`Arbiter.Agents.Claude.ConfigDir`) so the host operator's
   personal `~/.claude/CLAUDE.md` — which may carry a roleplay persona — cannot
   bleed into the review and crowd out structured findings.
@@ -222,7 +222,7 @@ defmodule Arbiter.Polecat.Tribunal do
   end
 
   @doc """
-  The bead id used for the reviewer acolyte — the author bead id with a
+  The bead id used for the reviewer worker — the author bead id with a
   `#review` suffix so it registers as a distinct polecat and records its own run
   row without colliding with the author.
   """
@@ -321,7 +321,7 @@ defmodule Arbiter.Polecat.Tribunal do
       # Mirrors the durable mailbox rows; the source for the escalation payload.
       thread: [],
       attempt: 0,
-      # The id of the acolyte whose output/exit we are currently waiting on, so a
+      # The id of the worker whose output/exit we are currently waiting on, so a
       # stale message from a prior (stopped) reviewer/implementer is ignored.
       current_id: nil,
       reviewer_pid: nil,
@@ -392,7 +392,7 @@ defmodule Arbiter.Polecat.Tribunal do
     {:reply, snapshot(state), state}
   end
 
-  # Capture output only from the acolyte we're currently waiting on; a late line
+  # Capture output only from the worker we're currently waiting on; a late line
   # from a prior (stopped) reviewer/implementer must not contaminate this pass.
   @impl true
   def handle_info({:polecat_output, id, line}, %{current_id: id} = state) do
@@ -401,10 +401,10 @@ defmodule Arbiter.Polecat.Tribunal do
 
   def handle_info({:polecat_output, _other, _line}, state), do: {:noreply, state}
 
-  # The current acolyte's subprocess exited — its transcript is complete. Dispatch
+  # The current worker's subprocess exited — its transcript is complete. Dispatch
   # by phase: a finished reviewer yields a verdict (or a re-prompt / a revise); a
   # finished implementer closes the round and triggers the next reviewer pass.
-  # (Each acolyte polecat also self-completes on its own `arb done`; either way
+  # (Each worker polecat also self-completes on its own `arb done`; either way
   # the exit is our reliable "transcript done" signal.)
   def handle_info({:polecat_exited, id, _status}, %{current_id: id, phase: :reviewing} = state) do
     case attempt_finish(state) do
@@ -421,7 +421,7 @@ defmodule Arbiter.Polecat.Tribunal do
     end
   end
 
-  # A stale exit from an acolyte we've moved on from.
+  # A stale exit from an worker we've moved on from.
   def handle_info({:polecat_exited, _other, _status}, state), do: {:noreply, state}
 
   # Timeouts are tagged with the attempt that scheduled them so a stale timer
@@ -454,7 +454,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   @impl true
   def terminate(_reason, state) do
-    # Stop the current acolyte polecat if it's still alive (e.g. on timeout).
+    # Stop the current worker polecat if it's still alive (e.g. on timeout).
     if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
       safe(fn -> Polecat.stop(state.reviewer_pid, :normal) end)
     end
@@ -554,7 +554,7 @@ defmodule Arbiter.Polecat.Tribunal do
   defp handle_reject(state, findings), do: enter_revise(state, findings)
 
   # Stage 2: post the reviewer's findings to the implementer over the mailbox,
-  # then spawn a fresh implementer acolyte (same branch/worktree) to fix or rebut
+  # then spawn a fresh implementer worker (same branch/worktree) to fix or rebut
   # each one. Returns `{:revise, state}` so the loop waits on the implementer, or
   # `{:done, state}` (escalated) if the implementer couldn't be spawned.
   defp enter_revise(state, findings) do
@@ -586,7 +586,7 @@ defmodule Arbiter.Polecat.Tribunal do
             state,
             :system,
             "Round #{state.round} revise could not start",
-            "The implementer acolyte could not be spawned: #{inspect(reason)}"
+            "The implementer worker could not be spawned: #{inspect(reason)}"
           )
 
         {:done, finish(state, {:request_changes, escalation_payload(state)})}
@@ -643,7 +643,7 @@ defmodule Arbiter.Polecat.Tribunal do
             next,
             :system,
             "Round #{next.round} re-review could not start",
-            "The reviewer acolyte could not be spawned: #{inspect(reason)}"
+            "The reviewer worker could not be spawned: #{inspect(reason)}"
           )
 
         {:done, finish(next, {:request_changes, escalation_payload(next)})}
@@ -791,7 +791,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # ---- the persisted thread ----------------------------------------------
 
   # Append an entry to the in-memory thread AND persist it as a durable mailbox
-  # row, so the implementer<->reviewer back-and-forth survives the acolytes that
+  # row, so the implementer<->reviewer back-and-forth survives the workers that
   # wrote it and the escalation can present the full, ordered argument.
   defp record_thread(state, role, subject, body) do
     persist_message(state, role, subject, body)
@@ -887,7 +887,7 @@ defmodule Arbiter.Polecat.Tribunal do
   defp current_diff(_state), do: "(diff unavailable — no worktree)"
 
   # bd-ofql8k defense-in-depth: an empty `base..HEAD` diff is NOT the same as
-  # "no work" — the acolyte may have edited files and forgotten to commit. Pair
+  # "no work" — the worker may have edited files and forgotten to commit. Pair
   # the diff with `git status --porcelain` so the escalation payload makes the
   # uncommitted state visible and the recipient (the reviewer prompt, Darth
   # Gnosis, the operator) can recognize it as "work present but uncommitted"
@@ -977,14 +977,14 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp current_head_sha(_state), do: nil
 
-  # ---- acolyte spawning ---------------------------------------------------
+  # ---- worker spawning ---------------------------------------------------
 
-  # Subscribe to the acolyte's output topic, spawn it, arm a fresh (attempt-
+  # Subscribe to the worker's output topic, spawn it, arm a fresh (attempt-
   # tagged) timeout, and reset the line buffer for this pass. Used for every
   # reviewer pass (first review, re-review, verdict re-prompt) and every
   # implementer revision; returns the updated state on success. Subscribe BEFORE
-  # spawning so we can't miss the acolyte's first output lines or its exit signal
-  # (the subprocess may finish almost immediately — a fast acolyte or a test
+  # spawning so we can't miss the worker's first output lines or its exit signal
+  # (the subprocess may finish almost immediately — a fast worker or a test
   # fixture). The topic is known from the id alone, so subscribing ahead of the
   # port open is safe.
   defp launch_acolyte(state, id, role, prompt, command) do
@@ -1001,8 +1001,8 @@ defmodule Arbiter.Polecat.Tribunal do
     end
   end
 
-  # Start an acolyte as a distinct polecat + claude session under `id`. The
-  # acolyte gets workspace_id: nil so its completion stays silent — no Admiral
+  # Start an worker as a distinct polecat + claude session under `id`. The
+  # worker gets workspace_id: nil so its completion stays silent — no Admiral
   # notification, no Refinery pickup for the synthetic id — while still recording
   # its own run row.
   defp spawn_acolyte(state, id, role, prompt, command) do
@@ -1045,7 +1045,7 @@ defmodule Arbiter.Polecat.Tribunal do
     end
   end
 
-  # Assemble `ClaudeSession.start/1` opts for an acolyte. The fixture-friendly
+  # Assemble `ClaudeSession.start/1` opts for an worker. The fixture-friendly
   # `command:` escape hatch (test path) bypasses the adapter — when set we spawn
   # the provided argv verbatim. Otherwise we route through `Arbiter.Agents` so
   # the reviewer role honors `workspace.config["review_agent"]["config"]`
@@ -1067,7 +1067,7 @@ defmodule Arbiter.Polecat.Tribunal do
         {adapter, role_atom} = adapter_for(ws, role)
         :ok = Agents.prepare(ws, role_atom)
 
-        # The reviewer/implementer acolyte gets the same per-domain security
+        # The reviewer/implementer worker gets the same per-domain security
         # posture as a worker spawn — resolved from the workspace, never the
         # operator's ~/.claude (bd-9u10op).
         agent_opts =
@@ -1168,8 +1168,8 @@ defmodule Arbiter.Polecat.Tribunal do
     _ -> nil
   end
 
-  # Stop the current acolyte polecat if it's still alive. Best-effort — used
-  # before spawning the next acolyte so one that finished without printing `arb
+  # Stop the current worker polecat if it's still alive. Best-effort — used
+  # before spawning the next worker so one that finished without printing `arb
   # done` (and so never self-completed) can't linger.
   defp stop_acolyte(state) do
     if is_pid(state.reviewer_pid) and Process.alive?(state.reviewer_pid) do
@@ -1179,7 +1179,7 @@ defmodule Arbiter.Polecat.Tribunal do
     :ok
   end
 
-  # ---- synthetic acolyte ids ----------------------------------------------
+  # ---- synthetic worker ids ----------------------------------------------
 
   # The synthetic bead id for a re-prompt reviewer: a fresh, distinct id per
   # attempt so it registers as its own polecat / run row and never collides with
@@ -1219,7 +1219,7 @@ defmodule Arbiter.Polecat.Tribunal do
   end
 
   # Minimal snapshot for a Tribunal probed as if it were a polecat. The Tribunal
-  # is a review gate, not an acolyte; this exists only so an accidental
+  # is a review gate, not an worker; this exists only so an accidental
   # :snapshot call gets a sane reply rather than crashing it. See bd-2y0gd5.
   defp snapshot(state) do
     %{
@@ -1256,8 +1256,8 @@ defmodule Arbiter.Polecat.Tribunal do
     bead = load_bead(state.bead_id)
 
     """
-    You are a REVIEWER acolyte — a Tribunal. You did NOT write this code; a
-    different acolyte did. Your job is to code-review its work before it merges.
+    You are a REVIEWER worker — a Tribunal. You did NOT write this code; a
+    different worker did. Your job is to code-review its work before it merges.
     You must reach an independent verdict — do not rubber-stamp.
 
     Bead under review: #{state.bead_id}
@@ -1368,7 +1368,7 @@ defmodule Arbiter.Polecat.Tribunal do
     bead = load_bead(state.bead_id)
 
     """
-    You are an IMPLEMENTER acolyte. A reviewer (a Tribunal) has reviewed the work
+    You are an IMPLEMENTER worker. A reviewer (a Tribunal) has reviewed the work
     on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
     finding so the work can pass review.
 
@@ -1413,7 +1413,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # session resume was dropped — provider-specific and fragile across billing
   # pauses/crashes), so we hand it the git-derived picture of what the prior
   # round(s) actually did — commits since the branch cut + any uncommitted work —
-  # exactly as the `arb resume` path (bd-auma3z) briefs a resumed acolyte. Skipped
+  # exactly as the `arb resume` path (bd-auma3z) briefs a resumed worker. Skipped
   # (empty string) for a worktree-less Tribunal: an ad-hoc / test run with nothing
   # on disk to summarize falls back to today's directive-only prompt.
   defp work_so_far_briefing(%{worktree_path: wt, target_branch: tb})

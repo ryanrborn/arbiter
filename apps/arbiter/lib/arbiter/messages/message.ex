@@ -5,17 +5,17 @@ defmodule Arbiter.Messages.Message do
   One table holds several kinds, distinguished by `:kind`:
 
     * `:notification` — broadcast event, no specific recipient (`to_ref` nil).
-      Acolyte completion, progress milestones, system events. Feeds the
+      Worker completion, progress milestones, system events. Feeds the
       Admiral's live dashboard. Never "consumed" — `read_at` stays nil.
     * `:mailbox` — targeted at a specific bead (`to_ref`). Requires read
       acknowledgement (`mark_read`).
     * `:direction` — user-authored instruction sent from the LiveView to a
-      running acolyte. A subtype of mailbox; distinguished for display.
-    * `:flag` — acolyte-to-acolyte signal (e.g. Varek telling Soren the API
+      running worker. A subtype of mailbox; distinguished for display.
+    * `:flag` — worker-to-worker signal (e.g. Varek telling Soren the API
       shape changed). A subtype of mailbox.
 
   The remaining kinds are the **Admiral mailbox family** — addressed reports
-  an acolyte (or the system) sends *up* to the Admiral (`to_ref "admiral"`),
+  an worker (or the system) sends *up* to the Admiral (`to_ref "admiral"`),
   surfaced by `arb inbox` and the prime briefing:
 
     * `:completion` — a directive finished successfully.
@@ -290,7 +290,7 @@ defmodule Arbiter.Messages.Message do
 
   This is the durable implementer↔reviewer transcript the Tribunal's
   revise-and-rediscuss loop builds (each reviewer finding and implementer
-  response is a persisted `:flag` row), so it survives the acolytes that wrote it
+  response is a persisted `:flag` row), so it survives the workers that wrote it
   and escalation can reconstruct the ordered argument for Darth Gnosis. Pass
   `workspace_id:` to scope to one workspace.
   """

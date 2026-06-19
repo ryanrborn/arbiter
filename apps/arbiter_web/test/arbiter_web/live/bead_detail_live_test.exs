@@ -64,7 +64,7 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
 
-      assert html =~ "Polecat"
+      assert html =~ "Worker"
       assert html =~ "idle"
       assert html =~ "view full output"
     end
@@ -79,14 +79,14 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
       assert html =~ bead.id
-      assert html =~ "Polecat"
+      assert html =~ "Worker"
     end
 
     test "tells the user when no polecat is running", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
-      assert html =~ "No polecat running"
+      assert html =~ "No worker running"
       assert html =~ "arb sling"
     end
 

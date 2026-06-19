@@ -112,7 +112,7 @@ defmodule Arbiter.Agents.Claude do
 
   @impl true
   def spawn_env(opts \\ []) do
-    # Acolyte runs get an isolated CLAUDE_CONFIG_DIR so the operator's personal
+    # Worker runs get an isolated CLAUDE_CONFIG_DIR so the operator's personal
     # ~/.claude/CLAUDE.md (persona) can't bleed into the worker's context
     # (bd-3y2mda); the optional API key composes on top.
     ConfigDir.env() ++ api_key_env(opts)

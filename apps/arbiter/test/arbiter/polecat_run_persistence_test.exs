@@ -72,7 +72,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
   end
 
   test "terminate from a non-terminal state finalizes the Run row :completed" do
-    # Mirror the REAL acolyte-completion teardown: a claude-driven polecat sits
+    # Mirror the REAL worker-completion teardown: a claude-driven polecat sits
     # at a non-terminal status (:running) and is torn down by the bead `:close`
     # after-action (StopPolecat -> Polecat.stop -> terminate/2) WITHOUT any
     # explicit Polecat.complete/2 ever firing. Before bd-39q7sk this left the

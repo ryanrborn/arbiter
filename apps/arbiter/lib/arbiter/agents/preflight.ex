@@ -3,7 +3,7 @@ defmodule Arbiter.Agents.Preflight do
   Cheap, provider-agnostic auth pre-flight for the agent CLI (bd-awi4nw).
 
   The confirmed failure mode: the operator's Claude OAuth (or Gemini key)
-  expires, every acolyte spawn 401s, and the fleet burns cycles dispatching a
+  expires, every worker spawn 401s, and the fleet burns cycles dispatching a
   wave of workers that all fail with a buried generic error. The fix is to
   *probe before slinging*: run a single cheap `claude --print` (or
   `gemini -p`) round-trip and check it authenticates. If it doesn't, refuse to
@@ -11,7 +11,7 @@ defmodule Arbiter.Agents.Preflight do
 
   This module owns the **probe execution**: it spawns the adapter's probe argv
   through an Erlang `Port` (the same liveness-first mechanism the polecat uses
-  for real acolytes), captures output + exit status under a timeout, and hands
+  for real workers), captures output + exit status under a timeout, and hands
   the result to `Arbiter.Polecat.StopReason` for classification. The adapter
   supplies *what* to run via the optional `auth_probe_argv/1` callback; an
   adapter that doesn't implement it is unprobeable and `check/2` returns
@@ -47,7 +47,7 @@ defmodule Arbiter.Agents.Preflight do
     * `:probe_command` — argv override (tests); bypasses the adapter.
     * `:probe_env` — env override (`[{name, value}]`); defaults to the
       adapter's `spawn_env/1` so the probe authenticates exactly as a real
-      acolyte spawn would.
+      worker spawn would.
     * `:timeout_ms` — max wait before declaring the probe hung (default 30s).
     * any keys the adapter's `auth_probe_argv/1` / `spawn_env/1` read
       (`:api_key`, `:model`, …).

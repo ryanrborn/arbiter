@@ -1,29 +1,22 @@
 defmodule Arbiter.Beads.Workspace do
   @moduledoc """
-  A `Workspace` groups beads and holds user-configurable settings: vernacular
-  (what the user calls each role/concept — gas-town, sith-fleet, fleet/ship/captain
-  — anything) and tracker config (external system: none, jira, linear, github).
+  A `Workspace` groups beads and holds user-configurable settings: tracker
+  config (external system: none, jira, linear, github), merge strategy, agent
+  routing, and so on.
 
-  Both live in a single JSON `config` column. Missing keys fall back to gas-town
-  vernacular + `:none` tracker. See `~/dev/arbiter/docs/decision-doc.md` sections
-  7 (vernacular) and 8 (tracker abstraction).
+  These live in a single JSON `config` column. Missing keys fall back to a
+  `:none` tracker. See `~/dev/arbiter/docs/decision-doc.md` section 8 (tracker
+  abstraction).
 
   ## Default workspace
 
   At boot, `priv/repo/seeds.exs` ensures a workspace named `"default"` exists with
-  gas-town vernacular and `:none` tracker. Beads land here unless the user
-  partitions them across multiple workspaces.
+  a `:none` tracker. Beads land here unless the user partitions them across
+  multiple workspaces.
 
   ## Config shape (all keys optional)
 
       %{
-        "vernacular" => %{
-          "coordinator" => "Admiral",
-          "worker" => "Acolyte",
-          # ... see decision-doc.md section 7 for the full list
-          "aliases" => %{"deploy" => "sling"},
-          "emoji" => %{"worker" => "⚔️"}
-        },
         "tracker" => %{
           "type" => "jira",                    # one of: "none", "jira", "linear", "github"
           "config" => %{
@@ -46,7 +39,6 @@ defmodule Arbiter.Beads.Workspace do
         }
       }
 
-  Vernacular helpers (`Vernacular.label/1`) land in gte-P2.
   Tracker helpers (`Tracker.for_bead/1`) land in gte-019.
   Merger resolution (`Arbiter.Mergers.for_workspace/1`) reads `merge.strategy`.
   """
@@ -139,8 +131,8 @@ defmodule Arbiter.Beads.Workspace do
       default %{}
 
       description """
-      Workspace configuration: vernacular + tracker. See module doc for shape.
-      Missing keys fall back to gas-town vernacular + :none tracker.
+      Workspace configuration: tracker, merge strategy, agent routing, etc.
+      See module doc for shape. Missing keys fall back to a :none tracker.
       """
     end
 
@@ -227,14 +219,14 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
-  Whether a Tribunal (second-acolyte code review) gates merges for this
+  Whether a Tribunal (second-worker code review) gates merges for this
   workspace, from `config["review"]["required"]`.
 
-  When `true`, the polecat parks at `:awaiting_tribunal` after the acolyte's
-  `arb done` and spawns a distinct reviewer acolyte; the branch merges only on
+  When `true`, the polecat parks at `:awaiting_tribunal` after the worker's
+  `arb done` and spawns a distinct reviewer worker; the branch merges only on
   an APPROVE verdict. When `false` (the **default**), completion routes straight
   to the merger as before — so enabling reviews never surprises an install that
-  hasn't opted in (mirrors the opt-in stance of vernacular).
+  hasn't opted in.
 
   Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
   through JSON workspace config. Anything else is treated as `false`.

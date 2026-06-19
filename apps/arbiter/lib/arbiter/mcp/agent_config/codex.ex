@@ -2,7 +2,7 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
   @moduledoc """
   OpenAI Codex CLI's `Arbiter.MCP.AgentConfig` adapter (Phase 3).
 
-  Writes a per-spawn `.codex/config.toml` into the acolyte's worktree,
+  Writes a per-spawn `.codex/config.toml` into the worker's worktree,
   declaring the Arbiter MCP server as a remote HTTP server with the spawn's
   scope token in a bearer header:
 

@@ -18,7 +18,7 @@ again before proceeding.
 
     arb prime
 
-It prints the active <%= @workspace %>, current vernacular, running
+It prints the active <%= @workspace %>, running
 <%= @worker_plural %>, <%= @issue_plural %> ready to be worked, and your
 standing orders. Read it before doing anything else — it is the source of
 truth for how this install wants you to operate.
@@ -86,8 +86,7 @@ Set `ARB_WORKSPACE=<name>` to target a specific <%= @workspace %>. The active
 - **<%= @epic_cap %>** — a parent <%= @issue %> grouping related <%= @issue_plural %> via `parent_of` edges; rolls up child progress and can auto-close when its children are done.
 - **<%= @worker_cap %>** — a worker agent. Slinging <%= @issue_article %> <%= @issue %> starts <%= @worker_article %> <%= @worker %> to work it.
 - **<%= @rig_cap %>** — a local git repository <%= @worker_article %> <%= @worker %> can provision a worktree in.
-- **<%= @workspace_cap %>** — a project scope. Holds <%= @rig_plural %>, tracker config, and vernacular.
-- **Vernacular** — installation-wide vocabulary. The terms in this document are rendered from it, so they match whatever this install calls things.
+- **<%= @workspace_cap %>** — a project scope. Holds <%= @rig_plural %>, tracker config, and merge settings.
 
 ## Filing convention: set difficulty up front
 

@@ -73,7 +73,7 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
 
   # Start a review_only polecat with no branch (coordinator-dispatch path).
   # `output_lines` is injected directly into meta to simulate what the reviewer
-  # acolyte would have printed before "arb done" — avoids spawning a real
+  # worker would have printed before "arb done" — avoids spawning a real
   # subprocess or going through ClaudeSession.
   defp start_reviewer(bead, output_lines, extra_meta \\ %{}) do
     meta =

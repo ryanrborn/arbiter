@@ -8,15 +8,6 @@ defmodule ArbiterWeb.Router do
     plug(:put_root_layout, html: {ArbiterWeb.Layouts, :root})
     plug(:protect_from_forgery)
     plug(:put_secure_browser_headers)
-    plug(:load_branding)
-  end
-
-  # Load installation-wide branding into the process dict for the dead render
-  # (root layout favicon/title/accent + the `Layouts.app` top-bar wordmark).
-  # Live re-renders are covered by the `:branding` on_mount hook.
-  defp load_branding(conn, _opts) do
-    Arbiter.Branding.put_global()
-    conn
   end
 
   pipeline :api do
@@ -30,14 +21,9 @@ defmodule ArbiterWeb.Router do
 
     live_session :default,
       on_mount: [
-        {ArbiterWeb.LiveHooks, :vernacular},
-        {ArbiterWeb.LiveHooks, :branding},
         {ArbiterWeb.LiveHooks, :current_path}
       ] do
       live("/", DashboardLive)
-      live("/settings/vernacular", GlobalVernacularLive)
-      live("/settings/branding", GlobalBrandingLive)
-      live("/workspace/:id/settings/vernacular", WorkspaceVernacularLive)
       live("/audit", AuditLogLive)
       live("/usage", UsageLive)
 
@@ -91,11 +77,6 @@ defmodule ArbiterWeb.Router do
     post("/workspaces/:workspace_id/sync", ClaimController, :sync)
     get("/workspaces/:workspace_id/tracker/issues", TrackerController, :issues)
     post("/workspaces/:workspace_id/tracker/tickets", TrackerController, :create_ticket)
-
-    # Global settings
-    get("/settings", SettingsController, :show)
-    put("/settings/vernacular", SettingsController, :update_vernacular)
-    put("/settings/branding", SettingsController, :update_branding)
 
     # Messages (inter-agent queue: notifications + mailboxes)
     get("/messages", MessageController, :index)

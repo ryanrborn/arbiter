@@ -2,7 +2,7 @@ defmodule Arbiter.Usage.Event do
   @moduledoc """
   A single agent-session usage row.
 
-  One row per finished Claude session (work acolyte or Tribunal reviewer),
+  One row per finished Claude session (work worker or Tribunal reviewer),
   inserted from `Arbiter.Polecat` when the session port emits its terminal
   `result` event. The polecat captures the structured fields off
   `Arbiter.Polecat.ClaudeSession`'s session state — see `usage_summary/1`
@@ -14,7 +14,7 @@ defmodule Arbiter.Usage.Event do
 
   ## Step
 
-  `:work` — the acolyte's own session that produced the diff.
+  `:work` — the worker's own session that produced the diff.
   `:review` — a Tribunal-spawned reviewer session. `bead_id` carries the
               `#review` suffix used by `Arbiter.Polecat.Tribunal` so the row
               is still attributable to the bead being reviewed (drop the

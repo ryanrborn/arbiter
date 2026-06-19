@@ -21,8 +21,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "name" => "default",
             "prefix" => "bd",
             "config" => %{
-              "tracker" => %{"type" => "jira"},
-              "vernacular" => %{"worker" => "Acolyte", "issue" => "Directive"}
+              "tracker" => %{"type" => "jira"}
             }
           }
         ],
@@ -46,15 +45,12 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "default"
       assert out =~ "tracker: jira"
 
-      assert out =~ "== Vernacular =="
-      assert out =~ "worker: Acolyte"
-
-      # Section headers use the active vernacular.
-      assert out =~ "== Active Acolytes (1) =="
+      # Section headers use the plain code terms.
+      assert out =~ "== Active workers (1) =="
       assert out =~ "bd-001"
       assert out =~ "step=implement"
 
-      assert out =~ "== Ready Directives (1) =="
+      assert out =~ "== Ready issues (1) =="
       assert out =~ "bd-002"
       assert out =~ "Fix the thing"
     end
@@ -99,9 +95,9 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
 
-      assert out =~ "== Active polecats =="
+      assert out =~ "== Active workers =="
       assert out =~ "(none)"
-      assert out =~ "== Ready beads =="
+      assert out =~ "== Ready issues =="
     end
 
     test "renders the Admiral Inbox section when there is unread mail" do
@@ -183,7 +179,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       # Surfaced high: before the work list (polecats / ready beads).
       orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
-      ready_at = :binary.match(out, "== Ready beads ==") |> elem(0)
+      ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
       assert orders_at < ready_at
     end
 
@@ -218,22 +214,13 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       # Surfaced above the work list.
       pitfalls_at = :binary.match(out, "== Operating Pitfalls ==") |> elem(0)
-      ready_at = :binary.match(out, "== Ready beads ==") |> elem(0)
+      ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
       assert pitfalls_at < ready_at
     end
 
-    test "Operating Pitfalls digest uses the active vernacular terms" do
+    test "Operating Pitfalls digest uses the plain code terms" do
       stub_all(
-        [
-          %{
-            "id" => "ws-1",
-            "name" => "default",
-            "prefix" => "bd",
-            "config" => %{
-              "vernacular" => %{"worker" => "Acolyte", "issue" => "Directive", "rig" => "Outpost"}
-            }
-          }
-        ],
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
         []
       )
@@ -241,20 +228,9 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
 
-      assert out =~ "Directive"
-      assert out =~ "Acolyte"
-      assert out =~ "Outpost"
-    end
-
-    test "empty vernacular reports 'default gas-town'" do
-      stub_all(
-        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
-        [],
-        []
-      )
-
-      {out, _err, _exit} = capture(fn -> Prime.run([]) end)
-      assert out =~ "(default gas-town"
+      assert out =~ "issue"
+      assert out =~ "worker"
+      assert out =~ "repo"
     end
   end
 

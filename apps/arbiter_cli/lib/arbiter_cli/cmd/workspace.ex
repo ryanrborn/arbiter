@@ -8,7 +8,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   Reads from `GET /api/workspaces` and `GET /api/workspaces/:id`.
   """
 
-  alias ArbiterCli.{Client, Output, Vernacular}
+  alias ArbiterCli.{Client, Output}
 
   def run(argv) do
     case argv do
@@ -65,13 +65,11 @@ defmodule ArbiterCli.Cmd.Workspace do
   defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
 
   defp emit_list([], :text) do
-    v = Vernacular.fetch()
-    IO.puts("(no #{Vernacular.label(v, "workspace")}s)")
+    IO.puts("(no workspaces)")
   end
 
   defp emit_list(list, :text) do
-    v = Vernacular.fetch()
-    IO.puts("#{Vernacular.cap(v, "workspace")}s (#{length(list)}):")
+    IO.puts("Workspaces (#{length(list)}):")
 
     Enum.each(list, fn ws ->
       IO.puts("  #{ws["name"]}  prefix=#{ws["prefix"]}  id=#{ws["id"]}")

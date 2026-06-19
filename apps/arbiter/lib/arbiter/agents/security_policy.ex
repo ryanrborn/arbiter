@@ -1,8 +1,8 @@
 defmodule Arbiter.Agents.SecurityPolicy do
   @moduledoc """
-  The normalized, **provider-agnostic** security posture for an acolyte run.
+  The normalized, **provider-agnostic** security posture for an worker run.
 
-  An acolyte (worker or reviewer) is an autonomous coding agent spawned in a
+  An worker (worker or reviewer) is an autonomous coding agent spawned in a
   git worktree. Left unconfigured it silently inherits the host operator's
   global agent config — on the Claude provider that means the operator's
   personal `~/.claude/settings.json` (historically `defaultMode: auto`, an
@@ -39,15 +39,15 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
     * `:bypass` — the headless-safe default. The interactive permission
       classifier is skipped entirely (`--dangerously-skip-permissions`) so
-      there is no approval prompt that can freeze a headless acolyte.
+      there is no approval prompt that can freeze a headless worker.
       The **deny list is still enforced** via `--settings` — the deny list is
       a hard block at the tool level, orthogonal to the interactive classifier.
-      This is the right default for autonomous, headless acolyte runs where
+      This is the right default for autonomous, headless worker runs where
       worktree containment + the deny list are the real fence.
     * `:auto`   — opt-in for interactive/supervised runs. The permission
       classifier is active (`--permission-mode auto`): edits are auto-accepted
       but the classifier can pause and ask for approval. The deny list is also
-      enforced. **Do not use as the acolyte default**: in headless `--print`
+      enforced. **Do not use as the worker default**: in headless `--print`
       mode, a classifier prompt that can't be answered freezes the run
       silently.
     * `:strict` — only explicitly allowed tools run; anything not on the
@@ -145,7 +145,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @doc """
   The hardcoded safe baseline: `bypass` mode (headless-safe — no interactive
   classifier freeze), the full destructive-op deny baseline, worktree-scoped
-  filesystem, network on (acolytes need it for `git push` / package installs),
+  filesystem, network on (workers need it for `git push` / package installs),
   no operator extras. See `permissions.mode` in the moduledoc for rationale.
   """
   @spec base() :: t()

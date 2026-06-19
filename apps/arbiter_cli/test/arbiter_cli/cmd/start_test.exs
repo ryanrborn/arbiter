@@ -11,7 +11,7 @@ defmodule ArbiterCli.Cmd.StartTest do
     # walk the filesystem looking for mix.exs. The commands themselves are
     # stubbed (see :bd2_cmd_runner), so the path need not actually exist.
     System.put_env("ARB_HOME", "/tmp/arbiter-start-test")
-    # Clear the acolyte guard so tests aren't blocked when run inside an acolyte session.
+    # Clear the worker guard so tests aren't blocked when run inside a worker session.
     prior_acolyte_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
     System.delete_env("ARB_ACOLYTE_BEAD_ID")
 

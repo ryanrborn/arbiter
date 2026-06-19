@@ -9,8 +9,8 @@ defmodule ArbiterWeb.Api.EventController do
   Topics (default: inbox,tribunal,polecat_failed):
     * inbox          — a message arrived in the coordinator's mailbox
     * tribunal       — a tribunal escalation requires Admiral ruling
-    * polecat_failed — an acolyte stopped unexpectedly (status → failed)
-    * polecat_done   — an acolyte completed (status → completed)
+    * polecat_failed — a worker stopped unexpectedly (status → failed)
+    * polecat_done   — a worker completed (status → completed)
     * bead_state     — any bead FSM transition (noisier — opt-in only)
 
   Wire format: one newline-terminated JSON object per event. A bare newline

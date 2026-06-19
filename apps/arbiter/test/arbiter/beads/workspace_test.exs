@@ -11,14 +11,12 @@ defmodule Arbiter.Beads.WorkspaceTest do
       assert is_binary(ws.id)
     end
 
-    test "succeeds with full vernacular + tracker config" do
+    test "succeeds with tracker config and ignores a legacy vernacular key" do
+      # Forward-safe: an existing workspace may still carry a `"vernacular"`
+      # config key. It is no longer validated — it is accepted and stored as-is
+      # (the substitution layer that read it has been removed).
       config = %{
-        "vernacular" => %{
-          "coordinator" => "Admiral",
-          "worker" => "Acolyte",
-          "aliases" => %{"deploy" => "sling", "report" => "done"},
-          "emoji" => %{"worker" => "⚔️"}
-        },
+        "vernacular" => %{"coordinator" => "Admiral"},
         "tracker" => %{
           "type" => "jira",
           "config" => %{
@@ -31,14 +29,15 @@ defmodule Arbiter.Beads.WorkspaceTest do
 
       assert {:ok, ws} =
                Ash.create(Workspace, %{
-                 name: "Death Squadron",
-                 description: "Sith Fleet persona",
+                 name: "verus",
+                 description: "tracker-backed workspace",
                  config: config
                })
 
-      assert ws.config["vernacular"]["coordinator"] == "Admiral"
       assert ws.config["tracker"]["type"] == "jira"
       assert ws.config["tracker"]["config"]["project_key"] == "VR"
+      # The legacy key is preserved untouched, not rejected.
+      assert ws.config["vernacular"]["coordinator"] == "Admiral"
     end
 
     test "fails when tracker.type is not in the enum" do
@@ -66,17 +65,6 @@ defmodule Arbiter.Beads.WorkspaceTest do
                Ash.create(Workspace, %{name: "bad-tracker-cfg", config: config})
 
       assert err |> Exception.message() |> String.contains?("tracker.config must be a map")
-    end
-
-    test "fails when vernacular.aliases has non-string values" do
-      config = %{"vernacular" => %{"aliases" => %{"deploy" => 42}}}
-
-      assert {:error, %Ash.Error.Invalid{} = err} =
-               Ash.create(Workspace, %{name: "bad-aliases", config: config})
-
-      assert err
-             |> Exception.message()
-             |> String.contains?("vernacular.aliases must be a map of string → string")
     end
 
     test "fails when name is missing" do

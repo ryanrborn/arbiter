@@ -13,9 +13,6 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"merge"` is present, it must be a map.
     * If `"merge.strategy"` is present, it must be one of the values in
       `Arbiter.Beads.Workspace.valid_merger_strategies/0` (`"direct"`, `"github"`).
-    * If `"vernacular"` is present, it must be a map.
-    * If `"vernacular.aliases"` is present, it must be a map of string → string.
-    * If `"vernacular.emoji"` is present, it must be a map of string → string.
     * If `"agent"` / `"review_agent"` is present, it must be a map.
     * If `"agent.type"` is present, it must be one of the values in
       `Arbiter.Agents.valid_agent_types/0` (`"claude"`, `"gemini"`), OR a
@@ -28,9 +25,8 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"tribunal"` is present, it must be a map.
     * If `"tribunal.max_rounds"` is present, it must be a positive integer.
 
-  Unknown keys are allowed (forward-compat). Deeper validation of vernacular keys
-  (coordinator, worker, etc.) is deferred to `Arbiter.Vernacular` in gte-P2 —
-  there it falls back to defaults rather than rejecting.
+  Unknown keys are allowed (forward-compat) — including any legacy
+  `"vernacular"` key, which is now ignored rather than validated.
   """
 
   use Ash.Resource.Change
@@ -50,7 +46,6 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     changeset
     |> validate_tracker(Map.get(config, "tracker"))
     |> validate_merge(Map.get(config, "merge"))
-    |> validate_vernacular(Map.get(config, "vernacular"))
     |> validate_agent_block("agent", Map.get(config, "agent"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
@@ -152,44 +147,6 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
 
   defp validate_merge(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "merge must be a map")
-  end
-
-  defp validate_vernacular(changeset, nil), do: changeset
-
-  defp validate_vernacular(changeset, vernacular) when is_map(vernacular) do
-    changeset
-    |> validate_string_map(Map.get(vernacular, "aliases"), "vernacular.aliases")
-    |> validate_string_map(Map.get(vernacular, "emoji"), "vernacular.emoji")
-  end
-
-  defp validate_vernacular(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "vernacular must be a map")
-  end
-
-  defp validate_string_map(changeset, nil, _label), do: changeset
-
-  defp validate_string_map(changeset, map, label) when is_map(map) do
-    invalid =
-      Enum.find(map, fn
-        {k, v} when is_binary(k) and is_binary(v) -> false
-        _ -> true
-      end)
-
-    case invalid do
-      nil ->
-        changeset
-
-      {k, v} ->
-        Changeset.add_error(changeset,
-          field: :config,
-          message:
-            "#{label} must be a map of string → string; got: #{inspect(k)} => #{inspect(v)}"
-        )
-    end
-  end
-
-  defp validate_string_map(changeset, _, label) do
-    Changeset.add_error(changeset, field: :config, message: "#{label} must be a map")
   end
 
   defp validate_agent_block(changeset, _label, nil), do: changeset

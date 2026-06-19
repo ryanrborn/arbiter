@@ -3,7 +3,7 @@ defmodule Arbiter.Beads.StatusBackfill do
   Reconcile bead statuses in the database against git history on a branch.
 
   The cutover postmortem flagged that bead statuses in the original Dolt
-  source drifted out of sync during late-Phase implementation: the Mayor
+  source drifted out of sync during late-Phase implementation: the coordinator
   stopped closing beads in Dolt once dogfood-switchover happened, so the
   `--sync-status` importer carried the stale `:open` statuses forward.
 

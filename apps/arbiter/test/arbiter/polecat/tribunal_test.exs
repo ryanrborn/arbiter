@@ -1,6 +1,6 @@
 defmodule Arbiter.Polecat.TribunalTest do
   @moduledoc """
-  The review (Tribunal) gate that sits between an acolyte's `arb done` and the
+  The review (Tribunal) gate that sits between a worker's `arb done` and the
   merger — Stage 1 (bd-4g1rg1) plus the Stage 2 revise-and-rediscuss loop
   (bd-3jm700).
 
@@ -13,7 +13,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       findings, and the Admiral is escalated,
     * review-off (default) → completion routes straight to the merger, no gate.
 
-  Plus a full end-to-end path where a **distinct** reviewer acolyte (a second
+  Plus a full end-to-end path where a **distinct** reviewer worker (a second
   polecat + a fixture "claude" subprocess) emits the verdict.
 
   Stage 2 covers the revise-and-rediscuss loop (`describe "revise-and-rediscuss
@@ -378,7 +378,7 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
   end
 
-  # ---- end-to-end: a distinct reviewer acolyte emits the verdict -----------
+  # ---- end-to-end: a distinct reviewer worker emits the verdict -----------
 
   describe "full path with a live (fixture) reviewer" do
     test "a reviewer approves → the branch merges, by a process distinct from the author",
@@ -416,7 +416,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 1
 
-      # The review was run by a DISTINCT acolyte (different mind, different
+      # The review was run by a DISTINCT worker (different mind, different
       # process): it recorded its OWN run row under the #review-suffixed id,
       # separate from the author's run. (Asserting on the persisted run avoids
       # racing the short-lived reviewer process in the registry.)
@@ -864,7 +864,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 8_000)
       assert merge_commit_count(repo) == 1
 
-      # A distinct implementer acolyte ran between the rounds (its own run row
+      # A distinct implementer worker ran between the rounds (its own run row
       # under the round-1 #impl id), proving a fresh mind addressed the findings.
       review_id = Tribunal.reviewer_bead_id(bead.id)
       runs = Ash.read!(Arbiter.Polecats.Run)

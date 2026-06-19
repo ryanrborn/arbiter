@@ -248,7 +248,7 @@ defmodule Arbiter.Polecat.DriverTest do
     end
 
     # bd-d1jp4r: ticks must not consume budget while the polecat is parked at
-    # :awaiting_review (Warden) or :awaiting_tribunal (Tribunal). A long acolyte
+    # :awaiting_review (Warden) or :awaiting_tribunal (Tribunal). A long worker
     # run + review gate was exhausting the 30-minute tick budget before the
     # Warden called Polecat.complete, leaving the bead stranded at :in_progress.
     test "does not count ticks while polecat is :awaiting_review", %{ws: ws} do
@@ -341,7 +341,7 @@ defmodule Arbiter.Polecat.DriverTest do
       assert reloaded.status == :closed
     end
 
-    # bd-7b46wd: if the tick budget is exhausted by active acolyte work and the
+    # bd-7b46wd: if the tick budget is exhausted by active worker work and the
     # max_ticks guard fires while the polecat has *already handed off* to the
     # Warden (:awaiting_review) or Tribunal (:awaiting_tribunal), the driver must
     # NOT stop — those states are owned by watchdogs that will drive the polecat

@@ -2,7 +2,7 @@ defmodule Arbiter.MCP.AgentConfig.Claude do
   @moduledoc """
   Claude Code's `Arbiter.MCP.AgentConfig` adapter (Phase 1).
 
-  Writes a per-spawn `.mcp.json` into the acolyte's worktree declaring the
+  Writes a per-spawn `.mcp.json` into the worker's worktree declaring the
   Arbiter MCP server as a remote HTTP server with the spawn's scope token in a
   bearer header:
 
