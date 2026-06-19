@@ -563,19 +563,48 @@ provider (Claude's cost comes straight from the CLI).
 > on an API-key/Vertex path should confirm the exact `result.stats` shape before
 > the parser below is committed.
 
-### Proposed follow-up (filed as bd-bbpm5e)
+### What shipped in bd-bbpm5e
 
-1. **Opt the Gemini spawn into structured output.** Add `--output-format
-   stream-json` to `Arbiter.Agents.Gemini.default_argv/2`.
-2. **Teach the session parser Gemini's event schema.** The polecat hot-path
-   currently decodes Claude-shaped stream-json in `ClaudeSession.absorb_usage/2`;
-   Gemini's `init`/`result`/`usageMetadata` shape needs either a Gemini branch
-   there or routing Gemini through the adapter's own `parse_line/2`/`usage_attrs/1`
-   (which already exist but aren't on the hot path).
-3. **Add a Gemini price table + cost derivation.** Introduce per-model
-   input/output (and cached) prices and compute `cost_usd` from the token counts
-   at `usage_attrs/1` time, since the CLI won't hand us a dollar figure.
+Token usage + a *derived* cost now land on Gemini ledger rows. Three pieces:
 
-Until then, Gemini ledger rows are correct on `provider` + `model` + duration
-and intentionally `nil` on tokens/cost — graceful degradation, same as any
-session that never produced a usage-bearing event.
+1. **The Gemini spawn opts into structured output.** `default_argv/2` appends
+   `--output-format stream-json` — **but only on the upstream `gemini` CLI
+   path.** The `agy` fork has no such flag (it only does `--print` plain text),
+   so agy spawns still stream raw text and degrade gracefully to
+   `provider + model + duration` with `nil` tokens/cost, exactly as before.
+2. **The session parser learned Gemini's schema.** `ClaudeSession` dispatches
+   on the session's `provider`: `"gemini"` events route to
+   `Arbiter.Agents.Gemini.Stream` (usage capture + display formatting +
+   live-activity), keeping Gemini's schema out of the Claude parser. Only
+   assistant message *text* opts into `arb done` detection.
+3. **A price table derives cost.** `Arbiter.Agents.Gemini.Pricing` holds
+   per-model input/output/cached rates and computes `cost_usd` from the token
+   counts (the CLI emits no dollar figure). Unknown models yield `nil` cost
+   rather than a fabricated figure.
+
+**Schema correction (confirmed against the installed CLI).** The earlier note
+above (sourced from the bundled `docs/`) said the per-model breakdown uses the
+`usageMetadata` camelCase names. That is the CLI's *internal* accounting; the
+actual `stream-json` `result.stats` payload — emitted by
+`StreamJsonFormatter.convertToStreamStats` (gemini-cli v0.45.0) — is
+**snake_case**:
+
+```
+{"type":"result","status":"success","stats":{
+   "total_tokens":N, "input_tokens":N,   // input_tokens = prompt, INCLUDES cached
+   "output_tokens":N,                      // = candidates
+   "cached":N,                             // cache-read subset of input_tokens
+   "input":N,                              // = max(0, input_tokens - cached) (non-cached)
+   "duration_ms":N, "tool_calls":N,
+   "models":{"gemini-2.5-pro":{...same buckets...}}}}
+```
+
+The `init` event carries `{session_id, model}`. Mapping to the ledger:
+`tokens_in = input_tokens`, `tokens_out = output_tokens`,
+`cache_read_tokens = cached`, `cache_creation_tokens = nil` (Gemini has no
+cache-creation analogue). Cost is priced per-model from `stats.models`.
+Gemini's thinking/tool tokens are folded into `total_tokens` but not broken out
+by stream-json, so billable output is approximated as
+`max(output_tokens, total_tokens - input_tokens)` to recover thinking cost (see
+`Arbiter.Agents.Gemini.Pricing` for the documented caveats, incl. the
+un-modelled >200k long-context premium).
