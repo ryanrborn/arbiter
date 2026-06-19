@@ -42,7 +42,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.RigConfig
+  alias Arbiter.Beads.RepoConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
@@ -88,7 +88,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> assign(:now, DateTime.utc_now())
      |> assign(:live, live?)
      |> assign(:worker_label, "worker")
-     |> assign(:rig_label, "repo")
+     |> assign(:repo_label, "repo")
      |> assign(:worktree_label, "worktree")
      |> assign(:issue_label, "issue")
      |> assign(:epic_label, "epic")
@@ -522,17 +522,17 @@ defmodule ArbiterWeb.DashboardLive do
     end)
   end
 
-  # ---- rigs ----
+  # ---- repos ----
 
   defp refresh_rigs(socket) do
     workspaces = socket.assigns[:workspaces_by_id] |> values_or_load()
 
-    paths_by_rig = collect_rig_paths(workspaces)
-    polecats_by_rig = group_polecats_by_rig()
+    paths_by_repo = collect_repo_paths(workspaces)
+    polecats_by_repo = group_polecats_by_repo()
 
     rigs =
-      paths_by_rig
-      |> Map.merge(rigs_from_polecats(polecats_by_rig, paths_by_rig))
+      paths_by_repo
+      |> Map.merge(repos_from_polecats(polecats_by_repo, paths_by_repo))
       |> Enum.map(fn {name, entry} ->
         path = entry.path
 
@@ -546,7 +546,7 @@ defmodule ArbiterWeb.DashboardLive do
           name: name,
           path: path,
           source: entry.source,
-          polecats: Map.get(polecats_by_rig, name, 0),
+          polecats: Map.get(polecats_by_repo, name, 0),
           worktrees: worktree_count
         }
       end)
@@ -558,48 +558,49 @@ defmodule ArbiterWeb.DashboardLive do
   defp values_or_load(nil), do: load_workspaces()
   defp values_or_load(%{} = m), do: Map.values(m)
 
-  # Build {rig_name => %{path:, source:}} from every workspace's
-  # config["rig_paths"] plus the application-env fallback. Workspace
-  # entries win over app-env when names collide.
-  defp collect_rig_paths(workspaces) do
+  # Build {repo_name => %{path:, source:}} from every workspace's
+  # config["repo_paths"] (or legacy "rig_paths") plus the application-env
+  # fallback. Workspace entries win over app-env when names collide.
+  defp collect_repo_paths(workspaces) do
     app_paths =
       :arbiter
-      |> Application.get_env(:rig_paths, %{})
+      |> Application.get_env(:repo_paths, %{})
       |> Map.new(fn {name, raw} ->
-        {name, %{path: RigConfig.rig_path_from_config(raw), source: "(app)"}}
+        {name, %{path: RepoConfig.repo_path_from_config(raw), source: "(app)"}}
       end)
 
     workspaces
     |> Enum.reduce(app_paths, fn ws, acc ->
-      ws_rig_paths =
+      ws_repo_paths =
         case ws.config do
+          %{"repo_paths" => paths} when is_map(paths) -> paths
           %{"rig_paths" => paths} when is_map(paths) -> paths
           _ -> %{}
         end
 
-      Enum.reduce(ws_rig_paths, acc, fn {name, raw}, acc ->
-        Map.put(acc, name, %{path: RigConfig.rig_path_from_config(raw), source: ws.name})
+      Enum.reduce(ws_repo_paths, acc, fn {name, raw}, acc ->
+        Map.put(acc, name, %{path: RepoConfig.repo_path_from_config(raw), source: ws.name})
       end)
     end)
   end
 
-  defp group_polecats_by_rig do
+  defp group_polecats_by_repo do
     try do
       Polecat.list_children()
     rescue
       _ -> []
     end
     |> Enum.reduce(%{}, fn p, acc ->
-      rig = p.rig || "(none)"
-      Map.update(acc, rig, 1, &(&1 + 1))
+      repo = p.repo || "(none)"
+      Map.update(acc, repo, 1, &(&1 + 1))
     end)
   end
 
-  # A polecat can be running against a rig name that isn't in any
-  # `rig_paths` config (default-rig "unknown", a typo, or an inherited
+  # A polecat can be running against a repo name that isn't in any
+  # `repo_paths` config (default-repo "unknown", a typo, or an inherited
   # legacy value). Surface those as well so the operator can see them.
-  defp rigs_from_polecats(polecats_by_rig, configured) do
-    polecats_by_rig
+  defp repos_from_polecats(polecats_by_repo, configured) do
+    polecats_by_repo
     |> Map.keys()
     |> Enum.reject(&Map.has_key?(configured, &1))
     |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)
@@ -1374,40 +1375,40 @@ defmodule ArbiterWeb.DashboardLive do
             </div>
           </section>
 
-          <section id="rigs-section" class="card bg-base-200 border border-base-300 shadow-sm">
+          <section id="repos-section" class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
               <h2 class="text-lg font-semibold flex items-center gap-2">
                 <.icon name="hero-server-stack" class="size-5 text-base-content/70" />
-                {cap_plural(@rig_label)} ({length(@rigs)})
+                {cap_plural(@repo_label)} ({length(@rigs)})
               </h2>
 
               <p :if={@rigs == []} class="text-sm text-base-content/60 italic">
-                No {plural(@rig_label)} configured. Add entries to
-                <code class="text-xs">:arbiter, :rig_paths</code>
-                in config or to a {@workspace_label}'s <code class="text-xs">config["rig_paths"]</code>.
+                No {plural(@repo_label)} configured. Add entries to
+                <code class="text-xs">:arbiter, :repo_paths</code>
+                in config or to a {@workspace_label}'s <code class="text-xs">config["repo_paths"]</code>.
               </p>
 
               <div :if={@rigs != []} class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div
-                  :for={rig <- @rigs}
+                  :for={repo <- @rigs}
                   class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-secondary/40"
                 >
                   <div class="flex items-center justify-between gap-2">
-                    <code class="font-medium truncate" title={rig.name}>{rig.name}</code>
-                    <span class="badge badge-ghost badge-sm shrink-0">{rig.source}</span>
+                    <code class="font-medium truncate" title={repo.name}>{repo.name}</code>
+                    <span class="badge badge-ghost badge-sm shrink-0">{repo.source}</span>
                   </div>
                   <div
                     class="text-xs text-base-content/50 mt-0.5 truncate font-mono"
-                    title={rig.path || "(no path)"}
+                    title={repo.path || "(no path)"}
                   >
-                    {rig.path || "(no path)"}
+                    {repo.path || "(no path)"}
                   </div>
                   <div class="flex flex-wrap items-center gap-1.5 mt-2.5 text-xs">
                     <span class="badge badge-sm badge-info" title={"Active #{plural(@worker_label)}"}>
-                      <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{rig.polecats}
+                      <.icon name="hero-cpu-chip" class="size-3 mr-0.5" />{repo.polecats}
                     </span>
                     <span class="badge badge-sm badge-ghost" title={cap_plural(@worktree_label)}>
-                      {rig.worktrees} {plural(@worktree_label)}
+                      {repo.worktrees} {plural(@worktree_label)}
                     </span>
                   </div>
                 </div>

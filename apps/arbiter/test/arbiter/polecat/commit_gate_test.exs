@@ -31,21 +31,21 @@ defmodule Arbiter.Polecat.CommitGateTest do
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
-  defp init_rig(dir) do
-    repo = Path.join(dir, "rig")
+  defp init_repo(dir) do
+    repo = Path.join(dir, "repo")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-    {_, 0} = git(["config", "user.email", "rig@example.com"], repo)
-    {_, 0} = git(["config", "user.name", "Rig"], repo)
+    {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
+    {_, 0} = git(["config", "user.name", "Repo"], repo)
     {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
     File.write!(Path.join(repo, "README.md"), "seed\n")
     {_, 0} = git(["add", "README.md"], repo)
     {_, 0} = git(["commit", "-q", "-m", "seed"], repo)
 
     # Worktree.create/3 fetches from `origin` and branches from `origin/<base>`,
-    # so the rig needs an upstream the provisioner can consult — mirrors the
+    # so the repo needs an upstream the provisioner can consult — mirrors the
     # bare-origin pattern in dispatch_test.exs.
-    remote = Path.join(dir, "rig-remote.git")
+    remote = Path.join(dir, "repo-remote.git")
     {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
     {_, 0} = git(["remote", "add", "origin", remote], repo)
     {_, 0} = git(["push", "-q", "origin", "main"], repo)
@@ -75,14 +75,14 @@ defmodule Arbiter.Polecat.CommitGateTest do
   setup do
     tmp = Path.join(System.tmp_dir!(), "commit-gate-#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
-    repo = init_rig(tmp)
+    repo = init_repo(tmp)
 
     Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
-    Application.put_env(:arbiter, :rig_paths, %{"gate/rig" => repo})
+    Application.put_env(:arbiter, :repo_paths, %{"gate/repo" => repo})
 
     on_exit(fn ->
       Application.delete_env(:arbiter, :worktree_root)
-      Application.delete_env(:arbiter, :rig_paths)
+      Application.delete_env(:arbiter, :repo_paths)
       File.rm_rf!(tmp)
     end)
 
@@ -144,7 +144,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
     {:ok, pid} =
       Polecat.start(
         bead_id: bead.id,
-        rig: "gate/rig",
+        repo: "gate/repo",
         workspace_id: ws_id(bead),
         meta: meta
       )

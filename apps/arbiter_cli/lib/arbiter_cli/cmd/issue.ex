@@ -14,10 +14,10 @@ defmodule ArbiterCli.Cmd.Issue do
                           [--deployment-notes text] [--pr-body text]
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
-      arb issue claim     <issue#> [--force] [--rig <rig>]
+      arb issue claim     <issue#> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready
-      arb issue dispatch  <id> [<rig>] [--with-claude] [--model <name>]
+      arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>]
   """
 
   alias ArbiterCli.Cmd

@@ -5,7 +5,7 @@ defmodule ArbiterWeb.Api.UsageController do
   Routes:
 
     * `GET /api/usage`          — aggregated rollup. Required query: `by` (one of
-                                  `day | bead | campaign | workspace | rig |
+                                  `day | bead | campaign | workspace | repo |
                                   model | step | provider`). Optional:
                                   `workspace_id`, `since` (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
@@ -88,7 +88,7 @@ defmodule ArbiterWeb.Api.UsageController do
       id: ev.id,
       bead_id: ev.bead_id,
       workspace_id: ev.workspace_id,
-      rig: ev.rig,
+      repo: ev.repo,
       step: Atom.to_string(ev.step),
       model: ev.model,
       provider: ev.provider,

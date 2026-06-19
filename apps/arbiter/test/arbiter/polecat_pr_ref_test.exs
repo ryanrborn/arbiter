@@ -42,7 +42,7 @@ defmodule Arbiter.PolecatPrRefTest do
   test "open_mr records the opened ref onto the bead's pr_ref", %{ws: ws, bead: bead} do
     StubMerger.next_open_ref("#1234")
 
-    {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "arbiter", workspace_id: ws.id)
+    {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "arbiter", workspace_id: ws.id)
     on_exit(fn -> if Process.alive?(polecat_pid), do: GenServer.stop(polecat_pid, :normal) end)
 
     :ok = Polecat.advance(polecat_pid, :running)

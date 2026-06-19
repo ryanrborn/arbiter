@@ -12,7 +12,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
   defp insert_run!(attrs) do
     base = %{
       bead_id: "bd-#{System.unique_integer([:positive])}",
-      rig: "arbiter",
+      repo: "arbiter",
       workspace_id: @ws,
       status: :running,
       started_at: DateTime.utc_now()

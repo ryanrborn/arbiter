@@ -19,7 +19,7 @@ defmodule Arbiter.Polecat.Dispatch do
   2. Transition bead to `:in_progress` (via the bead's `:update` action,
      skipping the `:close` FSM path).
   3. Provision a git worktree on a per-bead branch — skipped when the
-     rig isn't in `:arbiter, :rig_paths` or `provision_worktree: false`.
+     repo isn't in `:arbiter, :repo_paths` or `provision_worktree: false`.
   4. Start a polecat under `Arbiter.Polecat.Supervisor` for the bead.
   5. **Optionally** spawn a Claude subprocess in the worktree via
      `ClaudeSession.start/1`. Opt-in via `start_claude: true` — defaults
@@ -39,7 +39,7 @@ defmodule Arbiter.Polecat.Dispatch do
     machine_id: String.t(),
     machine_pid: pid(),
     driver_pid: pid() | nil,     # nil if start_driver: false
-    worktree_path: String.t() | nil,  # nil if rig unconfigured / opted out
+    worktree_path: String.t() | nil,  # nil if repo unconfigured / opted out
     claude_port: port() | nil    # nil unless start_claude: true
   }}
   ```
@@ -55,7 +55,7 @@ defmodule Arbiter.Polecat.Dispatch do
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Messages.AdmiralNotifier
   alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.RigConfig
+  alias Arbiter.Beads.RepoConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.BranchNamer
@@ -73,7 +73,7 @@ defmodule Arbiter.Polecat.Dispatch do
   require Ash.Query
 
   @type dispatch_opts :: [
-          rig: String.t() | nil,
+          repo: String.t() | nil,
           base_branch: String.t() | nil,
           workflow_module: module(),
           start_driver: boolean(),
@@ -108,7 +108,7 @@ defmodule Arbiter.Polecat.Dispatch do
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
          :ok <- ensure_not_awaiting_review(bead_id),
-         {:ok, opts} <- maybe_resolve_rig_for_real_work(bead, opts),
+         {:ok, opts} <- maybe_resolve_repo_for_real_work(bead, opts),
          :ok <- maybe_preflight(bead, opts),
          {:ok, bead} <- transition_to_in_progress(bead),
          {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
@@ -151,7 +151,7 @@ defmodule Arbiter.Polecat.Dispatch do
   1. Load + validate the bead (must not be `:closed`).
   2. Refuse if a polecat is still **actively** working the bead — resume only
      applies to a stopped/failed/dead worker. Stop the active one first.
-  3. Resolve the rig (explicit opt, else the bead's most recent run's rig).
+  3. Resolve the repo (explicit opt, else the bead's most recent run's repo).
   4. Require the worktree to still exist on disk — `{:error,
      :no_outpost}` if it was cleaned up (nothing to resume; re-`dispatch` instead).
   5. Build the resume briefing from the worktree's git state.
@@ -166,16 +166,16 @@ defmodule Arbiter.Polecat.Dispatch do
 
   Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
   `dispatch/2`. Resume-specific errors: `{:error, :no_outpost}`,
-  `{:error, {:acolyte_active, status}}`, `{:error, :rig_unknown}`.
+  `{:error, {:acolyte_active, status}}`, `{:error, :repo_unknown}`.
   """
   @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def resume(bead_id, opts \\ []) when is_binary(bead_id) do
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
          :ok <- ensure_not_active(bead_id),
-         {:ok, rig} <- resolve_resume_rig(bead, opts),
-         {:ok, worktree_path} <- resume_worktree(bead, rig),
-         target_branch <- resolve_target_branch(bead, Keyword.put(opts, :rig, rig)),
+         {:ok, repo} <- resolve_resume_repo(bead, opts),
+         {:ok, worktree_path} <- resume_worktree(bead, repo),
+         target_branch <- resolve_target_branch(bead, Keyword.put(opts, :repo, repo)),
          {:ok, context} <- ResumeContext.build(bead, worktree_path, target_branch) do
       prior_run_id = latest_run_id(bead_id)
 
@@ -194,7 +194,7 @@ defmodule Arbiter.Polecat.Dispatch do
 
       resume_opts =
         opts
-        |> Keyword.put(:rig, rig)
+        |> Keyword.put(:repo, repo)
         |> Keyword.put(:start_claude, true)
         |> Keyword.put(:resume, true)
         |> Keyword.put(:resume_context, context)
@@ -240,32 +240,32 @@ defmodule Arbiter.Polecat.Dispatch do
     :exit, _ -> nil
   end
 
-  # The rig: an explicit opt wins; otherwise inherit the bead's most recent run's
-  # rig so `arb resume <bead>` works without re-specifying it. No run + no opt is
-  # an error — we can't resolve the worktree without knowing the rig.
-  defp resolve_resume_rig(%Issue{id: bead_id}, opts) do
-    case Keyword.get(opts, :rig) do
-      rig when is_binary(rig) and rig != "" ->
-        {:ok, rig}
+  # The repo: an explicit opt wins; otherwise inherit the bead's most recent run's
+  # repo so `arb resume <bead>` works without re-specifying it. No run + no opt is
+  # an error — we can't resolve the worktree without knowing the repo.
+  defp resolve_resume_repo(%Issue{id: bead_id}, opts) do
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        {:ok, repo}
 
       _ ->
         case latest_run(bead_id) do
-          %Run{rig: rig} when is_binary(rig) and rig != "" -> {:ok, rig}
-          _ -> {:error, :rig_unknown}
+          %Run{repo: repo} when is_binary(repo) and repo != "" -> {:ok, repo}
+          _ -> {:error, :repo_unknown}
         end
     end
   end
 
   # Resolve the preserved worktree path for the bead's per-bead branch and require
   # it to exist on disk. A missing worktree means there's nothing to resume.
-  defp resume_worktree(%Issue{} = bead, rig) do
-    case resolve_rig_path(bead, rig) do
+  defp resume_worktree(%Issue{} = bead, repo) do
+    case resolve_repo_path(bead, repo) do
       repo_path when is_binary(repo_path) ->
         path = Worktree.worktree_path(BranchNamer.derive(bead))
         if File.dir?(path), do: {:ok, path}, else: {:error, :no_outpost}
 
       _ ->
-        {:error, :rig_unknown}
+        {:error, :repo_unknown}
     end
   end
 
@@ -354,10 +354,10 @@ defmodule Arbiter.Polecat.Dispatch do
   end
 
   defp start_polecat(%Issue{id: id, workspace_id: ws_id} = bead, worktree_path, opts) do
-    rig = Keyword.get(opts, :rig) || "unknown"
+    repo = Keyword.get(opts, :repo) || "unknown"
     meta = build_polecat_meta(bead, worktree_path, opts)
 
-    case Polecat.start(bead_id: id, rig: rig, workspace_id: ws_id, meta: meta) do
+    case Polecat.start(bead_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -373,7 +373,7 @@ defmodule Arbiter.Polecat.Dispatch do
           status when status in [:failed, :completed] ->
             _ = Polecat.stop(pid, :normal)
 
-            case Polecat.start(bead_id: id, rig: rig, workspace_id: ws_id, meta: meta) do
+            case Polecat.start(bead_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
               {:ok, new_pid} -> {:ok, new_pid}
               {:error, reason} -> {:error, {:polecat_start_failed, reason}}
             end
@@ -391,10 +391,10 @@ defmodule Arbiter.Polecat.Dispatch do
   # integrate the branch when the worker finishes (see the arb-done handler in
   # `Arbiter.Polecat`).
   #
-  # When a worktree was provisioned we know the per-bead branch and the rig
+  # When a worktree was provisioned we know the per-bead branch and the repo
   # path (the local checkout where the target branch lives — the `repo_path`
   # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
-  # (rig unconfigured, or `provision_worktree: false`) there is nothing to
+  # (repo unconfigured, or `provision_worktree: false`) there is nothing to
   # merge, so `:branch` stays absent and completion is a plain bead close.
   defp build_polecat_meta(%Issue{} = bead, worktree_path, opts) do
     base =
@@ -405,7 +405,7 @@ defmodule Arbiter.Polecat.Dispatch do
 
     base = maybe_put_resume_meta(base, opts)
 
-    case worktree_path && resolve_rig_path(bead, Keyword.get(opts, :rig)) do
+    case worktree_path && resolve_repo_path(bead, Keyword.get(opts, :repo)) do
       repo_path when is_binary(repo_path) ->
         Map.merge(base, %{
           branch: BranchNamer.derive(bead),
@@ -448,7 +448,7 @@ defmodule Arbiter.Polecat.Dispatch do
 
   defp attach_and_start_machine(%Issue{id: id}, worktree_path, opts) do
     workflow = Keyword.get(opts, :workflow_module, Work)
-    vars = %{bead_id: id, worktree_path: worktree_path, rig: Keyword.get(opts, :rig)}
+    vars = %{bead_id: id, worktree_path: worktree_path, repo: Keyword.get(opts, :repo)}
 
     with {:ok, machine_id} <- Machine.attach(workflow, id, vars),
          {:ok, pid} <- Machine.start(machine_id) do
@@ -467,18 +467,18 @@ defmodule Arbiter.Polecat.Dispatch do
   #
   # Behaviour:
   #   - `provision_worktree: false` in opts → skip, return `{:ok, nil}`.
-  #   - rig has no mapping in workspace config or Application env → skip,
+  #   - repo has no mapping in workspace config or Application env → skip,
   #     return `{:ok, nil}` (the default no-op stance).
   #   - Otherwise, derive a branch name and call `Worktree.create/3`, which
   #     `git fetch origin <target>` + `git worktree add -b <branch>
   #     origin/<target>`. A fetch or ref-resolve failure aborts with a clear
   #     error rather than silently falling back to a stale local base.
   #
-  # ## Rig path lookup order
+  # ## Repo path lookup order
   #
-  #   1. Bead's workspace config (`workspace.config["rig_paths"][rig]`)
+  #   1. Bead's workspace config (`workspace.config["repo_paths"][repo]`)
   #      — per-workspace, runtime-settable, owns the source of truth.
-  #   2. Application env (`:arbiter, :rig_paths`) — global fallback,
+  #   2. Application env (`:arbiter, :repo_paths`) — global fallback,
   #      configured in `config/dev.exs` for dev convenience.
   #
   # First hit wins. This lets workspaces override the global default
@@ -489,9 +489,9 @@ defmodule Arbiter.Polecat.Dispatch do
         {:ok, nil}
 
       true ->
-        rig = Keyword.get(opts, :rig)
+        repo = Keyword.get(opts, :repo)
 
-        case resolve_rig_path(bead, rig) do
+        case resolve_repo_path(bead, repo) do
           nil ->
             {:ok, nil}
 
@@ -520,10 +520,10 @@ defmodule Arbiter.Polecat.Dispatch do
     end
   end
 
-  defp resolve_rig_path(_bead, nil), do: nil
+  defp resolve_repo_path(_bead, nil), do: nil
 
-  defp resolve_rig_path(%Issue{workspace_id: ws_id}, rig) when is_binary(rig) do
-    workspace_rig_path(ws_id, rig) || application_rig_path(rig)
+  defp resolve_repo_path(%Issue{workspace_id: ws_id}, repo) when is_binary(repo) do
+    workspace_repo_path(ws_id, repo) || application_repo_path(repo)
   end
 
   # Resolve the integration branch — the branch the worktree is cut from and
@@ -533,27 +533,29 @@ defmodule Arbiter.Polecat.Dispatch do
   defp resolve_target_branch(%Issue{} = bead, opts) do
     TargetBranch.resolve(bead,
       base_branch: Keyword.get(opts, :base_branch),
-      rig: Keyword.get(opts, :rig)
+      repo: Keyword.get(opts, :repo)
     )
   end
 
-  defp workspace_rig_path(nil, _rig), do: nil
+  defp workspace_repo_path(nil, _repo), do: nil
 
-  defp workspace_rig_path(ws_id, rig) do
+  defp workspace_repo_path(ws_id, repo) do
     case load_workspace_config(ws_id) do
       %{} = config ->
-        rig_path_from_config(get_in(config, ["rig_paths", rig]))
+        repo_path_from_config(
+          get_in(config, ["repo_paths", repo]) || get_in(config, ["rig_paths", repo])
+        )
 
       _ ->
         nil
     end
   end
 
-  defp rig_path_from_config(raw), do: RigConfig.rig_path_from_config(raw)
+  defp repo_path_from_config(raw), do: RepoConfig.repo_path_from_config(raw)
 
-  defp application_rig_path(rig) do
-    rig_paths = Application.get_env(:arbiter, :rig_paths, %{})
-    rig_path_from_config(Map.get(rig_paths, rig))
+  defp application_repo_path(repo) do
+    repo_paths = Application.get_env(:arbiter, :repo_paths, %{})
+    repo_path_from_config(Map.get(repo_paths, repo))
   end
 
   defp load_workspace_config(ws_id) do
@@ -565,66 +567,71 @@ defmodule Arbiter.Polecat.Dispatch do
     _ -> nil
   end
 
-  # Real-work rig resolution (bd-1ziw04): when start_claude: true the dispatch
-  # MUST bind a rig — a no-rig idle stub does nothing and looks dispatched.
+  # Real-work repo resolution (bd-1ziw04): when start_claude: true the dispatch
+  # MUST bind a repo — a no-repo idle stub does nothing and looks dispatched.
   #
   # Contract (approach b):
-  #   * Explicit rig that resolves in :rig_paths → proceed.
-  #   * Explicit rig that does NOT resolve     → {:error, {:rig_not_found, rig}}.
-  #   * No rig, exactly one rig in :rig_paths  → auto-select, update opts.
-  #   * No rig, zero rigs in :rig_paths        → {:error, :no_rig_configured}.
-  #   * No rig, multiple rigs in :rig_paths    → {:error, {:ambiguous_rig, rigs}}.
+  #   * Explicit repo that resolves in :repo_paths → proceed.
+  #   * Explicit repo that does NOT resolve     → {:error, {:repo_not_found, repo}}.
+  #   * No repo, exactly one repo in :repo_paths  → auto-select, update opts.
+  #   * No repo, zero repos in :repo_paths        → {:error, :no_repo_configured}.
+  #   * No repo, multiple repos in :repo_paths    → {:error, {:ambiguous_repo, repos}}.
   #
   # The check fires only for `start_claude: true` dispatches; a dry/manual dispatch
-  # (no agent) is allowed to park without a rig.
-  defp maybe_resolve_rig_for_real_work(%Issue{} = bead, opts) do
+  # (no agent) is allowed to park without a repo.
+  defp maybe_resolve_repo_for_real_work(%Issue{} = bead, opts) do
     case Keyword.get(opts, :start_claude, false) do
       false -> {:ok, opts}
-      true -> resolve_rig_for_dispatch(bead, opts)
+      true -> resolve_repo_for_dispatch(bead, opts)
     end
   end
 
-  defp resolve_rig_for_dispatch(%Issue{} = bead, opts) do
-    case Keyword.get(opts, :rig) do
-      rig when is_binary(rig) and rig != "" ->
-        case resolve_rig_path(bead, rig) do
-          nil -> {:error, {:rig_not_found, rig}}
+  defp resolve_repo_for_dispatch(%Issue{} = bead, opts) do
+    case Keyword.get(opts, :repo) do
+      repo when is_binary(repo) and repo != "" ->
+        case resolve_repo_path(bead, repo) do
+          nil -> {:error, {:repo_not_found, repo}}
           _path -> {:ok, opts}
         end
 
       _ ->
-        case all_available_rigs(bead) do
-          [] -> {:error, :no_rig_configured}
-          [sole] -> {:ok, Keyword.put(opts, :rig, sole)}
-          rigs -> {:error, {:ambiguous_rig, rigs}}
+        case all_available_repos(bead) do
+          [] -> {:error, :no_repo_configured}
+          [sole] -> {:ok, Keyword.put(opts, :repo, sole)}
+          repos -> {:error, {:ambiguous_repo, repos}}
         end
     end
   end
 
-  # Enumerate all rig names that have a resolvable path, drawn from:
-  #   1. The bead's workspace config `rig_paths` map.
-  #   2. The global Application env `:rig_paths` map.
+  # Enumerate all repo names that have a resolvable path, drawn from:
+  #   1. The bead's workspace config `repo_paths` map (or legacy `rig_paths`).
+  #   2. The global Application env `:repo_paths` map.
   # Both sources are combined, de-duplicated, and sorted.
-  defp all_available_rigs(%Issue{workspace_id: ws_id}) do
-    ws_rigs =
+  defp all_available_repos(%Issue{workspace_id: ws_id}) do
+    ws_repos =
       case load_workspace_config(ws_id) do
+        %{"repo_paths" => rp} when is_map(rp) ->
+          Enum.flat_map(rp, fn {k, v} ->
+            if repo_path_from_config(v) != nil, do: [k], else: []
+          end)
+
         %{"rig_paths" => rp} when is_map(rp) ->
           Enum.flat_map(rp, fn {k, v} ->
-            if rig_path_from_config(v) != nil, do: [k], else: []
+            if repo_path_from_config(v) != nil, do: [k], else: []
           end)
 
         _ ->
           []
       end
 
-    app_rigs =
+    app_repos =
       :arbiter
-      |> Application.get_env(:rig_paths, %{})
+      |> Application.get_env(:repo_paths, %{})
       |> Enum.flat_map(fn {k, v} ->
-        if rig_path_from_config(v) != nil, do: [k], else: []
+        if repo_path_from_config(v) != nil, do: [k], else: []
       end)
 
-    (ws_rigs ++ app_rigs) |> Enum.uniq() |> Enum.sort()
+    (ws_repos ++ app_repos) |> Enum.uniq() |> Enum.sort()
   end
 
   # Pre-flight auth check (bd-awi4nw): before transitioning the bead and
@@ -722,7 +729,7 @@ defmodule Arbiter.Polecat.Dispatch do
     %{
       bead_id: id,
       workspace_id: ws_id,
-      rig: Keyword.get(opts, :rig),
+      repo: Keyword.get(opts, :repo),
       meta: %{}
     }
   end
@@ -752,8 +759,8 @@ defmodule Arbiter.Polecat.Dispatch do
 
       true ->
         # Review dispatches skip worktree provisioning but still need a real
-        # cwd for the Claude port. Fall back to the rig's local checkout so
-        # the reviewer has `git`/`gh`/etc. in scope; an unmapped rig with no
+        # cwd for the Claude port. Fall back to the repo's local checkout so
+        # the reviewer has `git`/`gh`/etc. in scope; an unmapped repo with no
         # worktree is still rejected — there's nowhere to `cd` to.
         cwd = worktree_path || review_cwd(bead, opts)
 
@@ -768,12 +775,12 @@ defmodule Arbiter.Polecat.Dispatch do
             # the spawn.
             #
             # Pass `worktree_path`, NOT `path` (bd-dlv3no): a review dispatch has
-            # no worktree, so `path` falls back to the rig's shared checkout
+            # no worktree, so `path` falls back to the repo's shared checkout
             # (`review_cwd/2`). Writing the token-bearing `.mcp.json` there leaks
             # it into the canonical checkout the live server + operator share —
             # the exact "worker leaks into the main worktree" class this fixes.
             # With a nil worktree the helper is a no-op, so reviews never touch
-            # the rig's working tree.
+            # the repo's working tree.
             _ = maybe_write_mcp_config(bead, worktree_path, opts)
 
             with {:ok, session_opts} <-
@@ -795,10 +802,10 @@ defmodule Arbiter.Polecat.Dispatch do
   # Resolve a sensible cwd for a review session that has no per-bead worktree.
   # Only fires when `review: true` is set so a regular dispatch without
   # provision_worktree still surfaces `:missing_worktree` instead of silently
-  # running Claude in the rig's main checkout.
+  # running Claude in the repo's main checkout.
   defp review_cwd(%Issue{} = bead, opts) do
     case Keyword.get(opts, :review, false) do
-      true -> resolve_rig_path(bead, Keyword.get(opts, :rig))
+      true -> resolve_repo_path(bead, Keyword.get(opts, :repo))
       _ -> nil
     end
   end
@@ -970,14 +977,14 @@ defmodule Arbiter.Polecat.Dispatch do
   end
 
   # Write the per-spawn Arbiter.MCP config into the worktree (bd-dem49g). Mints a
-  # narrow `:polecat`-tier scope token bound to this bead/rig/workspace and hands
+  # narrow `:polecat`-tier scope token bound to this bead/repo/workspace and hands
   # it to the agent-specific config adapter (Phase 1: Claude `.mcp.json`). The
   # token *is* the polecat's capability — it can only read/progress its own bead.
   #
   # Gated by `Arbiter.MCP.inject_config?/0` (off in test by default) and fully
   # best-effort: a missing signing secret or write failure is logged and swallowed
   # so MCP config never blocks a dispatch.
-  # No isolated worktree (e.g. a review dispatch running in the rig's shared
+  # No isolated worktree (e.g. a review dispatch running in the repo's shared
   # checkout) → never write the token-bearing `.mcp.json`. Injecting it into the
   # canonical checkout would leak the scope token into the working tree the live
   # server and operator share (bd-dlv3no).
@@ -990,7 +997,7 @@ defmodule Arbiter.Polecat.Dispatch do
       # slung *by a coordinator* via `polecat_dispatch` is minted one level deeper, so
       # a chain of dispatches is tracked. Defaults to 0 for a plain operator dispatch.
       token =
-        Arbiter.MCP.Scope.mint_polecat(bead, Keyword.get(opts, :rig),
+        Arbiter.MCP.Scope.mint_polecat(bead, Keyword.get(opts, :repo),
           depth: Keyword.get(opts, :depth, 0)
         )
 
@@ -1236,7 +1243,7 @@ defmodule Arbiter.Polecat.Dispatch do
     Acceptance:
     #{bead.acceptance || "(none)"}
 
-    #{tracker_line}Your current directory is the rig's local checkout. There is
+    #{tracker_line}Your current directory is the repo's local checkout. There is
     no per-bead branch and no worktree was provisioned — this is a review-only
     directive.
 

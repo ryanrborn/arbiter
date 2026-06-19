@@ -52,7 +52,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
           optional(:target_branch) => String.t() | nil,
           optional(:pr_ref) => term(),
           optional(:feedback) => [Merger.feedback_item()],
-          optional(:rig) => String.t() | nil,
+          optional(:repo) => String.t() | nil,
           optional(:start_claude) => boolean(),
           optional(:claude_command) => [String.t()]
         }
@@ -88,7 +88,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
 
     resume_opts =
       [revise_feedback: briefing]
-      |> maybe_put(:rig, Map.get(args, :rig))
+      |> maybe_put(:repo, Map.get(args, :repo))
       |> maybe_put(:claude_command, Map.get(args, :claude_command))
       |> Keyword.put(:start_claude, Map.get(args, :start_claude, true))
 

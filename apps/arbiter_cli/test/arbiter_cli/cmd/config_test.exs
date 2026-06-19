@@ -59,7 +59,7 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert reason =~ "tracker.type is \"github\""
     end
 
-    test "safety_check/1 accepts github merge with no owner or repo (both per-rig derivable)" do
+    test "safety_check/1 accepts github merge with no owner or repo (both per-repo derivable)" do
       assert :ok =
                Config.safety_check(%{"merge" => %{"strategy" => "github"}})
     end

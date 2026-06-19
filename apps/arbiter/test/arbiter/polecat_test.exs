@@ -12,12 +12,12 @@ defmodule Arbiter.PolecatTest do
 
   defp start_polecat(opts \\ []) do
     bead_id = Keyword.get(opts, :bead_id, new_bead_id())
-    rig = Keyword.get(opts, :rig, "arbiter")
+    repo = Keyword.get(opts, :repo, "arbiter")
 
     opts =
       opts
       |> Keyword.put_new(:bead_id, bead_id)
-      |> Keyword.put_new(:rig, rig)
+      |> Keyword.put_new(:repo, repo)
 
     {:ok, pid} = Polecat.start(opts)
 
@@ -36,7 +36,7 @@ defmodule Arbiter.PolecatTest do
 
       snap = Polecat.state(pid)
       assert snap.bead_id == bead_id
-      assert snap.rig == "arbiter"
+      assert snap.repo == "arbiter"
       assert snap.workspace_id == "ws-1"
       assert snap.current_step == :idle
       assert snap.status == :idle
@@ -55,18 +55,18 @@ defmodule Arbiter.PolecatTest do
     end
 
     test "start_link/1 without :bead_id returns {:error, :missing_bead_id}" do
-      assert Polecat.start_link(rig: "arbiter") == {:error, :missing_bead_id}
+      assert Polecat.start_link(repo: "arbiter") == {:error, :missing_bead_id}
     end
 
-    test "start_link/1 without :rig returns {:error, :missing_rig}" do
-      assert Polecat.start_link(bead_id: new_bead_id()) == {:error, :missing_rig}
+    test "start_link/1 without :repo returns {:error, :missing_repo}" do
+      assert Polecat.start_link(bead_id: new_bead_id()) == {:error, :missing_repo}
     end
 
     test "starting a second polecat for the same bead_id returns :already_started" do
       {pid, bead_id} = start_polecat()
 
       assert {:error, {:already_started, ^pid}} =
-               Polecat.start(bead_id: bead_id, rig: "arbiter")
+               Polecat.start(bead_id: bead_id, repo: "arbiter")
     end
   end
 
@@ -306,7 +306,7 @@ defmodule Arbiter.PolecatTest do
       {pid, _bead} = start_polecat()
       [entry | _] = Polecat.list_children() |> Enum.filter(&(&1.pid == pid))
 
-      for key <- [:bead_id, :workspace_id, :rig, :current_step, :status, :started_at, :meta] do
+      for key <- [:bead_id, :workspace_id, :repo, :current_step, :status, :started_at, :meta] do
         assert Map.has_key?(entry, key), "missing #{inspect(key)} in #{inspect(entry)}"
       end
     end

@@ -28,7 +28,7 @@ defmodule Arbiter.Beads.Issue.Changes.TeardownTest do
       {:ok, bead} = Ash.create(Issue, %{title: "with polecat", workspace_id: ws.id})
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       assert Polecat.whereis(bead.id) == polecat_pid
 
       {:ok, _closed} = Ash.update(bead, %{}, action: :close)

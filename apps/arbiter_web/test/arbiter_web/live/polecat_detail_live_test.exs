@@ -22,13 +22,13 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
   describe "GET /polecats/:bead_id" do
     test "renders the snapshot for a running polecat", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-test", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       :ok = Polecat.report(pid, :output_lines, ["hello", "world", "arb done"])
 
       {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
 
       assert html =~ bead.id
-      assert html =~ "test/rig"
+      assert html =~ "test/repo"
       assert html =~ "hello"
       assert html =~ "arb done"
     end
@@ -40,7 +40,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
 
     test "updates live when the polecat receives new output", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-live", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       {:ok, view, html} = live(conn, ~p"/polecats/#{bead.id}")
       refute html =~ "fresh-line"
@@ -69,7 +69,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
 
     test "shows the workspace context when the bead exists", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-ws", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
       assert html =~ "Workspace:"
@@ -78,7 +78,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
 
     test "Stop button kills the polecat and redirects to /", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-stop", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       {:ok, view, html} = live(conn, ~p"/polecats/#{bead.id}")
       assert html =~ "Stop worker"
@@ -92,7 +92,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
 
     test "no Stop button when the polecat is :completed", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-done", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "r")
       :ok = Polecat.advance(pid, :design)
       :ok = Polecat.complete(pid, :done)
 
@@ -103,13 +103,13 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
     test "renders the workflow step bar when a MachineState exists",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-wf", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       {:ok, _machine_id} =
         Arbiter.Workflows.Machine.attach(Arbiter.Workflows.Work, bead.id, %{
           bead_id: bead.id,
           worktree_path: nil,
-          rig: "r"
+          repo: "r"
         })
 
       {:ok, _view, html} = live(conn, ~p"/polecats/#{bead.id}")
@@ -123,7 +123,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
     test "a claude-driven polecat shows live activity, not frozen workflow steps",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "pd-claude", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       # Even with a MachineState attached (slung polecats always have one), a
       # claude-driven run must NOT show the never-advancing fixed steps — it
@@ -132,7 +132,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
         Arbiter.Workflows.Machine.attach(Arbiter.Workflows.Work, bead.id, %{
           bead_id: bead.id,
           worktree_path: nil,
-          rig: "r"
+          repo: "r"
         })
 
       :ok = Polecat.advance(pid, :claude)
@@ -156,7 +156,7 @@ defmodule ArbiterWeb.PolecatDetailLiveTest do
       # activity label, and assert the badge advances — driven solely by the
       # polecat's own activity-change broadcast, not an injected lifecycle event.
       {:ok, bead} = Ash.create(Issue, %{title: "pd-advance", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       cwd = Path.join(System.tmp_dir!(), "pd-advance-#{System.unique_integer([:positive])}")
       File.mkdir_p!(cwd)

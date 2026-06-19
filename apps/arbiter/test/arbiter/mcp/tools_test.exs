@@ -17,7 +17,7 @@ defmodule Arbiter.MCP.ToolsTest do
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-tools-ws", prefix: "mcp"})
     {:ok, bead} = Ash.create(Issue, %{title: "the bound bead", workspace_id: ws.id})
 
-    polecat = %Scope{tier: :polecat, workspace_id: ws.id, bead_id: bead.id, rig: "shipyard"}
+    polecat = %Scope{tier: :polecat, workspace_id: ws.id, bead_id: bead.id, repo: "shipyard"}
     coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
 
     {:ok, ws: ws, bead: bead, polecat: polecat, coordinator: coordinator}
@@ -565,16 +565,16 @@ defmodule Arbiter.MCP.ToolsTest do
 
       # can_dispatch + in-workspace + below depth, but no preserved worktree exists.
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_resume(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
+               Tools.polecat_resume(ctx.coordinator, %{"bead_id" => bead.id, "repo" => "test/repo"})
 
-      assert msg =~ "worktree" or msg =~ "rig"
+      assert msg =~ "worktree" or msg =~ "repo"
     end
   end
 
   describe "polecat_stop/2" do
     test "stops a running polecat in the workspace", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "stop target", workspace_id: ctx.ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
 
       assert {:ok, %{bead_id: bead_id, stopped: true}} =
@@ -594,7 +594,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "st-other", prefix: "sto"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
 
-      {:ok, pid} = Polecat.start(bead_id: foreign.id, rig: "test/rig", workspace_id: other_ws.id)
+      {:ok, pid} = Polecat.start(bead_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
       on_exit(fn -> Process.alive?(pid) && Polecat.stop(foreign.id, :normal) end)
 
       assert {:error, {:not_found, _}} =
@@ -645,7 +645,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, bead} = Ash.create(Issue, %{title: "to dispatch", workspace_id: ctx.ws.id})
 
       assert {:ok, data} =
-               Tools.polecat_dispatch(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
+               Tools.polecat_dispatch(ctx.coordinator, %{"bead_id" => bead.id, "repo" => "test/repo"})
 
       assert data.bead.status == "in_progress"
       assert data.claude_started == false
@@ -655,8 +655,8 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     # `provider` (and the deprecated `with_claude` alias) take the real-work
-    # dispatch path rather than parking. Without a configured rig that path
-    # surfaces a rig error — which is exactly the signal that the provider was
+    # dispatch path rather than parking. Without a configured repo that path
+    # surfaces a repo error — which is exactly the signal that the provider was
     # honored as a worker dispatch (a park would have returned {:ok, ...} with
     # claude_started: false).
     test "provider: \"gemini\" takes the real-work path (not a park)", ctx do
@@ -666,10 +666,10 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.polecat_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "provider" => "gemini",
-                 "rig" => "test/rig"
+                 "repo" => "test/repo"
                })
 
-      assert msg =~ "rig"
+      assert msg =~ "repo"
 
       on_exit(fn -> Polecat.stop(bead.id, :normal) end)
     end
@@ -681,10 +681,10 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.polecat_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "provider" => "claude",
-                 "rig" => "test/rig"
+                 "repo" => "test/repo"
                })
 
-      assert msg =~ "rig"
+      assert msg =~ "repo"
 
       on_exit(fn -> Polecat.stop(bead.id, :normal) end)
     end
@@ -696,10 +696,10 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.polecat_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "with_claude" => true,
-                 "rig" => "test/rig"
+                 "repo" => "test/repo"
                })
 
-      assert msg =~ "rig"
+      assert msg =~ "repo"
 
       on_exit(fn -> Polecat.stop(bead.id, :normal) end)
     end
@@ -713,7 +713,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "returns active polecats scoped to the coordinator's workspace", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "polecat-list target", workspace_id: ctx.ws.id})
 
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
 
       assert {:ok, %{polecats: polecats, count: count}} = Tools.polecat_list(ctx.coordinator, %{})
@@ -721,16 +721,16 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Enum.any?(polecats, &(&1.bead_id == bead.id))
 
       entry = Enum.find(polecats, &(&1.bead_id == bead.id))
-      assert is_binary(entry.rig)
+      assert is_binary(entry.repo)
       assert is_binary(entry.status)
-      assert entry.rig == "test/rig"
+      assert entry.repo == "test/repo"
     end
 
     test "does not include polecats from another workspace", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})
 
-      {:ok, _pid} = Polecat.start(bead_id: foreign.id, rig: "test/rig", workspace_id: other_ws.id)
+      {:ok, _pid} = Polecat.start(bead_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
       on_exit(fn -> Polecat.stop(foreign.id, :normal) end)
 
       assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
@@ -740,7 +740,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "surfaces the provider/model from the polecat's routing config", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "gemini polecat", workspace_id: ctx.ws.id})
 
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
 
       # Stamp the routing config the way Dispatch does at dispatch time.

@@ -8,11 +8,11 @@ defmodule Arbiter.Mergers.Direct do
   ## Required opt: `:repo_path`
 
   Unlike a hosted forge, `Direct` operates on a local checkout, so `open/4`
-  needs to know which repository (the rig path) to run inside. Pass it via the
+  needs to know which repository (the repo path) to run inside. Pass it via the
   `opts` map:
 
       Direct.open("feature/bd-1qx1nt", "Merge bd-1qx1nt", "", %{
-        repo_path: "/path/to/rig",
+        repo_path: "/path/to/repo",
         target_branch: "main"
       })
 
@@ -49,7 +49,7 @@ defmodule Arbiter.Mergers.Direct do
 
   ## Conflict handling — never leave the canonical tree broken
 
-  `open/4` operates on the *canonical* checkout (the rig), and the live Phoenix
+  `open/4` operates on the *canonical* checkout (the repo), and the live Phoenix
   server compiles from that same working tree. A conflicted `git merge` would
   otherwise leave the tree half-merged and conflict-markered — uncompilable —
   and the running server can no longer hot-reload (incident bd-1rhyla: a

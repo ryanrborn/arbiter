@@ -262,10 +262,10 @@ defmodule ArbiterCli.Cmd.Prime do
 
   # Condensed digest of the most-burned-by pitfalls. Always shown so a fresh
   # session starts with the essentials even before reading the full guide.
-  defp emit_field_guide_digest(issue, worker, rig) do
+  defp emit_field_guide_digest(issue, worker, repo) do
     IO.puts("== Operating Pitfalls ==")
 
-    Enum.each(field_guide_pitfalls(issue, worker, rig), fn line ->
+    Enum.each(field_guide_pitfalls(issue, worker, repo), fn line ->
       IO.puts("  [ ] #{line}")
     end)
 
@@ -273,12 +273,12 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
   end
 
-  defp field_guide_pitfalls(issue \\ "issue", worker \\ "worker", rig \\ "repo") do
+  defp field_guide_pitfalls(issue \\ "issue", worker \\ "worker", repo \\ "repo") do
     [
       "Concurrency: keep parallel #{issue}s FILE-DISJOINT — same file = merge collision",
       "Config: use `arb config get/set` only — raw API PATCH silently clobbers siblings",
       "Deploy: check for active #{worker}s before restarting the server — they will be abandoned",
-      "Freshness: keep #{rig}s current — a stale #{rig} propagates regressed state",
+      "Freshness: keep #{repo}s current — a stale #{repo} propagates regressed state",
       "Verify: check the port/log to confirm a #{worker} is live — status alone can lie",
       "ReviewGate: read the full implementer↔reviewer transcript before deciding"
     ]
@@ -300,7 +300,7 @@ defmodule ArbiterCli.Cmd.Prime do
           do: "activity=#{activity_label(p)}",
           else: "step=#{p["current_step"]}"
 
-      IO.puts("  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}")
+      IO.puts("  #{p["bead_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}")
     end)
   end
 

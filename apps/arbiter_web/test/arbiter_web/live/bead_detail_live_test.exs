@@ -60,7 +60,7 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
 
     test "shows polecat info inline when one is running", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "polly", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
 
@@ -75,7 +75,7 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
     test "renders when the polecat snapshot has no :claude_session? field",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no-claude", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
       assert html =~ bead.id
