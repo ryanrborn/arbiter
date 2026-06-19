@@ -3,9 +3,9 @@ defmodule Arbiter.Usage.Event do
   A single agent-session usage row.
 
   One row per finished Claude session (work worker or ReviewGate reviewer),
-  inserted from `Arbiter.Polecat` when the session port emits its terminal
-  `result` event. The polecat captures the structured fields off
-  `Arbiter.Polecat.ClaudeSession`'s session state — see `usage_summary/1`
+  inserted from `Arbiter.Worker` when the session port emits its terminal
+  `result` event. The worker captures the structured fields off
+  `Arbiter.Worker.ClaudeSession`'s session state — see `usage_summary/1`
   there.
 
   Multiple rows per bead are the point of this table: a re-slung bead writes
@@ -16,7 +16,7 @@ defmodule Arbiter.Usage.Event do
 
   `:work` — the worker's own session that produced the diff.
   `:review` — a ReviewGate-spawned reviewer session. `bead_id` carries the
-              `#review` suffix used by `Arbiter.Polecat.ReviewGate` so the row
+              `#review` suffix used by `Arbiter.Worker.ReviewGate` so the row
               is still attributable to the bead being reviewed (drop the
               suffix at read time).
   `:other` — escape hatch for future non-Claude agents that don't fit the
@@ -69,7 +69,7 @@ defmodule Arbiter.Usage.Event do
         :cost_usd,
         :duration_ms,
         :exit_status,
-        :polecat_run_id,
+        :worker_run_id,
         :occurred_at,
         :session_id,
         :raw
@@ -145,10 +145,10 @@ defmodule Arbiter.Usage.Event do
       public? true
     end
 
-    attribute :polecat_run_id, :uuid do
+    attribute :worker_run_id, :uuid do
       public? true
 
-      description "FK-like pointer to the Arbiter.Polecats.Run this session belonged to. Not a hard FK (the run row is best-effort)."
+      description "FK-like pointer to the Arbiter.Workers.Run this session belonged to. Not a hard FK (the run row is best-effort)."
     end
 
     attribute :session_id, :string do

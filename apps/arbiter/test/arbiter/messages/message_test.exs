@@ -8,11 +8,11 @@ defmodule Arbiter.Messages.MessageTest do
   describe "create/validation" do
     test "creates a notification with minimal attrs" do
       {:ok, m} =
-        Ash.create(Message, %{kind: :notification, workspace_id: @ws, body: "polecat done"})
+        Ash.create(Message, %{kind: :notification, workspace_id: @ws, body: "worker done"})
 
       assert m.kind == :notification
       assert m.workspace_id == @ws
-      assert m.body == "polecat done"
+      assert m.body == "worker done"
       assert m.to_ref == nil
       assert m.read_at == nil
       assert %DateTime{} = m.inserted_at

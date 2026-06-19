@@ -6,11 +6,11 @@ defmodule ArbiterWeb.Api.EventController do
 
   Auth: coordinator-tier MCP token in the `token=` query parameter.
 
-  Topics (default: inbox,review_gate,polecat_failed):
+  Topics (default: inbox,review_gate,worker_failed):
     * inbox          — a message arrived in the coordinator's mailbox
     * review_gate       — a review_gate escalation requires Admiral ruling
-    * polecat_failed — a worker stopped unexpectedly (status → failed)
-    * polecat_done   — a worker completed (status → completed)
+    * worker_failed — a worker stopped unexpectedly (status → failed)
+    * worker_done   — a worker completed (status → completed)
     * bead_state     — any bead FSM transition (noisier — opt-in only)
 
   Wire format: one newline-terminated JSON object per event. A bare newline
@@ -25,7 +25,7 @@ defmodule ArbiterWeb.Api.EventController do
   alias Arbiter.Events
   alias Arbiter.MCP.Scope
 
-  @default_topics ~w(inbox review_gate polecat_failed)
+  @default_topics ~w(inbox review_gate worker_failed)
   @keepalive_ms 30_000
 
   @doc """
@@ -61,7 +61,7 @@ defmodule ArbiterWeb.Api.EventController do
   defp authenticate(%{"token" => token}) when is_binary(token) and token != "" do
     case Scope.from_token(token) do
       {:ok, %Scope{tier: :coordinator} = scope} -> {:ok, scope}
-      {:ok, _polecat_tier} -> {:error, :unauthorized}
+      {:ok, _worker_tier} -> {:error, :unauthorized}
       {:error, _} -> {:error, :unauthorized}
     end
   end

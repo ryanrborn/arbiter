@@ -4,7 +4,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
   alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
-  alias Arbiter.Polecat.StopReason
+  alias Arbiter.Worker.StopReason
 
   # Start an isolated, unnamed Watchdog for each test so it does not conflict with
   # the application-started singleton (which is enabled: false in test config but

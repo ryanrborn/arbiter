@@ -8,7 +8,7 @@ defmodule Arbiter.Workflows.MergeQueueSupervisor do
 
   At application boot, `start_for_existing_workspaces/0` enumerates every
   workspace and starts a MergeQueue for each — eager start means no missed
-  `:polecat_done` events on a cold boot. New workspaces created at runtime
+  `:worker_done` events on a cold boot. New workspaces created at runtime
   start a MergeQueue via the `Arbiter.Beads.Workspace.Changes.StartMergeQueue`
   after_action hook.
 

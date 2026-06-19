@@ -12,10 +12,10 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   The stored state feeds two guards:
 
-    * **Dispatch guard** — `Arbiter.Polecat.Dispatch` calls `expired?/1` before
+    * **Dispatch guard** — `Arbiter.Worker.Dispatch` calls `expired?/1` before
       dispatching a real worker. A known-expired adapter is refused immediately
       without re-running the probe, preventing a wave of identical 401 failures.
-    * **Early mark** — `Arbiter.Polecat` calls `mark_expired/2` when a polecat
+    * **Early mark** — `Arbiter.Worker` calls `mark_expired/2` when a worker
       dies with `:auth_expired`, so the Watchdog records the failure immediately
       rather than waiting for the next periodic probe.
 
@@ -43,7 +43,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
 
   alias Arbiter.Agents.Preflight
   alias Arbiter.Messages.AdmiralNotifier
-  alias Arbiter.Polecat.StopReason
+  alias Arbiter.Worker.StopReason
 
   @default_interval_ms 300_000
   @default_recovery_interval_ms 60_000
@@ -76,7 +76,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   @doc """
   Immediately mark `adapter` as credential-expired and raise Admiral escalations.
 
-  Called by `Arbiter.Polecat.fail_stopped/2` when an worker dies with category
+  Called by `Arbiter.Worker.fail_stopped/2` when an worker dies with category
   `:auth_expired`, so the Watchdog records the failure and blocks future dispatches
   without waiting for the next periodic probe. Fire-and-forget; best-effort.
   Pass a `server` pid/name to target a specific instance (useful in tests).
@@ -140,7 +140,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     if already_expired?(state, adapter) do
       {:noreply, state}
     else
-      {:noreply, record_expiry(state, adapter, reason, :polecat_report)}
+      {:noreply, record_expiry(state, adapter, reason, :worker_report)}
     end
   end
 
@@ -200,7 +200,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   defp on_probe_ok(state, _adapter, :ok), do: state
 
   defp record_expiry(state, adapter, reason, source) do
-    source_label = if source == :periodic_probe, do: "periodic probe", else: "polecat report"
+    source_label = if source == :periodic_probe, do: "periodic probe", else: "worker report"
 
     Logger.warning(
       "CredentialWatchdog: #{adapter_name(adapter)} credentials expired " <>

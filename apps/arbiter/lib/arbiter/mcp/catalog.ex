@@ -14,12 +14,12 @@ defmodule Arbiter.MCP.Catalog do
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `bead_show` | polecat, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
+  | `bead_show` | worker, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
   | `bead_ready` | coordinator | `Issue.ready/1` |
-  | `inbox_check` | polecat, coordinator | `Messages.inbox/2` + `mark_read` |
+  | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (Admiral mailbox) |
-  | `workspace_show` | polecat, coordinator | `Ash.get(Workspace, id)` |
-  | `bead_update_progress` | polecat, coordinator | `Ash.update(issue, …, action: :update)` |
+  | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
+  | `bead_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
   ## Phase 2 catalog (coordinator tools + the both-tier `message_send`)
 
@@ -31,13 +31,13 @@ defmodule Arbiter.MCP.Catalog do
   | `bead_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `dep_add` | coordinator | `Ash.create(Dependency, …)` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
-  | `polecat_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Polecat.Dispatch.dispatch/2` |
-  | `polecat_resume` | coordinator (`can_dispatch`) | `Arbiter.Polecat.Dispatch.resume/2` |
-  | `polecat_review` | coordinator (`can_dispatch`) | `Arbiter.Polecat.Dispatch.dispatch/2` (`review: true`) |
-  | `polecat_stop` | coordinator | `Arbiter.Polecat.stop/2` |
-  | `polecat_list` | coordinator | `Arbiter.Polecat.list_children/0` |
-  | `message_send` | polecat, coordinator | `Messages.send_mail/1` (flag / direction) |
-  | `notify_list` | polecat, coordinator | `Messages.recent_notifications/2` |
+  | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
+  | `worker_resume` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.resume/2` |
+  | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) |
+  | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
+  | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
+  | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
+  | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `bead_list` | coordinator | `Ash.read(Issue, …)` with filters |
   | `tracker_claim` | coordinator | `Arbiter.Beads.Claim.claim/3` |
   | `tracker_sync` | coordinator | `Arbiter.Beads.Claim.plan/1` + `apply_plan/2` |
@@ -66,20 +66,20 @@ defmodule Arbiter.MCP.Catalog do
           | {:rpc_error, integer(), String.t()}
           | {:tool_error, String.t()}
 
-  @both [:polecat, :coordinator]
+  @both [:worker, :coordinator]
   @coordinator [:coordinator]
 
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
   # a workspace here targets it explicitly. Omitting it resolves the workspace
   # from the referenced entity (e.g. a bead's own workspace) or the installation
-  # default. A workspace-bound scope (a polecat) may only ever name its own.
+  # default. A workspace-bound scope (a worker) may only ever name its own.
   @workspace_field %{
     "type" => "string",
     "description" =>
       "Workspace name or id to operate in (optional). Coordinator tokens are " <>
         "workspace-agnostic; omit to resolve from the referenced bead or the " <>
-        "installation default. A polecat may only ever name its own workspace."
+        "installation default. A worker may only ever name its own workspace."
   }
 
   # Tools that do NOT take a `workspace` arg: `workspace_list` already enumerates
@@ -92,7 +92,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Read one bead (id, title, status, notes, tracker, `auto_close`, and child-progress " <>
-          "`child_closed`/`child_total` over its `parent_of` children, …). A polecat reads its " <>
+          "`child_closed`/`child_total` over its `parent_of` children, …). A worker reads its " <>
           "own bead (the `id` argument may be omitted); a coordinator must pass the `id`.",
       input_schema: %{
         "type" => "object",
@@ -100,7 +100,7 @@ defmodule Arbiter.MCP.Catalog do
           "id" => %{
             "type" => "string",
             "description" =>
-              "Bead id (e.g. \"bd-dem49g\"). Optional for a polecat (defaults to its own bead)."
+              "Bead id (e.g. \"bd-dem49g\"). Optional for a worker (defaults to its own bead)."
           }
         },
         "additionalProperties" => false
@@ -119,14 +119,14 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Read (and mark read) the unread mailbox for a bead — the structured replacement for " <>
-          "`arb inbox`. A polecat checks its own bead; a coordinator passes `bead_id`.",
+          "`arb inbox`. A worker checks its own bead; a coordinator passes `bead_id`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "bead_id" => %{
             "type" => "string",
             "description" =>
-              "Recipient bead id. Optional for a polecat (defaults to its own bead)."
+              "Recipient bead id. Optional for a worker (defaults to its own bead)."
           }
         },
         "additionalProperties" => false
@@ -169,13 +169,13 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Record progress / completion notes on a bead — `notes`, `qa_notes`, `deployment_notes`, " <>
           "`pr_body` only (the structured replacement for `arb issue update --qa-notes …`). A " <>
-          "polecat may only update its own bead and cannot change status or priority.",
+          "worker may only update its own bead and cannot change status or priority.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "id" => %{
             "type" => "string",
-            "description" => "Bead id. Optional for a polecat (defaults to its own bead)."
+            "description" => "Bead id. Optional for a worker (defaults to its own bead)."
           },
           "notes" => %{"type" => "string", "description" => "Free-form progress / working notes."},
           "qa_notes" => %{"type" => "string", "description" => "What QA should verify."},
@@ -357,10 +357,10 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.dep_remove/2
     },
     %{
-      name: "polecat_dispatch",
+      name: "worker_dispatch",
       tiers: @coordinator,
       description:
-        "Dispatch a polecat to work a bead in the workspace. Requires a `can_dispatch` coordinator " <>
+        "Dispatch a worker to work a bead in the workspace. Requires a `can_dispatch` coordinator " <>
           "token and is depth-limited (the dispatch-recursion guardrail). Pass `provider` to start a " <>
           "worker session (`claude` or `gemini`); omit it to park the bead in_progress.",
       input_schema: %{
@@ -384,10 +384,10 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["bead_id"],
         "additionalProperties" => false
       },
-      handler: &Tools.polecat_dispatch/2
+      handler: &Tools.worker_dispatch/2
     },
     %{
-      name: "polecat_resume",
+      name: "worker_resume",
       tiers: @coordinator,
       description:
         "Re-attach a fresh worker to a bead's preserved worktree (`arb resume`), continuing " <>
@@ -406,10 +406,10 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["bead_id"],
         "additionalProperties" => false
       },
-      handler: &Tools.polecat_resume/2
+      handler: &Tools.worker_resume/2
     },
     %{
-      name: "polecat_review",
+      name: "worker_review",
       tiers: @coordinator,
       description:
         "Dispatch a review-only worker against the PR/MR linked to a bead (`arb review`): no worktree, " <>
@@ -432,33 +432,33 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["bead_id"],
         "additionalProperties" => false
       },
-      handler: &Tools.polecat_review/2
+      handler: &Tools.worker_review/2
     },
     %{
-      name: "polecat_stop",
+      name: "worker_stop",
       tiers: @coordinator,
       description:
-        "Stop the polecat currently working a bead (`arb polecat stop`). Scoped to the coordinator's " <>
-          "workspace; a bead with no live polecat is reported not-found. Teardown only — does not dispatch.",
+        "Stop the worker currently working a bead (`arb worker stop`). Scoped to the coordinator's " <>
+          "workspace; a bead with no live worker is reported not-found. Teardown only — does not dispatch.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "bead_id" => %{
             "type" => "string",
-            "description" => "Bead whose polecat to stop (required)."
+            "description" => "Bead whose worker to stop (required)."
           }
         },
         "required" => ["bead_id"],
         "additionalProperties" => false
       },
-      handler: &Tools.polecat_stop/2
+      handler: &Tools.worker_stop/2
     },
     %{
       name: "message_send",
       tiers: @both,
       description:
         "Send a message to a bead's mailbox (the structured replacement for `arb message <bead> <text>`). " <>
-          "A coordinator sends a direction from `coordinator`; a polecat raises a flag from its own bead " <>
+          "A coordinator sends a direction from `coordinator`; a worker raises a flag from its own bead " <>
           "to a sibling. The sender identity is set from the scope and pinned to its workspace.",
       input_schema: %{
         "type" => "object",
@@ -491,13 +491,13 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.notify_list/2
     },
     %{
-      name: "polecat_list",
+      name: "worker_list",
       tiers: @coordinator,
       description:
-        "List active polecats in the workspace: bead_id, status, repo, started_at, activity, " <>
+        "List active workers in the workspace: bead_id, status, repo, started_at, activity, " <>
           "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the bead).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
-      handler: &Tools.polecat_list/2
+      handler: &Tools.worker_list/2
     },
     %{
       name: "bead_list",

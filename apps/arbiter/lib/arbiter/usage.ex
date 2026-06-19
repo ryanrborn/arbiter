@@ -4,9 +4,9 @@ defmodule Arbiter.Usage do
 
   Every Claude session — work worker or ReviewGate reviewer — emits a final
   `result` event carrying tokens (input / output / cache), `total_cost_usd`,
-  `duration_ms`, and model. The polecat captures that and inserts an
+  `duration_ms`, and model. The worker captures that and inserts an
   `Arbiter.Usage.Event` row keyed by bead + step (`:work | :review`) +
-  optional `workspace_id` and `polecat_run_id` for joinability.
+  optional `workspace_id` and `worker_run_id` for joinability.
 
   Multiple rows per bead are deliberate: a re-slung bead writes a second
   `:work` row, a ReviewGate review adds a `:review` row, etc. Rework is then

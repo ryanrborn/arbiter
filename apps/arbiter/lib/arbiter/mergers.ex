@@ -66,11 +66,11 @@ defmodule Arbiter.Mergers do
   (the `GitLab` and `GitHub` adapters read host/owner/repo/token via
   `Arbiter.Mergers.Gitlab.Config` / `Arbiter.Mergers.Github.Config`, exactly
   as `Arbiter.Trackers.Jira` does). A long-lived poller such as
-  `Arbiter.Polecat.Watchdog` runs in its own process, so it must seed that
+  `Arbiter.Worker.Watchdog` runs in its own process, so it must seed that
   config before calling `get/1` or `merge/1`.
 
   This keeps the adapter-specific coupling in one place: callers
-  (`Arbiter.Polecat`, `Arbiter.Polecat.Watchdog`) just call `prepare/1` and stay
+  (`Arbiter.Worker`, `Arbiter.Worker.Watchdog`) just call `prepare/1` and stay
   adapter-agnostic. A no-op for adapters that carry no per-process config
   (e.g. `Direct`) and for a `nil` workspace.
   """

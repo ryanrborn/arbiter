@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.Api.RepoController do
   @moduledoc """
-  REST endpoint for repos — the repo/project keys polecats operate on.
+  REST endpoint for repos — the repo/project keys workers operate on.
 
   Routes:
 
@@ -11,10 +11,10 @@ defmodule ArbiterWeb.Api.RepoController do
 
     * each workspace's `config["repo_paths"]` map (with compat fallback to `config["rig_paths"]`),
     * the application-env `:arbiter, :repo_paths` fallback (`source: "(app)"`),
-    * any repo name a live polecat is running against that isn't configured
+    * any repo name a live worker is running against that isn't configured
       anywhere (`source: "(unconfigured)"`).
 
-  For each repo the response carries the number of active polecats and the
+  For each repo the response carries the number of active workers and the
   number of git worktrees resident at its path.
   """
 
@@ -22,8 +22,8 @@ defmodule ArbiterWeb.Api.RepoController do
 
   alias Arbiter.Beads.RepoConfig
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Polecat
-  alias Arbiter.Polecat.Worktree
+  alias Arbiter.Worker
+  alias Arbiter.Worker.Worktree
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
@@ -37,10 +37,10 @@ defmodule ArbiterWeb.Api.RepoController do
     workspaces = load_workspaces()
 
     paths_by_repo = collect_repo_paths(workspaces)
-    polecats_by_repo = group_polecats_by_repo()
+    workers_by_repo = group_workers_by_repo()
 
     paths_by_repo
-    |> Map.merge(repos_from_polecats(polecats_by_repo, paths_by_repo))
+    |> Map.merge(repos_from_workers(workers_by_repo, paths_by_repo))
     |> Enum.map(fn {name, entry} ->
       path = entry.path
 
@@ -54,7 +54,7 @@ defmodule ArbiterWeb.Api.RepoController do
         name: name,
         path: path,
         source: entry.source,
-        polecats: Map.get(polecats_by_repo, name, 0),
+        workers: Map.get(workers_by_repo, name, 0),
         worktrees: worktree_count
       }
     end)
@@ -92,9 +92,9 @@ defmodule ArbiterWeb.Api.RepoController do
     end)
   end
 
-  defp group_polecats_by_repo do
+  defp group_workers_by_repo do
     try do
-      Polecat.list_children()
+      Worker.list_children()
     rescue
       _ -> []
     end
@@ -104,11 +104,11 @@ defmodule ArbiterWeb.Api.RepoController do
     end)
   end
 
-  # A polecat can be running against a repo name that isn't in any
+  # A worker can be running against a repo name that isn't in any
   # `repo_paths` config (default-repo "unknown", a typo, or an inherited
   # legacy value). Surface those as well.
-  defp repos_from_polecats(polecats_by_repo, configured) do
-    polecats_by_repo
+  defp repos_from_workers(workers_by_repo, configured) do
+    workers_by_repo
     |> Map.keys()
     |> Enum.reject(&Map.has_key?(configured, &1))
     |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)

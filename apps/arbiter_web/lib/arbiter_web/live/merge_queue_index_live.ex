@@ -3,27 +3,27 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   Index of every merge-queue entry at `/merge_queue` — the "See all" target for
   the dashboard's merge-queue section.
 
-  An entry is a polecat parked at `:awaiting_review`: an open MR integrating
+  An entry is a worker parked at `:awaiting_review`: an open MR integrating
   via `Arbiter.Mergers` (Direct/GitLab/GitHub), with the Watchdog's last poll
-  result. Sourced live from `Polecat.list_children/0`, paged in memory,
-  ordered longest-waiting first. Each entry links to the polecat detail page
-  — the polecat IS the merge-queue entry, so its detail page is the entry's
-  detail page. Re-renders on `:polecat_lifecycle` events and a 1s tick.
+  result. Sourced live from `Worker.list_children/0`, paged in memory,
+  ordered longest-waiting first. Each entry links to the worker detail page
+  — the worker IS the merge-queue entry, so its detail page is the entry's
+  detail page. Re-renders on `:worker_lifecycle` events and a 1s tick.
   """
 
   use ArbiterWeb, :live_view
 
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Polecat
-  alias Arbiter.Polecat.Watchdog
+  alias Arbiter.Worker
+  alias Arbiter.Worker.Watchdog
   alias ArbiterWeb.Paging
 
-  @polecats_topic "polecats"
+  @workers_topic "workers"
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, @polecats_topic)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       :timer.send_interval(1000, self(), :tick)
     end
 
@@ -44,7 +44,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   end
 
   @impl true
-  def handle_info({:polecat_lifecycle, _event, _snap}, socket), do: {:noreply, refresh(socket)}
+  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, refresh(socket)}
   def handle_info(:tick, socket), do: {:noreply, assign(socket, :now, DateTime.utc_now())}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
@@ -80,7 +80,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   end
 
   defp list_children do
-    Polecat.list_children()
+    Worker.list_children()
   rescue
     _ -> []
   end
@@ -141,7 +141,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
               >
                 <div class="flex items-center justify-between gap-2">
                   <.link
-                    navigate={~p"/polecats/#{m.bead_id}"}
+                    navigate={~p"/workers/#{m.bead_id}"}
                     class="flex items-center gap-2 min-w-0 group"
                   >
                     <span class="relative flex h-2.5 w-2.5 shrink-0">

@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
   alias ArbiterCli.Cmd.Update
 
   @green %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
-  @no_polecats %{"data" => []}
+  @no_workers %{"data" => []}
 
   setup do
     System.put_env("ARB_HOME", "/tmp/arbiter-update-test")
@@ -95,7 +95,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "pulls new commits, restarts Phoenix, reports the short log, exits 0" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(changed: true)
@@ -119,7 +119,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "--json emits a single object describing the pull and restart" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(changed: true)
@@ -140,7 +140,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "already up to date: skips the restart and exits 0" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(changed: false, pull: {"Already up to date.\n", 0})
@@ -161,7 +161,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "tracked modifications abort before pulling, exit 1" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(dirty: true)
@@ -176,7 +176,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "untracked-only working tree does NOT abort: proceeds to pull" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(untracked: true, changed: true)
@@ -191,7 +191,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "off the integration branch aborts before pulling, exit 1" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(branch: "feature/wip")
@@ -207,7 +207,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "non-fast-forward pull surfaces git's error, exit 1" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(pull: {"fatal: Not possible to fast-forward, aborting.\n", 1})
@@ -224,7 +224,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "refuses deploy when workers are actively working (no --force)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"},
+        {{"get", "/api/workers"},
          {%{"data" => [%{"bead_id" => "bd-xyz", "status" => "running"}]}, 200}}
       ])
 
@@ -242,7 +242,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "--force deploys even with active workers" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"},
+        {{"get", "/api/workers"},
          {%{"data" => [%{"bead_id" => "bd-xyz", "status" => "running"}]}, 200}}
       ])
 
@@ -257,7 +257,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
     test "proceeds normally when no workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_deploy(changed: true)
@@ -274,7 +274,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       # Reachable during preflight, but the started server never goes green.
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       test_pid = self()

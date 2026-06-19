@@ -3,12 +3,12 @@ defmodule Arbiter.MCP.ScopeTest do
 
   alias Arbiter.MCP.Scope
 
-  describe "mint_polecat/3 + from_token/1" do
-    test "round-trips the polecat claims, never carrying can_dispatch" do
-      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard")
+  describe "mint_worker/3 + from_token/1" do
+    test "round-trips the worker claims, never carrying can_dispatch" do
+      token = Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard")
 
       assert {:ok, scope} = Scope.from_token(token)
-      assert scope.tier == :polecat
+      assert scope.tier == :worker
       assert scope.workspace_id == "ws-1"
       assert scope.bead_id == "bd-1"
       assert scope.repo == "shipyard"
@@ -17,12 +17,12 @@ defmodule Arbiter.MCP.ScopeTest do
     end
 
     test "repo is optional" do
-      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"})
+      token = Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"})
       assert {:ok, %Scope{repo: nil}} = Scope.from_token(token)
     end
 
     test "carries a depth claim (the Phase 2 dispatch-recursion guardrail)" do
-      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard", depth: 2)
+      token = Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard", depth: 2)
       assert {:ok, %Scope{depth: 2}} = Scope.from_token(token)
     end
   end
@@ -66,7 +66,7 @@ defmodule Arbiter.MCP.ScopeTest do
     test "rejects an expired token" do
       # Plug.Crypto.sign/4 takes :signed_at in seconds; backdate well past max_age.
       past = System.system_time(:second) - 100_000
-      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "repo", signed_at: past)
+      token = Scope.mint_worker(%{id: "bd-1", workspace_id: "ws-1"}, "repo", signed_at: past)
       assert {:error, :expired} = Scope.from_token(token)
     end
   end
@@ -74,20 +74,20 @@ defmodule Arbiter.MCP.ScopeTest do
   describe "own_bead/2" do
     setup do
       %{
-        polecat: %Scope{tier: :polecat, workspace_id: "w", bead_id: "bd-1"},
+        worker: %Scope{tier: :worker, workspace_id: "w", bead_id: "bd-1"},
         coordinator: %Scope{tier: :coordinator, workspace_id: "w"}
       }
     end
 
-    test "polecat defaults to its bound bead when the arg is nil", %{polecat: pc} do
+    test "worker defaults to its bound bead when the arg is nil", %{worker: pc} do
       assert Scope.own_bead(pc, nil) == {:ok, "bd-1"}
     end
 
-    test "polecat allows its own bead id explicitly", %{polecat: pc} do
+    test "worker allows its own bead id explicitly", %{worker: pc} do
       assert Scope.own_bead(pc, "bd-1") == {:ok, "bd-1"}
     end
 
-    test "polecat rejects any other bead id", %{polecat: pc} do
+    test "worker rejects any other bead id", %{worker: pc} do
       assert Scope.own_bead(pc, "bd-2") == {:error, :unauthorized}
     end
 
@@ -106,8 +106,8 @@ defmodule Arbiter.MCP.ScopeTest do
       refute Scope.same_workspace?(scope, nil)
     end
 
-    test "a polecat matches only its bound workspace" do
-      pc = %Scope{tier: :polecat, workspace_id: "w", bead_id: "bd-1"}
+    test "a worker matches only its bound workspace" do
+      pc = %Scope{tier: :worker, workspace_id: "w", bead_id: "bd-1"}
       assert Scope.same_workspace?(pc, "w")
       refute Scope.same_workspace?(pc, "other")
     end

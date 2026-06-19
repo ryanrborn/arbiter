@@ -1,9 +1,9 @@
 defmodule Arbiter.Messages.AdmiralNotifier do
   @moduledoc """
-  Auto-posts Admiral notifications on worker (polecat) lifecycle events, so the
+  Auto-posts Admiral notifications on worker (worker) lifecycle events, so the
   Admiral is informed without workers having to send messages by hand.
 
-  Wired into `Arbiter.Polecat`'s terminal/await transitions. Each event maps to
+  Wired into `Arbiter.Worker`'s terminal/await transitions. Each event maps to
   a durable `:notification` `Arbiter.Messages.Message` — the broadcast kind that
   feeds the Admiral's dashboard (`to_ref` nil, never "consumed"):
 
@@ -24,7 +24,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   addressed `:escalation` **mailbox** messages (`to_ref: "admiral"`,
   `directive_ref: <bead>`) so they land in `arb inbox` rather than scrolling off
   the broadcast feed. The classified cause + remediation
-  (`Arbiter.Polecat.StopReason`) is baked into the subject/body. See bd-awi4nw.
+  (`Arbiter.Worker.StopReason`) is baked into the subject/body. See bd-awi4nw.
 
   ## Reconciliation with the bead spec
 
@@ -46,8 +46,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   Every entry point is best-effort: a missing workspace, a DB hiccup, or a
   payload bug is swallowed (with a debug breadcrumb) so notification work never
-  disrupts the polecat lifecycle. Mirrors the contract of
-  `Arbiter.Polecat.broadcast_lifecycle/2`.
+  disrupts the worker lifecycle. Mirrors the contract of
+  `Arbiter.Worker.broadcast_lifecycle/2`.
   """
 
   require Logger
@@ -55,12 +55,12 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
-  alias Arbiter.Polecat.StopReason
+  alias Arbiter.Worker.StopReason
 
   @config_key "admiral_notifications"
 
   @typedoc """
-  The subset of an `Arbiter.Polecat` snapshot this module reads. Passing the
+  The subset of an `Arbiter.Worker` snapshot this module reads. Passing the
   full snapshot map is fine — extra keys are ignored.
   """
   @type snapshot :: %{
@@ -85,7 +85,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   @doc """
   Post a `:pipeline_failed` notification. Best-effort, returns `:ok`. Fired by
-  `Arbiter.Polecat.Watchdog` when a CI pipeline fails and `watch_pipeline` is
+  `Arbiter.Worker.Watchdog` when a CI pipeline fails and `watch_pipeline` is
   enabled. The bead is NOT failed — a human may force-merge or rerun.
   """
   @spec pipeline_failed(snapshot(), String.t() | nil) :: :ok
@@ -105,7 +105,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   @doc """
   Post the `:awaiting_review_stuck` watchdog notification. Best-effort, returns
-  `:ok`. Fired by `Arbiter.Polecat.Watchdog` when a polecat has been parked at
+  `:ok`. Fired by `Arbiter.Worker.Watchdog` when a worker has been parked at
   `:awaiting_review` past its poll cap without a terminal MR outcome — so a
   silent hang surfaces to the operator instead of waiting forever (bd-66ey1o).
   """
@@ -129,7 +129,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   Unlike the lifecycle `:notification`s above, this is an addressed
   `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
-  `arb inbox` as an actionable item. The `Arbiter.Polecat.StopReason` carries
+  `arb inbox` as an actionable item. The `Arbiter.Worker.StopReason` carries
   the classified cause + remediation; the subject names the bead + cause and
   the body spells out the repo, last activity, exit code, and fix. Best-effort,
   returns `:ok`.
@@ -141,7 +141,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @doc """
   Escalate a failed pre-flight auth probe to the Admiral (bd-awi4nw).
 
-  Fired by `Arbiter.Polecat.Dispatch` when the agent CLI fails its cheap
+  Fired by `Arbiter.Worker.Dispatch` when the agent CLI fails its cheap
   token-validity probe *before* any worker is dispatched — so a wave of spawns
   that would all 401 is refused up front and the operator is told to
   re-authenticate. Same addressed `:escalation` shape as `acolyte_stopped/2`.
@@ -238,7 +238,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   # ---- core ---------------------------------------------------------------
 
   # A notification must be scoped to a workspace (Message.workspace_id is
-  # required), so a polecat with no workspace_id has nowhere to post.
+  # required), so a worker with no workspace_id has nowhere to post.
   defp post(event, %{workspace_id: ws_id} = snapshot) when is_binary(ws_id) do
     if enabled?(ws_id) do
       Message.notify(build(event, snapshot))
@@ -256,7 +256,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   # Actionable escalations are addressed mailbox messages (not broadcast
   # notifications) so they queue in `arb inbox` for the Admiral. They are NOT
   # gated by the `admiral_notifications` toggle — silencing routine completion
-  # noise must never silence a "your credentials expired" alarm. A polecat with
+  # noise must never silence a "your credentials expired" alarm. A worker with
   # no workspace_id has nowhere to post (Message.workspace_id is required).
   defp escalate(event, %{workspace_id: ws_id} = snapshot, %StopReason{} = reason)
        when is_binary(ws_id) do

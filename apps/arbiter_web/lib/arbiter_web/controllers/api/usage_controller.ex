@@ -101,7 +101,7 @@ defmodule ArbiterWeb.Api.UsageController do
       exit_status: ev.exit_status,
       occurred_at: iso(ev.occurred_at),
       session_id: ev.session_id,
-      polecat_run_id: ev.polecat_run_id
+      worker_run_id: ev.worker_run_id
     }
   end
 

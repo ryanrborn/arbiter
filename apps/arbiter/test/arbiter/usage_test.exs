@@ -1,11 +1,11 @@
 defmodule Arbiter.UsageTest do
-  # DataCase + async: false — the polecat path under test writes via Ash from
+  # DataCase + async: false — the worker path under test writes via Ash from
   # a GenServer process under the DynamicSupervisor; that process needs to
   # find the same sandbox connection. The Run-persistence test makes the same
   # call.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
   require Ash.Query
@@ -201,7 +201,7 @@ defmodule Arbiter.UsageTest do
     end
   end
 
-  describe "polecat session exit writes a usage row" do
+  describe "worker session exit writes a usage row" do
     @fixture Path.expand("../fixtures/echo_with_done.sh", __DIR__)
 
     setup do
@@ -259,7 +259,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-cs-usage-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -293,13 +293,13 @@ defmodule Arbiter.UsageTest do
       ]
 
       {:ok, _port} =
-        Arbiter.Polecat.ClaudeSession.start(
+        Arbiter.Worker.ClaudeSession.start(
           owner: pid,
           worktree_path: cwd,
           command: stream_json_command(cwd, events)
         )
 
-      # The polecat persists a usage row on the port :exit_status. Wait for it.
+      # The worker persists a usage row on the port :exit_status. Wait for it.
       ev =
         wait_until(fn ->
           case Event
@@ -328,7 +328,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-cs-nores-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -338,7 +338,7 @@ defmodule Arbiter.UsageTest do
       command = ["sh", "-c", "echo hello; echo arb done"]
 
       {:ok, _port} =
-        Arbiter.Polecat.ClaudeSession.start(
+        Arbiter.Worker.ClaudeSession.start(
           owner: pid,
           worktree_path: cwd,
           command: command
@@ -364,7 +364,7 @@ defmodule Arbiter.UsageTest do
       reviewer_id = "bd-reviewer-#{System.unique_integer([:positive])}#review"
 
       {:ok, pid} =
-        Polecat.start(
+        Worker.start(
           bead_id: reviewer_id,
           repo: "arbiter",
           workspace_id: nil,
@@ -394,7 +394,7 @@ defmodule Arbiter.UsageTest do
       ]
 
       {:ok, _port} =
-        Arbiter.Polecat.ClaudeSession.start(
+        Arbiter.Worker.ClaudeSession.start(
           owner: pid,
           worktree_path: cwd,
           command: stream_json_command(cwd, events)
@@ -419,7 +419,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-gemini-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -431,7 +431,7 @@ defmodule Arbiter.UsageTest do
       command = ["sh", "-c", "echo 'Reviewing code...'; echo 'VERDICT: APPROVE'; echo 'arb done'"]
 
       {:ok, _port} =
-        Arbiter.Polecat.ClaudeSession.start(
+        Arbiter.Worker.ClaudeSession.start(
           owner: pid,
           worktree_path: cwd,
           command: command,
@@ -461,7 +461,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-gemini-sj-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -496,7 +496,7 @@ defmodule Arbiter.UsageTest do
       ]
 
       {:ok, _port} =
-        Arbiter.Polecat.ClaudeSession.start(
+        Arbiter.Worker.ClaudeSession.start(
           owner: pid,
           worktree_path: cwd,
           command: stream_json_command(cwd, events),
@@ -533,7 +533,7 @@ defmodule Arbiter.UsageTest do
       reviewer_id = "bd-gemini-rev-#{System.unique_integer([:positive])}#review"
 
       {:ok, pid} =
-        Polecat.start(
+        Worker.start(
           bead_id: reviewer_id,
           repo: "arbiter",
           workspace_id: nil,
@@ -547,7 +547,7 @@ defmodule Arbiter.UsageTest do
       command = ["sh", "-c", "echo 'VERDICT: APPROVE'; echo 'arb done'"]
 
       {:ok, _port} =
-        Arbiter.Polecat.ClaudeSession.start(
+        Arbiter.Worker.ClaudeSession.start(
           owner: pid,
           worktree_path: cwd,
           command: command,

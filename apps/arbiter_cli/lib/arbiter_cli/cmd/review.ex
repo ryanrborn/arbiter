@@ -3,13 +3,13 @@ defmodule ArbiterCli.Cmd.Review do
   `arb review <bead-id> [--repo <repo>] [--model <name>] [--json]` — dispatch a
   review-only worker against the PR/MR linked to a bead.
 
-  POSTs to `/api/polecats/review`. The server transitions the bead to
+  POSTs to `/api/workers/review`. The server transitions the bead to
   `:in_progress`, attaches the `Arbiter.Workflows.CodeReview` workflow,
   **skips** worktree provisioning and per-bead branch creation, and spawns a
   Claude subprocess with a review prompt. The reviewer reads the PR/MR diff,
   posts findings + a verdict via the configured tracker, and prints `arb
   done` — completion runs through the no-branch path
-  (`Polecat.complete_now(:claude_done)`), bypassing the merge queue/merger.
+  (`Worker.complete_now(:claude_done)`), bypassing the merge queue/merger.
 
   ## Flags
 
@@ -56,7 +56,7 @@ defmodule ArbiterCli.Cmd.Review do
         |> maybe_put("repo", opts[:repo])
         |> maybe_put("model", opts[:model])
 
-      case Client.post("/api/polecats/review", body) do
+      case Client.post("/api/workers/review", body) do
         {:ok, payload} -> emit(payload, mode)
         {:error, err} -> Output.die(err)
       end
@@ -70,13 +70,13 @@ defmodule ArbiterCli.Cmd.Review do
 
   defp emit(payload, :text) do
     bead = payload["bead"] || %{}
-    polecat = payload["polecat"] || %{}
+    worker = payload["worker"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Review dispatched:")
     IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
     IO.puts("  Status:   #{bead["status"]}")
-    IO.puts("  Worker:  #{polecat["pid"]}")
+    IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
     case payload["claude_started"] do

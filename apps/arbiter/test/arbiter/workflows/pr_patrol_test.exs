@@ -2,7 +2,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Beads.{Issue, Workspace}
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
   alias Arbiter.Workflows.PRPatrol
   require Ash.Query
 
@@ -100,7 +100,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — actionable PRs" do
-    test "CHANGES_REQUESTED → 1 bead created, polecat spawned", %{ws: ws} do
+    test "CHANGES_REQUESTED → 1 bead created, worker spawned", %{ws: ws} do
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
@@ -129,8 +129,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert bead.title =~ "PR #42"
       assert bead.workspace_id == ws.id
 
-      # Polecat is registered for this bead
-      assert is_pid(Polecat.whereis(bead.id))
+      # Worker is registered for this bead
+      assert is_pid(Worker.whereis(bead.id))
     end
 
     test "dedup: second tick with the same actionable PR does NOT create another bead", %{ws: ws} do

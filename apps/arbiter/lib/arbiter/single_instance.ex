@@ -14,7 +14,7 @@ defmodule Arbiter.SingleInstance do
 
   SQLite serialises writes itself, so the guard is "lightweight" compared to
   the former Postgres advisory lock — it exists solely to prevent a second
-  concurrent server from sweeping the primary's live `:running` polecat runs
+  concurrent server from sweeping the primary's live `:running` worker runs
   as orphans during boot reconciliation.
 
   The lock is automatically released (file removed + ETS entry deleted) on a
