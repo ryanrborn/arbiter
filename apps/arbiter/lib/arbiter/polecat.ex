@@ -1194,11 +1194,21 @@ defmodule Arbiter.Polecat do
   #     first poll. A merge failure surfaces as a :failure_reason rather than
   #     silently closing the bead as done.
   #   * With no branch (ad-hoc runs / unconfigured rig / no worktree) there is
-  #     nothing to integrate, so we complete directly as before.
+  #     nothing to integrate. For review_only polecats this is the expected path
+  #     (coordinator-dispatched reviewers have no worktree). When the reviewer
+  #     produced an APPROVE verdict, trigger the Warden on the bead's pr_ref so
+  #     the PR is merged automatically (bd-4ji58d). For REQUEST_CHANGES or no
+  #     parseable verdict, fail the polecat so the bead stays :in_progress for a
+  #     fix-pass rather than silently closing with the PR unreviewed. Non-review
+  #     polecats with no branch complete directly as before.
   defp on_claude_done(%State{meta: meta} = state) do
     case mergeable_branch(meta) do
       nil ->
-        complete_now(state, :claude_done)
+        if review_only?(meta) do
+          route_reviewer_completion(state)
+        else
+          complete_now(state, :claude_done)
+        end
 
       branch ->
         # Skip commit gate for review-only polecats (reviewers make no commits
@@ -1235,6 +1245,129 @@ defmodule Arbiter.Polecat do
     else
       merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
     end
+  end
+
+  # ---- coordinator-dispatched reviewer completion (bd-4ji58d) ---------------
+
+  # For review_only polecats with no branch (the coordinator-dispatch path via
+  # `polecat_review` / `arb worker review`): parse the APPROVE / REQUEST_CHANGES
+  # verdict from the reviewer's captured output and act on it.
+  #
+  # APPROVE → park at :awaiting_review and start the Warden with via_tribunal:
+  # true so it merges the bead's pr_ref on its first poll. Mirrors the full
+  # Tribunal approve path without going through the Tribunal machinery.
+  #
+  # REQUEST_CHANGES / :no_verdict → fail the polecat (not complete it) so the
+  # Driver does NOT close the bead. The bead stays :in_progress for the
+  # coordinator to dispatch a fix-pass. Mirrors park_rejected/3 from the full
+  # tribunal path.
+  defp route_reviewer_completion(%State{} = state) do
+    output_lines = Map.get(state.meta || %{}, :output_lines, [])
+
+    case Arbiter.Polecat.Tribunal.parse_verdict(output_lines) do
+      {:approve, _findings} ->
+        trigger_warden_on_approval(state)
+
+      {:request_changes, findings} ->
+        park_rejected(state, :request_changes, findings)
+
+      :no_verdict ->
+        park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
+    end
+  end
+
+  # APPROVE path for a coordinator-dispatched review_only polecat. The reviewer
+  # has no branch of its own — the PR lives on the bead's pr_ref. If a pr_ref
+  # is present: park at :awaiting_review and start the Warden with
+  # via_tribunal: true so it merges on the first poll. If no pr_ref is recorded
+  # (reviewer was dispatched against a bead with no open PR), complete normally.
+  defp trigger_warden_on_approval(%State{bead_id: bead_id} = state) do
+    case fetch_bead_pr_ref(bead_id) do
+      {:ok, pr_ref} ->
+        opts = merge_opts_from_meta(state.meta, %{via_tribunal: true})
+
+        case resolve_merger(state, opts) do
+          {:ok, adapter, workspace} ->
+            Arbiter.Mergers.prepare(workspace)
+            merger_url = safe_link_for(adapter, pr_ref)
+
+            new_state = %State{
+              state
+              | status: :awaiting_review,
+                mr_ref: pr_ref,
+                merger_url: merger_url,
+                merger_adapter: adapter,
+                step_started_at: DateTime.utc_now(),
+                meta:
+                  state.meta
+                  |> Map.put(:mr_ref, pr_ref)
+                  |> Map.put(:merger_url, merger_url)
+            }
+
+            warden_ok? =
+              try do
+                start_warden(new_state, workspace, opts) == :ok
+              rescue
+                e ->
+                  Logger.warning(
+                    "Polecat: review_only APPROVE: Warden startup raised for bead=#{bead_id}: #{Exception.message(e)}"
+                  )
+
+                  false
+              catch
+                :exit, reason ->
+                  Logger.warning(
+                    "Polecat: review_only APPROVE: Warden startup exit for bead=#{bead_id}: #{inspect(reason)}"
+                  )
+
+                  false
+              end
+
+            unless warden_ok? do
+              escalate_warden_failure(new_state)
+            end
+
+            new_state
+
+          {:error, reason} ->
+            Logger.warning(
+              "Polecat: review_only APPROVE: could not resolve merger for bead=#{bead_id}: " <>
+                "#{inspect(reason)}; completing without merge"
+            )
+
+            complete_now(state, :claude_done)
+        end
+
+      {:error, :no_pr_ref} ->
+        # No open PR on the bead — complete normally, nothing to merge.
+        complete_now(state, :claude_done)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Polecat: review_only APPROVE: could not load bead pr_ref for bead=#{bead_id}: " <>
+            "#{inspect(reason)}; completing without merge"
+        )
+
+        complete_now(state, :claude_done)
+    end
+  end
+
+  # Load the pr_ref from the bead's current DB record. Returns {:ok, pr_ref}
+  # when present, {:error, :no_pr_ref} when nil/blank, and {:error, reason}
+  # on any other failure. Best-effort: callers fall back to a plain complete.
+  defp fetch_bead_pr_ref(bead_id) do
+    case Ash.get(Arbiter.Beads.Issue, bead_id) do
+      {:ok, %{pr_ref: pr_ref}} when is_binary(pr_ref) and pr_ref != "" ->
+        {:ok, pr_ref}
+
+      {:ok, _} ->
+        {:error, :no_pr_ref}
+
+      {:error, _} = err ->
+        err
+    end
+  rescue
+    _ -> {:error, :exception}
   end
 
   # bd-ofql8k commit gate. Returns `:ok` to proceed, or `{:gate, :uncommitted |
