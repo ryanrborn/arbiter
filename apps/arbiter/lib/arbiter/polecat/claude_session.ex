@@ -321,7 +321,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
         session = absorb_usage(session, event)
 
         event
-        |> format_event()
+        |> format_event(session)
         |> Enum.reduce(maybe_update_activity(session, event), fn {text, detect?}, acc ->
           emit_line(acc, text, detect?)
         end)
@@ -336,6 +336,17 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # carries tokens + cost + duration. Both update an in-session `:usage` map
   # that the polecat reads on exit. Best-effort — missing keys leave their slot
   # nil and the row is still persisted (graceful degradation).
+  # Gemini sessions carry a different stream-json schema, so route their events
+  # to the Gemini stream parser (which also derives cost from a price table,
+  # since the gemini CLI emits no dollar figure). Provider is set on the session
+  # config at spawn time; the `init`/`result` event clauses below are Claude's.
+  defp absorb_usage(%{provider: "gemini"} = session, event) do
+    update_usage(
+      session,
+      Arbiter.Agents.Gemini.Stream.usage_fields(event, Map.get(session, :model))
+    )
+  end
+
   defp absorb_usage(session, %{"type" => "system", "subtype" => "init"} = event) do
     update_usage(session, %{
       model: event["model"],
@@ -395,7 +406,13 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # unknown types) leave the prior activity in place — so "editing run.ex"
   # persists across the tool-result turn until the next action.
   defp maybe_update_activity(%{} = session, event) do
-    case activity_for_event(event) do
+    label =
+      case Map.get(session, :provider) do
+        "gemini" -> Arbiter.Agents.Gemini.Stream.activity_for_event(event)
+        _ -> activity_for_event(event)
+      end
+
+    case label do
       nil ->
         session
 
@@ -454,6 +471,14 @@ defmodule Arbiter.Polecat.ClaudeSession do
       _ -> :error
     end
   end
+
+  # Provider-aware dispatch: Gemini's stream-json events have a different shape,
+  # so they're formatted by the Gemini parser. Claude (and the nil/default
+  # provider) use the clauses below.
+  defp format_event(event, %{provider: "gemini"}),
+    do: Arbiter.Agents.Gemini.Stream.format_event(event)
+
+  defp format_event(event, _session), do: format_event(event)
 
   # Expand a stream-json event into `{display_line, detect_done?}` tuples.
   # Only assistant *text* opts into completion detection (see moduledoc).

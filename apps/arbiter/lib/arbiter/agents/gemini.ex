@@ -171,12 +171,21 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   defp build_argv(:gemini, exec, prompt, opts, %SecurityPolicy{permissions: %{mode: :bypass}}) do
-    [exec, "-p", prompt, "--skip-trust", "-y"] ++ model_flag(opts) ++ thinking_flag(opts)
+    [exec, "-p", prompt, "--skip-trust", "-y"] ++
+      model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
 
   defp build_argv(:gemini, exec, prompt, opts, _policy) do
-    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts)
+    [exec, "-p", prompt] ++ model_flag(opts) ++ thinking_flag(opts) ++ output_format_flag()
   end
+
+  # Only the upstream `gemini` CLI supports `--output-format stream-json` (it
+  # emits init/message/tool_use/tool_result/result JSONL events the polecat
+  # parses for token usage + derived cost — see `Arbiter.Agents.Gemini.Stream`).
+  # The `agy` fork has no such flag (it only does `--print` plain text), so the
+  # agy branches above omit it and fall back to raw-line streaming with no
+  # token/cost capture — graceful degradation, same as before bd-bbpm5e.
+  defp output_format_flag, do: ["--output-format", "stream-json"]
 
   defp model_flag(opts) do
     case resolve_model(opts) do

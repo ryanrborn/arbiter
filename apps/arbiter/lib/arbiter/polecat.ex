@@ -716,6 +716,7 @@ defmodule Arbiter.Polecat do
   defp provider_for(model) when is_binary(model) do
     cond do
       String.starts_with?(model, "claude") -> "claude"
+      String.starts_with?(model, "gemini") -> "gemini"
       String.contains?(model, "gpt") -> "openai"
       true -> "other"
     end
