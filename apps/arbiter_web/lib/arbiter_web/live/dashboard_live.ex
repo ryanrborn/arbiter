@@ -26,7 +26,9 @@ defmodule ArbiterWeb.DashboardLive do
     * `"polecats"`  — `{:polecat_lifecycle, event, snapshot}` from
                       `Arbiter.Polecat.broadcast_lifecycle/2`.
     * `"messages:<workspace_id>"` — `{:new_message, message}` from
-                      `Arbiter.Messages.Message.broadcast_new/1`, one
+                      `Arbiter.Messages.Message.broadcast_new/1` and
+                      `{:message_read, message}` from
+                      `Arbiter.Messages.Message.broadcast_read/1`, one
                       subscription per workspace known at mount. Drives the
                       live notifications feed and the Admiral mailbox.
 
@@ -136,6 +138,10 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_notifications()
      |> refresh_admiral_inbox()
      |> refresh_escalations()}
+  end
+
+  def handle_info({:message_read, _message}, socket) do
+    {:noreply, refresh_admiral_inbox(socket)}
   end
 
   # Lightweight 1s tick: only advances the clock so elapsed counters and
