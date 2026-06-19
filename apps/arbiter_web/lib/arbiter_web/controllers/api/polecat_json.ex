@@ -18,11 +18,12 @@ defmodule ArbiterWeb.Api.PolecatJSON do
     }
   end
 
-  def index(%{children: children}) do
+  def index(%{children: children, costs: costs}) do
     %{
       data:
         Enum.map(children, fn snap ->
           meta = Map.get(snap, :meta, %{}) || %{}
+          model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
 
           %{
             bead_id: snap.bead_id,
@@ -35,7 +36,9 @@ defmodule ArbiterWeb.Api.PolecatJSON do
             started_at: snap.started_at,
             mr_ref: Map.get(snap, :mr_ref),
             merger_url: Map.get(snap, :merger_url),
-            pid: inspect(snap.pid)
+            pid: inspect(snap.pid),
+            model: Arbiter.Polecat.Stats.short_model_name(model_id),
+            cost_usd: Map.get(costs, snap.bead_id, 0.0)
           }
         end)
     }
