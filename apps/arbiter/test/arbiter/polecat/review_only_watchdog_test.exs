@@ -93,7 +93,7 @@ defmodule Arbiter.Polecat.ReviewOnlyWatchdogTest do
       )
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead.id, rig: "rv/rig", workspace_id: bead.workspace_id, meta: meta)
+      Polecat.start(bead_id: bead.id, repo: "rv/repo", workspace_id: bead.workspace_id, meta: meta)
 
     :ok = Polecat.advance(pid, :claude)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -244,7 +244,7 @@ defmodule Arbiter.Polecat.ReviewOnlyWatchdogTest do
 
       # No review_only flag, no branch — should complete as before.
       meta = %{output_lines: ["VERDICT: APPROVE", "some work done"]}
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "rv/rig", workspace_id: ws.id, meta: meta)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "rv/repo", workspace_id: ws.id, meta: meta)
       :ok = Polecat.advance(pid, :claude)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 

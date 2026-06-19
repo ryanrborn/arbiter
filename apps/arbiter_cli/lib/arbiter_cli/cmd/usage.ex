@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
   Usage:
 
-      arb usage [--by day|bead|campaign|workspace|rig|model|step|provider]
+      arb usage [--by day|bead|campaign|workspace|repo|model|step|provider]
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
                 [--limit N]

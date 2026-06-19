@@ -16,7 +16,7 @@ defmodule Arbiter.PolecatNotificationTest do
 
     Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws))
 
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: ws)
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: ws)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     :ok = Polecat.advance(pid, :implement)
@@ -37,7 +37,7 @@ defmodule Arbiter.PolecatNotificationTest do
     ws = uniq("ws-fail")
     bead_id = uniq("bd-fail")
 
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: ws)
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: ws)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     :ok = Polecat.advance(pid, :implement)
@@ -54,7 +54,7 @@ defmodule Arbiter.PolecatNotificationTest do
     ws = uniq("ws-await")
     bead_id = uniq("bd-await")
 
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: ws)
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: ws)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     :ok = Polecat.advance(pid, :submit)
@@ -76,7 +76,7 @@ defmodule Arbiter.PolecatNotificationTest do
 
     bead_id = uniq("bd-quiet")
 
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: workspace.id)
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: workspace.id)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     :ok = Polecat.advance(pid, :implement)

@@ -6,10 +6,10 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker show   <bead-id> full snapshot incl. recent Claude output
       arb worker log    <bead-id> full uncapped durable transcript (audit)
       arb worker stop   <bead-id> terminate a running worker cleanly
-      arb worker resume <bead-id> [<rig>] [--model <name>]
+      arb worker resume <bead-id> [<repo>] [--model <name>]
                                   re-attach a fresh agent to a stopped
                                   worker's preserved worktree
-      arb worker review <bead-id> [--rig <rig>] [--model <name>]
+      arb worker review <bead-id> [--repo <repo>] [--model <name>]
                                   dispatch a review-only worker against the
                                   PR/MR linked to a bead
 

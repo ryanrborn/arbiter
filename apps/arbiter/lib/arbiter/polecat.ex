@@ -116,7 +116,7 @@ defmodule Arbiter.Polecat do
   @type snapshot :: %{
           bead_id: String.t(),
           workspace_id: String.t() | nil,
-          rig: String.t(),
+          repo: String.t(),
           current_step: step(),
           status: status(),
           started_at: DateTime.t(),
@@ -138,7 +138,7 @@ defmodule Arbiter.Polecat do
       # unregistering so we don't accidentally wipe the bead's primary slot.
       :registry_key,
       :workspace_id,
-      :rig,
+      :repo,
       :current_step,
       :status,
       :started_at,
@@ -197,7 +197,7 @@ defmodule Arbiter.Polecat do
 
   Required opts:
     * `:bead_id` — string, used as the default registry key.
-    * `:rig`    — string, the repo/project key the polecat operates on.
+    * `:repo`   — string, the repo/project key the polecat operates on.
 
   Optional opts:
     * `:workspace_id`   — string.
@@ -220,13 +220,13 @@ defmodule Arbiter.Polecat do
   def start_link(opts) when is_list(opts) do
     case Keyword.fetch(opts, :bead_id) do
       {:ok, bead_id} when is_binary(bead_id) and bead_id != "" ->
-        case Keyword.fetch(opts, :rig) do
-          {:ok, rig} when is_binary(rig) and rig != "" ->
+        case Keyword.fetch(opts, :repo) do
+          {:ok, repo} when is_binary(repo) and repo != "" ->
             registry_key = resolve_registry_key(opts, bead_id)
             GenServer.start_link(__MODULE__, opts, name: PRegistry.via_tuple(registry_key))
 
           _ ->
-            {:error, :missing_rig}
+            {:error, :missing_repo}
         end
 
       _ ->
@@ -252,7 +252,7 @@ defmodule Arbiter.Polecat do
   `Arbiter.Polecat.Supervisor`. Crashed / stopped polecats are omitted.
 
   Each entry is the same snapshot map `state/1` returns (bead_id,
-  workspace_id, rig, current_step, status, started_at, step_started_at,
+  workspace_id, repo, current_step, status, started_at, step_started_at,
   meta), plus `:pid`.
   """
   @spec list_children() :: [map()]
@@ -424,7 +424,7 @@ defmodule Arbiter.Polecat do
       bead_id: bead_id,
       registry_key: resolve_registry_key(opts, bead_id),
       workspace_id: Keyword.get(opts, :workspace_id),
-      rig: Keyword.fetch!(opts, :rig),
+      repo: Keyword.fetch!(opts, :repo),
       current_step: :idle,
       status: initial_status(meta),
       started_at: now,
@@ -539,7 +539,7 @@ defmodule Arbiter.Polecat do
     attrs = %{
       bead_id: state.bead_id,
       bead_title: lookup_bead_title(state.bead_id),
-      rig: state.rig,
+      repo: state.repo,
       workspace_id: state.workspace_id,
       status: :running,
       started_at: state.started_at,
@@ -683,7 +683,7 @@ defmodule Arbiter.Polecat do
     attrs = %{
       bead_id: state.bead_id,
       workspace_id: state.workspace_id,
-      rig: state.rig,
+      repo: state.repo,
       step: step,
       model: model,
       provider: provider,
@@ -1208,7 +1208,7 @@ defmodule Arbiter.Polecat do
   #     parks at :awaiting_review, and the Watchdog completes the polecat on its
   #     first poll. A merge failure surfaces as a :failure_reason rather than
   #     silently closing the bead as done.
-  #   * With no branch (ad-hoc runs / unconfigured rig / no worktree) there is
+  #   * With no branch (ad-hoc runs / unconfigured repo / no worktree) there is
   #     nothing to integrate. For review_only polecats this is the expected path
   #     (coordinator-dispatched reviewers have no worktree). When the reviewer
   #     produced an APPROVE verdict, trigger the Watchdog on the bead's pr_ref so
@@ -1392,8 +1392,8 @@ defmodule Arbiter.Polecat do
   #   * the worktree is actually checked out on the per-bead branch.
   #
   # The branch check exists because some test setups (notably ReviewGateTest)
-  # reuse the rig itself as the "worktree" with `worktree_path: repo` and a
-  # feature branch that was created on the rig but left checked-out elsewhere.
+  # reuse the repo itself as the "worktree" with `worktree_path: repo` and a
+  # feature branch that was created on the repo but left checked-out elsewhere.
   # In that case the worktree's HEAD is some other branch (usually `main`) and
   # `git rev-list main..HEAD` is meaningless — gating on it would manufacture
   # false `:no_commits` trips. Production worktrees provisioned via
@@ -2034,7 +2034,7 @@ defmodule Arbiter.Polecat do
           author: self(),
           bead_id: state.bead_id,
           workspace_id: state.workspace_id,
-          rig: state.rig,
+          repo: state.repo,
           worktree_path: Map.get(meta, :worktree_path),
           branch: branch,
           target_branch: Map.get(meta, :target_branch, "main")
@@ -2245,7 +2245,7 @@ defmodule Arbiter.Polecat do
     %{
       bead_id: s.bead_id,
       workspace_id: s.workspace_id,
-      rig: s.rig,
+      repo: s.repo,
       current_step: s.current_step,
       status: s.status,
       started_at: s.started_at,
@@ -2367,7 +2367,7 @@ defmodule Arbiter.Polecat do
   # keys and, when the caller didn't supply them, defaults from the polecat's
   # meta:
   #
-  #   * :repo_path — the rig path (local checkout where the target branch
+  #   * :repo_path — the repo path (local checkout where the target branch
   #     lives) the Direct adapter runs `git merge --no-ff` inside. Seeded into
   #     meta at dispatch time; falls back to the worktree path for older callers.
   #   * :target_branch — the base branch the worktree was cut from.

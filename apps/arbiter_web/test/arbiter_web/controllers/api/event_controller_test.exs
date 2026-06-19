@@ -29,7 +29,7 @@ defmodule ArbiterWeb.Api.EventControllerTest do
 
     test "returns 401 for a polecat-tier token (only coordinator allowed)", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Arbiter.Beads.Issue, %{title: "t", workspace_id: ws.id})
-      token = Scope.mint_polecat(bead, "test-rig")
+      token = Scope.mint_polecat(bead, "test-repo")
       conn = get(conn, "/events?token=#{token}")
       assert json_response(conn, 401)["error"] == "unauthorized"
     end

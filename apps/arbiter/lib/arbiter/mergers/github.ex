@@ -23,8 +23,8 @@ defmodule Arbiter.Mergers.Github do
 
   The opaque ref minted by `open/4` is one of:
 
-    * `"<owner>/<repo>#<number>"` — when the target repo was derived per-rig
-      from the rig's git remote (multi-repo workspaces where `merge.config`
+    * `"<owner>/<repo>#<number>"` — when the target repo was derived per-repo
+      from the repo's git remote (multi-repo workspaces where `merge.config`
       omits `repo`). The owner/repo are baked into the ref so later
       callbacks (`get/1`, `merge/1`, …) talk to the same repo without
       re-resolving.
@@ -34,16 +34,16 @@ defmodule Arbiter.Mergers.Github do
 
   Callers should treat the ref as opaque — the shape is internal.
 
-  ## Per-rig repo derivation
+  ## Per-repo repo derivation
 
-  When `workspace.config["merge"]["config"]` omits `repo` (a multi-rig
-  workspace whose rigs live in *different* repos, e.g. the `leotech`
-  workspace's four `leo-technologies-llc/*` rigs), `open/4` derives the
-  target repo from the rig's `origin` remote via
+  When `workspace.config["merge"]["config"]` omits `repo` (a multi-repo
+  workspace whose repos live in *different* repos, e.g. the `leotech`
+  workspace's four `leo-technologies-llc/*` repos), `open/4` derives the
+  target repo from the repo's `origin` remote via
   `Arbiter.Mergers.Github.RepoResolver` and bakes the result into the
-  minted `mr_ref`. The caller passes the rig path through `opts.repo_path`
+  minted `mr_ref`. The caller passes the repo path through `opts.repo_path`
   (the same key the `Direct` adapter already requires; the Polecat seeds
-  it from the rig's worktree).
+  it from the repo's worktree).
 
   ## Config selection
 
@@ -518,7 +518,7 @@ defmodule Arbiter.Mergers.Github do
   # ---- Internals: target / ref resolution ----------------------------------
 
   # Resolve the {owner, repo, ref_form} target for a fresh open/4. ref_form
-  # determines whether the minted mr_ref will embed owner/repo (per-rig
+  # determines whether the minted mr_ref will embed owner/repo (per-repo
   # derivation) or just carry the PR number (single-repo workspace).
   defp resolve_target(cfg, opts) do
     cond do
@@ -538,7 +538,7 @@ defmodule Arbiter.Mergers.Github do
            message:
              "GitHub merger config missing \"repo\" and no :repo_path in opts to derive it from. " <>
                "Set workspace.config[\"merge\"][\"config\"][\"repo\"] for single-repo workspaces, " <>
-               "or pass :repo_path so the adapter can derive owner/repo from the rig's git remote.",
+               "or pass :repo_path so the adapter can derive owner/repo from the repo's git remote.",
            raw: nil
          }}
     end

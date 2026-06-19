@@ -14,7 +14,7 @@ defmodule Arbiter.Polecats.ReconcilerTest do
   defp create_run(bead_id, status) do
     Ash.create!(Run, %{
       bead_id: bead_id,
-      rig: "arbiter",
+      repo: "arbiter",
       workspace_id: "ws-reconcile",
       status: status,
       started_at: DateTime.utc_now(),
@@ -45,7 +45,7 @@ defmodule Arbiter.Polecats.ReconcilerTest do
 
     # A live polecat both registers under Polecat.Registry and writes its own
     # :running Run row on init — exactly the case the sweep must skip.
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-reconcile")
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-reconcile")
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     assert {:ok, 0} = Reconciler.reconcile_orphaned_runs()
@@ -178,7 +178,7 @@ defmodule Arbiter.Polecats.ReconcilerTest do
       })
 
     # The Issue's id IS the bead_id used to register polecats.
-    {:ok, pid} = Polecat.start(bead_id: issue.id, rig: "arbiter", workspace_id: ws.id)
+    {:ok, pid} = Polecat.start(bead_id: issue.id, repo: "arbiter", workspace_id: ws.id)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()

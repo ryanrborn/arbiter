@@ -49,7 +49,7 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :provider, :text
       add :model, :text
       add :step, :text, null: false
-      add :rig, :text
+      add :repo, :text
       add :workspace_id, :text
       add :bead_id, :text, null: false
       add :id, :uuid, null: false, primary_key: true
@@ -70,7 +70,7 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :started_at, :utc_datetime_usec, null: false
       add :status, :text, null: false
       add :workspace_id, :text
-      add :rig, :text, null: false
+      add :repo, :text, null: false
       add :bead_title, :text
       add :bead_id, :text, null: false
       add :id, :uuid, null: false, primary_key: true

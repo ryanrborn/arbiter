@@ -46,7 +46,7 @@ defmodule Arbiter.Polecats.Run do
       accept [
         :bead_id,
         :bead_title,
-        :rig,
+        :repo,
         :workspace_id,
         :status,
         :started_at,
@@ -89,7 +89,7 @@ defmodule Arbiter.Polecats.Run do
       description "Denormalised bead title; nil if the bead was already gone."
     end
 
-    attribute :rig, :string do
+    attribute :repo, :string do
       allow_nil? false
       public? true
       constraints max_length: 255, trim?: true

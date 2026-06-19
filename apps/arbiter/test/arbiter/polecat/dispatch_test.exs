@@ -27,7 +27,7 @@ defmodule Arbiter.Polecat.DispatchTest do
     test "spawns a polecat and starts a workflow machine", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "hello world", workspace_id: ws.id})
 
-      assert {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", start_driver: false)
+      assert {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", start_driver: false)
       assert result.bead.status == :in_progress
       assert is_pid(result.polecat_pid)
       assert is_pid(result.machine_pid)
@@ -40,11 +40,11 @@ defmodule Arbiter.Polecat.DispatchTest do
 
     test "idempotent for already-in_progress beads", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
-      {:ok, _first} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
+      {:ok, _first} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
 
       # Second dispatch: bead is already :in_progress; polecat already exists.
       # Should NOT crash; should return the existing polecat pid.
-      assert {:ok, second} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
+      assert {:ok, second} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
       assert second.bead.status == :in_progress
       assert Polecat.whereis(bead.id) == second.polecat_pid
     end
@@ -56,14 +56,14 @@ defmodule Arbiter.Polecat.DispatchTest do
     test "redispatch a :failed polecat starts a fresh :idle polecat (bd-d70whv)", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "redispatch failed", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
       first_pid = first.polecat_pid
 
       :ok = Polecat.fail(first_pid, :credentials_expired)
       assert Polecat.state(first_pid).status == :failed
 
       # Re-dispatch: must evict the stale polecat and start a new one.
-      {:ok, second} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
 
       assert second.polecat_pid != first_pid
       refute Process.alive?(first_pid)
@@ -73,14 +73,14 @@ defmodule Arbiter.Polecat.DispatchTest do
     test "redispatch a :completed polecat also starts fresh (bd-d70whv)", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "redispatch completed", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
       first_pid = first.polecat_pid
 
       :ok = Polecat.advance(first_pid, :work)
       :ok = Polecat.complete(first_pid, :done)
       assert Polecat.state(first_pid).status == :completed
 
-      {:ok, second} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
 
       assert second.polecat_pid != first_pid
       refute Process.alive?(first_pid)
@@ -90,7 +90,7 @@ defmodule Arbiter.Polecat.DispatchTest do
     test "starts a Driver by default and drives bead to :closed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "drive me", workspace_id: ws.id})
 
-      assert {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", interval_ms: 5)
+      assert {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", interval_ms: 5)
       assert is_pid(result.driver_pid)
       assert Process.alive?(result.driver_pid)
 
@@ -127,7 +127,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       # Boot a polecat and park it at :awaiting_review via open_mr/5 with a
       # stub merger. Use a far-future Watchdog interval so the auto-started Watchdog
       # does not poll or transition the polecat during the assertion window.
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "arbiter")
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "arbiter")
       :ok = Polecat.advance(pid, :implement)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -150,18 +150,18 @@ defmodule Arbiter.Polecat.DispatchTest do
   describe "pre-flight auth check (bd-awi4nw)" do
     alias Arbiter.Messages.Message
 
-    # bd-1ziw04: real-work dispatchs now require the rig to be in :rig_paths.
-    # Configure a minimal entry so rig validation passes and the preflight check
+    # bd-1ziw04: real-work dispatchs now require the repo to be in :repo_paths.
+    # Configure a minimal entry so repo validation passes and the preflight check
     # actually fires. No real git repo is needed — the probe aborts before the
     # worktree provisioning step.
     setup do
-      prior = Application.get_env(:arbiter, :rig_paths)
-      Application.put_env(:arbiter, :rig_paths, %{"test/rig" => "/tmp"})
+      prior = Application.get_env(:arbiter, :repo_paths)
+      Application.put_env(:arbiter, :repo_paths, %{"test/repo" => "/tmp"})
 
       on_exit(fn ->
         if prior,
-          do: Application.put_env(:arbiter, :rig_paths, prior),
-          else: Application.delete_env(:arbiter, :rig_paths)
+          do: Application.put_env(:arbiter, :repo_paths, prior),
+          else: Application.delete_env(:arbiter, :repo_paths)
       end)
     end
 
@@ -170,7 +170,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       assert {:error, {:auth_check_failed, reason}} =
                Dispatch.dispatch(bead.id,
-                 rig: "test/rig",
+                 repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
                  probe_command: [
@@ -194,7 +194,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:error, {:auth_check_failed, _}} =
         Dispatch.dispatch(bead.id,
-          rig: "test/rig",
+          repo: "test/repo",
           start_driver: false,
           start_claude: true,
           probe_command: ["sh", "-c", "echo '401 invalid authentication credentials'; exit 1"],
@@ -216,7 +216,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       # provision_worktree: false so we don't try to git-fetch /tmp.
       assert {:ok, result} =
                Dispatch.dispatch(bead.id,
-                 rig: "test/rig",
+                 repo: "test/repo",
                  start_driver: false,
                  provision_worktree: false,
                  probe_command: ["sh", "-c", "exit 1"]
@@ -230,11 +230,11 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       # start_claude + preflight: false + provision_worktree: false errors at the
       # claude-start step (:missing_worktree) — proving we got PAST the (disabled)
-      # preflight rather than being refused by it. The rig must be valid so the
-      # rig-resolution guard (bd-1ziw04) passes before reaching the preflight gate.
+      # preflight rather than being refused by it. The repo must be valid so the
+      # repo-resolution guard (bd-1ziw04) passes before reaching the preflight gate.
       assert {:error, :missing_worktree} =
                Dispatch.dispatch(bead.id,
-                 rig: "test/rig",
+                 repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
                  provision_worktree: false,
@@ -247,7 +247,7 @@ defmodule Arbiter.Polecat.DispatchTest do
   describe "dispatch/2 result shape" do
     test "returns a map with the standard keys", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", start_driver: false)
 
       for key <- [:bead, :polecat_pid, :machine_id, :machine_pid, :driver_pid, :worktree_path] do
         assert Map.has_key?(result, key), "missing #{key}"
@@ -334,7 +334,7 @@ defmodule Arbiter.Polecat.DispatchTest do
     test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", start_driver: false)
       assert result.claude_port == nil
     end
 
@@ -343,22 +343,22 @@ defmodule Arbiter.Polecat.DispatchTest do
       {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
       # Use the tmp dir as a stand-in worktree by passing it through manually.
-      # Dispatch.maybe_provision_worktree returns nil when rig is unmapped, but
-      # we need a worktree_path for ClaudeSession; so we point a tmp rig at
+      # Dispatch.maybe_provision_worktree returns nil when repo is unmapped, but
+      # we need a worktree_path for ClaudeSession; so we point a tmp repo at
       # a real git repo and let Dispatch provision the worktree itself.
       repo = seed_repo!(tmp, "repo")
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
-      Application.put_env(:arbiter, :rig_paths, %{"claude/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"claude/repo" => repo})
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "claude/rig",
+          repo: "claude/repo",
           start_driver: false,
           start_claude: true,
           # Stand-in for a running `claude --print` session — stays alive (so it
@@ -372,25 +372,25 @@ defmodule Arbiter.Polecat.DispatchTest do
     end
 
     # bd-dlv3no: a review dispatch has no per-bead worktree, so its Claude cwd
-    # falls back to the rig's shared checkout. The per-spawn MCP config carries a
+    # falls back to the repo's shared checkout. The per-spawn MCP config carries a
     # bearer scope token; writing `.mcp.json` into that canonical checkout leaks
     # the token into the working tree the live server + operator share (the
     # "worker leaks into the main worktree" class). The spawn must NOT touch the
-    # rig's working tree.
-    test "review dispatch does not write .mcp.json into the shared rig checkout",
+    # repo's working tree.
+    test "review dispatch does not write .mcp.json into the shared repo checkout",
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "reviewrig")
 
-      Application.put_env(:arbiter, :rig_paths, %{"rv/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"rv/repo" => repo})
       enable_mcp_injection!()
 
-      on_exit(fn -> Application.delete_env(:arbiter, :rig_paths) end)
+      on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
 
       {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "rv/rig",
+          repo: "rv/repo",
           review: true,
           start_driver: false,
           start_claude: true,
@@ -398,7 +398,7 @@ defmodule Arbiter.Polecat.DispatchTest do
           claude_command: ["sleep", "2"]
         )
 
-      # Review runs in the rig (no worktree) ...
+      # Review runs in the repo (no worktree) ...
       assert result.worktree_path == nil
       assert is_port(result.claude_port)
       # ... and the token-bearing config never lands in that shared checkout.
@@ -406,25 +406,25 @@ defmodule Arbiter.Polecat.DispatchTest do
     end
 
     # Counterpart: a normal work dispatch DOES get the MCP config — but only ever
-    # inside its own isolated worktree, never the rig.
-    test "work dispatch writes .mcp.json into its isolated worktree (not the rig)",
+    # inside its own isolated worktree, never the repo.
+    test "work dispatch writes .mcp.json into its isolated worktree (not the repo)",
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "workrig")
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "work-wt"))
-      Application.put_env(:arbiter, :rig_paths, %{"work/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"work/repo" => repo})
       enable_mcp_injection!()
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "work/rig",
+          repo: "work/repo",
           start_driver: false,
           start_claude: true,
           claude_command: ["sleep", "2"]
@@ -483,19 +483,19 @@ defmodule Arbiter.Polecat.DispatchTest do
              "After fix: .mcp.json file should be removed from working tree"
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gic-wt"))
-      Application.put_env(:arbiter, :rig_paths, %{"gic/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"gic/repo" => repo})
       enable_mcp_injection!()
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, bead} = Ash.create(Issue, %{title: "check ignore", workspace_id: ws.id})
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "gic/rig",
+          repo: "gic/repo",
           start_driver: false,
           start_claude: true,
           claude_command: ["sleep", "2"]
@@ -521,13 +521,13 @@ defmodule Arbiter.Polecat.DispatchTest do
              "REGRESSION: .mcp.json shows in git status. After the fix, the injected file must be ignored and clean."
     end
 
-    test "start_claude: true with an unresolvable rig returns {:error, {:rig_not_found, rig}}",
+    test "start_claude: true with an unresolvable repo returns {:error, {:repo_not_found, repo}}",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
 
-      assert {:error, {:rig_not_found, "no-such-rig"}} =
+      assert {:error, {:repo_not_found, "no-such-repo"}} =
                Dispatch.dispatch(bead.id,
-                 rig: "no-such-rig",
+                 repo: "no-such-repo",
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["echo", "x"]
@@ -541,16 +541,16 @@ defmodule Arbiter.Polecat.DispatchTest do
       repo = seed_repo!(tmp, "drvrepo")
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "drv-wt"))
-      Application.put_env(:arbiter, :rig_paths, %{"drvr/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"drvr/repo" => repo})
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "drvr/rig",
+          repo: "drvr/repo",
           start_claude: true,
           # A stand-in for a *running* Claude session: it must stay alive for the
           # duration of this test. A command that exits immediately would (since
@@ -597,11 +597,11 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       repo = seed_repo!(tmp, "model-repo")
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "mwt"))
-      Application.put_env(:arbiter, :rig_paths, %{"m/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"m/repo" => repo})
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, ws} =
@@ -615,7 +615,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(bead.id,
-          rig: "m/rig",
+          repo: "m/repo",
           start_driver: false,
           start_claude: true,
           # This test asserts the WORK-spawn argv; disable the bd-awi4nw auth
@@ -636,11 +636,11 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       repo = seed_repo!(tmp, "override-repo")
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
-      Application.put_env(:arbiter, :rig_paths, %{"o/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"o/repo" => repo})
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, ws} =
@@ -654,7 +654,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(bead.id,
-          rig: "o/rig",
+          repo: "o/repo",
           start_driver: false,
           start_claude: true,
           model: "opus",
@@ -677,11 +677,11 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       repo = seed_repo!(tmp, "gem-repo")
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gwt"))
-      Application.put_env(:arbiter, :rig_paths, %{"g/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"g/repo" => repo})
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       # Workspace defaults to Claude — the forced provider must win over it.
@@ -694,7 +694,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "g/rig",
+          repo: "g/repo",
           start_driver: false,
           start_claude: true,
           agent_type: :gemini,
@@ -722,11 +722,11 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       repo = seed_repo!(tmp, "prio-repo")
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "pwt"))
-      Application.put_env(:arbiter, :rig_paths, %{"p/rig" => repo})
+      Application.put_env(:arbiter, :repo_paths, %{"p/repo" => repo})
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
-        Application.delete_env(:arbiter, :rig_paths)
+        Application.delete_env(:arbiter, :repo_paths)
       end)
 
       {:ok, ws} =
@@ -746,7 +746,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:ok, _result} =
         Dispatch.dispatch(bead.id,
-          rig: "p/rig",
+          repo: "p/repo",
           start_driver: false,
           start_claude: true,
           # WORK-spawn argv assertion — skip the auth pre-flight probe (bd-awi4nw).
@@ -798,7 +798,7 @@ defmodule Arbiter.Polecat.DispatchTest do
   end
 
   describe "worktree provisioning" do
-    @env_key :rig_paths
+    @env_key :repo_paths
 
     setup do
       tmp = Path.join(System.tmp_dir!(), "dispatch-wt-#{:erlang.unique_integer([:positive])}")
@@ -814,7 +814,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
 
       # Bare origin: Worktree.create fetches from `origin` and branches from
-      # `origin/<base>`. Tests set it up explicitly so the rig has an upstream
+      # `origin/<base>`. Tests set it up explicitly so the repo has an upstream
       # the provisioning path can consult.
       remote = Path.join(tmp, "remote.git")
       {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
@@ -825,18 +825,18 @@ defmodule Arbiter.Polecat.DispatchTest do
       File.mkdir_p!(worktree_root)
 
       prior_wt_root = Application.get_env(:arbiter, :worktree_root)
-      prior_rig_paths = Application.get_env(:arbiter, @env_key)
+      prior_repo_paths = Application.get_env(:arbiter, @env_key)
 
       Application.put_env(:arbiter, :worktree_root, worktree_root)
-      Application.put_env(:arbiter, @env_key, %{"st/rig" => repo})
+      Application.put_env(:arbiter, @env_key, %{"st/repo" => repo})
 
       on_exit(fn ->
         if prior_wt_root,
           do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
           else: Application.delete_env(:arbiter, :worktree_root)
 
-        if prior_rig_paths,
-          do: Application.put_env(:arbiter, @env_key, prior_rig_paths),
+        if prior_repo_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_repo_paths),
           else: Application.delete_env(:arbiter, @env_key)
 
         File.rm_rf!(tmp)
@@ -845,7 +845,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       %{repo: repo, remote: remote, worktree_root: worktree_root, tmp: tmp}
     end
 
-    test "creates a worktree on a derived branch when rig is configured",
+    test "creates a worktree on a derived branch when repo is configured",
          %{ws: ws, worktree_root: root} do
       {:ok, bead} =
         Ash.create(Issue, %{
@@ -855,7 +855,7 @@ defmodule Arbiter.Polecat.DispatchTest do
         })
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
+        Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
 
       assert is_binary(result.worktree_path)
       assert String.starts_with?(result.worktree_path, root)
@@ -866,10 +866,10 @@ defmodule Arbiter.Polecat.DispatchTest do
       assert {:ok, ^branch} = Arbiter.Polecat.Worktree.current_branch(result.worktree_path)
     end
 
-    test "skips worktree when rig is not in rig_paths", %{ws: ws} do
+    test "skips worktree when repo is not in repo_paths", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "unmapped", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "no-such-rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "no-such-repo", start_driver: false)
       assert result.worktree_path == nil
     end
 
@@ -878,14 +878,14 @@ defmodule Arbiter.Polecat.DispatchTest do
         Ash.create(Workspace, %{
           name: "per-ws-#{System.unique_integer([:positive])}",
           prefix: "pw",
-          config: %{"rig_paths" => %{"per-ws/rig" => repo}}
+          config: %{"repo_paths" => %{"per-ws/repo" => repo}}
         })
 
       {:ok, bead} = Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id})
 
-      # `per-ws/rig` is NOT in Application env — only in this workspace's
+      # `per-ws/repo` is NOT in Application env — only in this workspace's
       # config. Dispatch must still find it.
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "per-ws/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "per-ws/repo", start_driver: false)
       assert is_binary(result.worktree_path)
       assert File.dir?(result.worktree_path)
     end
@@ -911,14 +911,14 @@ defmodule Arbiter.Polecat.DispatchTest do
           name: "base-branch-ws-#{System.unique_integer([:positive])}",
           prefix: "bb",
           config: %{
-            "rig_paths" => %{"bb/rig" => repo},
+            "repo_paths" => %{"bb/repo" => repo},
             "merge" => %{"base" => "develop"}
           }
         })
 
       {:ok, bead} = Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "bb/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "bb/repo", start_driver: false)
 
       # Worktree was cut from `develop`: the develop-only file is present.
       assert is_binary(result.worktree_path)
@@ -933,7 +933,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       {:ok, bead} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false, provision_worktree: false)
+        Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false, provision_worktree: false)
 
       assert result.worktree_path == nil
     end
@@ -947,7 +947,7 @@ defmodule Arbiter.Polecat.DispatchTest do
         Ash.create(Issue, %{title: "re-dispatch after review", workspace_id: ws.id})
 
       # First dispatch — provisions the worktree, creating the branch locally.
-      {:ok, first} = Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
       assert is_binary(first.worktree_path)
       branch = Arbiter.Polecat.BranchNamer.derive(bead)
 
@@ -964,16 +964,16 @@ defmodule Arbiter.Polecat.DispatchTest do
       {:ok, bead} = Ash.update(bead, %{status: :open})
 
       # Second dispatch — branch already exists; must attach instead of creating.
-      assert {:ok, second} = Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
+      assert {:ok, second} = Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
       assert is_binary(second.worktree_path)
       assert File.dir?(second.worktree_path)
       assert {:ok, ^branch} = Arbiter.Polecat.Worktree.current_branch(second.worktree_path)
     end
 
-    test "worktree starts from upstream tip even when the rig's local base is stale",
+    test "worktree starts from upstream tip even when the repo's local base is stale",
          %{repo: repo, remote: remote, tmp: tmp, ws: ws} do
       # Reproduces the 2026-06-04 incident: a second clone advances origin/main;
-      # the rig's local `main` stays put. Dispatch must still produce a worktree
+      # the repo's local `main` stays put. Dispatch must still produce a worktree
       # at the upstream tip.
       clone = Path.join(tmp, "advance")
       {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
@@ -989,7 +989,7 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "stale local base", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "UPSTREAM.md"))
     end
@@ -1011,12 +1011,12 @@ defmodule Arbiter.Polecat.DispatchTest do
       {_, 0} =
         System.cmd("git", ["-C", broken, "remote", "add", "origin", Path.join(tmp, "no-such")])
 
-      Application.put_env(:arbiter, :rig_paths, %{"broken/rig" => broken})
+      Application.put_env(:arbiter, :repo_paths, %{"broken/repo" => broken})
 
       {:ok, bead} = Ash.create(Issue, %{title: "fetch failure", workspace_id: ws.id})
 
       assert {:error, {:worktree_failed, reason}} =
-               Dispatch.dispatch(bead.id, rig: "broken/rig", start_driver: false)
+               Dispatch.dispatch(bead.id, repo: "broken/repo", start_driver: false)
 
       assert match?({:fetch_failed, _}, reason) or match?({:missing_origin_ref, _}, reason),
              "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
@@ -1038,7 +1038,7 @@ defmodule Arbiter.Polecat.DispatchTest do
           name: "per-bead-target-#{System.unique_integer([:positive])}",
           prefix: "pb",
           # Workspace default is the bare "main"; the bead overrides to dolphin.
-          config: %{"rig_paths" => %{"pb/rig" => repo}, "merge" => %{"base" => "main"}}
+          config: %{"repo_paths" => %{"pb/repo" => repo}, "merge" => %{"base" => "main"}}
         })
 
       {:ok, bead} =
@@ -1048,7 +1048,7 @@ defmodule Arbiter.Polecat.DispatchTest do
           target_branch: "dolphin"
         })
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "pb/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "pb/repo", start_driver: false)
 
       # The bead-specified target wins: the worktree carries the dolphin file
       # and the polecat's meta records dolphin as the merge target.
@@ -1056,8 +1056,8 @@ defmodule Arbiter.Polecat.DispatchTest do
       assert %{target_branch: "dolphin"} = Polecat.state(result.polecat_pid).meta
     end
 
-    test "per-rig target_branch default applies when bead has none", %{repo: repo} do
-      # Push a `dolphin` branch and configure the rig to default to it.
+    test "per-repo target_branch default applies when bead has none", %{repo: repo} do
+      # Push a `dolphin` branch and configure the repo to default to it.
       {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "dolphin"])
       File.write!(Path.join(repo, "DOLPHIN.md"), "dolphin\n")
       {_, 0} = System.cmd("git", ["-C", repo, "add", "DOLPHIN.md"])
@@ -1067,20 +1067,20 @@ defmodule Arbiter.Polecat.DispatchTest do
 
       {:ok, ws_local} =
         Ash.create(Workspace, %{
-          name: "rig-default-target-#{System.unique_integer([:positive])}",
+          name: "repo-default-target-#{System.unique_integer([:positive])}",
           prefix: "rd",
-          # Rig-level default beats the workspace default ("main").
+          # Repo-level default beats the workspace default ("main").
           config: %{
-            "rig_paths" => %{
-              "rd/rig" => %{"path" => repo, "target_branch" => "dolphin"}
+            "repo_paths" => %{
+              "rd/repo" => %{"path" => repo, "target_branch" => "dolphin"}
             },
             "merge" => %{"base" => "main"}
           }
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "rig default", workspace_id: ws_local.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "repo default", workspace_id: ws_local.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "rd/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "rd/repo", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
       assert %{target_branch: "dolphin"} = Polecat.state(result.polecat_pid).meta
@@ -1217,7 +1217,7 @@ defmodule Arbiter.Polecat.DispatchTest do
   end
 
   describe "resume/2 (bd-auma3z)" do
-    @env_key :rig_paths
+    @env_key :repo_paths
 
     setup do
       tmp = Path.join(System.tmp_dir!(), "dispatch-resume-#{:erlang.unique_integer([:positive])}")
@@ -1241,18 +1241,18 @@ defmodule Arbiter.Polecat.DispatchTest do
       File.mkdir_p!(worktree_root)
 
       prior_wt_root = Application.get_env(:arbiter, :worktree_root)
-      prior_rig_paths = Application.get_env(:arbiter, @env_key)
+      prior_repo_paths = Application.get_env(:arbiter, @env_key)
 
       Application.put_env(:arbiter, :worktree_root, worktree_root)
-      Application.put_env(:arbiter, @env_key, %{"rs/rig" => repo})
+      Application.put_env(:arbiter, @env_key, %{"rs/repo" => repo})
 
       on_exit(fn ->
         if prior_wt_root,
           do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
           else: Application.delete_env(:arbiter, :worktree_root)
 
-        if prior_rig_paths,
-          do: Application.put_env(:arbiter, @env_key, prior_rig_paths),
+        if prior_repo_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_repo_paths),
           else: Application.delete_env(:arbiter, @env_key)
 
         File.rm_rf!(tmp)
@@ -1265,7 +1265,7 @@ defmodule Arbiter.Polecat.DispatchTest do
     # the polecat fails (lingers in :failed, registered) with the worktree left
     # on disk — exactly the state `arb resume` is built to recover from.
     defp stop_acolyte_with_outpost(bead_id) do
-      {:ok, first} = Dispatch.dispatch(bead_id, rig: "rs/rig", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead_id, repo: "rs/repo", start_driver: false)
       assert is_binary(first.worktree_path)
       :ok = Polecat.fail(first.polecat_pid, :token_exhausted)
       first
@@ -1336,17 +1336,17 @@ defmodule Arbiter.Polecat.DispatchTest do
     test "refuses while an worker is still actively working", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
       # Dispatch but DON'T stop — the polecat is live (:idle/:running), not stopped.
-      {:ok, _live} = Dispatch.dispatch(bead.id, rig: "rs/rig", start_driver: false)
+      {:ok, _live} = Dispatch.dispatch(bead.id, repo: "rs/repo", start_driver: false)
 
       assert {:error, {:acolyte_active, _status}} =
                Dispatch.resume(bead.id, start_driver: false)
     end
 
-    test "inherits the rig from the prior run when omitted", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "rig inherit", workspace_id: ws.id})
+    test "inherits the repo from the prior run when omitted", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "repo inherit", workspace_id: ws.id})
       _ = stop_acolyte_with_outpost(bead.id)
 
-      # No rig passed — must inherit "rs/rig" from the prior run record.
+      # No repo passed — must inherit "rs/repo" from the prior run record.
       {:ok, result} =
         Dispatch.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
 
@@ -1355,7 +1355,7 @@ defmodule Arbiter.Polecat.DispatchTest do
   end
 
   describe "review dispatch (review: true)" do
-    @env_key :rig_paths
+    @env_key :repo_paths
 
     setup do
       tmp = Path.join(System.tmp_dir!(), "dispatch-review-#{:erlang.unique_integer([:positive])}")
@@ -1371,7 +1371,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
 
       prior = Application.get_env(:arbiter, @env_key)
-      Application.put_env(:arbiter, @env_key, %{"rv/rig" => repo})
+      Application.put_env(:arbiter, @env_key, %{"rv/repo" => repo})
 
       on_exit(fn ->
         if prior,
@@ -1389,7 +1389,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id, rig: "rv/rig", review: true, start_driver: false)
+        Dispatch.dispatch(bead.id, repo: "rv/repo", review: true, start_driver: false)
 
       # No per-bead branch, no worktree.
       assert result.worktree_path == nil
@@ -1447,13 +1447,13 @@ defmodule Arbiter.Polecat.DispatchTest do
       refute prompt =~ "github:93"
     end
 
-    test "review with start_claude: true uses the rig path as cwd when no worktree",
+    test "review with start_claude: true uses the repo path as cwd when no worktree",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})
 
       {:ok, result} =
         Dispatch.dispatch(bead.id,
-          rig: "rv/rig",
+          repo: "rv/repo",
           review: true,
           start_claude: true,
           start_driver: false,
@@ -1466,13 +1466,13 @@ defmodule Arbiter.Polecat.DispatchTest do
       assert result.worktree_path == nil
     end
 
-    test "review with start_claude: true and an unresolvable rig errors",
+    test "review with start_claude: true and an unresolvable repo errors",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no cwd", workspace_id: ws.id})
 
-      assert {:error, {:rig_not_found, "no-such-rig"}} =
+      assert {:error, {:repo_not_found, "no-such-repo"}} =
                Dispatch.dispatch(bead.id,
-                 rig: "no-such-rig",
+                 repo: "no-such-repo",
                  review: true,
                  start_claude: true,
                  claude_command: ["true"]
@@ -1480,14 +1480,14 @@ defmodule Arbiter.Polecat.DispatchTest do
     end
   end
 
-  describe "real-work rig resolution (bd-1ziw04)" do
-    # Tests verify that start_claude: true dispatches fail loudly when no rig
-    # can be resolved, and auto-select when exactly one rig is available.
+  describe "real-work repo resolution (bd-1ziw04)" do
+    # Tests verify that start_claude: true dispatches fail loudly when no repo
+    # can be resolved, and auto-select when exactly one repo is available.
 
-    @env_key :rig_paths
+    @env_key :repo_paths
 
     setup do
-      tmp = Path.join(System.tmp_dir!(), "dispatch-rig-#{:erlang.unique_integer([:positive])}")
+      tmp = Path.join(System.tmp_dir!(), "dispatch-repo-#{:erlang.unique_integer([:positive])}")
       repo = Path.join(tmp, "source")
       File.mkdir_p!(repo)
 
@@ -1508,7 +1508,7 @@ defmodule Arbiter.Polecat.DispatchTest do
       File.mkdir_p!(worktree_root)
 
       prior_wt_root = Application.get_env(:arbiter, :worktree_root)
-      prior_rig_paths = Application.get_env(:arbiter, @env_key)
+      prior_repo_paths = Application.get_env(:arbiter, @env_key)
 
       Application.put_env(:arbiter, :worktree_root, worktree_root)
 
@@ -1517,8 +1517,8 @@ defmodule Arbiter.Polecat.DispatchTest do
           do: Application.put_env(:arbiter, :worktree_root, prior_wt_root),
           else: Application.delete_env(:arbiter, :worktree_root)
 
-        if prior_rig_paths,
-          do: Application.put_env(:arbiter, @env_key, prior_rig_paths),
+        if prior_repo_paths,
+          do: Application.put_env(:arbiter, @env_key, prior_repo_paths),
           else: Application.delete_env(:arbiter, @env_key)
 
         File.rm_rf!(tmp)
@@ -1527,12 +1527,12 @@ defmodule Arbiter.Polecat.DispatchTest do
       %{repo: repo}
     end
 
-    test "0 rigs: start_claude: true with no rig and empty :rig_paths fails loudly",
+    test "0 repos: start_claude: true with no repo and empty :repo_paths fails loudly",
          %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
-      {:ok, bead} = Ash.create(Issue, %{title: "no rigs", workspace_id: ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "no repos", workspace_id: ws.id})
 
-      assert {:error, :no_rig_configured} =
+      assert {:error, :no_repo_configured} =
                Dispatch.dispatch(bead.id,
                  start_driver: false,
                  start_claude: true,
@@ -1546,9 +1546,9 @@ defmodule Arbiter.Polecat.DispatchTest do
       assert Polecat.whereis(bead.id) == nil
     end
 
-    test "1 rig: start_claude: true with no rig auto-selects the sole configured rig",
+    test "1 repo: start_claude: true with no repo auto-selects the sole configured repo",
          %{ws: ws, repo: repo} do
-      Application.put_env(:arbiter, @env_key, %{"sole/rig" => repo})
+      Application.put_env(:arbiter, @env_key, %{"sole/repo" => repo})
       {:ok, bead} = Ash.create(Issue, %{title: "auto-select", workspace_id: ws.id})
 
       assert {:ok, result} =
@@ -1559,17 +1559,17 @@ defmodule Arbiter.Polecat.DispatchTest do
                  preflight: false
                )
 
-      # Worktree provisioned using the auto-selected rig.
+      # Worktree provisioned using the auto-selected repo.
       assert is_binary(result.worktree_path)
       assert File.dir?(result.worktree_path)
     end
 
-    test "multi-rig: start_claude: true with no rig and multiple :rig_paths fails loudly",
+    test "multi-repo: start_claude: true with no repo and multiple :repo_paths fails loudly",
          %{ws: ws, repo: repo} do
-      Application.put_env(:arbiter, @env_key, %{"rig/a" => repo, "rig/b" => repo})
-      {:ok, bead} = Ash.create(Issue, %{title: "multi rigs", workspace_id: ws.id})
+      Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
+      {:ok, bead} = Ash.create(Issue, %{title: "multi repos", workspace_id: ws.id})
 
-      assert {:error, {:ambiguous_rig, rigs}} =
+      assert {:error, {:ambiguous_repo, repos}} =
                Dispatch.dispatch(bead.id,
                  start_driver: false,
                  start_claude: true,
@@ -1577,8 +1577,8 @@ defmodule Arbiter.Polecat.DispatchTest do
                  preflight: false
                )
 
-      assert "rig/a" in rigs
-      assert "rig/b" in rigs
+      assert "repo/a" in repos
+      assert "repo/b" in repos
 
       # Refused before any state mutation.
       {:ok, reloaded} = Ash.get(Issue, bead.id)
@@ -1586,14 +1586,14 @@ defmodule Arbiter.Polecat.DispatchTest do
       assert Polecat.whereis(bead.id) == nil
     end
 
-    test "explicit rig not in :rig_paths fails with {:rig_not_found, rig}",
+    test "explicit repo not in :repo_paths fails with {:repo_not_found, repo}",
          %{ws: ws, repo: repo} do
-      Application.put_env(:arbiter, @env_key, %{"real/rig" => repo})
-      {:ok, bead} = Ash.create(Issue, %{title: "bad rig", workspace_id: ws.id})
+      Application.put_env(:arbiter, @env_key, %{"real/repo" => repo})
+      {:ok, bead} = Ash.create(Issue, %{title: "bad repo", workspace_id: ws.id})
 
-      assert {:error, {:rig_not_found, "no-such/rig"}} =
+      assert {:error, {:repo_not_found, "no-such/repo"}} =
                Dispatch.dispatch(bead.id,
-                 rig: "no-such/rig",
+                 repo: "no-such/repo",
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -1606,11 +1606,11 @@ defmodule Arbiter.Polecat.DispatchTest do
       assert Polecat.whereis(bead.id) == nil
     end
 
-    test "dry dispatch (no start_claude) is unaffected — still parks without a rig", %{ws: ws} do
+    test "dry dispatch (no start_claude) is unaffected — still parks without a repo", %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
       {:ok, bead} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
 
-      # No --with-claude → no rig required → succeeds and parks as :in_progress.
+      # No --with-claude → no repo required → succeeds and parks as :in_progress.
       assert {:ok, result} = Dispatch.dispatch(bead.id, start_driver: false)
       assert result.bead.status == :in_progress
       assert result.worktree_path == nil
