@@ -42,12 +42,12 @@ config :arbiter, Arbiter.MCP, inject_config: false, sse_max_lifetime_ms: 0
 # Durable per-run transcript root, isolated under tmp so the suite never
 # writes into a real data dir. Tests that assert on transcripts override this
 # per-test with a unique tmp dir.
-config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-polecat-logs-test")
+config :arbiter, :output_log_root, Path.join(System.tmp_dir!(), "arbiter-worker-logs-test")
 
 # Stalled-acolyte detection (bd-awi4nw): shorten the post-exit grace so the
 # deferred classify+escalate check fires fast under test. Still > 0 so a normal
 # completion's in-flight `arb done` wins the race before the check runs.
-config :arbiter, :polecat_exit_grace_ms, 50
+config :arbiter, :worker_exit_grace_ms, 50
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 config :phoenix_live_view, enable_expensive_runtime_checks: true

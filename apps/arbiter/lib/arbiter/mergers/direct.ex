@@ -61,7 +61,7 @@ defmodule Arbiter.Mergers.Direct do
 
       {:error, {:merge_conflict, %{branch: branch, files: [path, ...], output: raw_git_output}}}
 
-  so the caller (the polecat lifecycle) can escalate to the Admiral inbox with
+  so the caller (the worker lifecycle) can escalate to the Admiral inbox with
   the conflicting files and park the bead for rebase — without ever marking it
   merged. Any other (non-conflict) git failure still returns
   `{:error, {:git_failed, output}}`, and the abort runs defensively regardless

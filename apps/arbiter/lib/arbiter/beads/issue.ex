@@ -160,10 +160,10 @@ defmodule Arbiter.Beads.Issue do
       change set_attribute(:status, :closed)
       change set_attribute(:closed_at, &DateTime.utc_now/0)
 
-      # Best-effort teardown: stop the bead's polecat (if any) and remove
+      # Best-effort teardown: stop the bead's worker (if any) and remove
       # its worktree (if clean). Failures never fail the :close itself.
       # Runs for every :close path — CLI, Driver, MergeQueue.
-      change {Arbiter.Beads.Issue.Changes.StopPolecat, []}
+      change {Arbiter.Beads.Issue.Changes.StopWorker, []}
       change {Arbiter.Beads.Issue.Changes.CleanupWorktree, []}
 
       # Propagate the close to the linked external tracker only when
@@ -235,7 +235,7 @@ defmodule Arbiter.Beads.Issue do
       # Pattern allows uppercase to accommodate phase markers (gte-P1),
       # Verus-style mixed-case IDs from the Dolt import, AND legacy IDs
       # with underscores or multiple hyphens (e.g. `ac-access_control-merge_queue`,
-      # `vs-server-polecat-chrome`). Without that tolerance,
+      # `vs-server-worker-chrome`). Without that tolerance,
       # AshPaperTrail's Version row creation rejects those IDs and any
       # close/update on a legacy bead fails. Newly generated IDs are
       # still tidy lowercase prefix-shortid (see Changes.GenerateId).

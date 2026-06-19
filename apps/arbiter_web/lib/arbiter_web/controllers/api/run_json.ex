@@ -1,12 +1,12 @@
 defmodule ArbiterWeb.Api.RunJSON do
   @moduledoc """
-  Render functions for `Arbiter.Polecats.Run`.
+  Render functions for `Arbiter.Workers.Run`.
 
   `:index` omits `output_lines` (which can be up to 500 strings) to keep list
   responses compact — clients fetch full output through `:show`.
   """
 
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Workers.Run
 
   def index(%{runs: runs}) do
     %{data: Enum.map(runs, &summary/1)}

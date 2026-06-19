@@ -13,21 +13,21 @@ defmodule Arbiter.MCP.Scope do
   ## Tiers
 
       %Arbiter.MCP.Scope{
-        tier:         :polecat | :coordinator,
-        workspace_id: "uuid" | nil,    # polecat: the bound workspace; coordinator: nil (workspace-agnostic)
-        bead_id:      "bd-…" | nil,    # polecat tier: the one bead it may read/progress
-        repo:         "shipyard" | nil,# polecat tier: its repo
+        tier:         :worker | :coordinator,
+        workspace_id: "uuid" | nil,    # worker: the bound workspace; coordinator: nil (workspace-agnostic)
+        bead_id:      "bd-…" | nil,    # worker tier: the one bead it may read/progress
+        repo:         "shipyard" | nil,# worker tier: its repo
         can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
         depth:        0                # dispatch-recursion depth (Phase 2 guardrail)
       }
 
   | Tier | Reads | Writes | Dispatch |
   |---|---|---|---|
-  | `:polecat` | its own bead, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
+  | `:worker` | its own bead, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
   | `:coordinator` | across any workspace on the installation | create/update/close beads, deps (incl. `parent_of` grouping); dispatch | yes |
 
-  The `:polecat` tier is deliberately narrow — it must not list arbitrary beads,
-  dispatch, or touch another bead's state, and it is **workspace-scoped**: a polecat
+  The `:worker` tier is deliberately narrow — it must not list arbitrary beads,
+  dispatch, or touch another bead's state, and it is **workspace-scoped**: a worker
   token carries the workspace it was dispatched into and can never reach another.
   Tier-level tool visibility is declared in `Arbiter.MCP.Catalog`; the data-level
   checks (own-bead, workspace isolation) live here so handlers cannot accidentally
@@ -54,7 +54,7 @@ defmodule Arbiter.MCP.Scope do
             can_dispatch: false,
             depth: 0
 
-  @type tier :: :polecat | :coordinator
+  @type tier :: :worker | :coordinator
 
   @type t :: %__MODULE__{
           tier: tier(),
@@ -67,23 +67,23 @@ defmodule Arbiter.MCP.Scope do
 
   @doc "The valid tier atoms."
   @spec tiers() :: [tier()]
-  def tiers, do: [:polecat, :coordinator]
+  def tiers, do: [:worker, :coordinator]
 
   # ---- minting ------------------------------------------------------------
 
   @doc """
-  Mint a `:polecat`-tier scope token for a slung bead. The bead's id, workspace,
-  and repo are baked into the claims, so the token *is* the polecat's identity —
+  Mint a `:worker`-tier scope token for a slung bead. The bead's id, workspace,
+  and repo are baked into the claims, so the token *is* the worker's identity —
   it can only ever read/progress that one bead. Never carries `can_dispatch`.
 
   `bead` is anything exposing `:id` and `:workspace_id` (an `Arbiter.Beads.Issue`).
   """
-  @spec mint_polecat(%{id: String.t(), workspace_id: String.t()}, String.t() | nil, keyword()) ::
+  @spec mint_worker(%{id: String.t(), workspace_id: String.t()}, String.t() | nil, keyword()) ::
           String.t()
-  def mint_polecat(%{id: bead_id, workspace_id: ws_id}, repo \\ nil, opts \\ [])
+  def mint_worker(%{id: bead_id, workspace_id: ws_id}, repo \\ nil, opts \\ [])
       when is_binary(bead_id) and is_binary(ws_id) do
     %{
-      tier: :polecat,
+      tier: :worker,
       workspace_id: ws_id,
       bead_id: bead_id,
       repo: repo,
@@ -136,11 +136,11 @@ defmodule Arbiter.MCP.Scope do
 
   def from_token(_), do: {:error, :invalid}
 
-  defp from_claims(%{tier: :polecat, workspace_id: ws, bead_id: bead} = c)
+  defp from_claims(%{tier: :worker, workspace_id: ws, bead_id: bead} = c)
        when is_binary(ws) and is_binary(bead) do
     {:ok,
      %__MODULE__{
-       tier: :polecat,
+       tier: :worker,
        workspace_id: ws,
        bead_id: bead,
        repo: nilable_string(c[:repo]),
@@ -177,25 +177,25 @@ defmodule Arbiter.MCP.Scope do
   @doc """
   Resolve and authorize the bead id a tool may act on for this scope.
 
-    * `:polecat` — the requested id must be `nil` (defaults to the bound bead) or
+    * `:worker` — the requested id must be `nil` (defaults to the bound bead) or
       exactly the bound bead. Any other id is `{:error, :unauthorized}` — a
-      polecat cannot read or progress another bead through its token.
+      worker cannot read or progress another bead through its token.
     * `:coordinator` — the requested id is required (a non-empty binary) and used
       verbatim; a missing id is `{:error, :missing}` so the handler can surface a
       usable "id is required" rather than guessing.
   """
   @spec own_bead(t(), String.t() | nil) ::
           {:ok, String.t()} | {:error, :unauthorized | :missing}
-  def own_bead(%__MODULE__{tier: :polecat, bead_id: bound}, nil), do: {:ok, bound}
-  def own_bead(%__MODULE__{tier: :polecat, bead_id: bound}, bound), do: {:ok, bound}
-  def own_bead(%__MODULE__{tier: :polecat}, _other), do: {:error, :unauthorized}
+  def own_bead(%__MODULE__{tier: :worker, bead_id: bound}, nil), do: {:ok, bound}
+  def own_bead(%__MODULE__{tier: :worker, bead_id: bound}, bound), do: {:ok, bound}
+  def own_bead(%__MODULE__{tier: :worker}, _other), do: {:error, :unauthorized}
   def own_bead(%__MODULE__{tier: :coordinator}, id) when is_binary(id) and id != "", do: {:ok, id}
   def own_bead(%__MODULE__{tier: :coordinator}, _), do: {:error, :missing}
 
   @doc """
   Whether this scope may act on a resource in `workspace_id`.
 
-    * A **workspace-bound** scope (every polecat, a legacy bound coordinator) may
+    * A **workspace-bound** scope (every worker, a legacy bound coordinator) may
       act only within its own workspace; a cross-workspace resource is treated as
       not-found by the handlers (so existence does not leak across workspaces).
     * A **workspace-agnostic** coordinator (`workspace_id: nil`) may act in any

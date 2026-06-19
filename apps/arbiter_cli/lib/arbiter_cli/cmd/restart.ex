@@ -4,8 +4,8 @@ defmodule ArbiterCli.Cmd.Restart do
   freshly-merged code is loaded.
 
   Dev code-reload covers most edits, but a clean restart also re-runs the boot
-  reconciler (`Arbiter.Polecats.ReconcileGuard`), which fails any orphaned
-  `:running` polecat runs left behind by the previous node — something a hot
+  reconciler (`Arbiter.Workers.ReconcileGuard`), which fails any orphaned
+  `:running` worker runs left behind by the previous node — something a hot
   reload never does. Pairs with `arb start` (boot the stack if down) and
   `arb update` (pull latest main, then restart — it reuses `perform/2` below).
 
@@ -74,7 +74,7 @@ defmodule ArbiterCli.Cmd.Restart do
             )
         end
 
-      guard_active_polecats!(force)
+      guard_active_workers!(force)
 
       case perform(root, timeout_ms) do
         {:ok, actions, was_running} -> emit_restarted(mode, actions, was_running)
@@ -297,7 +297,7 @@ defmodule ArbiterCli.Cmd.Restart do
   session (i.e. `ARB_ACOLYTE_BEAD_ID` is set in the environment).
 
   A worker must never be able to bounce or kill the live orchestrating
-  server — doing so would kill the polecat that owns the worker and leave
+  server — doing so would kill the worker that owns the worker and leave
   the bead stuck. Shared with `arb update` (deploy), `arb start`, and
   `arb install-service`.
   """
@@ -324,18 +324,18 @@ defmodule ArbiterCli.Cmd.Restart do
   @active_statuses ~w(running awaiting awaiting_review_gate awaiting_review)
 
   @doc """
-  Abort with a helpful error when any polecats are actively working, unless
+  Abort with a helpful error when any workers are actively working, unless
   `force` is true. Safe to call when the server is down: a connection error
-  means no polecats can be running.
+  means no workers can be running.
 
   Shared with `arb update` (deploy) and `arb install-service`.
   """
-  @spec guard_active_polecats!(boolean()) :: :ok
-  def guard_active_polecats!(force) do
-    case Client.get("/api/polecats") do
-      {:ok, %{"data" => polecats}} ->
+  @spec guard_active_workers!(boolean()) :: :ok
+  def guard_active_workers!(force) do
+    case Client.get("/api/workers") do
+      {:ok, %{"data" => workers}} ->
         active =
-          Enum.filter(polecats, fn p ->
+          Enum.filter(workers, fn p ->
             p["status"] in @active_statuses
           end)
 
@@ -355,7 +355,7 @@ defmodule ArbiterCli.Cmd.Restart do
         end
 
       _ ->
-        # Server unreachable or unexpected response — no active polecats possible.
+        # Server unreachable or unexpected response — no active workers possible.
         :ok
     end
   end

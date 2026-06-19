@@ -50,7 +50,7 @@ defmodule Arbiter.Agents.Gemini do
   def auth_probe_argv(_opts \\ []) do
     # Cheap token-validity probe for whichever CLI is on PATH. A bad/expired key
     # makes Gemini print "API key not valid" / "RESOURCE_EXHAUSTED" (or 401) and
-    # exit non-zero — classified by Arbiter.Polecat.StopReason.
+    # exit non-zero — classified by Arbiter.Worker.StopReason.
     case resolve_executable() do
       {:ok, {_type, exec}} ->
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", exec, "-p", "ping"]}
@@ -111,7 +111,7 @@ defmodule Arbiter.Agents.Gemini do
     |> Map.put(:provider, provider())
   end
 
-  # The gemini / agy CLI emits no stream-json `init` event the polecat can read
+  # The gemini / agy CLI emits no stream-json `init` event the worker can read
   # the model from (unlike Claude), so we resolve it up front for the ledger /
   # dashboards. Mirrors `resolve_model/1` (explicit `:model` → tier → workspace
   # `active_model`) but adds a concrete terminal fallback: when nothing is
@@ -180,7 +180,7 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   # Only the upstream `gemini` CLI supports `--output-format stream-json` (it
-  # emits init/message/tool_use/tool_result/result JSONL events the polecat
+  # emits init/message/tool_use/tool_result/result JSONL events the worker
   # parses for token usage + derived cost — see `Arbiter.Agents.Gemini.Stream`).
   # The `agy` fork has no such flag (it only does `--print` plain text), so the
   # agy branches above omit it and fall back to raw-line streaming with no

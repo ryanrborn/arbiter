@@ -44,7 +44,7 @@ defmodule Arbiter.MCP.AgentConfigTest do
              } = config
     end
 
-    test "includes the polecat-tier includeTools allowlist by default" do
+    test "includes the worker-tier includeTools allowlist by default" do
       config = Gemini.config_map(mcp_url: "u", scope_token: "t")
       tools = config["mcpServers"]["arbiter"]["includeTools"]
 
@@ -100,7 +100,7 @@ defmodule Arbiter.MCP.AgentConfigTest do
     end
 
     test "writes a parseable .mcp.json whose token verifies back to the spawn scope", %{dir: dir} do
-      token = Scope.mint_polecat(%{id: "bd-77", workspace_id: "ws-77"}, "shipyard")
+      token = Scope.mint_worker(%{id: "bd-77", workspace_id: "ws-77"}, "shipyard")
 
       assert :ok =
                AgentConfig.write(:claude, dir,
@@ -116,13 +116,13 @@ defmodule Arbiter.MCP.AgentConfigTest do
       "Bearer " <> embedded = decoded["mcpServers"]["arbiter"]["headers"]["Authorization"]
 
       assert {:ok, scope} = Scope.from_token(embedded)
-      assert scope.tier == :polecat
+      assert scope.tier == :worker
       assert scope.bead_id == "bd-77"
       assert scope.workspace_id == "ws-77"
     end
 
     test "writes a parseable .gemini/settings.json for the :gemini provider", %{dir: dir} do
-      token = Scope.mint_polecat(%{id: "bd-88", workspace_id: "ws-88"}, "shipyard")
+      token = Scope.mint_worker(%{id: "bd-88", workspace_id: "ws-88"}, "shipyard")
 
       assert :ok =
                AgentConfig.write(:gemini, dir,
@@ -146,7 +146,7 @@ defmodule Arbiter.MCP.AgentConfigTest do
     end
 
     test "writes a .codex/config.toml for the :codex provider", %{dir: dir} do
-      token = Scope.mint_polecat(%{id: "bd-99", workspace_id: "ws-99"}, "shipyard")
+      token = Scope.mint_worker(%{id: "bd-99", workspace_id: "ws-99"}, "shipyard")
 
       assert :ok =
                AgentConfig.write(:codex, dir,

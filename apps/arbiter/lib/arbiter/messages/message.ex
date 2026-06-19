@@ -158,7 +158,7 @@ defmodule Arbiter.Messages.Message do
 
   Silent-on-failure (the PubSub registry may be down in tests) but leaves a
   debug breadcrumb so a payload bug isn't invisible — mirrors the contract of
-  `Arbiter.Polecat.broadcast_lifecycle/2`.
+  `Arbiter.Worker.broadcast_lifecycle/2`.
   """
   def broadcast_new(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:new_message, message})
@@ -333,7 +333,7 @@ defmodule Arbiter.Messages.Message do
   The `limit` most recent `:escalation` messages, newest first — read *and*
   unread alike (unlike `inbox/2`, which is unread-only). Escalations are raised
   solely by the ReviewGate review gate on a non-approve verdict
-  (`Arbiter.Polecat` reject/inconclusive path), so this is the durable record of
+  (`Arbiter.Worker` reject/inconclusive path), so this is the durable record of
   rejected reviews, carrying the reviewer's findings in `:body`. Powers the
   dashboard's ReviewGate view. Pass `workspace_id:` to scope to one workspace.
   """

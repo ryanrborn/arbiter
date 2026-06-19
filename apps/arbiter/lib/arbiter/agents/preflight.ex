@@ -10,9 +10,9 @@ defmodule Arbiter.Agents.Preflight do
   dispatch and tell the operator to re-authenticate.
 
   This module owns the **probe execution**: it spawns the adapter's probe argv
-  through an Erlang `Port` (the same liveness-first mechanism the polecat uses
+  through an Erlang `Port` (the same liveness-first mechanism the worker uses
   for real workers), captures output + exit status under a timeout, and hands
-  the result to `Arbiter.Polecat.StopReason` for classification. The adapter
+  the result to `Arbiter.Worker.StopReason` for classification. The adapter
   supplies *what* to run via the optional `auth_probe_argv/1` callback; an
   adapter that doesn't implement it is unprobeable and `check/2` returns
   `:skipped` (we never block on an absent probe).
@@ -34,7 +34,7 @@ defmodule Arbiter.Agents.Preflight do
 
   require Logger
 
-  alias Arbiter.Polecat.StopReason
+  alias Arbiter.Worker.StopReason
 
   @default_timeout_ms 30_000
 

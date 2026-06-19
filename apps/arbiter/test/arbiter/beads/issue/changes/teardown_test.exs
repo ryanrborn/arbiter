@@ -3,10 +3,10 @@ defmodule Arbiter.Beads.Issue.Changes.TeardownTest do
   Covers the after-action hooks wired into `Arbiter.Beads.Issue`'s `:close`
   action:
 
-    * `StopPolecat` — tear down the running polecat, if any.
+    * `StopWorker` — tear down the running worker, if any.
     * `CleanupWorktree` — remove the bead's worktree, if any (and clean).
 
-  Both must be best-effort: a missing polecat or worktree is a no-op; a
+  Both must be best-effort: a missing worker or worktree is a no-op; a
   dirty worktree is preserved.
   """
 
@@ -14,35 +14,35 @@ defmodule Arbiter.Beads.Issue.Changes.TeardownTest do
 
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Polecat
-  alias Arbiter.Polecat.BranchNamer
-  alias Arbiter.Polecat.Worktree
+  alias Arbiter.Worker
+  alias Arbiter.Worker.BranchNamer
+  alias Arbiter.Worker.Worktree
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "teardown-ws", prefix: "td"})
     {:ok, ws: ws}
   end
 
-  describe "StopPolecat after_action" do
-    test "stops the polecat registered for the bead when :close fires", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "with polecat", workspace_id: ws.id})
+  describe "StopWorker after_action" do
+    test "stops the worker registered for the bead when :close fires", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "with worker", workspace_id: ws.id})
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
-      assert Polecat.whereis(bead.id) == polecat_pid
+      {:ok, worker_pid} = Worker.start(bead_id: bead.id, repo: "test/repo")
+      assert Worker.whereis(bead.id) == worker_pid
 
       {:ok, _closed} = Ash.update(bead, %{}, action: :close)
 
-      # Synchronous teardown: by the time :close returns, the polecat is
+      # Synchronous teardown: by the time :close returns, the worker is
       # unregistered and the process is dead.
-      assert Polecat.whereis(bead.id) == nil
-      refute Process.alive?(polecat_pid)
+      assert Worker.whereis(bead.id) == nil
+      refute Process.alive?(worker_pid)
     end
 
-    test "is a silent no-op when no polecat is registered", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no polecat", workspace_id: ws.id})
+    test "is a silent no-op when no worker is registered", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no worker", workspace_id: ws.id})
 
-      assert Polecat.whereis(bead.id) == nil
+      assert Worker.whereis(bead.id) == nil
       assert {:ok, closed} = Ash.update(bead, %{}, action: :close)
       assert closed.status == :closed
     end

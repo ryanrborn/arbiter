@@ -1,6 +1,6 @@
 defmodule Arbiter.Agents.Agent do
   @moduledoc """
-  Behaviour for the autonomous-agent harness that drives a polecat — the
+  Behaviour for the autonomous-agent harness that drives a worker — the
   process that, given a prompt + worktree, writes the code, runs the tests,
   and signals completion with `arb done`.
 
@@ -14,13 +14,13 @@ defmodule Arbiter.Agents.Agent do
 
   The adapter is **stateless** w.r.t. the running OS process — port
   ownership, PubSub broadcast, line-cap buffering, and durable transcript
-  capture all stay in the polecat / session module. The adapter only:
+  capture all stay in the worker / session module. The adapter only:
 
     * produces an argv (and optionally an env) for the spawn,
     * declares the regex that recognizes `arb done` in its stream,
     * parses each output line into display tuples + an updated session
       state,
-    * surfaces the structured usage attrs the polecat persists into the
+    * surfaces the structured usage attrs the worker persists into the
       `Arbiter.Usage.Event` ledger on session exit.
 
   This keeps adapters small (just the upstream-CLI shape) and the
@@ -59,7 +59,7 @@ defmodule Arbiter.Agents.Agent do
 
   ## `init_session/1` shape
 
-  Returns the per-session state map the polecat threads through
+  Returns the per-session state map the worker threads through
   `parse_line/2` and `usage_attrs/1`. Adapters own its shape — callers
   treat it as opaque.
 
@@ -146,7 +146,7 @@ defmodule Arbiter.Agents.Agent do
   The concrete model id this adapter would dispatch with, given `opts` (the
   same keyword list passed to `default_argv/2`). Used to stamp the usage ledger
   and dashboards at spawn time — important for providers (e.g. Gemini) whose CLI
-  emits no `init` event carrying the model, so the polecat can't learn it from
+  emits no `init` event carrying the model, so the worker can't learn it from
   the stream.
 
   Returns the resolved model string, or `nil` when the adapter lets the CLI pick

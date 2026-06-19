@@ -3,8 +3,8 @@ defmodule Arbiter.Workflow do
   Behaviour + macro DSL for defining workflows (the Elixir port of the Go GT
   "formula" system).
 
-  In Go GT, formulas were YAML workflow templates (e.g. `mol-polecat-work`,
-  `mol-polecat-code-review`). In arbiter, they are plain Elixir modules
+  In Go GT, formulas were YAML workflow templates (e.g. `mol-worker-work`,
+  `mol-worker-code-review`). In arbiter, they are plain Elixir modules
   that `use Arbiter.Workflow` and declare a series of `step` definitions.
 
   ## Example

@@ -53,7 +53,7 @@ config :arbiter,
   ash_domains: [
     Arbiter.Beads,
     Arbiter.Messages,
-    Arbiter.Polecats,
+    Arbiter.Workers,
     Arbiter.Usage,
     Arbiter.Workflows
   ]

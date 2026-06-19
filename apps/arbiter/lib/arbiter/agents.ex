@@ -11,7 +11,7 @@ defmodule Arbiter.Agents do
   Mirrors `Arbiter.Trackers` and `Arbiter.Mergers`. Phase B of the harness
   design (`docs/agent-harness-design.md`) intentionally ships only the
   `Claude` adapter — the seam exists so a future adapter (Codex / Aider /
-  Gemini) can land without touching the polecat or the ReviewGate.
+  Gemini) can land without touching the worker or the ReviewGate.
 
   ## Resolution rule
 
@@ -128,7 +128,7 @@ defmodule Arbiter.Agents do
   Both roles share the same adapter machinery and the same per-process
   config dict — only one role's config can be active in a process at a
   time. The ReviewGate seeds `:review_agent` before spawning the reviewer
-  session; the polecat seeds `:agent` before spawning the worker.
+  session; the worker seeds `:agent` before spawning the worker.
   """
   @spec prepare(Workspace.t() | nil, :agent | :review_agent) :: :ok
   def prepare(nil, _role) do

@@ -26,7 +26,7 @@ defmodule Arbiter.Beads.Issue.Changes.SyncTracker do
        blank we log a clear, actionable error and **skip** the transition
        entirely — rather than firing a transition Jira would reject for empty
        fields. The notes are produced as an explicit completion step of
-       tracker-backed work (see the work prompt in `Arbiter.Polecat.Dispatch`).
+       tracker-backed work (see the work prompt in `Arbiter.Worker.Dispatch`).
     2. **Push** the notes via `Arbiter.Trackers.update_fields/2` (Markdown →
        ADF is handled by the Jira adapter), so the gated fields are filled
        *before* the transition is attempted.

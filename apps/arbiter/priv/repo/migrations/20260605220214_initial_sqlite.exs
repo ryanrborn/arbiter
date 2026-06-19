@@ -38,7 +38,7 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :raw, :map
       add :occurred_at, :utc_datetime_usec, null: false
       add :session_id, :text
-      add :polecat_run_id, :uuid
+      add :worker_run_id, :uuid
       add :exit_status, :bigint
       add :duration_ms, :bigint
       add :cost_usd, :float
@@ -59,7 +59,7 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
 
     create index(:usage_events, ["workspace_id", "occurred_at"])
 
-    create table(:polecat_runs, primary_key: false) do
+    create table(:worker_runs, primary_key: false) do
       add :updated_at, :utc_datetime_usec, null: false
       add :inserted_at, :utc_datetime_usec, null: false
       add :resumed_from_run_id, :uuid
@@ -76,7 +76,7 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :id, :uuid, null: false, primary_key: true
     end
 
-    create index(:polecat_runs, ["workspace_id", "status", "started_at"])
+    create index(:worker_runs, ["workspace_id", "status", "started_at"])
 
     create table(:messages, primary_key: false) do
       add :updated_at, :utc_datetime_usec, null: false
@@ -270,11 +270,11 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
 
     drop table(:messages)
 
-    drop_if_exists index(:polecat_runs, ["workspace_id", "status", "started_at"],
-                     name: "polecat_runs_workspace_id_status_started_at_index"
+    drop_if_exists index(:worker_runs, ["workspace_id", "status", "started_at"],
+                     name: "worker_runs_workspace_id_status_started_at_index"
                    )
 
-    drop table(:polecat_runs)
+    drop table(:worker_runs)
 
     drop_if_exists index(:usage_events, ["workspace_id", "occurred_at"],
                      name: "usage_events_workspace_id_occurred_at_index"
