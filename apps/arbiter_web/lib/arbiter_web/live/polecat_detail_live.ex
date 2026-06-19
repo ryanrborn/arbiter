@@ -559,7 +559,9 @@ defmodule ArbiterWeb.PolecatDetailLive do
                 <dt class="font-medium text-base-content/60">Model:</dt>
                 <dd>
                   <%= if m = execution_model(@snapshot) do %>
-                    <code class="font-mono text-xs">{m}</code>
+                    <code class="font-mono text-xs" title={m}>
+                      {Arbiter.Agents.ModelDisplay.short(m)}
+                    </code>
                   <% else %>
                     <span class="text-base-content/40 italic text-xs">unknown</span>
                   <% end %>

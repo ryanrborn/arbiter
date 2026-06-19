@@ -22,6 +22,29 @@ defmodule Arbiter.Agents.GeminiTest do
     end
   end
 
+  describe "resolved_model/1" do
+    setup do
+      Arbiter.Agents.Gemini.Config.clear()
+      on_exit(&Arbiter.Agents.Gemini.Config.clear/0)
+      :ok
+    end
+
+    test "uses an explicit :model override verbatim" do
+      assert Gemini.resolved_model(model: "gemini-2.5-flash") == "gemini-2.5-flash"
+    end
+
+    test "resolves a :model_tier to a concrete model" do
+      assert Gemini.resolved_model(model_tier: "premium") == "gemini-2.5-pro"
+      assert Gemini.resolved_model(model_tier: "economy") == "gemini-2.5-flash-lite"
+    end
+
+    test "falls back to the gemini-cli default model when nothing is configured" do
+      # No explicit model, no tier, no workspace active_model → the gemini-cli's
+      # own DEFAULT_GEMINI_MODEL, so the usage ledger still lands a concrete id.
+      assert Gemini.resolved_model([]) == "gemini-2.5-pro"
+    end
+  end
+
   describe "default_argv/2 executable resolution" do
     setup do
       tmp =

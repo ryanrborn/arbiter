@@ -604,6 +604,56 @@ defmodule Arbiter.MCP.ToolsTest do
 
       on_exit(fn -> Polecat.stop(bead.id, :normal) end)
     end
+
+    # `provider` (and the deprecated `with_claude` alias) take the real-work
+    # dispatch path rather than parking. Without a configured rig that path
+    # surfaces a rig error — which is exactly the signal that the provider was
+    # honored as a worker dispatch (a park would have returned {:ok, ...} with
+    # claude_started: false).
+    test "provider: \"gemini\" takes the real-work path (not a park)", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "gem sling", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.polecat_sling(ctx.coordinator, %{
+                 "bead_id" => bead.id,
+                 "provider" => "gemini",
+                 "rig" => "test/rig"
+               })
+
+      assert msg =~ "rig"
+
+      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+    end
+
+    test "provider: \"claude\" takes the real-work path (not a park)", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "claude sling", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.polecat_sling(ctx.coordinator, %{
+                 "bead_id" => bead.id,
+                 "provider" => "claude",
+                 "rig" => "test/rig"
+               })
+
+      assert msg =~ "rig"
+
+      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+    end
+
+    test "the deprecated with_claude: true alias still dispatches a worker", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "alias sling", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.polecat_sling(ctx.coordinator, %{
+                 "bead_id" => bead.id,
+                 "with_claude" => true,
+                 "rig" => "test/rig"
+               })
+
+      assert msg =~ "rig"
+
+      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+    end
   end
 
   describe "polecat_list/2" do
@@ -636,6 +686,22 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
       refute Enum.any?(polecats, &(&1.bead_id == foreign.id))
+    end
+
+    test "surfaces the provider/model from the polecat's routing config", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "gemini polecat", workspace_id: ctx.ws.id})
+
+      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
+
+      # Stamp the routing config the way Sling does at dispatch time.
+      :ok = Polecat.report(pid, :routing_config, %{provider: "gemini", model: "gemini-2.5-pro"})
+
+      assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
+      entry = Enum.find(polecats, &(&1.bead_id == bead.id))
+
+      assert entry.provider == "gemini"
+      assert entry.model == "gemini-2.5-pro"
     end
   end
 

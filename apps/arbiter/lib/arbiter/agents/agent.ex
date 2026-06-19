@@ -143,6 +143,19 @@ defmodule Arbiter.Agents.Agent do
   @callback provider() :: String.t()
 
   @doc """
+  The concrete model id this adapter would dispatch with, given `opts` (the
+  same keyword list passed to `default_argv/2`). Used to stamp the usage ledger
+  and dashboards at spawn time — important for providers (e.g. Gemini) whose CLI
+  emits no `init` event carrying the model, so the polecat can't learn it from
+  the stream.
+
+  Returns the resolved model string, or `nil` when the adapter lets the CLI pick
+  its own default and can't name it. Optional — adapters whose model is always
+  discoverable from the stream (e.g. Claude's `init` event) may omit it.
+  """
+  @callback resolved_model(opts :: keyword()) :: String.t() | nil
+
+  @doc """
   Returns `true` when this adapter honors the normalized `SecurityPolicy`
   passed in `opts[:security]` — i.e., enforces a non-empty destructive-op deny
   baseline in `:auto`/`:strict` modes and does not fall through to the host
@@ -167,5 +180,5 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback auth_probe_argv(opts :: keyword()) :: {:ok, [String.t()]} | {:error, term()}
 
-  @optional_callbacks [spawn_env: 1, security_enforced?: 0, auth_probe_argv: 1]
+  @optional_callbacks [spawn_env: 1, security_enforced?: 0, auth_probe_argv: 1, resolved_model: 1]
 end

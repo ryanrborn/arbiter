@@ -383,17 +383,24 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Dispatch a polecat to work a bead in the workspace. Requires a `can_sling` coordinator " <>
-          "token and is depth-limited (the sling-recursion guardrail). Without `with_claude` the " <>
-          "bead parks in_progress; with it, a worker session is started.",
+          "token and is depth-limited (the sling-recursion guardrail). Pass `provider` to start a " <>
+          "worker session (`claude` or `gemini`); omit it to park the bead in_progress.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "bead_id" => %{"type" => "string", "description" => "Bead to sling (required)."},
           "rig" => %{"type" => "string", "description" => "Rig to run in (optional)."},
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
+          "provider" => %{
+            "type" => "string",
+            "enum" => ["claude", "gemini"],
+            "description" =>
+              "Worker provider to dispatch. Omit to park the bead in_progress (no worker)."
+          },
           "with_claude" => %{
             "type" => "boolean",
-            "description" => "Start a real worker session (default false → park the bead)."
+            "description" =>
+              "DEPRECATED alias for `provider: \"claude\"`. `true` → start a Claude worker."
           }
         },
         "required" => ["bead_id"],

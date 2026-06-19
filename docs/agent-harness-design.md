@@ -517,3 +517,65 @@ The single most useful thing this work unlocks is **legibility of cost**:
 once a workspace can route P0 to Opus and P4 to Haiku and have those choices
 show up cleanly in `arb usage`, we'll see the shape of the spend and the
 multi-vendor question will answer itself.
+
+## 11. Gemini usage scraping — findings (bd-guegdl)
+
+`bd-guegdl` added the `provider` sling parameter (CLI `--provider`, MCP
+`provider`) and, as part of it, spiked **what the Gemini CLI actually emits** so
+we can decide a usage-parse strategy rather than guessing.
+
+### What ships in bd-guegdl
+
+* `provider: "gemini"` rows now land in `Arbiter.Usage.Event` with a concrete
+  **model id** and a **wall-clock duration**. The model is resolved at dispatch
+  time via the new optional `Agent.resolved_model/1` callback
+  (`Arbiter.Agents.Gemini.resolved_model/1`) and threaded onto the session
+  (`ClaudeSession` `:provider` / `:model` opts), because the Gemini CLI emits no
+  model the polecat can read mid-stream on the current spawn path (`agy -p` /
+  `gemini -p`, no `--output-format`).
+* **Cost and token counts are NOT yet captured for Gemini.** See below.
+
+### What the Gemini CLI emits (`@google/gemini-cli`)
+
+The `gemini` CLI *does* support a Claude-like structured output mode —
+`--output-format json` and `--output-format stream-json` — which we do **not**
+currently pass. Per its `docs/cli/headless.md`:
+
+* **`json`**: a single object `{ "response": string, "stats": object, "error"?:
+  object }`. `stats` carries token usage + API latency.
+* **`stream-json`**: newline-delimited events — `init` (session id + model),
+  `message`, `tool_use`, `tool_result`, `error`, and a final `result` with
+  *aggregated statistics and per-model token usage breakdowns*.
+
+Token fields use Gemini's `usageMetadata` naming, **not** Claude's:
+`promptTokenCount`, `candidatesTokenCount`, `totalTokenCount`,
+`cachedContentTokenCount`, `thoughtsTokenCount`, `toolUsePromptTokenCount`.
+
+Crucially, **the Gemini CLI emits no per-session dollar cost** — there is no
+analogue to Claude's `result.total_cost_usd`. Cost must be *derived* from token
+counts × a per-model price table, which Arbiter does not currently have for any
+provider (Claude's cost comes straight from the CLI).
+
+> Note: live capture against the installed CLI was blocked by an
+> `IneligibleTierError` (the free Gemini Code Assist tier was deprecated mid-2026
+> in favour of "Antigravity"), so the schema above is taken from the pinned
+> CLI's bundled `docs/` + source constants rather than a live run. A real run
+> on an API-key/Vertex path should confirm the exact `result.stats` shape before
+> the parser below is committed.
+
+### Proposed follow-up (filed as bd-bbpm5e)
+
+1. **Opt the Gemini spawn into structured output.** Add `--output-format
+   stream-json` to `Arbiter.Agents.Gemini.default_argv/2`.
+2. **Teach the session parser Gemini's event schema.** The polecat hot-path
+   currently decodes Claude-shaped stream-json in `ClaudeSession.absorb_usage/2`;
+   Gemini's `init`/`result`/`usageMetadata` shape needs either a Gemini branch
+   there or routing Gemini through the adapter's own `parse_line/2`/`usage_attrs/1`
+   (which already exist but aren't on the hot path).
+3. **Add a Gemini price table + cost derivation.** Introduce per-model
+   input/output (and cached) prices and compute `cost_usd` from the token counts
+   at `usage_attrs/1` time, since the CLI won't hand us a dollar figure.
+
+Until then, Gemini ledger rows are correct on `provider` + `model` + duration
+and intentionally `nil` on tokens/cost — graceful degradation, same as any
+session that never produced a usage-bearing event.

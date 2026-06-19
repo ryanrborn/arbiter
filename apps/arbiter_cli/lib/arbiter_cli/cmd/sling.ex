@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Sling do
   @moduledoc """
-  `arb sling <bead-id> [<rig>] [--with-claude | --with-gemini | --no-agent] [--model <name>]`
+  `arb sling <bead-id> [<rig>] [--provider claude|gemini | --no-agent] [--model <name>]`
   — spawn a polecat to work on a bead.
 
   POSTs to `/api/polecats/sling`. The server transitions the bead to
@@ -9,17 +9,17 @@ defmodule ArbiterCli.Cmd.Sling do
   the WorkflowMachine, and spawns an agent subprocess in the worktree.
 
   By default (no worker flag) the server reads the workspace's `agent.type`
-  config and spawns that agent. Use `--with-claude` or `--with-gemini` to
-  force a specific provider, or `--no-agent` to park the bead for a manual
-  attach instead.
+  config and spawns that agent. Use `--provider` to force a specific provider,
+  or `--no-agent` to park the bead for a manual attach instead.
 
   Flags:
-    --with-claude    explicitly spawn a Claude subprocess regardless of the
-                     workspace's `agent.type`. Requires the `claude` CLI on
-                     PATH. **Consumes Anthropic API credits.**
-    --with-gemini    explicitly spawn a Gemini subprocess regardless of the
-                     workspace's `agent.type`. Requires the `gemini` CLI on
-                     PATH. **Consumes Google API credits.**
+    --provider <p>   force the worker provider regardless of the workspace's
+                     `agent.type`. One of `claude` | `gemini`. `claude`
+                     requires the `claude` CLI on PATH (consumes Anthropic
+                     credits); `gemini` requires the `agy`/`gemini` CLI on PATH
+                     (consumes Google credits).
+    --with-claude    DEPRECATED alias for `--provider claude`.
+    --with-gemini    DEPRECATED alias for `--provider gemini`.
     --no-agent       dry sling — park the bead in `:in_progress` for a hand
                      to attach, with no agent spawned. Preserves the old
                      manual-attach path.
@@ -34,11 +34,14 @@ defmodule ArbiterCli.Cmd.Sling do
 
   @switches [
     json: :boolean,
+    provider: :string,
     with_claude: :boolean,
     with_gemini: :boolean,
     no_agent: :boolean,
     model: :string
   ]
+
+  @providers ~w(claude gemini)
 
   def run(argv) do
     if Output.help?(argv) do
@@ -58,6 +61,9 @@ defmodule ArbiterCli.Cmd.Sling do
 
       worker =
         cond do
+          opts[:provider] -> %{"provider" => validate_provider(opts[:provider])}
+          # Deprecated aliases — map to the same `provider` wire field the server
+          # now understands so old scripts keep working unchanged.
           opts[:with_claude] -> %{"with_claude" => true}
           opts[:with_gemini] -> %{"with_gemini" => true}
           opts[:no_agent] -> %{"no_agent" => true}
@@ -75,6 +81,12 @@ defmodule ArbiterCli.Cmd.Sling do
         {:error, err} -> Output.die(err)
       end
     end
+  end
+
+  defp validate_provider(p) when p in @providers, do: p
+
+  defp validate_provider(p) do
+    Output.die("--provider must be one of #{Enum.join(@providers, " | ")} (got #{inspect(p)})")
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -100,7 +112,7 @@ defmodule ArbiterCli.Cmd.Sling do
     end
 
     case payload["claude_started"] do
-      true -> IO.puts("  Claude:   started")
+      true -> IO.puts("  #{Vernacular.cap(v, "worker")}: started")
       _ -> :ok
     end
   end
