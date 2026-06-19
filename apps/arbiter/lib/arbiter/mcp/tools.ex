@@ -53,22 +53,28 @@ defmodule Arbiter.MCP.Tools do
   @spec bead_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_show(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, id) do
+         {:ok, issue} <- fetch_bead(scope, args, id) do
       {:ok, serialize_bead(load_progress(issue))}
     end
   end
 
   # ---- bead_ready ---------------------------------------------------------
 
-  @doc "List ready (unblocked, open) beads in the scope's workspace. Coordinator only."
-  @spec bead_ready(Scope.t(), map()) :: {:ok, map()}
-  def bead_ready(%Scope{workspace_id: ws_id}, _args) do
-    beads =
-      [workspace_id: ws_id]
-      |> Issue.ready()
-      |> Enum.map(&serialize_bead_summary/1)
+  @doc """
+  List ready (unblocked, open) beads in a workspace. Coordinator only. The
+  workspace is resolved from the optional `workspace` arg, else the scope's bound
+  workspace, else the installation default.
+  """
+  @spec bead_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def bead_ready(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+      beads =
+        [workspace_id: ws_id]
+        |> Issue.ready()
+        |> Enum.map(&serialize_bead_summary/1)
 
-    {:ok, %{beads: beads, count: length(beads)}}
+      {:ok, %{beads: beads, count: length(beads)}}
+    end
   end
 
   # ---- inbox_check --------------------------------------------------------
@@ -80,8 +86,9 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec inbox_check(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def inbox_check(%Scope{} = scope, args) do
-    with {:ok, to_ref} <- resolve_bead_id(scope, args, "bead_id") do
-      messages = Message.inbox(to_ref, workspace_id: scope.workspace_id)
+    with {:ok, to_ref} <- resolve_bead_id(scope, args, "bead_id"),
+         {:ok, bead} <- fetch_bead(scope, args, to_ref) do
+      messages = Message.inbox(to_ref, workspace_id: bead.workspace_id)
       _ = Enum.each(messages, &Message.mark_read/1)
 
       {:ok,
@@ -106,8 +113,9 @@ defmodule Arbiter.MCP.Tools do
   mirroring `arb inbox clear`.
   """
   @spec coordinator_inbox(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def coordinator_inbox(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, clear} <- fetch_bool(args, "clear", false) do
+  def coordinator_inbox(%Scope{} = scope, args) do
+    with {:ok, clear} <- fetch_bool(args, "clear", false),
+         {:ok, ws_id} <- resolve_workspace_id(scope, args) do
       messages = Message.inbox("admiral", workspace_id: ws_id)
       _ = Enum.each(messages, &Message.mark_read/1)
 
@@ -125,15 +133,18 @@ defmodule Arbiter.MCP.Tools do
   # ---- workspace_show -----------------------------------------------------
 
   @doc """
-  The scope's own workspace: config, vernacular, and the resolved acolyte
-  security posture. Always the bound workspace — the argument is ignored so a
-  scope can never inspect another workspace.
+  A workspace: config, vernacular, and the resolved acolyte security posture.
+  Resolved from the optional `workspace` arg (name or id), else the scope's bound
+  workspace, else the installation default. A workspace-bound scope (polecat) can
+  only ever inspect its own workspace.
   """
   @spec workspace_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def workspace_show(%Scope{workspace_id: ws_id}, _args) do
-    case Ash.get(Workspace, ws_id) do
-      {:ok, %Workspace{} = ws} -> {:ok, serialize_workspace(ws)}
-      _ -> {:error, {:not_found, "workspace #{ws_id} not found"}}
+  def workspace_show(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+      case Ash.get(Workspace, ws_id) do
+        {:ok, %Workspace{} = ws} -> {:ok, serialize_workspace(ws)}
+        _ -> {:error, {:not_found, "workspace #{ws_id} not found"}}
+      end
     end
   end
 
@@ -148,7 +159,7 @@ defmodule Arbiter.MCP.Tools do
   @spec bead_update_progress(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_update_progress(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, id),
+         {:ok, issue} <- fetch_bead(scope, args, id),
          {:ok, attrs} <- progress_attrs(args) do
       case Ash.update(issue, attrs, action: :update) do
         {:ok, updated} -> {:ok, serialize_bead(updated)}
@@ -164,15 +175,17 @@ defmodule Arbiter.MCP.Tools do
   # ---- bead_create --------------------------------------------------------
 
   @doc """
-  Create a bead in the scope's workspace. Coordinator only. `workspace_id` is
-  forced to the scope's workspace — a coordinator cannot create beads elsewhere.
-  Backs onto `Ash.create(Issue, …)` (the same path `arb create` / the REST
-  `POST /api/issues` take), so a workspace with a tracker configured still
-  mirrors the new bead upstream.
+  Create a bead in a workspace. Coordinator only. The target workspace is
+  resolved from the optional `workspace` arg (name or id), else the scope's bound
+  workspace, else the installation default — and `workspace_id` is then forced
+  onto the bead. Backs onto `Ash.create(Issue, …)` (the same path `arb create` /
+  the REST `POST /api/issues` take), so a workspace with a tracker configured
+  still mirrors the new bead upstream.
   """
   @spec bead_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_create(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, title} <- require_string(args, "title"),
+  def bead_create(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, title} <- require_string(args, "title"),
          {:ok, attrs} <- collect_attrs(args, bead_create_spec()) do
       attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
 
@@ -194,7 +207,7 @@ defmodule Arbiter.MCP.Tools do
   @spec bead_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_update(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, id),
+         {:ok, issue} <- fetch_bead(scope, args, id),
          {:ok, attrs} <- collect_attrs(args, bead_update_spec()),
          :ok <- require_some(attrs, "provide at least one field to update") do
       case Ash.update(issue, attrs, action: :update) do
@@ -214,7 +227,7 @@ defmodule Arbiter.MCP.Tools do
   @spec bead_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_close(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, id),
+         {:ok, issue} <- fetch_bead(scope, args, id),
          {:ok, close_upstream} <- fetch_bool(args, "close_upstream", false) do
       attrs =
         %{close_upstream: close_upstream}
@@ -239,7 +252,7 @@ defmodule Arbiter.MCP.Tools do
   @spec bead_reopen(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def bead_reopen(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, id) do
+         {:ok, issue} <- fetch_bead(scope, args, id) do
       case Ash.update(issue, %{}, action: :reopen) do
         {:ok, reopened} -> {:ok, serialize_bead(reopened)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
@@ -259,8 +272,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, from} <- require_string(args, "from_issue_id"),
          {:ok, to} <- require_string(args, "to_issue_id"),
          {:ok, type} <- require_enum(args, "type", Dependency.types()),
-         {:ok, _from_bead} <- fetch_bead(scope, from),
-         {:ok, _to_bead} <- fetch_bead(scope, to) do
+         {:ok, from_bead} <- fetch_bead(scope, args, from),
+         {:ok, _to_bead} <- fetch_bead_in_workspace(from_bead.workspace_id, to) do
       attrs =
         %{"from_issue_id" => from, "to_issue_id" => to, "type" => type}
         |> maybe_put("notes", fetch_string(args, "notes"))
@@ -285,8 +298,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, from} <- require_string(args, "from_issue_id"),
          {:ok, to} <- require_string(args, "to_issue_id"),
          {:ok, type} <- optional_enum(args, "type", Dependency.types()),
-         {:ok, _from_bead} <- fetch_bead(scope, from),
-         {:ok, _to_bead} <- fetch_bead(scope, to) do
+         {:ok, from_bead} <- fetch_bead(scope, args, from),
+         {:ok, _to_bead} <- fetch_bead_in_workspace(from_bead.workspace_id, to) do
       edges = find_dep_edges(from, to, type)
       _ = Enum.each(edges, &Ash.destroy!/1)
       {:ok, %{from_issue_id: from, to_issue_id: to, removed: length(edges)}}
@@ -304,16 +317,18 @@ defmodule Arbiter.MCP.Tools do
       bead in its workspace;
     * a **polecat** raises a `:flag` from its own bound bead to a sibling.
 
-  `workspace_id` is forced to the scope's workspace so a message can only ever be
-  created within it. Backs onto `Messages.send_mail/1`.
+  `workspace_id` is pinned to the recipient bead's own workspace (a polecat to
+  its bound workspace), so a message can only ever be created alongside its
+  recipient. Backs onto `Messages.send_mail/1`.
   """
   @spec message_send(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def message_send(%Scope{} = scope, args) do
     with {:ok, to_ref} <- require_string(args, "bead_id"),
-         {:ok, body} <- require_string(args, "body") do
+         {:ok, body} <- require_string(args, "body"),
+         {:ok, ws_id} <- message_workspace(scope, args, to_ref) do
       attrs =
         scope
-        |> message_envelope(to_ref)
+        |> message_envelope(ws_id, to_ref)
         |> Map.put(:body, body)
         |> maybe_put(:subject, fetch_string(args, "subject"))
 
@@ -324,10 +339,21 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # The workspace a message lands in. A polecat is pinned to its bound workspace.
+  # A coordinator infers it from the recipient bead itself (entity inference,
+  # honoring an explicit `workspace` arg), which also validates the recipient
+  # exists and is reachable by the scope.
+  defp message_workspace(%Scope{tier: :polecat, workspace_id: ws_id}, _args, _to_ref),
+    do: {:ok, ws_id}
+
+  defp message_workspace(%Scope{tier: :coordinator} = scope, args, to_ref) do
+    with {:ok, bead} <- fetch_bead(scope, args, to_ref), do: {:ok, bead.workspace_id}
+  end
+
   # The sender identity + kind are derived from the scope, never the client: a
   # coordinator directs (`from: "coordinator"`); a polecat flags from its own
-  # bound bead. Both are pinned to the scope's workspace.
-  defp message_envelope(%Scope{tier: :coordinator, workspace_id: ws_id}, to_ref) do
+  # bound bead. Both are pinned to the resolved workspace.
+  defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref) do
     %{
       kind: :direction,
       workspace_id: ws_id,
@@ -337,7 +363,7 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp message_envelope(%Scope{tier: :polecat, workspace_id: ws_id, bead_id: bead_id}, to_ref) do
+  defp message_envelope(%Scope{tier: :polecat, bead_id: bead_id}, ws_id, to_ref) do
     %{
       kind: :flag,
       workspace_id: ws_id,
@@ -370,7 +396,7 @@ defmodule Arbiter.MCP.Tools do
     with :ok <- ensure_can_sling(scope),
          :ok <- ensure_sling_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
       case Sling.sling(bead_id, sling_opts(scope, args)) do
         {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
@@ -392,7 +418,7 @@ defmodule Arbiter.MCP.Tools do
     with :ok <- ensure_can_sling(scope),
          :ok <- ensure_sling_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
       case Sling.resume(bead_id, dispatch_opts(scope, args)) do
         {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
@@ -415,7 +441,7 @@ defmodule Arbiter.MCP.Tools do
     with :ok <- ensure_can_sling(scope),
          :ok <- ensure_sling_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -441,7 +467,7 @@ defmodule Arbiter.MCP.Tools do
   @spec polecat_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def polecat_stop(%Scope{} = scope, args) do
     with {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, bead_id) do
+         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
       case Polecat.stop(bead_id, :normal) do
         :ok -> {:ok, %{bead_id: bead_id, stopped: true}}
         {:error, :not_found} -> {:error, {:not_found, "no running polecat for bead #{bead_id}"}}
@@ -456,18 +482,21 @@ defmodule Arbiter.MCP.Tools do
   `Arbiter.Polecat.list_children/0`, filtered to the scope's workspace_id so a
   coordinator never sees polecats running in other workspaces.
   """
-  @spec polecat_list(Scope.t(), map()) :: {:ok, map()}
-  def polecat_list(%Scope{workspace_id: ws_id}, _args) do
-    children =
-      Arbiter.Polecat.list_children()
-      |> Enum.filter(&(&1.workspace_id == ws_id))
+  @spec polecat_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def polecat_list(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+      children =
+        Arbiter.Polecat.list_children()
+        |> Enum.filter(&(&1.workspace_id == ws_id))
 
-    bead_ids = Enum.map(children, & &1.bead_id)
-    costs = Arbiter.Polecat.Stats.bead_costs_usd(bead_ids)
+      bead_ids = Enum.map(children, & &1.bead_id)
+      costs = Arbiter.Polecat.Stats.bead_costs_usd(bead_ids)
 
-    polecats = Enum.map(children, &serialize_polecat_summary(&1, Map.get(costs, &1.bead_id, 0.0)))
+      polecats =
+        Enum.map(children, &serialize_polecat_summary(&1, Map.get(costs, &1.bead_id, 0.0)))
 
-    {:ok, %{polecats: polecats, count: length(polecats)}}
+      {:ok, %{polecats: polecats, count: length(polecats)}}
+    end
   end
 
   # ---- bead_list ----------------------------------------------------------
@@ -478,8 +507,9 @@ defmodule Arbiter.MCP.Tools do
   scoped to the coordinator's workspace. Backs onto `Ash.read(Issue, ...)`.
   """
   @spec bead_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_list(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, status} <- optional_enum(args, "status", Issue.statuses()),
+  def bead_list(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, status} <- optional_enum(args, "status", Issue.statuses()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
          {:ok, priority} <- optional_integer(args, "priority") do
       query =
@@ -522,8 +552,9 @@ defmodule Arbiter.MCP.Tools do
   workspace. Backs onto `Arbiter.Usage.summarize/1`.
   """
   @spec usage_summarize(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def usage_summarize(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, by} <- require_enum(args, "by", Usage.valid_groupings()),
+  def usage_summarize(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, by} <- require_enum(args, "by", Usage.valid_groupings()),
          {:ok, since} <- optional_datetime(args, "since"),
          {:ok, limit} <- optional_integer(args, "limit") do
       opts =
@@ -550,8 +581,9 @@ defmodule Arbiter.MCP.Tools do
   Optional `limit` (default 20). Backs onto `Messages.recent_notifications/2`.
   """
   @spec notify_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def notify_list(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, limit} <- optional_integer(args, "limit") do
+  def notify_list(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, limit} <- optional_integer(args, "limit") do
       notifications =
         (limit || 20)
         |> Message.recent_notifications(workspace_id: ws_id)
@@ -571,8 +603,9 @@ defmodule Arbiter.MCP.Tools do
   already references the issue. Backs onto `Arbiter.Beads.Claim.claim/3`.
   """
   @spec tracker_claim(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def tracker_claim(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, ref} <- require_string(args, "ref"),
+  def tracker_claim(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, ref} <- require_string(args, "ref"),
          {:ok, force} <- fetch_bool(args, "force", false),
          {:ok, workspace} <- fetch_workspace(ws_id) do
       case Claim.claim(workspace, ref, force: force) do
@@ -592,8 +625,9 @@ defmodule Arbiter.MCP.Tools do
   reconciliation. Backs onto `Arbiter.Beads.Claim.plan/1` + `apply_plan/2`.
   """
   @spec tracker_sync(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def tracker_sync(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, dry} <- fetch_bool(args, "dry", false),
+  def tracker_sync(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, dry} <- fetch_bool(args, "dry", false),
          {:ok, workspace} <- fetch_workspace(ws_id),
          {:ok, plan} <- claim_plan(workspace) do
       actions = Enum.map(plan, &serialize_claim_action/1)
@@ -651,17 +685,121 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Fetch a bead and enforce workspace isolation. A bead in another workspace is
-  # reported as not-found so existence does not leak across workspaces.
-  defp fetch_bead(scope, id) do
-    case Ash.get(Issue, id) do
-      {:ok, %Issue{} = issue} ->
-        if Scope.same_workspace?(scope, issue.workspace_id),
-          do: {:ok, issue},
-          else: {:error, {:not_found, "bead #{id} not found"}}
+  # Fetch a bead and enforce workspace isolation. Honors an optional `workspace`
+  # arg (name or id): a workspace-bound scope may only ever reach its own
+  # workspace; a workspace-agnostic coordinator either targets the named
+  # workspace or, with no arg, infers it from the bead itself (entity inference).
+  # A bead outside the resolved workspace is reported not-found so existence does
+  # not leak across workspaces.
+  defp fetch_bead(scope, args, id) do
+    with {:ok, target_ws} <- authorized_workspace(scope, args) do
+      case Ash.get(Issue, id) do
+        {:ok, %Issue{} = issue} ->
+          if workspace_match?(issue.workspace_id, target_ws),
+            do: {:ok, issue},
+            else: {:error, {:not_found, "bead #{id} not found"}}
 
-      _ ->
-        {:error, {:not_found, "bead #{id} not found"}}
+        _ ->
+          {:error, {:not_found, "bead #{id} not found"}}
+      end
+    end
+  end
+
+  # Fetch a bead and require it to live in `ws_id` exactly — the second-endpoint
+  # check for dependency tools, so both endpoints of an edge stay in one
+  # workspace even for a workspace-agnostic coordinator inferring from the first.
+  defp fetch_bead_in_workspace(ws_id, id) do
+    case Ash.get(Issue, id) do
+      {:ok, %Issue{workspace_id: ^ws_id} = issue} -> {:ok, issue}
+      _ -> {:error, {:not_found, "bead #{id} not found"}}
+    end
+  end
+
+  # A `nil` target means "any workspace" (a workspace-agnostic coordinator that
+  # named no workspace — the bead's own workspace stands).
+  defp workspace_match?(_ws, nil), do: true
+  defp workspace_match?(ws, ws), do: true
+  defp workspace_match?(_ws, _target), do: false
+
+  # The workspace this call is authorized to operate in, honoring an optional
+  # `workspace` arg (name or id). Returns `{:ok, ws_id}` where `ws_id` may be
+  # `nil` — meaning the caller is a workspace-agnostic coordinator that named no
+  # workspace, so entity inference / the installation default applies downstream.
+  #
+  # A scope bound to one workspace (every polecat; a legacy workspace-bound
+  # coordinator) may only ever resolve to its own workspace — naming a different
+  # one is `{:error, {:unauthorized, …}}`.
+  defp authorized_workspace(%Scope{} = scope, args) do
+    case fetch_string(args, "workspace") do
+      nil ->
+        {:ok, scope.workspace_id}
+
+      ref ->
+        with {:ok, ws} <- resolve_workspace_ref(ref) do
+          cond do
+            is_nil(scope.workspace_id) -> {:ok, ws.id}
+            scope.workspace_id == ws.id -> {:ok, ws.id}
+            true -> {:error, {:unauthorized, "this scope is bound to a single workspace"}}
+          end
+        end
+    end
+  end
+
+  # A *concrete* workspace id for tools that operate within one workspace
+  # (create + enumerate). Resolution order: explicit `workspace` arg → the
+  # scope's bound workspace → the installation default workspace.
+  defp resolve_workspace_id(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- authorized_workspace(scope, args) do
+      if is_binary(ws_id), do: {:ok, ws_id}, else: default_workspace_id()
+    end
+  end
+
+  # Resolve a `workspace` arg (workspace id first, then name) to a Workspace.
+  defp resolve_workspace_ref(ref) when is_binary(ref) do
+    with :error <- workspace_by_id(ref),
+         :error <- workspace_by_name(ref) do
+      {:error, {:not_found, "workspace #{inspect(ref)} not found"}}
+    end
+  end
+
+  defp workspace_by_id(ref) do
+    case Ash.get(Workspace, ref) do
+      {:ok, %Workspace{} = ws} -> {:ok, ws}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp workspace_by_name(ref) do
+    case Workspace |> Ash.Query.filter(name == ^ref) |> Ash.read_one() do
+      {:ok, %Workspace{} = ws} -> {:ok, ws}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  # The installation default workspace, for a workspace-agnostic coordinator that
+  # named none: the lone workspace if there is exactly one, else the one named
+  # "default" (the boot-seeded default). Ambiguous otherwise — the caller must
+  # pass `workspace` explicitly.
+  defp default_workspace_id do
+    case Ash.read!(Workspace) do
+      [%Workspace{id: id}] ->
+        {:ok, id}
+
+      [] ->
+        {:error, {:invalid, "no workspaces exist on this installation"}}
+
+      many ->
+        case Enum.find(many, &(&1.name == "default")) do
+          %Workspace{id: id} ->
+            {:ok, id}
+
+          nil ->
+            {:error, {:invalid, "multiple workspaces; pass `workspace` (name or id) explicitly"}}
+        end
     end
   end
 

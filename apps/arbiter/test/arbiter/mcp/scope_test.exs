@@ -28,7 +28,17 @@ defmodule Arbiter.MCP.ScopeTest do
   end
 
   describe "mint_coordinator/2 + from_token/1" do
-    test "round-trips coordinator claims with can_sling on by default" do
+    test "mints a workspace-agnostic token (nil workspace) by default" do
+      token = Scope.mint_coordinator()
+
+      assert {:ok, scope} = Scope.from_token(token)
+      assert scope.tier == :coordinator
+      assert scope.workspace_id == nil
+      assert scope.bead_id == nil
+      assert scope.can_sling
+    end
+
+    test "round-trips a legacy workspace-bound coordinator (explicit workspace)" do
       token = Scope.mint_coordinator("ws-9")
 
       assert {:ok, scope} = Scope.from_token(token)
@@ -38,9 +48,9 @@ defmodule Arbiter.MCP.ScopeTest do
       assert scope.can_sling
     end
 
-    test "can_sling can be disabled" do
-      token = Scope.mint_coordinator("ws-9", can_sling: false)
-      assert {:ok, %Scope{can_sling: false}} = Scope.from_token(token)
+    test "can_sling can be disabled (workspace-agnostic)" do
+      token = Scope.mint_coordinator(nil, can_sling: false)
+      assert {:ok, %Scope{can_sling: false, workspace_id: nil}} = Scope.from_token(token)
     end
   end
 
@@ -89,10 +99,24 @@ defmodule Arbiter.MCP.ScopeTest do
   end
 
   describe "same_workspace?/2" do
-    test "matches only the bound workspace" do
+    test "a workspace-bound scope matches only its bound workspace" do
       scope = %Scope{tier: :coordinator, workspace_id: "w"}
       assert Scope.same_workspace?(scope, "w")
       refute Scope.same_workspace?(scope, "other")
+      refute Scope.same_workspace?(scope, nil)
+    end
+
+    test "a polecat matches only its bound workspace" do
+      pc = %Scope{tier: :polecat, workspace_id: "w", bead_id: "bd-1"}
+      assert Scope.same_workspace?(pc, "w")
+      refute Scope.same_workspace?(pc, "other")
+    end
+
+    test "a workspace-agnostic coordinator matches any workspace" do
+      scope = %Scope{tier: :coordinator, workspace_id: nil}
+      assert Scope.same_workspace?(scope, "w")
+      assert Scope.same_workspace?(scope, "other")
+      # …but still not a nil resource workspace.
       refute Scope.same_workspace?(scope, nil)
     end
   end
