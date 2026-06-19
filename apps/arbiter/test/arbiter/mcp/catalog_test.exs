@@ -41,6 +41,21 @@ defmodule Arbiter.MCP.CatalogTest do
       end
     end
 
+    test "workspace-resolving tools advertise an optional `workspace` param" do
+      for tool <- Catalog.all(), tool.name != "workspace_list" do
+        props = tool.input_schema["properties"]
+        assert is_map(props["workspace"]), "#{tool.name} is missing the `workspace` param"
+        assert props["workspace"]["type"] == "string"
+        # `workspace` is never required — every workspace resolution has a default.
+        refute "workspace" in (tool.input_schema["required"] || [])
+      end
+    end
+
+    test "workspace_list does not take a `workspace` param (it enumerates all)" do
+      tool = Enum.find(Catalog.all(), &(&1.name == "workspace_list"))
+      refute Map.has_key?(tool.input_schema["properties"], "workspace")
+    end
+
     test "polecat_sling exposes a provider enum field and keeps the with_claude alias" do
       tool = Enum.find(Catalog.all(), &(&1.name == "polecat_sling"))
       props = tool.input_schema["properties"]
