@@ -69,7 +69,24 @@ defmodule Arbiter.MCP.Catalog do
   @both [:polecat, :coordinator]
   @coordinator [:coordinator]
 
-  @tools [
+  # The optional `workspace` field every workspace-resolving tool advertises.
+  # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
+  # a workspace here targets it explicitly. Omitting it resolves the workspace
+  # from the referenced entity (e.g. a bead's own workspace) or the installation
+  # default. A workspace-bound scope (a polecat) may only ever name its own.
+  @workspace_field %{
+    "type" => "string",
+    "description" =>
+      "Workspace name or id to operate in (optional). Coordinator tokens are " <>
+        "workspace-agnostic; omit to resolve from the referenced bead or the " <>
+        "installation default. A polecat may only ever name its own workspace."
+  }
+
+  # Tools that do NOT take a `workspace` arg: `workspace_list` already enumerates
+  # every workspace.
+  @no_workspace_field ~w(workspace_list)
+
+  @raw_tools [
     %{
       name: "bead_show",
       tiers: @both,
@@ -584,6 +601,19 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.usage_summarize/2
     }
   ]
+
+  # Inject the optional `workspace` field into every workspace-resolving tool's
+  # input schema (all but `@no_workspace_field`), so callers can target a
+  # workspace explicitly without each tool restating the property by hand.
+  @tools Enum.map(@raw_tools, fn tool ->
+           if tool.name in @no_workspace_field do
+             tool
+           else
+             update_in(tool, [:input_schema, "properties"], fn props ->
+               Map.put(props, "workspace", @workspace_field)
+             end)
+           end
+         end)
 
   @doc "All Phase 1 tool definitions, regardless of tier."
   @spec all() :: [tool()]

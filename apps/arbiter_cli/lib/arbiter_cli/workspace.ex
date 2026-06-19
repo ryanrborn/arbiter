@@ -3,8 +3,11 @@ defmodule ArbiterCli.Workspace do
   Resolves the active workspace.
 
   Lookup order:
-    1. `ARB_WORKSPACE` env var (workspace name string)
+    1. `ARB_WORKSPACE` env var (workspace name *or* id)
     2. Workspace literally named `"default"`
+
+  The selector (env var or `--workspace` flag) matches a workspace by either its
+  name or its id, so `--workspace default` and `--workspace <uuid>` both resolve.
 
   Returns `{:ok, workspace_map}` or `{:error, reason_string}`.
   """
@@ -50,7 +53,7 @@ defmodule ArbiterCli.Workspace do
     target = System.get_env("ARB_WORKSPACE", "default")
 
     with {:ok, %{"data" => list}} <- Client.get("/api/workspaces") do
-      case Enum.find(list, &(&1["name"] == target)) do
+      case Enum.find(list, &(&1["name"] == target or &1["id"] == target)) do
         nil ->
           {:error,
            "no workspace named #{inspect(target)}. " <>
