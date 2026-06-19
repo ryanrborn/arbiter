@@ -135,7 +135,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp maybe_dispatch(%{"number" => pr_number} = pr, state) do
     if actionable?(state.repo, pr_number) and not deduped?(pr_number) do
       bead = create_follow_up(pr, state)
-      _ = Polecat.start(bead_id: bead.id, rig: state.repo, workspace_id: state.workspace_id)
+      _ = Polecat.start(bead_id: bead.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
     end
   end

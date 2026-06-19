@@ -74,7 +74,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
              })
 
       assert DecommissionSweep.gt_system?(%Issue{
-               title: "GT: server rig merge_queue should default to PR"
+               title: "GT: server repo merge_queue should default to PR"
              })
 
       assert DecommissionSweep.gt_system?(%Issue{

@@ -63,7 +63,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert out =~ "Already claimed: bd-abc"
   end
 
-  test "--rig prints a dispatch tip" do
+  test "--repo prints a dispatch tip" do
     stub_routes([
       @workspace_lookup,
       {{"post", "/api/workspaces/ws-1/claim"},
@@ -79,7 +79,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
         }, 201}}
     ])
 
-    {out, _err, code} = capture(fn -> Claim.run(["43", "--rig", "arbiter"]) end)
+    {out, _err, code} = capture(fn -> Claim.run(["43", "--repo", "arbiter"]) end)
     assert code == 0
     assert out =~ "arb dispatch bd-abc arbiter"
   end

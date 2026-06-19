@@ -1022,11 +1022,11 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # The opts common to every worker-dispatch tool (dispatch / resume / review):
-  # the optional `rig` / `model` overrides plus the child scope depth, minted
+  # the optional `repo` / `model` overrides plus the child scope depth, minted
   # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
   defp dispatch_opts(%Scope{depth: depth}, args) do
     [depth: depth + 1]
-    |> maybe_put_kw(:rig, fetch_string(args, "rig"))
+    |> maybe_put_kw(:repo, fetch_string(args, "repo"))
     |> maybe_put_kw(:model, fetch_string(args, "model"))
   end
 
@@ -1080,11 +1080,11 @@ defmodule Arbiter.MCP.Tools do
   defp dispatch_error_message({:bead_closed, id}),
     do: "bead #{id} is closed; reopen it before dispatching"
 
-  defp dispatch_error_message(:no_rig_configured), do: "no rigs configured for this workspace"
-  defp dispatch_error_message({:rig_not_found, rig}), do: "rig #{inspect(rig)} is not configured"
+  defp dispatch_error_message(:no_repo_configured), do: "no repos configured for this workspace"
+  defp dispatch_error_message({:repo_not_found, repo}), do: "repo #{inspect(repo)} is not configured"
 
-  defp dispatch_error_message({:ambiguous_rig, rigs}),
-    do: "multiple rigs available (#{Enum.join(rigs, ", ")}); pass `rig` explicitly"
+  defp dispatch_error_message({:ambiguous_repo, repos}),
+    do: "multiple repos available (#{Enum.join(repos, ", ")}); pass `repo` explicitly"
 
   defp dispatch_error_message({:bead_awaiting_review, id}),
     do: "bead #{id} is already awaiting review"
@@ -1093,8 +1093,8 @@ defmodule Arbiter.MCP.Tools do
   defp dispatch_error_message(:no_outpost),
     do: "no preserved worktree for this bead — nothing to resume; dispatch it fresh instead"
 
-  defp dispatch_error_message(:rig_unknown),
-    do: "could not resolve the rig for this bead; pass `rig` explicitly"
+  defp dispatch_error_message(:repo_unknown),
+    do: "could not resolve the repo for this bead; pass `repo` explicitly"
 
   defp dispatch_error_message({:acolyte_active, status}),
     do: "a worker is still active for this bead (#{status}); stop it before resuming"
@@ -1244,7 +1244,7 @@ defmodule Arbiter.MCP.Tools do
     %{
       bead_id: snap.bead_id,
       status: to_str(snap.status),
-      rig: snap.rig,
+      repo: snap.repo,
       started_at: iso(snap.started_at),
       activity: Map.get(meta, :activity),
       provider: Map.get(meta, :provider) || Map.get(routing, :provider),

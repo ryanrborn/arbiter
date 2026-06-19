@@ -184,7 +184,7 @@ defmodule Arbiter.Polecat.ReviewGate do
           {:author, pid()}
           | {:bead_id, String.t()}
           | {:workspace_id, String.t() | nil}
-          | {:rig, String.t()}
+          | {:repo, String.t()}
           | {:worktree_path, String.t() | nil}
           | {:branch, String.t()}
           | {:target_branch, String.t()}
@@ -198,7 +198,7 @@ defmodule Arbiter.Polecat.ReviewGate do
   Start a ReviewGate under `Arbiter.Polecat.Supervisor`.
 
   Required opts: `:author` (the author polecat pid to report back to),
-  `:bead_id`, `:rig`, `:branch`. Optional: `:workspace_id`, `:worktree_path`,
+  `:bead_id`, `:repo`, `:branch`. Optional: `:workspace_id`, `:worktree_path`,
   `:target_branch` (default `"main"`), `:command` (test override for the reviewer
   argv), `:revise_command` (test override for the implementer argv), `:rounds`
   (the revise-loop cap), `:timeout_ms`.
@@ -300,7 +300,7 @@ defmodule Arbiter.Polecat.ReviewGate do
       bead_id: bead_id,
       review_id: reviewer_bead_id(bead_id),
       workspace_id: Keyword.get(opts, :workspace_id),
-      rig: Keyword.get(opts, :rig, "unknown"),
+      repo: Keyword.get(opts, :repo, "unknown"),
       worktree_path: Keyword.get(opts, :worktree_path),
       branch: Keyword.fetch!(opts, :branch),
       target_branch: Keyword.get(opts, :target_branch, "main"),
@@ -927,7 +927,7 @@ defmodule Arbiter.Polecat.ReviewGate do
        when is_binary(wt) do
     # Mirror the polecat commit gate's branch guard (bd-ofql8k): only check
     # for commits when the worktree is actually checked out on the per-bead
-    # branch. Some test setups and ad-hoc runs reuse the rig repo as the
+    # branch. Some test setups and ad-hoc runs reuse the repo as the
     # "worktree" with HEAD on `main`; in that case `rev-list main..HEAD` is
     # meaningless (always 0) and the check would manufacture a false positive.
     # Production worktrees provisioned via Worktree.create/3 are always on the
@@ -1016,7 +1016,7 @@ defmodule Arbiter.Polecat.ReviewGate do
   defp start_acolyte_polecat(state, id, role) do
     case Polecat.start(
            bead_id: id,
-           rig: state.rig,
+           repo: state.repo,
            workspace_id: nil,
            meta: acolyte_meta(state, role)
          ) do
@@ -1227,7 +1227,7 @@ defmodule Arbiter.Polecat.ReviewGate do
       review_id: state.review_id,
       status: :reviewing,
       current_step: "review_gate",
-      rig: state.rig,
+      repo: state.repo,
       role: :review_gate,
       phase: state.phase,
       round: state.round,

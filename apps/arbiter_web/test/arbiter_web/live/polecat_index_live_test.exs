@@ -23,7 +23,7 @@ defmodule ArbiterWeb.PolecatIndexLiveTest do
 
   test "lists an active acolyte with its workspace, linking to detail", %{conn: conn, ws: ws} do
     {:ok, bead} = Ash.create(Issue, %{title: "active-worker", workspace_id: ws.id})
-    {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+    {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
     {:ok, _view, html} = live(conn, ~p"/polecats")
 
@@ -35,7 +35,7 @@ defmodule ArbiterWeb.PolecatIndexLiveTest do
 
   test "live: stopping an acolyte removes it via PubSub", %{conn: conn, ws: ws} do
     {:ok, bead} = Ash.create(Issue, %{title: "soon-stopped", workspace_id: ws.id})
-    {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+    {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
     {:ok, view, _html} = live(conn, ~p"/polecats")
     assert render(view) =~ bead.id

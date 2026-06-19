@@ -15,9 +15,9 @@ defmodule Arbiter.Workflows.WorkTest do
       assert Work.steps() == [:load_context, :design, :implement, :pre_verify, :submit]
     end
 
-    test "vars/0 includes :bead_id, :worktree_path, :rig" do
+    test "vars/0 includes :bead_id, :worktree_path, :repo" do
       vars = Work.vars()
-      for v <- [:bead_id, :worktree_path, :rig], do: assert(v in vars)
+      for v <- [:bead_id, :worktree_path, :repo], do: assert(v in vars)
     end
 
     test "step_definition/1 returns the expected shape" do
@@ -39,7 +39,7 @@ defmodule Arbiter.Workflows.WorkTest do
                Work.run_step(:load_context, %{
                  bead_id: bead.id,
                  worktree_path: "/tmp/x",
-                 rig: "test/rig"
+                 repo: "test/repo"
                })
 
       assert state[:load_context_done] == true
@@ -54,7 +54,7 @@ defmodule Arbiter.Workflows.WorkTest do
                Work.run_step(:load_context, %{
                  bead_id: "wt-doesnotexist",
                  worktree_path: "/tmp/x",
-                 rig: "test/rig"
+                 repo: "test/repo"
                })
     end
   end
@@ -120,7 +120,7 @@ defmodule Arbiter.Workflows.WorkTest do
       initial = %{
         bead_id: bead.id,
         worktree_path: "/tmp/work-e2e",
-        rig: "test/rig"
+        repo: "test/repo"
       }
 
       assert {:ok, final} = Workflow.run(Work, initial)

@@ -11,14 +11,14 @@ defmodule Arbiter.MCP.ScopeTest do
       assert scope.tier == :polecat
       assert scope.workspace_id == "ws-1"
       assert scope.bead_id == "bd-1"
-      assert scope.rig == "shipyard"
+      assert scope.repo == "shipyard"
       refute scope.can_dispatch
       assert scope.depth == 0
     end
 
-    test "rig is optional" do
+    test "repo is optional" do
       token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"})
-      assert {:ok, %Scope{rig: nil}} = Scope.from_token(token)
+      assert {:ok, %Scope{repo: nil}} = Scope.from_token(token)
     end
 
     test "carries a depth claim (the Phase 2 dispatch-recursion guardrail)" do
@@ -66,7 +66,7 @@ defmodule Arbiter.MCP.ScopeTest do
     test "rejects an expired token" do
       # Plug.Crypto.sign/4 takes :signed_at in seconds; backdate well past max_age.
       past = System.system_time(:second) - 100_000
-      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "rig", signed_at: past)
+      token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "repo", signed_at: past)
       assert {:error, :expired} = Scope.from_token(token)
     end
   end

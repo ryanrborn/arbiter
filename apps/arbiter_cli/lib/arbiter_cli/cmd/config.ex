@@ -32,9 +32,9 @@ defmodule ArbiterCli.Cmd.Config do
   Before sending a `set` or `unset`, the CLI computes the local before/after
   and refuses (without `--force`) any change that would drop required keys:
 
-    * empty `rig_paths` (when `rig_paths` exists and would become `{}`)
+    * empty `repo_paths` (when `repo_paths` exists and would become `{}`)
     * `tracker.type != "none"` with `tracker.config` missing or empty
-    * `merge.strategy == "github"` — no static check (owner + repo are per-rig derivable)
+    * `merge.strategy == "github"` — no static check (owner + repo are per-repo derivable)
 
   Destructive changes (any unset, or any set that overwrites a non-empty
   existing leaf) print a before/after diff. The server-side `ValidateConfig`
@@ -270,7 +270,7 @@ defmodule ArbiterCli.Cmd.Config do
   def safety_check(new_config) when is_map(new_config) do
     reasons =
       []
-      |> check_rig_paths(new_config)
+      |> check_repo_paths(new_config)
       |> check_tracker(new_config)
       |> check_github_merge(new_config)
 
@@ -280,13 +280,19 @@ defmodule ArbiterCli.Cmd.Config do
     end
   end
 
-  defp check_rig_paths(reasons, config) do
-    case Map.fetch(config, "rig_paths") do
+  defp check_repo_paths(reasons, config) do
+    case Map.fetch(config, "repo_paths") do
       {:ok, m} when is_map(m) and map_size(m) == 0 ->
-        ["rig_paths is empty — polecat dispatch cannot resolve a working dir" | reasons]
+        ["repo_paths is empty — polecat dispatch cannot resolve a working dir" | reasons]
 
       _ ->
-        reasons
+        case Map.fetch(config, "rig_paths") do
+          {:ok, m} when is_map(m) and map_size(m) == 0 ->
+            ["rig_paths is empty — polecat dispatch cannot resolve a working dir" | reasons]
+
+          _ ->
+            reasons
+        end
     end
   end
 
@@ -307,7 +313,7 @@ defmodule ArbiterCli.Cmd.Config do
   end
 
   defp check_github_merge(reasons, _config) do
-    # owner and repo are both per-rig derivable from the rig's origin remote
+    # owner and repo are both per-repo derivable from the repo's origin remote
     # (Arbiter.Mergers.Github.RepoResolver). No static check needed here —
     # the runtime raises a clear error if credentials are missing.
     reasons

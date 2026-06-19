@@ -64,7 +64,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       assert err =~ "worktree" || err =~ "422"
     end
 
-    test "rig and --model forward in the request body" do
+    test "repo and --model forward in the request body" do
       parent = self()
       name = Process.get(:bd2_stub_name)
 
@@ -88,11 +88,11 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       end)
 
       {_out, _err, code} =
-        capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-9", "my/rig", "--model", "opus"]) end)
+        capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-9", "my/repo", "--model", "opus"]) end)
 
       assert code == 0
       assert_receive {:body, body}
-      assert body["rig"] == "my/rig"
+      assert body["repo"] == "my/repo"
       assert body["model"] == "opus"
     end
   end

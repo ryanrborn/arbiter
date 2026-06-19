@@ -15,7 +15,7 @@ defmodule Arbiter.Usage do
   ## Aggregation
 
   `summarize/1` rolls events up by one of `:day`, `:bead`, `:campaign`
-  (parent/epic), `:workspace`, `:rig`, `:model`, or `:step`. It returns a list
+  (parent/epic), `:workspace`, `:repo`, `:model`, or `:step`. It returns a list
   of maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
 
   The CLI (`arb usage`) and Phoenix endpoint (`GET /api/usage`) sit on top of
@@ -34,7 +34,7 @@ defmodule Arbiter.Usage do
   end
 
   @type group_by ::
-          :day | :bead | :campaign | :workspace | :rig | :model | :step | :provider
+          :day | :bead | :campaign | :workspace | :repo | :model | :step | :provider
 
   @type since :: DateTime.t() | nil
 
@@ -49,7 +49,7 @@ defmodule Arbiter.Usage do
           required(:duration_ms) => non_neg_integer()
         }
 
-  @valid_by ~w(day bead campaign workspace rig model step provider)a
+  @valid_by ~w(day bead campaign workspace repo model step provider)a
 
   @doc """
   Roll up usage events into a list of summary rows.
@@ -125,7 +125,7 @@ defmodule Arbiter.Usage do
   defp group_events(events, :workspace),
     do: Enum.group_by(events, &(&1.workspace_id || "(none)"))
 
-  defp group_events(events, :rig), do: Enum.group_by(events, &(&1.rig || "(none)"))
+  defp group_events(events, :repo), do: Enum.group_by(events, &(&1.repo || "(none)"))
   defp group_events(events, :model), do: Enum.group_by(events, &(&1.model || "(unknown)"))
   defp group_events(events, :provider), do: Enum.group_by(events, &(&1.provider || "(unknown)"))
   defp group_events(events, :step), do: Enum.group_by(events, &Atom.to_string(&1.step))

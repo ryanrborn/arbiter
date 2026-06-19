@@ -66,7 +66,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @type snapshot :: %{
           required(:bead_id) => String.t(),
           optional(:workspace_id) => String.t() | nil,
-          optional(:rig) => String.t() | nil,
+          optional(:repo) => String.t() | nil,
           optional(:started_at) => DateTime.t() | nil,
           optional(:meta) => map() | nil
         }
@@ -131,7 +131,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
   `arb inbox` as an actionable item. The `Arbiter.Polecat.StopReason` carries
   the classified cause + remediation; the subject names the bead + cause and
-  the body spells out the rig, last activity, exit code, and fix. Best-effort,
+  the body spells out the repo, last activity, exit code, and fix. Best-effort,
   returns `:ok`.
   """
   @spec acolyte_stopped(snapshot(), StopReason.t()) :: :ok
@@ -326,7 +326,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
       [
         lead,
         "Bead: #{bead_id}",
-        "Rig: #{rig(snapshot)}",
+        "Repo: #{repo(snapshot)}",
         exit_line(reason),
         activity_line(snapshot),
         reason.remediation && "Remediation: #{reason.remediation}",
@@ -348,8 +348,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   defp resume_hint(_event, _bead_id), do: nil
 
-  defp rig(%{rig: rig}) when is_binary(rig) and rig != "", do: rig
-  defp rig(_), do: "unknown"
+  defp repo(%{repo: repo}) when is_binary(repo) and repo != "", do: repo
+  defp repo(_), do: "unknown"
 
   defp exit_line(%StopReason{exit_status: nil, signal: nil}), do: nil
   defp exit_line(%StopReason{exit_status: nil}), do: nil

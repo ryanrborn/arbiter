@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Resume do
   @moduledoc """
-  `arb resume <bead-id> [<rig>] [--model <name>]` — resume a stopped worker
+  `arb resume <bead-id> [<repo>] [--model <name>]` — resume a stopped worker
   (bd-auma3z).
 
   When a worker is stopped mid-work (token exhaustion, crash, kill) its
@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.Resume do
   stopped polecat, and dispatchs a fresh claude-driven worker onto the existing
   branch — reusing any already-open PR rather than opening a duplicate.
 
-  The rig is optional: if omitted, it's inherited from the bead's most recent
+  The repo is optional: if omitted, it's inherited from the bead's most recent
   run. Pass it explicitly when no prior run is on record.
 
   Flags:
@@ -36,17 +36,17 @@ defmodule ArbiterCli.Cmd.Resume do
       mode = if opts[:json], do: :json, else: :text
       model = opts[:model]
 
-      {bead_id, rig} =
+      {bead_id, repo} =
         case rest do
           [id] -> {id, nil}
-          [id, rig] -> {id, rig}
+          [id, repo] -> {id, repo}
           [] -> Output.die("resume requires a bead id (e.g. `arb resume bd-auma3z`)")
-          _ -> Output.die("resume takes at most two positional arguments: <bead-id> [<rig>]")
+          _ -> Output.die("resume takes at most two positional arguments: <bead-id> [<repo>]")
         end
 
       body =
         %{}
-        |> maybe_put("rig", rig)
+        |> maybe_put("repo", repo)
         |> maybe_put("model", model)
 
       case Client.post("/api/polecats/#{bead_id}/resume", body) do

@@ -51,7 +51,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
   describe "per-acolyte mailbox" do
     test "lists unread mailbox messages addressed to the bead", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "mbx", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r", workspace_id: ws.id)
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "r", workspace_id: ws.id)
 
       {:ok, _} =
         Message.send_mail(%{
@@ -71,7 +71,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
     test "compose form sends a direction to the bead", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "compose", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r", workspace_id: ws.id)
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "r", workspace_id: ws.id)
 
       {:ok, view, _html} = live(conn, ~p"/polecats/#{bead.id}")
 
@@ -88,7 +88,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
     test "marking a message read removes it from the unread list", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "read", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "r", workspace_id: ws.id)
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "r", workspace_id: ws.id)
 
       {:ok, msg} =
         Message.send_mail(%{workspace_id: ws.id, to_ref: bead.id, body: "ack me"})

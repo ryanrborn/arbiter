@@ -25,48 +25,48 @@ defmodule Arbiter.Polecat.TargetBranchTest do
 
   describe "resolve/2 precedence chain" do
     test "explicit :base_branch override wins over everything" do
-      ws = workspace(%{"rig_paths" => %{"r" => %{"target_branch" => "rigbr"}}})
+      ws = workspace(%{"repo_paths" => %{"r" => %{"target_branch" => "rigbr"}}})
       b = bead(ws, %{target_branch: "beadbr"})
 
       assert "override" =
-               TargetBranch.resolve(b, base_branch: "override", rig: "r", workspace_base: "ws")
+               TargetBranch.resolve(b, base_branch: "override", repo: "r", workspace_base: "ws")
     end
 
-    test "per-bead target_branch beats rig, workspace_base and merge.base" do
+    test "per-bead target_branch beats repo, workspace_base and merge.base" do
       ws =
         workspace(%{
-          "rig_paths" => %{"r" => %{"target_branch" => "rigbr"}},
+          "repo_paths" => %{"r" => %{"target_branch" => "rigbr"}},
           "merge" => %{"base" => "mergebr"}
         })
 
       b = bead(ws, %{target_branch: "beadbr"})
 
-      assert "beadbr" = TargetBranch.resolve(b, rig: "r", workspace_base: "queuebr")
+      assert "beadbr" = TargetBranch.resolve(b, repo: "r", workspace_base: "queuebr")
     end
 
-    test "per-rig target_branch applies when the bead has none" do
+    test "per-repo target_branch applies when the bead has none" do
       ws =
         workspace(%{
-          "rig_paths" => %{"r" => %{"path" => "/tmp", "target_branch" => "rigbr"}},
+          "repo_paths" => %{"r" => %{"path" => "/tmp", "target_branch" => "rigbr"}},
           "merge" => %{"base" => "mergebr"}
         })
 
       b = bead(ws)
 
-      # Rig beats the workspace merge.base and the queue-level base.
-      assert "rigbr" = TargetBranch.resolve(b, rig: "r", workspace_base: "queuebr")
+      # Repo beats the workspace merge.base and the queue-level base.
+      assert "rigbr" = TargetBranch.resolve(b, repo: "r", workspace_base: "queuebr")
     end
 
-    test "string-form rig_paths entry has no target_branch; falls through" do
+    test "string-form repo_paths entry has no target_branch; falls through" do
       ws =
-        workspace(%{"rig_paths" => %{"r" => "/just/a/path"}, "merge" => %{"base" => "mergebr"}})
+        workspace(%{"repo_paths" => %{"r" => "/just/a/path"}, "merge" => %{"base" => "mergebr"}})
 
       b = bead(ws)
 
-      assert "mergebr" = TargetBranch.resolve(b, rig: "r")
+      assert "mergebr" = TargetBranch.resolve(b, repo: "r")
     end
 
-    test "queue-level :workspace_base beats merge.base but loses to bead/rig" do
+    test "queue-level :workspace_base beats merge.base but loses to bead/repo" do
       ws = workspace(%{"merge" => %{"base" => "mergebr"}})
       b = bead(ws)
 
@@ -77,7 +77,7 @@ defmodule Arbiter.Polecat.TargetBranchTest do
       ws = workspace(%{"merge" => %{"base" => "development"}})
       b = bead(ws)
 
-      assert "development" = TargetBranch.resolve(b, rig: "r")
+      assert "development" = TargetBranch.resolve(b, repo: "r")
     end
 
     test "defaults to main for a bare workspace with no overrides" do
@@ -85,14 +85,14 @@ defmodule Arbiter.Polecat.TargetBranchTest do
       b = bead(ws)
 
       assert "main" = TargetBranch.resolve(b)
-      assert "main" = TargetBranch.resolve(b, rig: "r", workspace_base: nil)
+      assert "main" = TargetBranch.resolve(b, repo: "r", workspace_base: nil)
     end
 
-    test "nil rig means the per-rig default never applies" do
-      ws = workspace(%{"rig_paths" => %{"r" => %{"target_branch" => "rigbr"}}})
+    test "nil repo means the per-repo default never applies" do
+      ws = workspace(%{"repo_paths" => %{"r" => %{"target_branch" => "rigbr"}}})
       b = bead(ws)
 
-      assert "main" = TargetBranch.resolve(b, rig: nil)
+      assert "main" = TargetBranch.resolve(b, repo: nil)
     end
   end
 end

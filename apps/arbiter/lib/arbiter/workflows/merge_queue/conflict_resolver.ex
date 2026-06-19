@@ -43,7 +43,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
 
   alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.RigConfig
+  alias Arbiter.Beads.RepoConfig
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
@@ -64,7 +64,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
           optional(:branch) => String.t(),
           optional(:target_branch) => String.t(),
           optional(:repo_path) => String.t(),
-          optional(:rig) => String.t() | nil,
+          optional(:repo) => String.t() | nil,
           optional(:pr_ref) => term(),
           optional(:start_claude) => boolean(),
           optional(:claude_command) => [String.t()]
@@ -162,7 +162,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
     branch = Map.get(args, :branch) || derive_branch(bead)
     target_branch = Map.get(args, :target_branch) || workspace_base_branch(workspace) || "main"
-    repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :rig))
+    repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :repo))
 
     cond do
       is_nil(branch) ->
@@ -182,7 +182,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
            branch: branch,
            target_branch: target_branch,
            repo_path: repo_path,
-           rig: Map.get(args, :rig) || resolve_rig_name(workspace)
+           repo: Map.get(args, :repo) || resolve_repo_name(workspace)
          }}
     end
   end
@@ -214,65 +214,71 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   defp workspace_base_branch(_), do: nil
 
   # Repo path lookup mirrors `Arbiter.Polecat.Dispatch`: workspace config first,
-  # then application env. Without an explicit rig we take the first configured
-  # rig path — the canonical "one rig per workspace" path covers every existing
+  # then application env. Without an explicit repo we take the first configured
+  # repo path — the canonical "one repo per workspace" path covers every existing
   # merge queue target.
-  defp resolve_repo_path(workspace, rig) do
-    workspace_rig_path(workspace, rig) || application_rig_path(rig) ||
-      first_rig_path(workspace) || first_application_rig_path()
+  defp resolve_repo_path(workspace, repo) do
+    workspace_repo_path(workspace, repo) || application_repo_path(repo) ||
+      first_repo_path(workspace) || first_application_repo_path()
   end
 
-  defp workspace_rig_path(_workspace, nil), do: nil
+  defp workspace_repo_path(_workspace, nil), do: nil
 
-  defp workspace_rig_path(%Workspace{config: %{} = config}, rig) when is_binary(rig) do
-    RigConfig.rig_path_from_config(get_in(config, ["rig_paths", rig]))
+  defp workspace_repo_path(%Workspace{config: %{} = config}, repo) when is_binary(repo) do
+    RepoConfig.repo_path_from_config(
+      get_in(config, ["repo_paths", repo]) || get_in(config, ["rig_paths", repo])
+    )
   end
 
-  defp workspace_rig_path(_, _), do: nil
+  defp workspace_repo_path(_, _), do: nil
 
-  defp first_rig_path(%Workspace{config: %{} = config}) do
-    case Map.get(config, "rig_paths") do
+  defp first_repo_path(%Workspace{config: %{} = config}) do
+    paths =
+      Map.get(config, "repo_paths") || Map.get(config, "rig_paths")
+
+    case paths do
+      %{} ->
+        paths
+        |> Map.values()
+        |> Enum.find_value(&RepoConfig.repo_path_from_config/1)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp first_repo_path(_), do: nil
+
+  defp application_repo_path(nil), do: nil
+
+  defp application_repo_path(repo) when is_binary(repo) do
+    RepoConfig.repo_path_from_config(
+      Map.get(Application.get_env(:arbiter, :repo_paths, %{}), repo)
+    )
+  end
+
+  defp first_application_repo_path do
+    case Application.get_env(:arbiter, :repo_paths, %{}) do
       %{} = paths ->
         paths
         |> Map.values()
-        |> Enum.find_value(&RigConfig.rig_path_from_config/1)
+        |> Enum.find_value(&RepoConfig.repo_path_from_config/1)
 
       _ ->
         nil
     end
   end
 
-  defp first_rig_path(_), do: nil
+  defp resolve_repo_name(%Workspace{config: %{} = config}) do
+    paths = Map.get(config, "repo_paths") || Map.get(config, "rig_paths")
 
-  defp application_rig_path(nil), do: nil
-
-  defp application_rig_path(rig) when is_binary(rig) do
-    RigConfig.rig_path_from_config(Map.get(Application.get_env(:arbiter, :rig_paths, %{}), rig))
-  end
-
-  defp first_application_rig_path do
-    case Application.get_env(:arbiter, :rig_paths, %{}) do
-      %{} = paths ->
-        paths
-        |> Map.values()
-        |> Enum.find_value(&RigConfig.rig_path_from_config/1)
-
-      _ ->
-        nil
+    case paths do
+      %{} -> paths |> Map.keys() |> List.first()
+      _ -> nil
     end
   end
 
-  defp resolve_rig_name(%Workspace{config: %{} = config}) do
-    case Map.get(config, "rig_paths") do
-      %{} = paths ->
-        paths |> Map.keys() |> List.first()
-
-      _ ->
-        nil
-    end
-  end
-
-  defp resolve_rig_name(_), do: nil
+  defp resolve_repo_name(_), do: nil
 
   # ---- worktree / polecat / claude wiring ---------------------------------
 
@@ -313,7 +319,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       bead_id: bead.id,
       registry_key: bead.id <> @resolver_registry_suffix,
       workspace_id: bead.workspace_id,
-      rig: context.rig || "unknown",
+      repo: context.repo || "unknown",
       meta: meta
     ]
 

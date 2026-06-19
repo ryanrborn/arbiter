@@ -51,7 +51,7 @@ defmodule Arbiter.Polecat.Worktree do
 
   Before creating the worktree, fetches `<base_branch>` from `origin` in
   `repo_path`, so every worker starts on current upstream regardless of the
-  rig checkout's drift (stale local base, dirty working tree, or HEAD on an
+  repo checkout's drift (stale local base, dirty working tree, or HEAD on an
   unrelated branch). If `origin` is not configured or the ref cannot be
   resolved after the fetch, the call aborts with a clear error rather than
   silently falling back to a stale local base.
@@ -105,7 +105,7 @@ defmodule Arbiter.Polecat.Worktree do
       {:error, {:git_failed, msg}} ->
         {:error,
          {:missing_origin_remote,
-          "rig at #{repo_path} has no `origin` remote configured; " <>
+          "repo at #{repo_path} has no `origin` remote configured; " <>
             "branching from a stale local base is unsafe. git: #{msg}"}}
     end
   end

@@ -261,7 +261,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     # Filter out edges that reference beads not in our Postgres store.
-    # Cross-rig deps in Dolt may point to beads from rigs we didn't import
+    # Cross-repo deps in Dolt may point to beads from repos we didn't import
     # (e.g. server has deps pointing to ac-*, ad-* beads from other Dolt DBs).
     # Postgres FK would block these; skip them rather than failing the whole batch.
     known_ids =

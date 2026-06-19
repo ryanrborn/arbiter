@@ -302,8 +302,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   end
 
   describe "enqueue/2 PR base resolution (bd-b6rzoc)" do
-    # GitHub workspace whose rig defaults to an integration branch (object form).
-    @ws_github_rig %{
+    # GitHub workspace whose repo defaults to an integration branch (object form).
+    @ws_github_repo %{
       "merge" => %{
         "strategy" => "github",
         "config" => %{
@@ -312,8 +312,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
           "credentials_ref" => "test-token-abc123"
         }
       },
-      "rig_paths" => %{
-        "dolphin/rig" => %{"path" => "/tmp", "target_branch" => "integration/dolphin"}
+      "repo_paths" => %{
+        "dolphin/repo" => %{"path" => "/tmp", "target_branch" => "integration/dolphin"}
       }
     }
 
@@ -333,11 +333,11 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
     end
 
-    defp record_run(bead, rig) do
+    defp record_run(bead, repo) do
       {:ok, _run} =
         Ash.create(Run, %{
           bead_id: bead.id,
-          rig: rig,
+          repo: repo,
           workspace_id: bead.workspace_id,
           status: :completed,
           started_at: DateTime.utc_now()
@@ -361,14 +361,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert_receive {:pr_base, "dolphin"}
     end
 
-    @tag workspace_config: @ws_github_rig
-    test "rig-level target_branch sets the PR base AND matches the worktree base", %{
+    @tag workspace_config: @ws_github_repo
+    test "repo-level target_branch sets the PR base AND matches the worktree base", %{
       workspace: ws,
       bead: bead
     } do
-      # The bead was worked in dolphin/rig — recorded on its polecat run, exactly
-      # the rig Dispatch cut the worktree with.
-      :ok = record_run(bead, "dolphin/rig")
+      # The bead was worked in dolphin/repo — recorded on its polecat run, exactly
+      # the repo Dispatch cut the worktree with.
+      :ok = record_run(bead, "dolphin/repo")
       capture_base_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
@@ -378,9 +378,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert pr_base == "integration/dolphin"
 
       # Invariant: the worktree base Dispatch would compute for this bead (same
-      # shared resolver, same rig) is identical to the PR base.
+      # shared resolver, same repo) is identical to the PR base.
       {:ok, bead} = Ash.load(bead, [:workspace])
-      worktree_base = TargetBranch.resolve(bead, rig: "dolphin/rig")
+      worktree_base = TargetBranch.resolve(bead, repo: "dolphin/repo")
       assert worktree_base == pr_base
     end
 
@@ -388,7 +388,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     test "default-workspace bead with no overrides targets main", %{workspace: ws, bead: bead} do
       capture_base_stub(self())
 
-      # No explicit queue base, no bead target, no rig default, no merge.base.
+      # No explicit queue base, no bead target, no repo default, no merge.base.
       {_pid, name} = start_merge_queue(ws, base: nil)
       :ok = MergeQueue.enqueue(name, bead.id)
 
@@ -728,7 +728,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       refute_received :unexpected_merge
 
       # The conflict resolver path parks the item; the exact status depends on
-      # whether the resolver successfully spawns (it won't in test without a rig,
+      # whether the resolver successfully spawns (it won't in test without a repo,
       # so it'll be :failed or :conflict_resolving). Either way, it's not :closed.
       reloaded = Ash.get!(Issue, bead.id)
       assert reloaded.status == :open

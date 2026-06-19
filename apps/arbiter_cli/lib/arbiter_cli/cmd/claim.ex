@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Claim do
   @moduledoc """
-  `arb claim <issue#> [--force] [--difficulty N] [--rig <rig>] [--json]` — create a bead
+  `arb claim <issue#> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a bead
   linked to a GitHub issue assigned to the workspace user.
 
   POSTs to `/api/workspaces/:workspace_id/claim`. The server fetches the
@@ -16,7 +16,7 @@ defmodule ArbiterCli.Cmd.Claim do
     --difficulty N Task difficulty (0..4): D0 trivial · D1 easy · D2 medium ·
                    D3 hard · D4 very hard. Drives model tier and thinking
                    budget routed to workers. (default: D2 on the server)
-    --rig <rig>    Hint for a later `arb dispatch`. Recorded as a tip in the
+    --repo <repo>  Hint for a later `arb dispatch`. Recorded as a tip in the
                    command's text output — not persisted on the bead.
     --json         Emit JSON instead of human-readable text.
   """
@@ -26,7 +26,7 @@ defmodule ArbiterCli.Cmd.Claim do
   @switches [
     force: :boolean,
     difficulty: :integer,
-    rig: :string,
+    repo: :string,
     json: :boolean
   ]
 
@@ -54,7 +54,7 @@ defmodule ArbiterCli.Cmd.Claim do
         |> maybe_put("difficulty", opts[:difficulty])
 
       case Client.post("/api/workspaces/#{workspace_id}/claim", body) do
-        {:ok, payload} -> emit(payload, opts[:rig], mode)
+        {:ok, payload} -> emit(payload, opts[:repo], mode)
         {:error, err} -> Output.die(err)
       end
     end
@@ -71,9 +71,9 @@ defmodule ArbiterCli.Cmd.Claim do
     Output.die("invalid --difficulty #{inspect(other)} (must be an integer 0..4 / D0..D4)")
   end
 
-  defp emit(payload, _rig, :json), do: IO.puts(Jason.encode!(payload))
+  defp emit(payload, _repo, :json), do: IO.puts(Jason.encode!(payload))
 
-  defp emit(payload, rig, :text) do
+  defp emit(payload, repo, :text) do
     bead = payload["bead"] || %{}
 
     headline =
@@ -88,9 +88,9 @@ defmodule ArbiterCli.Cmd.Claim do
     IO.puts("  status:       #{bead["status"]}")
     IO.puts("  tracker:      #{bead["tracker_type"]}:#{bead["tracker_ref"]}")
 
-    if rig do
+    if repo do
       IO.puts("")
-      IO.puts("Tip: `arb dispatch #{bead["id"]} #{rig}` to start work on this bead.")
+      IO.puts("Tip: `arb dispatch #{bead["id"]} #{repo}` to start work on this bead.")
     end
   end
 end
