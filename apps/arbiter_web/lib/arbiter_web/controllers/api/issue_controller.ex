@@ -50,7 +50,7 @@ defmodule ArbiterWeb.Api.IssueController do
   end
 
   def show(conn, %{"id" => id}) do
-    case Ash.get(Issue, id) do
+    case Ash.get(Issue, id, load: [:child_total, :child_closed]) do
       {:ok, issue} -> render(conn, :show, issue: issue)
       {:error, _} = err -> err
     end

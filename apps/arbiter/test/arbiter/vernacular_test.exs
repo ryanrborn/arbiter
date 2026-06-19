@@ -17,7 +17,6 @@ defmodule Arbiter.VernacularTest do
       assert Vernacular.label(:monitor) == "witness"
       assert Vernacular.label(:watchdog) == "deacon"
       assert Vernacular.label(:issue) == "bead"
-      assert Vernacular.label(:batch) == "convoy"
       assert Vernacular.label(:rig) == "rig"
       assert Vernacular.label(:epic) == "mountain"
     end

@@ -9,7 +9,8 @@ defmodule ArbiterCli.Main do
       arb issue list      [--status ...] [--type ...] [--priority ...] [--labels ...] [--tracker]
       arb issue show      <id>
       arb issue create    <title> [--description ...] [--priority ...] [--type ...]
-                                  [--deps id1,id2] [--labels a,b] [--vanguard <batch-id>]
+                                  [--deps id1,id2] [--labels a,b] [--parent <parent-id>]
+                                  [--auto-close]
       arb issue update    <id> [--title ...] [--priority N] [--difficulty N] [--status s]
                                   [--description d] [--assignee a] [--append-notes text]
                                   [--qa-notes text] [--deployment-notes text]
@@ -27,13 +28,6 @@ defmodule ArbiterCli.Main do
       arb worker stop     <bead-id>
       arb worker resume   <bead-id> [<rig>] [--model <name>]
       arb worker review   <bead-id> [--rig <rig>] [--model <name>]
-
-      arb batch list
-      arb batch show      <batch-id>
-      arb batch create    <title> [--lifecycle system_managed|owned]
-      arb batch add       <batch-id> <issue-id...>
-      arb batch remove    <batch-id> <issue-id>
-      arb batch close     <batch-id> [--reason ...]
 
       arb repo list
       arb repo show       <name>
@@ -82,9 +76,9 @@ defmodule ArbiterCli.Main do
 
   Resources are neutral base terms; the active workspace's vernacular layers
   themed names on top as aliases. The default (Sith) vocabulary maps
-  `worker → polecat`, `issue → bead`, `batch → convoy`, `repo → warship`, and
+  `worker → polecat`, `issue → bead`, `repo → warship`, and
   `dispatch → sling`, so `arb polecat list`, `arb bead show <id>`,
-  `arb convoy create …`, `arb warship list`, and `arb sling <id>` all resolve
+  `arb warship list`, and `arb sling <id>` all resolve
   to their canonical counterparts. See `arb help vernacular`.
 
   ## Global flags
@@ -103,7 +97,7 @@ defmodule ArbiterCli.Main do
   # Pre-`arb <resource> <verb>` flat commands, mapped to their new canonical
   # form. Each still runs (we dispatch to the new handler) but prints a
   # one-line note pointing at the new grammar. Themed names (`polecat`,
-  # `convoy`, `warship`, `bead`, `sling`) are NOT here — they resolve through
+  # `warship`, `bead`, `sling`) are NOT here — they resolve through
   # the vernacular alias system and are not deprecated.
   @legacy %{
     "list" => {"issue", ["list"]},
@@ -200,7 +194,6 @@ defmodule ArbiterCli.Main do
 
   defp dispatch_known("issue", args), do: ArbiterCli.Cmd.Issue.run(args)
   defp dispatch_known("worker", args), do: ArbiterCli.Cmd.Worker.run(args)
-  defp dispatch_known("batch", args), do: ArbiterCli.Cmd.Batch.run(args)
   defp dispatch_known("repo", args), do: ArbiterCli.Cmd.Repo.run(args)
   defp dispatch_known("dep", args), do: ArbiterCli.Cmd.Dep.run(args)
   defp dispatch_known("config", args), do: ArbiterCli.Cmd.Config.run(args)
@@ -246,7 +239,6 @@ defmodule ArbiterCli.Main do
       ---------   --------------------    -------------------------------
       worker      polecat                 arb polecat list  → arb worker list
       issue       bead                    arb bead show     → arb issue show
-      batch       convoy                  arb convoy create → arb batch create
       repo        warship                 arb warship list  → arb repo list
       dispatch    sling                   arb sling <id>    → arb issue dispatch <id>
 
@@ -254,14 +246,14 @@ defmodule ArbiterCli.Main do
 
   The full Sith lexicon is shipped as a named preset. Apply it to the global
   vernacular to theme prose and dashboards (Admiral, Acolyte, Directive,
-  Strike Force, …) on top of the resource aliases above:
+  Campaign, …) on top of the resource aliases above:
 
       {
         "coordinator": "Admiral",  "worker": "Acolyte",
-        "issue": "Directive",      "batch": "Strike Force",
+        "issue": "Directive",      "epic": "Campaign",
         "repo": "Warship",         "dispatch": "Sling",
         "merge_queue": "Reclamation", "monitor": "Inquisitor",
-        "watchdog": "Grand Moff",  "epic": "Campaign"
+        "watchdog": "Grand Moff"
       }
 
   PUT it to /api/settings/vernacular, or set it from the dashboard's

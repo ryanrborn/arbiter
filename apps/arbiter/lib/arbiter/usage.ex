@@ -15,8 +15,8 @@ defmodule Arbiter.Usage do
   ## Aggregation
 
   `summarize/1` rolls events up by one of `:day`, `:bead`, `:campaign`
-  (convoy), `:workspace`, `:rig`, `:model`, or `:step`. It returns a list of
-  maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
+  (parent/epic), `:workspace`, `:rig`, `:model`, or `:step`. It returns a list
+  of maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
 
   The CLI (`arb usage`) and Phoenix endpoint (`GET /api/usage`) sit on top of
   this. Anything new (per-day burn dashboards, budget routing) should call
@@ -25,7 +25,7 @@ defmodule Arbiter.Usage do
 
   use Ash.Domain
 
-  alias Arbiter.Beads.ConvoyMembership
+  alias Arbiter.Beads.Dependency
   alias Arbiter.Usage.Event
   require Ash.Query
 
@@ -64,11 +64,10 @@ defmodule Arbiter.Usage do
   Returns `{:ok, [rollup]}` or `{:error, reason}`. Rows are sorted by
   `total_cost_usd` desc (or chronologically for `:by :day`).
 
-  `:campaign` joins through `Arbiter.Beads.ConvoyMembership` so a bead in
-  multiple convoys is counted in each — the same way the rest of the system
-  treats convoy membership. Beads that are members of *no* convoy don't appear
-  in `:by :campaign` rollups; they show in the catch-all sentinel
-  `:no_campaign` so spend isn't silently lost.
+  `:campaign` groups by a bead's `:parent_of` parent(s) — a bead with more than
+  one parent is counted in each, mirroring the parent-with-progress rollup.
+  Beads with *no* parent don't disappear; they fall into the catch-all sentinel
+  `(no_campaign)` so spend isn't silently lost.
   """
   @spec summarize(keyword()) :: {:ok, [rollup()]} | {:error, term()}
   def summarize(opts) when is_list(opts) do
@@ -115,8 +114,8 @@ defmodule Arbiter.Usage do
   end
 
   # Group events by the requested dimension. For :campaign we resolve each
-  # event's bead's convoys at read time (a join would be cleaner but the data
-  # volume is small for now; this is plain in-memory grouping).
+  # event's bead's `:parent_of` parents at read time (a join would be cleaner
+  # but the data volume is small for now; this is plain in-memory grouping).
   defp group_events(events, :day) do
     Enum.group_by(events, fn ev -> Date.to_iso8601(DateTime.to_date(ev.occurred_at)) end)
   end
@@ -132,14 +131,14 @@ defmodule Arbiter.Usage do
   defp group_events(events, :step), do: Enum.group_by(events, &Atom.to_string(&1.step))
 
   defp group_events(events, :campaign) do
-    memberships = load_convoy_memberships(events)
+    parents = load_parent_edges(events)
 
     Enum.reduce(events, %{}, fn ev, acc ->
       base_bead = base_bead_id(ev.bead_id)
 
-      case Map.get(memberships, base_bead, []) do
+      case Map.get(parents, base_bead, []) do
         [] -> Map.update(acc, "(no_campaign)", [ev], &[ev | &1])
-        convoys -> Enum.reduce(convoys, acc, fn cv, a -> Map.update(a, cv, [ev], &[ev | &1]) end)
+        ids -> Enum.reduce(ids, acc, fn pid, a -> Map.update(a, pid, [ev], &[ev | &1]) end)
       end
     end)
   end
@@ -153,7 +152,11 @@ defmodule Arbiter.Usage do
     end
   end
 
-  defp load_convoy_memberships(events) do
+  # Map each event's bead to the parent bead(s) it hangs under via `:parent_of`
+  # edges (the bead is the `to_issue`; its parents are the `from_issue`s).
+  defp load_parent_edges(events) do
+    parent_of = :parent_of
+
     bead_ids =
       events
       |> Enum.map(&base_bead_id(&1.bead_id))
@@ -164,11 +167,11 @@ defmodule Arbiter.Usage do
         %{}
 
       ids ->
-        ConvoyMembership
-        |> Ash.Query.filter(issue_id in ^ids)
+        Dependency
+        |> Ash.Query.filter(type == ^parent_of and to_issue_id in ^ids)
         |> Ash.read!()
-        |> Enum.reduce(%{}, fn m, acc ->
-          Map.update(acc, m.issue_id, [m.convoy_id], &[m.convoy_id | &1])
+        |> Enum.reduce(%{}, fn d, acc ->
+          Map.update(acc, d.to_issue_id, [d.from_issue_id], &[d.from_issue_id | &1])
         end)
     end
   rescue

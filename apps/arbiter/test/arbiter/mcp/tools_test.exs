@@ -1,8 +1,6 @@
 defmodule Arbiter.MCP.ToolsTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.Convoy
-  alias Arbiter.Beads.ConvoyMembership
   alias Arbiter.Beads.Dependency
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
@@ -63,39 +61,36 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "convoy_status/2" do
-    setup ctx do
-      {:ok, convoy} = Ash.create(Convoy, %{title: "release convoy", workspace_id: ctx.ws.id})
+  describe "bead_show/2 child-progress rollup" do
+    test "a parent bead reports child_total / child_closed over its parent_of children", ctx do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "epic parent", issue_type: :epic, workspace_id: ctx.ws.id})
 
-      {:ok, _} =
-        Ash.create(ConvoyMembership, %{convoy_id: convoy.id, issue_id: ctx.bead.id}, action: :add)
+      {:ok, c1} = Ash.create(Issue, %{title: "c1", workspace_id: ctx.ws.id})
+      {:ok, c2} = Ash.create(Issue, %{title: "c2", workspace_id: ctx.ws.id})
 
-      {:ok, convoy: convoy}
+      for c <- [c1, c2] do
+        {:ok, _} =
+          Ash.create(Dependency, %{
+            from_issue_id: parent.id,
+            to_issue_id: c.id,
+            type: :parent_of
+          })
+      end
+
+      {:ok, _} = Ash.update(c1, %{}, action: :close)
+
+      assert {:ok, data} = Tools.bead_show(ctx.coordinator, %{"id" => parent.id})
+      assert data.child_total == 2
+      assert data.child_closed == 1
+      assert data.child_open == 1
+      assert data.auto_close == false
     end
 
-    test "a coordinator sees member counts", ctx do
-      assert {:ok, data} = Tools.convoy_status(ctx.coordinator, %{"id" => ctx.convoy.id})
-      assert data.id == ctx.convoy.id
-      assert data.total_issues == 1
-      assert data.closed_issues == 0
-      assert data.open_issues == 1
-    end
-
-    test "a polecat sees a convoy it belongs to", ctx do
-      assert {:ok, data} = Tools.convoy_status(ctx.polecat, %{"id" => ctx.convoy.id})
-      assert data.id == ctx.convoy.id
-    end
-
-    test "a polecat may not query a convoy it is not a member of", ctx do
-      {:ok, other_bead} = Ash.create(Issue, %{title: "outsider", workspace_id: ctx.ws.id})
-      outsider = %{ctx.polecat | bead_id: other_bead.id}
-
-      assert {:error, {:unauthorized, _}} =
-               Tools.convoy_status(outsider, %{"id" => ctx.convoy.id})
-    end
-
-    test "requires a convoy id", ctx do
-      assert {:error, {:invalid, _}} = Tools.convoy_status(ctx.coordinator, %{})
+    test "a leaf bead reports zero children", ctx do
+      assert {:ok, data} = Tools.bead_show(ctx.coordinator, %{"id" => ctx.bead.id})
+      assert data.child_total == 0
+      assert data.child_closed == 0
     end
   end
 
@@ -355,39 +350,43 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "convoy_create/2 + convoy_add_member/2 + convoy_close/2 + convoy_list/2" do
-    test "create, attach a member, list, and close a convoy", ctx do
-      assert {:ok, convoy} =
-               Tools.convoy_create(ctx.coordinator, %{
-                 "title" => "release",
-                 "lifecycle" => "owned"
+  describe "parent/child grouping via dep_add parent_of + auto_close" do
+    test "bead_create accepts auto_close and bead_update can toggle it", ctx do
+      assert {:ok, parent} =
+               Tools.bead_create(ctx.coordinator, %{
+                 "title" => "epic",
+                 "issue_type" => "epic",
+                 "auto_close" => true
                })
 
-      assert convoy.title == "release"
-      assert convoy.lifecycle == "owned"
-      assert convoy.total_issues == 0
+      assert parent.issue_type == "epic"
+      assert parent.auto_close == true
 
-      assert {:ok, with_member} =
-               Tools.convoy_add_member(ctx.coordinator, %{
-                 "id" => convoy.id,
-                 "issue_id" => ctx.bead.id
-               })
+      assert {:ok, updated} =
+               Tools.bead_update(ctx.coordinator, %{"id" => parent.id, "auto_close" => false})
 
-      assert with_member.total_issues == 1
-
-      assert {:ok, %{convoys: convoys}} = Tools.convoy_list(ctx.coordinator, %{})
-      assert Enum.any?(convoys, &(&1.id == convoy.id))
-
-      assert {:ok, closed} = Tools.convoy_close(ctx.coordinator, %{"id" => convoy.id})
-      assert closed.status == "closed"
+      assert updated.auto_close == false
     end
 
-    test "convoy_list does not leak convoys from another workspace", ctx do
-      {:ok, other_ws} = Ash.create(Workspace, %{name: "cv-other", prefix: "cvo"})
-      {:ok, _foreign} = Ash.create(Convoy, %{title: "foreign cv", workspace_id: other_ws.id})
+    test "attaching a child with a parent_of edge auto-closes the parent when done", ctx do
+      assert {:ok, parent} =
+               Tools.bead_create(ctx.coordinator, %{"title" => "epic", "auto_close" => true})
 
-      assert {:ok, %{convoys: convoys}} = Tools.convoy_list(ctx.coordinator, %{})
-      refute Enum.any?(convoys, &(&1.title == "foreign cv"))
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ctx.ws.id})
+
+      assert {:ok, _dep} =
+               Tools.dep_add(ctx.coordinator, %{
+                 "from_issue_id" => parent.id,
+                 "to_issue_id" => child.id,
+                 "type" => "parent_of"
+               })
+
+      {:ok, _} = Ash.update(child, %{}, action: :close)
+
+      assert {:ok, data} = Tools.bead_show(ctx.coordinator, %{"id" => parent.id})
+      assert data.status == "closed"
+      assert data.child_closed == 1
+      assert data.child_total == 1
     end
   end
 

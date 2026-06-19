@@ -7,7 +7,7 @@ defmodule Arbiter.MCP.Tools do
   Phase 1 ships the read tools plus the one narrowed polecat write
   (`bead_update_progress`); Phase 2 adds the coordinator-only mutating tools —
   `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_add` /
-  `dep_remove`, the `convoy_*` family, the `polecat_*` lifecycle family
+  `dep_remove` (grouping/epics use a `parent_of` edge), the `polecat_*` lifecycle family
   (`polecat_sling` / `polecat_resume` / `polecat_review` / `polecat_stop` /
   `polecat_list`), `message_send`, `notify_list`, the `tracker_*` bridge
   (`tracker_claim` / `tracker_sync`), `workspace_list`, and `usage_summarize`
@@ -32,8 +32,6 @@ defmodule Arbiter.MCP.Tools do
 
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Beads.Claim
-  alias Arbiter.Beads.Convoy
-  alias Arbiter.Beads.ConvoyMembership
   alias Arbiter.Beads.Dependency
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
@@ -56,7 +54,7 @@ defmodule Arbiter.MCP.Tools do
   def bead_show(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_bead_id(scope, args),
          {:ok, issue} <- fetch_bead(scope, id) do
-      {:ok, serialize_bead(issue)}
+      {:ok, serialize_bead(load_progress(issue))}
     end
   end
 
@@ -71,26 +69,6 @@ defmodule Arbiter.MCP.Tools do
       |> Enum.map(&serialize_bead_summary/1)
 
     {:ok, %{beads: beads, count: length(beads)}}
-  end
-
-  # ---- convoy_status ------------------------------------------------------
-
-  @doc """
-  Convoy progress (open/closed member counts). Coordinator: any convoy in its
-  workspace. Polecat: only a convoy its bound bead is a member of.
-  """
-  @spec convoy_status(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def convoy_status(%Scope{} = scope, args) do
-    case fetch_string(args, "id") do
-      nil ->
-        {:error, {:invalid, "convoy_status requires a convoy `id`"}}
-
-      id ->
-        with {:ok, convoy} <- fetch_convoy(scope, id),
-             :ok <- ensure_convoy_visible(scope, convoy) do
-          {:ok, serialize_convoy(convoy)}
-        end
-    end
   end
 
   # ---- inbox_check --------------------------------------------------------
@@ -312,75 +290,6 @@ defmodule Arbiter.MCP.Tools do
       edges = find_dep_edges(from, to, type)
       _ = Enum.each(edges, &Ash.destroy!/1)
       {:ok, %{from_issue_id: from, to_issue_id: to, removed: length(edges)}}
-    end
-  end
-
-  # ---- convoy_list --------------------------------------------------------
-
-  @doc "List the convoys in the scope's workspace, with member counts. Coordinator only."
-  @spec convoy_list(Scope.t(), map()) :: {:ok, map()}
-  def convoy_list(%Scope{workspace_id: ws_id}, _args) do
-    convoys =
-      Convoy
-      |> Ash.Query.filter(workspace_id == ^ws_id)
-      |> Ash.read!(load: [:total_issues, :closed_issues])
-      |> Enum.map(&serialize_convoy/1)
-
-    {:ok, %{convoys: convoys, count: length(convoys)}}
-  end
-
-  # ---- convoy_create ------------------------------------------------------
-
-  @doc """
-  Create a convoy in the scope's workspace. Coordinator only. `workspace_id` is
-  forced to the scope's workspace. Backs onto `Ash.create(Convoy, …)`.
-  """
-  @spec convoy_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def convoy_create(%Scope{workspace_id: ws_id}, args) do
-    with {:ok, title} <- require_string(args, "title"),
-         {:ok, attrs} <- collect_attrs(args, convoy_create_spec()) do
-      attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
-
-      case Ash.create(Convoy, attrs) do
-        {:ok, convoy} -> {:ok, serialize_convoy(reload_convoy(convoy))}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- convoy_add_member --------------------------------------------------
-
-  @doc """
-  Attach a bead to a convoy (idempotent). Coordinator only. Both the convoy and
-  the bead must live in the scope's workspace. Backs onto the
-  `ConvoyMembership.:add` upsert.
-  """
-  @spec convoy_add_member(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def convoy_add_member(%Scope{} = scope, args) do
-    with {:ok, convoy_id} <- require_string(args, "id"),
-         {:ok, issue_id} <- require_string(args, "issue_id"),
-         {:ok, convoy} <- fetch_convoy(scope, convoy_id),
-         {:ok, _issue} <- fetch_bead(scope, issue_id) do
-      case Ash.create(ConvoyMembership, %{convoy_id: convoy.id, issue_id: issue_id}, action: :add) do
-        {:ok, _membership} -> {:ok, serialize_convoy(reload_convoy(convoy))}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
-    end
-  end
-
-  # ---- convoy_close -------------------------------------------------------
-
-  @doc "Close a convoy in the scope's workspace. Coordinator only."
-  @spec convoy_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def convoy_close(%Scope{} = scope, args) do
-    with {:ok, convoy_id} <- require_string(args, "id"),
-         {:ok, convoy} <- fetch_convoy(scope, convoy_id) do
-      attrs = maybe_put(%{}, :reason, fetch_string(args, "reason"))
-
-      case Ash.update(convoy, attrs, action: :close) do
-        {:ok, closed} -> {:ok, serialize_convoy(reload_convoy(closed))}
-        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
-      end
     end
   end
 
@@ -756,36 +665,13 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp fetch_convoy(scope, id) do
-    case Ash.get(Convoy, id) do
-      {:ok, %Convoy{} = convoy} ->
-        if Scope.same_workspace?(scope, convoy.workspace_id) do
-          load_convoy(convoy)
-        else
-          {:error, {:not_found, "convoy #{id} not found"}}
-        end
-
-      _ ->
-        {:error, {:not_found, "convoy #{id} not found"}}
-    end
-  end
-
-  defp load_convoy(convoy) do
-    {:ok, Ash.load!(convoy, [:total_issues, :closed_issues, :issues])}
+  # Load the child-progress rollup calcs for a bead so the serializer can emit
+  # `child_total` / `child_closed`. Best-effort: on any load error the bead is
+  # returned unchanged (the serializer then omits the progress fields).
+  defp load_progress(%Issue{} = issue) do
+    Ash.load!(issue, [:child_total, :child_closed])
   rescue
-    _ -> {:error, {:not_found, "convoy #{convoy.id} not found"}}
-  end
-
-  # A polecat may only see a convoy its bound bead belongs to. Coordinator sees
-  # any convoy in the workspace (already gated by fetch_convoy).
-  defp ensure_convoy_visible(%Scope{tier: :coordinator}, _convoy), do: :ok
-
-  defp ensure_convoy_visible(%Scope{tier: :polecat, bead_id: bead_id}, convoy) do
-    members = convoy.issues || []
-
-    if Enum.any?(members, &(&1.id == bead_id)),
-      do: :ok,
-      else: {:error, {:unauthorized, "this polecat is not a member of convoy #{convoy.id}"}}
+    _ -> issue
   end
 
   # Keep only the three allowed progress fields; require at least one.
@@ -837,6 +723,11 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp coerce_field(:integer, _), do: {:error, "must be an integer"}
+
+  defp coerce_field(:boolean, v) when is_boolean(v), do: {:ok, v}
+  defp coerce_field(:boolean, "true"), do: {:ok, true}
+  defp coerce_field(:boolean, "false"), do: {:ok, false}
+  defp coerce_field(:boolean, _), do: {:error, "must be a boolean"}
 
   defp coerce_field({:enum, allowed}, v) do
     case to_allowed_atom(v, allowed) do
@@ -951,6 +842,7 @@ defmodule Arbiter.MCP.Tools do
       {"priority", :integer},
       {"difficulty", :integer},
       {"issue_type", {:enum, Issue.issue_types()}},
+      {"auto_close", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"assignee", :string},
       {"tracker_ref", :string},
@@ -970,16 +862,13 @@ defmodule Arbiter.MCP.Tools do
       {"priority", :integer},
       {"difficulty", :integer},
       {"issue_type", {:enum, Issue.issue_types()}},
+      {"auto_close", :boolean},
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"assignee", :string},
       {"tracker_ref", :string},
       {"pr_ref", :string},
       {"target_branch", :string}
     ]
-  end
-
-  defp convoy_create_spec do
-    [{"lifecycle", {:enum, Convoy.lifecycles()}}]
   end
 
   # ---- Phase 2 sling guardrail + opts (docs/mcp-server-design.md §4.3) ----
@@ -1088,8 +977,6 @@ defmodule Arbiter.MCP.Tools do
     |> Ash.read!()
   end
 
-  defp reload_convoy(%Convoy{} = convoy), do: Ash.load!(convoy, [:total_issues, :closed_issues])
-
   # The scope's own workspace, loaded for the tracker bridge tools.
   defp fetch_workspace(ws_id) do
     case Ash.get(Workspace, ws_id) do
@@ -1150,6 +1037,7 @@ defmodule Arbiter.MCP.Tools do
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type),
+      auto_close: i.auto_close,
       assignee: i.assignee,
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
@@ -1161,7 +1049,17 @@ defmodule Arbiter.MCP.Tools do
       created_at: iso(i.created_at),
       updated_at: iso(i.updated_at)
     }
+    |> put_progress(i)
   end
+
+  # Include the child-progress rollup when the calcs are loaded (bead_show loads
+  # them). Omitted when not loaded so other serialize paths stay cheap.
+  defp put_progress(map, %Issue{child_total: t, child_closed: c})
+       when is_integer(t) and is_integer(c) do
+    Map.merge(map, %{child_total: t, child_closed: c, child_open: max(t - c, 0)})
+  end
+
+  defp put_progress(map, _i), do: map
 
   defp serialize_bead_summary(%Issue{} = i) do
     %{
@@ -1171,24 +1069,6 @@ defmodule Arbiter.MCP.Tools do
       priority: i.priority,
       difficulty: i.difficulty,
       issue_type: to_str(i.issue_type)
-    }
-  end
-
-  defp serialize_convoy(%Convoy{} = c) do
-    total = calc(c.total_issues)
-    closed = calc(c.closed_issues)
-
-    %{
-      id: c.id,
-      title: c.title,
-      status: to_str(c.status),
-      lifecycle: to_str(c.lifecycle),
-      total_issues: total,
-      closed_issues: closed,
-      open_issues: max(total - closed, 0),
-      closed_reason: c.closed_reason,
-      closed_at: iso(c.closed_at),
-      workspace_id: c.workspace_id
     }
   end
 
@@ -1286,9 +1166,6 @@ defmodule Arbiter.MCP.Tools do
 
   defp serialize_claim_result({:error, action, reason}),
     do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}
-
-  defp calc(n) when is_integer(n), do: n
-  defp calc(_), do: 0
 
   defp to_str(nil), do: nil
   defp to_str(a) when is_atom(a), do: Atom.to_string(a)

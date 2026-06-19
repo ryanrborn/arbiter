@@ -15,14 +15,14 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
     7. Close A.
     8. `Issue.ready/0` must include neither A nor B.
 
-  Plus a smaller convoy auto-close sanity check (gte-004 surface) — create a
-  system_managed convoy with one member, close the member, expect convoy
-  status :closed.
+  Plus a smaller parent-with-progress auto-close sanity check — create a parent
+  bead with `auto_close: true` and one `:parent_of` child, close the child,
+  expect the parent to auto-close.
   """
 
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Convoy, ConvoyMembership, Dependency, Issue, Workspace}
+  alias Arbiter.Beads.{Dependency, Issue, Workspace}
 
   describe "ready/0 transitions across a blocking dependency" do
     setup do
@@ -86,52 +86,83 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
     end
   end
 
-  describe "convoy auto-close (gte-004 surface)" do
+  describe "parent-with-progress auto-close" do
     setup do
-      {:ok, ws} = Ash.create(Workspace, %{name: "convoy-smoke", prefix: "cs"})
+      {:ok, ws} = Ash.create(Workspace, %{name: "parent-smoke", prefix: "ps"})
       {:ok, ws: ws}
     end
 
-    test "system_managed convoy auto-closes when its sole issue closes", %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "lone member", workspace_id: ws.id})
-
-      {:ok, convoy} =
-        Ash.create(Convoy, %{
-          title: "Solo convoy",
-          lifecycle: :system_managed,
+    test "an auto_close parent closes when its sole child closes", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{
+          title: "Epic",
+          issue_type: :epic,
+          auto_close: true,
           workspace_id: ws.id
         })
 
-      {:ok, _m} =
-        Ash.create(ConvoyMembership, %{
-          convoy_id: convoy.id,
-          issue_id: issue.id
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: child.id,
+          type: :parent_of
         })
 
-      {:ok, _closed_issue} = Ash.update(issue, %{}, action: :close)
+      {:ok, _closed_child} = Ash.update(child, %{}, action: :close)
 
-      reloaded =
-        Ash.get!(Convoy, convoy.id, load: [:total_issues, :closed_issues])
+      reloaded = Ash.get!(Issue, parent.id, load: [:child_total, :child_closed])
 
       assert reloaded.status == :closed,
-             "system_managed convoy with all members closed should auto-close (was #{inspect(reloaded.status)})"
+             "auto_close parent with all children closed should auto-close (was #{inspect(reloaded.status)})"
+
+      assert reloaded.child_total == 1
+      assert reloaded.child_closed == 1
     end
 
-    test "owned convoy does NOT auto-close even when all members close", %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "lone owned", workspace_id: ws.id})
+    test "a parent without auto_close does NOT close when its children close", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "Owned epic", issue_type: :epic, workspace_id: ws.id})
 
-      {:ok, convoy} =
-        Ash.create(Convoy, %{title: "Owned convoy", lifecycle: :owned, workspace_id: ws.id})
+      {:ok, child} = Ash.create(Issue, %{title: "child", workspace_id: ws.id})
 
-      {:ok, _m} =
-        Ash.create(ConvoyMembership, %{convoy_id: convoy.id, issue_id: issue.id})
+      {:ok, _dep} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: child.id,
+          type: :parent_of
+        })
 
-      {:ok, _closed_issue} = Ash.update(issue, %{}, action: :close)
+      {:ok, _closed_child} = Ash.update(child, %{}, action: :close)
 
-      reloaded = Ash.get!(Convoy, convoy.id)
+      reloaded = Ash.get!(Issue, parent.id)
 
       assert reloaded.status == :open,
-             "owned convoys require explicit closure; should still be open"
+             "a parent without auto_close requires explicit closure; should still be open"
+    end
+
+    test "an auto_close parent stays open while any child is still open", %{ws: ws} do
+      {:ok, parent} =
+        Ash.create(Issue, %{title: "Epic", auto_close: true, workspace_id: ws.id})
+
+      {:ok, c1} = Ash.create(Issue, %{title: "c1", workspace_id: ws.id})
+      {:ok, c2} = Ash.create(Issue, %{title: "c2", workspace_id: ws.id})
+
+      for c <- [c1, c2] do
+        {:ok, _} =
+          Ash.create(Dependency, %{from_issue_id: parent.id, to_issue_id: c.id, type: :parent_of})
+      end
+
+      {:ok, _} = Ash.update(c1, %{}, action: :close)
+
+      reloaded = Ash.get!(Issue, parent.id, load: [:child_total, :child_closed])
+
+      assert reloaded.status == :open,
+             "parent should stay open while child c2 is still open"
+
+      assert reloaded.child_total == 2
+      assert reloaded.child_closed == 1
     end
   end
 end

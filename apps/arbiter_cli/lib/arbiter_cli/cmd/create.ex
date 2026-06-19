@@ -3,7 +3,7 @@ defmodule ArbiterCli.Cmd.Create do
   `arb create <title> [--description ...] [--priority N] [--difficulty N]
                        [--type T] [--deps id1,id2] [--labels a,b]
                        [--assignee a] [--tracker-ref REF] [--no-tracker]
-                       [--target-branch NAME] [--vanguard <convoy-id>]
+                       [--target-branch NAME] [--parent <parent-id>]
                        [--ticket-only]`
 
   Creates a new issue in the resolved workspace (see `ArbiterCli.Workspace`).
@@ -34,10 +34,11 @@ defmodule ArbiterCli.Cmd.Create do
   one-line justification in the bead's description. Routing maps the value
   to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
-  `--vanguard <convoy-id>` attaches the new issue to an existing convoy
-  (vernacular: "Vanguard") immediately after creation. Like `--deps`, the bead
-  is durable even if the attach fails — the failure is surfaced and arb exits
-  non-zero.
+  `--parent <parent-id>` attaches the new issue as a child of an existing parent
+  bead immediately after creation, by adding a `parent_of` dependency edge
+  (`<parent-id> parent_of <new-id>`). The parent then rolls up child progress
+  and can auto-close. Like `--deps`, the bead is durable even if the attach
+  fails — the failure is surfaced and arb exits non-zero.
 
   When the workspace has a tracker configured (`config["tracker"]["type"] !=
   none`), the server **also creates a corresponding upstream issue** and
@@ -56,7 +57,7 @@ defmodule ArbiterCli.Cmd.Create do
       must have a tracker configured. Mutually exclusive with `--no-tracker` /
       `--local-only` (opposite intent).
       Honored: `--title`, `--description`, `--priority`, `--type`, `--assignee`.
-      Not honored (warning emitted): `--difficulty`, `--deps`, `--vanguard`,
+      Not honored (warning emitted): `--difficulty`, `--deps`, `--parent`,
       `--tracker-ref`, `--target-branch`, `--labels`.
 
   `--deps id1,id2` is a convenience that creates `blocks` dependencies for
@@ -88,7 +89,8 @@ defmodule ArbiterCli.Cmd.Create do
     ticket_only: :boolean,
     no_bead: :boolean,
     unclaimed: :boolean,
-    vanguard: :string,
+    parent: :string,
+    auto_close: :boolean,
     force: :boolean,
     json: :boolean
   ]
@@ -134,7 +136,7 @@ defmodule ArbiterCli.Cmd.Create do
       [
         {"--difficulty", opts[:difficulty]},
         {"--deps", opts[:deps]},
-        {"--vanguard", opts[:vanguard]},
+        {"--parent", opts[:parent]},
         {"--tracker-ref", opts[:tracker_ref]},
         {"--target-branch", opts[:target_branch]},
         {"--labels", opts[:labels]}
@@ -180,6 +182,7 @@ defmodule ArbiterCli.Cmd.Create do
       |> maybe_put("assignee", opts[:assignee])
       |> maybe_put("tracker_ref", opts[:tracker_ref])
       |> maybe_put("target_branch", opts[:target_branch])
+      |> maybe_put_flag("auto_close", opts[:auto_close] == true)
       |> maybe_put_flag("skip_upstream_create", skip_upstream?)
       |> maybe_put_flag("force", force?)
 
@@ -207,8 +210,8 @@ defmodule ArbiterCli.Cmd.Create do
       attach_deps(issue["id"], opts[:deps])
     end
 
-    if opts[:vanguard] do
-      attach_vanguard(issue["id"], opts[:vanguard])
+    if opts[:parent] do
+      attach_parent(issue["id"], opts[:parent])
     end
 
     Output.emit_issue(issue, mode)
@@ -248,18 +251,20 @@ defmodule ArbiterCli.Cmd.Create do
     end)
   end
 
-  # Attach the freshly-created issue to a convoy (vernacular: "Vanguard"). The
-  # bead is durable; a failed attach is surfaced and arb exits non-zero,
-  # mirroring `attach_deps/2`.
-  defp attach_vanguard(new_id, convoy_id) do
-    case Client.post("/api/convoys/" <> convoy_id <> "/members", %{"issue_id" => new_id}) do
+  # Attach the freshly-created issue as a child of an existing parent bead via a
+  # `parent_of` edge (`parent_id parent_of new_id`). The bead is durable; a
+  # failed attach is surfaced and arb exits non-zero, mirroring `attach_deps/2`.
+  defp attach_parent(new_id, parent_id) do
+    body = %{"from_issue_id" => parent_id, "to_issue_id" => new_id, "type" => "parent_of"}
+
+    case Client.post("/api/dependencies", body) do
       {:ok, _} ->
         :ok
 
       {:error, err} ->
         Output.die(%{
           err
-          | message: "failed to attach #{new_id} to #{convoy_id}: #{err.message}"
+          | message: "failed to attach #{new_id} to parent #{parent_id}: #{err.message}"
         })
     end
   end
