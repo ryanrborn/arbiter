@@ -457,6 +457,78 @@ defmodule Arbiter.UsageTest do
       assert ev.duration_ms >= 0
     end
 
+    test "captures tokens + derived cost + model from gemini stream-json result event" do
+      bead_id = "bd-gemini-sj-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-usage")
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-gemini-sj")
+
+      # Real gemini-cli stream-json shape (v0.45.0): init carries model +
+      # session_id; result carries snake_case stats with a per-model breakdown.
+      events = [
+        %{"type" => "init", "session_id" => "g-sess-1", "model" => "gemini-2.5-pro"},
+        %{"type" => "message", "role" => "assistant", "content" => "working\narb done"},
+        %{
+          "type" => "result",
+          "status" => "success",
+          "stats" => %{
+            "input_tokens" => 1_000_000,
+            "input" => 800_000,
+            "cached" => 200_000,
+            "output_tokens" => 500_000,
+            "total_tokens" => 1_500_000,
+            "duration_ms" => 4321,
+            "models" => %{
+              "gemini-2.5-pro" => %{
+                "input_tokens" => 1_000_000,
+                "input" => 800_000,
+                "cached" => 200_000,
+                "output_tokens" => 500_000,
+                "total_tokens" => 1_500_000
+              }
+            }
+          }
+        }
+      ]
+
+      {:ok, _port} =
+        Arbiter.Polecat.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(bead_id == ^bead_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      assert ev.provider == "gemini"
+      assert ev.model == "gemini-2.5-pro"
+      assert ev.tokens_in == 1_000_000
+      assert ev.tokens_out == 500_000
+      assert ev.cache_read_tokens == 200_000
+      # No cache-creation analogue on Gemini.
+      assert ev.cache_creation_tokens == nil
+      assert ev.duration_ms == 4321
+      assert ev.session_id == "g-sess-1"
+      # Cost is derived (CLI emits no dollar figure): pro 800k*1.25 + 200k*0.31
+      # + 500k*10 per 1M = 6.062.
+      assert_in_delta ev.cost_usd, 6.062, 1.0e-4
+      assert is_map(ev.raw)
+    end
+
     test "gemini reviewer session writes :review step with provider=gemini" do
       reviewer_id = "bd-gemini-rev-#{System.unique_integer([:positive])}#review"
 

@@ -213,6 +213,35 @@ defmodule Arbiter.Agents.GeminiTest do
       assert "--thinking-budget" in argv
       assert "8192" in argv
     end
+
+    test "gemini CLI path opts into --output-format stream-json", %{tmp: tmp} do
+      gemini_stub = Path.join(tmp, "gemini")
+      File.write!(gemini_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(gemini_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      assert ["sh", "-c", _exec, "sh", ^gemini_stub | rest] = argv
+      assert "--output-format" in rest
+      assert "stream-json" in rest
+      # The two are adjacent, in order.
+      assert chunk_after(rest, "--output-format") == "stream-json"
+    end
+
+    test "agy CLI path does NOT add --output-format (unsupported by the fork)", %{tmp: tmp} do
+      agy_stub = Path.join(tmp, "agy")
+      File.write!(agy_stub, "#!/bin/sh\nexit 0\n")
+      File.chmod!(agy_stub, 0o755)
+
+      assert {:ok, argv} = Gemini.default_argv("the prompt", [])
+      refute "--output-format" in argv
+      refute "stream-json" in argv
+    end
+  end
+
+  defp chunk_after(list, flag) do
+    list
+    |> Enum.drop_while(&(&1 != flag))
+    |> Enum.at(1)
   end
 
   describe "spawn_env/1" do
