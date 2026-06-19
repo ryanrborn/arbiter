@@ -150,11 +150,35 @@ defmodule Arbiter.Mergers.Github do
          ref: mr_ref,
          status: pr_status(pr),
          approved: approved?(reviews),
+         changes_requested: changes_requested?(reviews),
+         latest_review_id: latest_changes_requested_id(reviews),
          pipeline: pipeline,
          ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
          conflicting:
            Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
          url: Map.get(pr, "html_url") || ""
+       }}
+    end
+  end
+
+  @impl true
+  def list_review_feedback(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", [])
+           |> handle_json(),
+         {:ok, comments} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/comments", [])
+           |> handle_json() do
+      reviews = List.wrap(reviews)
+      comments = List.wrap(comments)
+
+      {:ok,
+       %{
+         changes_requested: changes_requested?(reviews),
+         latest_review_id: latest_changes_requested_id(reviews),
+         feedback: build_feedback(reviews, comments)
        }}
     end
   end
@@ -369,14 +393,89 @@ defmodule Arbiter.Mergers.Github do
   defp pr_status(%{"state" => "closed"}), do: :closed
   defp pr_status(_), do: :open
 
-  # approved when at least one APPROVED review exists and none are
-  # CHANGES_REQUESTED (per the bead's contract).
+  # Approved when the *latest* verdict per reviewer settles on APPROVED with no
+  # outstanding CHANGES_REQUESTED. Using the latest-per-reviewer state (rather
+  # than "any APPROVED ever") is what lets a re-review APPROVE clear an earlier
+  # CHANGES_REQUESTED that still lives in the PR's review history — the
+  # post-revise re-approval the Refinery relies on (bd-95lsjb).
   defp approved?(reviews) when is_list(reviews) do
-    states = Enum.map(reviews, &Map.get(&1, "state"))
+    states = latest_review_states(reviews)
     "APPROVED" in states and "CHANGES_REQUESTED" not in states
   end
 
   defp approved?(_), do: false
+
+  # True when the latest verdict from any reviewer is CHANGES_REQUESTED — the
+  # signal the Refinery turns into an auto-revise pass.
+  defp changes_requested?(reviews) when is_list(reviews) do
+    "CHANGES_REQUESTED" in latest_review_states(reviews)
+  end
+
+  defp changes_requested?(_), do: false
+
+  # The verdict state of each reviewer's most recent verdict review. GitHub
+  # returns reviews in chronological order, so the last entry per author is the
+  # current one. Non-verdict reviews (COMMENTED, PENDING) don't change approval
+  # state and are dropped; DISMISSED is retained so a dismissed verdict can
+  # supersede an earlier APPROVED/CHANGES_REQUESTED (and is then itself ignored
+  # by the approve/changes checks above).
+  defp latest_review_states(reviews) do
+    reviews
+    |> Enum.filter(&(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]))
+    |> Enum.group_by(&review_author/1)
+    |> Enum.map(fn {_author, group} -> group |> List.last() |> Map.get("state") end)
+  end
+
+  defp review_author(review), do: get_in(review, ["user", "login"])
+
+  # An opaque debounce handle for the most recent CHANGES_REQUESTED review:
+  # its numeric id when present, else its submitted_at timestamp. nil when no
+  # CHANGES_REQUESTED review exists.
+  defp latest_changes_requested_id(reviews) when is_list(reviews) do
+    reviews
+    |> Enum.filter(&(Map.get(&1, "state") == "CHANGES_REQUESTED"))
+    |> List.last()
+    |> case do
+      nil -> nil
+      review -> Map.get(review, "id") || Map.get(review, "submitted_at")
+    end
+  end
+
+  defp latest_changes_requested_id(_), do: nil
+
+  # Assemble the feedback list the revise worker is briefed with: every review
+  # that carries a non-blank summary body, plus every inline review comment.
+  defp build_feedback(reviews, comments) do
+    review_items =
+      reviews
+      |> Enum.filter(fn r -> present_body?(Map.get(r, "body")) end)
+      |> Enum.map(fn r ->
+        %{
+          kind: :review,
+          author: review_author(r),
+          state: Map.get(r, "state"),
+          body: Map.get(r, "body")
+        }
+      end)
+
+    comment_items =
+      comments
+      |> Enum.filter(fn c -> present_body?(Map.get(c, "body")) end)
+      |> Enum.map(fn c ->
+        %{
+          kind: :comment,
+          author: get_in(c, ["user", "login"]),
+          path: Map.get(c, "path"),
+          line: Map.get(c, "line") || Map.get(c, "original_line"),
+          body: Map.get(c, "body")
+        }
+      end)
+
+    review_items ++ comment_items
+  end
+
+  defp present_body?(body) when is_binary(body), do: String.trim(body) != ""
+  defp present_body?(_), do: false
 
   # Fetch CI status via the check-runs API for the head commit SHA.
   # Returns nil when the SHA is absent or no check-runs exist (no CI configured)

@@ -179,6 +179,12 @@ defmodule Arbiter.Polecat.Sling do
          {:ok, context} <- ResumeContext.build(bead, worktree_path, target_branch) do
       prior_run_id = latest_run_id(bead_id)
 
+      # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
+      # reviewer's PR-side feedback. Prepend it to the git-derived resume
+      # briefing so the fresh acolyte addresses the feedback first, then
+      # continues from the preserved outpost.
+      context = prepend_revise_feedback(context, opts)
+
       # Free the registry slot: a stopped acolyte's polecat lingers in :failed,
       # still registered under bead_id. Without stopping it, sling/2's
       # start_polecat would hit {:already_started, pid} and attach to the dead
@@ -196,6 +202,13 @@ defmodule Arbiter.Polecat.Sling do
         |> Keyword.put(:existing_pr_ref, bead.pr_ref)
 
       sling(bead_id, resume_opts)
+    end
+  end
+
+  defp prepend_revise_feedback(context, opts) do
+    case Keyword.get(opts, :revise_feedback) do
+      briefing when is_binary(briefing) and briefing != "" -> briefing <> (context || "")
+      _ -> context
     end
   end
 
