@@ -81,6 +81,8 @@ defmodule Arbiter.Test.StubMerger do
       approved: false,
       ci_clean: false,
       conflicting: false,
+      changes_requested: false,
+      latest_review_id: nil,
       pipeline: nil
     }
 
@@ -123,6 +125,10 @@ defmodule Arbiter.Test.StubMerger do
 
   @impl true
   def submit_review(_ref, _verdict, _body, _opts), do: {:ok, %{}}
+
+  @impl true
+  def list_review_feedback(_ref),
+    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
 
   # ---- internals ----------------------------------------------------------
 
