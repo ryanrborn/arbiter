@@ -1,11 +1,11 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
   `arb dispatch <bead-id> [<repo>] [--provider claude|gemini | --no-agent] [--model <name>]`
-  — spawn a polecat to work on a bead.
+  — spawn a worker to work on a bead.
 
-  POSTs to `/api/polecats/dispatch`. The server transitions the bead to
-  `:in_progress`, starts a polecat GenServer under
-  `Arbiter.Polecat.Supervisor`, attaches `Arbiter.Workflows.Work` via
+  POSTs to `/api/workers/dispatch`. The server transitions the bead to
+  `:in_progress`, starts a worker GenServer under
+  `Arbiter.Worker.Supervisor`, attaches `Arbiter.Workflows.Work` via
   the WorkflowMachine, and spawns an agent subprocess in the worktree.
 
   By default (no worker flag) the server reads the workspace's `agent.type`
@@ -76,7 +76,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
 
-      case Client.post("/api/polecats/dispatch", body) do
+      case Client.post("/api/workers/dispatch", body) do
         {:ok, payload} -> emit(payload, mode)
         {:error, err} -> Output.die(err)
       end
@@ -96,13 +96,13 @@ defmodule ArbiterCli.Cmd.Dispatch do
 
   defp emit(payload, :text) do
     bead = payload["bead"] || %{}
-    polecat = payload["polecat"] || %{}
+    worker = payload["worker"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Dispatch:")
     IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
     IO.puts("  Status:   #{bead["status"]}")
-    IO.puts("  Worker:  #{polecat["pid"]}")
+    IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
     case payload["worktree_path"] do

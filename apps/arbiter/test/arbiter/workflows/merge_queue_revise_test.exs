@@ -47,7 +47,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
           send(pid, {:revise_called, args})
 
           case result do
-            :ok -> {:ok, %{polecat_pid: pid, worktree_path: "/tmp/fake", branch: "x"}}
+            :ok -> {:ok, %{worker_pid: pid, worktree_path: "/tmp/fake", branch: "x"}}
             other -> other
           end
 

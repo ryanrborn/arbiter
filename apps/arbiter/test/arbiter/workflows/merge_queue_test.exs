@@ -5,8 +5,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
-  alias Arbiter.Polecat.TargetBranch
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Worker.TargetBranch
+  alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueue
 
   # Stub worktree module used in tests — avoids real filesystem git calls.
@@ -366,7 +366,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       workspace: ws,
       bead: bead
     } do
-      # The bead was worked in dolphin/repo — recorded on its polecat run, exactly
+      # The bead was worked in dolphin/repo — recorded on its worker run, exactly
       # the repo Dispatch cut the worktree with.
       :ok = record_run(bead, "dolphin/repo")
       capture_base_stub(self())
@@ -777,7 +777,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   end
 
   # bd-d1jp4r: when the Watchdog merges a PR before the MergeQueue processes the
-  # {:polecat_done, bead_id} event, advance_status must close the bead on the
+  # {:worker_done, bead_id} event, advance_status must close the bead on the
   # first tick rather than stalling at :awaiting_approval forever. This happens
   # because a merged GitHub PR returns status: :merged but no GitHub review
   # (the ReviewGate approved in-process), so approved: false and ci_clean: false.
@@ -900,7 +900,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   describe "PubSub" do
     @tag workspace_config: @ws_github
-    test "{:polecat_done, bead_id} message triggers enqueue", %{workspace: ws, bead: bead} do
+    test "{:worker_done, bead_id} message triggers enqueue", %{workspace: ws, bead: bead} do
       test_pid = self()
 
       stub(fn conn ->
@@ -913,7 +913,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {pid, _name} = start_merge_queue(ws)
-      send(pid, {:polecat_done, bead.id})
+      send(pid, {:worker_done, bead.id})
 
       assert_receive :pr_open_called, 500
 

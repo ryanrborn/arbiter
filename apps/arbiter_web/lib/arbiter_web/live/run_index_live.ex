@@ -1,22 +1,22 @@
 defmodule ArbiterWeb.RunIndexLive do
   @moduledoc """
-  Index of every worker run at `/polecats/history` — the "See all" target for
+  Index of every worker run at `/workers/history` — the "See all" target for
   the dashboard's completed-workers section.
 
-  Lists all persisted `Arbiter.Polecats.Run` records (the durable post-mortem
-  of each polecat execution) with a status filter and paging, newest first.
+  Lists all persisted `Arbiter.Workers.Run` records (the durable post-mortem
+  of each worker execution) with a status filter and paging, newest first.
   Each row links to the run detail page. Re-renders live on
-  `:polecat_lifecycle` events so a freshly-finished run appears without a
+  `:worker_lifecycle` events so a freshly-finished run appears without a
   refresh.
   """
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Workers.Run
   alias ArbiterWeb.Paging
   require Ash.Query
 
-  @polecats_topic "polecats"
+  @workers_topic "workers"
 
   @filters [
     {"All", :all},
@@ -27,7 +27,7 @@ defmodule ArbiterWeb.RunIndexLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Arbiter.PubSub, @polecats_topic)
+    if connected?(socket), do: Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
 
     {:ok,
      socket
@@ -47,7 +47,7 @@ defmodule ArbiterWeb.RunIndexLive do
   end
 
   @impl true
-  def handle_info({:polecat_lifecycle, _event, _snap}, socket), do: {:noreply, refresh(socket)}
+  def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, refresh(socket)}
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   defp refresh(socket) do
@@ -73,8 +73,8 @@ defmodule ArbiterWeb.RunIndexLive do
 
   defp parse_status(_), do: :all
 
-  defp run_path(:all, page), do: ~p"/polecats/history?#{%{page: page}}"
-  defp run_path(status, page), do: ~p"/polecats/history?#{%{status: status, page: page}}"
+  defp run_path(:all, page), do: ~p"/workers/history?#{%{page: page}}"
+  defp run_path(status, page), do: ~p"/workers/history?#{%{status: status, page: page}}"
 
   @impl true
   def render(assigns) do
@@ -117,7 +117,7 @@ defmodule ArbiterWeb.RunIndexLive do
                 <tbody>
                   <tr :for={r <- @runs} class="hover:bg-base-300/40 transition-colors">
                     <td>
-                      <.link navigate={~p"/polecats/history/#{r.id}"} class="link link-hover">
+                      <.link navigate={~p"/workers/history/#{r.id}"} class="link link-hover">
                         <code class="text-xs">{r.bead_id}</code>
                       </.link>
                     </td>

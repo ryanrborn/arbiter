@@ -4,11 +4,11 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
   import Phoenix.LiveViewTest
 
   alias Arbiter.Beads.{Dependency, Issue, Workspace}
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
 
   setup do
-    for snap <- Polecat.list_children() do
-      Polecat.stop(snap.bead_id)
+    for snap <- Worker.list_children() do
+      Worker.stop(snap.bead_id)
     end
 
     Process.sleep(50)
@@ -58,9 +58,9 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
       assert html =~ "B"
     end
 
-    test "shows polecat info inline when one is running", %{conn: conn, ws: ws} do
+    test "shows worker info inline when one is running", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "polly", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
+      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo")
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
 
@@ -69,20 +69,20 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
       assert html =~ "view full output"
     end
 
-    # Regression for bd-bb9fev: a polecat snapshot without `:claude_session?`
+    # Regression for bd-bb9fev: a worker snapshot without `:claude_session?`
     # used to crash render/1 with BadBooleanError because the strict `and`
     # operator rejected a nil left operand.
-    test "renders when the polecat snapshot has no :claude_session? field",
+    test "renders when the worker snapshot has no :claude_session? field",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no-claude", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
+      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo")
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
       assert html =~ bead.id
       assert html =~ "Worker"
     end
 
-    test "tells the user when no polecat is running", %{conn: conn, ws: ws} do
+    test "tells the user when no worker is running", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "lonely", workspace_id: ws.id})
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")

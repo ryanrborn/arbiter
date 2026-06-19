@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.Work do
   @moduledoc """
-  The default polecat work workflow. Port of `mol-polecat-work` from the Go
+  The default worker work workflow. Port of `mol-worker-work` from the Go
   Gas Town.
 
   Steps: `:load_context`, `:design`, `:implement`, `:pre_verify`, `:submit`.
@@ -24,7 +24,7 @@ defmodule Arbiter.Workflows.Work do
   `run/2` (via `Arbiter.Workflow.run/2`) threads a state map through each
   step. Required input vars (the state must include these at start):
 
-    * `:bead_id` — string. The bead this polecat is working on.
+    * `:bead_id` — string. The bead this worker is working on.
     * `:worktree_path` — string. Where the branch lives.
     * `:repo` — string. The repo / project key.
 
@@ -43,7 +43,7 @@ defmodule Arbiter.Workflows.Work do
   This surfaces any unread direction from the Admiral (`arb message <bead-id>
   <text>`) or flags from sibling workers, and marks them read. The Driver
   does not poll the mailbox — it is the worker's responsibility via the CLI.
-  See `Arbiter.Polecat.Dispatch.prompt_for/1` for where this is wired into the
+  See `Arbiter.Worker.Dispatch.prompt_for/1` for where this is wired into the
   Claude prompt template.
   """
 
@@ -105,7 +105,7 @@ defmodule Arbiter.Workflows.Work do
   end
 
   def run_step(:design, state) do
-    # Phase 2: placeholder. Real design work happens inside the polecat's
+    # Phase 2: placeholder. Real design work happens inside the worker's
     # Claude session, not here. This step exists so the workflow graph is
     # complete and downstream steps' needs: are satisfied.
     {:ok, Map.put(state, :design_done, true)}

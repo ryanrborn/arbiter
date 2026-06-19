@@ -9,7 +9,7 @@ defmodule Arbiter.MCP.ToolsTest do
   alias Arbiter.MCP.Scope
   alias Arbiter.MCP.Tools
   alias Arbiter.Messages.Message
-  alias Arbiter.Polecat
+  alias Arbiter.Worker
 
   require Ash.Query
 
@@ -17,23 +17,23 @@ defmodule Arbiter.MCP.ToolsTest do
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-tools-ws", prefix: "mcp"})
     {:ok, bead} = Ash.create(Issue, %{title: "the bound bead", workspace_id: ws.id})
 
-    polecat = %Scope{tier: :polecat, workspace_id: ws.id, bead_id: bead.id, repo: "shipyard"}
+    worker = %Scope{tier: :worker, workspace_id: ws.id, bead_id: bead.id, repo: "shipyard"}
     coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
 
-    {:ok, ws: ws, bead: bead, polecat: polecat, coordinator: coordinator}
+    {:ok, ws: ws, bead: bead, worker: worker, coordinator: coordinator}
   end
 
   describe "bead_show/2" do
-    test "a polecat reads its own bead (id defaulted from the token)", ctx do
-      assert {:ok, data} = Tools.bead_show(ctx.polecat, %{})
+    test "a worker reads its own bead (id defaulted from the token)", ctx do
+      assert {:ok, data} = Tools.bead_show(ctx.worker, %{})
       assert data.id == ctx.bead.id
       assert data.title == "the bound bead"
       assert data.status == "open"
     end
 
-    test "a polecat may not read another bead", ctx do
+    test "a worker may not read another bead", ctx do
       {:ok, other} = Ash.create(Issue, %{title: "someone else", workspace_id: ctx.ws.id})
-      assert {:error, {:unauthorized, _}} = Tools.bead_show(ctx.polecat, %{"id" => other.id})
+      assert {:error, {:unauthorized, _}} = Tools.bead_show(ctx.worker, %{"id" => other.id})
     end
 
     test "a coordinator reads any bead in its workspace", ctx do
@@ -95,17 +95,17 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "inbox_check/2" do
-    test "returns the unread mailbox for the polecat's bead and marks it read", ctx do
+    test "returns the unread mailbox for the worker's bead and marks it read", ctx do
       {:ok, _} = Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.bead.id, body: "ping"})
 
       assert {:ok, %{messages: [msg], count: 1, bead_id: bead_id}} =
-               Tools.inbox_check(ctx.polecat, %{})
+               Tools.inbox_check(ctx.worker, %{})
 
       assert bead_id == ctx.bead.id
       assert msg.body == "ping"
 
       # Second check is empty — the first marked them read.
-      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.polecat, %{})
+      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
     end
   end
 
@@ -151,9 +151,9 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
     end
 
-    test "polecat tier is denied (catalog-level gating)", ctx do
+    test "worker tier is denied (catalog-level gating)", ctx do
       assert {:rpc_error, -32_003, message} =
-               Catalog.call(ctx.polecat, "coordinator_inbox", %{})
+               Catalog.call(ctx.worker, "coordinator_inbox", %{})
 
       assert message =~ "not permitted"
     end
@@ -161,7 +161,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "workspace_show/2" do
     test "returns the scope's own workspace config + resolved security posture", ctx do
-      assert {:ok, data} = Tools.workspace_show(ctx.polecat, %{})
+      assert {:ok, data} = Tools.workspace_show(ctx.worker, %{})
       assert data.id == ctx.ws.id
       assert data.prefix == "mcp"
       assert is_map(data.config)
@@ -170,9 +170,9 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "bead_update_progress/2" do
-    test "a polecat records qa/deployment notes on its own bead", ctx do
+    test "a worker records qa/deployment notes on its own bead", ctx do
       assert {:ok, data} =
-               Tools.bead_update_progress(ctx.polecat, %{
+               Tools.bead_update_progress(ctx.worker, %{
                  "qa_notes" => "verify the login flow",
                  "deployment_notes" => "None"
                })
@@ -184,10 +184,10 @@ defmodule Arbiter.MCP.ToolsTest do
       assert reloaded.qa_notes == "verify the login flow"
     end
 
-    test "a polecat records pr_body on its own bead (bd-53xrmi)", ctx do
+    test "a worker records pr_body on its own bead (bd-53xrmi)", ctx do
       body = "## Summary\nWorker-authored.\n\n## Test plan\n- [x] mix test"
 
-      assert {:ok, data} = Tools.bead_update_progress(ctx.polecat, %{"pr_body" => body})
+      assert {:ok, data} = Tools.bead_update_progress(ctx.worker, %{"pr_body" => body})
       assert data.pr_body == body
 
       {:ok, reloaded} = Ash.get(Issue, ctx.bead.id)
@@ -196,21 +196,21 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "ignores non-progress fields (cannot flip status)", ctx do
       assert {:ok, data} =
-               Tools.bead_update_progress(ctx.polecat, %{"notes" => "wip", "status" => "closed"})
+               Tools.bead_update_progress(ctx.worker, %{"notes" => "wip", "status" => "closed"})
 
       assert data.status == "open"
       assert data.notes == "wip"
     end
 
     test "requires at least one progress field", ctx do
-      assert {:error, {:invalid, _}} = Tools.bead_update_progress(ctx.polecat, %{})
+      assert {:error, {:invalid, _}} = Tools.bead_update_progress(ctx.worker, %{})
     end
 
-    test "a polecat may not progress another bead", ctx do
+    test "a worker may not progress another bead", ctx do
       {:ok, other} = Ash.create(Issue, %{title: "not yours", workspace_id: ctx.ws.id})
 
       assert {:error, {:unauthorized, _}} =
-               Tools.bead_update_progress(ctx.polecat, %{"id" => other.id, "notes" => "x"})
+               Tools.bead_update_progress(ctx.worker, %{"id" => other.id, "notes" => "x"})
     end
   end
 
@@ -407,16 +407,16 @@ defmodule Arbiter.MCP.ToolsTest do
       assert inbox_msg.body == "pick this up next"
     end
 
-    test "a polecat raises a flag from its own bead to a sibling", ctx do
+    test "a worker raises a flag from its own bead to a sibling", ctx do
       {:ok, sibling} = Ash.create(Issue, %{title: "sibling", workspace_id: ctx.ws.id})
 
       assert {:ok, msg} =
-               Tools.message_send(ctx.polecat, %{
+               Tools.message_send(ctx.worker, %{
                  "bead_id" => sibling.id,
                  "body" => "heads up — the API shape changed"
                })
 
-      # The sender identity is the polecat's own bead, set from the scope — not
+      # The sender identity is the worker's own bead, set from the scope — not
       # spoofable by the client.
       assert msg.kind == "flag"
       assert msg.from_ref == ctx.bead.id
@@ -459,14 +459,14 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "notify_list/2" do
     test "lists recent notifications scoped to the workspace (both tiers)", ctx do
-      {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a polecat finished"})
+      {:ok, _} = Message.notify(%{workspace_id: ctx.ws.id, body: "a worker finished"})
 
       assert {:ok, %{notifications: [n], count: 1}} = Tools.notify_list(ctx.coordinator, %{})
-      assert n.body == "a polecat finished"
+      assert n.body == "a worker finished"
       assert n.kind == "notification"
 
-      # A polecat sees the same workspace feed.
-      assert {:ok, %{count: 1}} = Tools.notify_list(ctx.polecat, %{})
+      # A worker sees the same workspace feed.
+      assert {:ok, %{count: 1}} = Tools.notify_list(ctx.worker, %{})
     end
 
     test "does not leak notifications from another workspace", ctx do
@@ -528,26 +528,26 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "polecat_resume/2 + polecat_review/2 (dispatch-recursion guardrail, §4.3)" do
+  describe "worker_resume/2 + worker_review/2 (dispatch-recursion guardrail, §4.3)" do
     test "resume refuses a coordinator scope without can_dispatch", ctx do
       no_dispatch = %{ctx.coordinator | can_dispatch: false}
 
       assert {:error, {:unauthorized, _}} =
-               Tools.polecat_resume(no_dispatch, %{"bead_id" => ctx.bead.id})
+               Tools.worker_resume(no_dispatch, %{"bead_id" => ctx.bead.id})
     end
 
     test "review refuses a coordinator scope without can_dispatch", ctx do
       no_dispatch = %{ctx.coordinator | can_dispatch: false}
 
       assert {:error, {:unauthorized, _}} =
-               Tools.polecat_review(no_dispatch, %{"bead_id" => ctx.bead.id})
+               Tools.worker_review(no_dispatch, %{"bead_id" => ctx.bead.id})
     end
 
     test "resume refuses once the depth limit is reached", ctx do
       at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
 
       assert {:error, {:unauthorized, msg}} =
-               Tools.polecat_resume(at_limit, %{"bead_id" => ctx.bead.id})
+               Tools.worker_resume(at_limit, %{"bead_id" => ctx.bead.id})
 
       assert msg =~ "depth"
     end
@@ -557,7 +557,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
 
       assert {:error, {:not_found, _}} =
-               Tools.polecat_review(ctx.coordinator, %{"bead_id" => foreign.id})
+               Tools.worker_review(ctx.coordinator, %{"bead_id" => foreign.id})
     end
 
     test "resume surfaces the no-worktree error for a bead never slung", ctx do
@@ -565,40 +565,40 @@ defmodule Arbiter.MCP.ToolsTest do
 
       # can_dispatch + in-workspace + below depth, but no preserved worktree exists.
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_resume(ctx.coordinator, %{"bead_id" => bead.id, "repo" => "test/repo"})
+               Tools.worker_resume(ctx.coordinator, %{"bead_id" => bead.id, "repo" => "test/repo"})
 
       assert msg =~ "worktree" or msg =~ "repo"
     end
   end
 
-  describe "polecat_stop/2" do
-    test "stops a running polecat in the workspace", ctx do
+  describe "worker_stop/2" do
+    test "stops a running worker in the workspace", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "stop target", workspace_id: ctx.ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
-      on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
+      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(bead.id, :normal) end)
 
       assert {:ok, %{bead_id: bead_id, stopped: true}} =
-               Tools.polecat_stop(ctx.coordinator, %{"bead_id" => bead.id})
+               Tools.worker_stop(ctx.coordinator, %{"bead_id" => bead.id})
 
       assert bead_id == bead.id
     end
 
-    test "a bead with no live polecat is reported not-found", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "no polecat", workspace_id: ctx.ws.id})
+    test "a bead with no live worker is reported not-found", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "no worker", workspace_id: ctx.ws.id})
 
       assert {:error, {:not_found, _}} =
-               Tools.polecat_stop(ctx.coordinator, %{"bead_id" => bead.id})
+               Tools.worker_stop(ctx.coordinator, %{"bead_id" => bead.id})
     end
 
-    test "cannot stop a polecat for a bead in another workspace (not-found)", ctx do
+    test "cannot stop a worker for a bead in another workspace (not-found)", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "st-other", prefix: "sto"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
 
-      {:ok, pid} = Polecat.start(bead_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
-      on_exit(fn -> Process.alive?(pid) && Polecat.stop(foreign.id, :normal) end)
+      {:ok, pid} = Worker.start(bead_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(foreign.id, :normal) end)
 
       assert {:error, {:not_found, _}} =
-               Tools.polecat_stop(ctx.coordinator, %{"bead_id" => foreign.id})
+               Tools.worker_stop(ctx.coordinator, %{"bead_id" => foreign.id})
     end
   end
 
@@ -616,19 +616,19 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "polecat_dispatch/2 (dispatch-recursion guardrail, §4.3)" do
+  describe "worker_dispatch/2 (dispatch-recursion guardrail, §4.3)" do
     test "refuses a coordinator scope without can_dispatch", ctx do
       no_dispatch = %{ctx.coordinator | can_dispatch: false}
 
       assert {:error, {:unauthorized, _}} =
-               Tools.polecat_dispatch(no_dispatch, %{"bead_id" => ctx.bead.id})
+               Tools.worker_dispatch(no_dispatch, %{"bead_id" => ctx.bead.id})
     end
 
     test "refuses once the depth limit is reached", ctx do
       at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
 
       assert {:error, {:unauthorized, msg}} =
-               Tools.polecat_dispatch(at_limit, %{"bead_id" => ctx.bead.id})
+               Tools.worker_dispatch(at_limit, %{"bead_id" => ctx.bead.id})
 
       assert msg =~ "depth"
     end
@@ -638,20 +638,20 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
 
       assert {:error, {:not_found, _}} =
-               Tools.polecat_dispatch(ctx.coordinator, %{"bead_id" => foreign.id})
+               Tools.worker_dispatch(ctx.coordinator, %{"bead_id" => foreign.id})
     end
 
     test "parks the bead in_progress and reports the child depth", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "to dispatch", workspace_id: ctx.ws.id})
 
       assert {:ok, data} =
-               Tools.polecat_dispatch(ctx.coordinator, %{"bead_id" => bead.id, "repo" => "test/repo"})
+               Tools.worker_dispatch(ctx.coordinator, %{"bead_id" => bead.id, "repo" => "test/repo"})
 
       assert data.bead.status == "in_progress"
       assert data.claude_started == false
       assert data.depth == ctx.coordinator.depth + 1
 
-      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+      on_exit(fn -> Worker.stop(bead.id, :normal) end)
     end
 
     # `provider` (and the deprecated `with_claude` alias) take the real-work
@@ -663,7 +663,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, bead} = Ash.create(Issue, %{title: "gem dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_dispatch(ctx.coordinator, %{
+               Tools.worker_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "provider" => "gemini",
                  "repo" => "test/repo"
@@ -671,14 +671,14 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert msg =~ "repo"
 
-      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+      on_exit(fn -> Worker.stop(bead.id, :normal) end)
     end
 
     test "provider: \"claude\" takes the real-work path (not a park)", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "claude dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_dispatch(ctx.coordinator, %{
+               Tools.worker_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "provider" => "claude",
                  "repo" => "test/repo"
@@ -686,14 +686,14 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert msg =~ "repo"
 
-      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+      on_exit(fn -> Worker.stop(bead.id, :normal) end)
     end
 
     test "the deprecated with_claude: true alias still dispatches a worker", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "alias dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_dispatch(ctx.coordinator, %{
+               Tools.worker_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "with_claude" => true,
                  "repo" => "test/repo"
@@ -701,53 +701,53 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert msg =~ "repo"
 
-      on_exit(fn -> Polecat.stop(bead.id, :normal) end)
+      on_exit(fn -> Worker.stop(bead.id, :normal) end)
     end
   end
 
-  describe "polecat_list/2" do
-    test "returns an empty list when no polecats are running in the workspace", ctx do
-      assert {:ok, %{polecats: [], count: 0}} = Tools.polecat_list(ctx.coordinator, %{})
+  describe "worker_list/2" do
+    test "returns an empty list when no workers are running in the workspace", ctx do
+      assert {:ok, %{workers: [], count: 0}} = Tools.worker_list(ctx.coordinator, %{})
     end
 
-    test "returns active polecats scoped to the coordinator's workspace", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "polecat-list target", workspace_id: ctx.ws.id})
+    test "returns active workers scoped to the coordinator's workspace", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "worker-list target", workspace_id: ctx.ws.id})
 
-      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
-      on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
+      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(bead.id, :normal) end)
 
-      assert {:ok, %{polecats: polecats, count: count}} = Tools.polecat_list(ctx.coordinator, %{})
+      assert {:ok, %{workers: workers, count: count}} = Tools.worker_list(ctx.coordinator, %{})
       assert count >= 1
-      assert Enum.any?(polecats, &(&1.bead_id == bead.id))
+      assert Enum.any?(workers, &(&1.bead_id == bead.id))
 
-      entry = Enum.find(polecats, &(&1.bead_id == bead.id))
+      entry = Enum.find(workers, &(&1.bead_id == bead.id))
       assert is_binary(entry.repo)
       assert is_binary(entry.status)
       assert entry.repo == "test/repo"
     end
 
-    test "does not include polecats from another workspace", ctx do
+    test "does not include workers from another workspace", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})
 
-      {:ok, _pid} = Polecat.start(bead_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
-      on_exit(fn -> Polecat.stop(foreign.id, :normal) end)
+      {:ok, _pid} = Worker.start(bead_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+      on_exit(fn -> Worker.stop(foreign.id, :normal) end)
 
-      assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
-      refute Enum.any?(polecats, &(&1.bead_id == foreign.id))
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      refute Enum.any?(workers, &(&1.bead_id == foreign.id))
     end
 
-    test "surfaces the provider/model from the polecat's routing config", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "gemini polecat", workspace_id: ctx.ws.id})
+    test "surfaces the provider/model from the worker's routing config", ctx do
+      {:ok, bead} = Ash.create(Issue, %{title: "gemini worker", workspace_id: ctx.ws.id})
 
-      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
-      on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
+      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(bead.id, :normal) end)
 
       # Stamp the routing config the way Dispatch does at dispatch time.
-      :ok = Polecat.report(pid, :routing_config, %{provider: "gemini", model: "gemini-2.5-pro"})
+      :ok = Worker.report(pid, :routing_config, %{provider: "gemini", model: "gemini-2.5-pro"})
 
-      assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
-      entry = Enum.find(polecats, &(&1.bead_id == bead.id))
+      assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
+      entry = Enum.find(workers, &(&1.bead_id == bead.id))
 
       assert entry.provider == "gemini"
       assert entry.model == "gemini-2.5-pro"
@@ -928,17 +928,17 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.bead_create(ctx.coordinator, %{"title" => "x", "workspace" => other_ws.id})
     end
 
-    test "a polecat naming a different workspace is unauthorized", ctx do
+    test "a worker naming a different workspace is unauthorized", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "pc-other-ws", prefix: "pco"})
 
       assert {:error, {:unauthorized, _}} =
-               Tools.bead_show(ctx.polecat, %{"id" => ctx.bead.id, "workspace" => other_ws.id})
+               Tools.bead_show(ctx.worker, %{"id" => ctx.bead.id, "workspace" => other_ws.id})
     end
   end
 
   describe "Catalog.call/3 dispatch" do
     test "routes an authorized call to its handler and returns structured data", ctx do
-      assert {:ok, data} = Catalog.call(ctx.polecat, "bead_show", %{})
+      assert {:ok, data} = Catalog.call(ctx.worker, "bead_show", %{})
       assert data.id == ctx.bead.id
     end
 

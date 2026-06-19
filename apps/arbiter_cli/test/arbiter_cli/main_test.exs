@@ -39,10 +39,10 @@ defmodule ArbiterCli.MainTest do
       assert err =~ "unknown command: isue"
     end
 
-    test "themed resource names are no longer aliased" do
-      {_out, err, code} = capture(fn -> Main.main(["polecat"]) end)
-      assert code == 2
-      assert err =~ "unknown command: polecat"
+    test "worker is now a real command — not an unknown themed alias" do
+      {_out, err, code} = capture(fn -> Main.main(["worker"]) end)
+      assert code == 1
+      assert err =~ "worker requires a subcommand"
     end
   end
 end

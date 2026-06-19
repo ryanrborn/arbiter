@@ -12,16 +12,16 @@ defmodule Arbiter.Events do
   |-----------------|--------------------------------------------------------|
   | `inbox`         | A message arrives in the coordinator's mailbox          |
   | `review_gate`      | A review_gate escalation requires Admiral ruling           |
-  | `polecat_failed`| An worker stops unexpectedly (status → failed)         |
-  | `polecat_done`  | An worker completes (status → completed)               |
+  | `worker_failed`| An worker stops unexpectedly (status → failed)         |
+  | `worker_done`  | An worker completes (status → completed)               |
   | `bead_state`    | Any bead FSM transition (noisier — opt-in only)         |
 
   ## Broadcast hooks
 
   Called from:
-    * `Arbiter.Polecat.fail_now/2` and `fail_stopped/2` → `:polecat_failed`
-    * `Arbiter.Polecat.broadcast_done/1` → `:polecat_done`
-    * `Arbiter.Polecat.escalate_review_gate/3` → `:review_gate`
+    * `Arbiter.Worker.fail_now/2` and `fail_stopped/2` → `:worker_failed`
+    * `Arbiter.Worker.broadcast_done/1` → `:worker_done`
+    * `Arbiter.Worker.escalate_review_gate/3` → `:review_gate`
     * `Arbiter.Messages.Message.broadcast_new/1` → `:inbox` (admiral-addressed only)
     * `Arbiter.Beads.Issue.broadcast_lifecycle/2` → `:bead_state`
 
@@ -30,7 +30,7 @@ defmodule Arbiter.Events do
 
   require Logger
 
-  @valid_topics ~w(inbox review_gate polecat_failed polecat_done bead_state)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done bead_state)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics
@@ -41,7 +41,7 @@ defmodule Arbiter.Events do
   @doc """
   Broadcast an event on the workspace's event stream PubSub topic.
 
-  `event_topic` is one of the valid topic strings (e.g. `"polecat_failed"`).
+  `event_topic` is one of the valid topic strings (e.g. `"worker_failed"`).
   `payload` is merged with `topic` and `at` (ISO-8601 timestamp) before broadcasting.
   Best-effort: PubSub failures are swallowed.
   """

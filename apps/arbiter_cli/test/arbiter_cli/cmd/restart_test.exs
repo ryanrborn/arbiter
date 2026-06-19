@@ -5,7 +5,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
   alias ArbiterCli.Cmd.Restart
 
   @green %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
-  @no_polecats %{"data" => []}
+  @no_workers %{"data" => []}
 
   setup do
     # Deterministic project-root resolution; the shelled commands are stubbed
@@ -68,7 +68,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "stops the listener, starts Phoenix, waits for green, exits 0" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_lifecycle(["12345"])
@@ -90,7 +90,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "--json reports stop + start actions and ok" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_lifecycle(["999"])
@@ -139,7 +139,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "force-kills when SIGTERM doesn't free the port in time" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       test_pid = self()
@@ -185,7 +185,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "uses ss when lsof is absent, then starts Phoenix normally" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       test_pid = self()
@@ -227,7 +227,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "uses pgrep when both lsof and ss are absent, then starts Phoenix normally" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       test_pid = self()
@@ -257,7 +257,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "proceeds as 'not running' when lsof, ss, and pgrep all find nothing" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
@@ -282,7 +282,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "times out with exit 1 when Phoenix never comes back green" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       # Stop succeeds (port_free? returns true), but the started server never goes reachable.
@@ -318,7 +318,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "refuses to restart when workers are actively working (no --force)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"},
+        {{"get", "/api/workers"},
          {%{"data" => [%{"bead_id" => "bd-abc", "status" => "running"}]}, 200}}
       ])
 
@@ -333,7 +333,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "--force proceeds even when workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"},
+        {{"get", "/api/workers"},
          {%{"data" => [%{"bead_id" => "bd-abc", "status" => "running"}]}, 200}}
       ])
 
@@ -355,7 +355,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "proceeds normally when no workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
@@ -373,7 +373,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
       assert out =~ "Arbiter Phoenix restarted"
     end
 
-    test "proceeds when the server is unreachable (can't check polecats)" do
+    test "proceeds when the server is unreachable (can't check workers)" do
       stub_transport_error(:get, "/api/workspaces", :econnrefused)
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
@@ -396,7 +396,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     test "spawns Phoenix with cd set to the project root when .run-server.sh is absent" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       test_pid = self()
@@ -427,7 +427,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       test_pid = self()
@@ -468,7 +468,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       Process.put(:bd2_cmd_runner, fn cmd, _args, _opts ->
@@ -494,7 +494,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
 
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
-        {{"get", "/api/polecats"}, {@no_polecats, 200}}
+        {{"get", "/api/workers"}, {@no_workers, 200}}
       ])
 
       stub_lifecycle(["321"])

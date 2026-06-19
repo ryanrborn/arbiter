@@ -28,7 +28,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
              })
 
       assert DecommissionSweep.daemon_role?(%Issue{
-               title: "Witness for auth_server - monitors polecat health."
+               title: "Witness for auth_server - monitors worker health."
              })
 
       assert DecommissionSweep.daemon_role?(%Issue{
@@ -46,15 +46,15 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
       refute DecommissionSweep.daemon_role?(%Issue{title: "MergeQueue merge queue (gte-023)"})
     end
 
-    test "Polecat identity beads" do
-      assert DecommissionSweep.polecat_identity?(%Issue{
-               id: "vs-server-polecat-chrome",
-               title: "vs-server-polecat-chrome"
+    test "Worker identity beads" do
+      assert DecommissionSweep.worker_identity?(%Issue{
+               id: "vs-server-worker-chrome",
+               title: "vs-server-worker-chrome"
              })
 
-      refute DecommissionSweep.polecat_identity?(%Issue{
+      refute DecommissionSweep.worker_identity?(%Issue{
                id: "bd-something",
-               title: "Real work that mentions polecat by name"
+               title: "Real work that mentions worker by name"
              })
     end
 
@@ -70,7 +70,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
              })
 
       assert DecommissionSweep.gt_system?(%Issue{
-               title: "GT polecat work formula should produce names"
+               title: "GT worker work formula should produce names"
              })
 
       assert DecommissionSweep.gt_system?(%Issue{

@@ -3,7 +3,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
   Parses the gemini CLI's `--output-format stream-json` event stream.
 
   The gemini CLI's JSONL events have a *different* shape from Claude's
-  stream-json, so the polecat hot path (`Arbiter.Polecat.ClaudeSession`)
+  stream-json, so the worker hot path (`Arbiter.Worker.ClaudeSession`)
   delegates here when a session's provider is `"gemini"`. This keeps Gemini's
   schema knowledge in the Gemini namespace rather than polluting the Claude
   parser.
@@ -70,7 +70,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
 
   @doc """
   Expand a decoded stream-json event into `{display_line, detect_done?}` tuples
-  for the live tail. Mirrors `Arbiter.Polecat.ClaudeSession`'s formatting.
+  for the live tail. Mirrors `Arbiter.Worker.ClaudeSession`'s formatting.
   """
   @spec format_event(map()) :: [{String.t(), boolean()}]
   def format_event(%{"type" => "init"} = event) do

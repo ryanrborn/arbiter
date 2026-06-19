@@ -156,7 +156,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   end
 
   describe "guards" do
-    test "a polecat with no workspace posts nothing" do
+    test "a worker with no workspace posts nothing" do
       assert :ok =
                AdmiralNotifier.completed(%{
                  bead_id: "bd-x",
@@ -170,7 +170,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   end
 
   describe "acolyte_stopped/2 (bd-awi4nw)" do
-    alias Arbiter.Polecat.StopReason
+    alias Arbiter.Worker.StopReason
 
     defp only_escalation(ws) do
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)
@@ -247,7 +247,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   end
 
   describe "preflight_failed/2 (bd-awi4nw)" do
-    alias Arbiter.Polecat.StopReason
+    alias Arbiter.Worker.StopReason
 
     test "raises a 'refused to dispatch' escalation" do
       ws = uniq("ws")

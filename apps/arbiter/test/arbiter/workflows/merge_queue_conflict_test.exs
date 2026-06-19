@@ -3,7 +3,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   Tests for the merge queue's CONFLICTING-PR auto-resolution path (bd-dolcqq).
 
   Drives the `MergeQueue` with a stub resolver so the conflict-spawn machinery
-  is exercised without booting a real Polecat / ClaudeSession. Mocks GitHub
+  is exercised without booting a real Worker / ClaudeSession. Mocks GitHub
   PR fetches via `Req.Test` so we can simulate a PR flipping between
   CONFLICTING and clean across ticks.
   """
@@ -49,7 +49,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
           send(pid, {:resolver_called, args})
 
           case resolver_result do
-            :ok -> {:ok, %{polecat_pid: pid, worktree_path: "/tmp/fake", branch: "x"}}
+            :ok -> {:ok, %{worker_pid: pid, worktree_path: "/tmp/fake", branch: "x"}}
             err -> err
           end
 
@@ -469,10 +469,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   # The block below exercises the real `resolve/1` against a fixture git
   # repo with an existing conflicting branch. This is the path the round-2
   # ReviewGate flagged as untested — every other test in this file uses a
-  # stub that short-circuits `Worktree.attach` and `Polecat.start`. We bypass
+  # stub that short-circuits `Worktree.attach` and `Worker.start`. We bypass
   # the real `claude` invocation via `start_claude: false` (the resolver's
   # documented test escape) but still exercise the worktree-attach +
-  # polecat-spawn pair where the two Major round-2 defects lived.
+  # worker-spawn pair where the two Major round-2 defects lived.
   describe "ConflictResolver.resolve/1 (production path)" do
     setup do
       tmp =
@@ -516,18 +516,18 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       %{tmp: tmp, repo: repo}
     end
 
-    test "attaches an EXISTING branch (does NOT use -b) and spawns a polecat under bead_id:conflict",
+    test "attaches an EXISTING branch (does NOT use -b) and spawns a worker under bead_id:conflict",
          %{workspace: ws, bead: bead, repo: repo} do
       # Pre-create the conflicting branch in the fixture repo. This is the
       # key precondition: the bead's branch already exists (the conflicting
       # PR is open against it), so `Worktree.create` (which uses -b) would
       # fail. `Worktree.attach` is the right tool.
-      branch = Arbiter.Polecat.BranchNamer.derive(bead)
+      branch = Arbiter.Worker.BranchNamer.derive(bead)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
 
-      # Pre-condition: no polecat registered yet under either slot.
-      assert Arbiter.Polecat.whereis(bead.id) == nil
-      assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == nil
+      # Pre-condition: no worker registered yet under either slot.
+      assert Arbiter.Worker.whereis(bead.id) == nil
+      assert Arbiter.Worker.whereis(bead.id <> ":conflict") == nil
 
       {:ok, info} =
         Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
@@ -538,42 +538,42 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
           start_claude: false
         })
 
-      # The resolver returns a fresh polecat pid for the worktree it attached
+      # The resolver returns a fresh worker pid for the worktree it attached
       # to the existing branch.
-      assert is_pid(info.polecat_pid)
+      assert is_pid(info.worker_pid)
       assert info.branch == branch
       assert is_binary(info.worktree_path)
       assert File.dir?(info.worktree_path)
 
       # Crucial: registry slot for the resolver is `bead_id:conflict`, NOT
-      # `bead_id`. The bead_id slot stays open for the original work polecat.
-      assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == info.polecat_pid
-      assert Arbiter.Polecat.whereis(bead.id) == nil
+      # `bead_id`. The bead_id slot stays open for the original work worker.
+      assert Arbiter.Worker.whereis(bead.id <> ":conflict") == info.worker_pid
+      assert Arbiter.Worker.whereis(bead.id) == nil
 
-      # The polecat's meta carries the conflict-resolver role + the branch
-      # being rebased — proves we built the polecat for this job, not
+      # The worker's meta carries the conflict-resolver role + the branch
+      # being rebased — proves we built the worker for this job, not
       # accidentally reused one from elsewhere.
-      snap = Arbiter.Polecat.state(info.polecat_pid)
+      snap = Arbiter.Worker.state(info.worker_pid)
       assert snap.meta[:role] == :conflict_resolver
       assert snap.meta[:conflict_resolver_branch] == branch
       assert snap.meta[:target_branch] == "main"
 
-      # Cleanup: the polecat was started under the DynamicSupervisor; tear it
+      # Cleanup: the worker was started under the DynamicSupervisor; tear it
       # down so the test doesn't leak processes.
-      :ok = GenServer.stop(info.polecat_pid, :normal, 1_000)
+      :ok = GenServer.stop(info.worker_pid, :normal, 1_000)
     end
 
-    test "a stale resolver polecat (already running for this bead) is surfaced, not papered over",
+    test "a stale resolver worker (already running for this bead) is surfaced, not papered over",
          %{workspace: ws, bead: bead, repo: repo} do
       # Simulate a previous resolver run that hasn't terminated by starting a
-      # second polecat under the resolver's registry key. The resolver must
+      # second worker under the resolver's registry key. The resolver must
       # NOT silently return that pid — the round-2 finding was that the
       # `:already_started` shortcut hid a real wrong-process bug.
-      branch = Arbiter.Polecat.BranchNamer.derive(bead)
+      branch = Arbiter.Worker.BranchNamer.derive(bead)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
 
       {:ok, prior} =
-        Arbiter.Polecat.start(
+        Arbiter.Worker.start(
           bead_id: bead.id,
           registry_key: bead.id <> ":conflict",
           repo: "test/repo",
@@ -610,8 +610,8 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
         })
 
       assert {:error, {:worktree_failed, {:git_failed, _}}} = result
-      # And no polecat got partially spawned.
-      assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == nil
+      # And no worker got partially spawned.
+      assert Arbiter.Worker.whereis(bead.id <> ":conflict") == nil
     end
   end
 end

@@ -2,11 +2,11 @@ defmodule Arbiter.Agents.Claude do
   @moduledoc """
   Claude adapter implementing `Arbiter.Agents.Agent`.
 
-  Wraps the existing `Arbiter.Polecat.ClaudeSession` parsing pipeline behind
+  Wraps the existing `Arbiter.Worker.ClaudeSession` parsing pipeline behind
   the `Agent` behaviour. The session/parsing logic stays in
   `ClaudeSession` (callable as a library); this module is the seam that
   lets a future adapter (Codex / Aider / Gemini) replace just the argv +
-  parser without forcing the polecat to grow a switch statement.
+  parser without forcing the worker to grow a switch statement.
 
   Phase B of `docs/agent-harness-design.md` — Claude is the only adapter
   today, intentionally. The two cheaper levers (model-tiering and
@@ -49,7 +49,7 @@ defmodule Arbiter.Agents.Claude do
   alias Arbiter.Agents.Claude.ConfigDir
   alias Arbiter.Agents.Claude.Security
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Polecat.ClaudeSession
+  alias Arbiter.Worker.ClaudeSession
 
   @done_regex ~r/\barb done\b/
 
@@ -100,7 +100,7 @@ defmodule Arbiter.Agents.Claude do
     # is closed via the sh wrapper (same as a real spawn) so the CLI doesn't
     # block waiting for piped input. An expired OAuth / bad key makes this print
     # "401 / invalid authentication credentials" and exit non-zero, which
-    # Arbiter.Polecat.StopReason classifies as :auth_expired.
+    # Arbiter.Worker.StopReason classifies as :auth_expired.
     case resolve_claude_executable() do
       {:ok, claude} ->
         {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh", claude, "--print", "ping"]}
@@ -138,7 +138,7 @@ defmodule Arbiter.Agents.Claude do
 
   @impl true
   def parse_line(session, line) when is_binary(line) do
-    # The polecat already accumulates lines; here we just turn one logical
+    # The worker already accumulates lines; here we just turn one logical
     # line into display tuples + an updated session. Tool results carry the
     # "arm_done? = false" flag so a `cat`/`grep` of the literal `arb done`
     # phrase from disk can't trip the completion sentinel.
@@ -158,11 +158,11 @@ defmodule Arbiter.Agents.Claude do
   # call are the display tuples we owe the caller. We diff old vs new and
   # synthesize the {text, arm_done?} tuples.
   #
-  # Today the polecat lives outside the adapter and owns the buffered
+  # Today the worker lives outside the adapter and owns the buffered
   # state — so `parse_line/2` is only invoked from the adapter test surface
-  # and from the agent-routing scaffolding. The ReviewGate/polecat hot-path
+  # and from the agent-routing scaffolding. The ReviewGate/worker hot-path
   # still calls ClaudeSession directly. We keep the adapter parse_line
-  # callable so future adapters can plug in without rewriting the polecat.
+  # callable so future adapters can plug in without rewriting the worker.
   defp collect_display(prev, next) do
     prev_len = length(Map.get(prev, :output_lines, []))
     new_len = length(Map.get(next, :output_lines, []))
@@ -173,7 +173,7 @@ defmodule Arbiter.Agents.Claude do
       |> Enum.reverse()
 
     # All lines added through ClaudeSession.handle_data are display lines;
-    # the only ones the polecat treats as non-arming are tool-result lines,
+    # the only ones the worker treats as non-arming are tool-result lines,
     # which ClaudeSession's emit path already exempts from the done sentinel
     # via the `detect_done?` flag. We mirror that here as a best-effort:
     # lines starting with the tool-result glyph are not arming.

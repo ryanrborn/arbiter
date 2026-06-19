@@ -1,8 +1,8 @@
 defmodule ArbiterWeb.DashboardLiveTest.QueueMerger do
   @moduledoc """
-  Minimal `Arbiter.Mergers.Merger` stub for driving a polecat to
+  Minimal `Arbiter.Mergers.Merger` stub for driving a worker to
   `:awaiting_review` in the dashboard's merge-queue tests. `get/1` returns a
-  still-open MR so the Watchdog (if it ever polls) keeps the polecat parked.
+  still-open MR so the Watchdog (if it ever polls) keeps the worker parked.
   """
   @behaviour Arbiter.Mergers.Merger
 
@@ -36,15 +36,15 @@ defmodule ArbiterWeb.DashboardLiveTest do
   alias ArbiterWeb.DashboardLiveTest.QueueMerger
 
   alias Arbiter.Beads.{Dependency, Issue, Workspace}
-  alias Arbiter.Polecat
-  alias Arbiter.Polecats.Run
+  alias Arbiter.Worker
+  alias Arbiter.Workers.Run
 
   setup do
-    # Polecats are supervised at the VM level — prior tests in the umbrella
+    # Workers are supervised at the VM level — prior tests in the umbrella
     # may have left children running. Stop them so the dashboard's "active
-    # polecats" section starts in a known empty state.
-    for snap <- Polecat.list_children() do
-      Polecat.stop(snap.bead_id)
+    # workers" section starts in a known empty state.
+    for snap <- Worker.list_children() do
+      Worker.stop(snap.bead_id)
     end
 
     Process.sleep(50)
@@ -73,7 +73,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Escalations"
     end
 
-    test "empty polecats shows the no-active-* line", %{conn: conn} do
+    test "empty workers shows the no-active-* line", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "No active"
     end
@@ -117,12 +117,12 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "ds"
     end
 
-    test "counts active polecats per workspace", %{conn: conn, ws: ws} do
+    test "counts active workers per workspace", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "polly-ws", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
-      # The workspace row should reflect the active polecat. Hard to assert
+      # The workspace row should reflect the active worker. Hard to assert
       # an exact cell value in the rendered table, but a workspace column
       # next to "1" somewhere is sufficient.
       assert html =~ ws.name
@@ -153,11 +153,11 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "(app)"
     end
 
-    test "counts active polecats per repo", %{conn: conn, ws: ws} do
+    test "counts active workers per repo", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "repo-pol", workspace_id: ws.id})
 
       {:ok, _pid} =
-        Polecat.start(
+        Worker.start(
           bead_id: bead.id,
           repo: "dashboard-test-repo",
           workspace_id: ws.id
@@ -165,7 +165,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "dashboard-test-repo"
-      # Row should show 1 active polecat for the repo.
+      # Row should show 1 active worker for the repo.
       # Hard to assert specific cell content; check the repo name + a 1
       # appear on the same page render.
       assert html =~ "dashboard-test-repo"
@@ -194,10 +194,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "/tmp/object-form-repo"
     end
 
-    test "surfaces a polecat using an unconfigured repo under (unconfigured)",
+    test "surfaces a worker using an unconfigured repo under (unconfigured)",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "weird-repo", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "no-such-repo", workspace_id: ws.id)
+      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "no-such-repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "no-such-repo"
@@ -205,14 +205,14 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "active polecats workspace column" do
-    test "shows the workspace name on each polecat row", %{conn: conn, ws: ws} do
+  describe "active workers workspace column" do
+    test "shows the workspace name on each worker row", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "ws-col", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "active-polecats"
+      assert html =~ "active-workers"
       assert html =~ ws.name
     end
   end
@@ -294,25 +294,25 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "active polecats section" do
-    test "starting a polecat shows it; stopping removes it", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "polecat-bead", workspace_id: ws.id})
+  describe "active workers section" do
+    test "starting a worker shows it; stopping removes it", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "worker-bead", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, "/")
-      # Sanity: before starting, the Active Polecats section shows the empty
+      # Sanity: before starting, the Active Workers section shows the empty
       # message (the bead may still appear in "Recent beads" — that's fine).
       assert render(view) =~ "No active"
 
       {:ok, _pid} =
-        Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+        Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
-      # PubSub fires :started — re-render now lists the polecat in the
+      # PubSub fires :started — re-render now lists the worker in the
       # active table (count goes from 0 to 1, and the empty message is gone).
       html = render(view)
       assert html =~ "Active Workers (1)"
-      refute html =~ "No active polecats"
+      refute html =~ "No active workers"
 
-      Polecat.stop(bead.id)
+      Worker.stop(bead.id)
       # Allow time for terminate's broadcast to propagate
       Process.sleep(150)
 
@@ -357,7 +357,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       assert html =~ "the-completed-title"
       assert html =~ "the-failed-title"
-      assert html =~ "/polecats/history/#{completed.id}"
+      assert html =~ "/workers/history/#{completed.id}"
     end
   end
 
@@ -371,11 +371,11 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "an in-flight merge surfaces with MR link, merger type and Watchdog activity",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "merging-bead", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Polecat.advance(pid, :integrate)
+      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
 
       {:ok, "!99"} =
-        Polecat.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
+        Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -393,12 +393,12 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
     test "a recorded approval drives the status badge label", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "approved-bead", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
-      :ok = Polecat.advance(pid, :integrate)
-      {:ok, _} = Polecat.open_mr(pid, "feature/y", "Integrate y", "", merge_opts())
+      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, _} = Worker.open_mr(pid, "feature/y", "Integrate y", "", merge_opts())
 
       # Simulate the result of a Watchdog poll without waiting on its timer.
-      :ok = Polecat.record_merger_status(pid, %{status: :open, approved: true})
+      :ok = Worker.record_merger_status(pid, %{status: :open, approved: true})
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -415,9 +415,9 @@ defmodule ArbiterWeb.DashboardLiveTest do
         })
 
       {:ok, bead} = Ash.create(Issue, %{title: "gl-bead", workspace_id: gl_ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: gl_ws.id)
-      :ok = Polecat.advance(pid, :integrate)
-      {:ok, _} = Polecat.open_mr(pid, "feature/z", "Integrate z", "", merge_opts())
+      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: gl_ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, _} = Worker.open_mr(pid, "feature/z", "Integrate z", "", merge_opts())
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -476,10 +476,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "a review in flight surfaces under 'in review'", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "under-review", workspace_id: ws.id})
 
-      # Drive an author polecat to :awaiting_review_gate without spawning a live
+      # Drive an author worker to :awaiting_review_gate without spawning a live
       # reviewer (review_spawn: false) — the same seam the ReviewGate tests use.
       {:ok, pid} =
-        Polecat.start(
+        Worker.start(
           bead_id: bead.id,
           repo: "test/repo",
           workspace_id: ws.id,
@@ -490,10 +490,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
           }
         )
 
-      :ok = Polecat.advance(pid, :claude)
+      :ok = Worker.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -504,7 +504,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   # Poll until `fun` returns true or a short deadline elapses. Mirrors the
-  # review_gate suite's helper for waiting on an async polecat transition.
+  # review_gate suite's helper for waiting on an async worker transition.
   defp wait_until(fun, attempts \\ 100)
   defp wait_until(_fun, 0), do: flunk("condition not met before deadline")
 
@@ -518,7 +518,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   # open_mr opts that pin a stub adapter and push the Watchdog's first poll far
-  # into the future, so the polecat parks at :awaiting_review deterministically
+  # into the future, so the worker parks at :awaiting_review deterministically
   # without the poll loop racing the assertions.
   defp merge_opts do
     %{

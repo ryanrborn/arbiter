@@ -352,7 +352,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert CodeReview.step_definition(:verdict).needs == [:file_findings]
     end
 
-    test "module does not call merger merge/1, Polecat.Worktree.push, or GitHub.pr_merge" do
+    test "module does not call merger merge/1, Worker.Worktree.push, or GitHub.pr_merge" do
       # Static guarantee: the workflow itself does not reference any of the
       # forbidden merge / push symbols. We inspect the source (stripping the
       # @moduledoc block so the documented forbidden-actions list doesn't
