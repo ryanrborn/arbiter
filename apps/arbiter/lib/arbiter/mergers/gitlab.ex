@@ -118,6 +118,8 @@ defmodule Arbiter.Mergers.Gitlab do
              ref: ref_for(iid),
              status: map_state(Map.get(body, "state")),
              approved: approved?(body),
+             changes_requested: false,
+             latest_review_id: nil,
              pipeline: pipeline,
              ci_clean: merge_status == "can_be_merged",
              conflicting:
@@ -254,6 +256,14 @@ defmodule Arbiter.Mergers.Gitlab do
       end
     end
   end
+
+  # GitLab has no native "request changes" review verb (see submit_review/4),
+  # so there is no distinct CHANGES_REQUESTED signal to ingest. The auto-revise
+  # path is GitHub-shaped (bd-95lsjb); GitLab no-ops here rather than guessing a
+  # verdict from discussion notes.
+  @impl true
+  def list_review_feedback(mr_ref) when is_binary(mr_ref),
+    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
 
   # ---- Public helpers ------------------------------------------------------
 

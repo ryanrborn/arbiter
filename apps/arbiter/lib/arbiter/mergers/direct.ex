@@ -107,6 +107,12 @@ defmodule Arbiter.Mergers.Direct do
   @impl true
   def link_for(_mr_ref), do: ""
 
+  # No forge, no PR-side review surface — there is never human review feedback
+  # to ingest, so the Refinery's auto-revise path is a no-op here (bd-95lsjb).
+  @impl true
+  def list_review_feedback(_mr_ref),
+    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
   # ---- Review callbacks ----
 
   @impl true
