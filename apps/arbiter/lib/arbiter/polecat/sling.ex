@@ -1066,7 +1066,7 @@ defmodule Arbiter.Polecat.Sling do
 
     Acceptance:
     #{bead.acceptance || "(none)"}
-
+    #{prior_review_findings_section(bead)}
     Your current directory is a fresh git worktree on a per-bead branch.
     Work the bead to completion: load context, design, implement, test,
     commit on this branch, and push it.
@@ -1075,7 +1075,7 @@ defmodule Arbiter.Polecat.Sling do
     create`). The Refinery opens the single canonical PR for this bead, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
-    #{pr_body_step(bead)}#{completion_notes_step(bead)}
+    #{pr_review_instruction(bead)}#{pr_body_step(bead)}#{completion_notes_step(bead)}
     Coordination: at the start of each step, check your mailbox by running
 
         arb inbox #{bead.id}
@@ -1124,6 +1124,41 @@ defmodule Arbiter.Polecat.Sling do
     Do this before printing `arb done`.
     """
   end
+
+  # When a prior tribunal pass escalated with REQUEST_CHANGES, the reviewer's
+  # findings are stored in bead.notes by record_tribunal_outcome/3 in Polecat.
+  # Surface them here so the re-slunged acolyte sees them immediately in its
+  # prompt without having to call bead_show or gh pr view first.
+  defp prior_review_findings_section(%Issue{notes: notes})
+       when is_binary(notes) and notes != "" do
+    """
+
+    Prior review findings (address these before starting new work):
+    #{notes}
+    """
+  end
+
+  defp prior_review_findings_section(_bead), do: ""
+
+  # When a PR is already open for this bead, the re-slunged acolyte must read
+  # the PR review comments to find what changed. The findings in bead.notes
+  # (above) are the primary source, but the PR reviews are the canonical record
+  # — fetching them explicitly guards against notes being stale or missing.
+  defp pr_review_instruction(%Issue{pr_ref: pr_ref})
+       when is_binary(pr_ref) and pr_ref != "" do
+    """
+
+    This bead has an existing PR (##{pr_ref}). Read the PR review comments
+    before starting work — the review findings are there:
+
+        gh pr view #{pr_ref} --json reviews,reviewComments
+
+    Address every finding (fix the code or rebut with justification), then
+    push commits to the existing branch. Do NOT open a new PR.
+    """
+  end
+
+  defp pr_review_instruction(_bead), do: ""
 
   # For tracker-backed beads (an upstream Jira/etc. ticket), completing the
   # work includes producing the gated completion notes the tracker requires
