@@ -17,43 +17,49 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert out =~ "Hello"
   end
 
-  test "--vanguard attaches the new issue to the convoy" do
+  test "--parent attaches the new issue to the parent bead via a parent_of edge" do
     parent = self()
 
     stub_routes([
       {{"get", "/api/workspaces"},
        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
       {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
-      {{"post", "/api/convoys/bd-cv-zzz/members"},
+      {{"post", "/api/dependencies"},
        fn conn ->
          {:ok, body, conn} = Plug.Conn.read_body(conn)
-         send(parent, {:member_body, Jason.decode!(body)})
-         conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => "bd-cv-zzz"})
+         send(parent, {:dep_body, Jason.decode!(body)})
+         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "dep-1"})
        end}
     ])
 
     {out, _err, exit_code} =
-      capture(fn -> Create.run(["X", "--vanguard", "bd-cv-zzz"]) end)
+      capture(fn -> Create.run(["X", "--parent", "bd-epic"]) end)
 
     assert exit_code == 0
     assert out =~ "bd-007"
-    assert_receive {:member_body, %{"issue_id" => "bd-007"}}
+
+    assert_receive {:dep_body,
+                    %{
+                      "from_issue_id" => "bd-epic",
+                      "to_issue_id" => "bd-007",
+                      "type" => "parent_of"
+                    }}
   end
 
-  test "--vanguard attach failure surfaces and exits non-zero" do
+  test "--parent attach failure surfaces and exits non-zero" do
     stub_routes([
       {{"get", "/api/workspaces"},
        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
       {{"post", "/api/issues"}, {%{"id" => "bd-007", "title" => "X"}, 201}},
-      {{"post", "/api/convoys/bd-cv-zzz/members"},
+      {{"post", "/api/dependencies"},
        {%{"error" => %{"type" => "not_found", "message" => "resource not found"}}, 404}}
     ])
 
     {_out, err, exit_code} =
-      capture(fn -> Create.run(["X", "--vanguard", "bd-cv-zzz"]) end)
+      capture(fn -> Create.run(["X", "--parent", "bd-epic"]) end)
 
     assert exit_code == 4
-    assert err =~ "failed to attach bd-007 to bd-cv-zzz"
+    assert err =~ "failed to attach bd-007 to parent bd-epic"
   end
 
   test "no title argument exits non-zero" do

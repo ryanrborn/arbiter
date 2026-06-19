@@ -38,7 +38,6 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   @polecat_tools ~w(
     bead_show
     bead_update_progress
-    convoy_status
     inbox_check
     message_send
     notify_list

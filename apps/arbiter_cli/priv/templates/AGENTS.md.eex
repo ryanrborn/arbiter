@@ -83,7 +83,7 @@ Set `ARB_WORKSPACE=<name>` to target a specific <%= @workspace %>. The active
 ## Concepts
 
 - **<%= @issue_cap %>** — a unit of work (task, bug, feature). Has an id like `<%= @domain_prefix %>-001`.
-- **<%= @batch_cap %>** — a batch grouping related <%= @issue_plural %>.
+- **<%= @epic_cap %>** — a parent <%= @issue %> grouping related <%= @issue_plural %> via `parent_of` edges; rolls up child progress and can auto-close when its children are done.
 - **<%= @worker_cap %>** — a worker agent. Slinging <%= @issue_article %> <%= @issue %> starts <%= @worker_article %> <%= @worker %> to work it.
 - **<%= @rig_cap %>** — a local git repository <%= @worker_article %> <%= @worker %> can provision a worktree in.
 - **<%= @workspace_cap %>** — a project scope. Holds <%= @rig_plural %>, tracker config, and vernacular.

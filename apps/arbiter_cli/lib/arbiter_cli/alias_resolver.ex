@@ -6,8 +6,8 @@ defmodule ArbiterCli.AliasResolver do
 
   The CLI uses an `arb <resource> <verb>` grammar (e.g. `arb issue list`,
   `arb worker stop`). The resources are neutral base terms — `issue`,
-  `worker`, `batch`, `repo` — and themed vocabularies (the Sith "polecat",
-  "bead", "convoy", "warship", "sling", …) are layered on top as *aliases*.
+  `worker`, `repo` — and themed vocabularies (the Sith "polecat",
+  "bead", "warship", "sling", …) are layered on top as *aliases*.
   This module resolves that first token to its canonical form.
 
   Lookup order:
@@ -28,7 +28,7 @@ defmodule ArbiterCli.AliasResolver do
 
     * **Default vernacular** — the built-in `@default_vernacular` map below,
       which gives every install the Sith resource names (`polecat`, `bead`,
-      `convoy`, `warship`, `sling`) out of the box even when the server is
+      `warship`, `sling`) out of the box even when the server is
       unreachable. Derived the same way as label aliases.
     * **Derived label aliases** — any vernacular entry from the server whose
       KEY is itself a known resource/verb is treated as a command alias from
@@ -48,16 +48,15 @@ defmodule ArbiterCli.AliasResolver do
   # The canonical command surface: resources, plus the flat meta commands that
   # carry no resource ambiguity, plus `dispatch` (the top-level shortcut for
   # `issue dispatch`, which the Sith label "sling" aliases to).
-  @known_verbs ~w(issue worker batch repo dep config server workspace message usage install mcp dispatch prime where init help version)
+  @known_verbs ~w(issue worker repo dep config server workspace message usage install mcp dispatch prime where init help version)
 
   # Built-in default vernacular: the Sith resource names every install starts
   # with. Keys are canonical resources/verbs; values are their themed labels.
-  # Derived into aliases so `arb polecat`/`arb bead`/`arb convoy`/`arb warship`/
+  # Derived into aliases so `arb polecat`/`arb bead`/`arb warship`/
   # `arb sling` resolve even offline. A live workspace vernacular overrides these.
   @default_vernacular %{
     "worker" => "polecat",
     "issue" => "bead",
-    "batch" => "convoy",
     "repo" => "warship",
     "dispatch" => "sling"
   }

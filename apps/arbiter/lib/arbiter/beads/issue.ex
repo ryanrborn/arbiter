@@ -43,6 +43,8 @@ defmodule Arbiter.Beads.Issue do
     data_layer: AshSqlite.DataLayer,
     extensions: [AshPaperTrail.Resource]
 
+  require Ash.Query
+
   @statuses ~w(open in_progress closed)a
   @issue_types ~w(task bug feature epic chore decision)a
   @tracker_types ~w(none jira shortcut linear github)a
@@ -79,6 +81,7 @@ defmodule Arbiter.Beads.Issue do
         :priority,
         :difficulty,
         :issue_type,
+        :auto_close,
         :assignee,
         :tracker_type,
         :tracker_ref,
@@ -120,6 +123,7 @@ defmodule Arbiter.Beads.Issue do
         :priority,
         :difficulty,
         :issue_type,
+        :auto_close,
         :assignee,
         :tracker_type,
         :tracker_ref,
@@ -168,15 +172,16 @@ defmodule Arbiter.Beads.Issue do
       # Best-effort: a sync failure never fails the local close.
       change {Arbiter.Beads.Issue.Changes.SyncTracker, []}
 
-      # After closing, check whether any system-managed convoy this issue belongs
-      # to should auto-close, then broadcast the closure. Both run via
-      # after_transaction (post-commit) rather than after_action (pre-commit),
-      # so LiveView queries from separate DB connections see the committed state
-      # and the dashboard updates correctly when a directive is completed.
+      # After closing, roll the closure up to any auto-close parent of this bead
+      # (a `:parent_of` epic that should close once all its children are done),
+      # then broadcast the closure. Both run via after_transaction (post-commit)
+      # rather than after_action (pre-commit), so LiveView queries from separate
+      # DB connections see the committed state and the dashboard updates
+      # correctly when a directive is completed.
       change fn changeset, _context ->
         Ash.Changeset.after_transaction(changeset, fn
           _changeset, {:ok, issue} ->
-            Arbiter.Beads.Convoy.maybe_auto_close_for_issue(issue)
+            Arbiter.Beads.Issue.maybe_auto_close_parents(issue)
             Arbiter.Beads.Issue.broadcast_lifecycle(:closed, issue)
             {:ok, issue}
 
@@ -313,6 +318,20 @@ defmodule Arbiter.Beads.Issue do
       constraints one_of: @issue_types
     end
 
+    attribute :auto_close, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description """
+      When true, this bead auto-closes once ALL of its `:parent_of` children
+      are closed (and there is at least one child). This is the parent-with-
+      progress flag that replaces the old Convoy `:system_managed` vs `:owned`
+      lifecycle: `auto_close: true` ≈ system_managed, `false` ≈ owned (the user
+      closes the parent explicitly). Default `false`.
+      """
+    end
+
     attribute :assignee, :string do
       public? true
       constraints max_length: 255, trim?: true
@@ -376,16 +395,18 @@ defmodule Arbiter.Beads.Issue do
       public? true
       attribute_writable? true
     end
+  end
 
-    has_many :convoy_memberships, Arbiter.Beads.ConvoyMembership do
-      destination_attribute :issue_id
+  calculations do
+    # Progress rollup over this bead's `:parent_of` children. SQLite can't do
+    # inline aggregates across the dependency join, so these are batch module
+    # calculations (see Arbiter.Beads.Issue.Calcs). Load with
+    # `Ash.load!(issue, [:child_total, :child_closed])`.
+    calculate :child_total, :integer, Arbiter.Beads.Issue.Calcs.ChildTotal do
       public? true
     end
 
-    many_to_many :convoys, Arbiter.Beads.Convoy do
-      through Arbiter.Beads.ConvoyMembership
-      source_attribute_on_join_resource :issue_id
-      destination_attribute_on_join_resource :convoy_id
+    calculate :child_closed, :integer, Arbiter.Beads.Issue.Calcs.ChildClosed do
       public? true
     end
   end
@@ -472,5 +493,66 @@ defmodule Arbiter.Beads.Issue do
         Enum.reject(open_issues, fn i -> MapSet.member?(blocked_from_ids, i.id) end)
       end
     end
+  end
+
+  # ---- parent-with-progress rollup ---------------------------------------
+
+  @doc """
+  Walk the `:parent_of` parents of `issue` and call `maybe_auto_close/1` on
+  each. Intended for the `after_transaction` hook on `Issue.close`: when a child
+  closes, any auto-close parent whose children are now all done closes too.
+  Returns `:ok`.
+  """
+  def maybe_auto_close_parents(issue) do
+    issue.id
+    |> parents_of()
+    |> Enum.each(&maybe_auto_close/1)
+
+    :ok
+  end
+
+  @doc """
+  If `parent` has `auto_close` set, is still open, and all its (≥1) `:parent_of`
+  children are closed, close it with reason "all children closed". Returns the
+  (possibly updated) parent bead. Safe to call repeatedly.
+
+  Closing the parent runs the normal `:close` action — including this same
+  rollup — so the closure cascades up a chain of auto-close epics.
+  """
+  def maybe_auto_close(parent) do
+    parent = Ash.load!(parent, [:child_total, :child_closed])
+
+    cond do
+      not parent.auto_close ->
+        parent
+
+      parent.status == :closed ->
+        parent
+
+      parent.child_total == 0 ->
+        parent
+
+      parent.child_closed < parent.child_total ->
+        parent
+
+      true ->
+        {:ok, closed} =
+          Ash.update(parent, %{reason: "all children closed"}, action: :close)
+
+        closed
+    end
+  end
+
+  # The parent beads of `child_id`: the `from_issue` of every `:parent_of` edge
+  # pointing at it. A child may have more than one parent.
+  defp parents_of(child_id) do
+    parent_of = :parent_of
+
+    Arbiter.Beads.Dependency
+    |> Ash.Query.filter(type == ^parent_of and to_issue_id == ^child_id)
+    |> Ash.read!()
+    |> Enum.map(& &1.from_issue_id)
+    |> Enum.uniq()
+    |> Enum.map(&Ash.get!(__MODULE__, &1))
   end
 end

@@ -14,9 +14,8 @@ defmodule Arbiter.MCP.Catalog do
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `bead_show` | polecat, coordinator | `Ash.get(Issue, id)` |
+  | `bead_show` | polecat, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
   | `bead_ready` | coordinator | `Issue.ready/1` |
-  | `convoy_status` | polecat, coordinator | `Ash.get(Convoy, id)` + calcs |
   | `inbox_check` | polecat, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (Admiral mailbox) |
   | `workspace_show` | polecat, coordinator | `Ash.get(Workspace, id)` |
@@ -30,12 +29,8 @@ defmodule Arbiter.MCP.Catalog do
   | `bead_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `bead_close` | coordinator | `Ash.update(issue, …, action: :close)` |
   | `bead_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
-  | `dep_add` | coordinator | `Ash.create(Dependency, …)` |
+  | `dep_add` | coordinator | `Ash.create(Dependency, …)` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
-  | `convoy_list` | coordinator | `Ash.read(Convoy)` + calcs |
-  | `convoy_create` | coordinator | `Ash.create(Convoy, …)` |
-  | `convoy_add_member` | coordinator | `ConvoyMembership.:add` |
-  | `convoy_close` | coordinator | `Ash.update(convoy, …, action: :close)` |
   | `polecat_sling` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` |
   | `polecat_resume` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.resume/2` |
   | `polecat_review` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` (`review: true`) |
@@ -79,8 +74,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "bead_show",
       tiers: @both,
       description:
-        "Read one bead (id, title, status, notes, tracker, …). A polecat reads its own bead " <>
-          "(the `id` argument may be omitted); a coordinator must pass the `id`.",
+        "Read one bead (id, title, status, notes, tracker, `auto_close`, and child-progress " <>
+          "`child_closed`/`child_total` over its `parent_of` children, …). A polecat reads its " <>
+          "own bead (the `id` argument may be omitted); a coordinator must pass the `id`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -100,22 +96,6 @@ defmodule Arbiter.MCP.Catalog do
       description: "List ready (open, unblocked) beads in the workspace.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.bead_ready/2
-    },
-    %{
-      name: "convoy_status",
-      tiers: @both,
-      description:
-        "Convoy progress (open/closed member counts). A polecat may only query a convoy its " <>
-          "bead belongs to.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "id" => %{"type" => "string", "description" => "Convoy id (e.g. \"bd-cv-3o8abc\")."}
-        },
-        "required" => ["id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.convoy_status/2
     },
     %{
       name: "inbox_check",
@@ -204,8 +184,8 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Create a bead in the workspace. `title` is required; optional `description`, " <>
-          "`acceptance`, `priority`, `difficulty`, `issue_type`, `assignee`, `tracker_type`, …. " <>
-          "The bead is always created in the coordinator's own workspace.",
+          "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, `assignee`, " <>
+          "`tracker_type`, …. The bead is always created in the coordinator's own workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -223,6 +203,12 @@ defmodule Arbiter.MCP.Catalog do
           "issue_type" => %{
             "type" => "string",
             "description" => "task | bug | feature | epic | chore | decision."
+          },
+          "auto_close" => %{
+            "type" => "boolean",
+            "description" =>
+              "When true, this bead auto-closes once all its `parent_of` children are closed " <>
+                "(≥1 child). Default false."
           },
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{
@@ -257,6 +243,10 @@ defmodule Arbiter.MCP.Catalog do
           "priority" => %{"type" => "integer"},
           "difficulty" => %{"type" => "integer"},
           "issue_type" => %{"type" => "string"},
+          "auto_close" => %{
+            "type" => "boolean",
+            "description" => "Auto-close this bead when all its `parent_of` children are closed."
+          },
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{"type" => "string"},
           "tracker_ref" => %{"type" => "string"},
@@ -311,7 +301,9 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Add a dependency edge between two beads in the workspace. `type` is one of blocks, " <>
-          "depends_on, relates_to, discovered_from, parent_of.",
+          "depends_on, relates_to, discovered_from, parent_of. Use `parent_of` (from = parent, " <>
+          "to = child) to attach a child to a parent bead — that is how grouping/epics work; the " <>
+          "parent then rolls up child progress and can auto-close.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -346,60 +338,6 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.dep_remove/2
-    },
-    %{
-      name: "convoy_list",
-      tiers: @coordinator,
-      description: "List the convoys in the workspace, with open/closed member counts.",
-      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
-      handler: &Tools.convoy_list/2
-    },
-    %{
-      name: "convoy_create",
-      tiers: @coordinator,
-      description:
-        "Create a convoy in the workspace. `title` is required; `lifecycle` is system_managed " <>
-          "(default) or owned.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "title" => %{"type" => "string", "description" => "Convoy title (required)."},
-          "lifecycle" => %{"type" => "string", "description" => "system_managed | owned."}
-        },
-        "required" => ["title"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.convoy_create/2
-    },
-    %{
-      name: "convoy_add_member",
-      tiers: @coordinator,
-      description: "Attach a bead to a convoy (idempotent). Both must be in the workspace.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "id" => %{"type" => "string", "description" => "Convoy id (required)."},
-          "issue_id" => %{"type" => "string", "description" => "Bead id to attach (required)."}
-        },
-        "required" => ["id", "issue_id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.convoy_add_member/2
-    },
-    %{
-      name: "convoy_close",
-      tiers: @coordinator,
-      description: "Close a convoy in the workspace. Optional `reason`.",
-      input_schema: %{
-        "type" => "object",
-        "properties" => %{
-          "id" => %{"type" => "string", "description" => "Convoy id (required)."},
-          "reason" => %{"type" => "string"}
-        },
-        "required" => ["id"],
-        "additionalProperties" => false
-      },
-      handler: &Tools.convoy_close/2
     },
     %{
       name: "polecat_sling",

@@ -34,7 +34,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
     * Refinery merge-queue items (no server-side endpoint yet).
     * Recent audit-log entries (no server-side endpoint yet).
-    * Active convoy state (no list endpoint yet).
+    * Open epic / parent-bead progress (no dedicated endpoint yet).
 
   Those need REST endpoints landed before they can be surfaced here. v1
   covers the highest-value subset: what's running, what's actionable,
