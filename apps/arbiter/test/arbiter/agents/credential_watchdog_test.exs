@@ -1,16 +1,16 @@
-defmodule Arbiter.Agents.CredentialWardenTest do
+defmodule Arbiter.Agents.CredentialWatchdogTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Agents.CredentialWarden
+  alias Arbiter.Agents.CredentialWatchdog
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat.StopReason
 
-  # Start an isolated, unnamed Warden for each test so it does not conflict with
+  # Start an isolated, unnamed Watchdog for each test so it does not conflict with
   # the application-started singleton (which is enabled: false in test config but
   # still occupies the __MODULE__ name). We pass the returned pid explicitly to
   # all API calls that accept a server argument.
-  defp start_warden(opts \\ []) do
+  defp start_watchdog(opts \\ []) do
     defaults = [
       name: nil,
       enabled: false,
@@ -24,7 +24,7 @@ defmodule Arbiter.Agents.CredentialWardenTest do
     {:ok, pid} =
       start_supervised(%{
         id: make_ref(),
-        start: {CredentialWarden, :start_link, [merged]}
+        start: {CredentialWatchdog, :start_link, [merged]}
       })
 
     pid
@@ -34,7 +34,7 @@ defmodule Arbiter.Agents.CredentialWardenTest do
     %StopReason{
       category: :auth_expired,
       summary: "401 invalid authentication credentials",
-      remediation: "Re-authenticate the agent CLI, then re-sling.",
+      remediation: "Re-authenticate the agent CLI, then re-dispatch.",
       exit_status: 1,
       signal: nil
     }
@@ -42,43 +42,43 @@ defmodule Arbiter.Agents.CredentialWardenTest do
 
   describe "expired?/2" do
     test "returns false before any expiry is recorded" do
-      pid = start_warden()
-      refute CredentialWarden.expired?(Arbiter.Agents.Claude, pid)
-      refute CredentialWarden.expired?(Arbiter.Agents.Gemini, pid)
+      pid = start_watchdog()
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, pid)
     end
 
     test "returns false for an unknown adapter" do
-      pid = start_warden()
-      refute CredentialWarden.expired?(SomeRandomAdapter, pid)
+      pid = start_watchdog()
+      refute CredentialWatchdog.expired?(SomeRandomAdapter, pid)
     end
 
-    test "returns false when the warden is not running" do
-      # No warden started — expired?/1 must not crash the caller.
+    test "returns false when the watchdog is not running" do
+      # No watchdog started — expired?/1 must not crash the caller.
       # This calls the module-name default, which exists (app-started, enabled: false)
       # and knows no adapters as expired.
-      refute CredentialWarden.expired?(Arbiter.Agents.Claude)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude)
     end
   end
 
   describe "mark_expired/3" do
     test "marks the adapter as expired so expired?/2 returns true" do
-      pid = start_warden()
-      refute CredentialWarden.expired?(Arbiter.Agents.Claude, pid)
+      pid = start_watchdog()
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
-      :ok = CredentialWarden.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
 
       # Give the cast time to be processed.
       Process.sleep(20)
 
-      assert CredentialWarden.expired?(Arbiter.Agents.Claude, pid)
-      refute CredentialWarden.expired?(Arbiter.Agents.Gemini, pid)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Gemini, pid)
     end
 
     test "does not re-escalate when the adapter is already known-expired" do
       {:ok, ws} = Ash.create(Workspace, %{name: "cw-dedup-ws", prefix: "cwd"})
-      pid = start_warden()
+      pid = start_watchdog()
 
-      :ok = CredentialWarden.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
       Process.sleep(20)
 
       count_before =
@@ -86,7 +86,7 @@ defmodule Arbiter.Agents.CredentialWardenTest do
         |> Enum.count(&(&1.kind == :escalation))
 
       # A second mark_expired must not send a duplicate escalation.
-      :ok = CredentialWarden.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
       Process.sleep(20)
 
       count_after =
@@ -99,9 +99,9 @@ defmodule Arbiter.Agents.CredentialWardenTest do
     test "escalates to Admiral across all active workspaces" do
       {:ok, ws1} = Ash.create(Workspace, %{name: "cw-ws1", prefix: "cw1"})
       {:ok, ws2} = Ash.create(Workspace, %{name: "cw-ws2", prefix: "cw2"})
-      pid = start_warden()
+      pid = start_watchdog()
 
-      :ok = CredentialWarden.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
       Process.sleep(100)
 
       esc1 =
@@ -128,14 +128,14 @@ defmodule Arbiter.Agents.CredentialWardenTest do
     end
 
     test "marks expired and escalates when probe returns :auth_expired", %{ws: ws} do
-      pid = start_warden(adapters: [Arbiter.Agents.Claude])
+      pid = start_watchdog(adapters: [Arbiter.Agents.Claude])
 
       # Drive mark_expired directly (Preflight.check on Claude in CI has no CLI,
       # so we avoid a real probe and test the state + escalation path instead).
-      :ok = CredentialWarden.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
       Process.sleep(100)
 
-      assert CredentialWarden.expired?(Arbiter.Agents.Claude, pid)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
       escalation =
         Message.inbox("admiral", workspace_id: ws.id)
@@ -147,14 +147,14 @@ defmodule Arbiter.Agents.CredentialWardenTest do
     end
 
     test "reset/1 clears all expiry state", %{ws: _ws} do
-      pid = start_warden(adapters: [Arbiter.Agents.Claude])
+      pid = start_watchdog(adapters: [Arbiter.Agents.Claude])
 
-      :ok = CredentialWarden.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
+      :ok = CredentialWatchdog.mark_expired(Arbiter.Agents.Claude, auth_expired_reason(), pid)
       Process.sleep(20)
-      assert CredentialWarden.expired?(Arbiter.Agents.Claude, pid)
+      assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
-      :ok = CredentialWarden.reset(pid)
-      refute CredentialWarden.expired?(Arbiter.Agents.Claude, pid)
+      :ok = CredentialWatchdog.reset(pid)
+      refute CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
     end
   end
 end

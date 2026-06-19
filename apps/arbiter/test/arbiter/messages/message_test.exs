@@ -198,7 +198,7 @@ defmodule Arbiter.Messages.MessageTest do
           kind: :escalation,
           to_ref: "admiral",
           workspace_id: @ws,
-          subject: "Tribunal: changes requested for bd-aaa",
+          subject: "ReviewGate: changes requested for bd-aaa",
           body: "first"
         })
 
@@ -207,7 +207,7 @@ defmodule Arbiter.Messages.MessageTest do
           kind: :escalation,
           to_ref: "admiral",
           workspace_id: @ws,
-          subject: "Tribunal: review inconclusive for bd-bbb",
+          subject: "ReviewGate: review inconclusive for bd-bbb",
           body: "second"
         })
 

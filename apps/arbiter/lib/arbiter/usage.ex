@@ -2,14 +2,14 @@ defmodule Arbiter.Usage do
   @moduledoc """
   Ash domain + aggregation API for the structured token/cost usage ledger.
 
-  Every Claude session — work worker or Tribunal reviewer — emits a final
+  Every Claude session — work worker or ReviewGate reviewer — emits a final
   `result` event carrying tokens (input / output / cache), `total_cost_usd`,
   `duration_ms`, and model. The polecat captures that and inserts an
   `Arbiter.Usage.Event` row keyed by bead + step (`:work | :review`) +
   optional `workspace_id` and `polecat_run_id` for joinability.
 
   Multiple rows per bead are deliberate: a re-slung bead writes a second
-  `:work` row, a Tribunal review adds a `:review` row, etc. Rework is then
+  `:work` row, a ReviewGate review adds a `:review` row, etc. Rework is then
   visible as the spend across rows for the same bead.
 
   ## Aggregation
@@ -143,7 +143,7 @@ defmodule Arbiter.Usage do
     end)
   end
 
-  # Drop the "#review" suffix used by Tribunal reviewers so a review event is
+  # Drop the "#review" suffix used by ReviewGate reviewers so a review event is
   # still attributable to the author bead for campaign lookup.
   defp base_bead_id(<<id::binary>>) do
     case String.split(id, "#", parts: 2) do

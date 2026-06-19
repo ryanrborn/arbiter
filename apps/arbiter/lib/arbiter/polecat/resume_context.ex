@@ -5,12 +5,12 @@ defmodule Arbiter.Polecat.ResumeContext do
   When a worker is stopped mid-work (token exhaustion, crash, kill) its
   per-bead git worktree is preserved on disk: any commits it
   made are on the branch, and any in-flight edits sit uncommitted in the tree.
-  Re-slinging from scratch would discard that history from the agent's context
+  Re-dispatching from scratch would discard that history from the agent's context
   and risk redoing or duplicating completed steps.
 
   This module reads the **git state of the preserved worktree** and renders a
   Markdown prefix that is prepended to the standard work prompt by
-  `Arbiter.Polecat.Sling`. The resumed (fresh) agent reads it and continues
+  `Arbiter.Polecat.Dispatch`. The resumed (fresh) agent reads it and continues
   from where the prior one left off.
 
   ## Provider-agnostic by construction
@@ -86,7 +86,7 @@ defmodule Arbiter.Polecat.ResumeContext do
   WITHOUT the surrounding resume framing.
 
   Split out of `build/3` so callers other than the `arb resume` path can reuse
-  the same git-derived continuity briefing. The Tribunal's revise-and-rediscuss
+  the same git-derived continuity briefing. The ReviewGate's revise-and-rediscuss
   loop (bd-1na62i, Stage 3) prepends it to a revise-round implementer: between
   review rounds the prior round's fixes are committed on the branch (and any
   stragglers sit uncommitted), and the fresh implementer mind needs that picture

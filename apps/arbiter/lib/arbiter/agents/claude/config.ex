@@ -4,7 +4,7 @@ defmodule Arbiter.Agents.Claude.Config do
 
   Mirrors `Arbiter.Trackers.Jira.Config` / `Arbiter.Mergers.Github.Config`:
   the per-process active config lives in the process dictionary, seeded by
-  `Arbiter.Agents.prepare/1`. Long-lived callers (the polecat, the Tribunal)
+  `Arbiter.Agents.prepare/1`. Long-lived callers (the polecat, the ReviewGate)
   seed once at the request boundary; adapters resolve through this module
   inside the request lifecycle.
 
@@ -104,7 +104,7 @@ defmodule Arbiter.Agents.Claude.Config do
 
   @doc """
   Set the active config for either the worker `:agent` or the reviewer
-  `:review_agent` role. The two share a shape; the policy / Tribunal
+  `:review_agent` role. The two share a shape; the policy / ReviewGate
   decides which one to seed.
   """
   @spec put_active(Workspace.t() | map() | nil, :agent | :review_agent) :: :ok

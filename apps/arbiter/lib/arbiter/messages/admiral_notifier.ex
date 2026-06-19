@@ -20,7 +20,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   A dead/stopped worker (token exhaustion, crash, external kill, auth expiry)
   or a failed pre-flight auth probe is not just dashboard noise — it needs the
-  operator to *act* (re-authenticate, top up credits, re-sling). Those go out as
+  operator to *act* (re-authenticate, top up credits, re-dispatch). Those go out as
   addressed `:escalation` **mailbox** messages (`to_ref: "admiral"`,
   `directive_ref: <bead>`) so they land in `arb inbox` rather than scrolling off
   the broadcast feed. The classified cause + remediation
@@ -85,7 +85,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   @doc """
   Post a `:pipeline_failed` notification. Best-effort, returns `:ok`. Fired by
-  `Arbiter.Polecat.Warden` when a CI pipeline fails and `watch_pipeline` is
+  `Arbiter.Polecat.Watchdog` when a CI pipeline fails and `watch_pipeline` is
   enabled. The bead is NOT failed — a human may force-merge or rerun.
   """
   @spec pipeline_failed(snapshot(), String.t() | nil) :: :ok
@@ -105,7 +105,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   @doc """
   Post the `:awaiting_review_stuck` watchdog notification. Best-effort, returns
-  `:ok`. Fired by `Arbiter.Polecat.Warden` when a polecat has been parked at
+  `:ok`. Fired by `Arbiter.Polecat.Watchdog` when a polecat has been parked at
   `:awaiting_review` past its poll cap without a terminal MR outcome — so a
   silent hang surfaces to the operator instead of waiting forever (bd-66ey1o).
   """
@@ -141,7 +141,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @doc """
   Escalate a failed pre-flight auth probe to the Admiral (bd-awi4nw).
 
-  Fired by `Arbiter.Polecat.Sling` when the agent CLI fails its cheap
+  Fired by `Arbiter.Polecat.Dispatch` when the agent CLI fails its cheap
   token-validity probe *before* any worker is dispatched — so a wave of spawns
   that would all 401 is refused up front and the operator is told to
   re-authenticate. Same addressed `:escalation` shape as `acolyte_stopped/2`.
@@ -154,7 +154,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @doc """
   Escalate a proactively-detected credential expiry to the Admiral (bd-5wchp1).
 
-  Fired by `Arbiter.Agents.CredentialWarden` when a periodic liveness probe
+  Fired by `Arbiter.Agents.CredentialWatchdog` when a periodic liveness probe
   detects that credentials are expired *before* any worker has been dispatched
   or failed. Unlike `acolyte_stopped/2` and `preflight_failed/2`, this has no
   associated bead — it names the adapter that failed instead.
@@ -176,7 +176,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   Escalate a failed external-tracker sync to the Admiral (bd-c4cfuv).
 
   Fired by `Arbiter.Trackers.Sync` / `Arbiter.Beads.Issue.Changes.SyncTracker`
-  when a lifecycle transition (sling → In Progress, PR-open → In Code Review,
+  when a lifecycle transition (dispatch → In Progress, PR-open → In Code Review,
   merge → Done, …) can't be resolved or fails on the wire. The original
   incident (VR-17911) was invisible precisely because such failures were
   swallowed; this surfaces a `status_map`/workflow mismatch as an actionable
@@ -318,7 +318,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
           "Worker for #{title_for(bead_id)} stopped: #{reason.summary}."
 
         :preflight_failed ->
-          "Refused to sling #{title_for(bead_id)} — agent pre-flight auth probe failed: " <>
+          "Refused to dispatch #{title_for(bead_id)} — agent pre-flight auth probe failed: " <>
             "#{reason.summary}."
       end
 
@@ -339,7 +339,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   end
 
   # bd-auma3z: a stopped worker's worktree (committed/uncommitted
-  # progress) is preserved, so the operator can continue rather than re-slinging
+  # progress) is preserved, so the operator can continue rather than re-dispatching
   # from scratch. Offer the resume verb right in the escalation. Only for
   # `:acolyte_stopped` — a `:preflight_failed` refusal happens before any work,
   # so there is no worktree to resume.

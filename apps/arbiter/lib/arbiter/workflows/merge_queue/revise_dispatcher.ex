@@ -1,44 +1,44 @@
-defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
+defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   @moduledoc """
   Dispatch an auto-revise pass on a bead's **existing** worktree when a human
   reviewer requests changes (or leaves actionable review comments) on its PR
   (bd-95lsjb).
 
-  Invoked by `Arbiter.Workflows.Refinery` when `adapter.get` reports a
+  Invoked by `Arbiter.Workflows.MergeQueue` when `adapter.get` reports a
   CHANGES_REQUESTED review newer than the last one the queue handled. Before
   this, a CHANGES_REQUESTED review left the item idling at `:awaiting_approval`
-  forever — the internal Tribunal is the only revise loop, and it runs
+  forever — the internal ReviewGate is the only revise loop, and it runs
   *pre-PR*, so human PR-side feedback was wired into nothing. The revise
   dispatcher closes that gap.
 
   ## Job scope
 
-  This reuses the `arb resume` path (`Arbiter.Polecat.Sling.resume/2`): it
+  This reuses the `arb resume` path (`Arbiter.Polecat.Dispatch.resume/2`): it
   re-attaches a fresh worker to the bead's **preserved worktree** —
   the same branch the PR already tracks — briefed with the reviewer's feedback
   prepended to the standard work prompt. The worker addresses the feedback,
   commits, and pushes to the **same branch**; the existing PR updates in place.
 
   It must NOT open a new PR (pairs with bd-53xrmi: single canonical PR, the
-  worker only pushes). `Sling.resume` threads the bead's existing `pr_ref`
+  worker only pushes). `Dispatch.resume` threads the bead's existing `pr_ref`
   through so completion reuses the open PR rather than duplicating it.
 
   ## Merger/tracker-agnostic
 
   Like the `ConflictResolver`, this module operates on the bead + its preserved
-  worktree. It is unaware of GitHub/GitLab — the Refinery one layer up reads
+  worktree. It is unaware of GitHub/GitLab — the MergeQueue one layer up reads
   the CHANGES_REQUESTED signal from whichever forge adapter it's wired to and
   passes the rendered feedback down.
 
   ## Behaviour
 
-  `ReviseDispatcher` is a behaviour so the Refinery accepts a swappable
+  `ReviseDispatcher` is a behaviour so the MergeQueue accepts a swappable
   implementation (defaults to this module). Tests inject a stub so they don't
   boot a real Claude session or shell out to git.
   """
 
   alias Arbiter.Mergers.Merger
-  alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecat.Dispatch
 
   require Logger
 
@@ -64,10 +64,10 @@ defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
   feedback and push to the same branch.
 
   Returns `{:ok, info}` once the worker is spawned (the revise runs
-  asynchronously; the Refinery returns the item to `:awaiting_approval` to
+  asynchronously; the MergeQueue returns the item to `:awaiting_approval` to
   await re-review). Returns `{:error, reason}` when the worktree can't be
   resumed (e.g. it was cleaned up, or a polecat is still actively working the
-  bead) — the Refinery parks the item `:failed` so it doesn't spin.
+  bead) — the MergeQueue parks the item `:failed` so it doesn't spin.
   """
   @callback dispatch(args :: dispatch_args()) :: dispatch_result()
 
@@ -75,10 +75,10 @@ defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
 
   @doc """
   Default implementation of `dispatch/1`. Delegates to
-  `Arbiter.Polecat.Sling.resume/2` with the review feedback rendered into a
+  `Arbiter.Polecat.Dispatch.resume/2` with the review feedback rendered into a
   briefing that is prepended to the work prompt.
 
-  Tests should pass a stub via the Refinery's `:revise_dispatcher` opt so they
+  Tests should pass a stub via the MergeQueue's `:revise_dispatcher` opt so they
   don't shell out to git or spawn `claude`.
   """
   @impl true
@@ -92,7 +92,7 @@ defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
       |> maybe_put(:claude_command, Map.get(args, :claude_command))
       |> Keyword.put(:start_claude, Map.get(args, :start_claude, true))
 
-    case Sling.resume(bead_id, resume_opts) do
+    case Dispatch.resume(bead_id, resume_opts) do
       {:ok, info} -> {:ok, info}
       {:error, reason} -> {:error, reason}
     end

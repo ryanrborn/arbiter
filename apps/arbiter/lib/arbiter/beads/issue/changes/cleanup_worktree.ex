@@ -5,7 +5,7 @@ defmodule Arbiter.Beads.Issue.Changes.CleanupWorktree do
 
   Path is derived from the bead via `Arbiter.Polecat.BranchNamer.derive/1`
   + `Arbiter.Polecat.Worktree.worktree_path/1` — the same convention
-  `Sling` uses on provisioning, so we never need a stored path.
+  `Dispatch` uses on provisioning, so we never need a stored path.
 
   Best-effort. Skipped silently when:
 

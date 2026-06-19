@@ -146,7 +146,7 @@ defmodule Arbiter.Polecat.Worktree do
   Counterpart to `create/3`. Use it when you need a worktree checked out on
   a branch that already exists in the repo — typically because a remote PR
   was opened against it. The merge queue's conflict-resolver worker
-  (`Arbiter.Workflows.Refinery.ConflictResolver`) is the primary caller: it
+  (`Arbiter.Workflows.MergeQueue.ConflictResolver`) is the primary caller: it
   rebases the existing PR branch in place, so it must NOT create a new
   branch that would shadow the PR's head ref.
 

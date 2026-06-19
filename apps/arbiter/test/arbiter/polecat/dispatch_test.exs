@@ -1,9 +1,9 @@
-defmodule Arbiter.Polecat.SlingTest do
+defmodule Arbiter.Polecat.DispatchTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecat.Dispatch
   alias Arbiter.Polecats.Run
   require Ash.Query
 
@@ -19,15 +19,15 @@ defmodule Arbiter.Polecat.SlingTest do
   end
 
   setup do
-    {:ok, ws} = Ash.create(Workspace, %{name: "sling-test-ws", prefix: "st"})
+    {:ok, ws} = Ash.create(Workspace, %{name: "dispatch-test-ws", prefix: "st"})
     {:ok, ws: ws}
   end
 
-  describe "sling/2 happy path" do
+  describe "dispatch/2 happy path" do
     test "spawns a polecat and starts a workflow machine", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "hello world", workspace_id: ws.id})
 
-      assert {:ok, result} = Sling.sling(bead.id, rig: "test/rig", start_driver: false)
+      assert {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", start_driver: false)
       assert result.bead.status == :in_progress
       assert is_pid(result.polecat_pid)
       assert is_pid(result.machine_pid)
@@ -40,47 +40,47 @@ defmodule Arbiter.Polecat.SlingTest do
 
     test "idempotent for already-in_progress beads", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
-      {:ok, _first} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      {:ok, _first} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
 
-      # Second sling: bead is already :in_progress; polecat already exists.
+      # Second dispatch: bead is already :in_progress; polecat already exists.
       # Should NOT crash; should return the existing polecat pid.
-      assert {:ok, second} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      assert {:ok, second} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
       assert second.bead.status == :in_progress
       assert Polecat.whereis(bead.id) == second.polecat_pid
     end
 
-    # bd-d70whv: resling a failed polecat must start a fresh polecat rather than
+    # bd-d70whv: redispatch a failed polecat must start a fresh polecat rather than
     # reusing the stale :failed one. Previously, start_polecat/3 returned the
     # existing pid on {:already_started, pid} regardless of status, and the
     # :failed status caused the "arb done" FSM guard to silently no-op.
-    test "resling a :failed polecat starts a fresh :idle polecat (bd-d70whv)", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "resling failed", workspace_id: ws.id})
+    test "redispatch a :failed polecat starts a fresh :idle polecat (bd-d70whv)", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "redispatch failed", workspace_id: ws.id})
 
-      {:ok, first} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
       first_pid = first.polecat_pid
 
       :ok = Polecat.fail(first_pid, :credentials_expired)
       assert Polecat.state(first_pid).status == :failed
 
-      # Re-sling: must evict the stale polecat and start a new one.
-      {:ok, second} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      # Re-dispatch: must evict the stale polecat and start a new one.
+      {:ok, second} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
 
       assert second.polecat_pid != first_pid
       refute Process.alive?(first_pid)
       assert Polecat.state(second.polecat_pid).status == :idle
     end
 
-    test "resling a :completed polecat also starts fresh (bd-d70whv)", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "resling completed", workspace_id: ws.id})
+    test "redispatch a :completed polecat also starts fresh (bd-d70whv)", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "redispatch completed", workspace_id: ws.id})
 
-      {:ok, first} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
       first_pid = first.polecat_pid
 
       :ok = Polecat.advance(first_pid, :work)
       :ok = Polecat.complete(first_pid, :done)
       assert Polecat.state(first_pid).status == :completed
 
-      {:ok, second} = Sling.sling(bead.id, rig: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(bead.id, rig: "r", start_driver: false)
 
       assert second.polecat_pid != first_pid
       refute Process.alive?(first_pid)
@@ -90,7 +90,7 @@ defmodule Arbiter.Polecat.SlingTest do
     test "starts a Driver by default and drives bead to :closed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "drive me", workspace_id: ws.id})
 
-      assert {:ok, result} = Sling.sling(bead.id, rig: "test/rig", interval_ms: 5)
+      assert {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", interval_ms: 5)
       assert is_pid(result.driver_pid)
       assert Process.alive?(result.driver_pid)
 
@@ -105,17 +105,17 @@ defmodule Arbiter.Polecat.SlingTest do
     end
   end
 
-  describe "sling/2 error cases" do
+  describe "dispatch/2 error cases" do
     test "non-existent bead returns {:error, {:bead_not_found, _}}" do
       assert {:error, {:bead_not_found, "no-such-bead-123"}} =
-               Sling.sling("no-such-bead-123")
+               Dispatch.dispatch("no-such-bead-123")
     end
 
     test "closed beads cannot be slung", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
       {:ok, _closed} = Ash.update(bead, %{}, action: :close)
 
-      assert {:error, {:bead_closed, _}} = Sling.sling(bead.id)
+      assert {:error, {:bead_closed, _}} = Dispatch.dispatch(bead.id)
     end
 
     test "beads already awaiting review cannot be re-slung (bd-appwsh)", %{ws: ws} do
@@ -125,7 +125,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "awaiting-review guard", workspace_id: ws.id})
 
       # Boot a polecat and park it at :awaiting_review via open_mr/5 with a
-      # stub merger. Use a far-future Warden interval so the auto-started Warden
+      # stub merger. Use a far-future Watchdog interval so the auto-started Watchdog
       # does not poll or transition the polecat during the assertion window.
       {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "arbiter")
       :ok = Polecat.advance(pid, :implement)
@@ -143,14 +143,14 @@ defmodule Arbiter.Polecat.SlingTest do
       assert {:ok, "!test"} = Polecat.open_mr(pid, "feature/guard", "Guard", "", open_opts)
       assert Polecat.state(pid).status == :awaiting_review
 
-      assert {:error, {:bead_awaiting_review, _}} = Sling.sling(bead.id, start_driver: false)
+      assert {:error, {:bead_awaiting_review, _}} = Dispatch.dispatch(bead.id, start_driver: false)
     end
   end
 
   describe "pre-flight auth check (bd-awi4nw)" do
     alias Arbiter.Messages.Message
 
-    # bd-1ziw04: real-work slings now require the rig to be in :rig_paths.
+    # bd-1ziw04: real-work dispatchs now require the rig to be in :rig_paths.
     # Configure a minimal entry so rig validation passes and the preflight check
     # actually fires. No real git repo is needed — the probe aborts before the
     # worktree provisioning step.
@@ -165,11 +165,11 @@ defmodule Arbiter.Polecat.SlingTest do
       end)
     end
 
-    test "a failing auth probe REFUSES to sling and leaves the bead untouched", %{ws: ws} do
+    test "a failing auth probe REFUSES to dispatch and leaves the bead untouched", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "auth gate", workspace_id: ws.id})
 
       assert {:error, {:auth_check_failed, reason}} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  rig: "test/rig",
                  start_driver: false,
                  start_claude: true,
@@ -193,7 +193,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "auth escalate", workspace_id: ws.id})
 
       {:error, {:auth_check_failed, _}} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "test/rig",
           start_driver: false,
           start_claude: true,
@@ -215,7 +215,7 @@ defmodule Arbiter.Polecat.SlingTest do
       # Even with a probe_command that would 401, no start_claude means no probe.
       # provision_worktree: false so we don't try to git-fetch /tmp.
       assert {:ok, result} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  rig: "test/rig",
                  start_driver: false,
                  provision_worktree: false,
@@ -233,7 +233,7 @@ defmodule Arbiter.Polecat.SlingTest do
       # preflight rather than being refused by it. The rig must be valid so the
       # rig-resolution guard (bd-1ziw04) passes before reaching the preflight gate.
       assert {:error, :missing_worktree} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  rig: "test/rig",
                  start_driver: false,
                  start_claude: true,
@@ -244,10 +244,10 @@ defmodule Arbiter.Polecat.SlingTest do
     end
   end
 
-  describe "sling/2 result shape" do
+  describe "dispatch/2 result shape" do
     test "returns a map with the standard keys", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
-      {:ok, result} = Sling.sling(bead.id, rig: "test/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", start_driver: false)
 
       for key <- [:bead, :polecat_pid, :machine_id, :machine_pid, :driver_pid, :worktree_path] do
         assert Map.has_key?(result, key), "missing #{key}"
@@ -257,7 +257,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
   describe "Claude session (start_claude opt)" do
     setup do
-      tmp = Path.join(System.tmp_dir!(), "sling-claude-#{:erlang.unique_integer([:positive])}")
+      tmp = Path.join(System.tmp_dir!(), "dispatch-claude-#{:erlang.unique_integer([:positive])}")
       File.mkdir_p!(tmp)
 
       on_exit(fn -> File.rm_rf!(tmp) end)
@@ -334,7 +334,7 @@ defmodule Arbiter.Polecat.SlingTest do
     test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
 
-      {:ok, result} = Sling.sling(bead.id, rig: "test/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "test/rig", start_driver: false)
       assert result.claude_port == nil
     end
 
@@ -343,9 +343,9 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
       # Use the tmp dir as a stand-in worktree by passing it through manually.
-      # Sling.maybe_provision_worktree returns nil when rig is unmapped, but
+      # Dispatch.maybe_provision_worktree returns nil when rig is unmapped, but
       # we need a worktree_path for ClaudeSession; so we point a tmp rig at
-      # a real git repo and let Sling provision the worktree itself.
+      # a real git repo and let Dispatch provision the worktree itself.
       repo = seed_repo!(tmp, "repo")
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
@@ -357,13 +357,13 @@ defmodule Arbiter.Polecat.SlingTest do
       end)
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "claude/rig",
           start_driver: false,
           start_claude: true,
           # Stand-in for a running `claude --print` session — stays alive (so it
           # isn't caught by bd-awi4nw stop-detection as a died-early worker),
-          # but proves ClaudeSession.start was wired into Sling.
+          # but proves ClaudeSession.start was wired into Dispatch.
           claude_command: ["sleep", "2"]
         )
 
@@ -389,7 +389,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "rv/rig",
           review: true,
           start_driver: false,
@@ -423,7 +423,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "work/rig",
           start_driver: false,
           start_claude: true,
@@ -494,7 +494,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "check ignore", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "gic/rig",
           start_driver: false,
           start_claude: true,
@@ -526,7 +526,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
 
       assert {:error, {:rig_not_found, "no-such-rig"}} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  rig: "no-such-rig",
                  start_driver: false,
                  start_claude: true,
@@ -549,7 +549,7 @@ defmodule Arbiter.Polecat.SlingTest do
       end)
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "drvr/rig",
           start_claude: true,
           # A stand-in for a *running* Claude session: it must stay alive for the
@@ -564,7 +564,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
       assert is_pid(result.driver_pid)
 
-      # Sling must have nudged the polecat out of :idle so the UI/CLI
+      # Dispatch must have nudged the polecat out of :idle so the UI/CLI
       # report a meaningful status while Claude works. In claude_driven
       # mode the Driver never ticks the Machine, so without this nudge
       # the polecat would stay :idle until "arb done" fires.
@@ -614,7 +614,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "model bead", workspace_id: ws.id})
 
       {:ok, _result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "m/rig",
           start_driver: false,
           start_claude: true,
@@ -629,7 +629,7 @@ defmodule Arbiter.Polecat.SlingTest do
       assert "sonnet" in args
     end
 
-    test "per-sling :model opt overrides the workspace's routed model",
+    test "per-dispatch :model opt overrides the workspace's routed model",
          %{ws: ws, tmp: tmp} do
       argv_file = Path.join(tmp, "argv.txt")
       :ok = stub_claude_on_path(tmp, argv_file)
@@ -653,7 +653,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "override", workspace_id: ws.id})
 
       {:ok, _result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "o/rig",
           start_driver: false,
           start_claude: true,
@@ -693,7 +693,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "gemini bead", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "g/rig",
           start_driver: false,
           start_claude: true,
@@ -745,7 +745,7 @@ defmodule Arbiter.Polecat.SlingTest do
         Ash.create(Issue, %{title: "trivial", workspace_id: ws.id, priority: 4})
 
       {:ok, _result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "p/rig",
           start_driver: false,
           start_claude: true,
@@ -801,7 +801,7 @@ defmodule Arbiter.Polecat.SlingTest do
     @env_key :rig_paths
 
     setup do
-      tmp = Path.join(System.tmp_dir!(), "sling-wt-#{:erlang.unique_integer([:positive])}")
+      tmp = Path.join(System.tmp_dir!(), "dispatch-wt-#{:erlang.unique_integer([:positive])}")
       repo = Path.join(tmp, "source")
       File.mkdir_p!(repo)
 
@@ -855,7 +855,7 @@ defmodule Arbiter.Polecat.SlingTest do
         })
 
       {:ok, result} =
-        Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+        Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
 
       assert is_binary(result.worktree_path)
       assert String.starts_with?(result.worktree_path, root)
@@ -869,7 +869,7 @@ defmodule Arbiter.Polecat.SlingTest do
     test "skips worktree when rig is not in rig_paths", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "unmapped", workspace_id: ws.id})
 
-      {:ok, result} = Sling.sling(bead.id, rig: "no-such-rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "no-such-rig", start_driver: false)
       assert result.worktree_path == nil
     end
 
@@ -884,8 +884,8 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id})
 
       # `per-ws/rig` is NOT in Application env — only in this workspace's
-      # config. Sling must still find it.
-      {:ok, result} = Sling.sling(bead.id, rig: "per-ws/rig", start_driver: false)
+      # config. Dispatch must still find it.
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "per-ws/rig", start_driver: false)
       assert is_binary(result.worktree_path)
       assert File.dir?(result.worktree_path)
     end
@@ -918,7 +918,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id})
 
-      {:ok, result} = Sling.sling(bead.id, rig: "bb/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "bb/rig", start_driver: false)
 
       # Worktree was cut from `develop`: the develop-only file is present.
       assert is_binary(result.worktree_path)
@@ -933,21 +933,21 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id, rig: "st/rig", start_driver: false, provision_worktree: false)
+        Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false, provision_worktree: false)
 
       assert result.worktree_path == nil
     end
 
-    test "attaches to existing branch when re-slinging a reopened bead", %{repo: repo, ws: ws} do
+    test "attaches to existing branch when re-dispatching a reopened bead", %{repo: repo, ws: ws} do
       # Reproduces bd-4tta5n: bead is slung once (branch created), the worktree
       # is cleaned up but the branch remains, then the bead is reopened and
-      # re-slung. Worktree.create fails with "already exists"; sling must fall
+      # re-slung. Worktree.create fails with "already exists"; dispatch must fall
       # back to Worktree.attach and succeed.
       {:ok, bead} =
-        Ash.create(Issue, %{title: "re-sling after review", workspace_id: ws.id})
+        Ash.create(Issue, %{title: "re-dispatch after review", workspace_id: ws.id})
 
-      # First sling — provisions the worktree, creating the branch locally.
-      {:ok, first} = Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+      # First dispatch — provisions the worktree, creating the branch locally.
+      {:ok, first} = Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
       assert is_binary(first.worktree_path)
       branch = Arbiter.Polecat.BranchNamer.derive(bead)
 
@@ -963,8 +963,8 @@ defmodule Arbiter.Polecat.SlingTest do
       # Reopen bead so it can be re-slung.
       {:ok, bead} = Ash.update(bead, %{status: :open})
 
-      # Second sling — branch already exists; must attach instead of creating.
-      assert {:ok, second} = Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+      # Second dispatch — branch already exists; must attach instead of creating.
+      assert {:ok, second} = Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
       assert is_binary(second.worktree_path)
       assert File.dir?(second.worktree_path)
       assert {:ok, ^branch} = Arbiter.Polecat.Worktree.current_branch(second.worktree_path)
@@ -973,7 +973,7 @@ defmodule Arbiter.Polecat.SlingTest do
     test "worktree starts from upstream tip even when the rig's local base is stale",
          %{repo: repo, remote: remote, tmp: tmp, ws: ws} do
       # Reproduces the 2026-06-04 incident: a second clone advances origin/main;
-      # the rig's local `main` stays put. Sling must still produce a worktree
+      # the rig's local `main` stays put. Dispatch must still produce a worktree
       # at the upstream tip.
       clone = Path.join(tmp, "advance")
       {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
@@ -989,14 +989,14 @@ defmodule Arbiter.Polecat.SlingTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "stale local base", workspace_id: ws.id})
 
-      {:ok, result} = Sling.sling(bead.id, rig: "st/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "st/rig", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "UPSTREAM.md"))
     end
 
-    test "fetch failure aborts the sling with a clear error", %{ws: ws, tmp: tmp} do
+    test "fetch failure aborts the dispatch with a clear error", %{ws: ws, tmp: tmp} do
       # Rig with a broken `origin` (points at a nonexistent path): the fetch
-      # must fail and the sling abort with a structured error rather than
+      # must fail and the dispatch abort with a structured error rather than
       # silently falling back to the stale local base.
       broken = Path.join(tmp, "broken-origin")
       File.mkdir_p!(broken)
@@ -1016,7 +1016,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "fetch failure", workspace_id: ws.id})
 
       assert {:error, {:worktree_failed, reason}} =
-               Sling.sling(bead.id, rig: "broken/rig", start_driver: false)
+               Dispatch.dispatch(bead.id, rig: "broken/rig", start_driver: false)
 
       assert match?({:fetch_failed, _}, reason) or match?({:missing_origin_ref, _}, reason),
              "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
@@ -1048,7 +1048,7 @@ defmodule Arbiter.Polecat.SlingTest do
           target_branch: "dolphin"
         })
 
-      {:ok, result} = Sling.sling(bead.id, rig: "pb/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "pb/rig", start_driver: false)
 
       # The bead-specified target wins: the worktree carries the dolphin file
       # and the polecat's meta records dolphin as the merge target.
@@ -1080,7 +1080,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "rig default", workspace_id: ws_local.id})
 
-      {:ok, result} = Sling.sling(bead.id, rig: "rd/rig", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "rd/rig", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
       assert %{target_branch: "dolphin"} = Polecat.state(result.polecat_pid).meta
@@ -1092,11 +1092,11 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "fix pass bead", workspace_id: ws.id})
 
       {:ok, bead} =
-        Ash.update(bead, %{notes: "## Tribunal verdict: REQUEST_CHANGES\n\nFix the null guard."},
+        Ash.update(bead, %{notes: "## ReviewGate verdict: REQUEST_CHANGES\n\nFix the null guard."},
           action: :update
         )
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       assert prompt =~ "Prior review findings"
       assert prompt =~ "Fix the null guard."
@@ -1105,7 +1105,7 @@ defmodule Arbiter.Polecat.SlingTest do
     test "omits prior review findings section when bead has no notes", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "fresh bead", workspace_id: ws.id})
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       refute prompt =~ "Prior review findings"
     end
@@ -1114,7 +1114,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "fix pass with pr", workspace_id: ws.id})
       {:ok, bead} = Ash.update(bead, %{pr_ref: "319"}, action: :update)
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       assert prompt =~ "existing PR (#319)"
       assert prompt =~ "gh pr view 319 --json reviews,reviewComments"
@@ -1124,7 +1124,7 @@ defmodule Arbiter.Polecat.SlingTest do
     test "omits PR review instruction when bead has no pr_ref", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "no pr bead", workspace_id: ws.id})
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       refute prompt =~ "gh pr view"
     end
@@ -1133,7 +1133,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "review bead", workspace_id: ws.id})
       {:ok, bead} = Ash.update(bead, %{pr_ref: "42", notes: "some notes"}, action: :update)
 
-      review_prompt = Sling.prompt_for_bead(bead, review: true)
+      review_prompt = Dispatch.prompt_for_bead(bead, review: true)
       refute review_prompt =~ "Prior review findings"
       refute review_prompt =~ "existing PR"
     end
@@ -1150,7 +1150,7 @@ defmodule Arbiter.Polecat.SlingTest do
           skip_upstream_create: true
         })
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       # Notes persist via the MCP tool, never the arb escript (bd-53xrmi).
       assert prompt =~ "backed by an external tracker"
@@ -1164,7 +1164,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} =
         Ash.create(Issue, %{title: "local work", workspace_id: ws.id, tracker_type: "none"})
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       refute prompt =~ "qa_notes"
       refute prompt =~ "backed by an external tracker"
@@ -1180,7 +1180,7 @@ defmodule Arbiter.Polecat.SlingTest do
           skip_upstream_create: true
         })
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       refute prompt =~ "qa_notes"
     end
@@ -1191,7 +1191,7 @@ defmodule Arbiter.Polecat.SlingTest do
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "author body", workspace_id: ws.id})
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
 
       # Authors the body and persists it via the MCP tool, never the arb escript.
       assert prompt =~ "bead_update_progress"
@@ -1210,7 +1210,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} =
         Ash.create(Issue, %{title: "local body", workspace_id: ws.id, tracker_type: "none"})
 
-      prompt = Sling.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_bead(bead, [])
       assert prompt =~ "pr_body"
       assert prompt =~ "bead_update_progress"
     end
@@ -1220,7 +1220,7 @@ defmodule Arbiter.Polecat.SlingTest do
     @env_key :rig_paths
 
     setup do
-      tmp = Path.join(System.tmp_dir!(), "sling-resume-#{:erlang.unique_integer([:positive])}")
+      tmp = Path.join(System.tmp_dir!(), "dispatch-resume-#{:erlang.unique_integer([:positive])}")
       repo = Path.join(tmp, "source")
       File.mkdir_p!(repo)
 
@@ -1261,11 +1261,11 @@ defmodule Arbiter.Polecat.SlingTest do
       %{repo: repo, worktree_root: worktree_root}
     end
 
-    # Sling a bead, provisioning its worktree, then simulate a mid-work stop:
+    # Dispatch a bead, provisioning its worktree, then simulate a mid-work stop:
     # the polecat fails (lingers in :failed, registered) with the worktree left
     # on disk — exactly the state `arb resume` is built to recover from.
     defp stop_acolyte_with_outpost(bead_id) do
-      {:ok, first} = Sling.sling(bead_id, rig: "rs/rig", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(bead_id, rig: "rs/rig", start_driver: false)
       assert is_binary(first.worktree_path)
       :ok = Polecat.fail(first.polecat_pid, :token_exhausted)
       first
@@ -1279,7 +1279,7 @@ defmodule Arbiter.Polecat.SlingTest do
       assert prior_run.status == :failed
 
       {:ok, result} =
-        Sling.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
+        Dispatch.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
 
       # Same worktree, fresh polecat.
       assert result.worktree_path == first.worktree_path
@@ -1322,7 +1322,7 @@ defmodule Arbiter.Polecat.SlingTest do
       Arbiter.Polecat.Worktree.cleanup(first.worktree_path)
       refute File.dir?(first.worktree_path)
 
-      assert {:error, :no_outpost} = Sling.resume(bead.id, start_driver: false)
+      assert {:error, :no_outpost} = Dispatch.resume(bead.id, start_driver: false)
     end
 
     test "refuses to resume a closed bead", %{ws: ws} do
@@ -1330,16 +1330,16 @@ defmodule Arbiter.Polecat.SlingTest do
       _ = stop_acolyte_with_outpost(bead.id)
       {:ok, _} = Ash.update(bead, %{}, action: :close)
 
-      assert {:error, {:bead_closed, _}} = Sling.resume(bead.id, start_driver: false)
+      assert {:error, {:bead_closed, _}} = Dispatch.resume(bead.id, start_driver: false)
     end
 
     test "refuses while an worker is still actively working", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
-      # Sling but DON'T stop — the polecat is live (:idle/:running), not stopped.
-      {:ok, _live} = Sling.sling(bead.id, rig: "rs/rig", start_driver: false)
+      # Dispatch but DON'T stop — the polecat is live (:idle/:running), not stopped.
+      {:ok, _live} = Dispatch.dispatch(bead.id, rig: "rs/rig", start_driver: false)
 
       assert {:error, {:acolyte_active, _status}} =
-               Sling.resume(bead.id, start_driver: false)
+               Dispatch.resume(bead.id, start_driver: false)
     end
 
     test "inherits the rig from the prior run when omitted", %{ws: ws} do
@@ -1348,7 +1348,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
       # No rig passed — must inherit "rs/rig" from the prior run record.
       {:ok, result} =
-        Sling.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
+        Dispatch.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
 
       assert is_binary(result.worktree_path)
     end
@@ -1358,7 +1358,7 @@ defmodule Arbiter.Polecat.SlingTest do
     @env_key :rig_paths
 
     setup do
-      tmp = Path.join(System.tmp_dir!(), "sling-review-#{:erlang.unique_integer([:positive])}")
+      tmp = Path.join(System.tmp_dir!(), "dispatch-review-#{:erlang.unique_integer([:positive])}")
       repo = Path.join(tmp, "source")
       File.mkdir_p!(repo)
 
@@ -1389,7 +1389,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id, rig: "rv/rig", review: true, start_driver: false)
+        Dispatch.dispatch(bead.id, rig: "rv/rig", review: true, start_driver: false)
 
       # No per-bead branch, no worktree.
       assert result.worktree_path == nil
@@ -1415,7 +1415,7 @@ defmodule Arbiter.Polecat.SlingTest do
         })
 
       prompt =
-        Arbiter.Polecat.Sling.prompt_for_bead(bead, review: true)
+        Arbiter.Polecat.Dispatch.prompt_for_bead(bead, review: true)
 
       assert prompt =~ "reviewer polecat"
       assert prompt =~ "github:999"
@@ -1424,7 +1424,7 @@ defmodule Arbiter.Polecat.SlingTest do
       assert prompt =~ "arb done"
 
       # The work prompt is still produced by default for non-review dispatches.
-      work = Arbiter.Polecat.Sling.prompt_for_bead(bead, [])
+      work = Arbiter.Polecat.Dispatch.prompt_for_bead(bead, [])
       assert work =~ "working autonomously"
       refute work =~ "reviewer polecat"
     end
@@ -1441,7 +1441,7 @@ defmodule Arbiter.Polecat.SlingTest do
 
       {:ok, bead} = Ash.update(bead, %{pr_ref: "123"}, action: :update)
 
-      prompt = Arbiter.Polecat.Sling.prompt_for_bead(bead, review: true)
+      prompt = Arbiter.Polecat.Dispatch.prompt_for_bead(bead, review: true)
 
       assert prompt =~ "github:123"
       refute prompt =~ "github:93"
@@ -1452,7 +1452,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})
 
       {:ok, result} =
-        Sling.sling(bead.id,
+        Dispatch.dispatch(bead.id,
           rig: "rv/rig",
           review: true,
           start_claude: true,
@@ -1471,7 +1471,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "no cwd", workspace_id: ws.id})
 
       assert {:error, {:rig_not_found, "no-such-rig"}} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  rig: "no-such-rig",
                  review: true,
                  start_claude: true,
@@ -1487,7 +1487,7 @@ defmodule Arbiter.Polecat.SlingTest do
     @env_key :rig_paths
 
     setup do
-      tmp = Path.join(System.tmp_dir!(), "sling-rig-#{:erlang.unique_integer([:positive])}")
+      tmp = Path.join(System.tmp_dir!(), "dispatch-rig-#{:erlang.unique_integer([:positive])}")
       repo = Path.join(tmp, "source")
       File.mkdir_p!(repo)
 
@@ -1533,7 +1533,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "no rigs", workspace_id: ws.id})
 
       assert {:error, :no_rig_configured} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -1552,7 +1552,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "auto-select", workspace_id: ws.id})
 
       assert {:ok, result} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["sleep", "2"],
@@ -1570,7 +1570,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "multi rigs", workspace_id: ws.id})
 
       assert {:error, {:ambiguous_rig, rigs}} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -1592,7 +1592,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, bead} = Ash.create(Issue, %{title: "bad rig", workspace_id: ws.id})
 
       assert {:error, {:rig_not_found, "no-such/rig"}} =
-               Sling.sling(bead.id,
+               Dispatch.dispatch(bead.id,
                  rig: "no-such/rig",
                  start_driver: false,
                  start_claude: true,
@@ -1606,12 +1606,12 @@ defmodule Arbiter.Polecat.SlingTest do
       assert Polecat.whereis(bead.id) == nil
     end
 
-    test "dry sling (no start_claude) is unaffected — still parks without a rig", %{ws: ws} do
+    test "dry dispatch (no start_claude) is unaffected — still parks without a rig", %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
-      {:ok, bead} = Ash.create(Issue, %{title: "dry sling", workspace_id: ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
 
       # No --with-claude → no rig required → succeeds and parks as :in_progress.
-      assert {:ok, result} = Sling.sling(bead.id, start_driver: false)
+      assert {:ok, result} = Dispatch.dispatch(bead.id, start_driver: false)
       assert result.bead.status == :in_progress
       assert result.worktree_path == nil
     end

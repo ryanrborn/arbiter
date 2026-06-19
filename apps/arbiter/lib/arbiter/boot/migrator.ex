@@ -18,7 +18,7 @@ defmodule Arbiter.Boot.Migrator do
   `Arbiter.Application.start/2` return — which is what lets the `:arbiter_web`
   app (and `ArbiterWeb.Endpoint`) start *after* the schema is current.
 
-  A `Task` child (like the reconcile/refinery boot tasks) would be the wrong
+  A `Task` child (like the reconcile/merge_queue boot tasks) would be the wrong
   tool: a Task is merely *spawned* during boot and runs concurrently, so the
   endpoint could bind its port and serve requests against a half-migrated
   schema. The ordering guarantee we need is exactly the blocking one.

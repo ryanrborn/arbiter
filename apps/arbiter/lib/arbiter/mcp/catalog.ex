@@ -31,9 +31,9 @@ defmodule Arbiter.MCP.Catalog do
   | `bead_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `dep_add` | coordinator | `Ash.create(Dependency, …)` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
-  | `polecat_sling` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` |
-  | `polecat_resume` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.resume/2` |
-  | `polecat_review` | coordinator (`can_sling`) | `Arbiter.Polecat.Sling.sling/2` (`review: true`) |
+  | `polecat_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Polecat.Dispatch.dispatch/2` |
+  | `polecat_resume` | coordinator (`can_dispatch`) | `Arbiter.Polecat.Dispatch.resume/2` |
+  | `polecat_review` | coordinator (`can_dispatch`) | `Arbiter.Polecat.Dispatch.dispatch/2` (`review: true`) |
   | `polecat_stop` | coordinator | `Arbiter.Polecat.stop/2` |
   | `polecat_list` | coordinator | `Arbiter.Polecat.list_children/0` |
   | `message_send` | polecat, coordinator | `Messages.send_mail/1` (flag / direction) |
@@ -187,7 +187,7 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The worker-authored PR/MR description (Summary / Test plan / References) the " <>
-                "Refinery opens the bead's single canonical PR with."
+                "MergeQueue opens the bead's single canonical PR with."
           }
         },
         "additionalProperties" => false
@@ -357,16 +357,16 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.dep_remove/2
     },
     %{
-      name: "polecat_sling",
+      name: "polecat_dispatch",
       tiers: @coordinator,
       description:
-        "Dispatch a polecat to work a bead in the workspace. Requires a `can_sling` coordinator " <>
-          "token and is depth-limited (the sling-recursion guardrail). Pass `provider` to start a " <>
+        "Dispatch a polecat to work a bead in the workspace. Requires a `can_dispatch` coordinator " <>
+          "token and is depth-limited (the dispatch-recursion guardrail). Pass `provider` to start a " <>
           "worker session (`claude` or `gemini`); omit it to park the bead in_progress.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{"type" => "string", "description" => "Bead to sling (required)."},
+          "bead_id" => %{"type" => "string", "description" => "Bead to dispatch (required)."},
           "rig" => %{"type" => "string", "description" => "Rig to run in (optional)."},
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "provider" => %{
@@ -384,15 +384,15 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["bead_id"],
         "additionalProperties" => false
       },
-      handler: &Tools.polecat_sling/2
+      handler: &Tools.polecat_dispatch/2
     },
     %{
       name: "polecat_resume",
       tiers: @coordinator,
       description:
         "Re-attach a fresh worker to a bead's preserved worktree (`arb resume`), continuing " <>
-          "the stopped run rather than restarting. Requires a `can_sling` coordinator token and is " <>
-          "depth-limited (the sling-recursion guardrail).",
+          "the stopped run rather than restarting. Requires a `can_dispatch` coordinator token and is " <>
+          "depth-limited (the dispatch-recursion guardrail).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -413,7 +413,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Dispatch a review-only worker against the PR/MR linked to a bead (`arb review`): no worktree, " <>
-          "no branch, no merge. Requires a `can_sling` coordinator token and is depth-limited. " <>
+          "no branch, no merge. Requires a `can_dispatch` coordinator token and is depth-limited. " <>
           "Claude-driven by default; pass `with_claude: false` to dispatch without spawning an agent.",
       input_schema: %{
         "type" => "object",
@@ -439,7 +439,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Stop the polecat currently working a bead (`arb polecat stop`). Scoped to the coordinator's " <>
-          "workspace; a bead with no live polecat is reported not-found. Teardown only — does not sling.",
+          "workspace; a bead with no live polecat is reported not-found. Teardown only — does not dispatch.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

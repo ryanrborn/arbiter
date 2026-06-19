@@ -11,7 +11,7 @@ defmodule Arbiter.Agents do
   Mirrors `Arbiter.Trackers` and `Arbiter.Mergers`. Phase B of the harness
   design (`docs/agent-harness-design.md`) intentionally ships only the
   `Claude` adapter — the seam exists so a future adapter (Codex / Aider /
-  Gemini) can land without touching the polecat or the Tribunal.
+  Gemini) can land without touching the polecat or the ReviewGate.
 
   ## Resolution rule
 
@@ -23,7 +23,7 @@ defmodule Arbiter.Agents do
 
   ## Reviewer dispatch
 
-  The Tribunal's reviewer is a separate role with its own adapter slot
+  The ReviewGate's reviewer is a separate role with its own adapter slot
   under `config["review_agent"]`. Same shape as `config["agent"]`. Falls
   back to the worker agent's adapter (so a workspace that names
   `agent.type = "claude"` and omits `review_agent` gets a Claude reviewer
@@ -127,7 +127,7 @@ defmodule Arbiter.Agents do
 
   Both roles share the same adapter machinery and the same per-process
   config dict — only one role's config can be active in a process at a
-  time. The Tribunal seeds `:review_agent` before spawning the reviewer
+  time. The ReviewGate seeds `:review_agent` before spawning the reviewer
   session; the polecat seeds `:agent` before spawning the worker.
   """
   @spec prepare(Workspace.t() | nil, :agent | :review_agent) :: :ok

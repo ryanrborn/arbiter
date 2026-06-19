@@ -160,7 +160,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
                   "title" => "Never boot a second Arbiter instance",
                   "detail" => "it sweeps live runs"
                 },
-                %{"title" => "No merge to main without the Tribunal review gate"}
+                %{"title" => "No merge to main without the ReviewGate review gate"}
               ]
             }
           }
@@ -175,7 +175,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "== Standing Orders =="
       assert out =~ "[ ] Watch the Admiral inbox — stand a ~60s background poll."
       assert out =~ "[ ] Never boot a second Arbiter instance — it sweeps live runs"
-      assert out =~ "[ ] No merge to main without the Tribunal review gate"
+      assert out =~ "[ ] No merge to main without the ReviewGate review gate"
 
       # Surfaced high: before the work list (polecats / ready beads).
       orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
@@ -209,7 +209,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "[ ] Concurrency:"
       assert out =~ "[ ] Config:"
       assert out =~ "[ ] Deploy:"
-      assert out =~ "[ ] Tribunal:"
+      assert out =~ "[ ] ReviewGate:"
       assert out =~ "ARBITER_OPERATOR.md"
 
       # Surfaced above the work list.

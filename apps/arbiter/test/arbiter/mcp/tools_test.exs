@@ -18,7 +18,7 @@ defmodule Arbiter.MCP.ToolsTest do
     {:ok, bead} = Ash.create(Issue, %{title: "the bound bead", workspace_id: ws.id})
 
     polecat = %Scope{tier: :polecat, workspace_id: ws.id, bead_id: bead.id, rig: "shipyard"}
-    coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_sling: true}
+    coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
 
     {:ok, ws: ws, bead: bead, polecat: polecat, coordinator: coordinator}
   end
@@ -528,19 +528,19 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "polecat_resume/2 + polecat_review/2 (sling-recursion guardrail, §4.3)" do
-    test "resume refuses a coordinator scope without can_sling", ctx do
-      no_sling = %{ctx.coordinator | can_sling: false}
+  describe "polecat_resume/2 + polecat_review/2 (dispatch-recursion guardrail, §4.3)" do
+    test "resume refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
 
       assert {:error, {:unauthorized, _}} =
-               Tools.polecat_resume(no_sling, %{"bead_id" => ctx.bead.id})
+               Tools.polecat_resume(no_dispatch, %{"bead_id" => ctx.bead.id})
     end
 
-    test "review refuses a coordinator scope without can_sling", ctx do
-      no_sling = %{ctx.coordinator | can_sling: false}
+    test "review refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
 
       assert {:error, {:unauthorized, _}} =
-               Tools.polecat_review(no_sling, %{"bead_id" => ctx.bead.id})
+               Tools.polecat_review(no_dispatch, %{"bead_id" => ctx.bead.id})
     end
 
     test "resume refuses once the depth limit is reached", ctx do
@@ -563,7 +563,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "resume surfaces the no-worktree error for a bead never slung", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "never slung", workspace_id: ctx.ws.id})
 
-      # can_sling + in-workspace + below depth, but no preserved worktree exists.
+      # can_dispatch + in-workspace + below depth, but no preserved worktree exists.
       assert {:error, {:invalid, msg}} =
                Tools.polecat_resume(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
 
@@ -616,36 +616,36 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
-  describe "polecat_sling/2 (sling-recursion guardrail, §4.3)" do
-    test "refuses a coordinator scope without can_sling", ctx do
-      no_sling = %{ctx.coordinator | can_sling: false}
+  describe "polecat_dispatch/2 (dispatch-recursion guardrail, §4.3)" do
+    test "refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
 
       assert {:error, {:unauthorized, _}} =
-               Tools.polecat_sling(no_sling, %{"bead_id" => ctx.bead.id})
+               Tools.polecat_dispatch(no_dispatch, %{"bead_id" => ctx.bead.id})
     end
 
     test "refuses once the depth limit is reached", ctx do
       at_limit = %{ctx.coordinator | depth: MCP.max_depth()}
 
       assert {:error, {:unauthorized, msg}} =
-               Tools.polecat_sling(at_limit, %{"bead_id" => ctx.bead.id})
+               Tools.polecat_dispatch(at_limit, %{"bead_id" => ctx.bead.id})
 
       assert msg =~ "depth"
     end
 
-    test "cannot sling a bead in another workspace (not-found)", ctx do
+    test "cannot dispatch a bead in another workspace (not-found)", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "sl-other", prefix: "slo"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
 
       assert {:error, {:not_found, _}} =
-               Tools.polecat_sling(ctx.coordinator, %{"bead_id" => foreign.id})
+               Tools.polecat_dispatch(ctx.coordinator, %{"bead_id" => foreign.id})
     end
 
     test "parks the bead in_progress and reports the child depth", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "to sling", workspace_id: ctx.ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "to dispatch", workspace_id: ctx.ws.id})
 
       assert {:ok, data} =
-               Tools.polecat_sling(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
+               Tools.polecat_dispatch(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
 
       assert data.bead.status == "in_progress"
       assert data.claude_started == false
@@ -660,10 +660,10 @@ defmodule Arbiter.MCP.ToolsTest do
     # honored as a worker dispatch (a park would have returned {:ok, ...} with
     # claude_started: false).
     test "provider: \"gemini\" takes the real-work path (not a park)", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "gem sling", workspace_id: ctx.ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "gem dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_sling(ctx.coordinator, %{
+               Tools.polecat_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "provider" => "gemini",
                  "rig" => "test/rig"
@@ -675,10 +675,10 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "provider: \"claude\" takes the real-work path (not a park)", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "claude sling", workspace_id: ctx.ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "claude dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_sling(ctx.coordinator, %{
+               Tools.polecat_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "provider" => "claude",
                  "rig" => "test/rig"
@@ -690,10 +690,10 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "the deprecated with_claude: true alias still dispatches a worker", ctx do
-      {:ok, bead} = Ash.create(Issue, %{title: "alias sling", workspace_id: ctx.ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "alias dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.polecat_sling(ctx.coordinator, %{
+               Tools.polecat_dispatch(ctx.coordinator, %{
                  "bead_id" => bead.id,
                  "with_claude" => true,
                  "rig" => "test/rig"
@@ -743,7 +743,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ctx.ws.id)
       on_exit(fn -> Process.alive?(pid) && Polecat.stop(bead.id, :normal) end)
 
-      # Stamp the routing config the way Sling does at dispatch time.
+      # Stamp the routing config the way Dispatch does at dispatch time.
       :ok = Polecat.report(pid, :routing_config, %{provider: "gemini", model: "gemini-2.5-pro"})
 
       assert {:ok, %{polecats: polecats}} = Tools.polecat_list(ctx.coordinator, %{})
@@ -819,7 +819,7 @@ defmodule Arbiter.MCP.ToolsTest do
     setup ctx do
       # A coordinator token with no bound workspace (workspace_id: nil) — the
       # shape `arb mcp token mint` / POST /api/mcp/tokens now produce.
-      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_sling: true}
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
       {:ok, other_ws} = Ash.create(Workspace, %{name: "agnostic-other-ws", prefix: "agw"})
       {:ok, foreign} = Ash.create(Issue, %{title: "in the other ws", workspace_id: other_ws.id})
@@ -904,7 +904,7 @@ defmodule Arbiter.MCP.ToolsTest do
          ctx do
       # The module setup creates exactly one workspace (ctx.ws) in this sandbox,
       # so it is unambiguously the installation default.
-      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_sling: true}
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
       assert {:ok, data} = Tools.bead_create(agnostic, %{"title" => "lands in the only ws"})
       assert data.workspace_id == ctx.ws.id
@@ -913,7 +913,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "a coordinator falls back to the workspace named \"default\" when several exist" do
       {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
       {:ok, _other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
-      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_sling: true}
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
       assert {:ok, data} = Tools.bead_create(agnostic, %{"title" => "to default"})
       assert data.workspace_id == default.id

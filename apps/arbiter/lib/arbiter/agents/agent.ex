@@ -38,8 +38,8 @@ defmodule Arbiter.Agents.Agent do
       key (single-key today; round-robin from `api_keys` list in a follow-up).
     * `:config` — adapter-specific extra config (an opaque map).
     * `:security` — the resolved `Arbiter.Agents.SecurityPolicy` for this
-      spawn (permission mode, allow/deny, sandbox). The caller (Sling /
-      Tribunal) resolves it from the workspace; the adapter maps it to its
+      spawn (permission mode, allow/deny, sandbox). The caller (Dispatch /
+      ReviewGate) resolves it from the workspace; the adapter maps it to its
       provider's mechanism. When absent the adapter MUST fall back to
       `SecurityPolicy.default/0` (the install-wide hardened floor) — a spawn is
       never un-permissioned.

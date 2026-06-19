@@ -1,10 +1,10 @@
-defmodule Arbiter.Beads.Workspace.Changes.StartRefinery do
+defmodule Arbiter.Beads.Workspace.Changes.StartMergeQueue do
   @moduledoc """
-  After-action hook that starts a Refinery (merge queue) process for a newly
-  created workspace. Gated by `Arbiter.Workflows.RefinerySupervisor.auto_start?/0`
+  After-action hook that starts a MergeQueue (merge queue) process for a newly
+  created workspace. Gated by `Arbiter.Workflows.MergeQueueSupervisor.auto_start?/0`
   so tests can opt out.
 
-  Best-effort: a failure to start the Refinery is logged but does not fail the
+  Best-effort: a failure to start the MergeQueue is logged but does not fail the
   workspace create — the boot enumeration on next app start would catch it.
   """
 
@@ -12,13 +12,13 @@ defmodule Arbiter.Beads.Workspace.Changes.StartRefinery do
 
   require Logger
 
-  alias Arbiter.Workflows.RefinerySupervisor
+  alias Arbiter.Workflows.MergeQueueSupervisor
 
   @impl true
   def change(changeset, _opts, _context) do
-    if RefinerySupervisor.auto_start?() do
+    if MergeQueueSupervisor.auto_start?() do
       Ash.Changeset.after_action(changeset, fn _cs, workspace ->
-        case RefinerySupervisor.start_refinery(workspace.id) do
+        case MergeQueueSupervisor.start_merge_queue(workspace.id) do
           {:ok, _pid} ->
             :ok
 
@@ -26,14 +26,14 @@ defmodule Arbiter.Beads.Workspace.Changes.StartRefinery do
             :ok
 
           # `DynamicSupervisor.on_start_child/0` admits `:ignore`. Today
-          # `Refinery.init/1` doesn't return it, but a no-op match keeps the
+          # `MergeQueue.init/1` doesn't return it, but a no-op match keeps the
           # spec exhaustive.
           :ignore ->
             :ok
 
           {:error, reason} ->
             Logger.warning(
-              "StartRefinery: failed to start refinery for workspace #{workspace.id}: " <>
+              "StartMergeQueue: failed to start merge_queue for workspace #{workspace.id}: " <>
                 inspect(reason)
             )
         end

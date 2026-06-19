@@ -288,7 +288,7 @@ defmodule Arbiter.Messages.Message do
   mailbox-family message whose `directive_ref` is `ref`, regardless of direction
   or read state.
 
-  This is the durable implementer↔reviewer transcript the Tribunal's
+  This is the durable implementer↔reviewer transcript the ReviewGate's
   revise-and-rediscuss loop builds (each reviewer finding and implementer
   response is a persisted `:flag` row), so it survives the workers that wrote it
   and escalation can reconstruct the ordered argument for Darth Gnosis. Pass
@@ -332,10 +332,10 @@ defmodule Arbiter.Messages.Message do
   @doc """
   The `limit` most recent `:escalation` messages, newest first — read *and*
   unread alike (unlike `inbox/2`, which is unread-only). Escalations are raised
-  solely by the Tribunal review gate on a non-approve verdict
+  solely by the ReviewGate review gate on a non-approve verdict
   (`Arbiter.Polecat` reject/inconclusive path), so this is the durable record of
   rejected reviews, carrying the reviewer's findings in `:body`. Powers the
-  dashboard's Tribunal view. Pass `workspace_id:` to scope to one workspace.
+  dashboard's ReviewGate view. Pass `workspace_id:` to scope to one workspace.
   """
   def recent_escalations(limit \\ 10, opts \\ []) do
     query =

@@ -16,15 +16,15 @@ defmodule Arbiter.Polecat do
                                               machine died before any step ran)
       :failed            → :running           (advance/2 — defense-in-depth: a re-slung
                                               failed polecat is normally replaced by a
-                                              fresh one (sling.ex bd-d70whv), but if for
+                                              fresh one (dispatch.ex bd-d70whv), but if for
                                               any reason the stale polecat is reused,
                                               advance resets it to :running so arb-done
                                               is processed instead of silently ignored)
       :running           → :awaiting          (await/2 — parked, generic external wait)
       :awaiting          → :running           (resume/1)
-      :running           → :awaiting_tribunal (arb-done when review is required)
-      :awaiting_tribunal → :awaiting_review   (tribunal_verdict/2 :approve → merge)
-      :awaiting_tribunal → :failed            (tribunal_verdict/2 reject → parked)
+      :running           → :awaiting_review_gate (arb-done when review is required)
+      :awaiting_review_gate → :awaiting_review   (review_gate_verdict/2 :approve → merge)
+      :awaiting_review_gate → :failed            (review_gate_verdict/2 reject → parked)
       :running           → :awaiting_review   (open_mr/5 — MR opened, parked for review)
       :awaiting_review   → :completed         (complete/2 — MR merged)
       :awaiting_review   → :failed            (fail/2 — MR closed/rejected)
@@ -34,14 +34,14 @@ defmodule Arbiter.Polecat do
 
   Illegal transitions return `{:error, {:invalid_transition, from, to}}`.
 
-  ## Review gate (`:awaiting_tribunal`)
+  ## Review gate (`:awaiting_review_gate`)
 
   A standing order: an worker must not merge its own work. When the worker's
   `arb done` fires and the workspace requires review
-  (`Workspace.review_required?/1`), the polecat parks at `:awaiting_tribunal` and
-  spawns an `Arbiter.Polecat.Tribunal` — which runs a **distinct** reviewer
-  worker over the diff — *instead of* calling the merger. The Tribunal reports a
-  verdict back via `tribunal_verdict/2`: APPROVE proceeds to `do_open_mr` (the
+  (`Workspace.review_required?/1`), the polecat parks at `:awaiting_review_gate` and
+  spawns an `Arbiter.Polecat.ReviewGate` — which runs a **distinct** reviewer
+  worker over the diff — *instead of* calling the merger. The ReviewGate reports a
+  verdict back via `review_gate_verdict/2`: APPROVE proceeds to `do_open_mr` (the
   same merge path), REQUEST_CHANGES (or an inconclusive review) parks the bead
   with the findings and escalates to the Admiral without merging. When review is
   not required (the default) completion routes straight to the merger as before.
@@ -52,13 +52,13 @@ defmodule Arbiter.Polecat do
   `open_mr/5` instead of completing immediately. That call resolves the
   workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
   MR, stores the `mr_ref` + clickable `merger_url` on the polecat, transitions
-  to `:awaiting_review`, and spawns an `Arbiter.Polecat.Warden` to poll for
-  approval. The Warden — not the worker's `arb done` — owns the terminal
+  to `:awaiting_review`, and spawns an `Arbiter.Polecat.Watchdog` to poll for
+  approval. The Watchdog — not the worker's `arb done` — owns the terminal
   transition: it completes the polecat when the MR merges, or fails it when the
-  MR is closed. See `Arbiter.Polecat.Warden`.
+  MR is closed. See `Arbiter.Polecat.Watchdog`.
 
   This is also the path the `arb done` marker takes in claude-driven mode: when
-  the polecat knows its branch (a worktree was provisioned at sling time) the
+  the polecat knows its branch (a worktree was provisioned at dispatch time) the
   marker triggers the same `open_mr` flow rather than closing the bead
   directly. For the default `Direct` strategy the merge (`git merge --no-ff`)
   runs immediately, so the branch reaches the target line before the bead
@@ -101,7 +101,7 @@ defmodule Arbiter.Polecat do
           | :resuming
           | :running
           | :awaiting
-          | :awaiting_tribunal
+          | :awaiting_review_gate
           | :awaiting_review
           | :completed
           | :failed
@@ -153,7 +153,7 @@ defmodule Arbiter.Polecat do
       # config we only have at open time). nil when there's no MR or no web UI.
       :merger_url,
       # The resolved merger adapter module (Arbiter.Mergers.Direct / .Gitlab),
-      # captured at open_mr time. Internal — used to mint the Warden.
+      # captured at open_mr time. Internal — used to mint the Watchdog.
       :merger_adapter,
       # uuid of the persisted Arbiter.Polecats.Run row, or nil if the create
       # write failed (best-effort — see record_run_started/1). Subsequent
@@ -173,9 +173,9 @@ defmodule Arbiter.Polecat do
 
   # Statuses in which a subprocess exit means "the worker stopped without
   # completing" — i.e. a stall to detect + escalate (bd-awi4nw). The review-gate
-  # states (:awaiting_tribunal/:awaiting_review) and terminal states
+  # states (:awaiting_review_gate/:awaiting_review) and terminal states
   # (:completed/:failed) are excluded: there the subprocess SHOULD exit and the
-  # next stage (Tribunal/Warden) owns the outcome, not the dead port.
+  # next stage (ReviewGate/Watchdog) owns the outcome, not the dead port.
   # `:resuming` is the initial status of a polecat re-attached to a preserved
   # worktree via `arb resume` (bd-auma3z). It's live — a subprocess that exits
   # before the resumed agent gets going is still a stop worth detecting — and it
@@ -261,7 +261,7 @@ defmodule Arbiter.Polecat do
     |> DynamicSupervisor.which_children()
     |> Enum.flat_map(fn
       # Only actual polecats answer :snapshot. Other children of this supervisor
-      # — notably an Arbiter.Polecat.Tribunal review gate — must NOT be probed:
+      # — notably an Arbiter.Polecat.ReviewGate review gate — must NOT be probed:
       # calling :snapshot on them crashes them and strands the author. Match
       # strictly on the Polecat module. See bd-2y0gd5.
       {_id, pid, :worker, [__MODULE__]} when is_pid(pid) ->
@@ -322,7 +322,7 @@ defmodule Arbiter.Polecat do
 
   Resolves the workspace's merger adapter, calls `open/4`, stores the resulting
   `mr_ref` + clickable `merger_url`, transitions `:running -> :awaiting_review`,
-  and spawns an `Arbiter.Polecat.Warden` to poll for approval. Only valid from
+  and spawns an `Arbiter.Polecat.Watchdog` to poll for approval. Only valid from
   `:running`.
 
   `opts` is a map forwarded to the adapter's `open/4` (`:target_branch`,
@@ -334,7 +334,7 @@ defmodule Arbiter.Polecat do
       resolution.
     * `:workspace` — the `Workspace` struct (used to seed adapter config and
       read the auto-merge flag) when `:adapter` is supplied.
-    * `:auto_merge`, `:interval_ms`, `:initial_delay_ms` — Warden overrides.
+    * `:auto_merge`, `:interval_ms`, `:initial_delay_ms` — Watchdog overrides.
 
   Returns `{:ok, mr_ref}` on success, or `{:error, reason}` (the polecat stays
   `:running`) if the adapter can't be resolved or `open/4` fails.
@@ -350,9 +350,9 @@ defmodule Arbiter.Polecat do
   Record the latest `Arbiter.Mergers.get/1` result on the polecat's `:meta`
   (as `:last_merger_status`) along with a `:last_checked_at` timestamp.
 
-  Called by the `Arbiter.Polecat.Warden` on every poll so the dashboard and
+  Called by the `Arbiter.Polecat.Watchdog` on every poll so the dashboard and
   detail view can surface approval status and freshness without holding the
-  Warden's state.
+  Watchdog's state.
   """
   @spec record_merger_status(ref(), map()) :: :ok | {:error, term()}
   def record_merger_status(ref, status) when is_map(status),
@@ -373,9 +373,9 @@ defmodule Arbiter.Polecat do
   def fail(ref, reason \\ nil), do: call(ref, {:fail, reason})
 
   @doc """
-  Deliver a Tribunal (review-gate) verdict. Only valid from `:awaiting_tribunal`
+  Deliver a ReviewGate (review-gate) verdict. Only valid from `:awaiting_review_gate`
   — the state the polecat parks at after the worker's `arb done` when review is
-  required. Called by `Arbiter.Polecat.Tribunal` once the reviewer worker
+  required. Called by `Arbiter.Polecat.ReviewGate` once the reviewer worker
   reaches its verdict.
 
     * `{:approve, findings}` → records the approval and proceeds to the merger
@@ -388,9 +388,9 @@ defmodule Arbiter.Polecat do
       (escalate, do not merge) since the safe default is never to merge unreviewed
       work.
   """
-  @spec tribunal_verdict(ref(), Arbiter.Polecat.Tribunal.verdict() | {:no_verdict, String.t()}) ::
+  @spec review_gate_verdict(ref(), Arbiter.Polecat.ReviewGate.verdict() | {:no_verdict, String.t()}) ::
           :ok | {:error, term()}
-  def tribunal_verdict(ref, verdict), do: call(ref, {:tribunal_verdict, verdict})
+  def review_gate_verdict(ref, verdict), do: call(ref, {:review_gate_verdict, verdict})
 
   @doc """
   Record an arbitrary key/value pair in the polecat's `:meta` map.
@@ -455,7 +455,7 @@ defmodule Arbiter.Polecat do
     * `:started` — the polecat just booted (`init/1`).
     * `:stopped` — the polecat is terminating (`terminate/2`).
     * `:updated` — a mid-life state change worth pushing to live views, namely
-      parking at `:awaiting_review` (MR opened) and each Warden poll that
+      parking at `:awaiting_review` (MR opened) and each Watchdog poll that
       records a fresh merger status. Lets the dashboard's merge-queue view
       track in-flight merges without polling.
 
@@ -478,9 +478,9 @@ defmodule Arbiter.Polecat do
   end
 
   # Broadcast {:polecat_done, bead_id} to "polecat:done:<workspace_id>" so the
-  # workspace's Refinery (the merge queue) can pick the bead up and drive it through
+  # workspace's MergeQueue (the merge queue) can pick the bead up and drive it through
   # the merge queue. A polecat without a workspace_id (e.g. ad-hoc local runs)
-  # has no Refinery listening and so the broadcast is skipped.
+  # has no MergeQueue listening and so the broadcast is skipped.
   #
   # Review-only polecats (`meta[:review_only] == true`) skip the merge queue
   # broadcast — they don't author code, so there's nothing for the merge queue
@@ -648,7 +648,7 @@ defmodule Arbiter.Polecat do
   # session exits. The session carries everything we need (model, tokens,
   # cost, duration) in its `:usage` map; we shovel it into `Arbiter.Usage.Event`
   # alongside the polecat's identifying fields. A reviewer polecat (spawned by
-  # the Tribunal, meta.role == :reviewer) writes a `:review` step row;
+  # the ReviewGate, meta.role == :reviewer) writes a `:review` step row;
   # everything else writes `:work`. Missing fields are fine — we record what
   # we have rather than dropping the row.
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
@@ -798,7 +798,7 @@ defmodule Arbiter.Polecat do
     case do_open_mr(state, branch, title, description, opts) do
       {:ok, mr_ref, new_state} ->
         # The polecat just parked at :awaiting_review with an MR open and a
-        # Warden watching. Push an :updated lifecycle event so the dashboard's
+        # Watchdog watching. Push an :updated lifecycle event so the dashboard's
         # merge-queue view picks the in-flight merge up live (the topic
         # otherwise only fires on :started/:stopped).
         broadcast_lifecycle(:updated, new_state)
@@ -825,7 +825,7 @@ defmodule Arbiter.Polecat do
 
     new_state = %State{state | meta: meta}
 
-    # Each Warden poll lands here. Push an :updated lifecycle event so the
+    # Each Watchdog poll lands here. Push an :updated lifecycle event so the
     # merge-queue view's approval status + last-checked freshness stay live.
     broadcast_lifecycle(:updated, new_state)
 
@@ -850,12 +850,12 @@ defmodule Arbiter.Polecat do
     {:reply, {:error, {:invalid_transition, status, :failed}}, state}
   end
 
-  def handle_call({:tribunal_verdict, verdict}, _from, %State{status: :awaiting_tribunal} = state) do
-    {:reply, :ok, apply_tribunal_verdict(state, verdict)}
+  def handle_call({:review_gate_verdict, verdict}, _from, %State{status: :awaiting_review_gate} = state) do
+    {:reply, :ok, apply_review_gate_verdict(state, verdict)}
   end
 
-  def handle_call({:tribunal_verdict, _verdict}, _from, %State{status: status} = state) do
-    {:reply, {:error, {:invalid_transition, status, :tribunal_verdict}}, state}
+  def handle_call({:review_gate_verdict, _verdict}, _from, %State{status: status} = state) do
+    {:reply, {:error, {:invalid_transition, status, :review_gate_verdict}}, state}
   end
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
@@ -891,7 +891,7 @@ defmodule Arbiter.Polecat do
       #
       # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
       # the worker with a nudge prompt when arb-done arrives with uncommitted
-      # work, without round-tripping through the workspace-aware Sling builder
+      # work, without round-tripping through the workspace-aware Dispatch builder
       # that does not know how to swap the prompt mid-session.
       meta =
         (state.meta || %{})
@@ -963,7 +963,7 @@ defmodule Arbiter.Polecat do
   #      over; no-op and let the live session drive the outcome.
   #   2. the run already signalled `arb done` somewhere (primary OR continuation)
   #      → prefer completion. Re-enter on_claude_done so the commit gate decides:
-  #      committed work routes to the Tribunal, uncommitted work still diverts.
+  #      committed work routes to the ReviewGate, uncommitted work still diverts.
   def handle_info({:__acolyte_stopped__, port}, %State{status: status} = state)
       when status in @live_statuses do
     case Map.fetch(state.claude_sessions, port) do
@@ -991,15 +991,15 @@ defmodule Arbiter.Polecat do
   end
 
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
-      when status not in [:completed, :failed, :awaiting_tribunal, :awaiting_review] do
+      when status not in [:completed, :failed, :awaiting_review_gate, :awaiting_review] do
     # "arb done" detected. The guard accepts most non-terminal statuses
     # (:idle, :running, :awaiting). In claude_driven mode the polecat may sit at
     # :idle (the Machine is not ticked, so Polecat.advance is never called), so
     # accepting :idle here is intentional and critical for this signal to fire.
     #
-    # :awaiting_tribunal and :awaiting_review are deliberately excluded: once the
-    # worker has signalled done, the review gate (Tribunal) and then the merger
-    # / Warden decide completion — not a repeated "arb done" on the author's
+    # :awaiting_review_gate and :awaiting_review are deliberately excluded: once the
+    # worker has signalled done, the review gate (ReviewGate) and then the merger
+    # / Watchdog decide completion — not a repeated "arb done" on the author's
     # stdout. A late marker is ignored (handled by the catch-all clause below).
     #
     # bd-1pdyov: stamp :done_seen so a later whole-run stop check (e.g. a primary
@@ -1015,26 +1015,26 @@ defmodule Arbiter.Polecat do
     {:noreply, mark_done_seen(state)}
   end
 
-  # The Tribunal (review gate) exited before delivering a verdict. Do NOT strand
-  # the author at :awaiting_tribunal — treat it as an inconclusive review and
+  # The ReviewGate (review gate) exited before delivering a verdict. Do NOT strand
+  # the author at :awaiting_review_gate — treat it as an inconclusive review and
   # escalate (no merge). Matched by the monitor ref stashed in meta. bd-2y0gd5.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
-        %State{status: :awaiting_tribunal, meta: %{tribunal_ref: ref}} = state
+        %State{status: :awaiting_review_gate, meta: %{review_gate_ref: ref}} = state
       ) do
     Logger.warning(
-      "Polecat: Tribunal for bead=#{state.bead_id} exited before a verdict " <>
+      "Polecat: ReviewGate for bead=#{state.bead_id} exited before a verdict " <>
         "(#{inspect(reason)}); escalating as no_verdict"
     )
 
     {:noreply,
-     apply_tribunal_verdict(
+     apply_review_gate_verdict(
        state,
-       {:no_verdict, "Tribunal process exited before delivering a verdict (#{inspect(reason)})."}
+       {:no_verdict, "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
      )}
   end
 
-  # Any other monitor DOWN (the Tribunal's expected exit AFTER a verdict, or an
+  # Any other monitor DOWN (the ReviewGate's expected exit AFTER a verdict, or an
   # unrelated monitor) — nothing to do.
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
 
@@ -1121,7 +1121,7 @@ defmodule Arbiter.Polecat do
   # actionable classification (auth expiry, credit exhaustion, kill, …).
   #
   # bd-5wchp1: when the stop category is :auth_expired, also notify the
-  # CredentialWarden so it records the expiry and blocks future dispatches
+  # CredentialWatchdog so it records the expiry and blocks future dispatches
   # immediately, without waiting for the next periodic probe.
   defp fail_stopped(%State{} = state, session) do
     exit_status = Map.get(session, :exit_status)
@@ -1133,7 +1133,7 @@ defmodule Arbiter.Polecat do
     )
 
     if reason.category == :auth_expired do
-      notify_credential_warden(state, reason)
+      notify_credential_watchdog(state, reason)
     end
 
     meta =
@@ -1149,10 +1149,10 @@ defmodule Arbiter.Polecat do
     new_state
   end
 
-  # Resolve the agent adapter from the polecat's routing config (set by Sling
-  # via Polecat.report/3) and notify the CredentialWarden. Best-effort —
+  # Resolve the agent adapter from the polecat's routing config (set by Dispatch
+  # via Polecat.report/3) and notify the CredentialWatchdog. Best-effort —
   # missing routing info or an unknown provider just skips the notification.
-  defp notify_credential_warden(%State{meta: meta}, reason) do
+  defp notify_credential_watchdog(%State{meta: meta}, reason) do
     provider = meta && (Map.get(meta, :routing_config) || %{}) |> Map.get(:provider)
 
     adapter =
@@ -1165,7 +1165,7 @@ defmodule Arbiter.Polecat do
       end
 
     if is_atom(adapter) and not is_nil(adapter) do
-      Arbiter.Agents.CredentialWarden.mark_expired(adapter, reason)
+      Arbiter.Agents.CredentialWatchdog.mark_expired(adapter, reason)
     end
   end
 
@@ -1205,13 +1205,13 @@ defmodule Arbiter.Polecat do
   #   * When the polecat knows its branch (a worktree was provisioned) we open
   #     the MR / run the merge via the same path open_mr/5 uses. For the default
   #     Direct strategy this merges --no-ff into the target branch synchronously,
-  #     parks at :awaiting_review, and the Warden completes the polecat on its
+  #     parks at :awaiting_review, and the Watchdog completes the polecat on its
   #     first poll. A merge failure surfaces as a :failure_reason rather than
   #     silently closing the bead as done.
   #   * With no branch (ad-hoc runs / unconfigured rig / no worktree) there is
   #     nothing to integrate. For review_only polecats this is the expected path
   #     (coordinator-dispatched reviewers have no worktree). When the reviewer
-  #     produced an APPROVE verdict, trigger the Warden on the bead's pr_ref so
+  #     produced an APPROVE verdict, trigger the Watchdog on the bead's pr_ref so
   #     the PR is merged automatically (bd-4ji58d). For REQUEST_CHANGES or no
   #     parseable verdict, fail the polecat so the bead stays :in_progress for a
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
@@ -1232,7 +1232,7 @@ defmodule Arbiter.Polecat do
         if review_only?(meta) do
           route_completion(state, branch)
         else
-          # bd-ofql8k: before routing to the Tribunal (which diffs the per-bead
+          # bd-ofql8k: before routing to the ReviewGate (which diffs the per-bead
           # branch's COMMITTED history) or the merger, check that the worktree is
           # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
           # target. The repeated failure mode this guards against: the worker
@@ -1253,10 +1253,10 @@ defmodule Arbiter.Polecat do
 
   defp route_completion(%State{meta: meta} = state, branch) do
     if review_required?(state) do
-      # Standing order: don't merge unreviewed work. Park at :awaiting_tribunal
+      # Standing order: don't merge unreviewed work. Park at :awaiting_review_gate
       # and let a distinct reviewer worker judge the diff first. The merge
-      # fires only on tribunal_verdict/2 :approve.
-      enter_tribunal(state, branch)
+      # fires only on review_gate_verdict/2 :approve.
+      enter_review_gate(state, branch)
     else
       merge_branch(state, branch, merge_opts_from_meta(meta, %{}))
     end
@@ -1268,20 +1268,20 @@ defmodule Arbiter.Polecat do
   # `polecat_review` / `arb worker review`): parse the APPROVE / REQUEST_CHANGES
   # verdict from the reviewer's captured output and act on it.
   #
-  # APPROVE → park at :awaiting_review and start the Warden with via_tribunal:
+  # APPROVE → park at :awaiting_review and start the Watchdog with via_review_gate:
   # true so it merges the bead's pr_ref on its first poll. Mirrors the full
-  # Tribunal approve path without going through the Tribunal machinery.
+  # ReviewGate approve path without going through the ReviewGate machinery.
   #
   # REQUEST_CHANGES / :no_verdict → fail the polecat (not complete it) so the
   # Driver does NOT close the bead. The bead stays :in_progress for the
   # coordinator to dispatch a fix-pass. Mirrors park_rejected/3 from the full
-  # tribunal path.
+  # review_gate path.
   defp route_reviewer_completion(%State{} = state) do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 
-    case Arbiter.Polecat.Tribunal.parse_verdict(output_lines) do
+    case Arbiter.Polecat.ReviewGate.parse_verdict(output_lines) do
       {:approve, _findings} ->
-        trigger_warden_on_approval(state)
+        trigger_watchdog_on_approval(state)
 
       {:request_changes, findings} ->
         park_rejected(state, :request_changes, findings)
@@ -1293,13 +1293,13 @@ defmodule Arbiter.Polecat do
 
   # APPROVE path for a coordinator-dispatched review_only polecat. The reviewer
   # has no branch of its own — the PR lives on the bead's pr_ref. If a pr_ref
-  # is present: park at :awaiting_review and start the Warden with
-  # via_tribunal: true so it merges on the first poll. If no pr_ref is recorded
+  # is present: park at :awaiting_review and start the Watchdog with
+  # via_review_gate: true so it merges on the first poll. If no pr_ref is recorded
   # (reviewer was dispatched against a bead with no open PR), complete normally.
-  defp trigger_warden_on_approval(%State{bead_id: bead_id} = state) do
+  defp trigger_watchdog_on_approval(%State{bead_id: bead_id} = state) do
     case fetch_bead_pr_ref(bead_id) do
       {:ok, pr_ref} ->
-        opts = merge_opts_from_meta(state.meta, %{via_tribunal: true})
+        opts = merge_opts_from_meta(state.meta, %{via_review_gate: true})
 
         case resolve_merger(state, opts) do
           {:ok, adapter, workspace} ->
@@ -1319,27 +1319,27 @@ defmodule Arbiter.Polecat do
                   |> Map.put(:merger_url, merger_url)
             }
 
-            warden_ok? =
+            watchdog_ok? =
               try do
-                start_warden(new_state, workspace, opts) == :ok
+                start_watchdog(new_state, workspace, opts) == :ok
               rescue
                 e ->
                   Logger.warning(
-                    "Polecat: review_only APPROVE: Warden startup raised for bead=#{bead_id}: #{Exception.message(e)}"
+                    "Polecat: review_only APPROVE: Watchdog startup raised for bead=#{bead_id}: #{Exception.message(e)}"
                   )
 
                   false
               catch
                 :exit, reason ->
                   Logger.warning(
-                    "Polecat: review_only APPROVE: Warden startup exit for bead=#{bead_id}: #{inspect(reason)}"
+                    "Polecat: review_only APPROVE: Watchdog startup exit for bead=#{bead_id}: #{inspect(reason)}"
                   )
 
                   false
               end
 
-            unless warden_ok? do
-              escalate_warden_failure(new_state)
+            unless watchdog_ok? do
+              escalate_watchdog_failure(new_state)
             end
 
             new_state
@@ -1391,7 +1391,7 @@ defmodule Arbiter.Polecat do
   #   * a worktree is configured and exists on disk, AND
   #   * the worktree is actually checked out on the per-bead branch.
   #
-  # The branch check exists because some test setups (notably TribunalTest)
+  # The branch check exists because some test setups (notably ReviewGateTest)
   # reuse the rig itself as the "worktree" with `worktree_path: repo` and a
   # feature branch that was created on the rig but left checked-out elsewhere.
   # In that case the worktree's HEAD is some other branch (usually `main`) and
@@ -1441,7 +1441,7 @@ defmodule Arbiter.Polecat do
   # tests pass 0 to assert the structural gate without the retry layer.
   #
   # If nothing usable is captured to relaunch with, OR the cap is exhausted, we
-  # fail_now WITHOUT routing to the Tribunal: a stale, empty `base..HEAD` diff
+  # fail_now WITHOUT routing to the ReviewGate: a stale, empty `base..HEAD` diff
   # must not reach a reviewer who will report "no work" while the work is right
   # there in the worktree.
   defp handle_commit_gate(%State{meta: meta} = state, _branch, reason) do
@@ -1762,10 +1762,10 @@ defmodule Arbiter.Polecat do
   # The shared "integrate this branch" path: open the MR / run the merge, or fail
   # the polecat (not silently complete it) if the adapter rejects.
   #
-  # `opts` may carry `:via_tribunal` (default `false`). When true the Warden is
+  # `opts` may carry `:via_review_gate` (default `false`). When true the Watchdog is
   # told the gate has already approved this MR, so it merges on its first poll
   # instead of waiting for a hosted-forge approval signal that will never come
-  # (bd-66ey1o: the Tribunal approves in-process, it does NOT post a GitHub
+  # (bd-66ey1o: the ReviewGate approves in-process, it does NOT post a GitHub
   # review).
   defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
     title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
@@ -1813,7 +1813,7 @@ defmodule Arbiter.Polecat do
 
   # Append the conflict + conflicting files to the bead's notes so `arb show`
   # and the UI carry the rebase context. Best-effort: a DB hiccup is logged,
-  # never fatal (mirrors record_tribunal_outcome/3).
+  # never fatal (mirrors record_review_gate_outcome/3).
   defp record_merge_conflict_note(%State{bead_id: bead_id}, branch, detail) do
     block = format_merge_conflict_note(branch, detail)
 
@@ -1842,7 +1842,7 @@ defmodule Arbiter.Polecat do
 
   # Raise an escalation to the Admiral's mailbox naming the conflicting files.
   # Requires a workspace (messages are workspace-scoped); mirrors
-  # escalate_tribunal/3.
+  # escalate_review_gate/3.
   defp escalate_merge_conflict(%State{workspace_id: ws_id, bead_id: bead_id}, branch, detail)
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
@@ -1900,7 +1900,7 @@ defmodule Arbiter.Polecat do
   end
 
   # Pull merge-adapter overrides out of the polecat's meta so the
-  # tribunal-approve path can route through a test stub adapter without going
+  # review_gate-approve path can route through a test stub adapter without going
   # through workspace config. Tests set these via `meta:` at polecat start;
   # production callers leave them nil and rely on workspace resolution.
   defp merge_opts_from_meta(meta, base) when is_map(base) do
@@ -1909,15 +1909,15 @@ defmodule Arbiter.Polecat do
     base
     |> maybe_put_meta(:adapter, Map.get(meta, :merger_adapter_override))
     |> maybe_put_meta(:workspace, Map.get(meta, :merger_workspace_override))
-    |> maybe_put_meta(:interval_ms, Map.get(meta, :warden_interval_ms))
-    |> maybe_put_meta(:initial_delay_ms, Map.get(meta, :warden_initial_delay_ms))
-    |> maybe_put_meta(:max_polls, Map.get(meta, :warden_max_polls))
+    |> maybe_put_meta(:interval_ms, Map.get(meta, :watchdog_interval_ms))
+    |> maybe_put_meta(:initial_delay_ms, Map.get(meta, :watchdog_initial_delay_ms))
+    |> maybe_put_meta(:max_polls, Map.get(meta, :watchdog_max_polls))
   end
 
   defp maybe_put_meta(map, _key, nil), do: map
   defp maybe_put_meta(map, key, value), do: Map.put(map, key, value)
 
-  # ---- review gate (Tribunal) --------------------------------------------
+  # ---- review gate (ReviewGate) --------------------------------------------
 
   # Resolve whether this polecat's workspace requires a review gate. An explicit
   # meta override (`:review_required`) wins — used by tests and advanced callers;
@@ -1938,13 +1938,13 @@ defmodule Arbiter.Polecat do
     _ -> false
   end
 
-  # Resolve the revise-and-rediscuss round cap for the Tribunal.
+  # Resolve the revise-and-rediscuss round cap for the ReviewGate.
   #
   # Resolution order:
   #   1. An explicit meta `:review_rounds` override (tests / advanced callers).
   #   2. `min(difficulty_default, workspace_cap)` — the difficulty-derived default
-  #      (bd-a5k6wb) optionally tightened by `config["tribunal"]["max_rounds"]`.
-  #   3. Falls back to `nil` to let the Tribunal apply its built-in D2 default.
+  #      (bd-a5k6wb) optionally tightened by `config["review_gate"]["max_rounds"]`.
+  #   3. Falls back to `nil` to let the ReviewGate apply its built-in D2 default.
   #
   # The bead's difficulty drives the default; the workspace cap can only tighten
   # it (min), never loosen it beyond the difficulty-appropriate ceiling.
@@ -1955,11 +1955,11 @@ defmodule Arbiter.Polecat do
 
       _ ->
         difficulty = bead_difficulty(state.bead_id)
-        difficulty_default = Arbiter.Polecat.Tribunal.rounds_for_difficulty(difficulty)
+        difficulty_default = Arbiter.Polecat.ReviewGate.rounds_for_difficulty(difficulty)
 
         case state.workspace_id && Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
           {:ok, ws} ->
-            case Arbiter.Beads.Workspace.tribunal_max_rounds(ws) do
+            case Arbiter.Beads.Workspace.review_gate_max_rounds(ws) do
               nil -> difficulty_default
               cap -> min(difficulty_default, cap)
             end
@@ -1973,7 +1973,7 @@ defmodule Arbiter.Polecat do
   end
 
   # Load the bead's difficulty integer (0..4) from the DB. Returns nil on any
-  # error so the Tribunal falls back to its D2 default rather than crashing.
+  # error so the ReviewGate falls back to its D2 default rather than crashing.
   defp bead_difficulty(bead_id) when is_binary(bead_id) do
     case Ash.get(Arbiter.Beads.Issue, bead_id) do
       {:ok, %Arbiter.Beads.Issue{difficulty: d}} -> d
@@ -1985,49 +1985,49 @@ defmodule Arbiter.Polecat do
 
   defp bead_difficulty(_), do: nil
 
-  # Park at :awaiting_tribunal and spawn the reviewer. The branch + merge title
-  # are stashed in meta so tribunal_verdict/2 can fire the same merge path on
+  # Park at :awaiting_review_gate and spawn the reviewer. The branch + merge title
+  # are stashed in meta so review_gate_verdict/2 can fire the same merge path on
   # approval without re-deriving them.
-  defp enter_tribunal(%State{} = state, branch) do
-    meta = Map.put(state.meta || %{}, :tribunal_branch, branch)
+  defp enter_review_gate(%State{} = state, branch) do
+    meta = Map.put(state.meta || %{}, :review_gate_branch, branch)
 
     parked = %State{
       state
-      | status: :awaiting_tribunal,
+      | status: :awaiting_review_gate,
         step_started_at: DateTime.utc_now(),
         meta: meta
     }
 
-    case spawn_tribunal(parked, branch) do
-      # Stash the monitor ref so a Tribunal that dies before reporting can't
-      # silently strand us at :awaiting_tribunal (see the :DOWN handler).
+    case spawn_review_gate(parked, branch) do
+      # Stash the monitor ref so a ReviewGate that dies before reporting can't
+      # silently strand us at :awaiting_review_gate (see the :DOWN handler).
       {:ok, ref} ->
-        %State{parked | meta: Map.put(parked.meta, :tribunal_ref, ref)}
+        %State{parked | meta: Map.put(parked.meta, :review_gate_ref, ref)}
 
-      # Tests drive tribunal_verdict/2 directly (review_spawn: false).
+      # Tests drive review_gate_verdict/2 directly (review_spawn: false).
       :skip ->
         parked
 
-      # The Tribunal couldn't start — don't park unreviewed work forever; treat
+      # The ReviewGate couldn't start — don't park unreviewed work forever; treat
       # it as an inconclusive review and escalate (no merge). bd-2y0gd5.
       :error ->
-        apply_tribunal_verdict(
+        apply_review_gate_verdict(
           parked,
-          {:no_verdict, "Tribunal failed to start; merge blocked pending review."}
+          {:no_verdict, "ReviewGate failed to start; merge blocked pending review."}
         )
     end
   end
 
-  # Spawn the Tribunal (which runs the distinct reviewer worker). The
+  # Spawn the ReviewGate (which runs the distinct reviewer worker). The
   # `:review_spawn` meta flag (default true) lets tests park the polecat at
-  # :awaiting_tribunal and drive tribunal_verdict/2 directly, in isolation from a
+  # :awaiting_review_gate and drive review_gate_verdict/2 directly, in isolation from a
   # live reviewer subprocess. `:review_command` is the reviewer argv test escape
-  # hatch (forwarded to the Tribunal → ClaudeSession), mirroring sling's
+  # hatch (forwarded to the ReviewGate → ClaudeSession), mirroring dispatch's
   # `:claude_command`.
-  # Spawn the Tribunal and MONITOR it. Returns {:ok, monitor_ref} so the author
-  # can detect a Tribunal that dies before reporting, :skip when review_spawn is
-  # off (tests drive tribunal_verdict/2 directly), or :error when it can't start.
-  defp spawn_tribunal(%State{meta: meta} = state, branch) do
+  # Spawn the ReviewGate and MONITOR it. Returns {:ok, monitor_ref} so the author
+  # can detect a ReviewGate that dies before reporting, :skip when review_spawn is
+  # off (tests drive review_gate_verdict/2 directly), or :error when it can't start.
+  defp spawn_review_gate(%State{meta: meta} = state, branch) do
     if Map.get(meta, :review_spawn, true) do
       opts =
         [
@@ -2045,13 +2045,13 @@ defmodule Arbiter.Polecat do
         |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
 
-      case Arbiter.Polecat.Tribunal.start(opts) do
+      case Arbiter.Polecat.ReviewGate.start(opts) do
         {:ok, pid} ->
           {:ok, Process.monitor(pid)}
 
         {:error, reason} ->
           Logger.warning(
-            "Polecat: failed to start Tribunal for bead=#{state.bead_id}: #{inspect(reason)}"
+            "Polecat: failed to start ReviewGate for bead=#{state.bead_id}: #{inspect(reason)}"
           )
 
           :error
@@ -2061,25 +2061,25 @@ defmodule Arbiter.Polecat do
     end
   end
 
-  # Apply a Tribunal verdict from :awaiting_tribunal.
-  defp apply_tribunal_verdict(%State{} = state, {:approve, findings}) do
-    record_tribunal_outcome(state, :approve, findings)
-    branch = Map.get(state.meta, :tribunal_branch) || mergeable_branch(state.meta)
-    # Tell the Warden the gate approved this MR. Without this, hosted-forge
+  # Apply a ReviewGate verdict from :awaiting_review_gate.
+  defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do
+    record_review_gate_outcome(state, :approve, findings)
+    branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
+    # Tell the Watchdog the gate approved this MR. Without this, hosted-forge
     # adapters (Github) park forever at :awaiting_review waiting for a
-    # PR-level approval the Tribunal never posts (bd-66ey1o).
-    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_tribunal: true}))
+    # PR-level approval the ReviewGate never posts (bd-66ey1o).
+    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_review_gate: true}))
   end
 
-  defp apply_tribunal_verdict(%State{} = state, {:request_changes, findings}) do
+  defp apply_review_gate_verdict(%State{} = state, {:request_changes, findings}) do
     park_rejected(state, :request_changes, findings)
   end
 
-  defp apply_tribunal_verdict(%State{} = state, {:no_verdict, findings}) do
+  defp apply_review_gate_verdict(%State{} = state, {:no_verdict, findings}) do
     park_rejected(state, :no_verdict, findings)
   end
 
-  defp apply_tribunal_verdict(%State{} = state, :no_verdict) do
+  defp apply_review_gate_verdict(%State{} = state, :no_verdict) do
     park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
   end
 
@@ -2088,25 +2088,25 @@ defmodule Arbiter.Polecat do
   # findings live in meta + bead notes + the escalation message (well under the
   # Run.failure_reason length cap).
   defp park_rejected(%State{} = state, verdict, findings) do
-    record_tribunal_outcome(state, verdict, findings)
-    escalate_tribunal(state, verdict, findings)
+    record_review_gate_outcome(state, verdict, findings)
+    escalate_review_gate(state, verdict, findings)
 
     meta =
       state.meta
-      |> Map.put(:tribunal_verdict, verdict)
-      |> Map.put(:tribunal_findings, findings)
+      |> Map.put(:review_gate_verdict, verdict)
+      |> Map.put(:review_gate_findings, findings)
 
     fail_now(%State{state | meta: meta}, fail_reason_for(verdict))
   end
 
-  defp fail_reason_for(:no_verdict), do: :tribunal_inconclusive
-  defp fail_reason_for(_), do: :tribunal_rejected
+  defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
+  defp fail_reason_for(_), do: :review_gate_rejected
 
   # Append the verdict + findings to the bead's notes so it surfaces in
   # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.
-  defp record_tribunal_outcome(%State{bead_id: bead_id, meta: meta}, verdict, findings) do
-    rounds = Map.get(meta || %{}, :tribunal_rounds)
-    block = format_tribunal_note(verdict, findings, rounds)
+  defp record_review_gate_outcome(%State{bead_id: bead_id, meta: meta}, verdict, findings) do
+    rounds = Map.get(meta || %{}, :review_gate_rounds)
+    block = format_review_gate_note(verdict, findings, rounds)
 
     with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
       notes =
@@ -2116,21 +2116,21 @@ defmodule Arbiter.Polecat do
 
       case Ash.update(bead, %{notes: notes}, action: :update) do
         {:ok, _} -> :ok
-        {:error, reason} -> log_tribunal_warning(bead_id, reason)
+        {:error, reason} -> log_review_gate_warning(bead_id, reason)
       end
     end
 
     :ok
   rescue
-    e -> log_tribunal_warning(bead_id, e)
+    e -> log_review_gate_warning(bead_id, e)
   end
 
-  defp format_tribunal_note(verdict, findings, rounds) do
+  defp format_review_gate_note(verdict, findings, rounds) do
     header =
       case verdict do
-        :approve -> "Tribunal verdict: APPROVE"
-        :request_changes -> "Tribunal verdict: REQUEST_CHANGES"
-        :no_verdict -> "Tribunal verdict: INCONCLUSIVE (no verdict)"
+        :approve -> "ReviewGate verdict: APPROVE"
+        :request_changes -> "ReviewGate verdict: REQUEST_CHANGES"
+        :no_verdict -> "ReviewGate verdict: INCONCLUSIVE (no verdict)"
       end
 
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -2140,12 +2140,12 @@ defmodule Arbiter.Polecat do
 
   # On a non-approve verdict, raise an escalation to the Admiral's mailbox with
   # the reviewer's findings. Requires a workspace (messages are workspace-scoped).
-  defp escalate_tribunal(%State{workspace_id: ws_id, bead_id: bead_id}, verdict, findings)
+  defp escalate_review_gate(%State{workspace_id: ws_id, bead_id: bead_id}, verdict, findings)
        when is_binary(ws_id) do
     subject =
       case verdict do
-        :no_verdict -> "Tribunal: review inconclusive for #{bead_id}"
-        _ -> "Tribunal: changes requested for #{bead_id}"
+        :no_verdict -> "ReviewGate: review inconclusive for #{bead_id}"
+        _ -> "ReviewGate: changes requested for #{bead_id}"
       end
 
     Arbiter.Messages.Message.send_mail(%{
@@ -2158,20 +2158,20 @@ defmodule Arbiter.Polecat do
       body: findings
     })
 
-    Arbiter.Events.broadcast(ws_id, "tribunal", %{bead_id: bead_id, message: subject})
+    Arbiter.Events.broadcast(ws_id, "review_gate", %{bead_id: bead_id, message: subject})
 
     :ok
   rescue
-    e -> log_tribunal_warning(bead_id, e)
+    e -> log_review_gate_warning(bead_id, e)
   catch
     :exit, _ -> :ok
   end
 
-  defp escalate_tribunal(_state, _verdict, _findings), do: :ok
+  defp escalate_review_gate(_state, _verdict, _findings), do: :ok
 
-  defp log_tribunal_warning(bead_id, reason) do
+  defp log_review_gate_warning(bead_id, reason) do
     Logger.warning(
-      "Polecat.record_tribunal_outcome swallowed for bead=#{bead_id}: #{inspect(reason)}"
+      "Polecat.record_review_gate_outcome swallowed for bead=#{bead_id}: #{inspect(reason)}"
     )
 
     :error
@@ -2259,14 +2259,14 @@ defmodule Arbiter.Polecat do
   # ---- merge-request review internals ------------------------------------
 
   # Resolve the merger, open the MR / run the merge, park at :awaiting_review,
-  # and spawn the Warden. Returns `{:ok, mr_ref, new_state}` on success or
+  # and spawn the Watchdog. Returns `{:ok, mr_ref, new_state}` on success or
   # `{:error, reason, unchanged_state}` on failure.
   #
   # Shared by the explicit open_mr/5 API (handle_call) and the worker
   # completion path (the arb-done handler) so the branch is always integrated
   # through the same code, regardless of how completion was triggered. For the
   # default Direct strategy this performs the local `git merge --no-ff`
-  # synchronously; the Warden then completes the polecat on its first poll.
+  # synchronously; the Watchdog then completes the polecat on its first poll.
   defp do_open_mr(%State{} = state, branch, title, description, opts) do
     case resolve_merger(state, opts) do
       {:ok, adapter, workspace} ->
@@ -2278,9 +2278,9 @@ defmodule Arbiter.Polecat do
             merger_url = safe_link_for(adapter, mr_ref)
 
             # bd-7b46wd: persist the PR/MR ref onto the bead so the workspace
-            # Refinery ADOPTS this PR (instead of opening a duplicate) when it
+            # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
             # later receives the {:polecat_done, bead_id} broadcast. Without
-            # this the Refinery's existing_mr_ref/1 is always nil, it falls
+            # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
             # through to open_mr_for/3, fails opening a second PR on the
             # already-merged branch, and the bead is never auto-closed.
             record_pr_ref_on_bead(state, mr_ref)
@@ -2299,32 +2299,32 @@ defmodule Arbiter.Polecat do
                   |> Map.put(:merger_url, merger_url)
             }
 
-            # Guard: MR already exists on the forge. Warden startup failure must
+            # Guard: MR already exists on the forge. Watchdog startup failure must
             # NOT prevent the polecat from parking at :awaiting_review — the MR
-            # is real and must not be discarded. If the Warden can't start for
+            # is real and must not be discarded. If the Watchdog can't start for
             # any reason, escalate to the Admiral so the MR is not silently
             # orphaned while the polecat parks indefinitely.
-            warden_ok? =
+            watchdog_ok? =
               try do
-                start_warden(new_state, workspace, opts) == :ok
+                start_watchdog(new_state, workspace, opts) == :ok
               rescue
                 e ->
                   Logger.warning(
-                    "Polecat.open_mr: Warden startup raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+                    "Polecat.open_mr: Watchdog startup raised for bead=#{state.bead_id}: #{Exception.message(e)}"
                   )
 
                   false
               catch
                 :exit, reason ->
                   Logger.warning(
-                    "Polecat.open_mr: Warden startup exit for bead=#{state.bead_id}: #{inspect(reason)}"
+                    "Polecat.open_mr: Watchdog startup exit for bead=#{state.bead_id}: #{inspect(reason)}"
                   )
 
                   false
               end
 
-            unless warden_ok? do
-              escalate_warden_failure(new_state)
+            unless watchdog_ok? do
+              escalate_watchdog_failure(new_state)
             end
 
             {:ok, mr_ref, new_state}
@@ -2369,7 +2369,7 @@ defmodule Arbiter.Polecat do
   #
   #   * :repo_path — the rig path (local checkout where the target branch
   #     lives) the Direct adapter runs `git merge --no-ff` inside. Seeded into
-  #     meta at sling time; falls back to the worktree path for older callers.
+  #     meta at dispatch time; falls back to the worktree path for older callers.
   #   * :target_branch — the base branch the worktree was cut from.
   defp build_open_opts(%State{meta: meta}, opts) do
     meta = meta || %{}
@@ -2406,10 +2406,10 @@ defmodule Arbiter.Polecat do
   end
 
   # Persist the opened MR/PR ref onto the bead's `pr_ref` (bd-7b46wd). This is
-  # the single signal the workspace Refinery reads (`existing_mr_ref/1`) to
+  # the single signal the workspace MergeQueue reads (`existing_mr_ref/1`) to
   # ADOPT an already-open PR rather than open a duplicate — without it the
-  # Warden-merged PR is invisible to the Refinery and the bead never closes.
-  # Mirrors `Arbiter.Workflows.Refinery.maybe_record_mr_ref/2`. Best-effort: a
+  # Watchdog-merged PR is invisible to the MergeQueue and the bead never closes.
+  # Mirrors `Arbiter.Workflows.MergeQueue.maybe_record_mr_ref/2`. Best-effort: a
   # DB hiccup logs at debug and never fails the open.
   defp record_pr_ref_on_bead(%State{bead_id: bead_id}, mr_ref)
        when is_binary(mr_ref) and mr_ref != "" do
@@ -2459,36 +2459,36 @@ defmodule Arbiter.Polecat do
       :ok
   end
 
-  # Spawn the Warden that polls for approval. auto_merge + poll interval come
+  # Spawn the Watchdog that polls for approval. auto_merge + poll interval come
   # from the workspace config (opts may override, primarily for tests).
   #
-  # The `:via_tribunal` opt (carried through from the Tribunal-APPROVE merge
-  # path) tells the Warden the gate has already approved this MR; it short-
+  # The `:via_review_gate` opt (carried through from the ReviewGate-APPROVE merge
+  # path) tells the Watchdog the gate has already approved this MR; it short-
   # circuits hosted-forge approval polling and merges on its first poll. The
-  # workspace's auto_merge setting is irrelevant in that case — a Tribunal
+  # workspace's auto_merge setting is irrelevant in that case — a ReviewGate
   # APPROVE is the merge-now signal.
-  defp start_warden(%State{} = state, workspace, opts) do
-    # Test escape hatch: :warden_start_error in opts simulates a Warden startup
+  defp start_watchdog(%State{} = state, workspace, opts) do
+    # Test escape hatch: :watchdog_start_error in opts simulates a Watchdog startup
     # failure without needing a real error condition, mirroring :review_spawn for
-    # the Tribunal. Production callers never set this key.
-    if Map.get(opts, :warden_start_error) do
+    # the ReviewGate. Production callers never set this key.
+    if Map.get(opts, :watchdog_start_error) do
       :error
     else
-      do_start_warden(state, workspace, opts)
+      do_start_watchdog(state, workspace, opts)
     end
   end
 
-  defp do_start_warden(%State{} = state, workspace, opts) do
-    via_tribunal = Map.get(opts, :via_tribunal, false)
+  defp do_start_watchdog(%State{} = state, workspace, opts) do
+    via_review_gate = Map.get(opts, :via_review_gate, false)
 
     auto_merge =
       cond do
-        via_tribunal -> true
+        via_review_gate -> true
         Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
         true -> workspace_auto_merge?(workspace)
       end
 
-    warden_opts =
+    watchdog_opts =
       [
         bead_id: state.bead_id,
         polecat: self(),
@@ -2496,37 +2496,37 @@ defmodule Arbiter.Polecat do
         adapter: state.merger_adapter,
         workspace: workspace,
         auto_merge: auto_merge,
-        via_tribunal: via_tribunal
+        via_review_gate: via_review_gate
       ]
       |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
       |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
-      |> maybe_opt(:max_polls, Map.get(opts, :max_polls) || workspace_warden_max_polls(workspace))
+      |> maybe_opt(:max_polls, Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace))
 
-    case Arbiter.Polecat.Warden.start(warden_opts) do
+    case Arbiter.Polecat.Watchdog.start(watchdog_opts) do
       {:ok, _pid} ->
         :ok
 
       # DynamicSupervisor.start_child/2 admits :ignore per its typespec; today
-      # Warden.init/1 returns :ignore when polecat_pid is not a pid (defensive
-      # path). Treat as a no-op: the MR is already created and the Warden is
-      # simply not needed (matches pattern in start_refinery.ex).
+      # Watchdog.init/1 returns :ignore when polecat_pid is not a pid (defensive
+      # path). Treat as a no-op: the MR is already created and the Watchdog is
+      # simply not needed (matches pattern in start_merge_queue.ex).
       :ignore ->
         :ok
 
       {:error, reason} ->
         Logger.warning(
-          "Polecat.open_mr: failed to start Warden for bead=#{state.bead_id}: #{inspect(reason)}"
+          "Polecat.open_mr: failed to start Watchdog for bead=#{state.bead_id}: #{inspect(reason)}"
         )
 
         :error
     end
   end
 
-  # An MR was opened but the Warden failed to start. The polecat stays at
+  # An MR was opened but the Watchdog failed to start. The polecat stays at
   # :awaiting_review (the MR is real and must not be discarded), but the Admiral
   # is escalated so the orphaned MR can be resolved manually rather than hanging
   # indefinitely with no watcher.
-  defp escalate_warden_failure(%State{
+  defp escalate_watchdog_failure(%State{
          workspace_id: ws_id,
          bead_id: bead_id,
          mr_ref: mr_ref,
@@ -2540,7 +2540,7 @@ defmodule Arbiter.Polecat do
       end
 
     Logger.warning(
-      "Polecat.open_mr: Warden failed to start for bead=#{bead_id} — MR #{mr_ref} orphaned; escalating"
+      "Polecat.open_mr: Watchdog failed to start for bead=#{bead_id} — MR #{mr_ref} orphaned; escalating"
     )
 
     Arbiter.Messages.Message.send_mail(%{
@@ -2549,20 +2549,20 @@ defmodule Arbiter.Polecat do
       from_ref: bead_id,
       workspace_id: ws_id,
       directive_ref: bead_id,
-      subject: "Warden startup failed: #{bead_id} MR orphaned",
+      subject: "Watchdog startup failed: #{bead_id} MR orphaned",
       body:
-        "The Warden process failed to start after MR #{mr_info} was opened for bead #{bead_id}. " <>
-          "The MR exists on the forge but has no Warden watching it — " <>
+        "The Watchdog process failed to start after MR #{mr_info} was opened for bead #{bead_id}. " <>
+          "The MR exists on the forge but has no Watchdog watching it — " <>
           "manual completion or failure is required once the MR resolves.\n\n" <>
           "To complete: Polecat.complete(#{inspect(bead_id)}, :merged)\n" <>
-          "To fail:     Polecat.fail(#{inspect(bead_id)}, :warden_lost)"
+          "To fail:     Polecat.fail(#{inspect(bead_id)}, :watchdog_lost)"
     })
 
     :ok
   rescue
     e ->
       Logger.warning(
-        "Polecat: Warden-failure escalation swallowed for bead=#{bead_id}: #{Exception.message(e)}"
+        "Polecat: Watchdog-failure escalation swallowed for bead=#{bead_id}: #{Exception.message(e)}"
       )
 
       :ok
@@ -2570,17 +2570,17 @@ defmodule Arbiter.Polecat do
     :exit, _ -> :ok
   end
 
-  defp escalate_warden_failure(_state), do: :ok
+  defp escalate_watchdog_failure(_state), do: :ok
 
   defp workspace_auto_merge?(%Arbiter.Beads.Workspace{} = ws),
     do: Arbiter.Beads.Workspace.auto_merge?(ws)
 
   defp workspace_auto_merge?(_), do: false
 
-  defp workspace_warden_max_polls(%Arbiter.Beads.Workspace{} = ws),
-    do: Arbiter.Beads.Workspace.warden_max_polls(ws)
+  defp workspace_watchdog_max_polls(%Arbiter.Beads.Workspace{} = ws),
+    do: Arbiter.Beads.Workspace.watchdog_max_polls(ws)
 
-  defp workspace_warden_max_polls(_), do: nil
+  defp workspace_watchdog_max_polls(_), do: nil
 
   defp maybe_opt(opts, _key, nil), do: opts
   defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)

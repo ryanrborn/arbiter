@@ -1,4 +1,4 @@
-defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
+defmodule Arbiter.Polecat.ReviewOnlyWatchdogTest do
   @moduledoc """
   Regression tests for bd-4ji58d.
 
@@ -10,8 +10,8 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
 
   After the fix:
 
-    * APPROVE → reviewer polecat parks at :awaiting_review and the Warden
-      merges the bead's pr_ref automatically (via_tribunal: true path).
+    * APPROVE → reviewer polecat parks at :awaiting_review and the Watchdog
+      merges the bead's pr_ref automatically (via_review_gate: true path).
     * REQUEST_CHANGES → reviewer polecat fails (not completes) so the Driver
       does NOT close the bead; it stays :in_progress for a fix-pass.
     * No verdict → same as REQUEST_CHANGES (fail, bead stays :in_progress).
@@ -83,11 +83,11 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
           output_lines: output_lines,
           merger_adapter_override: StubMerger,
           merger_workspace_override: nil,
-          # Park the Warden far in the future so it doesn't auto-poll during
+          # Park the Watchdog far in the future so it doesn't auto-poll during
           # status assertions. Tests that want to see the merge drive the
-          # Warden manually via StubMerger.
-          warden_initial_delay_ms: 5_000_000,
-          warden_interval_ms: 5_000_000
+          # Watchdog manually via StubMerger.
+          watchdog_initial_delay_ms: 5_000_000,
+          watchdog_interval_ms: 5_000_000
         },
         extra_meta
       )
@@ -124,7 +124,7 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
       assert snap.mr_ref == "pr-42"
     end
 
-    test "Warden auto-merges and completes the polecat when the PR is approved" do
+    test "Watchdog auto-merges and completes the polecat when the PR is approved" do
       ws = new_workspace()
       bead = new_bead(ws)
       {:ok, bead} = Ash.update(bead, %{pr_ref: "pr-99"}, action: :update)
@@ -137,9 +137,9 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
 
       pid =
         start_reviewer(bead, ["VERDICT: APPROVE", "great work"], %{
-          # Let the Warden poll immediately so the merge fires without sleeping.
-          warden_initial_delay_ms: 0,
-          warden_interval_ms: 50
+          # Let the Watchdog poll immediately so the merge fires without sleeping.
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
         })
 
       send(pid, {:__claude_session_done__, "arb done"})
@@ -149,7 +149,7 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
       snap = Polecat.state(pid)
       assert snap.status == :completed
       assert snap.mr_ref == "pr-99"
-      # Warden's via_tribunal path calls merge on the first approved poll.
+      # Watchdog's via_review_gate path calls merge on the first approved poll.
       assert StubMerger.merge_count("pr-99") >= 1
     end
 

@@ -249,7 +249,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   describe "preflight_failed/2 (bd-awi4nw)" do
     alias Arbiter.Polecat.StopReason
 
-    test "raises a 'refused to sling' escalation" do
+    test "raises a 'refused to dispatch' escalation" do
       ws = uniq("ws")
       bead_id = uniq("bd")
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
@@ -262,7 +262,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)
       assert escalation.subject =~ "pre-flight auth failed"
-      assert escalation.body =~ "Refused to sling"
+      assert escalation.body =~ "Refused to dispatch"
     end
   end
 end

@@ -75,7 +75,7 @@ defmodule Arbiter.Polecat.ResumeContextTest do
     assert prefix =~ "diff truncated"
   end
 
-  # `work_so_far/2` is the reusable git-state body shared with the Tribunal's
+  # `work_so_far/2` is the reusable git-state body shared with the ReviewGate's
   # revise loop (bd-1na62i). It returns just the committed/uncommitted blocks,
   # WITHOUT the "RESUMING work" framing that wraps it in `build/3`.
   test "work_so_far/2 renders the git-state blocks without the resume framing",

@@ -34,7 +34,7 @@ defmodule ArbiterWeb.Router do
       live("/beads", BeadIndexLive)
       live("/beads/:id", BeadDetailLive)
 
-      live("/crucible", CrucibleIndexLive)
+      live("/merge_queue", MergeQueueIndexLive)
 
       live("/polecats", PolecatIndexLive)
       live("/polecats/history", RunIndexLive)
@@ -96,7 +96,7 @@ defmodule ArbiterWeb.Router do
     get("/usage/events", UsageController, :events)
 
     # Polecats (workflow runner)
-    post("/polecats/sling", PolecatController, :sling)
+    post("/polecats/dispatch", PolecatController, :dispatch)
     post("/polecats/review", PolecatController, :review)
     post("/polecats/:bead_id/resume", PolecatController, :resume)
     get("/polecats/history", RunController, :index)

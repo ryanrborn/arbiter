@@ -13,8 +13,8 @@ defmodule Arbiter.ApplicationTest do
   describe "children/1 boot wiring" do
     # Regression guard for bd-6k8519, which shipped the SAME boot-breaking
     # duplicate-`:Task`-id collision TWICE. The two boot Tasks
-    # (reconcile_boot_task, refinery_boot_task) are gated behind
-    # `RefinerySupervisor.auto_start?()`, which is false in `test`. So in the
+    # (reconcile_boot_task, merge_queue_boot_task) are gated behind
+    # `MergeQueueSupervisor.auto_start?()`, which is false in `test`. So in the
     # test env the colliding children are never appended to the child list and
     # every test — including any supervision-tree test — passes green. Only a
     # real dev/prod boot crashes with "more than one child specification has
@@ -43,7 +43,7 @@ defmodule Arbiter.ApplicationTest do
       ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
 
       assert :reconcile_boot_task in ids
-      assert :refinery_boot_task in ids
+      assert :merge_queue_boot_task in ids
     end
 
     test "the single-instance guard precedes the reconcile task when auto_start? is true" do
@@ -59,10 +59,10 @@ defmodule Arbiter.ApplicationTest do
       assert guard_ix < reconcile_ix
     end
 
-    test "the migrator runs after the single-instance guard and before reconcile/refinery" do
+    test "the migrator runs after the single-instance guard and before reconcile/merge_queue" do
       # The migrator reads Arbiter.SingleInstance.primary?/0 (so the guard must
       # precede it) and brings the schema to head SYNCHRONOUSLY, so it must run
-      # before the reconcile/refinery boot Tasks query the database.
+      # before the reconcile/merge_queue boot Tasks query the database.
       ids = Application.children(auto_start?: true) |> Enum.map(&child_id/1)
 
       assert Arbiter.Boot.Migrator in ids
@@ -70,18 +70,18 @@ defmodule Arbiter.ApplicationTest do
       guard_ix = Enum.find_index(ids, &(&1 == Arbiter.SingleInstance))
       migrator_ix = Enum.find_index(ids, &(&1 == Arbiter.Boot.Migrator))
       reconcile_ix = Enum.find_index(ids, &(&1 == :reconcile_boot_task))
-      refinery_ix = Enum.find_index(ids, &(&1 == :refinery_boot_task))
+      merge_queue_ix = Enum.find_index(ids, &(&1 == :merge_queue_boot_task))
 
       assert guard_ix < migrator_ix
       assert migrator_ix < reconcile_ix
-      assert migrator_ix < refinery_ix
+      assert migrator_ix < merge_queue_ix
     end
 
     test "the gated boot tasks are absent when auto_start? is false (the test-env default)" do
       ids = Application.children(auto_start?: false) |> Enum.map(&child_id/1)
 
       refute :reconcile_boot_task in ids
-      refute :refinery_boot_task in ids
+      refute :merge_queue_boot_task in ids
       refute Arbiter.SingleInstance in ids
       refute Arbiter.Boot.Migrator in ids
     end

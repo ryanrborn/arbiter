@@ -67,7 +67,7 @@ The Arbiter web dashboard is at <%= @host %>. It shows active
 | `arb reopen <id>` | Reopen a closed <%= @issue %> |
 | `arb dep add <from> <type> <to>` | Add a dependency (e.g. `arb dep add <%= @domain_prefix %>-1 blocks <%= @domain_prefix %>-2`) |
 | `arb dep rm <from> <to>` | Remove a dependency |
-| `arb sling <id> [<%= @rig %>] --with-claude` | Sling with a live worker subprocess (defaults to Claude) (**costs API credits**) |
+| `arb dispatch <id> [<%= @rig %>] --with-claude` | Dispatch with a live worker subprocess (defaults to Claude) (**costs API credits**) |
 | `arb inbox <id>` | Read/clear <%= @worker_article %> <%= @worker %>'s mailbox for <%= @issue_article %> <%= @issue %> |
 | `arb message <id> <text>` | Leave a message in <%= @issue_article %> <%= @issue %>'s mailbox |
 | `arb polecat show <id>` | Show <%= @worker %> detail and output |
@@ -114,7 +114,7 @@ D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass.
 
 When filing, also drop a one-line **difficulty justification** in the
 description ("D3 because the change spans the routing dispatcher, two
-adapter configs, and the tribunal seam") so reviewers can sanity-check
+adapter configs, and the review_gate seam") so reviewers can sanity-check
 your call. `arb create --help` carries the same rubric inline.
 
 ## Memory discipline

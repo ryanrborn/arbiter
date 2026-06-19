@@ -100,14 +100,14 @@ defmodule Arbiter.Mergers.Merger do
 
   @typedoc """
   Aggregated human PR-side review feedback (bd-95lsjb). Returned by
-  `list_review_feedback/1` and consumed by the Refinery to drive an
+  `list_review_feedback/1` and consumed by the MergeQueue to drive an
   auto-revise pass on the existing worktree.
 
     * `:changes_requested` — true when the latest verdict (per reviewer) on
       the PR is CHANGES_REQUESTED.
     * `:latest_review_id` — an opaque, monotonic-ish handle for the most
       recent CHANGES_REQUESTED review (its id, else its timestamp). The
-      Refinery debounces on this so the same review is actioned at most once.
+      MergeQueue debounces on this so the same review is actioned at most once.
     * `:feedback` — the review summaries (with bodies) and inline comments to
       inject into the revise worker's prompt.
   """
@@ -139,7 +139,7 @@ defmodule Arbiter.Mergers.Merger do
 
   @doc """
   Fetch the human PR-side review feedback for `mr_ref` — the latest review
-  verdict (with its body) and the inline review comments — so the Refinery
+  verdict (with its body) and the inline review comments — so the MergeQueue
   can dispatch an auto-revise pass when a reviewer requests changes
   (bd-95lsjb).
 

@@ -26,7 +26,7 @@ defmodule Arbiter.MCP do
         url: "http://127.0.0.1:4848/mcp",  # overrides the derived endpoint URL
         secret: "…",             # overrides the endpoint secret_key_base for signing
         max_age: 86_400,         # token TTL in seconds (default 24h)
-        max_depth: 3,            # sling-recursion depth cap (Phase 2 guardrail)
+        max_depth: 3,            # dispatch-recursion depth cap (Phase 2 guardrail)
         server_name: "arbiter"   # the mcpServers key in .mcp.json
 
   All keys are optional; the defaults below stand in for a vanilla install.
@@ -59,7 +59,7 @@ defmodule Arbiter.MCP do
   @spec max_age() :: pos_integer()
   def max_age, do: config(:max_age, @default_max_age)
 
-  @doc "The sling-recursion depth cap a coordinator token may reach (Phase 2)."
+  @doc "The dispatch-recursion depth cap a coordinator token may reach (Phase 2)."
   @spec max_depth() :: non_neg_integer()
   def max_depth, do: config(:max_depth, @default_max_depth)
 

@@ -4,7 +4,7 @@ defmodule ArbiterWeb.UsageLive do
 
   Renders per-day, per-provider, per-model, and per-step rollups sourced from
   `Arbiter.Usage.summarize/1`. Also surfaces the top beads by cost and the
-  rework signal (beads with more than one `:work` row — re-slings).
+  rework signal (beads with more than one `:work` row — re-dispatchs).
 
   Refresh-on-load only for v1; PubSub live updates are a Phase 5 add-on once
   spend events are broadcast.
@@ -91,7 +91,7 @@ defmodule ArbiterWeb.UsageLive do
     DateTime.utc_now() |> DateTime.add(-days * 86_400, :second)
   end
 
-  # Beads with more than one :work row — re-slings, which is the rework story
+  # Beads with more than one :work row — re-dispatchs, which is the rework story
   # #77 was built to expose. Queries :work events directly rather than going
   # through summarize/1 because summarize groups all steps together per bead.
   defp load_rework_beads(since) do
@@ -143,7 +143,7 @@ defmodule ArbiterWeb.UsageLive do
           </h1>
           <p class="text-sm text-base-content/60 mt-1">
             Token cost ledger — per-session spend rolled up from <code class="text-xs">Arbiter.Usage.Event</code>.
-            Multiple rows per bead expose rework spend (re-slings).
+            Multiple rows per bead expose rework spend (re-dispatchs).
           </p>
         </div>
 

@@ -16,7 +16,7 @@ defmodule ArbiterCli.Cmd.Claim do
     --difficulty N Task difficulty (0..4): D0 trivial · D1 easy · D2 medium ·
                    D3 hard · D4 very hard. Drives model tier and thinking
                    budget routed to workers. (default: D2 on the server)
-    --rig <rig>    Hint for a later `arb sling`. Recorded as a tip in the
+    --rig <rig>    Hint for a later `arb dispatch`. Recorded as a tip in the
                    command's text output — not persisted on the bead.
     --json         Emit JSON instead of human-readable text.
   """
@@ -90,7 +90,7 @@ defmodule ArbiterCli.Cmd.Claim do
 
     if rig do
       IO.puts("")
-      IO.puts("Tip: `arb sling #{bead["id"]} #{rig}` to start work on this bead.")
+      IO.puts("Tip: `arb dispatch #{bead["id"]} #{rig}` to start work on this bead.")
     end
   end
 end

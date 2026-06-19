@@ -2,7 +2,7 @@
 # Fixture for bd-ofql8k: simulates the root-cause failure mode. The worker
 # EDITS a file in its worktree correctly, prints "arb done"... but never
 # `git commit`s, so HEAD stays at the base branch with the work uncommitted.
-# Before bd-ofql8k the Tribunal then diffed `base..HEAD`, saw empty, and
+# Before bd-ofql8k the ReviewGate then diffed `base..HEAD`, saw empty, and
 # reported "no code exists" while sitting on the very changes it claimed
 # were missing.
 set -e

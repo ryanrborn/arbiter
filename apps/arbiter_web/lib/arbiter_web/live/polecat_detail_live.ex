@@ -18,7 +18,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Warden
+  alias Arbiter.Polecat.Watchdog
   alias Arbiter.Polecats.Run
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Workflows.MachineState
@@ -528,7 +528,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
                       <.icon name="hero-archive-box" class="size-4" /> Run history
                     </.link>
                   <% end %>
-                  <%= if @snapshot.status in [:idle, :resuming, :running, :awaiting, :awaiting_tribunal, :awaiting_review] do %>
+                  <%= if @snapshot.status in [:idle, :resuming, :running, :awaiting, :awaiting_review_gate, :awaiting_review] do %>
                     <button
                       phx-click="stop"
                       data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
@@ -713,7 +713,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
                 <% end %>
 
                 <dt class="font-semibold">Poll interval:</dt>
-                <dd>{div(Warden.default_interval_ms(), 1000)}s</dd>
+                <dd>{div(Watchdog.default_interval_ms(), 1000)}s</dd>
 
                 <dt class="font-semibold">Last checked:</dt>
                 <dd>
@@ -938,7 +938,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   defp status_class(:resuming), do: "badge-info"
   defp status_class(:running), do: "badge-info"
   defp status_class(:awaiting), do: "badge-warning"
-  defp status_class(:awaiting_tribunal), do: "badge-warning"
+  defp status_class(:awaiting_review_gate), do: "badge-warning"
   defp status_class(:awaiting_review), do: "badge-warning"
   defp status_class(:completed), do: "badge-success"
   defp status_class(:failed), do: "badge-error"
@@ -948,7 +948,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
   defp status_label(:resuming), do: "Resuming"
   defp status_label(:running), do: "Running"
   defp status_label(:awaiting), do: "Awaiting"
-  defp status_label(:awaiting_tribunal), do: "In tribunal"
+  defp status_label(:awaiting_review_gate), do: "In review_gate"
   defp status_label(:awaiting_review), do: "Awaiting review"
   defp status_label(:completed), do: "Completed"
   defp status_label(:failed), do: "Failed"
@@ -958,7 +958,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
 
   defp status_label(other), do: to_string(other)
 
-  # Badge color + text for the last Mergers.get/1 result the Warden recorded.
+  # Badge color + text for the last Mergers.get/1 result the Watchdog recorded.
   defp approval_class(%{status: :merged}), do: "badge-success"
   defp approval_class(%{status: :closed}), do: "badge-error"
   defp approval_class(%{approved: true}), do: "badge-success"

@@ -8,12 +8,12 @@ defmodule Arbiter.MCP.Tools do
   (`bead_update_progress`); Phase 2 adds the coordinator-only mutating tools —
   `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_add` /
   `dep_remove` (grouping/epics use a `parent_of` edge), the `polecat_*` lifecycle family
-  (`polecat_sling` / `polecat_resume` / `polecat_review` / `polecat_stop` /
+  (`polecat_dispatch` / `polecat_resume` / `polecat_review` / `polecat_stop` /
   `polecat_list`), `message_send`, `notify_list`, the `tracker_*` bridge
   (`tracker_claim` / `tracker_sync`), `workspace_list`, and `usage_summarize`
   (see `docs/mcp-server-design.md` §8). The worker-dispatch tools
-  (`polecat_sling` / `polecat_resume` / `polecat_review`) carry the
-  sling-recursion guardrail (`can_sling` + `depth`, §4.3).
+  (`polecat_dispatch` / `polecat_resume` / `polecat_review`) carry the
+  dispatch-recursion guardrail (`can_dispatch` + `depth`, §4.3).
 
   Handlers take `(scope, arguments)` where `scope` is an `Arbiter.MCP.Scope` and
   `arguments` is the decoded `tools/call` arguments object (string keys). They
@@ -39,7 +39,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.MCP.Scope
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecat.Dispatch
   alias Arbiter.Trackers
   alias Arbiter.Usage
 
@@ -373,14 +373,14 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  # ---- polecat_sling ------------------------------------------------------
+  # ---- polecat_dispatch ------------------------------------------------------
 
   @doc """
   Dispatch a polecat to work a bead in the scope's workspace. **Coordinator only,
-  and the strongest-gated tool.** It enforces the sling-recursion guardrail
+  and the strongest-gated tool.** It enforces the dispatch-recursion guardrail
   (`docs/mcp-server-design.md` §4.3):
 
-    1. The scope must carry `can_sling` — a coordinator minted without it (and
+    1. The scope must carry `can_dispatch` — a coordinator minted without it (and
        every polecat, which never carries it) is refused.
     2. The scope's `depth` must be below the configured `Arbiter.MCP.max_depth/0`
        — cheap insurance against a misconfigured coordinator fan-out.
@@ -389,17 +389,17 @@ defmodule Arbiter.MCP.Tools do
   so a chain of dispatches is tracked. With a `provider` (`"claude"` | `"gemini"`,
   or the deprecated `with_claude: true` alias) a worker session is started;
   without one the bead simply parks `:in_progress` (no agent spawned).
-  Backs onto `Arbiter.Polecat.Sling.sling/2`.
+  Backs onto `Arbiter.Polecat.Dispatch.dispatch/2`.
   """
-  @spec polecat_sling(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def polecat_sling(%Scope{} = scope, args) do
-    with :ok <- ensure_can_sling(scope),
-         :ok <- ensure_sling_depth(scope),
+  @spec polecat_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def polecat_dispatch(%Scope{} = scope, args) do
+    with :ok <- ensure_can_dispatch(scope),
+         :ok <- ensure_dispatch_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
          {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
-      case Sling.sling(bead_id, sling_opts(scope, args)) do
-        {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
+      case Dispatch.dispatch(bead_id, worker_dispatch_opts(scope, args)) do
+        {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
+        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
     end
   end
@@ -408,20 +408,20 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Re-attach a fresh worker to a bead's **preserved** worktree
-  (`arb resume`). Coordinator only, and — like `polecat_sling` — gated by the
-  sling-recursion guardrail (`can_sling` + `depth`): resume spawns a worker, so
+  (`arb resume`). Coordinator only, and — like `polecat_dispatch` — gated by the
+  dispatch-recursion guardrail (`can_dispatch` + `depth`): resume spawns a worker, so
   the same recursion concerns apply. The child polecat's scope is minted one
-  level deeper. Backs onto `Arbiter.Polecat.Sling.resume/2`.
+  level deeper. Backs onto `Arbiter.Polecat.Dispatch.resume/2`.
   """
   @spec polecat_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def polecat_resume(%Scope{} = scope, args) do
-    with :ok <- ensure_can_sling(scope),
-         :ok <- ensure_sling_depth(scope),
+    with :ok <- ensure_can_dispatch(scope),
+         :ok <- ensure_dispatch_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
          {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
-      case Sling.resume(bead_id, dispatch_opts(scope, args)) do
-        {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
+      case Dispatch.resume(bead_id, dispatch_opts(scope, args)) do
+        {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
+        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
     end
   end
@@ -431,15 +431,15 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Dispatch a **review-only** worker against the PR/MR linked to a bead
   (`arb review`): no worktree, no per-bead branch, no route through the
-  merge queue/merger. Coordinator only, and gated by the sling-recursion guardrail
-  (`can_sling` + `depth`) — a review dispatch spawns an agent. The child
+  merge queue/merger. Coordinator only, and gated by the dispatch-recursion guardrail
+  (`can_dispatch` + `depth`) — a review dispatch spawns an agent. The child
   polecat's scope is minted one level deeper. Backs onto
-  `Arbiter.Polecat.Sling.sling/2` with `review: true`.
+  `Arbiter.Polecat.Dispatch.dispatch/2` with `review: true`.
   """
   @spec polecat_review(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def polecat_review(%Scope{} = scope, args) do
-    with :ok <- ensure_can_sling(scope),
-         :ok <- ensure_sling_depth(scope),
+    with :ok <- ensure_can_dispatch(scope),
+         :ok <- ensure_dispatch_depth(scope),
          {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
          {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
       opts =
@@ -448,9 +448,9 @@ defmodule Arbiter.MCP.Tools do
         |> Keyword.put(:review, true)
         |> review_claude_flag(args)
 
-      case Sling.sling(bead_id, opts) do
-        {:ok, result} -> {:ok, serialize_sling(result, scope.depth + 1)}
-        {:error, reason} -> {:error, {:invalid, sling_error_message(reason)}}
+      case Dispatch.dispatch(bead_id, opts) do
+        {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
+        {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
     end
   end
@@ -462,7 +462,7 @@ defmodule Arbiter.MCP.Tools do
   only. The bead is resolved through `fetch_bead`, so a coordinator can only
   stop polecats for beads in its own workspace; a bead with no live polecat is
   reported as not-found. Stopping is teardown — it never spawns — so it does not
-  require `can_sling`. Backs onto `Arbiter.Polecat.stop/2`.
+  require `can_dispatch`. Backs onto `Arbiter.Polecat.stop/2`.
   """
   @spec polecat_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def polecat_stop(%Scope{} = scope, args) do
@@ -1009,19 +1009,19 @@ defmodule Arbiter.MCP.Tools do
     ]
   end
 
-  # ---- Phase 2 sling guardrail + opts (docs/mcp-server-design.md §4.3) ----
+  # ---- Phase 2 dispatch guardrail + opts (docs/mcp-server-design.md §4.3) ----
 
-  defp ensure_can_sling(%Scope{can_sling: true}), do: :ok
+  defp ensure_can_dispatch(%Scope{can_dispatch: true}), do: :ok
 
-  defp ensure_can_sling(%Scope{}),
-    do: {:error, {:unauthorized, "this scope may not sling (can_sling is not set)"}}
+  defp ensure_can_dispatch(%Scope{}),
+    do: {:error, {:unauthorized, "this scope may not dispatch (can_dispatch is not set)"}}
 
-  defp ensure_sling_depth(%Scope{depth: depth}) do
+  defp ensure_dispatch_depth(%Scope{depth: depth}) do
     max = MCP.max_depth()
-    if depth < max, do: :ok, else: {:error, {:unauthorized, "sling depth limit (#{max}) reached"}}
+    if depth < max, do: :ok, else: {:error, {:unauthorized, "dispatch depth limit (#{max}) reached"}}
   end
 
-  # The opts common to every worker-dispatch tool (sling / resume / review):
+  # The opts common to every worker-dispatch tool (dispatch / resume / review):
   # the optional `rig` / `model` overrides plus the child scope depth, minted
   # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
   defp dispatch_opts(%Scope{depth: depth}, args) do
@@ -1030,15 +1030,15 @@ defmodule Arbiter.MCP.Tools do
     |> maybe_put_kw(:model, fetch_string(args, "model"))
   end
 
-  # Map `polecat_sling` arguments onto `Sling.sling/2` opts, mirroring the REST
-  # `POST /api/polecats/sling` contract: a `provider` dispatches a real worker
+  # Map `polecat_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the REST
+  # `POST /api/polecats/dispatch` contract: a `provider` dispatches a real worker
   # session (forcing that agent via `agent_type`); the deprecated `with_claude`
   # boolean is still honored as an alias for `provider: "claude"`; otherwise the
   # bead parks `:in_progress` (no Driver).
-  defp sling_opts(scope, args) do
+  defp worker_dispatch_opts(scope, args) do
     base = dispatch_opts(scope, args)
 
-    case sling_provider(args) do
+    case dispatch_provider(args) do
       nil ->
         Keyword.put(base, :start_driver, false)
 
@@ -1047,11 +1047,11 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Resolve the worker provider from `polecat_sling` args. Prefers the explicit
+  # Resolve the worker provider from `polecat_dispatch` args. Prefers the explicit
   # `provider` field (`"claude"` | `"gemini"`), falling back to the deprecated
   # `with_claude: true` alias. Returns `nil` when neither selects a worker — the
   # bead then parks in_progress.
-  defp sling_provider(args) do
+  defp dispatch_provider(args) do
     case Map.get(args, "provider") do
       "claude" ->
         :claude
@@ -1077,29 +1077,29 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp sling_error_message({:bead_closed, id}),
-    do: "bead #{id} is closed; reopen it before slinging"
+  defp dispatch_error_message({:bead_closed, id}),
+    do: "bead #{id} is closed; reopen it before dispatching"
 
-  defp sling_error_message(:no_rig_configured), do: "no rigs configured for this workspace"
-  defp sling_error_message({:rig_not_found, rig}), do: "rig #{inspect(rig)} is not configured"
+  defp dispatch_error_message(:no_rig_configured), do: "no rigs configured for this workspace"
+  defp dispatch_error_message({:rig_not_found, rig}), do: "rig #{inspect(rig)} is not configured"
 
-  defp sling_error_message({:ambiguous_rig, rigs}),
+  defp dispatch_error_message({:ambiguous_rig, rigs}),
     do: "multiple rigs available (#{Enum.join(rigs, ", ")}); pass `rig` explicitly"
 
-  defp sling_error_message({:bead_awaiting_review, id}),
+  defp dispatch_error_message({:bead_awaiting_review, id}),
     do: "bead #{id} is already awaiting review"
 
-  # Resume-specific (`Sling.resume/2`).
-  defp sling_error_message(:no_outpost),
-    do: "no preserved worktree for this bead — nothing to resume; sling it fresh instead"
+  # Resume-specific (`Dispatch.resume/2`).
+  defp dispatch_error_message(:no_outpost),
+    do: "no preserved worktree for this bead — nothing to resume; dispatch it fresh instead"
 
-  defp sling_error_message(:rig_unknown),
+  defp dispatch_error_message(:rig_unknown),
     do: "could not resolve the rig for this bead; pass `rig` explicitly"
 
-  defp sling_error_message({:acolyte_active, status}),
+  defp dispatch_error_message({:acolyte_active, status}),
     do: "a worker is still active for this bead (#{status}); stop it before resuming"
 
-  defp sling_error_message(other), do: "sling failed: #{inspect(other)}"
+  defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
   # ---- Phase 2 fetch helpers ---------------------------------------------
 
@@ -1222,10 +1222,10 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  # The sling result carries live pids/ports; render the JSON-safe subset (pids
-  # inspected to strings), mirroring `ArbiterWeb.Api.PolecatJSON.sling/1`. `depth`
+  # The dispatch result carries live pids/ports; render the JSON-safe subset (pids
+  # inspected to strings), mirroring `ArbiterWeb.Api.PolecatJSON.dispatch/1`. `depth`
   # is the slung polecat's scope depth (parent + 1).
-  defp serialize_sling(result, depth) do
+  defp serialize_dispatch(result, depth) do
     %{
       bead: serialize_bead(result.bead),
       polecat: %{bead_id: result.bead.id, pid: inspect(result.polecat_pid)},

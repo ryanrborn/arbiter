@@ -43,7 +43,7 @@ defmodule Arbiter.Workflows.Work do
   This surfaces any unread direction from the Admiral (`arb message <bead-id>
   <text>`) or flags from sibling workers, and marks them read. The Driver
   does not poll the mailbox — it is the worker's responsibility via the CLI.
-  See `Arbiter.Polecat.Sling.prompt_for/1` for where this is wired into the
+  See `Arbiter.Polecat.Dispatch.prompt_for/1` for where this is wired into the
   Claude prompt template.
   """
 

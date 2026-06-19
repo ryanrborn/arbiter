@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.Polecat do
       arb polecat log <bead-id>    — full uncapped durable transcript (audit)
       arb polecat stop <bead-id>   — terminate a running polecat cleanly
 
-  Use `arb sling` to start a polecat in the first place.
+  Use `arb dispatch` to start a polecat in the first place.
 
   `show` reports a live polecat's full snapshot when one is running. When no
   live polecat exists for the bead it falls back to the most recent historical

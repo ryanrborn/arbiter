@@ -13,7 +13,7 @@ defmodule Arbiter.MCP.CatalogTest do
 
   # Coordinator-only tools; never visible to a polecat.
   @coordinator_only ~w(bead_ready bead_create bead_update bead_close bead_reopen dep_add dep_remove
-                       polecat_sling
+                       polecat_dispatch
                        polecat_resume polecat_review polecat_stop polecat_list bead_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox)
 
@@ -56,8 +56,8 @@ defmodule Arbiter.MCP.CatalogTest do
       refute Map.has_key?(tool.input_schema["properties"], "workspace")
     end
 
-    test "polecat_sling exposes a provider enum field and keeps the with_claude alias" do
-      tool = Enum.find(Catalog.all(), &(&1.name == "polecat_sling"))
+    test "polecat_dispatch exposes a provider enum field and keeps the with_claude alias" do
+      tool = Enum.find(Catalog.all(), &(&1.name == "polecat_dispatch"))
       props = tool.input_schema["properties"]
 
       assert props["provider"]["enum"] == ["claude", "gemini"]

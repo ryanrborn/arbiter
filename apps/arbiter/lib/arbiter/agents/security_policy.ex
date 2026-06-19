@@ -65,7 +65,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
     * `:no_secret_reads`    — reading `.env`, private keys, `~/.ssh`, cloud creds.
     * `:no_outside_writes`  — writing to sensitive paths outside the worktree.
     * `:no_pr_create`       — opening a PR/MR from the worker (`gh pr create`,
-      `glab mr create`). The Refinery owns PR creation; a worker that opens its
+      `glab mr create`). The MergeQueue owns PR creation; a worker that opens its
       own PR produces a duplicate on the wrong base (bd-53xrmi).
 
   Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
@@ -168,7 +168,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   @doc """
   The install-wide default: `base/0` overlaid with
   `Application.get_env(:arbiter, :acolyte_security_policy)`. This is the floor
-  used whenever no workspace policy is in play (ad-hoc Tribunal runs, bare
+  used whenever no workspace policy is in play (ad-hoc ReviewGate runs, bare
   `ClaudeSession.start/1` callers).
   """
   @spec default() :: t()

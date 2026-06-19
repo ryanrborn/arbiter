@@ -4,7 +4,7 @@ defmodule Arbiter.Trackers.SyncTest do
   (`Arbiter.Trackers.Sync`) — the layer that drives the real VR workflow:
 
     * PR-open -> In Code Review + a PR-link comment + a remote link.
-    * Tribunal-approved-but-parked -> Pending Merge.
+    * ReviewGate-approved-but-parked -> Pending Merge.
     * A genuine sync failure surfaces loudly as an escalation (the
       VR-17911 silent-failure regression guard).
 

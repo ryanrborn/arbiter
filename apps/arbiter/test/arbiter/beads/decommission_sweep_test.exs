@@ -24,7 +24,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
 
     test "Daemon role definitions" do
       assert DecommissionSweep.daemon_role?(%Issue{
-               title: "Refinery for access_control - processes merge queue."
+               title: "MergeQueue for access_control - processes merge queue."
              })
 
       assert DecommissionSweep.daemon_role?(%Issue{
@@ -43,7 +43,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
                title: "Mayor - global coordinator, handles escalations."
              })
 
-      refute DecommissionSweep.daemon_role?(%Issue{title: "Refinery merge queue (gte-023)"})
+      refute DecommissionSweep.daemon_role?(%Issue{title: "MergeQueue merge queue (gte-023)"})
     end
 
     test "Polecat identity beads" do
@@ -74,7 +74,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
              })
 
       assert DecommissionSweep.gt_system?(%Issue{
-               title: "GT: server rig refinery should default to PR"
+               title: "GT: server rig merge_queue should default to PR"
              })
 
       assert DecommissionSweep.gt_system?(%Issue{
@@ -105,7 +105,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
     test "Patrol cycle notes" do
       assert DecommissionSweep.patrol_note?(%Issue{title: "Deacon Patrol"})
       assert DecommissionSweep.patrol_note?(%Issue{title: "Witness Patrol"})
-      assert DecommissionSweep.patrol_note?(%Issue{title: "Refinery Patrol"})
+      assert DecommissionSweep.patrol_note?(%Issue{title: "MergeQueue Patrol"})
       refute DecommissionSweep.patrol_note?(%Issue{title: "Patrol-style scheduling discussion"})
     end
   end
@@ -145,7 +145,7 @@ defmodule Arbiter.Beads.DecommissionSweepTest do
   describe "apply!/1" do
     test "closes each proposed bead", %{ws: ws} do
       b1 = new_bead(ws, "🤝 HANDOFF: a")
-      b2 = new_bead(ws, "Refinery for fakerig - processes merge queue.")
+      b2 = new_bead(ws, "MergeQueue for fakerig - processes merge queue.")
 
       proposals = DecommissionSweep.proposals()
 

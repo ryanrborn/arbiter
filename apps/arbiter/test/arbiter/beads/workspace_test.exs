@@ -367,102 +367,102 @@ defmodule Arbiter.Beads.WorkspaceTest do
     end
   end
 
-  describe "warden_max_polls/1" do
+  describe "watchdog_max_polls/1" do
     test "returns integer when set as integer" do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "wmp-int",
-          config: %{"merge" => %{"warden_max_polls" => 1440}}
+          config: %{"merge" => %{"watchdog_max_polls" => 1440}}
         })
 
-      assert Workspace.warden_max_polls(ws) == 1440
+      assert Workspace.watchdog_max_polls(ws) == 1440
     end
 
     test "returns integer when set as string (JSON round-trip)" do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "wmp-str",
-          config: %{"merge" => %{"warden_max_polls" => "720"}}
+          config: %{"merge" => %{"watchdog_max_polls" => "720"}}
         })
 
-      assert Workspace.warden_max_polls(ws) == 720
+      assert Workspace.watchdog_max_polls(ws) == 720
     end
 
     test "returns :infinity when set to the string \"infinity\"" do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "wmp-inf",
-          config: %{"merge" => %{"warden_max_polls" => "infinity"}}
+          config: %{"merge" => %{"watchdog_max_polls" => "infinity"}}
         })
 
-      assert Workspace.warden_max_polls(ws) == :infinity
+      assert Workspace.watchdog_max_polls(ws) == :infinity
     end
 
     test "returns nil when unset" do
       {:ok, ws} = Ash.create(Workspace, %{name: "wmp-unset"})
-      assert Workspace.warden_max_polls(ws) == nil
+      assert Workspace.watchdog_max_polls(ws) == nil
     end
 
-    test "validate_config rejects invalid warden_max_polls" do
+    test "validate_config rejects invalid watchdog_max_polls" do
       assert {:error, _} =
                Ash.create(Workspace, %{
                  name: "wmp-bad",
-                 config: %{"merge" => %{"warden_max_polls" => -5}}
+                 config: %{"merge" => %{"watchdog_max_polls" => -5}}
                })
 
       assert {:error, _} =
                Ash.create(Workspace, %{
                  name: "wmp-bad2",
-                 config: %{"merge" => %{"warden_max_polls" => "not-a-number"}}
+                 config: %{"merge" => %{"watchdog_max_polls" => "not-a-number"}}
                })
     end
   end
 
-  describe "tribunal_max_rounds/1" do
+  describe "review_gate_max_rounds/1" do
     test "returns integer when set as integer" do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "tmr-int",
-          config: %{"tribunal" => %{"max_rounds" => 3}}
+          config: %{"review_gate" => %{"max_rounds" => 3}}
         })
 
-      assert Workspace.tribunal_max_rounds(ws) == 3
+      assert Workspace.review_gate_max_rounds(ws) == 3
     end
 
     test "returns integer when set as string (JSON round-trip)" do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "tmr-str",
-          config: %{"tribunal" => %{"max_rounds" => "2"}}
+          config: %{"review_gate" => %{"max_rounds" => "2"}}
         })
 
-      assert Workspace.tribunal_max_rounds(ws) == 2
+      assert Workspace.review_gate_max_rounds(ws) == 2
     end
 
     test "returns nil when unset" do
       {:ok, ws} = Ash.create(Workspace, %{name: "tmr-unset"})
-      assert Workspace.tribunal_max_rounds(ws) == nil
+      assert Workspace.review_gate_max_rounds(ws) == nil
     end
 
     test "validate_config rejects non-positive max_rounds" do
       assert {:error, _} =
                Ash.create(Workspace, %{
                  name: "tmr-bad",
-                 config: %{"tribunal" => %{"max_rounds" => 0}}
+                 config: %{"review_gate" => %{"max_rounds" => 0}}
                })
 
       assert {:error, _} =
                Ash.create(Workspace, %{
                  name: "tmr-bad2",
-                 config: %{"tribunal" => %{"max_rounds" => "not-a-number"}}
+                 config: %{"review_gate" => %{"max_rounds" => "not-a-number"}}
                })
     end
 
-    test "validate_config rejects tribunal as a non-map" do
+    test "validate_config rejects review_gate as a non-map" do
       assert {:error, _} =
                Ash.create(Workspace, %{
                  name: "tmr-bad3",
-                 config: %{"tribunal" => "invalid"}
+                 config: %{"review_gate" => "invalid"}
                })
     end
   end

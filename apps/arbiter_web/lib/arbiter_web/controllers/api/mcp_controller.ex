@@ -63,7 +63,7 @@ defmodule ArbiterWeb.Api.McpController do
           "workspace_id" => scope.workspace_id,
           "bead_id" => scope.bead_id,
           "rig" => scope.rig,
-          "can_sling" => scope.can_sling,
+          "can_dispatch" => scope.can_dispatch,
           "depth" => scope.depth
         })
 

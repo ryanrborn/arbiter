@@ -1,12 +1,12 @@
-defmodule Arbiter.Polecat.TribunalTest do
+defmodule Arbiter.Polecat.ReviewGateTest do
   @moduledoc """
-  The review (Tribunal) gate that sits between a worker's `arb done` and the
+  The review (ReviewGate) gate that sits between a worker's `arb done` and the
   merger — Stage 1 (bd-4g1rg1) plus the Stage 2 revise-and-rediscuss loop
   (bd-3jm700).
 
   Stage 1 covers the four required paths plus verdict parsing:
 
-    * gate parks at `:awaiting_tribunal` (and does NOT merge) when review is
+    * gate parks at `:awaiting_review_gate` (and does NOT merge) when review is
       required,
     * APPROVE → the branch merges (a real `git merge --no-ff` on main),
     * REQUEST_CHANGES → the branch is NOT merged, the bead is parked with the
@@ -28,7 +28,7 @@ defmodule Arbiter.Polecat.TribunalTest do
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Tribunal
+  alias Arbiter.Polecat.ReviewGate
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
@@ -43,7 +43,7 @@ defmodule Arbiter.Polecat.TribunalTest do
   describe "parse_verdict/1" do
     test "recognizes APPROVE" do
       assert {:approve, findings} =
-               Tribunal.parse_verdict(["looks good", "VERDICT: APPROVE", "ship it"])
+               ReviewGate.parse_verdict(["looks good", "VERDICT: APPROVE", "ship it"])
 
       assert findings =~ "VERDICT: APPROVE"
       assert findings =~ "ship it"
@@ -56,26 +56,26 @@ defmodule Arbiter.Polecat.TribunalTest do
         "- [high] foo.ex:12 missing nil guard"
       ]
 
-      assert {:request_changes, findings} = Tribunal.parse_verdict(lines)
+      assert {:request_changes, findings} = ReviewGate.parse_verdict(lines)
       refute findings =~ "preamble noise"
       assert findings =~ "missing nil guard"
     end
 
     test "treats REJECT as a request-changes alias" do
-      assert {:request_changes, _} = Tribunal.parse_verdict(["VERDICT: REJECT now"])
+      assert {:request_changes, _} = ReviewGate.parse_verdict(["VERDICT: REJECT now"])
     end
 
     test "is case-insensitive and tolerates leading whitespace" do
-      assert {:approve, _} = Tribunal.parse_verdict(["   verdict:  approve"])
+      assert {:approve, _} = ReviewGate.parse_verdict(["   verdict:  approve"])
     end
 
     test "returns :no_verdict when no sentinel is present" do
-      assert :no_verdict = Tribunal.parse_verdict(["just some output", "no decision here"])
+      assert :no_verdict = ReviewGate.parse_verdict(["just some output", "no decision here"])
     end
 
     test "the first verdict line wins (APPROVE before REQUEST_CHANGES)" do
       assert {:approve, _} =
-               Tribunal.parse_verdict(["VERDICT: APPROVE", "VERDICT: REQUEST_CHANGES"])
+               ReviewGate.parse_verdict(["VERDICT: APPROVE", "VERDICT: REQUEST_CHANGES"])
     end
   end
 
@@ -83,7 +83,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
   describe "cap/2" do
     test "returns the text unchanged when within the byte cap" do
-      assert Tribunal.cap("short", 50) == "short"
+      assert ReviewGate.cap("short", 50) == "short"
     end
 
     test "truncating mid-codepoint backs off to a valid UTF-8 boundary" do
@@ -92,7 +92,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       # payload then runs String.trim/1 (outside any rescue) and persists to a
       # Postgres UTF8 column — both reject malformed bytes.
       text = String.duplicate("a", 9) <> "€uro"
-      capped = Tribunal.cap(text, 10)
+      capped = ReviewGate.cap(text, 10)
 
       assert String.valid?(capped), "cap/2 must never emit invalid UTF-8"
       assert capped == "aaaaaaaaa\n… (truncated)"
@@ -104,7 +104,7 @@ defmodule Arbiter.Polecat.TribunalTest do
     test "an exact-byte boundary on a multibyte char is preserved" do
       # cap == 12 lands exactly after the full "€" (bytes 10..12), nothing to shave.
       text = String.duplicate("a", 9) <> "€uro"
-      assert Tribunal.cap(text, 12) == "aaaaaaaaa€\n… (truncated)"
+      assert ReviewGate.cap(text, 12) == "aaaaaaaaa€\n… (truncated)"
     end
   end
 
@@ -160,7 +160,7 @@ defmodule Arbiter.Polecat.TribunalTest do
   end
 
   setup do
-    tmp = Path.join(System.tmp_dir!(), "tribunal-#{:erlang.unique_integer([:positive])}")
+    tmp = Path.join(System.tmp_dir!(), "review_gate-#{:erlang.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
     repo = init_rig(tmp)
 
@@ -220,7 +220,7 @@ defmodule Arbiter.Polecat.TribunalTest do
     {:ok, bead} =
       Ash.create(
         Issue,
-        Map.merge(%{title: "tribunal bead", workspace_id: ws.id, issue_type: :feature}, attrs)
+        Map.merge(%{title: "review_gate bead", workspace_id: ws.id, issue_type: :feature}, attrs)
       )
 
     {:ok, bead} = Ash.update(bead, %{status: :in_progress})
@@ -230,14 +230,14 @@ defmodule Arbiter.Polecat.TribunalTest do
   # ---- gate behaviour ------------------------------------------------------
 
   describe "the gate" do
-    test "parks at :awaiting_tribunal and does NOT merge when review is required",
+    test "parks at :awaiting_review_gate and does NOT merge when review is required",
          %{repo: repo, ws: ws} do
       bead = new_bead(ws)
       {pid, _branch} = start_author(bead, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
       # The gate held: no merge happened.
       assert merge_commit_count(repo) == 0
@@ -249,26 +249,26 @@ defmodule Arbiter.Polecat.TribunalTest do
       {pid, _branch} = start_author(bead, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
-      :ok = Polecat.tribunal_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+      :ok = Polecat.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-      # Direct merges synchronously; the Warden then completes the polecat.
+      # Direct merges synchronously; the Watchdog then completes the polecat.
       wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end)
       assert merge_commit_count(repo) == 1
 
       # The approval is recorded on the bead notes (visible via arb show).
       {:ok, reloaded} = Ash.get(Issue, bead.id)
-      assert reloaded.notes =~ "Tribunal verdict: APPROVE"
+      assert reloaded.notes =~ "ReviewGate verdict: APPROVE"
     end
 
     test "APPROVE with a hosted-forge stub adapter that never reports approval still merges (bd-66ey1o)",
          %{repo: repo, ws: ws} do
-      # Reproduces the production bug: a Tribunal APPROVE arrives, the merger
+      # Reproduces the production bug: a ReviewGate APPROVE arrives, the merger
       # opens (or reuses) an MR, and the adapter's get/1 reports
       # `%{status: :open, approved: false}` (no GitHub-side approval). Before
-      # bd-66ey1o the Warden polled forever waiting for `approved: true`. The
-      # fix plumbs `via_tribunal: true` through to the Warden so the merge
+      # bd-66ey1o the Watchdog polled forever waiting for `approved: true`. The
+      # fix plumbs `via_review_gate: true` through to the Watchdog so the merge
       # fires on its first poll.
       Arbiter.Test.StubMerger.reset()
       Arbiter.Test.StubMerger.next_open_ref("!76")
@@ -279,17 +279,17 @@ defmodule Arbiter.Polecat.TribunalTest do
       {pid, _branch} =
         start_author(bead, repo, %{
           merger_adapter_override: Arbiter.Test.StubMerger,
-          warden_interval_ms: 20,
-          warden_initial_delay_ms: 0,
-          warden_max_polls: 50
+          watchdog_interval_ms: 20,
+          watchdog_initial_delay_ms: 0,
+          watchdog_max_polls: 50
         })
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
-      :ok = Polecat.tribunal_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+      :ok = Polecat.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
 
-      # The Warden must merge despite never seeing a forge-side approval.
+      # The Watchdog must merge despite never seeing a forge-side approval.
       wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end, 3_000)
       assert Arbiter.Test.StubMerger.merge_count("!76") >= 1
       # The local repo was NOT git-merged (StubMerger is a stub) — the merge
@@ -303,10 +303,10 @@ defmodule Arbiter.Polecat.TribunalTest do
       {pid, _branch} = start_author(bead, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
       findings = "VERDICT: REQUEST_CHANGES\n- [high] feature.txt:1 needs a guard"
-      :ok = Polecat.tribunal_verdict(pid, {:request_changes, findings})
+      :ok = Polecat.review_gate_verdict(pid, {:request_changes, findings})
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
 
@@ -314,14 +314,14 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert merge_commit_count(repo) == 0
 
       snap = Polecat.state(pid)
-      assert snap.meta.failure_reason == :tribunal_rejected
-      assert snap.meta.tribunal_verdict == :request_changes
-      assert snap.meta.tribunal_findings =~ "needs a guard"
+      assert snap.meta.failure_reason == :review_gate_rejected
+      assert snap.meta.review_gate_verdict == :request_changes
+      assert snap.meta.review_gate_findings =~ "needs a guard"
 
       # Bead parked (still in_progress, not closed) with findings in its notes.
       {:ok, reloaded} = Ash.get(Issue, bead.id)
       assert reloaded.status == :in_progress
-      assert reloaded.notes =~ "Tribunal verdict: REQUEST_CHANGES"
+      assert reloaded.notes =~ "ReviewGate verdict: REQUEST_CHANGES"
       assert reloaded.notes =~ "needs a guard"
 
       # The Admiral was escalated.
@@ -335,13 +335,13 @@ defmodule Arbiter.Polecat.TribunalTest do
       {pid, _branch} = start_author(bead, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
-      :ok = Polecat.tribunal_verdict(pid, {:no_verdict, "reviewer crashed"})
+      :ok = Polecat.review_gate_verdict(pid, {:no_verdict, "reviewer crashed"})
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_inconclusive
     end
 
     test "review-off (default) bypasses the gate and merges immediately",
@@ -362,19 +362,19 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      # Straight to the merger — never parks at :awaiting_tribunal.
+      # Straight to the merger — never parks at :awaiting_review_gate.
       wait_until(fn -> match?(%{status: :completed}, Polecat.state(pid)) end)
       assert merge_commit_count(repo) == 1
-      refute Polecat.state(pid).meta[:tribunal_verdict]
+      refute Polecat.state(pid).meta[:review_gate_verdict]
     end
 
-    test "tribunal_verdict/2 is rejected outside :awaiting_tribunal", %{repo: repo, ws: ws} do
+    test "review_gate_verdict/2 is rejected outside :awaiting_review_gate", %{repo: repo, ws: ws} do
       bead = new_bead(ws)
       {pid, _branch} = start_author(bead, repo, %{})
 
       # Still :running — no verdict expected yet.
-      assert {:error, {:invalid_transition, :running, :tribunal_verdict}} =
-               Polecat.tribunal_verdict(pid, {:approve, "x"})
+      assert {:error, {:invalid_transition, :running, :review_gate_verdict}} =
+               Polecat.review_gate_verdict(pid, {:approve, "x"})
     end
   end
 
@@ -420,7 +420,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       # process): it recorded its OWN run row under the #review-suffixed id,
       # separate from the author's run. (Asserting on the persisted run avoids
       # racing the short-lived reviewer process in the registry.)
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       runs = Ash.read!(Arbiter.Polecats.Run)
       assert Enum.any?(runs, &(&1.bead_id == review_id)), "expected a distinct reviewer run row"
       assert Enum.any?(runs, &(&1.bead_id == bead.id)), "expected the author's own run row"
@@ -456,7 +456,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_rejected
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
@@ -465,7 +465,7 @@ defmodule Arbiter.Polecat.TribunalTest do
     test "review_agent.config.model is passed as `--model` when no command override is given",
          %{repo: repo, tmp: tmp} do
       # Build a `claude` shim on PATH that writes its argv to a file. Without
-      # `review_command` in meta the Tribunal walks the adapter path
+      # `review_command` in meta the ReviewGate walks the adapter path
       # (Arbiter.Agents.Claude.default_argv) — we want to see `--model haiku`
       # on the reviewer's spawn because the workspace sets review_agent to
       # Haiku while the worker stays on Sonnet.
@@ -567,7 +567,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       # The re-prompt ran as a distinct follow-up reviewer (its own run row under
       # the versioned id), separate from the first (verdict-less) pass.
-      reprompt_id = Tribunal.reviewer_bead_id(bead.id) <> "#v2"
+      reprompt_id = ReviewGate.reviewer_bead_id(bead.id) <> "#v2"
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
@@ -603,7 +603,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_rejected
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
@@ -637,10 +637,10 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_inconclusive
 
       # The re-prompt WAS attempted before escalating — its run row exists.
-      reprompt_id = Tribunal.reviewer_bead_id(bead.id) <> "#v2"
+      reprompt_id = ReviewGate.reviewer_bead_id(bead.id) <> "#v2"
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
@@ -648,7 +648,7 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
 
     # bd-3y2mda: a REQUEST_CHANGES verdict with NO findings is useless (the
-    # implementer has nothing to act on). The Tribunal treats it as malformed and
+    # implementer has nothing to act on). The ReviewGate treats it as malformed and
     # re-prompts — exactly like a missing sentinel — rather than entering the
     # revise loop empty-handed.
     test "REQUEST_CHANGES with no findings is re-prompted; a valid re-prompt is honored",
@@ -681,7 +681,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       # APPROVE merged. A merge at all proves the empty verdict was re-prompted.
       assert merge_commit_count(repo) == 1
 
-      reprompt_id = Tribunal.reviewer_bead_id(bead.id) <> "#v2"
+      reprompt_id = ReviewGate.reviewer_bead_id(bead.id) <> "#v2"
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
@@ -718,7 +718,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_inconclusive
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_inconclusive
     end
 
     # bd-79goxj: an empty-findings REQUEST_CHANGES in the last allowed round must
@@ -766,16 +766,16 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert merge_commit_count(repo) == 1
 
       # A round-2 implementer ran, proving the findings DID reach it.
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl2")),
              "expected a round-2 implementer run (findings reached the implementer)"
     end
 
-    # bd-79goxj: the verdict retry budget is per-round, not Tribunal-lifetime.
+    # bd-79goxj: the verdict retry budget is per-round, not ReviewGate-lifetime.
     # The fixture produces empty REQUEST_CHANGES on the first pass of BOTH round 1
-    # and round 2 — each needing one retry. Without the fix the Tribunal exhausts
+    # and round 2 — each needing one retry. Without the fix the ReviewGate exhausts
     # its 1-retry budget in round 1 and escalates inconclusive when round 2 also
     # needs a reprompt. With the fix retries_left resets to initial_retries at the
     # start of each new round, so round 2 still gets its reprompt → APPROVE → merge.
@@ -816,7 +816,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       # Merge proves round 2 got its reprompt (exhausted budget would have escalated).
       assert merge_commit_count(repo) == 1
 
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
@@ -866,7 +866,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       # A distinct implementer worker ran between the rounds (its own run row
       # under the round-1 #impl id), proving a fresh mind addressed the findings.
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
@@ -890,7 +890,7 @@ defmodule Arbiter.Polecat.TribunalTest do
     end
 
     # The reviewer holds the line on BOTH rounds (the @rounds fixture rejects
-    # first, then emits REQUEST_CHANGES again). After the 2-round cap the Tribunal
+    # first, then emits REQUEST_CHANGES again). After the 2-round cap the ReviewGate
     # escalates to Darth Gnosis with the FULL transcript + diff — no merge.
     test "not converged after the cap → escalate with the full transcript, no merge",
          %{repo: repo, ws: ws} do
@@ -923,7 +923,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 8_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_rejected
 
       # The escalation to the Admiral carries the FULL ordered transcript (both
       # rounds of findings + the implementer's response) and the current diff —
@@ -945,7 +945,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       # The full thread persisted as durable mailbox rows: r1 findings, r1
       # response, r2 findings — three :flag entries, oldest first.
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       flags = bead.id |> Message.thread(workspace_id: ws.id) |> Enum.filter(&(&1.kind == :flag))
       assert length(flags) == 3
 
@@ -989,10 +989,10 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 6_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_rejected
 
       # No implementer was ever spawned — the round cap was 1.
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       runs = Ash.read!(Arbiter.Polecats.Run)
 
       refute Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
@@ -1026,7 +1026,7 @@ defmodule Arbiter.Polecat.TribunalTest do
         round: 2
       }
 
-      prompt = Tribunal.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix the thing")
+      prompt = ReviewGate.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix the thing")
 
       # The briefing surfaces both the committed work and the uncommitted WIP.
       assert prompt =~ "Work done so far on this branch"
@@ -1038,7 +1038,7 @@ defmodule Arbiter.Polecat.TribunalTest do
       assert prompt =~ "the directive"
     end
 
-    # A worktree-less Tribunal (ad-hoc / test run) must degrade to the
+    # A worktree-less ReviewGate (ad-hoc / test run) must degrade to the
     # directive-only prompt rather than crash trying to read git state.
     test "degrades gracefully with no worktree", %{ws: ws} do
       bead = new_bead(ws, %{description: "the directive"})
@@ -1051,7 +1051,7 @@ defmodule Arbiter.Polecat.TribunalTest do
         round: 1
       }
 
-      prompt = Tribunal.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix it")
+      prompt = ReviewGate.revise_prompt(state, "VERDICT: REQUEST_CHANGES\n1. fix it")
 
       refute prompt =~ "Work done so far on this branch"
       assert prompt =~ "fix it"
@@ -1071,7 +1071,7 @@ defmodule Arbiter.Polecat.TribunalTest do
 
       # Findings contain both the REQUEST_CHANGES sentinel and an arb done marker
       findings = "VERDICT: REQUEST_CHANGES\n1. fix it\narb done"
-      prompt = Tribunal.revise_prompt(state, findings)
+      prompt = ReviewGate.revise_prompt(state, findings)
 
       # The prompt has the template instructions containing 'arb done' at the end,
       # but the findings section itself must be clean.
@@ -1091,11 +1091,11 @@ defmodule Arbiter.Polecat.TribunalTest do
   # ---- Pre-spawn commit gate and HEAD-SHA anchoring (bd-1mksks) ------------
 
   describe "pre-spawn commit gate (bd-1mksks)" do
-    # The Tribunal must gate on commits BEFORE spawning the reviewer. Even if the
+    # The ReviewGate must gate on commits BEFORE spawning the reviewer. Even if the
     # polecat commit gate already fired, this second layer catches the revise-round
     # case (the revise implementer's polecat has no worktree_path in meta, so its
     # commit gate does not fire).
-    test "Tribunal escalates as request_changes when branch has no commits",
+    test "ReviewGate escalates as request_changes when branch has no commits",
          %{repo: repo, ws: ws} do
       bead = new_bead(ws)
       branch = "feature/no-commits"
@@ -1106,9 +1106,9 @@ defmodule Arbiter.Polecat.TribunalTest do
       # Return to main so the repo state is clear.
       {_, 0} = git(["checkout", "-q", "main"], repo)
 
-      # Park the author polecat at :awaiting_tribunal via review_spawn: false so
+      # Park the author polecat at :awaiting_review_gate via review_spawn: false so
       # the polecat commit gate does NOT fire (no worktree_path in meta → gate
-      # skips). We then start a Tribunal manually, pointing at a worktree that is
+      # skips). We then start a ReviewGate manually, pointing at a worktree that is
       # actually on feature/no-commits with 0 commits ahead.
       meta = %{
         branch: branch,
@@ -1125,9 +1125,9 @@ defmodule Arbiter.Polecat.TribunalTest do
       on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
       :ok = Polecat.advance(author, :claude)
       send(author, {:__claude_session_done__, "arb done"})
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(author)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(author)) end)
 
-      # Switch the branch worktree to `feature/no-commits` so the Tribunal sees
+      # Switch the branch worktree to `feature/no-commits` so the ReviewGate sees
       # the branch with 0 commits ahead. We use a fresh sub-worktree for this.
       sub_wt = Path.join(Path.dirname(repo), "no-commits-wt")
       File.mkdir_p!(sub_wt)
@@ -1143,11 +1143,11 @@ defmodule Arbiter.Polecat.TribunalTest do
           stderr_to_stdout: true
         )
 
-      # Directly spawn a Tribunal that points at the zero-commit worktree.
+      # Directly spawn a ReviewGate that points at the zero-commit worktree.
       # A real reviewer command is supplied but should NEVER be reached — the
-      # Tribunal must escalate before it spawns the reviewer.
-      {:ok, _tribunal} =
-        Tribunal.start(
+      # ReviewGate must escalate before it spawns the reviewer.
+      {:ok, _review_gate} =
+        ReviewGate.start(
           author: author,
           bead_id: bead.id,
           workspace_id: ws.id,
@@ -1159,11 +1159,11 @@ defmodule Arbiter.Polecat.TribunalTest do
           timeout_ms: 5_000
         )
 
-      # The Tribunal should report :request_changes immediately (no reviewer spawn).
+      # The ReviewGate should report :request_changes immediately (no reviewer spawn).
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(author)) end, 4_000)
       snap = Polecat.state(author)
-      assert snap.meta.failure_reason == :tribunal_rejected
-      assert snap.meta.tribunal_findings =~ "no commits ahead"
+      assert snap.meta.failure_reason == :review_gate_rejected
+      assert snap.meta.review_gate_findings =~ "no commits ahead"
       # The branch was NOT merged.
       assert merge_commit_count(repo) == 0
     end
@@ -1195,7 +1195,7 @@ defmodule Arbiter.Polecat.TribunalTest do
         head_sha: expected_sha
       }
 
-      prompt = Tribunal.review_prompt(state)
+      prompt = ReviewGate.review_prompt(state)
 
       assert prompt =~ expected_sha,
              "review_prompt must embed the HEAD SHA so the reviewer can verify the commit"
@@ -1217,7 +1217,7 @@ defmodule Arbiter.Polecat.TribunalTest do
         head_sha: nil
       }
 
-      prompt = Tribunal.review_prompt(state)
+      prompt = ReviewGate.review_prompt(state)
 
       # No SHA anchor — the prompt must still be valid.
       refute prompt =~ "HEAD at dispatch time was commit",
@@ -1229,43 +1229,43 @@ defmodule Arbiter.Polecat.TribunalTest do
   end
 
   describe "review-gate hardening (bd-2y0gd5)" do
-    test "snapshotting the supervisor's children never crashes the Tribunal",
+    test "snapshotting the supervisor's children never crashes the ReviewGate",
          %{repo: repo, ws: ws} do
       pid = start_live_gate(repo, ws)
-      tribunal = wait_until_tribunal()
+      review_gate = wait_until_review_gate()
 
       # The crash trigger: enumerate + :snapshot every supervisor child.
       children = Polecat.list_children()
 
-      # The Tribunal is NOT a polecat, so it must be filtered OUT of the list...
-      refute Enum.any?(children, &(&1.pid == tribunal))
+      # The ReviewGate is NOT a polecat, so it must be filtered OUT of the list...
+      refute Enum.any?(children, &(&1.pid == review_gate))
       # ...and the probe must not have killed it.
-      assert Process.alive?(tribunal)
+      assert Process.alive?(review_gate)
       # A direct :snapshot also answers gracefully instead of crashing.
-      assert %{role: :tribunal, status: :reviewing} = GenServer.call(tribunal, :snapshot)
+      assert %{role: :review_gate, status: :reviewing} = GenServer.call(review_gate, :snapshot)
       # Gate intact: the author is still parked, nothing merged.
-      assert %{status: :awaiting_tribunal} = Polecat.state(pid)
+      assert %{status: :awaiting_review_gate} = Polecat.state(pid)
       assert merge_commit_count(repo) == 0
     end
 
-    test "a Tribunal that dies before a verdict escalates the author (no strand, no merge)",
+    test "a ReviewGate that dies before a verdict escalates the author (no strand, no merge)",
          %{repo: repo, ws: ws} do
       pid = start_live_gate(repo, ws)
-      tribunal = wait_until_tribunal()
+      review_gate = wait_until_review_gate()
 
       # Kill the gate before it can deliver a verdict.
-      Process.exit(tribunal, :kill)
+      Process.exit(review_gate, :kill)
 
       # The author must escalate to :failed (no_verdict) — NOT hang at
-      # :awaiting_tribunal — and must NOT merge.
+      # :awaiting_review_gate — and must NOT merge.
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 4_000)
       assert merge_commit_count(repo) == 0
     end
   end
 
-  # Start an author through the gate with a *lingering* reviewer (so the Tribunal
+  # Start an author through the gate with a *lingering* reviewer (so the ReviewGate
   # stays alive while a test probes or kills it). Cleanup cascades: stopping the
-  # author trips the Tribunal's author-monitor, which stops the reviewer.
+  # author trips the ReviewGate's author-monitor, which stops the reviewer.
   defp start_live_gate(repo, ws) do
     bead = new_bead(ws)
     branch = "feature/rev"
@@ -1290,14 +1290,14 @@ defmodule Arbiter.Polecat.TribunalTest do
       )
 
     on_exit(fn ->
-      review_id = Tribunal.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_bead_id(bead.id)
       if rp = Polecat.whereis(review_id), do: safe_stop(rp)
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)
     end)
 
     :ok = Polecat.advance(pid, :claude)
     send(pid, {:__claude_session_done__, "arb done"})
-    wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end, 4_000)
+    wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end, 4_000)
     pid
   end
 
@@ -1305,18 +1305,18 @@ defmodule Arbiter.Polecat.TribunalTest do
 
   describe "rounds_for_difficulty/1" do
     test "D0 and D1 beads get a 2-round cap" do
-      assert Tribunal.rounds_for_difficulty(0) == 2
-      assert Tribunal.rounds_for_difficulty(1) == 2
+      assert ReviewGate.rounds_for_difficulty(0) == 2
+      assert ReviewGate.rounds_for_difficulty(1) == 2
     end
 
     test "D2 (moderate) and nil get the 3-round default" do
-      assert Tribunal.rounds_for_difficulty(2) == 3
-      assert Tribunal.rounds_for_difficulty(nil) == 3
+      assert ReviewGate.rounds_for_difficulty(2) == 3
+      assert ReviewGate.rounds_for_difficulty(nil) == 3
     end
 
     test "D3 and D4 beads get a 4-round cap" do
-      assert Tribunal.rounds_for_difficulty(3) == 4
-      assert Tribunal.rounds_for_difficulty(4) == 4
+      assert ReviewGate.rounds_for_difficulty(3) == 4
+      assert ReviewGate.rounds_for_difficulty(4) == 4
     end
   end
 
@@ -1370,7 +1370,7 @@ defmodule Arbiter.Polecat.TribunalTest do
           prefix: "cp",
           config: %{
             "review" => %{"required" => true},
-            "tribunal" => %{"max_rounds" => 2}
+            "review_gate" => %{"max_rounds" => 2}
           }
         })
 
@@ -1402,12 +1402,12 @@ defmodule Arbiter.Polecat.TribunalTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # The workspace cap of 2 is less than the D3 difficulty default of 4.
-      # After 2 rounds of rejections the Tribunal escalates — not 4.
+      # After 2 rounds of rejections the ReviewGate escalates — not 4.
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end, 10_000)
       assert merge_commit_count(repo) == 0
-      assert Polecat.state(pid).meta.failure_reason == :tribunal_rejected
+      assert Polecat.state(pid).meta.failure_reason == :review_gate_rejected
 
-      escalation_body = Polecat.state(pid).meta.tribunal_findings
+      escalation_body = Polecat.state(pid).meta.review_gate_findings
       # The escalation payload names both rounds, proving it ran exactly 2.
       assert escalation_body =~ "Round 1"
       assert escalation_body =~ "Round 2"
@@ -1422,18 +1422,18 @@ defmodule Arbiter.Polecat.TribunalTest do
     :exit, _ -> :ok
   end
 
-  # Poll for the live Tribunal child of the polecat supervisor; return its pid.
-  defp wait_until_tribunal(timeout \\ 4_000) do
+  # Poll for the live ReviewGate child of the polecat supervisor; return its pid.
+  defp wait_until_review_gate(timeout \\ 4_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    do_wait_tribunal(deadline)
+    do_wait_review_gate(deadline)
   end
 
-  defp do_wait_tribunal(deadline) do
+  defp do_wait_review_gate(deadline) do
     pid =
       Arbiter.Polecat.Supervisor
       |> DynamicSupervisor.which_children()
       |> Enum.find_value(fn
-        {_, p, _, [Arbiter.Polecat.Tribunal]} when is_pid(p) -> p
+        {_, p, _, [Arbiter.Polecat.ReviewGate]} when is_pid(p) -> p
         _ -> nil
       end)
 
@@ -1442,11 +1442,11 @@ defmodule Arbiter.Polecat.TribunalTest do
         pid
 
       System.monotonic_time(:millisecond) > deadline ->
-        flunk("Tribunal child did not appear within timeout")
+        flunk("ReviewGate child did not appear within timeout")
 
       true ->
         Process.sleep(15)
-        do_wait_tribunal(deadline)
+        do_wait_review_gate(deadline)
     end
   end
 end

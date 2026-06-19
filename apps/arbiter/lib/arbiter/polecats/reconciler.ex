@@ -98,8 +98,8 @@ defmodule Arbiter.Polecats.Reconciler do
 
   This covers the specific failure mode where the server is killed between the
   implementer finishing (`arb done` → PR opened, `pr_ref` written to the Issue)
-  and the Tribunal/Warden hand-off being established. After a reboot the polecat
-  process no longer exists, so the Warden that would merge the PR was never
+  and the ReviewGate/Watchdog hand-off being established. After a reboot the polecat
+  process no longer exists, so the Watchdog that would merge the PR was never
   spawned. The Issue is stuck `:in_progress` with an open PR and no driver.
 
   Returns `{:ok, count}` or `{:error, reason}`.
@@ -149,7 +149,7 @@ defmodule Arbiter.Polecats.Reconciler do
 
     body =
       "Bead #{bead_id} has an open PR (#{pr_ref}) but no live polecat to drive the merge.\n" <>
-        "The server was likely restarted between `arb done` and the Warden being established.\n" <>
+        "The server was likely restarted between `arb done` and the Watchdog being established.\n" <>
         "Action: verify the PR is ready to merge, then run `arb issue dispatch #{bead_id}` to re-drive " <>
         "or manually merge and close the bead."
 

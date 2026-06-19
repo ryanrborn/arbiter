@@ -46,7 +46,7 @@ defmodule ArbiterCli.Cmd.Update do
   a worker produces for tracker-backed work (QA Testing Notes / Deployment
   Notes on the Jira ticket). They overwrite the field (unlike `--append-notes`).
 
-  `--pr-body` sets the worker-authored PR/MR description the Refinery opens
+  `--pr-body` sets the worker-authored PR/MR description the MergeQueue opens
   the bead's single canonical PR with (Summary / Test plan / References). It
   overwrites the field.
 

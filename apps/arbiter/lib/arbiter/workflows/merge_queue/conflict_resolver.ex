@@ -1,9 +1,9 @@
-defmodule Arbiter.Workflows.Refinery.ConflictResolver do
+defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @moduledoc """
   Spawn a short-lived worker to rebase a CONFLICTING bead branch onto the
   current head of its target branch, resolve conflicts, and force-push.
 
-  Invoked by `Arbiter.Workflows.Refinery` when a merge queue item enters the
+  Invoked by `Arbiter.Workflows.MergeQueue` when a merge queue item enters the
   CONFLICTING state (the merger reports `mergeable: false` on the PR).
   Before this, the queue froze the item and waited for a human to rebase —
   twice this morning that meant an Admiral page on a dispatcher-bead
@@ -30,13 +30,13 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   This module operates on raw git artefacts (a local checkout, a branch
   name, a target branch). It is unaware of GitHub/GitLab/etc — those live
-  one layer up in the Refinery, which detects the CONFLICTING state from
+  one layer up in the MergeQueue, which detects the CONFLICTING state from
   whichever forge adapter it's wired to. A future merge queue variant that
   speaks GitLab MRs reuses this resolver unchanged.
 
   ## Behaviour
 
-  `ConflictResolver` is a behaviour so the Refinery accepts a swappable
+  `ConflictResolver` is a behaviour so the MergeQueue accepts a swappable
   resolver implementation (defaults to this module). Tests inject a
   noop stub so they do not boot a real Claude session or shell out to
   git.
@@ -79,11 +79,11 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   Resolves `branch`, `target_branch`, and `repo_path` from the bead +
   workspace when not supplied in `args`. Returns `{:ok, info}` once the
-  worker is spawned (the rebase runs asynchronously); the Refinery picks
+  worker is spawned (the rebase runs asynchronously); the MergeQueue picks
   up the resolution on its next poll when the PR turns mergeable again.
 
   When the worker cannot be spawned (no local checkout, no branch,
-  workspace missing) returns `{:error, reason}`. The Refinery's escalation
+  workspace missing) returns `{:error, reason}`. The MergeQueue's escalation
   path handles that by mailing the Admiral so the bead does not sit in
   CONFLICTING limbo.
   """
@@ -91,9 +91,9 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   @doc """
   Optional: post an `:escalation` mailbox message to the Admiral about an
-  unresolved conflict. The Refinery calls this on spawn failure and on the
+  unresolved conflict. The MergeQueue calls this on spawn failure and on the
   second consecutive CONFLICTING observation. The real
-  `Arbiter.Workflows.Refinery.ConflictResolver` implements it; test stubs
+  `Arbiter.Workflows.MergeQueue.ConflictResolver` implements it; test stubs
   may implement it to intercept escalations for assertion.
   """
   @callback escalate_unresolved(
@@ -105,8 +105,8 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   @doc """
   Optional: post a `:notification` announcing a successful auto-resolution.
-  The Refinery calls this when a CONFLICTING PR turns mergeable again on
-  a poll. The real `Arbiter.Workflows.Refinery.ConflictResolver` implements
+  The MergeQueue calls this when a CONFLICTING PR turns mergeable again on
+  a poll. The real `Arbiter.Workflows.MergeQueue.ConflictResolver` implements
   it; test stubs may implement it to intercept notifications for assertion.
   """
   @callback notify_resolution(
@@ -121,7 +121,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   Default implementation of `resolve/1`. Spawns a real Polecat with a
   ClaudeSession running the resolver prompt inside a fresh worktree.
 
-  Tests should pass a stub module via the Refinery's `:conflict_resolver`
+  Tests should pass a stub module via the MergeQueue's `:conflict_resolver`
   opt so they don't shell out to git or spawn `claude`.
   """
   @impl true
@@ -156,7 +156,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   # Resolve everything the worker needs: a local checkout to cut the worktree
   # from, the bead's branch name, and the target branch to rebase onto. Caller-
-  # supplied args win over derived values so the Refinery and tests can override.
+  # supplied args win over derived values so the MergeQueue and tests can override.
   defp resolve_context(%Issue{} = bead, args) do
     workspace = maybe_load_workspace(bead.workspace_id)
 
@@ -213,7 +213,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   defp workspace_base_branch(_), do: nil
 
-  # Repo path lookup mirrors `Arbiter.Polecat.Sling`: workspace config first,
+  # Repo path lookup mirrors `Arbiter.Polecat.Dispatch`: workspace config first,
   # then application env. Without an explicit rig we take the first configured
   # rig path — the canonical "one rig per workspace" path covers every existing
   # merge queue target.
@@ -323,7 +323,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
       # A resolver is already in flight for this bead (a previous tick's
       # spawn that hasn't terminated yet). Don't open a second Claude session
-      # against it — surface the collision so the Refinery's escalation path
+      # against it — surface the collision so the MergeQueue's escalation path
       # mails the Admiral instead of pretending we restarted the rebase.
       {:error, {:already_started, pid}} ->
         {:error, {:resolver_already_running, pid}}
@@ -419,7 +419,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   @doc """
   Post an `:escalation` mailbox message to the Admiral about an unresolved
-  conflict. Used by the Refinery when the resolver itself can't be spawned
+  conflict. Used by the MergeQueue when the resolver itself can't be spawned
   or the second consecutive CONFLICTING observation arrives (the rebase
   pass didn't unblock the PR).
 
@@ -464,7 +464,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   @doc """
   Post a `:notification` announcing a successful auto-resolution. Used by
-  the Refinery when the next poll after a resolver spawn shows the PR is
+  the MergeQueue when the next poll after a resolver spawn shows the PR is
   mergeable again — the rebase + force-push worked.
 
   Symmetric with `escalate_unresolved/4` so the acceptance criterion

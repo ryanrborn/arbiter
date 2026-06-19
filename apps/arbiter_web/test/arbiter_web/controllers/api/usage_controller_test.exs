@@ -97,7 +97,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert Enum.all?(data, &(&1["bead_id"] == "bd-only"))
     end
 
-    test "bead_id filter includes tribunal reviewer events (#review suffix)", %{conn: conn} do
+    test "bead_id filter includes review_gate reviewer events (#review suffix)", %{conn: conn} do
       _ = insert_event!(%{bead_id: "bd-trib", step: :work, cost_usd: 0.1})
       _ = insert_event!(%{bead_id: "bd-trib#review", step: :review, cost_usd: 0.2})
       _ = insert_event!(%{bead_id: "bd-trib#review#r2", step: :review, cost_usd: 0.3})

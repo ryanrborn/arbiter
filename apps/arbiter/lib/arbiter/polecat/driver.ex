@@ -15,7 +15,7 @@ defmodule Arbiter.Polecat.Driver do
   the polecat reaches `:completed` (typically triggered by Claude printing
   `arb done` on stdout — see `Polecat.ClaudeSession`).
 
-  This mode resolves the Driver/Claude race that `arb sling --with-claude`
+  This mode resolves the Driver/Claude race that `arb dispatch --with-claude`
   exposed: the bookkeeping workflow used to finish in ~500ms and close the
   bead before Claude had time to respond.
 
@@ -35,7 +35,7 @@ defmodule Arbiter.Polecat.Driver do
     - `:failed` → log, stop (bead remains `:in_progress` for inspection).
     - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
       (`:awaiting_review` is the brief window after the worker's `arb done`
-      opens an MR; the Warden, not the Driver, drives it to terminal).
+      opens an MR; the Watchdog, not the Driver, drives it to terminal).
 
   ## Shared lifecycle
 
@@ -141,7 +141,7 @@ defmodule Arbiter.Polecat.Driver do
 
   def handle_info(:check_polecat, %{ticks: t, max_ticks: m} = state) when t >= m do
     # Even at max_ticks, close a completed polecat rather than leaving the bead
-    # stranded. This handles the race where the Warden calls Polecat.complete
+    # stranded. This handles the race where the Watchdog calls Polecat.complete
     # in the same window the Driver's tick budget expires (bd-d1jp4r).
     case safe_polecat_state(state.polecat_pid) do
       %{status: :completed} = polecat_state ->
@@ -149,10 +149,10 @@ defmodule Arbiter.Polecat.Driver do
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
-      %{status: status} when status in [:awaiting_tribunal, :awaiting_review] ->
+      %{status: status} when status in [:awaiting_review_gate, :awaiting_review] ->
         # bd-7b46wd: the tick budget was spent on active worker work, but the
-        # worker has since handed off to the Tribunal (review gate) or the
-        # Warden (merge poller). Both own the terminal transition and have
+        # worker has since handed off to the ReviewGate (review gate) or the
+        # Watchdog (merge poller). Both own the terminal transition and have
         # their own watchdogs, so giving up here would strand a bead that is
         # legitimately mid-merge. Keep waiting for :completed rather than
         # stopping — same reasoning as the pre-max_ticks handler below.
@@ -188,13 +188,13 @@ defmodule Arbiter.Polecat.Driver do
         Process.send_after(self(), :check_polecat, state.interval_ms)
         {:noreply, %{state | ticks: state.ticks + 1}}
 
-      %{status: status} when status in [:awaiting_tribunal, :awaiting_review] ->
-        # :awaiting_tribunal — a distinct reviewer worker (Tribunal) is
+      %{status: status} when status in [:awaiting_review_gate, :awaiting_review] ->
+        # :awaiting_review_gate — a distinct reviewer worker (ReviewGate) is
         # evaluating the diff; it will report a verdict that merges or parks.
-        # :awaiting_review — the Warden is polling the forge for merge/approval;
+        # :awaiting_review — the Watchdog is polling the forge for merge/approval;
         # it drives the terminal transition, not the Driver.
         # Neither state is "Claude stuck" — they're externally owned handoffs.
-        # Don't burn tick budget here: the Warden (bd-d1jp4r) and Tribunal each
+        # Don't burn tick budget here: the Watchdog (bd-d1jp4r) and ReviewGate each
         # have their own watchdogs; the Driver just needs to stay alive until
         # Polecat.complete fires.
         Process.send_after(self(), :check_polecat, state.interval_ms)

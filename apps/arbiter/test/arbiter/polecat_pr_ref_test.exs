@@ -4,9 +4,9 @@ defmodule Arbiter.PolecatPrRefTest do
   branch is integrated through the configured merger), the opened ref must be
   persisted onto the bead's `pr_ref`.
 
-  This is the single signal the workspace Refinery reads to ADOPT an already-open
-  PR (`Refinery.existing_mr_ref/1`) instead of opening a duplicate. Without it
-  the Warden-merged PR is invisible to the Refinery: it falls through to
+  This is the single signal the workspace MergeQueue reads to ADOPT an already-open
+  PR (`MergeQueue.existing_mr_ref/1`) instead of opening a duplicate. Without it
+  the Watchdog-merged PR is invisible to the MergeQueue: it falls through to
   `open_mr_for/3`, fails opening a second PR on the already-merged branch, and
   the bead is never auto-closed — exactly the recurring silent-stall the bead
   describes.
@@ -21,7 +21,7 @@ defmodule Arbiter.PolecatPrRefTest do
   alias Arbiter.Polecat
   alias Arbiter.Test.StubMerger
 
-  # Park the auto-started Warden far in the future so it doesn't merge/complete
+  # Park the auto-started Watchdog far in the future so it doesn't merge/complete
   # (and tear the polecat + bead down) while we assert on the recorded pr_ref.
   @parked %{
     adapter: StubMerger,
@@ -50,7 +50,7 @@ defmodule Arbiter.PolecatPrRefTest do
     assert {:ok, "#1234"} =
              Polecat.open_mr(polecat_pid, "bd-branch", "title", "body", @parked)
 
-    # The bead now carries the PR ref so the Refinery adopts it instead of
+    # The bead now carries the PR ref so the MergeQueue adopts it instead of
     # opening a duplicate.
     {:ok, reloaded} = Ash.get(Issue, bead.id)
     assert reloaded.pr_ref == "#1234"

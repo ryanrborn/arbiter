@@ -2,7 +2,7 @@ defmodule ArbiterWeb.Api.PolecatJSON do
   alias Arbiter.Polecats.Run
   alias ArbiterWeb.Api.IssueJSON
 
-  def sling(%{result: result}) do
+  def dispatch(%{result: result}) do
     %{
       bead: IssueJSON.data(result.bead),
       polecat: %{

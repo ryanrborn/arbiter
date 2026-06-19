@@ -87,7 +87,7 @@ defmodule ArbiterWeb.BeadDetailLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/beads/#{bead.id}")
       assert html =~ "No worker running"
-      assert html =~ "arb sling"
+      assert html =~ "arb dispatch"
     end
 
     test "404-ish state when bead doesn't exist", %{conn: conn} do

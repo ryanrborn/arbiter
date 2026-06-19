@@ -65,7 +65,7 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert guide =~ "Config Safety"
       assert guide =~ "Deploy Safely"
       assert guide =~ "Trust State, But Verify"
-      assert guide =~ "Tribunal"
+      assert guide =~ "ReviewGate"
       assert guide =~ "Provider-Agnostic"
 
       # Generic — no operator-personal content.

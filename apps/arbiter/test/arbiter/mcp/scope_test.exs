@@ -4,7 +4,7 @@ defmodule Arbiter.MCP.ScopeTest do
   alias Arbiter.MCP.Scope
 
   describe "mint_polecat/3 + from_token/1" do
-    test "round-trips the polecat claims, never carrying can_sling" do
+    test "round-trips the polecat claims, never carrying can_dispatch" do
       token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard")
 
       assert {:ok, scope} = Scope.from_token(token)
@@ -12,7 +12,7 @@ defmodule Arbiter.MCP.ScopeTest do
       assert scope.workspace_id == "ws-1"
       assert scope.bead_id == "bd-1"
       assert scope.rig == "shipyard"
-      refute scope.can_sling
+      refute scope.can_dispatch
       assert scope.depth == 0
     end
 
@@ -21,7 +21,7 @@ defmodule Arbiter.MCP.ScopeTest do
       assert {:ok, %Scope{rig: nil}} = Scope.from_token(token)
     end
 
-    test "carries a depth claim (the Phase 2 sling-recursion guardrail)" do
+    test "carries a depth claim (the Phase 2 dispatch-recursion guardrail)" do
       token = Scope.mint_polecat(%{id: "bd-1", workspace_id: "ws-1"}, "shipyard", depth: 2)
       assert {:ok, %Scope{depth: 2}} = Scope.from_token(token)
     end
@@ -35,7 +35,7 @@ defmodule Arbiter.MCP.ScopeTest do
       assert scope.tier == :coordinator
       assert scope.workspace_id == nil
       assert scope.bead_id == nil
-      assert scope.can_sling
+      assert scope.can_dispatch
     end
 
     test "round-trips a legacy workspace-bound coordinator (explicit workspace)" do
@@ -45,12 +45,12 @@ defmodule Arbiter.MCP.ScopeTest do
       assert scope.tier == :coordinator
       assert scope.workspace_id == "ws-9"
       assert scope.bead_id == nil
-      assert scope.can_sling
+      assert scope.can_dispatch
     end
 
-    test "can_sling can be disabled (workspace-agnostic)" do
-      token = Scope.mint_coordinator(nil, can_sling: false)
-      assert {:ok, %Scope{can_sling: false, workspace_id: nil}} = Scope.from_token(token)
+    test "can_dispatch can be disabled (workspace-agnostic)" do
+      token = Scope.mint_coordinator(nil, can_dispatch: false)
+      assert {:ok, %Scope{can_dispatch: false, workspace_id: nil}} = Scope.from_token(token)
     end
   end
 

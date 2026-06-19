@@ -21,7 +21,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
 
   We point the spawn at a stable, Arbiter-managed directory via the
   `CLAUDE_CONFIG_DIR` env var (`Arbiter.Agents.Claude.spawn_env/1` and the
-  Tribunal's reviewer/implementer spawns both consult `env/0`). The directory is
+  ReviewGate's reviewer/implementer spawns both consult `env/0`). The directory is
   seeded **idempotently** on each spawn with the *minimum* a functioning worker
   needs — and nothing personal:
 

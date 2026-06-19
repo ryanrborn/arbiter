@@ -6,9 +6,9 @@ defmodule ArbiterWeb.Api.EventController do
 
   Auth: coordinator-tier MCP token in the `token=` query parameter.
 
-  Topics (default: inbox,tribunal,polecat_failed):
+  Topics (default: inbox,review_gate,polecat_failed):
     * inbox          — a message arrived in the coordinator's mailbox
-    * tribunal       — a tribunal escalation requires Admiral ruling
+    * review_gate       — a review_gate escalation requires Admiral ruling
     * polecat_failed — a worker stopped unexpectedly (status → failed)
     * polecat_done   — a worker completed (status → completed)
     * bead_state     — any bead FSM transition (noisier — opt-in only)
@@ -17,7 +17,7 @@ defmodule ArbiterWeb.Api.EventController do
   is sent every 30 seconds on idle connections as a keepalive.
 
   Client usage:
-      curl -N "http://127.0.0.1:4848/events?token=...&subscribe=inbox,tribunal"
+      curl -N "http://127.0.0.1:4848/events?token=...&subscribe=inbox,review_gate"
   """
 
   use ArbiterWeb, :controller
@@ -25,7 +25,7 @@ defmodule ArbiterWeb.Api.EventController do
   alias Arbiter.Events
   alias Arbiter.MCP.Scope
 
-  @default_topics ~w(inbox tribunal polecat_failed)
+  @default_topics ~w(inbox review_gate polecat_failed)
   @keepalive_ms 30_000
 
   @doc """

@@ -126,6 +126,10 @@ defmodule ArbiterCli.Main do
     end
   end
 
+  # Hidden backwards-compat alias: arb sling → arb dispatch. Not in help or
+  # known_verbs so it never shows up in suggestions or usage text.
+  defp dispatch("sling", args), do: ArbiterCli.Cmd.Dispatch.run(args)
+
   defp dispatch(cmd, args) do
     # A `--workspace <name|id>` / `-w` flag anywhere in the invocation overrides
     # the active workspace, exactly as `ARB_WORKSPACE` does. Strip it centrally —

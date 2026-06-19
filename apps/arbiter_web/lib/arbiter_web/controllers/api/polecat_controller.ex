@@ -1,12 +1,12 @@
 defmodule ArbiterWeb.Api.PolecatController do
   @moduledoc """
-  REST endpoints for polecat lifecycle. The arb CLI calls `sling/2` to
+  REST endpoints for polecat lifecycle. The arb CLI calls `dispatch/2` to
   start work on a bead; future LiveView dashboards will use the same
   endpoints + `list/2` to introspect running polecats.
 
   Routes:
 
-    * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `provider`).
+    * `POST /api/polecats/dispatch`           — :dispatch (body: `bead_id`, optional `rig`, `provider`).
       `provider` is `"claude"` | `"gemini"` (deprecated aliases: `with_claude` /
       `with_gemini` booleans). With a provider a worker subprocess works the bead
       and the Driver closes it on `arb done`; with `no_agent` the bead parks in
@@ -27,34 +27,34 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   alias Arbiter.Polecat
   alias Arbiter.Polecat.OutputLog
-  alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecat.Dispatch
   alias Arbiter.Polecats.Run
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
 
-  def sling(conn, params) do
+  def dispatch(conn, params) do
     case params do
       %{"bead_id" => bead_id} when is_binary(bead_id) and bead_id != "" ->
-        opts = sling_opts(params)
+        opts = dispatch_opts(params)
 
-        case Sling.sling(bead_id, opts) do
+        case Dispatch.dispatch(bead_id, opts) do
           {:ok, result} ->
             conn
             |> put_status(:created)
-            |> render(:sling, result: result)
+            |> render(:dispatch, result: result)
 
           {:error, {:bead_not_found, _}} ->
             {:error, :not_found}
 
           {:error, {:bead_closed, _}} ->
             {:error,
-             {:invalid_request, "bead is closed; reopen it before slinging", %{bead_id: bead_id}}}
+             {:invalid_request, "bead is closed; reopen it before dispatching", %{bead_id: bead_id}}}
 
           {:error, {:bead_awaiting_review, _}} ->
             {:error,
              {:invalid_request,
-              "bead is already awaiting review; the Warden will close it on MR merge",
+              "bead is already awaiting review; the Watchdog will close it on MR merge",
               %{bead_id: bead_id}}}
 
           {:error, :no_rig_configured} ->
@@ -79,7 +79,7 @@ defmodule ArbiterWeb.Api.PolecatController do
               %{bead_id: bead_id, available_rigs: rigs}}}
 
           {:error, reason} ->
-            {:error, {:server_error, "sling failed", %{reason: inspect(reason)}}}
+            {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
         end
 
       _ ->
@@ -101,11 +101,11 @@ defmodule ArbiterWeb.Api.PolecatController do
       %{"bead_id" => bead_id} when is_binary(bead_id) and bead_id != "" ->
         opts = review_opts(params)
 
-        case Sling.sling(bead_id, opts) do
+        case Dispatch.dispatch(bead_id, opts) do
           {:ok, result} ->
             conn
             |> put_status(:created)
-            |> render(:sling, result: result)
+            |> render(:dispatch, result: result)
 
           {:error, {:bead_not_found, _}} ->
             {:error, :not_found}
@@ -117,7 +117,7 @@ defmodule ArbiterWeb.Api.PolecatController do
           {:error, {:bead_awaiting_review, _}} ->
             {:error,
              {:invalid_request,
-              "bead is already awaiting review; a Warden is active and will close it on MR merge",
+              "bead is already awaiting review; a Watchdog is active and will close it on MR merge",
               %{bead_id: bead_id}}}
 
           {:error, reason} ->
@@ -133,17 +133,17 @@ defmodule ArbiterWeb.Api.PolecatController do
   Resume a stopped worker (bd-auma3z). Re-attaches a fresh agent to the bead's
   preserved worktree with a git-derived briefing of the prior run's
   work, so it continues rather than restarting from scratch. Always
-  claude-driven. Renders the same payload as `sling/2`.
+  claude-driven. Renders the same payload as `dispatch/2`.
   """
   def resume(conn, %{"bead_id" => bead_id} = params)
       when is_binary(bead_id) and bead_id != "" do
     opts = resume_opts(params)
 
-    case Sling.resume(bead_id, opts) do
+    case Dispatch.resume(bead_id, opts) do
       {:ok, result} ->
         conn
         |> put_status(:created)
-        |> render(:sling, result: result)
+        |> render(:dispatch, result: result)
 
       {:error, {:bead_not_found, _}} ->
         {:error, :not_found}
@@ -155,7 +155,7 @@ defmodule ArbiterWeb.Api.PolecatController do
       {:error, :no_outpost} ->
         {:error,
          {:invalid_request,
-          "no preserved worktree for this bead — nothing to resume; sling it fresh instead",
+          "no preserved worktree for this bead — nothing to resume; dispatch it fresh instead",
           %{bead_id: bead_id}}}
 
       {:error, :rig_unknown} ->
@@ -268,10 +268,10 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   def log(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
 
-  # Map request params onto `Sling.sling/2` opts.
+  # Map request params onto `Dispatch.dispatch/2` opts.
   #
   # Worker resolution:
-  #   * `no_agent`    → dry sling: park the bead in `:in_progress` for a hand
+  #   * `no_agent`    → dry dispatch: park the bead in `:in_progress` for a hand
   #     to attach. The Driver is suppressed (`start_driver: false`) so the
   #     no-op Work workflow doesn't race to a bogus `:closed`.
   #   * `provider`    → force the named provider (`"claude"` | `"gemini"`),
@@ -283,7 +283,7 @@ defmodule ArbiterWeb.Api.PolecatController do
   #   * none          → use the workspace's `agent.type` config (the default).
   #     Resolves via `Agents.for_workspace`, picking the provider the workspace
   #     is configured for.
-  defp sling_opts(params) do
+  defp dispatch_opts(params) do
     base =
       [rig: params["rig"]]
       |> add_model_override(params["model"])
@@ -310,23 +310,23 @@ defmodule ArbiterWeb.Api.PolecatController do
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 
-  # Normalize the `provider` request field to the `:agent_type` atom Sling
+  # Normalize the `provider` request field to the `:agent_type` atom Dispatch
   # expects. Unknown / missing values fall through to nil so the alias / default
   # branches still apply.
   defp normalize_provider("claude"), do: :claude
   defp normalize_provider("gemini"), do: :gemini
   defp normalize_provider(_), do: nil
 
-  # Map request params onto `Sling.resume/2` opts. Rig is optional — resume
+  # Map request params onto `Dispatch.resume/2` opts. Rig is optional — resume
   # falls back to the bead's most recent run's rig when omitted. `--model` is an
-  # optional per-dispatch override, same as sling.
+  # optional per-dispatch override, same as dispatch.
   defp resume_opts(params) do
     [rig: params["rig"]]
     |> add_model_override(params["model"])
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
 
-  # `--model` from the CLI is forwarded into `Sling.sling/2` so the worker
+  # `--model` from the CLI is forwarded into `Dispatch.dispatch/2` so the worker
   # session runs on the named model regardless of workspace/routing config.
   # Only honored when start_claude is true (no agent ⇒ no model to pick).
   defp add_model_override(opts, model) when is_binary(model) and model != "" do
@@ -335,7 +335,7 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   defp add_model_override(opts, _), do: opts
 
-  # Review-only dispatch. `review: true` cascades into Sling: it pulls the
+  # Review-only dispatch. `review: true` cascades into Dispatch: it pulls the
   # CodeReview workflow, suppresses worktree provisioning, swaps the prompt,
   # and stamps `review_only` into the polecat's meta so completion doesn't
   # fan out to the merge queue.
