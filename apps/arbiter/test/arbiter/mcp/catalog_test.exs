@@ -40,6 +40,15 @@ defmodule Arbiter.MCP.CatalogTest do
         assert is_map(tool.input_schema["properties"])
       end
     end
+
+    test "polecat_sling exposes a provider enum field and keeps the with_claude alias" do
+      tool = Enum.find(Catalog.all(), &(&1.name == "polecat_sling"))
+      props = tool.input_schema["properties"]
+
+      assert props["provider"]["enum"] == ["claude", "gemini"]
+      # The deprecated boolean alias is still advertised so existing callers work.
+      assert props["with_claude"]["type"] == "boolean"
+    end
   end
 
   describe "call/3 capability gating" do

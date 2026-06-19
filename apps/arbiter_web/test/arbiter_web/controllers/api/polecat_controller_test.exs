@@ -158,6 +158,25 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       refute reloaded.status == :closed
     end
 
+    # A `provider` takes the real-work dispatch path (start_claude: true) rather
+    # than parking. With an unconfigured rig that path returns a 400 rig error —
+    # the signal that the provider was honored as a worker dispatch (a park would
+    # 201 with the bead in_progress and no agent).
+    test "provider routes to a real worker dispatch (rig error rather than park)",
+         %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "gem-provider", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/polecats/sling", %{
+          "bead_id" => bead.id,
+          "provider" => "gemini",
+          "rig" => "no-such-rig"
+        })
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "rig"
+    end
+
     test "returns 404 for an unknown bead_id", %{conn: conn} do
       conn = post(conn, ~p"/api/polecats/sling", %{"bead_id" => "no-such-bead"})
       assert json_response(conn, 404)
