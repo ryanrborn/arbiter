@@ -1,0 +1,64 @@
+defmodule Arbiter.Events do
+  @moduledoc """
+  PubSub broadcast hooks for the server-push event stream (`GET /events`).
+
+  Fires workspace-scoped `{:event, map}` messages on the `"events:<ws_id>"`
+  topic. `ArbiterWeb.Api.EventController` subscribes to this topic and streams
+  matching events as newline-delimited JSON to connected coordinators.
+
+  ## Topic registry
+
+  | Topic           | Fires when                                             |
+  |-----------------|--------------------------------------------------------|
+  | `inbox`         | A message arrives in the coordinator's mailbox          |
+  | `tribunal`      | A tribunal escalation requires Admiral ruling           |
+  | `polecat_failed`| An acolyte stops unexpectedly (status → failed)         |
+  | `polecat_done`  | An acolyte completes (status → completed)               |
+  | `bead_state`    | Any bead FSM transition (noisier — opt-in only)         |
+
+  ## Broadcast hooks
+
+  Called from:
+    * `Arbiter.Polecat.fail_now/2` and `fail_stopped/2` → `:polecat_failed`
+    * `Arbiter.Polecat.broadcast_done/1` → `:polecat_done`
+    * `Arbiter.Polecat.escalate_tribunal/3` → `:tribunal`
+    * `Arbiter.Messages.Message.broadcast_new/1` → `:inbox` (admiral-addressed only)
+    * `Arbiter.Beads.Issue.broadcast_lifecycle/2` → `:bead_state`
+
+  All broadcasts are best-effort: PubSub failures are logged at debug and swallowed.
+  """
+
+  require Logger
+
+  @valid_topics ~w(inbox tribunal polecat_failed polecat_done bead_state)
+
+  @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
+  def valid_topics, do: @valid_topics
+
+  @doc "The PubSub topic for a workspace's event stream."
+  def pubsub_topic(workspace_id) when is_binary(workspace_id), do: "events:" <> workspace_id
+
+  @doc """
+  Broadcast an event on the workspace's event stream PubSub topic.
+
+  `event_topic` is one of the valid topic strings (e.g. `"polecat_failed"`).
+  `payload` is merged with `topic` and `at` (ISO-8601 timestamp) before broadcasting.
+  Best-effort: PubSub failures are swallowed.
+  """
+  def broadcast(workspace_id, event_topic, payload)
+      when is_binary(workspace_id) and is_binary(event_topic) and is_map(payload) do
+    event =
+      payload
+      |> Map.put(:topic, event_topic)
+      |> Map.put(:at, DateTime.utc_now() |> DateTime.to_iso8601())
+
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, pubsub_topic(workspace_id), {:event, event})
+    :ok
+  rescue
+    e ->
+      Logger.debug("Arbiter.Events.broadcast/3 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  def broadcast(_workspace_id, _event_topic, _payload), do: :ok
+end
