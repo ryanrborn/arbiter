@@ -1079,6 +1079,58 @@ defmodule Arbiter.Polecat.SlingTest do
     end
   end
 
+  describe "work prompt fix-pass sections (bd-bw93c3)" do
+    test "includes prior review findings when bead has notes", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "fix pass bead", workspace_id: ws.id})
+
+      {:ok, bead} =
+        Ash.update(bead, %{notes: "## Tribunal verdict: REQUEST_CHANGES\n\nFix the null guard."},
+          action: :update
+        )
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      assert prompt =~ "Prior review findings"
+      assert prompt =~ "Fix the null guard."
+    end
+
+    test "omits prior review findings section when bead has no notes", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "fresh bead", workspace_id: ws.id})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      refute prompt =~ "Prior review findings"
+    end
+
+    test "includes PR review instruction when bead has a pr_ref", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "fix pass with pr", workspace_id: ws.id})
+      {:ok, bead} = Ash.update(bead, %{pr_ref: "319"}, action: :update)
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      assert prompt =~ "existing PR (#319)"
+      assert prompt =~ "gh pr view 319 --json reviews,reviewComments"
+      assert prompt =~ "Do NOT open a new PR"
+    end
+
+    test "omits PR review instruction when bead has no pr_ref", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no pr bead", workspace_id: ws.id})
+
+      prompt = Sling.prompt_for_bead(bead, [])
+
+      refute prompt =~ "gh pr view"
+    end
+
+    test "review prompt is unaffected by notes or pr_ref in work mode", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "review bead", workspace_id: ws.id})
+      {:ok, bead} = Ash.update(bead, %{pr_ref: "42", notes: "some notes"}, action: :update)
+
+      review_prompt = Sling.prompt_for_bead(bead, review: true)
+      refute review_prompt =~ "Prior review findings"
+      refute review_prompt =~ "existing PR"
+    end
+  end
+
   describe "work prompt completion notes (tracker-backed beads)" do
     test "instructs a tracker-backed acolyte to produce QA + Deployment notes", %{ws: ws} do
       {:ok, bead} =
