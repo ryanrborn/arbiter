@@ -57,11 +57,6 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
-            <.link navigate={~p"/convoys"} class={nav_class(@current_path, "/convoys")}>
-              {cap_plural(Arbiter.Vernacular.label(:batch))}
-            </.link>
-          </li>
-          <li>
             <.link navigate={~p"/polecats"} class={nav_class(@current_path, "/polecats")}>
               {cap_plural(Arbiter.Vernacular.label(:worker))}
             </.link>

@@ -13,8 +13,9 @@
       <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
         <dt class="font-semibold">{@issues_label}</dt>
         <dd>
-          Issues, dependencies, and vanguards modelled as Ash resources backed by
-          Postgres. Audit history is captured via <code>ash_paper_trail</code>.
+          Issues and dependencies modelled as Ash resources backed by
+          Postgres. A bead can parent others via <code>parent_of</code> edges,
+          rolling up child progress. Audit history is captured via <code>ash_paper_trail</code>.
         </dd>
 
         <dt class="font-semibold">{@acolytes_label}</dt>
@@ -33,7 +34,7 @@
         <dt class="font-semibold">REST API</dt>
         <dd>
           JSON endpoints under <code>/api</code> for directives, dependencies,
-          vanguards, domains, and acolyte dispatches. Used by the CLI and external
+          domains, and acolyte dispatches. Used by the CLI and external
           integrations.
         </dd>
 

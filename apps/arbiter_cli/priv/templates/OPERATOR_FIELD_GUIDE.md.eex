@@ -164,8 +164,7 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 | Acolyte | <%= @worker_cap %> — a worker agent |
 | Fleet | The set of active <%= @worker_plural %> |
 | Directive | <%= @issue_cap %> — a unit of work |
-| Campaign | <%= @batch_cap %> — a batch of related <%= @issue_plural %> |
-| Strike Force | A set of directives deployed together |
+| Campaign | <%= @epic_cap %> — a parent <%= @issue %> grouping related <%= @issue_plural %>; rolls up child progress and can auto-close |
 | Inquisitor | Reviewer agent |
 | Crucible | The review / escalation system |
 | Tribunal | The pre-merge review gate |

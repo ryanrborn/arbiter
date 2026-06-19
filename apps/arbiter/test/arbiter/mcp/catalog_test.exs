@@ -8,12 +8,12 @@ defmodule Arbiter.MCP.CatalogTest do
   @coordinator %Scope{tier: :coordinator, workspace_id: "w"}
 
   # The both-tier tools a polecat may also reach.
-  @both_tier ~w(bead_show inbox_check bead_update_progress workspace_show convoy_status
+  @both_tier ~w(bead_show inbox_check bead_update_progress workspace_show
                 message_send notify_list)
 
   # Coordinator-only tools; never visible to a polecat.
   @coordinator_only ~w(bead_ready bead_create bead_update bead_close bead_reopen dep_add dep_remove
-                       convoy_create convoy_add_member convoy_close convoy_list polecat_sling
+                       polecat_sling
                        polecat_resume polecat_review polecat_stop polecat_list bead_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox)
 

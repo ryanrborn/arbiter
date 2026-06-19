@@ -23,11 +23,11 @@ defmodule Arbiter.MCP.Scope do
 
   | Tier | Reads | Writes | Sling |
   |---|---|---|---|
-  | `:polecat` | its own bead, its own convoy, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
-  | `:coordinator` | across the workspace | create/update/close beads, deps, convoys; sling | yes |
+  | `:polecat` | its own bead, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
+  | `:coordinator` | across the workspace | create/update/close beads, deps (incl. `parent_of` grouping); sling | yes |
 
   The `:polecat` tier is deliberately narrow — it must not list arbitrary beads,
-  sling, or touch another convoy's state. Tier-level tool visibility is declared
+  sling, or touch another bead's state. Tier-level tool visibility is declared
   in `Arbiter.MCP.Catalog`; the data-level checks (own-bead, workspace isolation)
   live here so handlers cannot accidentally skip them.
   """

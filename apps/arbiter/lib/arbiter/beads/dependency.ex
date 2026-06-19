@@ -14,8 +14,11 @@ defmodule Arbiter.Beads.Dependency do
     readiness or block progress.
   * `:discovered_from` — `from_issue` was discovered while working on
     `to_issue`. Informational lineage.
-  * `:parent_of` — `from_issue` is a parent (e.g. epic) of `to_issue`.
-    Informational; used by Convoy/epic rollups in later beads.
+  * `:parent_of` — `from_issue` is a parent (e.g. an epic) of `to_issue`. Does
+    not gate readiness, but it *is* the grouping edge: a parent bead rolls up
+    `{child_closed, child_total}` progress over its `:parent_of` children and,
+    when its `auto_close` flag is set, closes once they are all done. See
+    `Arbiter.Beads.Issue.Calcs` and `Arbiter.Beads.Issue.maybe_auto_close/1`.
 
   Only `:blocks` and `:depends_on` gate readiness; the others are informational.
 

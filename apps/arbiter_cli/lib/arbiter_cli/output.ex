@@ -167,6 +167,8 @@ defmodule ArbiterCli.Output do
         {"Priority", issue["priority"]},
         {"Difficulty", difficulty_label(issue["difficulty"])},
         {"Type", issue["issue_type"]},
+        {"Progress", child_progress_label(issue)},
+        {"Auto-close", auto_close_label(issue)},
         {"Assignee", issue["assignee"]},
         {Vernacular.cap(vern, "workspace"), issue["workspace_id"]},
         {"Tracker", tracker_label(issue)},
@@ -198,6 +200,20 @@ defmodule ArbiterCli.Output do
   defp difficulty_label(n) when is_integer(n) and n in 0..4, do: "D#{n}"
   defp difficulty_label(other), do: to_string(other)
 
+  # Child-progress rollup line for a parent bead. Only shown when the bead has
+  # at least one `:parent_of` child (child_total > 0).
+  defp child_progress_label(%{"child_total" => total, "child_closed" => closed})
+       when is_integer(total) and total > 0 and is_integer(closed) do
+    "#{closed}/#{total} children closed"
+  end
+
+  defp child_progress_label(_), do: nil
+
+  # Only surface the auto-close flag when it is actually on; a plain bead with
+  # auto_close=false shouldn't clutter the detail view.
+  defp auto_close_label(%{"auto_close" => true}), do: "yes (closes when all children done)"
+  defp auto_close_label(_), do: nil
+
   defp tracker_label(%{"tracker_type" => nil}), do: nil
   defp tracker_label(%{"tracker_type" => "none"}), do: nil
 
@@ -209,56 +225,6 @@ defmodule ArbiterCli.Output do
   defp tracker_label(_), do: nil
 
   defp indent(text), do: String.replace(text, "\n", "\n  ")
-
-  # ----- convoy (batch) emit -----
-
-  @doc """
-  Print a convoy (a.k.a. "batch" in vernacular — e.g. "Vanguard"). Mode-aware.
-
-  The text view leads with the vernacular noun, then lists members and a
-  `closed/total` progress line when the aggregates are present.
-  """
-  @spec emit_convoy(map(), :text | :json) :: :ok
-  def emit_convoy(convoy, :json), do: IO.puts(Jason.encode!(convoy))
-
-  def emit_convoy(convoy, :text) do
-    vern = Vernacular.fetch()
-    noun = Vernacular.cap(vern, "batch")
-
-    header =
-      [
-        {noun, convoy["id"]},
-        {"Title", convoy["title"]},
-        {"Status", convoy["status"]},
-        {"Lifecycle", convoy["lifecycle"]},
-        {"Progress", progress_label(convoy)},
-        {"Closed", convoy["closed_at"]},
-        {"Reason", convoy["closed_reason"]}
-      ]
-      |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
-      |> Enum.map(fn {k, v} -> "#{String.pad_trailing(k <> ":", 12)}#{v}" end)
-      |> Enum.join("\n")
-
-    IO.puts(header <> "\n" <> members_section(convoy["member_ids"], vern))
-  end
-
-  defp progress_label(convoy) do
-    case {convoy["closed_issues"], convoy["total_issues"]} do
-      {closed, total} when is_integer(closed) and is_integer(total) ->
-        "#{closed}/#{total} closed"
-
-      _ ->
-        nil
-    end
-  end
-
-  defp members_section(nil, vern), do: "#{Vernacular.cap(vern, "issue")} members: (unknown)"
-  defp members_section([], vern), do: "#{Vernacular.cap(vern, "issue")} members: (none)"
-
-  defp members_section(ids, vern) when is_list(ids) do
-    lines = Enum.map_join(ids, "\n", fn id -> "  " <> id end)
-    "#{Vernacular.cap(vern, "issue")} members:\n" <> lines
-  end
 
   # ----- error reporting -----
 

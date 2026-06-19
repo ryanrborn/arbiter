@@ -161,7 +161,7 @@ defmodule ArbiterCli.Cmd.Init do
       issue_article: article(label.("issue")),
       issue_plural: plural(label.("issue")),
       issue_plural_cap: plural(cap.("issue")),
-      batch_cap: cap.("batch"),
+      epic_cap: cap.("epic"),
       rig: label.("rig"),
       rig_cap: cap.("rig"),
       rig_plural: plural(label.("rig")),

@@ -19,7 +19,6 @@ defmodule ArbiterCli.AliasResolverTest do
 
       assert {:ok, "worker"} = AliasResolver.resolve("polecat")
       assert {:ok, "issue"} = AliasResolver.resolve("bead")
-      assert {:ok, "batch"} = AliasResolver.resolve("convoy")
       assert {:ok, "repo"} = AliasResolver.resolve("warship")
       assert {:ok, "dispatch"} = AliasResolver.resolve("sling")
     end
@@ -35,7 +34,7 @@ defmodule ArbiterCli.AliasResolverTest do
       stub_get("/api/settings", %{"data" => %{"vernacular" => %{}}})
 
       assert {:ok, "worker"} = AliasResolver.resolve("Polecat")
-      assert {:ok, "batch"} = AliasResolver.resolve("CONVOY")
+      assert {:ok, "issue"} = AliasResolver.resolve("BEAD")
     end
   end
 
