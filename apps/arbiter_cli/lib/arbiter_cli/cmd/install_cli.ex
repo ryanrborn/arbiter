@@ -70,7 +70,9 @@ defmodule ArbiterCli.Cmd.InstallCli do
     case Start.run_cmd("mix", ["escript.build"], cd: cli_dir, stderr_to_stdout: true) do
       {_out, 0} ->
         escript_path = Path.join(cli_dir, "arb")
-        install_path = (System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb"))
+
+        install_path =
+          System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb")
 
         # Ensure ~/.local/bin exists
         install_dir = Path.dirname(install_path)
@@ -107,7 +109,8 @@ defmodule ArbiterCli.Cmd.InstallCli do
   end
 
   defp emit_success(:json, _root) do
-    install_path = (System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb"))
+    install_path =
+      System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb")
 
     IO.puts(
       Jason.encode!(%{
@@ -119,7 +122,8 @@ defmodule ArbiterCli.Cmd.InstallCli do
   end
 
   defp emit_success(:text, _root) do
-    install_path = (System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb"))
+    install_path =
+      System.get_env("ARB_INSTALL_BIN") || Path.join(System.user_home!(), ".local/bin/arb")
 
     IO.puts("")
     IO.puts("CLI escript built and installed at #{install_path}")

@@ -92,7 +92,9 @@ defmodule Arbiter.Polecat.ReviewOnlyWardenTest do
         extra_meta
       )
 
-    {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "rv/rig", workspace_id: bead.workspace_id, meta: meta)
+    {:ok, pid} =
+      Polecat.start(bead_id: bead.id, rig: "rv/rig", workspace_id: bead.workspace_id, meta: meta)
+
     :ok = Polecat.advance(pid, :claude)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     pid
