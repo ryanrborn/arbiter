@@ -221,7 +221,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
   defp default_claude_argv(prompt) do
     case resolve_claude() do
       {:ok, claude} ->
-        # Even this built-in path (workspace-less Tribunal runs, bare
+        # Even this built-in path (workspace-less ReviewGate runs, bare
         # ClaudeSession.start/1 callers) is hardened with the install-wide
         # default security posture, so no worker spawn inherits the operator's
         # personal ~/.claude permission posture (bd-9u10op). Workspace-aware
@@ -798,10 +798,10 @@ defmodule Arbiter.Polecat.ClaudeSession do
     end)
   end
 
-  # When the caller passes an explicit `:env` (the workspace-aware Sling /
-  # Tribunal path always does, via the adapter's spawn_env/1) we use it
+  # When the caller passes an explicit `:env` (the workspace-aware Dispatch /
+  # ReviewGate path always does, via the adapter's spawn_env/1) we use it
   # verbatim. When it's absent (bare ClaudeSession.start/1 callers, the
-  # workspace-less Tribunal path) we default to the isolated CLAUDE_CONFIG_DIR
+  # workspace-less ReviewGate path) we default to the isolated CLAUDE_CONFIG_DIR
   # so even those spawns don't inherit the operator's ~/.claude. In the test
   # env config isolation is disabled, so this resolves to [] there.
   #

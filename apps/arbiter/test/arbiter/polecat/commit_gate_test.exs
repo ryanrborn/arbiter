@@ -4,7 +4,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
 
   Root cause the gate addresses: the worker EDITS files in its worktree
   correctly but never `git commit`s, so HEAD stays at the base branch with
-  the work UNCOMMITTED in the worktree. Before this fix the Tribunal — which
+  the work UNCOMMITTED in the worktree. Before this fix the ReviewGate — which
   runs in the same worktree — diffed `git diff <base>..HEAD` (committed
   history only), saw empty, and reported "no code exists" while literally
   sitting on the uncommitted changes.
@@ -14,7 +14,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
   either (a) relaunches the worker with a clear "you have uncommitted
   changes — commit + push" nudge, capped at `meta[:commit_nudge_cap]` (default
   1), or (b) fails + escalates with details when the cap is exhausted. The
-  Tribunal is never reached in either case, so it can never falsely report
+  ReviewGate is never reached in either case, so it can never falsely report
   "no work" while the work is sitting right there.
 
   These tests pin the structural gate (cap: 0 → fail immediately) so the
@@ -44,7 +44,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
 
     # Worktree.create/3 fetches from `origin` and branches from `origin/<base>`,
     # so the rig needs an upstream the provisioner can consult — mirrors the
-    # bare-origin pattern in sling_test.exs.
+    # bare-origin pattern in dispatch_test.exs.
     remote = Path.join(dir, "rig-remote.git")
     {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
     {_, 0} = git(["remote", "add", "origin", remote], repo)
@@ -90,17 +90,17 @@ defmodule Arbiter.Polecat.CommitGateTest do
       Ash.create(Workspace, %{
         name: "gate-ws-#{System.unique_integer([:positive])}",
         prefix: "gt",
-        # Review required: tests must verify the gate trips BEFORE the Tribunal
+        # Review required: tests must verify the gate trips BEFORE the ReviewGate
         # is spawned. With review:false the merge path also short-circuits, so
         # an absent gate would surface as the wrong assertion (merge attempted
-        # instead of Tribunal entered).
+        # instead of ReviewGate entered).
         config: %{"review" => %{"required" => true}}
       })
 
     %{repo: repo, ws: ws}
   end
 
-  # Provision a fresh worktree on a per-bead branch using the same helper Sling
+  # Provision a fresh worktree on a per-bead branch using the same helper Dispatch
   # uses in production. Tests want to drive the polecat directly (cap: 0 → fail
   # path), but the worktree on disk has to be real so the gate's git inspection
   # is exercised, not stubbed.
@@ -133,8 +133,8 @@ defmodule Arbiter.Polecat.CommitGateTest do
           worktree_path: worktree_path,
           target_branch: "main",
           merge_title: "Merge #{bead.id}",
-          # Skip the live Tribunal subprocess — a tripped gate must NOT route
-          # to a Tribunal at all, so a stubbed-out spawn would prove nothing.
+          # Skip the live ReviewGate subprocess — a tripped gate must NOT route
+          # to a ReviewGate at all, so a stubbed-out spawn would prove nothing.
           # If the gate fails, status moves to :failed before this even matters.
           review_spawn: false
         },
@@ -194,10 +194,10 @@ defmodule Arbiter.Polecat.CommitGateTest do
   # ---- the gate itself ----------------------------------------------------
 
   describe "the commit gate (bd-ofql8k)" do
-    test "an arb-done with UNCOMMITTED changes fails + escalates instead of routing to Tribunal",
+    test "an arb-done with UNCOMMITTED changes fails + escalates instead of routing to ReviewGate",
          %{repo: repo, ws: ws} do
       # Reproduce the bd-8ucc29 / #135 root cause: edit a file in the worktree
-      # but never `git commit`. Before the gate, the Tribunal would be spawned
+      # but never `git commit`. Before the gate, the ReviewGate would be spawned
       # against an empty `base..HEAD` and report "no work" while the edit was
       # right there. After the gate, with the nudge cap pinned at 0 (so we
       # assert the structural gate without the retry layer), the polecat must
@@ -215,8 +215,8 @@ defmodule Arbiter.Polecat.CommitGateTest do
 
       snap = Polecat.state(pid)
 
-      # The structural pin: NEVER routed to Tribunal.
-      refute snap.status == :awaiting_tribunal
+      # The structural pin: NEVER routed to ReviewGate.
+      refute snap.status == :awaiting_review_gate
       refute snap.status == :completed
       assert snap.meta.failure_reason == :uncommitted_at_completion
       assert snap.meta.commit_gate_reason == :uncommitted
@@ -261,7 +261,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
       wait_until(fn -> match?(%{status: :failed}, Polecat.state(pid)) end)
 
       snap = Polecat.state(pid)
-      refute snap.status == :awaiting_tribunal
+      refute snap.status == :awaiting_review_gate
       assert snap.meta.failure_reason == :no_commits_at_completion
       assert snap.meta.commit_gate_reason == :no_commits
 
@@ -270,7 +270,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
       assert reloaded.notes =~ "zero commits ahead"
     end
 
-    test "an arb-done with a CLEAN tree + ≥1 commit ahead proceeds to the Tribunal",
+    test "an arb-done with a CLEAN tree + ≥1 commit ahead proceeds to the ReviewGate",
          %{repo: repo, ws: ws} do
       # The happy-path counterpart: the gate must let real work through to
       # the review gate. Without this assertion, a too-strict gate would
@@ -286,8 +286,8 @@ defmodule Arbiter.Polecat.CommitGateTest do
       send(pid, {:__claude_session_done__, "arb done"})
 
       # The gate passes → review_spawn: false leaves the polecat parked at
-      # :awaiting_tribunal waiting for a directly-delivered verdict.
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      # :awaiting_review_gate waiting for a directly-delivered verdict.
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
       snap = Polecat.state(pid)
       refute snap.status == :failed
@@ -319,7 +319,7 @@ defmodule Arbiter.Polecat.CommitGateTest do
       # the gate and proceed directly.
       wait_until(fn ->
         snap = Polecat.state(pid)
-        snap.status in [:completed, :awaiting_review, :awaiting_tribunal]
+        snap.status in [:completed, :awaiting_review, :awaiting_review_gate]
       end)
 
       snap = Polecat.state(pid)

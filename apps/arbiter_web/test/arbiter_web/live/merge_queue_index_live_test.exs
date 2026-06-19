@@ -1,4 +1,4 @@
-defmodule ArbiterWeb.CrucibleIndexLiveTest.QueueMerger do
+defmodule ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger do
   @moduledoc "Stub merger that parks a polecat at :awaiting_review (see dashboard test)."
   @behaviour Arbiter.Mergers.Merger
 
@@ -24,12 +24,12 @@ defmodule ArbiterWeb.CrucibleIndexLiveTest.QueueMerger do
   def submit_review(_ref, _verdict, _body, _opts), do: :ok
 end
 
-defmodule ArbiterWeb.CrucibleIndexLiveTest do
+defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   use ArbiterWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
-  alias ArbiterWeb.CrucibleIndexLiveTest.QueueMerger
+  alias ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Polecat
 
@@ -54,8 +54,8 @@ defmodule ArbiterWeb.CrucibleIndexLiveTest do
   end
 
   test "empty state when nothing is integrating", %{conn: conn} do
-    {:ok, _view, html} = live(conn, ~p"/crucible")
-    assert html =~ ~s(id="crucible-empty")
+    {:ok, _view, html} = live(conn, ~p"/merge_queue")
+    assert html =~ ~s(id="merge_queue-empty")
   end
 
   test "an in-flight merge surfaces with its MR link and links to the polecat detail",
@@ -65,9 +65,9 @@ defmodule ArbiterWeb.CrucibleIndexLiveTest do
     :ok = Polecat.advance(pid, :integrate)
     {:ok, "!77"} = Polecat.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
 
-    {:ok, _view, html} = live(conn, ~p"/crucible")
+    {:ok, _view, html} = live(conn, ~p"/merge_queue")
 
-    assert html =~ ~s(id="crucible")
+    assert html =~ ~s(id="merge_queue")
     assert html =~ bead.id
     assert html =~ "!77"
     assert html =~ "https://example.test/mr/77"

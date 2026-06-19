@@ -2,21 +2,21 @@ defmodule Arbiter.Usage.Event do
   @moduledoc """
   A single agent-session usage row.
 
-  One row per finished Claude session (work worker or Tribunal reviewer),
+  One row per finished Claude session (work worker or ReviewGate reviewer),
   inserted from `Arbiter.Polecat` when the session port emits its terminal
   `result` event. The polecat captures the structured fields off
   `Arbiter.Polecat.ClaudeSession`'s session state — see `usage_summary/1`
   there.
 
   Multiple rows per bead are the point of this table: a re-slung bead writes
-  a second `:work` row, a Tribunal review adds a `:review` row, and so the
+  a second `:work` row, a ReviewGate review adds a `:review` row, and so the
   spend-on-rework story falls out of `Arbiter.Usage.summarize/1` for free.
 
   ## Step
 
   `:work` — the worker's own session that produced the diff.
-  `:review` — a Tribunal-spawned reviewer session. `bead_id` carries the
-              `#review` suffix used by `Arbiter.Polecat.Tribunal` so the row
+  `:review` — a ReviewGate-spawned reviewer session. `bead_id` carries the
+              `#review` suffix used by `Arbiter.Polecat.ReviewGate` so the row
               is still attributable to the bead being reviewed (drop the
               suffix at read time).
   `:other` — escape hatch for future non-Claude agents that don't fit the
@@ -84,7 +84,7 @@ defmodule Arbiter.Usage.Event do
       allow_nil? false
       public? true
       constraints max_length: 255, trim?: true
-      description "Bead this session worked. For Tribunal reviewers carries a `#review` suffix."
+      description "Bead this session worked. For ReviewGate reviewers carries a `#review` suffix."
     end
 
     attribute :workspace_id, :string do

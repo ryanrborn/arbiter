@@ -1,10 +1,10 @@
-defmodule ArbiterWeb.CrucibleIndexLive do
+defmodule ArbiterWeb.MergeQueueIndexLive do
   @moduledoc """
-  Index of every merge-queue entry at `/crucible` — the "See all" target for
+  Index of every merge-queue entry at `/merge_queue` — the "See all" target for
   the dashboard's merge-queue section.
 
   An entry is a polecat parked at `:awaiting_review`: an open MR integrating
-  via `Arbiter.Mergers` (Direct/GitLab/GitHub), with the Warden's last poll
+  via `Arbiter.Mergers` (Direct/GitLab/GitHub), with the Watchdog's last poll
   result. Sourced live from `Polecat.list_children/0`, paged in memory,
   ordered longest-waiting first. Each entry links to the polecat detail page
   — the polecat IS the merge-queue entry, so its detail page is the entry's
@@ -15,7 +15,7 @@ defmodule ArbiterWeb.CrucibleIndexLive do
 
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Warden
+  alias Arbiter.Polecat.Watchdog
   alias ArbiterWeb.Paging
 
   @polecats_topic "polecats"
@@ -111,7 +111,7 @@ defmodule ArbiterWeb.CrucibleIndexLive do
     _ -> :direct
   end
 
-  defp crucible_path(page), do: ~p"/crucible?#{%{page: page}}"
+  defp merge_queue_path(page), do: ~p"/merge_queue?#{%{page: page}}"
 
   @impl true
   def render(assigns) do
@@ -130,11 +130,11 @@ defmodule ArbiterWeb.CrucibleIndexLive do
 
         <section class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
-            <.empty_state :if={@entries == []} id="crucible-empty" icon="hero-inbox">
+            <.empty_state :if={@entries == []} id="merge_queue-empty" icon="hero-inbox">
               No {plural(@pr_label)} integrating right now.
             </.empty_state>
 
-            <ul :if={@entries != []} id="crucible" class="flex flex-col gap-3">
+            <ul :if={@entries != []} id="merge_queue" class="flex flex-col gap-3">
               <li
                 :for={m <- @entries}
                 class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-primary/50"
@@ -190,7 +190,7 @@ defmodule ArbiterWeb.CrucibleIndexLive do
               page={@page}
               total_pages={@total_pages}
               total_count={@total_count}
-              page_path={&crucible_path/1}
+              page_path={&merge_queue_path/1}
             />
           </div>
         </section>
@@ -220,7 +220,7 @@ defmodule ArbiterWeb.CrucibleIndexLive do
   defp merge_status_label(nil), do: "Awaiting first poll"
 
   defp merge_status_label(status) when is_map(status) do
-    case Warden.classify(status) do
+    case Watchdog.classify(status) do
       :merged -> "Merged"
       :approved -> "Approved"
       :closed -> "Closed / rejected"
@@ -231,7 +231,7 @@ defmodule ArbiterWeb.CrucibleIndexLive do
   defp merge_status_class(nil), do: "badge-ghost"
 
   defp merge_status_class(status) when is_map(status) do
-    case Warden.classify(status) do
+    case Watchdog.classify(status) do
       :merged -> "badge-success"
       :approved -> "badge-success"
       :closed -> "badge-error"

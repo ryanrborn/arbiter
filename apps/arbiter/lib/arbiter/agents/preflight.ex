@@ -5,9 +5,9 @@ defmodule Arbiter.Agents.Preflight do
   The confirmed failure mode: the operator's Claude OAuth (or Gemini key)
   expires, every worker spawn 401s, and the fleet burns cycles dispatching a
   wave of workers that all fail with a buried generic error. The fix is to
-  *probe before slinging*: run a single cheap `claude --print` (or
+  *probe before dispatching*: run a single cheap `claude --print` (or
   `gemini -p`) round-trip and check it authenticates. If it doesn't, refuse to
-  sling and tell the operator to re-authenticate.
+  dispatch and tell the operator to re-authenticate.
 
   This module owns the **probe execution**: it spawns the adapter's probe argv
   through an Erlang `Port` (the same liveness-first mechanism the polecat uses
@@ -185,13 +185,13 @@ defmodule Arbiter.Agents.Preflight do
   end
 
   # The probe couldn't even run (CLI missing, spawn failed). That's still a
-  # refuse-to-sling condition — slinging would fail the same way — but it's a
+  # refuse-to-dispatch condition — dispatching would fail the same way — but it's a
   # crash/setup issue, not credential expiry, so classify it as such.
   defp probe_unavailable({:executable_not_found, exec}) do
     %StopReason{
       category: :crashed,
       summary: "agent CLI not found on PATH (#{exec})",
-      remediation: "Install / fix the agent CLI on the host before slinging.",
+      remediation: "Install / fix the agent CLI on the host before dispatching.",
       exit_status: nil,
       signal: nil
     }
@@ -201,7 +201,7 @@ defmodule Arbiter.Agents.Preflight do
     %StopReason{
       category: :crashed,
       summary: "agent auth pre-flight could not run: #{inspect(reason)}",
-      remediation: "Check the agent CLI install + host before slinging.",
+      remediation: "Check the agent CLI install + host before dispatching.",
       exit_status: nil,
       signal: nil
     }

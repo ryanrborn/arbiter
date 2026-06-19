@@ -17,17 +17,17 @@ defmodule Arbiter.MCP.Scope do
         workspace_id: "uuid" | nil,    # polecat: the bound workspace; coordinator: nil (workspace-agnostic)
         bead_id:      "bd-…" | nil,    # polecat tier: the one bead it may read/progress
         rig:          "shipyard" | nil,# polecat tier: its rig
-        can_sling:    false | true,    # coordinator-only; the recursion guardrail
-        depth:        0                # sling-recursion depth (Phase 2 guardrail)
+        can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
+        depth:        0                # dispatch-recursion depth (Phase 2 guardrail)
       }
 
-  | Tier | Reads | Writes | Sling |
+  | Tier | Reads | Writes | Dispatch |
   |---|---|---|---|
   | `:polecat` | its own bead, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
-  | `:coordinator` | across any workspace on the installation | create/update/close beads, deps (incl. `parent_of` grouping); sling | yes |
+  | `:coordinator` | across any workspace on the installation | create/update/close beads, deps (incl. `parent_of` grouping); dispatch | yes |
 
   The `:polecat` tier is deliberately narrow — it must not list arbitrary beads,
-  sling, or touch another bead's state, and it is **workspace-scoped**: a polecat
+  dispatch, or touch another bead's state, and it is **workspace-scoped**: a polecat
   token carries the workspace it was dispatched into and can never reach another.
   Tier-level tool visibility is declared in `Arbiter.MCP.Catalog`; the data-level
   checks (own-bead, workspace isolation) live here so handlers cannot accidentally
@@ -51,7 +51,7 @@ defmodule Arbiter.MCP.Scope do
             workspace_id: nil,
             bead_id: nil,
             rig: nil,
-            can_sling: false,
+            can_dispatch: false,
             depth: 0
 
   @type tier :: :polecat | :coordinator
@@ -61,7 +61,7 @@ defmodule Arbiter.MCP.Scope do
           workspace_id: String.t() | nil,
           bead_id: String.t() | nil,
           rig: String.t() | nil,
-          can_sling: boolean(),
+          can_dispatch: boolean(),
           depth: non_neg_integer()
         }
 
@@ -74,7 +74,7 @@ defmodule Arbiter.MCP.Scope do
   @doc """
   Mint a `:polecat`-tier scope token for a slung bead. The bead's id, workspace,
   and rig are baked into the claims, so the token *is* the polecat's identity —
-  it can only ever read/progress that one bead. Never carries `can_sling`.
+  it can only ever read/progress that one bead. Never carries `can_dispatch`.
 
   `bead` is anything exposing `:id` and `:workspace_id` (an `Arbiter.Beads.Issue`).
   """
@@ -87,7 +87,7 @@ defmodule Arbiter.MCP.Scope do
       workspace_id: ws_id,
       bead_id: bead_id,
       rig: rig,
-      can_sling: false,
+      can_dispatch: false,
       depth: Keyword.get(opts, :depth, 0)
     }
     |> MCP.mint(opts)
@@ -96,8 +96,8 @@ defmodule Arbiter.MCP.Scope do
   @doc """
   Mint a `:coordinator`-tier scope token. The first consumer is the operator's
   own tooling; a future autonomous coordinator presents the same token.
-  Carries `can_sling: true` by default (override via opts) — the Phase 2
-  sling-recursion guardrail reads it together with `:depth`.
+  Carries `can_dispatch: true` by default (override via opts) — the Phase 2
+  dispatch-recursion guardrail reads it together with `:depth`.
 
   `workspace_id` defaults to `nil`, minting a **workspace-agnostic** token valid
   for any workspace on the installation — the path the `arb mcp token mint` /
@@ -113,7 +113,7 @@ defmodule Arbiter.MCP.Scope do
       workspace_id: workspace_id,
       bead_id: nil,
       rig: nil,
-      can_sling: Keyword.get(opts, :can_sling, true),
+      can_dispatch: Keyword.get(opts, :can_dispatch, true),
       depth: Keyword.get(opts, :depth, 0)
     }
     |> MCP.mint(opts)
@@ -144,7 +144,7 @@ defmodule Arbiter.MCP.Scope do
        workspace_id: ws,
        bead_id: bead,
        rig: nilable_string(c[:rig]),
-       can_sling: false,
+       can_dispatch: false,
        depth: depth(c[:depth])
      }}
   end
@@ -159,7 +159,7 @@ defmodule Arbiter.MCP.Scope do
        workspace_id: nilable_string(c[:workspace_id]),
        bead_id: nil,
        rig: nil,
-       can_sling: c[:can_sling] == true,
+       can_dispatch: c[:can_dispatch] == true,
        depth: depth(c[:depth])
      }}
   end

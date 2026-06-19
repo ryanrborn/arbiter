@@ -21,7 +21,7 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
     {pid, bead_id}
   end
 
-  # Park well into the future so the auto-started Warden doesn't poll while we
+  # Park well into the future so the auto-started Watchdog doesn't poll while we
   # assert on the transition itself.
   @parked [interval_ms: 1_000_000, initial_delay_ms: 1_000_000]
 
@@ -101,7 +101,7 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
       assert Polecat.state(pid).status == :running
     end
 
-    test "end-to-end: a merged MR drives the polecat to :completed via the warden" do
+    test "end-to-end: a merged MR drives the polecat to :completed via the watchdog" do
       {pid, _bead_id} = running_polecat()
       StubMerger.next_open_ref("!7")
       StubMerger.queue_get("!7", [%{status: :merged}])
@@ -120,14 +120,14 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
     end
   end
 
-  describe "via_tribunal: a Tribunal-approved MR merges without forge approval (bd-66ey1o)" do
-    # Before bd-66ey1o the Warden waited on `approved: true` from the adapter's
+  describe "via_review_gate: a ReviewGate-approved MR merges without forge approval (bd-66ey1o)" do
+    # Before bd-66ey1o the Watchdog waited on `approved: true` from the adapter's
     # get/1 even when the polecat had just been told the gate had approved. For
-    # hosted-forge adapters that approval is never posted (the Tribunal is in-
+    # hosted-forge adapters that approval is never posted (the ReviewGate is in-
     # process), so the polecat hung at :awaiting_review forever. With the
-    # `via_tribunal: true` flag the Warden treats any non-terminal poll as
+    # `via_review_gate: true` flag the Watchdog treats any non-terminal poll as
     # `:approved` and force-auto-merges on its first poll.
-    test "open_mr with via_tribunal: true drives polecat to :completed without forge approval" do
+    test "open_mr with via_review_gate: true drives polecat to :completed without forge approval" do
       {pid, _bead_id} = running_polecat()
       StubMerger.next_open_ref("!99")
       # No queue_get → StubMerger.get/1 returns %{status: :open, approved: false}
@@ -137,24 +137,24 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
                Polecat.open_mr(
                  pid,
                  "feature/trib",
-                 "Tribunal-approved merge",
+                 "ReviewGate-approved merge",
                  "",
-                 open_opts(via_tribunal: true, interval_ms: 20, initial_delay_ms: 0)
+                 open_opts(via_review_gate: true, interval_ms: 20, initial_delay_ms: 0)
                )
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
       assert Polecat.state(pid).meta.result == :merged
-      # The Warden must have called the adapter's merge/1 — that's the whole
-      # point of via_tribunal: don't just wait for a human, actually merge.
+      # The Watchdog must have called the adapter's merge/1 — that's the whole
+      # point of via_review_gate: don't just wait for a human, actually merge.
       assert StubMerger.merge_count("!99") >= 1
     end
 
-    test "without via_tribunal, the same scenario reproduces the silent hang" do
+    test "without via_review_gate, the same scenario reproduces the silent hang" do
       # Regression characterization: with the flag absent and no GitHub-side
       # approval forthcoming, the polecat stays parked. The watchdog (added in
-      # the same fix) will eventually escalate — see warden_test — but in the
+      # the same fix) will eventually escalate — see watchdog_test — but in the
       # window before that fires we can prove the polecat does NOT auto-merge,
-      # which is exactly the bug the via_tribunal flag closes.
+      # which is exactly the bug the via_review_gate flag closes.
       {pid, _bead_id} = running_polecat()
       StubMerger.next_open_ref("!100")
 
@@ -165,7 +165,7 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
                  "Unapproved",
                  "",
                  open_opts(
-                   via_tribunal: false,
+                   via_review_gate: false,
                    auto_merge: true,
                    interval_ms: 20,
                    initial_delay_ms: 0,
@@ -173,7 +173,7 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
                  )
                )
 
-      # Let the Warden poll a few times.
+      # Let the Watchdog poll a few times.
       Process.sleep(120)
       assert Polecat.state(pid).status == :awaiting_review
       assert StubMerger.merge_count("!100") == 0

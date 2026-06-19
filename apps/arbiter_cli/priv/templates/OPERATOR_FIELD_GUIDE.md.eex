@@ -13,9 +13,9 @@ You coordinate; the fleet executes. Core loop:
 
 1. File <%= @issue_article %> <%= @issue %> with crisp acceptance criteria, difficulty, and
    priority.
-2. Sling to a <%= @rig %> (`arb sling <id> [<%= @rig %>] --with-claude`).
+2. Dispatch to a <%= @rig %> (`arb dispatch <id> [<%= @rig %>] --with-claude`).
 3. Monitor — `arb prime` / `arb polecat show <id>` / `arb polecat list`.
-4. Tribunal (pre-merge review gate) escalates for your judgment; decide, don't
+4. ReviewGate (pre-merge review gate) escalates for your judgment; decide, don't
    rubber-stamp.
 5. Merge and close the <%= @issue %> (or let close-on-merge handle it).
 
@@ -26,7 +26,7 @@ External comms (GitHub, Slack) stay in normal professional voice.
 When taking in new directives locally via `arb claim` or `arb create`, **always
 set difficulty immediately after intake**. Both commands create beads without
 prompting for difficulty, and the field defaults to unset. Difficulty drives the
-model tier and thinking budget — set it before slinging to avoid under-scoped work.
+model tier and thinking budget — set it before dispatching to avoid under-scoped work.
 
 Workflow:
 
@@ -110,7 +110,7 @@ their work. Before restarting:
 - Close-on-merge can miss on out-of-band merges — close the <%= @issue %>
   manually if it stalls.
 
-## 9. Tribunal
+## 9. ReviewGate
 
 The pre-merge review gate. After the round cap it escalates for **your**
 judgment.
@@ -135,7 +135,7 @@ Never hardcode model names. Route via abstract tiers:
 | premium | Hard / correctness-critical work |
 
 Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
-sling time.
+dispatch time.
 
 **Verify CLI flags against the installed agent CLI version** — a wrong flag
 crashes the <%= @worker %> at launch with no useful error.

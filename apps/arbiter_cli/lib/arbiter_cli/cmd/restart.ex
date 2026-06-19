@@ -321,7 +321,7 @@ defmodule ArbiterCli.Cmd.Restart do
 
   # Statuses that mean a Claude worker is actively spending tokens and has a
   # worktree that would be abandoned if the server is bounced now.
-  @active_statuses ~w(running awaiting awaiting_tribunal awaiting_review)
+  @active_statuses ~w(running awaiting awaiting_review_gate awaiting_review)
 
   @doc """
   Abort with a helpful error when any polecats are actively working, unless

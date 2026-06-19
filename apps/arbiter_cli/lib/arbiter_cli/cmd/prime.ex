@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.Prime do
        when the domain carries no orders.
     3. **Operating Pitfalls** — a concise digest of the most-burned-by
        operating pitfalls (concurrency, config safety, deploy, freshness,
-       verify, tribunal). Always shown. Points to `ARBITER_OPERATOR.md`
+       verify, review_gate). Always shown. Points to `ARBITER_OPERATOR.md`
        for the full operator field guide.
     4. **Admiral Inbox** — up to 5 most recent unread messages addressed to
        the Admiral. Omitted entirely when there are none.
@@ -29,7 +29,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   ## What's intentionally NOT in v1
 
-    * Refinery merge-queue items (no server-side endpoint yet).
+    * MergeQueue merge-queue items (no server-side endpoint yet).
     * Recent audit-log entries (no server-side endpoint yet).
     * Open epic / parent-bead progress (no dedicated endpoint yet).
 
@@ -280,7 +280,7 @@ defmodule ArbiterCli.Cmd.Prime do
       "Deploy: check for active #{worker}s before restarting the server — they will be abandoned",
       "Freshness: keep #{rig}s current — a stale #{rig} propagates regressed state",
       "Verify: check the port/log to confirm a #{worker} is live — status alone can lie",
-      "Tribunal: read the full implementer↔reviewer transcript before deciding"
+      "ReviewGate: read the full implementer↔reviewer transcript before deciding"
     ]
   end
 

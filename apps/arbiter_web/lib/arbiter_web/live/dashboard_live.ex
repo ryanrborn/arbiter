@@ -6,14 +6,14 @@ defmodule ArbiterWeb.DashboardLive do
     * Recent beads (last 20 by `updated_at` desc)
     * Merge queue — branches integrating via `Arbiter.Mergers`
       (Direct/GitLab/GitHub): the polecats parked at `:awaiting_review`, each
-      with its open MR, approval status, and Warden poll activity. Live.
+      with its open MR, approval status, and Watchdog poll activity. Live.
     * Admiral mailbox — unread mailbox-family messages addressed to the
       coordinator (`to_ref "admiral"`): completions, failures, escalations,
       flags, info. Read-acknowledge per message; clear drains the read tail.
       The dashboard counterpart of `arb inbox` / `arb msg`. Live.
     * Notifications feed — recent `:notification` broadcasts (read-only).
-    * Tribunal (review gate) — reviews in flight (authors parked at
-      `:awaiting_tribunal`, enriched with their reviewer's live activity) plus
+    * ReviewGate (review gate) — reviews in flight (authors parked at
+      `:awaiting_review_gate`, enriched with their reviewer's live activity) plus
       the durable record of non-approve verdicts (recent `:escalation`
       messages, carrying the reviewer's findings). Approvals proceed straight to
       the merge queue, so they surface there, not here. Live.
@@ -46,7 +46,7 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Warden
+  alias Arbiter.Polecat.Watchdog
   alias Arbiter.Polecat.Worktree
   alias Arbiter.Polecats.Run
   require Ash.Query
@@ -68,7 +68,7 @@ defmodule ArbiterWeb.DashboardLive do
   # campaigns section, capped. Each is a bead with `:parent_of` children.
   @current_epics_limit 6
 
-  # Number of escalations (Tribunal verdicts) shown in the Tribunal view.
+  # Number of escalations (ReviewGate verdicts) shown in the ReviewGate view.
   @recent_escalations_limit 10
 
   @impl true
@@ -203,7 +203,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   # The merge queue: branches integrating via Arbiter.Mergers.
   # Sourced live from polecats parked at :awaiting_review — each has an open MR
-  # (mr_ref + clickable merger_url), the last Mergers.get/1 result the Warden
+  # (mr_ref + clickable merger_url), the last Mergers.get/1 result the Watchdog
   # recorded (:last_merger_status), and when it was last polled. Ordered
   # longest-waiting first so a stalled merge surfaces at the top of the queue.
   #
@@ -254,9 +254,9 @@ defmodule ArbiterWeb.DashboardLive do
     _ -> :direct
   end
 
-  # ---- tribunal (review gate) ----
+  # ---- review_gate (review gate) ----
 
-  # Reviews in flight right now: author polecats parked at :awaiting_tribunal
+  # Reviews in flight right now: author polecats parked at :awaiting_review_gate
   # while a distinct reviewer mind code-reviews their diff. Each is enriched
   # with the live activity of its reviewer (a sibling `<bead>#review` polecat,
   # matched via meta.reviews) so the operator can see what the review is doing,
@@ -279,7 +279,7 @@ defmodule ArbiterWeb.DashboardLive do
 
     pending =
       children
-      |> Enum.filter(&(&1.status == :awaiting_tribunal))
+      |> Enum.filter(&(&1.status == :awaiting_review_gate))
       |> Enum.map(fn p ->
         %{
           bead_id: p.bead_id,
@@ -293,9 +293,9 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :pending_reviews, pending)
   end
 
-  # Recent Tribunal escalations: the durable record of non-approve verdicts
+  # Recent ReviewGate escalations: the durable record of non-approve verdicts
   # (REQUEST_CHANGES / inconclusive), newest first, fleet-wide. Carries the
-  # reviewer's findings in :body. Read and unread alike — a Tribunal verdict
+  # reviewer's findings in :body. Read and unread alike — a ReviewGate verdict
   # stays in the history once the Admiral has seen it.
   defp refresh_escalations(socket) do
     escalations =
@@ -642,7 +642,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp polecat_status_class(:resuming), do: "badge-info"
   defp polecat_status_class(:running), do: "badge-info"
   defp polecat_status_class(:awaiting), do: "badge-warning"
-  defp polecat_status_class(:awaiting_tribunal), do: "badge-warning"
+  defp polecat_status_class(:awaiting_review_gate), do: "badge-warning"
   defp polecat_status_class(:awaiting_review), do: "badge-warning"
   defp polecat_status_class(:completed), do: "badge-success"
   defp polecat_status_class(:failed), do: "badge-error"
@@ -652,7 +652,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp polecat_status_label(:resuming), do: "Resuming"
   defp polecat_status_label(:running), do: "Running"
   defp polecat_status_label(:awaiting), do: "Awaiting"
-  defp polecat_status_label(:awaiting_tribunal), do: "In tribunal"
+  defp polecat_status_label(:awaiting_review_gate), do: "In review_gate"
   defp polecat_status_label(:awaiting_review), do: "Awaiting review"
   defp polecat_status_label(:completed), do: "Completed"
   defp polecat_status_label(:failed), do: "Failed"
@@ -687,14 +687,14 @@ defmodule ArbiterWeb.DashboardLive do
   defp security_mode_class(_), do: "badge-ghost"
 
   # Approval/merge state of an in-flight merge, derived from the last
-  # Mergers.get/1 result the Warden recorded. Routes through Warden.classify/1
+  # Mergers.get/1 result the Watchdog recorded. Routes through Watchdog.classify/1
   # — the single approval-detection decision surface — so the dashboard label
-  # can never drift from the Warden's own merge/fail logic. `nil` means the
-  # Warden hasn't completed its first poll yet.
+  # can never drift from the Watchdog's own merge/fail logic. `nil` means the
+  # Watchdog hasn't completed its first poll yet.
   defp merge_status_label(nil), do: "Awaiting first poll"
 
   defp merge_status_label(status) when is_map(status) do
-    case Warden.classify(status) do
+    case Watchdog.classify(status) do
       :merged -> "Merged"
       :approved -> "Approved"
       :closed -> "Closed / rejected"
@@ -705,7 +705,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp merge_status_class(nil), do: "badge-ghost"
 
   defp merge_status_class(status) when is_map(status) do
-    case Warden.classify(status) do
+    case Watchdog.classify(status) do
       :merged -> "badge-success"
       :approved -> "badge-success"
       :closed -> "badge-error"
@@ -713,10 +713,10 @@ defmodule ArbiterWeb.DashboardLive do
     end
   end
 
-  # Warden poll cadence, in seconds, for the merge-queue freshness line. The
+  # Watchdog poll cadence, in seconds, for the merge-queue freshness line. The
   # per-workspace override isn't exposed on the snapshot, so we show the
   # default — the same value the polecat detail view reports.
-  defp poll_interval_seconds, do: div(Warden.default_interval_ms(), 1000)
+  defp poll_interval_seconds, do: div(Watchdog.default_interval_ms(), 1000)
 
   defp humanize_duration(%DateTime{} = started_at, %DateTime{} = ended_at) do
     started_at |> DateTime.diff(ended_at, :second) |> abs() |> humanize_seconds()
@@ -821,11 +821,11 @@ defmodule ArbiterWeb.DashboardLive do
 
   defp reviewer_activity(_), do: nil
 
-  # Derive the verdict an escalation represents from its subject. The Tribunal
+  # Derive the verdict an escalation represents from its subject. The ReviewGate
   # raises escalations with subjects of the form
-  # "Tribunal: changes requested for <bead>" or
-  # "Tribunal: review inconclusive for <bead>"; anything else falls back to a
-  # neutral label so a non-Tribunal escalation still renders sensibly.
+  # "ReviewGate: changes requested for <bead>" or
+  # "ReviewGate: review inconclusive for <bead>"; anything else falls back to a
+  # neutral label so a non-ReviewGate escalation still renders sensibly.
   defp escalation_verdict_label(subject) when is_binary(subject) do
     cond do
       String.contains?(subject, "inconclusive") -> "Inconclusive"
@@ -1484,7 +1484,7 @@ defmodule ArbiterWeb.DashboardLive do
                   — {plural(@pr_label)} integrating now
                 </span>
               </h2>
-              <.see_all_link navigate={~p"/crucible"} />
+              <.see_all_link navigate={~p"/merge_queue"} />
             </div>
 
             <div
@@ -1498,7 +1498,7 @@ defmodule ArbiterWeb.DashboardLive do
               </p>
               <p class="text-xs text-base-content/50">
                 Branches awaiting review via {@merge_queue_label} (Direct, GitLab, GitHub)
-                appear here with their approval status and Warden poll activity.
+                appear here with their approval status and Watchdog poll activity.
               </p>
             </div>
 
@@ -1552,14 +1552,14 @@ defmodule ArbiterWeb.DashboardLive do
                   <code :if={!m.merger_url} class="truncate text-base-content/70">{m.mr_ref}</code>
                 </div>
 
-                <%!-- Warden activity: poll cadence + freshness of the last check. --%>
+                <%!-- Watchdog activity: poll cadence + freshness of the last check. --%>
                 <div class="flex items-center gap-1.5 mt-2 pt-2 border-t border-base-300 text-xs text-base-content/50">
                   <.icon name="hero-eye" class="size-3 shrink-0" />
                   <span :if={m.last_checked_at}>
-                    Warden checked {relative_time(m.last_checked_at, @now)} · every {poll_interval_seconds()}s
+                    Watchdog checked {relative_time(m.last_checked_at, @now)} · every {poll_interval_seconds()}s
                   </span>
                   <span :if={!m.last_checked_at}>
-                    Warden polling every {poll_interval_seconds()}s
+                    Watchdog polling every {poll_interval_seconds()}s
                   </span>
                 </div>
               </li>
@@ -1567,17 +1567,17 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── I. Tribunal (review gate) ────────────────────────────── --%>
+        <%!-- ── I. ReviewGate (review gate) ────────────────────────────── --%>
         <%!-- The review gate: a separate reviewer mind code-reviews each diff
              before it merges. Two surfaces — reviews in flight right now
-             (authors parked at :awaiting_tribunal), and the durable record of
+             (authors parked at :awaiting_review_gate), and the durable record of
              non-approve verdicts (escalations carrying the reviewer's findings).
              Approvals proceed straight to the merge queue, so they surface
              there and in Completed, not here. Live. --%>
-        <section id="tribunal-section" class="card bg-base-200 border border-base-300 shadow-sm">
+        <section id="review_gate-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-scale" class="size-5 text-warning" /> Tribunal
+              <.icon name="hero-scale" class="size-5 text-warning" /> ReviewGate
               <span class="text-sm font-normal text-base-content/50">
                 — code review before merge
               </span>
@@ -1596,7 +1596,7 @@ defmodule ArbiterWeb.DashboardLive do
                 class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-4 text-center"
               >
                 <p class="text-sm text-base-content/60">
-                  No reviews in flight. When a {@worker_label} signals done in a {@workspace_label} that requires review, the Tribunal spawns a reviewer and the {@issue_label} appears
+                  No reviews in flight. When a {@worker_label} signals done in a {@workspace_label} that requires review, the ReviewGate spawns a reviewer and the {@issue_label} appears
                   here until a verdict lands.
                 </p>
               </div>
@@ -1622,7 +1622,7 @@ defmodule ArbiterWeb.DashboardLive do
                     </.link>
                     <span
                       class="text-xs font-mono text-base-content/70 tabular-nums shrink-0"
-                      title="Time in tribunal"
+                      title="Time in review_gate"
                     >
                       {humanize_seconds(runtime_seconds(r.since, @now))} in review
                     </span>
@@ -1656,7 +1656,7 @@ defmodule ArbiterWeb.DashboardLive do
                 class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-4 text-center"
               >
                 <p class="text-sm text-base-content/60">
-                  No {plural(@escalation_label)}. A Tribunal that requests changes or returns
+                  No {plural(@escalation_label)}. A ReviewGate that requests changes or returns
                   an inconclusive verdict escalates here with the reviewer's findings — the
                   branch is parked, not merged.
                 </p>

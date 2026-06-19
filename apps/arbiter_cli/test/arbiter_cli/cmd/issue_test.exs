@@ -30,8 +30,8 @@ defmodule ArbiterCli.Cmd.IssueTest do
       assert out =~ "bd-1"
     end
 
-    test "dispatch routes to the sling endpoint" do
-      stub_post("/api/polecats/sling", %{
+    test "dispatch routes to the dispatch endpoint" do
+      stub_post("/api/polecats/dispatch", %{
         "bead" => %{"id" => "bd-1"},
         "polecat" => %{},
         "machine" => %{}

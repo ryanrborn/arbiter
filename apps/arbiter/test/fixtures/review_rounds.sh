@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture: a reviewer (Tribunal) worker for the Stage 2 revise-and-rediscuss
+# Fixture: a reviewer (ReviewGate) worker for the Stage 2 revise-and-rediscuss
 # loop (bd-3jm700). It REQUEST_CHANGES on its first pass, then emits $1 on every
 # later pass — so a test can drive "reject once, then converge / keep rejecting".
 #
@@ -8,13 +8,13 @@
 #        APPROVE.
 #
 # A marker file in the CWD (the shared worktree, unique per test) tells the first
-# pass apart from later ones — the Tribunal spawns a fresh reviewer mind per
+# pass apart from later ones — the ReviewGate spawns a fresh reviewer mind per
 # round, so the script itself must remember it already ran. The implementer
 # fixture runs in the same CWD between passes but uses a different marker name.
 # Stands in for a real `claude --print` reviewer so tests never invoke the paid
 # CLI.
 later_verdict="${1:-APPROVE}"
-marker="./.tribunal_round_attempt"
+marker="./.review_gate_round_attempt"
 
 if [ -f "$marker" ]; then
   echo "re-reviewing the updated diff after the implementer's revision"

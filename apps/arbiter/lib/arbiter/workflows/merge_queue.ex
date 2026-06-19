@@ -1,4 +1,4 @@
-defmodule Arbiter.Workflows.Refinery do
+defmodule Arbiter.Workflows.MergeQueue do
   @moduledoc """
   Per-workspace merge-queue GenServer. Picks up "polecat done" events,
   opens MRs/PRs (or merges directly per workspace config), polls them for
@@ -50,13 +50,13 @@ defmodule Arbiter.Workflows.Refinery do
 
   When `adapter.get` reports `conflicting: true` we used to
   freeze the item and wait for a human rebase — twice in one morning that
-  meant an Admiral page on parallel dispatcher-bead waves. Now the Refinery
+  meant an Admiral page on parallel dispatcher-bead waves. Now the MergeQueue
   side-steps that:
 
       :awaiting_approval (or any non-terminal status)
         │   adapter.get reports conflicting: true
         ▼
-      :conflict_resolving — spawn `Arbiter.Workflows.Refinery.ConflictResolver`
+      :conflict_resolving — spawn `Arbiter.Workflows.MergeQueue.ConflictResolver`
                             (a swappable behaviour, defaults to a Polecat +
                             ClaudeSession running rebase + force-push)
         │   worker pushes resolved branch
@@ -68,21 +68,21 @@ defmodule Arbiter.Workflows.Refinery do
   Each conflict gets **exactly one** resolver attempt. The resolver is a
   *mechanical* rebase; if a single pass + force-push doesn't unblock the
   MR (the next tick still sees `conflicting: true`), the conflict is almost
-  certainly semantic and the Refinery posts an `:escalation` mail (via
-  `Arbiter.Workflows.Refinery.ConflictResolver.escalate_unresolved/4`)
+  certainly semantic and the MergeQueue posts an `:escalation` mail (via
+  `Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved/4`)
   and parks the item `:failed`. Spawn failures (no rig configured,
   worktree creation failed, workspace gone, resolver already running)
   take the same escalation path. Better a loud escalation than a silent
   stall.
 
   The resolver module is injected via `:conflict_resolver` (start_link opt)
-  → `:arbiter, :refinery_conflict_resolver` (application env) → the default
+  → `:arbiter, :merge_queue_conflict_resolver` (application env) → the default
   real implementation. Tests pass a stub so they don't spawn real workers.
 
   ## Auto-revise on requested changes (bd-95lsjb)
 
   When `adapter.get` reports a CHANGES_REQUESTED review (the latest verdict
-  per reviewer) newer than the last one the queue handled, the Refinery
+  per reviewer) newer than the last one the queue handled, the MergeQueue
   dispatches a single revise pass on the **existing worktree** instead of
   idling at `:awaiting_approval`:
 
@@ -93,7 +93,7 @@ defmodule Arbiter.Workflows.Refinery do
       :changes_requested — fetch the full feedback
                            (`adapter.list_review_feedback/1`), post a brief
                            acknowledging comment, then spawn
-                           `Arbiter.Workflows.Refinery.ReviseDispatcher` (the
+                           `Arbiter.Workflows.MergeQueue.ReviseDispatcher` (the
                            `arb resume` path: a fresh worker on the bead's
                            preserved worktree + `pr_ref`, briefed with the
                            reviewer feedback). It commits + pushes to the SAME
@@ -111,7 +111,7 @@ defmodule Arbiter.Workflows.Refinery do
   dispatch failure parks the item `:failed` (no retry loop). The `Direct`
   merger no-ops (no forge review surface), so direct-strategy beads are
   unaffected. The dispatcher module is injected via `:revise_dispatcher`
-  (start_link opt) → `:arbiter, :refinery_revise_dispatcher` (application env)
+  (start_link opt) → `:arbiter, :merge_queue_revise_dispatcher` (application env)
   → the default real implementation; tests pass a stub.
 
   ## Merge adapter
@@ -129,25 +129,25 @@ defmodule Arbiter.Workflows.Refinery do
   ## PubSub topic
 
   Subscribes to `"polecat:done:" <> workspace_id`. Per-workspace because
-  each Refinery process runs against exactly one workspace and shouldn't
+  each MergeQueue process runs against exactly one workspace and shouldn't
   see other workspaces' events. The polecat (or the orchestrator that
   drives it) is responsible for broadcasting to that topic when its
   workflow completes successfully.
 
-  Subscribers to `"refinery:" <> workspace_id` will receive
-  `{:bead_closed_by_refinery, bead_id}` once the merge lands.
+  Subscribers to `"merge_queue:" <> workspace_id` will receive
+  `{:bead_closed_by_merge_queue, bead_id}` once the merge lands.
 
   ## Supervision
 
   This GenServer is **NOT** started under `Arbiter.Application` by
   default. Workspaces are dynamic — there's no static list to enumerate at
   boot — so a future supervisor (gte-024 territory) will start one
-  refinery per workspace lazily. For now, tests and CLI tools start it
+  merge_queue per workspace lazily. For now, tests and CLI tools start it
   manually with `start_link/1`.
 
   ## Configuration knobs (start_link/1 opts)
 
-    * `:workspace_id` (string, required) — the workspace this refinery serves.
+    * `:workspace_id` (string, required) — the workspace this merge_queue serves.
     * `:name` — process name (default `__MODULE__`).
     * `:poll_interval_ms` — how often `:tick` fires (default 30_000).
     * `:base` — an explicit *queue-level* base override. It sits **below** a
@@ -159,13 +159,13 @@ defmodule Arbiter.Workflows.Refinery do
       timer is not scheduled. Tests use `false` and drive ticks via
       `tick/1` so they don't race with real time.
     * `:conflict_resolver` — module implementing the
-      `Arbiter.Workflows.Refinery.ConflictResolver` behaviour. Defaults to
+      `Arbiter.Workflows.MergeQueue.ConflictResolver` behaviour. Defaults to
       the real implementation (which spawns a Polecat + ClaudeSession);
       tests pass a stub.
     * `:revise_dispatcher` — module implementing the
-      `Arbiter.Workflows.Refinery.ReviseDispatcher` behaviour (bd-95lsjb).
+      `Arbiter.Workflows.MergeQueue.ReviseDispatcher` behaviour (bd-95lsjb).
       Defaults to the real implementation (which resumes the bead's worktree
-      via `Arbiter.Polecat.Sling.resume/2`); tests pass a stub.
+      via `Arbiter.Polecat.Dispatch.resume/2`); tests pass a stub.
   """
 
   use GenServer
@@ -230,7 +230,7 @@ defmodule Arbiter.Workflows.Refinery do
   # ---- public API ---------------------------------------------------------
 
   @doc """
-  Start a refinery for a workspace. See moduledoc for options.
+  Start a merge_queue for a workspace. See moduledoc for options.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -251,7 +251,7 @@ defmodule Arbiter.Workflows.Refinery do
   end
 
   @doc """
-  Return a snapshot of the refinery state for inspection / tests.
+  Return a snapshot of the merge_queue state for inspection / tests.
   """
   @spec state(GenServer.server()) :: map()
   def state(server \\ __MODULE__) do
@@ -274,7 +274,7 @@ defmodule Arbiter.Workflows.Refinery do
     workspace_id =
       case Keyword.fetch(opts, :workspace_id) do
         {:ok, id} when is_binary(id) and id != "" -> id
-        _ -> raise ArgumentError, "Refinery requires :workspace_id"
+        _ -> raise ArgumentError, "MergeQueue requires :workspace_id"
       end
 
     poll_interval_ms = Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms)
@@ -303,8 +303,8 @@ defmodule Arbiter.Workflows.Refinery do
           :conflict_resolver,
           Application.get_env(
             :arbiter,
-            :refinery_conflict_resolver,
-            Arbiter.Workflows.Refinery.ConflictResolver
+            :merge_queue_conflict_resolver,
+            Arbiter.Workflows.MergeQueue.ConflictResolver
           )
         ),
       revise_dispatcher:
@@ -313,8 +313,8 @@ defmodule Arbiter.Workflows.Refinery do
           :revise_dispatcher,
           Application.get_env(
             :arbiter,
-            :refinery_revise_dispatcher,
-            Arbiter.Workflows.Refinery.ReviseDispatcher
+            :merge_queue_revise_dispatcher,
+            Arbiter.Workflows.MergeQueue.ReviseDispatcher
           )
         ),
       worktree_module: Keyword.get(opts, :worktree_module, Worktree),
@@ -414,7 +414,7 @@ defmodule Arbiter.Workflows.Refinery do
     mr_ref = existing_mr_ref(bead)
 
     Logger.info(
-      "Refinery: bead #{bead.id} already has MR #{mr_ref}; adopting it " <>
+      "MergeQueue: bead #{bead.id} already has MR #{mr_ref}; adopting it " <>
         "instead of opening a duplicate"
     )
 
@@ -430,7 +430,7 @@ defmodule Arbiter.Workflows.Refinery do
   end
 
   # Resolve the PR base for a bead via the shared resolver, identical to the
-  # chain `Arbiter.Polecat.Sling` uses for the worktree base, so the two can
+  # chain `Arbiter.Polecat.Dispatch` uses for the worktree base, so the two can
   # never diverge (bd-b6rzoc). `state.base` is threaded in as the queue-level
   # `:workspace_base` — below the bead/rig config, never short-circuiting it.
   defp resolve_base(%State{} = state, %Issue{} = bead) do
@@ -441,7 +441,7 @@ defmodule Arbiter.Workflows.Refinery do
   end
 
   # The rig the bead was actually worked in — drawn from its most recent
-  # polecat run, the same rig `Sling` cut the worktree with. nil when the bead
+  # polecat run, the same rig `Dispatch` cut the worktree with. nil when the bead
   # has no run on record (e.g. a bead enqueued without ever being slung), in
   # which case the per-rig default simply doesn't apply.
   defp resolve_bead_rig(%Issue{id: bead_id}) do
@@ -498,7 +498,7 @@ defmodule Arbiter.Workflows.Refinery do
     end
   end
 
-  # The PR/MR body the Refinery opens with. Precedence:
+  # The PR/MR body the MergeQueue opens with. Precedence:
   #
   #   1. the worker-authored `pr_body` (bd-53xrmi) — Summary / Test plan /
   #      References written *after* the change landed, filling the repo's PR
@@ -513,7 +513,7 @@ defmodule Arbiter.Workflows.Refinery do
   # description was empty/nil (e.g. the spec lived only upstream), and GitHub
   # injects the repo's bare PR template whenever the body is empty. `pr_body ||
   # description || default_body` is *always* non-empty (default_body always
-  # carries the title), so the Refinery can never again open a bare-template PR.
+  # carries the title), so the MergeQueue can never again open a bare-template PR.
   # The bead is fetched fresh via `Ash.get/2` in `do_enqueue/2`, which selects
   # all attributes — so `pr_body` and `description` are loaded, never silently
   # nil from a partial select.
@@ -599,8 +599,8 @@ defmodule Arbiter.Workflows.Refinery do
       item.status == :changes_requested ->
         advance_status(state, %{item | status: :awaiting_approval}, mr_state)
 
-      # MR was already merged externally (e.g. the Warden merged it for a
-      # Tribunal-approved bead before the Refinery processed the polecat_done
+      # MR was already merged externally (e.g. the Watchdog merged it for a
+      # ReviewGate-approved bead before the MergeQueue processed the polecat_done
       # event). Close the bead directly without re-attempting adapter.merge/1
       # — that call would fail on an already-closed PR. bd-d1jp4r. Checked
       # before the changes-requested branch so a merged PR never triggers a
@@ -673,7 +673,7 @@ defmodule Arbiter.Workflows.Refinery do
 
     case safe_resolve(state.conflict_resolver, args) do
       {:ok, _info} ->
-        Logger.info("Refinery: spawned conflict resolver for bead=#{item.bead_id}")
+        Logger.info("MergeQueue: spawned conflict resolver for bead=#{item.bead_id}")
 
         item = %{
           item
@@ -686,7 +686,7 @@ defmodule Arbiter.Workflows.Refinery do
 
       {:error, reason} ->
         Logger.warning(
-          "Refinery: conflict resolver failed for bead=#{item.bead_id}: #{inspect(reason)}"
+          "MergeQueue: conflict resolver failed for bead=#{item.bead_id}: #{inspect(reason)}"
         )
 
         safe_escalate(
@@ -748,7 +748,7 @@ defmodule Arbiter.Workflows.Refinery do
     case safe_dispatch_revise(state.revise_dispatcher, args) do
       {:ok, _info} ->
         Logger.info(
-          "Refinery: dispatched revise pass for bead=#{item.bead_id} " <>
+          "MergeQueue: dispatched revise pass for bead=#{item.bead_id} " <>
             "(review=#{inspect(review_id)})"
         )
 
@@ -763,7 +763,7 @@ defmodule Arbiter.Workflows.Refinery do
 
       {:error, reason} ->
         Logger.warning(
-          "Refinery: revise dispatch failed for bead=#{item.bead_id}: #{inspect(reason)}"
+          "MergeQueue: revise dispatch failed for bead=#{item.bead_id}: #{inspect(reason)}"
         )
 
         {%{item | status: :failed, last_error: {:revise_dispatch_failed, reason}}, state}
@@ -824,14 +824,14 @@ defmodule Arbiter.Workflows.Refinery do
       if function_exported?(resolver_module, :escalate_unresolved, 4) do
         resolver_module
       else
-        Arbiter.Workflows.Refinery.ConflictResolver
+        Arbiter.Workflows.MergeQueue.ConflictResolver
       end
 
     target.escalate_unresolved(bead_id, workspace_id, branch, reason)
   rescue
     e ->
       Logger.warning(
-        "Refinery.safe_escalate: swallowed exception for bead=#{bead_id}: " <>
+        "MergeQueue.safe_escalate: swallowed exception for bead=#{bead_id}: " <>
           Exception.message(e)
       )
 
@@ -845,14 +845,14 @@ defmodule Arbiter.Workflows.Refinery do
       if function_exported?(resolver_module, :notify_resolution, 3) do
         resolver_module
       else
-        Arbiter.Workflows.Refinery.ConflictResolver
+        Arbiter.Workflows.MergeQueue.ConflictResolver
       end
 
     target.notify_resolution(item.bead_id, state.workspace_id, item_branch_label(item))
   rescue
     e ->
       Logger.warning(
-        "Refinery.safe_notify_resolution: swallowed exception for bead=#{item.bead_id}: " <>
+        "MergeQueue.safe_notify_resolution: swallowed exception for bead=#{item.bead_id}: " <>
           Exception.message(e)
       )
 
@@ -883,14 +883,14 @@ defmodule Arbiter.Workflows.Refinery do
       {:ok, bead} ->
         case Ash.update(bead, %{close_upstream: true}, action: :close) do
           {:ok, _closed} ->
-            broadcast_refinery_event(state, {:bead_closed_by_refinery, item.bead_id})
+            broadcast_merge_queue_event(state, {:bead_closed_by_merge_queue, item.bead_id})
 
           {:error, reason} ->
-            Logger.warning("Refinery: failed to close bead #{item.bead_id}: #{inspect(reason)}")
+            Logger.warning("MergeQueue: failed to close bead #{item.bead_id}: #{inspect(reason)}")
         end
 
       {:error, reason} ->
-        Logger.warning("Refinery: bead #{item.bead_id} vanished before close: #{inspect(reason)}")
+        Logger.warning("MergeQueue: bead #{item.bead_id} vanished before close: #{inspect(reason)}")
     end
 
     state
@@ -963,7 +963,7 @@ defmodule Arbiter.Workflows.Refinery do
 
       {:error, reason} ->
         Logger.warning(
-          "Refinery: failed to link MR #{mr_ref} onto tracker " <>
+          "MergeQueue: failed to link MR #{mr_ref} onto tracker " <>
             "#{bead.tracker_type} ref=#{bead.tracker_ref} for bead=#{bead.id}: #{inspect(reason)}"
         )
 
@@ -972,14 +972,14 @@ defmodule Arbiter.Workflows.Refinery do
   rescue
     e ->
       Logger.warning(
-        "Refinery: error linking MR #{mr_ref} for bead=#{bead.id}: #{Exception.message(e)}"
+        "MergeQueue: error linking MR #{mr_ref} for bead=#{bead.id}: #{Exception.message(e)}"
       )
 
       :ok
   catch
     :exit, reason ->
       Logger.warning(
-        "Refinery: exit linking MR #{mr_ref} for bead=#{bead.id}: #{inspect(reason)}"
+        "MergeQueue: exit linking MR #{mr_ref} for bead=#{bead.id}: #{inspect(reason)}"
       )
 
       :ok
@@ -989,8 +989,8 @@ defmodule Arbiter.Workflows.Refinery do
     Process.send_after(self(), :tick, ms)
   end
 
-  defp broadcast_refinery_event(%State{workspace_id: ws_id}, msg) do
-    _ = Phoenix.PubSub.broadcast(Arbiter.PubSub, "refinery:" <> ws_id, msg)
+  defp broadcast_merge_queue_event(%State{workspace_id: ws_id}, msg) do
+    _ = Phoenix.PubSub.broadcast(Arbiter.PubSub, "merge_queue:" <> ws_id, msg)
     :ok
   end
 
@@ -1008,7 +1008,7 @@ defmodule Arbiter.Workflows.Refinery do
 
   # Load the workspace and resolve the adapter module. Returns {adapter, workspace}
   # with workspace=nil if the load fails (e.g. fake ID in supervisor tests or DB
-  # not yet ready). Defaults to Mergers.Direct so the Refinery still starts.
+  # not yet ready). Defaults to Mergers.Direct so the MergeQueue still starts.
   defp load_adapter_for(workspace_id) do
     case Ash.get(Workspace, workspace_id) do
       {:ok, workspace} -> {Mergers.for_workspace(workspace), workspace}

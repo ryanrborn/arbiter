@@ -25,7 +25,7 @@ defmodule ArbiterCli.Cmd.Review do
   ## What this does NOT do
 
   Reviews never push, merge, or modify a branch. Adding a `--push` flag
-  would defeat the purpose — to dispatch authored work, use `arb sling`.
+  would defeat the purpose — to dispatch authored work, use `arb dispatch`.
   """
 
   alias ArbiterCli.{Client, Output}

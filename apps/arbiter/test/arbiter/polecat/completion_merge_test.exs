@@ -1,19 +1,19 @@
 defmodule Arbiter.Polecat.CompletionMergeTest do
   @moduledoc """
-  End-to-end proof for bd-7qq81g: a `--with-claude` sling on the default
+  End-to-end proof for bd-7qq81g: a `--with-claude` dispatch on the default
   (Direct) domain must integrate the branch into the target line when the
   worker finishes — a real `git merge --no-ff` commit on `main` — rather than
   closing the bead without merging.
   """
 
-  # DataCase (async: false → shared sandbox) so the polecat/driver/warden
+  # DataCase (async: false → shared sandbox) so the polecat/driver/watchdog
   # processes under the DynamicSupervisor reach the same DB connection.
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Beads.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecat.Dispatch
 
   @fixture Path.expand("../../fixtures/commit_and_done.sh", __DIR__)
 
@@ -86,7 +86,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
       Ash.create(Issue, %{title: "integrate me", workspace_id: ws.id, issue_type: :feature})
 
     {:ok, result} =
-      Sling.sling(bead.id,
+      Dispatch.dispatch(bead.id,
         rig: "merge/rig",
         start_claude: true,
         claude_command: [@fixture],
