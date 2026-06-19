@@ -137,6 +137,14 @@ defmodule ArbiterWeb.Router do
     post("/polecats/:bead_id/stop", PolecatController, :stop)
   end
 
+  # Server-push event stream — long-lived chunked HTTP connection for coordinator
+  # sessions. Auth via query-string token; not piped through :api because the
+  # response is application/x-ndjson (not JSON) and content negotiation would
+  # reject it. The controller owns auth and content-type entirely.
+  scope "/", ArbiterWeb.Api do
+    get("/events", EventController, :stream)
+  end
+
   # Arbiter.MCP — the in-process Model Context Protocol server for agent
   # sessions. A single JSON-RPC-over-Streamable-HTTP endpoint; capability is the
   # per-spawn scope token in the Authorization header, decoded in the plug. Not
