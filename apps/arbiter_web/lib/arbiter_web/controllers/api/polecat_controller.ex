@@ -6,9 +6,11 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   Routes:
 
-    * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `with_claude`).
-      Without `with_claude` the bead parks in `:in_progress` (no Driver); with
-      it, a Claude subprocess works the bead and the Driver closes it on `arb done`.
+    * `POST /api/polecats/sling`           — :sling (body: `bead_id`, optional `rig`, `provider`).
+      `provider` is `"claude"` | `"gemini"` (deprecated aliases: `with_claude` /
+      `with_gemini` booleans). With a provider a worker subprocess works the bead
+      and the Driver closes it on `arb done`; with `no_agent` the bead parks in
+      `:in_progress` (no Driver).
     * `POST /api/polecats/review`          — :review (body: `bead_id`, optional `rig`).
       Dispatches a review-only acolyte: no worktree, no per-bead branch, no
       route through the Crucible/merger. Always claude-driven.
@@ -269,12 +271,15 @@ defmodule ArbiterWeb.Api.PolecatController do
   #   * `no_agent`    → dry sling: park the bead in `:in_progress` for a hand
   #     to attach. The Driver is suppressed (`start_driver: false`) so the
   #     no-op Work workflow doesn't race to a bogus `:closed`.
-  #   * `with_claude` → force Claude as the agent, regardless of workspace's
-  #     `agent.type`. `agent_type: :claude` overrides routing.
-  #   * `with_gemini` → force Gemini as the agent, overriding routing.
+  #   * `provider`    → force the named provider (`"claude"` | `"gemini"`),
+  #     regardless of workspace's `agent.type`. `agent_type: <atom>` overrides
+  #     routing.
+  #   * `with_claude` / `with_gemini` → DEPRECATED aliases for
+  #     `provider: "claude"` / `provider: "gemini"`. Still honored so existing
+  #     scripts and the MCP `with_claude` alias don't break.
   #   * none          → use the workspace's `agent.type` config (the default).
-  #     Resolves via `Agents.for_workspace` exactly as `--with-claude` used to,
-  #     but picks the provider the workspace is configured for.
+  #     Resolves via `Agents.for_workspace`, picking the provider the workspace
+  #     is configured for.
   defp sling_opts(params) do
     base =
       [rig: params["rig"]]
@@ -284,6 +289,9 @@ defmodule ArbiterWeb.Api.PolecatController do
       cond do
         truthy(params["no_agent"]) == true ->
           [start_driver: false]
+
+        provider = normalize_provider(params["provider"]) ->
+          [start_claude: true, agent_type: provider]
 
         truthy(params["with_claude"]) == true ->
           [start_claude: true, agent_type: :claude]
@@ -298,6 +306,13 @@ defmodule ArbiterWeb.Api.PolecatController do
     (base ++ worker_opts)
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
+
+  # Normalize the `provider` request field to the `:agent_type` atom Sling
+  # expects. Unknown / missing values fall through to nil so the alias / default
+  # branches still apply.
+  defp normalize_provider("claude"), do: :claude
+  defp normalize_provider("gemini"), do: :gemini
+  defp normalize_provider(_), do: nil
 
   # Map request params onto `Sling.resume/2` opts. Rig is optional — resume
   # falls back to the bead's most recent run's rig when omitted. `--model` is an
