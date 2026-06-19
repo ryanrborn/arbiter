@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.RefineryConflictTest do
   @moduledoc """
-  Tests for the Crucible's CONFLICTING-PR auto-resolution path (bd-dolcqq).
+  Tests for the merge queue's CONFLICTING-PR auto-resolution path (bd-dolcqq).
 
   Drives the `Refinery` with a stub resolver so the conflict-spawn machinery
   is exercised without booting a real Polecat / ClaudeSession. Mocks GitHub

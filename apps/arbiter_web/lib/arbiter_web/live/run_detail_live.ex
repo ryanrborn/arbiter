@@ -11,17 +11,16 @@ defmodule ArbiterWeb.RunDetailLive do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecats.Run
-  alias Arbiter.Vernacular
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     socket =
       socket
       |> assign(:run_id, id)
-      |> assign(:worker_label, Vernacular.label(:worker))
-      |> assign(:issue_label, Vernacular.label(:issue))
-      |> assign(:rig_label, Vernacular.label(:rig))
-      |> assign(:workspace_label, Vernacular.label(:workspace))
+      |> assign(:worker_label, "worker")
+      |> assign(:issue_label, "issue")
+      |> assign(:rig_label, "repo")
+      |> assign(:workspace_label, "workspace")
       |> load_run(id)
 
     {:ok, socket}

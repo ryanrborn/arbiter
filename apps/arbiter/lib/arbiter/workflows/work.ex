@@ -33,16 +33,16 @@ defmodule Arbiter.Workflows.Work do
 
   ## Mailbox convention
 
-  Acolytes coordinate through the inter-agent message queue
+  Workers coordinate through the inter-agent message queue
   (`Arbiter.Messages.Message`), not tmux prompt injection. By **convention**
-  (not enforced by the Driver), an acolyte checks its mailbox at the start of
+  (not enforced by the Driver), an worker checks its mailbox at the start of
   each workflow step by running:
 
       arb inbox <bead-id>
 
   This surfaces any unread direction from the Admiral (`arb message <bead-id>
-  <text>`) or flags from sibling acolytes, and marks them read. The Driver
-  does not poll the mailbox — it is the acolyte's responsibility via the CLI.
+  <text>`) or flags from sibling workers, and marks them read. The Driver
+  does not poll the mailbox — it is the worker's responsibility via the CLI.
   See `Arbiter.Polecat.Sling.prompt_for/1` for where this is wired into the
   Claude prompt template.
   """

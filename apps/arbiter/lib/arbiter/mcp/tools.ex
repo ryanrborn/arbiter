@@ -11,7 +11,7 @@ defmodule Arbiter.MCP.Tools do
   (`polecat_sling` / `polecat_resume` / `polecat_review` / `polecat_stop` /
   `polecat_list`), `message_send`, `notify_list`, the `tracker_*` bridge
   (`tracker_claim` / `tracker_sync`), `workspace_list`, and `usage_summarize`
-  (see `docs/mcp-server-design.md` §8). The acolyte-dispatch tools
+  (see `docs/mcp-server-design.md` §8). The worker-dispatch tools
   (`polecat_sling` / `polecat_resume` / `polecat_review`) carry the
   sling-recursion guardrail (`can_sling` + `depth`, §4.3).
 
@@ -125,8 +125,8 @@ defmodule Arbiter.MCP.Tools do
   # ---- workspace_show -----------------------------------------------------
 
   @doc """
-  The scope's own workspace: config, vernacular, and the resolved acolyte
-  security posture. Always the bound workspace — the argument is ignored so a
+  The scope's own workspace: config and the resolved worker security posture.
+  Always the bound workspace — the argument is ignored so a
   scope can never inspect another workspace.
   """
   @spec workspace_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -381,7 +381,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- polecat_resume -----------------------------------------------------
 
   @doc """
-  Re-attach a fresh acolyte to a bead's **preserved outpost** worktree
+  Re-attach a fresh worker to a bead's **preserved** worktree
   (`arb resume`). Coordinator only, and — like `polecat_sling` — gated by the
   sling-recursion guardrail (`can_sling` + `depth`): resume spawns a worker, so
   the same recursion concerns apply. The child polecat's scope is minted one
@@ -403,9 +403,9 @@ defmodule Arbiter.MCP.Tools do
   # ---- polecat_review -----------------------------------------------------
 
   @doc """
-  Dispatch a **review-only** acolyte against the PR/MR linked to a bead
+  Dispatch a **review-only** worker against the PR/MR linked to a bead
   (`arb review`): no worktree, no per-bead branch, no route through the
-  Crucible/merger. Coordinator only, and gated by the sling-recursion guardrail
+  merge queue/merger. Coordinator only, and gated by the sling-recursion guardrail
   (`can_sling` + `depth`) — a review dispatch spawns an agent. The child
   polecat's scope is minted one level deeper. Backs onto
   `Arbiter.Polecat.Sling.sling/2` with `review: true`.
@@ -883,7 +883,7 @@ defmodule Arbiter.MCP.Tools do
     if depth < max, do: :ok, else: {:error, {:unauthorized, "sling depth limit (#{max}) reached"}}
   end
 
-  # The opts common to every acolyte-dispatch tool (sling / resume / review):
+  # The opts common to every worker-dispatch tool (sling / resume / review):
   # the optional `rig` / `model` overrides plus the child scope depth, minted
   # one level deeper (`depth + 1`) so a chain of dispatches stays tracked.
   defp dispatch_opts(%Scope{depth: depth}, args) do
@@ -953,13 +953,13 @@ defmodule Arbiter.MCP.Tools do
 
   # Resume-specific (`Sling.resume/2`).
   defp sling_error_message(:no_outpost),
-    do: "no preserved outpost worktree for this bead — nothing to resume; sling it fresh instead"
+    do: "no preserved worktree for this bead — nothing to resume; sling it fresh instead"
 
   defp sling_error_message(:rig_unknown),
     do: "could not resolve the rig for this bead; pass `rig` explicitly"
 
   defp sling_error_message({:acolyte_active, status}),
-    do: "an acolyte is still active for this bead (#{status}); stop it before resuming"
+    do: "a worker is still active for this bead (#{status}); stop it before resuming"
 
   defp sling_error_message(other), do: "sling failed: #{inspect(other)}"
 

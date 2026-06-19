@@ -13,8 +13,8 @@ defmodule ArbiterCli.Cmd.RestartTest do
     System.put_env("ARB_HOME", "/tmp/arbiter-restart-test")
     # Default port path — keep ARB_HOST off the default so api_port/0 parses 4848.
     System.delete_env("ARB_HOST")
-    # Clear the acolyte guard so tests aren't blocked when run inside an acolyte session.
-    # The acolyte-session guard tests set this themselves.
+    # Clear the worker guard so tests aren't blocked when run inside a worker session.
+    # The worker-session guard tests set this themselves.
     prior_acolyte_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
     System.delete_env("ARB_ACOLYTE_BEAD_ID")
 
@@ -315,7 +315,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
   end
 
   describe "active-work guard" do
-    test "refuses to restart when acolytes are actively working (no --force)" do
+    test "refuses to restart when workers are actively working (no --force)" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/polecats"},
@@ -325,12 +325,12 @@ defmodule ArbiterCli.Cmd.RestartTest do
       {_out, err, code} = capture(fn -> Restart.run([]) end)
 
       assert code == 1
-      assert err =~ "acolyte"
+      assert err =~ "worker"
       assert err =~ "bd-abc"
       assert err =~ "--force"
     end
 
-    test "--force proceeds even when acolytes are active" do
+    test "--force proceeds even when workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/polecats"},
@@ -352,7 +352,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
       assert out =~ "Arbiter Phoenix restarted"
     end
 
-    test "proceeds normally when no acolytes are active" do
+    test "proceeds normally when no workers are active" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/polecats"}, {@no_polecats, 200}}
@@ -451,7 +451,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
     end
   end
 
-  describe "acolyte-session guard (bd-crqku8)" do
+  describe "worker-session guard (bd-crqku8)" do
     test "refuses to restart when ARB_ACOLYTE_BEAD_ID is set" do
       System.put_env("ARB_ACOLYTE_BEAD_ID", "bd-test-acolyte")
       on_exit(fn -> System.delete_env("ARB_ACOLYTE_BEAD_ID") end)
@@ -459,7 +459,7 @@ defmodule ArbiterCli.Cmd.RestartTest do
       {_out, err, code} = capture(fn -> Restart.run([]) end)
 
       assert code == 1
-      assert err =~ "acolyte session"
+      assert err =~ "worker session"
       assert err =~ "bd-test-acolyte"
     end
 

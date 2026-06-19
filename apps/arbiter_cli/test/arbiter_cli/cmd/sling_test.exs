@@ -26,7 +26,7 @@ defmodule ArbiterCli.Cmd.SlingTest do
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017"]) end)
       assert code == 0
-      assert out =~ "Sling:"
+      assert out =~ "Dispatch:"
       assert out =~ "gte-017 — sling cmd"
       assert out =~ "in_progress"
       assert out =~ "#PID<0.123.0>"
@@ -43,7 +43,7 @@ defmodule ArbiterCli.Cmd.SlingTest do
         capture(fn -> ArbiterCli.Cmd.Sling.run(["gte-017", "verus_server"]) end)
 
       assert code == 0
-      assert out =~ "Sling:"
+      assert out =~ "Dispatch:"
     end
 
     test "--json mode emits JSON" do
@@ -60,8 +60,7 @@ defmodule ArbiterCli.Cmd.SlingTest do
     end
 
     # Stubs POST /api/polecats/sling, captures the request body, and forwards
-    # any other request (e.g. Vernacular.fetch's GET /api/settings) as 500/JSON
-    # so the CLI's vernacular path silently falls back to @defaults.
+    # any other request as 500/JSON.
     defp stub_sling_capture do
       parent = self()
       name = Process.get(:bd2_stub_name)

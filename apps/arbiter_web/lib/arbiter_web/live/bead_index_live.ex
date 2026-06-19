@@ -11,7 +11,6 @@ defmodule ArbiterWeb.BeadIndexLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Beads.Issue
-  alias Arbiter.Vernacular
   alias ArbiterWeb.Paging
   require Ash.Query
 
@@ -31,7 +30,7 @@ defmodule ArbiterWeb.BeadIndexLive do
     {:ok,
      socket
      |> assign(:live, connected?(socket))
-     |> assign(:issue_label, Vernacular.label(:issue))
+     |> assign(:issue_label, "issue")
      |> assign(:filters, @filters)}
   end
 

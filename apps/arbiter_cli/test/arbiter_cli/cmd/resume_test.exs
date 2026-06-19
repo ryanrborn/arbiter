@@ -53,7 +53,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
         %{
           "error" => %{
             "type" => "invalid_request",
-            "message" => "no preserved outpost worktree for this bead"
+            "message" => "no preserved worktree for this bead"
           }
         },
         422
@@ -61,7 +61,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
 
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-x"]) end)
       assert code != 0
-      assert err =~ "outpost" || err =~ "422"
+      assert err =~ "worktree" || err =~ "422"
     end
 
     test "rig and --model forward in the request body" do

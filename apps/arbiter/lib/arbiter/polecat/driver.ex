@@ -34,7 +34,7 @@ defmodule Arbiter.Polecat.Driver do
     - `:completed` → close the bead, optionally cleanup worktree, stop.
     - `:failed` → log, stop (bead remains `:in_progress` for inspection).
     - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
-      (`:awaiting_review` is the brief window after the acolyte's `arb done`
+      (`:awaiting_review` is the brief window after the worker's `arb done`
       opens an MR; the Warden, not the Driver, drives it to terminal).
 
   ## Shared lifecycle
@@ -150,8 +150,8 @@ defmodule Arbiter.Polecat.Driver do
         {:stop, :normal, state}
 
       %{status: status} when status in [:awaiting_tribunal, :awaiting_review] ->
-        # bd-7b46wd: the tick budget was spent on active acolyte work, but the
-        # acolyte has since handed off to the Tribunal (review gate) or the
+        # bd-7b46wd: the tick budget was spent on active worker work, but the
+        # worker has since handed off to the Tribunal (review gate) or the
         # Warden (merge poller). Both own the terminal transition and have
         # their own watchdogs, so giving up here would strand a bead that is
         # legitimately mid-merge. Keep waiting for :completed rather than
@@ -189,7 +189,7 @@ defmodule Arbiter.Polecat.Driver do
         {:noreply, %{state | ticks: state.ticks + 1}}
 
       %{status: status} when status in [:awaiting_tribunal, :awaiting_review] ->
-        # :awaiting_tribunal — a distinct reviewer acolyte (Tribunal) is
+        # :awaiting_tribunal — a distinct reviewer worker (Tribunal) is
         # evaluating the diff; it will report a verdict that merges or parks.
         # :awaiting_review — the Warden is polling the forge for merge/approval;
         # it drives the terminal transition, not the Driver.

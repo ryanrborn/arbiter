@@ -290,14 +290,14 @@ defmodule ArbiterCli.Cmd.Restart do
     end
   end
 
-  # ---- acolyte-session guard ---------------------------------------------
+  # ---- worker-session guard ---------------------------------------------
 
   @doc """
-  Abort with an error when the calling process is itself inside an acolyte
+  Abort with an error when the calling process is itself inside a worker
   session (i.e. `ARB_ACOLYTE_BEAD_ID` is set in the environment).
 
-  An acolyte must never be able to bounce or kill the live orchestrating
-  server — doing so would kill the polecat that owns the acolyte and leave
+  A worker must never be able to bounce or kill the live orchestrating
+  server — doing so would kill the polecat that owns the worker and leave
   the bead stuck. Shared with `arb update` (deploy), `arb start`, and
   `arb install-service`.
   """
@@ -306,10 +306,10 @@ defmodule ArbiterCli.Cmd.Restart do
     case System.get_env("ARB_ACOLYTE_BEAD_ID") do
       id when is_binary(id) and id != "" ->
         Output.die(
-          "this command cannot be run from inside an acolyte session",
-          "Bead #{id} is the active acolyte. Running arb restart/update/start/install-service\n" <>
-            "from within an acolyte would kill the orchestrating server and leave the bead stuck.\n" <>
-            "Run this command from a normal shell outside the acolyte worktree."
+          "this command cannot be run from inside a worker session",
+          "Bead #{id} is the active worker. Running arb restart/update/start/install-service\n" <>
+            "from within a worker would kill the orchestrating server and leave the bead stuck.\n" <>
+            "Run this command from a normal shell outside the worker worktree."
         )
 
       _ ->
@@ -319,8 +319,8 @@ defmodule ArbiterCli.Cmd.Restart do
 
   # ---- active-work guard -------------------------------------------------
 
-  # Statuses that mean a Claude acolyte is actively spending tokens and has an
-  # outpost (worktree) that would be abandoned if the server is bounced now.
+  # Statuses that mean a Claude worker is actively spending tokens and has a
+  # worktree that would be abandoned if the server is bounced now.
   @active_statuses ~w(running awaiting awaiting_tribunal awaiting_review)
 
   @doc """
@@ -346,8 +346,8 @@ defmodule ArbiterCli.Cmd.Restart do
             end)
 
           Output.die(
-            "#{length(active)} acolyte(s) are actively working",
-            "Restarting now kills in-flight work and abandons their outposts and token spend.\n" <>
+            "#{length(active)} worker(s) are actively working",
+            "Restarting now kills in-flight work and abandons their worktrees and token spend.\n" <>
               "Active:\n" <>
               list <>
               "\nPass --force to override."

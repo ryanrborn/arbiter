@@ -372,7 +372,7 @@ defmodule Arbiter.Mergers.Gitlab do
   # ---- Internals: duplicate-MR adoption ------------------------------------
 
   # GitLab returns 422 with a message list containing "another open merge
-  # request already exists for this source branch" when the acolyte created
+  # request already exists for this source branch" when the worker created
   # the MR itself (via `glab mr create`) before the merger fired. Match
   # case-insensitively against the canonical substring.
   defp duplicate_mr_error?(%{"message" => messages}) when is_list(messages) do

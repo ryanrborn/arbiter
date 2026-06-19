@@ -72,15 +72,6 @@ defmodule ArbiterCli.Main do
       arb version
       arb help
 
-  ## Vernacular aliases
-
-  Resources are neutral base terms; the active workspace's vernacular layers
-  themed names on top as aliases. The default (Sith) vocabulary maps
-  `worker → polecat`, `issue → bead`, `repo → warship`, and
-  `dispatch → sling`, so `arb polecat list`, `arb bead show <id>`,
-  `arb warship list`, and `arb sling <id>` all resolve
-  to their canonical counterparts. See `arb help vernacular`.
-
   ## Global flags
 
       --json     Emit machine-readable JSON (default is human-readable text)
@@ -96,9 +87,7 @@ defmodule ArbiterCli.Main do
 
   # Pre-`arb <resource> <verb>` flat commands, mapped to their new canonical
   # form. Each still runs (we dispatch to the new handler) but prints a
-  # one-line note pointing at the new grammar. Themed names (`polecat`,
-  # `warship`, `bead`, `sling`) are NOT here — they resolve through
-  # the vernacular alias system and are not deprecated.
+  # one-line note pointing at the new grammar.
   @legacy %{
     "list" => {"issue", ["list"]},
     "show" => {"issue", ["show"]},
@@ -117,7 +106,6 @@ defmodule ArbiterCli.Main do
     "inbox" => {"message", ["inbox"]},
     "notify" => {"message", ["notify"]},
     "msg" => {"message", ["send"]},
-    "warships" => {"repo", ["list"]},
     "install-cli" => {"install", ["cli"]},
     "install-service" => {"install", ["service"]}
   }
@@ -203,8 +191,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
-  # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`
-  # (the Sith label "sling" aliases to it).
+  # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`.
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
@@ -212,73 +199,10 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("version", args), do: ArbiterCli.Cmd.Version.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
-  # `arb help [vernacular]`
-  defp help(["vernacular" | _]) do
-    IO.puts(vernacular_help())
-    emit_vernacular_verbs()
-    ArbiterCli.Output.halt(0)
-  end
-
   defp help(_), do: usage_and_exit(0)
 
   defp usage_and_exit(code) do
     IO.puts(@moduledoc)
-    emit_vernacular_verbs()
     ArbiterCli.Output.halt(code)
-  end
-
-  @vernacular_help """
-  Vernacular — themed vocabularies as aliases
-  ===========================================
-
-  Every resource has a neutral canonical name; the active workspace's
-  vernacular maps a themed label onto it. Themed labels resolve to the
-  canonical resource automatically (no per-alias config):
-
-      canonical   default (Sith) label    example
-      ---------   --------------------    -------------------------------
-      worker      polecat                 arb polecat list  → arb worker list
-      issue       bead                    arb bead show     → arb issue show
-      repo        warship                 arb warship list  → arb repo list
-      dispatch    sling                   arb sling <id>    → arb issue dispatch <id>
-
-  ## The `sith` preset
-
-  The full Sith lexicon is shipped as a named preset. Apply it to the global
-  vernacular to theme prose and dashboards (Admiral, Acolyte, Directive,
-  Campaign, …) on top of the resource aliases above:
-
-      {
-        "coordinator": "Admiral",  "worker": "Acolyte",
-        "issue": "Directive",      "epic": "Campaign",
-        "repo": "Warship",         "dispatch": "Sling",
-        "merge_queue": "Reclamation", "monitor": "Inquisitor",
-        "watchdog": "Grand Moff"
-      }
-
-  PUT it to /api/settings/vernacular, or set it from the dashboard's
-  vernacular editor. Any installation can opt into its own lexicon the same
-  way; the canonical resource names never change.
-  """
-
-  defp vernacular_help, do: @vernacular_help
-
-  # Surface the active workspace's vernacular command aliases so users see the
-  # themed verbs they can type (e.g. `arb polecat` → `arb worker`). Silently
-  # omitted when the workspace can't be reached and the defaults are empty.
-  defp emit_vernacular_verbs do
-    case ArbiterCli.AliasResolver.verb_aliases() do
-      aliases when map_size(aliases) == 0 ->
-        :ok
-
-      aliases ->
-        IO.puts("Vernacular aliases (active workspace):")
-
-        aliases
-        |> Enum.sort()
-        |> Enum.each(fn {alias, canonical} ->
-          IO.puts("    arb #{alias}  (alias for `arb #{canonical}`)")
-        end)
-    end
   end
 end

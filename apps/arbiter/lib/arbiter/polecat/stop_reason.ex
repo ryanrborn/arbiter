@@ -1,8 +1,8 @@
 defmodule Arbiter.Polecat.StopReason do
   @moduledoc """
-  Classify *why* an acolyte's agent subprocess stopped.
+  Classify *why* an worker's agent subprocess stopped.
 
-  This module is the **classification** half of stalled-acolyte detection
+  This module is the **classification** half of stalled-worker detection
   (bd-awi4nw). Detection itself keys on **process/port liveness** — the polecat
   learns the subprocess is gone from the Erlang port's `{:exit_status, n}`
   message (or, for a silent hang, from a no-output watchdog), never from
@@ -31,7 +31,7 @@ defmodule Arbiter.Polecat.StopReason do
       flag-rejection proof case (`unknown option --reasoning-effort` → immediate
       non-zero exit) lands here unless its stderr matches a more specific
       signature.
-    * `:exited_without_done` — clean exit (status 0) but the acolyte never
+    * `:exited_without_done` — clean exit (status 0) but the worker never
       emitted `arb done`. It quit early without completing the bead.
     * `:stalled` — no exit at all; the subprocess is alive but produced no
       output within the watchdog window (caller passes `exit_status: nil`).
@@ -146,7 +146,7 @@ defmodule Arbiter.Polecat.StopReason do
         %__MODULE__{
           category: :rate_limited,
           summary: "agent was rate-limited / the API was overloaded",
-          remediation: "Usually transient — retry with backoff, or reduce concurrent acolytes.",
+          remediation: "Usually transient — retry with backoff, or reduce concurrent workers.",
           exit_status: exit_status,
           signal: signal
         }
@@ -156,7 +156,7 @@ defmodule Arbiter.Polecat.StopReason do
           category: :stalled,
           summary: "agent produced no output within the watchdog window (possible hang)",
           remediation:
-            "Inspect the acolyte's transcript; if genuinely hung, stop and re-sling the bead.",
+            "Inspect the worker's transcript; if genuinely hung, stop and re-sling the bead.",
           exit_status: nil,
           signal: nil
         }
@@ -176,7 +176,7 @@ defmodule Arbiter.Polecat.StopReason do
           category: :exited_without_done,
           summary: "agent exited cleanly but never signalled `arb done` (quit before completing)",
           remediation:
-            "The acolyte stopped early without finishing the bead. Review the transcript, " <>
+            "The worker stopped early without finishing the bead. Review the transcript, " <>
               "then re-sling.",
           exit_status: 0,
           signal: nil

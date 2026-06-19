@@ -6,7 +6,7 @@ defmodule Arbiter.Polecats.Reconciler do
   stamps the terminal status (`:completed` / `:failed`) when it stops. If the
   node dies between those two writes — a crash, a hard restart — the row is left
   `:running` forever. `arb prime` tracks live processes, so it correctly shows
-  no active acolytes, but the durable history lies: it claims work is still in
+  no active workers, but the durable history lies: it claims work is still in
   flight when the process that owned it is long gone.
 
   This module sweeps those orphans. A `:running` row whose `bead_id` has no live
@@ -18,7 +18,7 @@ defmodule Arbiter.Polecats.Reconciler do
 
   Liveness is keyed off the LOCAL process registry, which is empty on a fresh
   boot — so this sweep is only correct on the *one* canonical instance per DB.
-  A second instance booting against the same DB (e.g. an acolyte running
+  A second instance booting against the same DB (e.g. an worker running
   `mix phx.server` / `iex -S mix` / `mix run` while the real server is up) has
   an empty registry too, so it would mistake the primary instance's live runs
   for orphans and fail them. The boot path therefore gates the sweep on
@@ -39,7 +39,7 @@ defmodule Arbiter.Polecats.Reconciler do
   alias Arbiter.Polecats.Run
 
   # The failure_reason stamped onto reconciled orphans. Distinct, greppable,
-  # and human-legible on the dashboard's "Completed Acolytes" view.
+  # and human-legible on the dashboard's "Completed Workers" view.
   @failure_reason "server restarted"
 
   @doc """

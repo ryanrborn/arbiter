@@ -101,7 +101,7 @@ defmodule Arbiter.Mergers.Merger do
   @typedoc """
   Aggregated human PR-side review feedback (bd-95lsjb). Returned by
   `list_review_feedback/1` and consumed by the Refinery to drive an
-  auto-revise pass on the existing outpost.
+  auto-revise pass on the existing worktree.
 
     * `:changes_requested` — true when the latest verdict (per reviewer) on
       the PR is CHANGES_REQUESTED.

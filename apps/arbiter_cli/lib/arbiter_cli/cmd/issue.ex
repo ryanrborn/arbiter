@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Issue do
   @moduledoc """
-  `arb issue <verb>` — the issue (vernacular: "bead") resource.
+  `arb issue <verb>` — the issue resource.
 
       arb issue list      [--status ...] [--type ...] [--priority ...]
                           [--labels ...] [--tracker]
@@ -18,9 +18,6 @@ defmodule ArbiterCli.Cmd.Issue do
       arb issue sync      [--dry]
       arb issue ready
       arb issue dispatch  <id> [<rig>] [--with-claude] [--model <name>]
-
-  In the default (Sith) vernacular `issue` reads as "bead" and `dispatch`
-  reads as "sling", so `arb bead show <id>` and `arb sling <id>` resolve here.
   """
 
   alias ArbiterCli.Cmd

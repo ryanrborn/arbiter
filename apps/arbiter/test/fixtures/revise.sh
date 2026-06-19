@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture: an IMPLEMENTER acolyte for the Stage 2 revise-and-rediscuss loop
+# Fixture: an IMPLEMENTER worker for the Stage 2 revise-and-rediscuss loop
 # (bd-3jm700). Stands in for a real `claude --print` implementer that addresses
 # the reviewer's findings between review rounds. It prints a short, recognisable
 # "I addressed the findings" transcript (captured by the Tribunal and posted back

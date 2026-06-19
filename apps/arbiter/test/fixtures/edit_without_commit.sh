@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture for bd-ofql8k: simulates the root-cause failure mode. The acolyte
+# Fixture for bd-ofql8k: simulates the root-cause failure mode. The worker
 # EDITS a file in its worktree correctly, prints "arb done"... but never
 # `git commit`s, so HEAD stays at the base branch with the work uncommitted.
 # Before bd-ofql8k the Tribunal then diffed `base..HEAD`, saw empty, and

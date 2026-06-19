@@ -2,7 +2,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
   @moduledoc """
   End-to-end proof for bd-7qq81g: a `--with-claude` sling on the default
   (Direct) domain must integrate the branch into the target line when the
-  acolyte finishes — a real `git merge --no-ff` commit on `main` — rather than
+  worker finishes — a real `git merge --no-ff` commit on `main` — rather than
   closing the bead without merging.
   """
 
@@ -98,7 +98,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
       if Process.alive?(result.polecat_pid), do: GenServer.stop(result.polecat_pid, :normal)
     end)
 
-    # Wait for the whole path: acolyte done → Direct merge → bead closes.
+    # Wait for the whole path: worker done → Direct merge → bead closes.
     # We use the bead's DB status (not polecat in-memory state) because the
     # StopPolecat after-action kills the polecat process right after close_bead
     # returns — checking Polecat.state/1 would raise if we arrive slightly late.
@@ -110,7 +110,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     {merges, 0} = git(["rev-list", "--merges", "--count", "main"], repo)
     assert String.trim(merges) == "1"
 
-    # ...and the acolyte's work landed on main via that merge.
+    # ...and the worker's work landed on main via that merge.
     {tree, 0} = git(["ls-tree", "--name-only", "main"], repo)
     assert tree =~ "acolyte_work.txt"
   end

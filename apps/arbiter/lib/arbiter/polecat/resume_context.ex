@@ -1,9 +1,9 @@
 defmodule Arbiter.Polecat.ResumeContext do
   @moduledoc """
-  Build the "work so far" briefing for a **resumed** acolyte (bd-auma3z).
+  Build the "work so far" briefing for a **resumed** worker (bd-auma3z).
 
-  When an acolyte is stopped mid-work (token exhaustion, crash, kill) its
-  outpost — the per-bead git worktree — is preserved on disk: any commits it
+  When a worker is stopped mid-work (token exhaustion, crash, kill) its
+  per-bead git worktree is preserved on disk: any commits it
   made are on the branch, and any in-flight edits sit uncommitted in the tree.
   Re-slinging from scratch would discard that history from the agent's context
   and risk redoing or duplicating completed steps.
@@ -36,7 +36,7 @@ defmodule Arbiter.Polecat.ResumeContext do
   alias Arbiter.Beads.Issue
   alias Arbiter.Polecat.Worktree
 
-  # Cap the embedded `git diff HEAD` so a resumed acolyte that left a huge
+  # Cap the embedded `git diff HEAD` so a resumed worker that left a huge
   # uncommitted change doesn't produce a multi-megabyte prompt. The agent can
   # always run `git diff` itself in the worktree for the full picture; the
   # briefing only needs to orient it.
@@ -64,13 +64,13 @@ defmodule Arbiter.Polecat.ResumeContext do
 
   defp render(%Issue{id: id}, worktree_path, base_branch) do
     """
-    You are RESUMING work on bead #{id}. A prior acolyte was working this bead
+    You are RESUMING work on bead #{id}. A prior worker was working this bead
     in this same git worktree (your current directory) but stopped before
     finishing. Its work is preserved here — DO NOT start over or redo steps that
     are already done. Read the state below, verify it, and continue from there.
 
     #{work_so_far(worktree_path, base_branch)}
-    Continue from where the prior acolyte left off: finish the remaining work,
+    Continue from where the prior worker left off: finish the remaining work,
     commit it on this branch, and complete the bead as usual. If commits or
     uncommitted changes above already satisfy part of the acceptance, do not
     redo them — build on them.
@@ -101,16 +101,16 @@ defmodule Arbiter.Polecat.ResumeContext do
     ## Work already committed (git log #{base_branch}..HEAD)
     #{commits_block(worktree_path, base_branch)}
 
-    ## Uncommitted work-in-progress in the outpost
+    ## Uncommitted work-in-progress in the worktree
     #{uncommitted_block(worktree_path)}
     """
   end
 
-  # `git log --oneline <base>..HEAD` — the commits the prior acolyte made on the
+  # `git log --oneline <base>..HEAD` — the commits the prior worker made on the
   # per-bead branch since it diverged from the integration branch.
   defp commits_block(worktree_path, base_branch) do
     case run_git(["log", "--oneline", "#{base_branch}..HEAD"], worktree_path) do
-      {:ok, ""} -> "(no commits yet — the prior acolyte committed nothing)"
+      {:ok, ""} -> "(no commits yet — the prior worker committed nothing)"
       {:ok, out} -> fenced(out)
       {:error, _} -> "(could not read git log)"
     end

@@ -1,6 +1,6 @@
 defmodule Arbiter.Trackers.Sync do
   @moduledoc """
-  Loud, Summons-raising orchestration for external-tracker lifecycle sync.
+  Loud, escalation-raising orchestration for external-tracker lifecycle sync.
 
   Two entry points, both tracker-agnostic:
 
@@ -12,8 +12,8 @@ defmodule Arbiter.Trackers.Sync do
 
     * `notify_failure/3` — the shared failure surface. The original incident
       (VR-17911 never auto-transitioned) was invisible because tracker errors
-      were silently swallowed. This logs loudly **and** raises an Admiral
-      Summons so a `status_map` / workflow mismatch can't hide.
+      were silently swallowed. This logs loudly **and** raises an
+      escalation so a `status_map` / workflow mismatch can't hide.
 
   ## Benign vs. loud
 
@@ -21,7 +21,7 @@ defmodule Arbiter.Trackers.Sync do
   lifecycle event (e.g. GitHub has no "In Code Review") returns
   `:status_unmapped` / `:transition_not_found` / `:not_supported` — we skip
   quietly. A *mapped* status that can't be reached (`:no_transition_path`) or a
-  real wire failure (auth, 5xx, network) is loud + Summons. See `loud?/1`.
+  real wire failure (auth, 5xx, network) is loud + escalation. See `loud?/1`.
   """
 
   require Logger
@@ -72,7 +72,7 @@ defmodule Arbiter.Trackers.Sync do
 
   @doc """
   Transition the bead's external item toward the status mapped from `event`,
-  surfacing any genuine failure loudly (log + Summons). Returns `:ok` on
+  surfacing any genuine failure loudly (log + escalation). Returns `:ok` on
   success or a benign skip, `{:error, reason}` only after escalating a loud
   failure (so callers that care can react; most ignore it).
 
@@ -102,14 +102,14 @@ defmodule Arbiter.Trackers.Sync do
   end
 
   @doc """
-  Log loudly and raise an Admiral Summons for a tracker-sync failure. The
+  Log loudly and raise an escalation for a tracker-sync failure. The
   single place a swallowed-error regression would have to get past.
   """
   @spec notify_failure(Issue.t(), atom(), term()) :: :ok
   def notify_failure(%Issue{} = issue, event, reason) do
     Logger.error(
       "Trackers.Sync: FAILED to sync bead=#{issue.id} tracker=#{issue.tracker_type} " <>
-        "ref=#{issue.tracker_ref} on #{event}: #{describe(reason)} — raising Admiral Summons. " <>
+        "ref=#{issue.tracker_ref} on #{event}: #{describe(reason)} — raising escalation. " <>
         "Reconcile the workspace status_map / transition_graph with the tracker workflow."
     )
 
@@ -177,7 +177,7 @@ defmodule Arbiter.Trackers.Sync do
   @benign_kinds ~w(status_unmapped transition_not_found not_supported config_missing)a
 
   @doc false
-  # A failure worth a Summons vs. a benign "this tracker doesn't model it" skip.
+  # A failure worth an escalation vs. a benign "this tracker doesn't model it" skip.
   def loud?(:not_supported), do: false
   def loud?(%{kind: kind}) when kind in @benign_kinds, do: false
   def loud?(_), do: true

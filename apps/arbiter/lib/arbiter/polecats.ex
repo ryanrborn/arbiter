@@ -5,7 +5,7 @@ defmodule Arbiter.Polecats do
   An active polecat is an ephemeral GenServer — once it stops, its state is
   gone. `Arbiter.Polecats.Run` is the persistent record of what happened: who
   worked which bead, with what output, and how it ended. It survives node
-  restarts and powers the "Completed Acolytes" view.
+  restarts and powers the "Completed Workers" view.
 
   See `Arbiter.Polecats.Run` for the schema. The polecat GenServer writes
   through this domain on init (status :running) and on terminal transitions
