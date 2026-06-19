@@ -40,7 +40,9 @@ defmodule ArbiterCli.WorkspaceTest do
       prev = System.get_env("ARB_WORKSPACE")
 
       on_exit(fn ->
-        if prev, do: System.put_env("ARB_WORKSPACE", prev), else: System.delete_env("ARB_WORKSPACE")
+        if prev,
+          do: System.put_env("ARB_WORKSPACE", prev),
+          else: System.delete_env("ARB_WORKSPACE")
       end)
 
       :ok
@@ -62,8 +64,10 @@ defmodule ArbiterCli.WorkspaceTest do
         # were ignored, the default workspace's endpoint would be hit instead
         # and this route would 500 (unmatched).
         {{"get", "/api/workspaces/ws-leo/tracker/issues"},
-         {%{"supported" => true, "data" => [%{"ref" => "VR-1", "title" => "Upstream", "status" => "open"}]},
-          200}}
+         {%{
+            "supported" => true,
+            "data" => [%{"ref" => "VR-1", "title" => "Upstream", "status" => "open"}]
+          }, 200}}
       ])
 
       {out, _err, code} =

@@ -459,7 +459,9 @@ defmodule Arbiter.Polecat.SlingTest do
 
       # Verify the buggy state: .mcp.json is tracked despite being in .gitignore
       {tracked_before, 0} = System.cmd("git", ["-C", repo, "ls-files"])
-      assert String.contains?(tracked_before, ".mcp.json"), "Setup: .mcp.json should be tracked in the test repo"
+
+      assert String.contains?(tracked_before, ".mcp.json"),
+             "Setup: .mcp.json should be tracked in the test repo"
 
       # Now apply the fix: untrack .mcp.json with git rm --cached
       # This removes .mcp.json from git's index but leaves the file in the working tree
@@ -473,8 +475,12 @@ defmodule Arbiter.Polecat.SlingTest do
 
       # Verify the fix: .mcp.json is no longer tracked and not in the working tree
       {tracked_after, 0} = System.cmd("git", ["-C", repo, "ls-files"])
-      refute String.contains?(tracked_after, ".mcp.json"), "After fix: .mcp.json should be untracked"
-      refute File.exists?(mcp_path), "After fix: .mcp.json file should be removed from working tree"
+
+      refute String.contains?(tracked_after, ".mcp.json"),
+             "After fix: .mcp.json should be untracked"
+
+      refute File.exists?(mcp_path),
+             "After fix: .mcp.json file should be removed from working tree"
 
       Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "gic-wt"))
       Application.put_env(:arbiter, :rig_paths, %{"gic/rig" => repo})
@@ -503,12 +509,14 @@ defmodule Arbiter.Polecat.SlingTest do
 
       # Critical assertion: after the fix, .mcp.json must NOT be in git ls-files.
       {wt_tracked, 0} = System.cmd("git", ["-C", wt, "ls-files"])
+
       refute String.contains?(wt_tracked, ".mcp.json"),
              "REGRESSION: .mcp.json is tracked in worktree. After the fix, it should be untracked and ignored."
 
       # The worktree status must be clean. The injected .mcp.json is ignored,
       # so it should not appear in git status.
       {status_output, _status_code} = System.cmd("git", ["-C", wt, "status", "--porcelain"])
+
       refute String.contains?(status_output, ".mcp.json"),
              "REGRESSION: .mcp.json shows in git status. After the fix, the injected file must be ignored and clean."
     end
