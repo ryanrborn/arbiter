@@ -436,9 +436,14 @@ defmodule Arbiter.Trackers.Shortcut do
   defp post_comment(ref, text) do
     with {:ok, cfg} <- Config.resolve() do
       case request(cfg, :post, "/stories/#{ref}/comments", json: %{"text" => text}) do
-        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 -> :ok
-        {:ok, %Req.Response{status: status_code, body: body}} -> {:error, http_error(status_code, body)}
-        {:error, exception} -> {:error, transport_error(exception)}
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
       end
     end
   end
@@ -454,9 +459,14 @@ defmodule Arbiter.Trackers.Shortcut do
       new_ids = Enum.uniq([member_id | current_ids])
 
       case request(cfg, :put, "/stories/#{ref}", json: %{"owner_ids" => new_ids}) do
-        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 -> :ok
-        {:ok, %Req.Response{status: status_code, body: body}} -> {:error, http_error(status_code, body)}
-        {:error, exception} -> {:error, transport_error(exception)}
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
       end
     end
   end
