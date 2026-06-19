@@ -18,6 +18,7 @@ defmodule Arbiter.MCP.Catalog do
   | `bead_ready` | coordinator | `Issue.ready/1` |
   | `convoy_status` | polecat, coordinator | `Ash.get(Convoy, id)` + calcs |
   | `inbox_check` | polecat, coordinator | `Messages.inbox/2` + `mark_read` |
+  | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (Admiral mailbox) |
   | `workspace_show` | polecat, coordinator | `Ash.get(Workspace, id)` |
   | `bead_update_progress` | polecat, coordinator | `Ash.update(issue, …, action: :update)` |
 
@@ -134,6 +135,28 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.inbox_check/2
+    },
+    %{
+      name: "coordinator_inbox",
+      tiers: @coordinator,
+      description:
+        "Read (and mark read) the Admiral escalation mailbox for the workspace — the structured " <>
+          "replacement for `arb message inbox` / `arb inbox`. Lists all unread messages where " <>
+          "`to_ref == \"admiral\"` and marks them read, so the dashboard unread count drops to 0. " <>
+          "Optional `clear: true` also destroys the already-read tail (mirrors `arb inbox clear`). " <>
+          "Coordinator only.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "clear" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also destroy the already-read tail after listing (mirrors `arb inbox clear`). Default false."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.coordinator_inbox/2
     },
     %{
       name: "workspace_show",

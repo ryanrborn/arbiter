@@ -114,6 +114,55 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "coordinator_inbox/2" do
+    test "lists unread Admiral messages and marks them read", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Summons!"})
+
+      assert {:ok, %{messages: [msg], count: 1, cleared: 0}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert msg.body == "Summons!"
+      assert msg.to_ref == "admiral"
+
+      # Second call is empty — the first marked them read.
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "clear: true destroys already-read messages (including the ones just marked read)", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
+
+      # First call: lists "first" and marks it read.
+      {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      # Send a second unread message.
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
+
+      # With clear: true — lists "second" (count: 1), marks it read, then clears all already-read
+      # messages. "first" and "second" are both read at this point, so cleared: 2.
+      assert {:ok, %{count: 1, cleared: 2}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{"clear" => true})
+    end
+
+    test "does not surface messages from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-other", prefix: "cio"})
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "admiral", body: "foreign"})
+
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
+    end
+
+    test "polecat tier is denied (catalog-level gating)", ctx do
+      assert {:rpc_error, -32_003, message} =
+               Catalog.call(ctx.polecat, "coordinator_inbox", %{})
+
+      assert message =~ "not permitted"
+    end
+  end
+
   describe "workspace_show/2" do
     test "returns the scope's own workspace config + resolved security posture", ctx do
       assert {:ok, data} = Tools.workspace_show(ctx.polecat, %{})

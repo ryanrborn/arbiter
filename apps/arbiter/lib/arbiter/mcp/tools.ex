@@ -115,6 +115,35 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- coordinator_inbox --------------------------------------------------
+
+  @doc """
+  The unread Admiral escalation mailbox for the bound workspace, marked read on
+  return — the structured replacement for `arb message inbox` / `arb inbox`.
+  Coordinator only; the polecat tier is denied at the catalog level.
+
+  Lists all unread messages where `to_ref == "admiral"` in the workspace and
+  marks each one read, so the dashboard unread count drops to 0. Optional
+  `clear: true` also destroys the already-read tail (`Message.clear_read/2`),
+  mirroring `arb inbox clear`.
+  """
+  @spec coordinator_inbox(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def coordinator_inbox(%Scope{workspace_id: ws_id}, args) do
+    with {:ok, clear} <- fetch_bool(args, "clear", false) do
+      messages = Message.inbox("admiral", workspace_id: ws_id)
+      _ = Enum.each(messages, &Message.mark_read/1)
+
+      cleared = if clear, do: Message.clear_read("admiral", workspace_id: ws_id), else: 0
+
+      {:ok,
+       %{
+         messages: Enum.map(messages, &serialize_message/1),
+         count: length(messages),
+         cleared: cleared
+       }}
+    end
+  end
+
   # ---- workspace_show -----------------------------------------------------
 
   @doc """
