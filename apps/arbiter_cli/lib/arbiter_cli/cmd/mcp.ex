@@ -2,16 +2,17 @@ defmodule ArbiterCli.Cmd.Mcp do
   @moduledoc """
   `arb mcp <verb>` — manage MCP scope tokens.
 
-      arb mcp token mint --tier coordinator [--workspace <id>] [--ttl <seconds>] [--json]
-          Mint a coordinator-tier scope token for the given workspace.
-          Default workspace: active workspace (from ARB_WORKSPACE or "default").
-          Default TTL: 2592000 seconds (30 days).
+      arb mcp token mint --tier coordinator [--ttl <seconds>] [--json]
+          Mint a coordinator-tier scope token. Coordinator tokens are
+          workspace-agnostic: one token operates across every workspace on the
+          installation (pass `--workspace` / a `workspace` param per call to
+          target a specific one). Default TTL: 2592000 seconds (30 days).
 
       arb mcp token verify <token> [--json]
           Decode and display the claims from a scope token (expiry, tier, workspace).
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{Client, Output}
 
   @default_ttl 2_592_000
 
@@ -53,7 +54,7 @@ defmodule ArbiterCli.Cmd.Mcp do
     else
       {opts, _rest, _invalid} =
         OptionParser.parse(argv,
-          switches: [tier: :string, workspace: :string, ttl: :integer, json: :boolean]
+          switches: [tier: :string, ttl: :integer, json: :boolean]
         )
 
       tier = opts[:tier] || "coordinator"
@@ -65,18 +66,8 @@ defmodule ArbiterCli.Cmd.Mcp do
       mode = if opts[:json], do: :json, else: :text
       ttl = opts[:ttl] || @default_ttl
 
-      workspace_id =
-        case opts[:workspace] do
-          nil ->
-            Workspace.id_or_halt()
-
-          id ->
-            id
-        end
-
-      body = %{"workspace_id" => workspace_id, "ttl" => ttl}
-
-      case Client.post("/api/mcp/tokens", body) do
+      # Coordinator tokens are workspace-agnostic — no workspace is bound at mint.
+      case Client.post("/api/mcp/tokens", %{"ttl" => ttl}) do
         {:ok, resp} -> emit_mint(resp, mode)
         {:error, err} -> Output.die(err)
       end
@@ -110,10 +101,14 @@ defmodule ArbiterCli.Cmd.Mcp do
   defp emit_mint(resp, :text) do
     IO.puts(resp["token"])
     IO.puts(:stderr, "tier:         #{resp["tier"]}")
-    IO.puts(:stderr, "workspace_id: #{resp["workspace_id"]}")
+    IO.puts(:stderr, "workspace:    #{workspace_label(resp["workspace_id"])}")
     IO.puts(:stderr, "expires_in:   #{resp["expires_in"]}s (#{ttl_human(resp["expires_in"])})")
     IO.puts(:stderr, "server_url:   #{resp["server_url"]}")
   end
+
+  defp workspace_label(nil), do: "any (workspace-agnostic)"
+  defp workspace_label(""), do: "any (workspace-agnostic)"
+  defp workspace_label(id), do: id
 
   defp emit_verify(%{"valid" => false, "reason" => reason}, :json) do
     IO.puts(Jason.encode!(%{"valid" => false, "reason" => reason}))
@@ -131,7 +126,7 @@ defmodule ArbiterCli.Cmd.Mcp do
   defp emit_verify(resp, :text) do
     IO.puts("valid:        true")
     IO.puts("tier:         #{resp["tier"]}")
-    IO.puts("workspace_id: #{resp["workspace_id"]}")
+    IO.puts("workspace:    #{workspace_label(resp["workspace_id"])}")
 
     if resp["bead_id"] do
       IO.puts("bead_id:      #{resp["bead_id"]}")
