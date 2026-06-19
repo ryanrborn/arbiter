@@ -99,7 +99,7 @@ defmodule ArbiterWeb.PolecatIndexLive do
   defp matches_status?(%{status: :running}, :running), do: true
 
   defp matches_status?(%{status: status}, :awaiting),
-    do: status in [:awaiting, :awaiting_review, :awaiting_tribunal]
+    do: status in [:awaiting, :awaiting_review, :awaiting_review_gate]
 
   defp matches_status?(_p, _), do: false
 
@@ -214,7 +214,7 @@ defmodule ArbiterWeb.PolecatIndexLive do
   defp status_dot_class(:running), do: "bg-info"
   defp status_dot_class(:awaiting), do: "bg-warning"
   defp status_dot_class(:awaiting_review), do: "bg-warning"
-  defp status_dot_class(:awaiting_tribunal), do: "bg-warning"
+  defp status_dot_class(:awaiting_review_gate), do: "bg-warning"
   defp status_dot_class(:completed), do: "bg-success"
   defp status_dot_class(:failed), do: "bg-error"
   defp status_dot_class(_), do: "bg-base-content/30"
@@ -223,7 +223,7 @@ defmodule ArbiterWeb.PolecatIndexLive do
   defp polecat_status_class(:resuming), do: "badge-info"
   defp polecat_status_class(:running), do: "badge-info"
   defp polecat_status_class(:awaiting), do: "badge-warning"
-  defp polecat_status_class(:awaiting_tribunal), do: "badge-warning"
+  defp polecat_status_class(:awaiting_review_gate), do: "badge-warning"
   defp polecat_status_class(:awaiting_review), do: "badge-warning"
   defp polecat_status_class(:completed), do: "badge-success"
   defp polecat_status_class(:failed), do: "badge-error"
@@ -233,7 +233,7 @@ defmodule ArbiterWeb.PolecatIndexLive do
   defp polecat_status_label(:resuming), do: "Resuming"
   defp polecat_status_label(:running), do: "Running"
   defp polecat_status_label(:awaiting), do: "Awaiting"
-  defp polecat_status_label(:awaiting_tribunal), do: "In tribunal"
+  defp polecat_status_label(:awaiting_review_gate), do: "In review_gate"
   defp polecat_status_label(:awaiting_review), do: "Awaiting review"
   defp polecat_status_label(:completed), do: "Completed"
   defp polecat_status_label(:failed), do: "Failed"

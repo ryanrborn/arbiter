@@ -283,7 +283,7 @@ defmodule ArbiterCli.Cmd.Config do
   defp check_rig_paths(reasons, config) do
     case Map.fetch(config, "rig_paths") do
       {:ok, m} when is_map(m) and map_size(m) == 0 ->
-        ["rig_paths is empty — polecat sling cannot resolve a working dir" | reasons]
+        ["rig_paths is empty — polecat dispatch cannot resolve a working dir" | reasons]
 
       _ ->
         reasons

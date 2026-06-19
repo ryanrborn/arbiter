@@ -105,10 +105,10 @@ defmodule Arbiter.PolecatTest do
       assert {:error, :not_found} = Polecat.advance("nope-#{System.unique_integer()}", :load)
     end
 
-    # bd-d70whv: resling a failed polecat reuses the existing polecat record.
+    # bd-d70whv: redispatch a failed polecat reuses the existing polecat record.
     # advance/2 must transition :failed → :running so arb-done is processed
     # instead of being silently ignored by the guard in handle_info.
-    test "advance/2 from :failed → :running (resling a failed polecat)" do
+    test "advance/2 from :failed → :running (redispatch a failed polecat)" do
       {pid, _} = start_polecat()
       :ok = Polecat.advance(pid, :load)
       :ok = Polecat.fail(pid, :credentials_expired)

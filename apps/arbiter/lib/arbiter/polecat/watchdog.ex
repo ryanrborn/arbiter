@@ -1,10 +1,10 @@
-defmodule Arbiter.Polecat.Warden do
+defmodule Arbiter.Polecat.Watchdog do
   @moduledoc """
   Watchdog process for a polecat parked at `:awaiting_review`.
 
   When an worker finishes its work it opens a merge request and the paired
   `Arbiter.Polecat` transitions `:running -> :awaiting_review`, spawning one
-  Warden. The Warden polls `Arbiter.Mergers.get/1` on an interval and drives
+  Watchdog. The Watchdog polls `Arbiter.Mergers.get/1` on an interval and drives
   the polecat to its terminal state based on the MR's fate:
 
       MR merged           -> Polecat.complete(:merged)
@@ -13,9 +13,9 @@ defmodule Arbiter.Polecat.Warden do
                                           poll sees :merged, then complete
       MR closed/rejected  -> Polecat.fail({:mr_closed, ref})
 
-  One Warden supervises one polecat. It is started under
-  `Arbiter.Polecat.WardenSupervisor` (a `DynamicSupervisor`, `restart:
-  :temporary`) and monitors the polecat: if the polecat dies, the Warden
+  One Watchdog supervises one polecat. It is started under
+  `Arbiter.Polecat.WatchdogSupervisor` (a `DynamicSupervisor`, `restart:
+  :temporary`) and monitors the polecat: if the polecat dies, the Watchdog
   stops.
 
   ## Approval detection lives in one function
@@ -28,7 +28,7 @@ defmodule Arbiter.Polecat.Warden do
 
   Polling is the shipped mechanism. A future push path would add
   `POST /webhooks/gitlab` and `POST /webhooks/github` controllers that, on a
-  merge-request event, look up the Warden for the affected `mr_ref` and send
+  merge-request event, look up the Watchdog for the affected `mr_ref` and send
   it `{:mr_event, get_result}`. Because `classify/1` already encapsulates the
   approval logic, the webhook handler reuses it verbatim and the poll interval
   becomes a slow safety-net backstop rather than the primary trigger. No state
@@ -38,7 +38,7 @@ defmodule Arbiter.Polecat.Warden do
   ## Adapter config
 
   Hosted-forge adapters (GitLab) resolve host/project/token from the process
-  dictionary. The Warden runs in its own process, so it seeds that config via
+  dictionary. The Watchdog runs in its own process, so it seeds that config via
   `Arbiter.Mergers.prepare/1` in `init/1` (a no-op for `Direct`).
   """
 
@@ -57,8 +57,8 @@ defmodule Arbiter.Polecat.Warden do
   #
   # auto_merge OFF (human-merge lanes): :infinity — a human reviewer may take
   # hours or overnight. Failing the polecat after 30 min was a false negative
-  # (bd-akr4il, VR-17739). The Warden polls indefinitely until the MR is
-  # merged or closed. Override via workspace config["merge"]["warden_max_polls"].
+  # (bd-akr4il, VR-17739). The Watchdog polls indefinitely until the MR is
+  # merged or closed. Override via workspace config["merge"]["watchdog_max_polls"].
   @default_max_polls_auto 30
   @default_max_polls_manual :infinity
 
@@ -69,7 +69,7 @@ defmodule Arbiter.Polecat.Warden do
           | {:adapter, module()}
           | {:workspace, Arbiter.Beads.Workspace.t() | nil}
           | {:auto_merge, boolean()}
-          | {:via_tribunal, boolean()}
+          | {:via_review_gate, boolean()}
           | {:interval_ms, non_neg_integer()}
           | {:initial_delay_ms, non_neg_integer()}
           | {:max_polls, non_neg_integer()}
@@ -80,31 +80,31 @@ defmodule Arbiter.Polecat.Warden do
   # ---- public API ---------------------------------------------------------
 
   @doc """
-  Start a Warden under `Arbiter.Polecat.WardenSupervisor`.
+  Start a Watchdog under `Arbiter.Polecat.WatchdogSupervisor`.
 
   Required opts: `:bead_id`, `:polecat` (pid or bead_id), `:mr_ref`,
   `:adapter`. Optional:
 
     * `:workspace`
     * `:auto_merge` (default `false`)
-    * `:via_tribunal` (default `false`) — when true, the Tribunal gate has
-      already approved this MR; the Warden treats every non-terminal poll as
+    * `:via_review_gate` (default `false`) — when true, the ReviewGate gate has
+      already approved this MR; the Watchdog treats every non-terminal poll as
       `:approved` and forces auto-merge, so the merge fires on the first poll
       without waiting for a hosted-forge approval the gate never posts.
     * `:interval_ms` (default `#{@default_interval_ms}`)
     * `:initial_delay_ms` (default `0` — poll once promptly, then on the interval)
-    * `:max_polls` — consecutive `:pending` polls before the Warden escalates.
+    * `:max_polls` — consecutive `:pending` polls before the Watchdog escalates.
       Default is `#{@default_max_polls_auto}` when `auto_merge: true` (fail
       loudly — auto-merge should fire quickly) and `:infinity` when
       `auto_merge: false` (human-merge lanes; a human may take overnight or
-      longer, so the Warden parks rather than hard-fails). When a finite cap is
+      longer, so the Watchdog parks rather than hard-fails). When a finite cap is
       reached on a manual lane the polecat is **left parked** in
-      `:awaiting_review` and the Warden stops polling — it is NOT failed.
+      `:awaiting_review` and the Watchdog stops polling — it is NOT failed.
       Pass `:infinity` to disable the watchdog entirely.
   """
   @spec start(opts()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
-    DynamicSupervisor.start_child(Arbiter.Polecat.WardenSupervisor, {__MODULE__, opts})
+    DynamicSupervisor.start_child(Arbiter.Polecat.WatchdogSupervisor, {__MODULE__, opts})
   end
 
   @spec start_link(opts()) :: GenServer.on_start()
@@ -173,11 +173,11 @@ defmodule Arbiter.Polecat.Warden do
         workspace = Keyword.get(opts, :workspace)
         Mergers.prepare(workspace)
 
-        via_tribunal = Keyword.get(opts, :via_tribunal, false)
-        # A Tribunal-approved MR has no pending hosted-forge approval to wait
+        via_review_gate = Keyword.get(opts, :via_review_gate, false)
+        # A ReviewGate-approved MR has no pending hosted-forge approval to wait
         # for, so auto_merge is implicit. Honor any explicit override (for
         # tests) but default to true when the gate has approved.
-        auto_merge = Keyword.get(opts, :auto_merge, via_tribunal)
+        auto_merge = Keyword.get(opts, :auto_merge, via_review_gate)
 
         default_max_polls =
           if auto_merge, do: @default_max_polls_auto, else: @default_max_polls_manual
@@ -195,7 +195,7 @@ defmodule Arbiter.Polecat.Warden do
           adapter: adapter,
           workspace: workspace,
           auto_merge: auto_merge,
-          via_tribunal: via_tribunal,
+          via_review_gate: via_review_gate,
           interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
           max_polls: Keyword.get(opts, :max_polls, default_max_polls),
           poll_count: 0,
@@ -223,7 +223,7 @@ defmodule Arbiter.Polecat.Warden do
 
       {:error, reason} ->
         Logger.debug(
-          "Polecat.Warden: get/1 error for bead=#{state.bead_id} mr=#{state.mr_ref}: #{inspect(reason)}"
+          "Polecat.Watchdog: get/1 error for bead=#{state.bead_id} mr=#{state.mr_ref}: #{inspect(reason)}"
         )
 
         reschedule(state)
@@ -237,13 +237,13 @@ defmodule Arbiter.Polecat.Warden do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
-  # The Tribunal gate approves in-process — hosted-forge adapters never see
+  # The ReviewGate gate approves in-process — hosted-forge adapters never see
   # that approval on the PR/MR itself, so `classify/1` would forever return
   # `:pending`. When the polecat told us the gate already approved, treat any
   # non-terminal status as `:approved` so the auto-merge path fires on the
   # first poll. `:merged` / `:closed` still win because they're terminal facts
   # about the MR itself, not approval-state interpretation.
-  defp effective_outcome(%{via_tribunal: true} = _state, result) do
+  defp effective_outcome(%{via_review_gate: true} = _state, result) do
     case classify(result) do
       :pending -> :approved
       other -> other
@@ -258,13 +258,13 @@ defmodule Arbiter.Polecat.Warden do
   # apply_outcome/3, so the approval semantics stay in one place.
 
   defp apply_outcome(:merged, _result, state) do
-    Logger.info("Polecat.Warden: MR #{state.mr_ref} merged for bead=#{state.bead_id}")
+    Logger.info("Polecat.Watchdog: MR #{state.mr_ref} merged for bead=#{state.bead_id}")
     safe(fn -> Polecat.complete(state.polecat_pid, :merged) end)
     {:stop, :normal, state}
   end
 
   defp apply_outcome(:closed, _result, state) do
-    Logger.info("Polecat.Warden: MR #{state.mr_ref} closed for bead=#{state.bead_id}")
+    Logger.info("Polecat.Watchdog: MR #{state.mr_ref} closed for bead=#{state.bead_id}")
     safe(fn -> Polecat.fail(state.polecat_pid, {:mr_closed, state.mr_ref}) end)
     {:stop, :normal, state}
   end
@@ -273,7 +273,7 @@ defmodule Arbiter.Polecat.Warden do
     case safe_merge(state) do
       :ok ->
         Logger.info(
-          "Polecat.Warden: auto-merged approved MR #{state.mr_ref} for bead=#{state.bead_id}"
+          "Polecat.Watchdog: auto-merged approved MR #{state.mr_ref} for bead=#{state.bead_id}"
         )
 
         safe(fn -> Polecat.complete(state.polecat_pid, :merged) end)
@@ -283,7 +283,7 @@ defmodule Arbiter.Polecat.Warden do
         # Merge failed (race, branch conflict, transient). Stay parked and let
         # the next poll re-attempt rather than failing the bead outright.
         Logger.warning(
-          "Polecat.Warden: auto-merge failed for bead=#{state.bead_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry"
+          "Polecat.Watchdog: auto-merge failed for bead=#{state.bead_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry"
         )
 
         reschedule(state)
@@ -318,7 +318,7 @@ defmodule Arbiter.Polecat.Warden do
   rescue
     e ->
       Logger.debug(
-        "Polecat.Warden: pending-merge tracker sync raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+        "Polecat.Watchdog: pending-merge tracker sync raised for bead=#{state.bead_id}: #{Exception.message(e)}"
       )
 
       :ok
@@ -343,7 +343,7 @@ defmodule Arbiter.Polecat.Warden do
 
     if current_pipeline == :failed and state.last_pipeline != :failed do
       Logger.warning(
-        "Polecat.Warden: CI pipeline failed for bead=#{state.bead_id} mr=#{state.mr_ref}; " <>
+        "Polecat.Watchdog: CI pipeline failed for bead=#{state.bead_id} mr=#{state.mr_ref}; " <>
           "escalating to Admiral, staying parked"
       )
 
@@ -374,14 +374,14 @@ defmodule Arbiter.Polecat.Warden do
   #                       min timeout means something is broken on the forge side)
   #   - auto_merge OFF → park the polecat (a human reviewer may take overnight or
   #                       longer; failing here was a false negative — VR-17739).
-  #                       The Warden stops polling to free resources, and the
+  #                       The Watchdog stops polling to free resources, and the
   #                       polecat stays in :awaiting_review so a boot-resume or
   #                       webhook can re-attach it later.
   # Pass `max_polls: :infinity` to disable.
   defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: true} = state)
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
-      "Polecat.Warden: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
+      "Polecat.Watchdog: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
         "#{cap} polls without a terminal outcome; escalating + failing"
     )
 
@@ -393,7 +393,7 @@ defmodule Arbiter.Polecat.Warden do
   defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: false} = state)
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
-      "Polecat.Warden: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
+      "Polecat.Watchdog: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
         "#{cap} polls on a manual-merge lane; parking (polecat stays :awaiting_review)"
     )
 

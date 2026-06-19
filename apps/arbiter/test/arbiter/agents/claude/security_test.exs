@@ -86,7 +86,7 @@ defmodule Arbiter.Agents.Claude.SecurityTest do
       refute Enum.any?(rules, &(&1 =~ "rm -rf"))
     end
 
-    # bd-53xrmi: the Refinery owns PR creation; a worker must not open its own
+    # bd-53xrmi: the MergeQueue owns PR creation; a worker must not open its own
     # PR (it lands a duplicate on the wrong base). The no_pr_create category is
     # in the safe-default baseline, so it's denied by default.
     test "the no_pr_create baseline denies gh pr create / glab mr create" do

@@ -385,7 +385,7 @@ defmodule ArbiterWeb.BeadDetailLive do
                     </p>
                     <p class="mt-1 text-xs text-base-content/50">
                       Spawn one with <code class="text-xs bg-base-300 px-1.5 py-0.5 rounded">
-                        arb sling {@bead_id}
+                        arb dispatch {@bead_id}
                       </code>.
                     </p>
                   </div>

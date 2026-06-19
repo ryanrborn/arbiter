@@ -33,9 +33,9 @@ defmodule Arbiter.Beads.Workspace do
             "credentials_ref" => "env:GITHUB_TOKEN"
           }
         },
-        "tribunal" => %{
+        "review_gate" => %{
           "max_rounds" => 2                    # optional integer ≥ 1; caps the difficulty
-                                               # default (min wins). See tribunal_max_rounds/1.
+                                               # default (min wins). See review_gate_max_rounds/1.
         }
       }
 
@@ -63,7 +63,7 @@ defmodule Arbiter.Beads.Workspace do
       primary? true
       accept [:name, :description, :prefix, :config]
       change {Arbiter.Beads.Workspace.Changes.ValidateConfig, []}
-      change {Arbiter.Beads.Workspace.Changes.StartRefinery, []}
+      change {Arbiter.Beads.Workspace.Changes.StartMergeQueue, []}
     end
 
     update :update do
@@ -172,7 +172,7 @@ defmodule Arbiter.Beads.Workspace do
   `config["merge"]["auto_merge"]`.
 
   When `true`, an approved (but not-yet-merged) MR is merged automatically by
-  the polecat's `Arbiter.Polecat.Warden` before the polecat completes. When
+  the polecat's `Arbiter.Polecat.Watchdog` before the polecat completes. When
   `false` (the default), the polecat parks at `:awaiting_review` until a human
   merges; the next poll then sees `:merged` and completes.
 
@@ -189,18 +189,18 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
-  Workspace-override for the Warden watchdog cap (`config["merge"]["warden_max_polls"]`).
+  Workspace-override for the Watchdog watchdog cap (`config["merge"]["watchdog_max_polls"]`).
 
   Returns a positive integer, `:infinity`, or `nil` when not configured (the
-  Warden then uses its mode-specific default: `Arbiter.Polecat.Warden.default_max_polls_auto/0`
+  Watchdog then uses its mode-specific default: `Arbiter.Polecat.Watchdog.default_max_polls_auto/0`
   for `auto_merge: true` lanes, `:infinity` for `auto_merge: false` lanes).
 
   Accepts an integer, a stringified integer (round-trips through JSON), or the
   string `"infinity"`.
   """
-  @spec warden_max_polls(t()) :: pos_integer() | :infinity | nil
-  def warden_max_polls(workspace) do
-    case get_in(workspace.config || %{}, ["merge", "warden_max_polls"]) do
+  @spec watchdog_max_polls(t()) :: pos_integer() | :infinity | nil
+  def watchdog_max_polls(workspace) do
+    case get_in(workspace.config || %{}, ["merge", "watchdog_max_polls"]) do
       n when is_integer(n) and n > 0 ->
         n
 
@@ -219,10 +219,10 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
-  Whether a Tribunal (second-worker code review) gates merges for this
+  Whether a ReviewGate (second-worker code review) gates merges for this
   workspace, from `config["review"]["required"]`.
 
-  When `true`, the polecat parks at `:awaiting_tribunal` after the worker's
+  When `true`, the polecat parks at `:awaiting_review_gate` after the worker's
   `arb done` and spawns a distinct reviewer worker; the branch merges only on
   an APPROVE verdict. When `false` (the **default**), completion routes straight
   to the merger as before — so enabling reviews never surprises an install that
@@ -241,10 +241,10 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
-  Whether the Warden should watch CI pipeline status alongside MR state, from
+  Whether the Watchdog should watch CI pipeline status alongside MR state, from
   `config["merge"]["watch_pipeline"]`.
 
-  When `true`, the Warden escalates to the Admiral when a pipeline fails, but
+  When `true`, the Watchdog escalates to the Admiral when a pipeline fails, but
   does NOT fail the bead — a human may force-merge or rerun. Defaults to
   `false` so installs without CI are unaffected.
 
@@ -261,7 +261,7 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
-  The maximum number of revise-and-re-review rounds the Tribunal runs before
+  The maximum number of revise-and-re-review rounds the ReviewGate runs before
   escalating, from `config["review"]["rounds"]`. Defaults to `2`.
 
   Reserved for the Stage 2 revise loop (bd-4g1rg1 ships only the Stage 1 gate);
@@ -286,8 +286,8 @@ defmodule Arbiter.Beads.Workspace do
   end
 
   @doc """
-  Optional workspace cap on the Tribunal's revise-and-rediscuss round count,
-  from `config["tribunal"]["max_rounds"]`.
+  Optional workspace cap on the ReviewGate's revise-and-rediscuss round count,
+  from `config["review_gate"]["max_rounds"]`.
 
   When set, this cap is applied as `min(difficulty_default, workspace_cap)` so
   it can only tighten the difficulty-derived default — never loosen it beyond
@@ -297,9 +297,9 @@ defmodule Arbiter.Beads.Workspace do
   Accepts a positive integer or the stringified integer that round-trips through
   JSON config.
   """
-  @spec tribunal_max_rounds(t()) :: pos_integer() | nil
-  def tribunal_max_rounds(workspace) do
-    case get_in(workspace.config || %{}, ["tribunal", "max_rounds"]) do
+  @spec review_gate_max_rounds(t()) :: pos_integer() | nil
+  def review_gate_max_rounds(workspace) do
+    case get_in(workspace.config || %{}, ["review_gate", "max_rounds"]) do
       n when is_integer(n) and n > 0 ->
         n
 

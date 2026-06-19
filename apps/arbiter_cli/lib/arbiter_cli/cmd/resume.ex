@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.Resume do
 
   POSTs to `/api/polecats/:bead_id/resume`. The server validates the bead has a
   preserved worktree and isn't being actively worked, stops the lingering
-  stopped polecat, and slings a fresh claude-driven worker onto the existing
+  stopped polecat, and dispatchs a fresh claude-driven worker onto the existing
   branch — reusing any already-open PR rather than opening a duplicate.
 
   The rig is optional: if omitted, it's inherited from the bead's most recent

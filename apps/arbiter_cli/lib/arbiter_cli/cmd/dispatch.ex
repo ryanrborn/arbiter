@@ -1,9 +1,9 @@
-defmodule ArbiterCli.Cmd.Sling do
+defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb sling <bead-id> [<rig>] [--provider claude|gemini | --no-agent] [--model <name>]`
+  `arb dispatch <bead-id> [<rig>] [--provider claude|gemini | --no-agent] [--model <name>]`
   — spawn a polecat to work on a bead.
 
-  POSTs to `/api/polecats/sling`. The server transitions the bead to
+  POSTs to `/api/polecats/dispatch`. The server transitions the bead to
   `:in_progress`, starts a polecat GenServer under
   `Arbiter.Polecat.Supervisor`, attaches `Arbiter.Workflows.Work` via
   the WorkflowMachine, and spawns an agent subprocess in the worktree.
@@ -20,7 +20,7 @@ defmodule ArbiterCli.Cmd.Sling do
                      (consumes Google credits).
     --with-claude    DEPRECATED alias for `--provider claude`.
     --with-gemini    DEPRECATED alias for `--provider gemini`.
-    --no-agent       dry sling — park the bead in `:in_progress` for a hand
+    --no-agent       dry dispatch — park the bead in `:in_progress` for a hand
                      to attach, with no agent spawned. Preserves the old
                      manual-attach path.
     --model <name>   one-shot override of the model the worker session runs
@@ -55,8 +55,8 @@ defmodule ArbiterCli.Cmd.Sling do
         case rest do
           [id] -> {id, nil}
           [id, rig] -> {id, rig}
-          [] -> Output.die("sling requires an issue id (e.g. `arb sling gte-006`)")
-          _ -> Output.die("sling takes at most two positional arguments: <bead-id> [<rig>]")
+          [] -> Output.die("dispatch requires an issue id (e.g. `arb dispatch gte-006`)")
+          _ -> Output.die("dispatch takes at most two positional arguments: <bead-id> [<rig>]")
         end
 
       worker =
@@ -76,7 +76,7 @@ defmodule ArbiterCli.Cmd.Sling do
         |> maybe_put("rig", rig)
         |> maybe_put("model", model)
 
-      case Client.post("/api/polecats/sling", body) do
+      case Client.post("/api/polecats/dispatch", body) do
         {:ok, payload} -> emit(payload, mode)
         {:error, err} -> Output.die(err)
       end

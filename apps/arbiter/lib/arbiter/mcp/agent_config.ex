@@ -14,7 +14,7 @@ defmodule Arbiter.MCP.AgentConfig do
 
   Resolution is forward-safe: `write/3` for an unknown provider is a silent no-op,
   so a workspace routed to an agent without an adapter yet simply spawns without
-  MCP config rather than failing the sling.
+  MCP config rather than failing the dispatch.
   """
 
   @callback write_mcp_config(worktree :: Path.t(), opts :: keyword()) :: :ok | {:error, term()}

@@ -12,7 +12,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
 
     * **HANDOFF**: title starts with `🤝 HANDOFF` — old GT mayor/witness
       session-handoff protocol artifacts.
-    * **Daemon role definition**: `Refinery for X`, `Witness for X`,
+    * **Daemon role definition**: `MergeQueue for X`, `Witness for X`,
       `Crew worker N in X`, `mayor`/`deacon` titles. The GT identity
       beads for daemon roles per rig.
     * **Polecat identity**: bead IDs matching `<prefix>-...-polecat-...`.
@@ -23,7 +23,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
     * **Escalation reply**: title starts with `Re: ESCALATION` or
       `Re: REFINERY BLOCKED`.
     * **Patrol cycle note**: title contains `Patrol` (Deacon Patrol,
-      Witness Patrol, Refinery Patrol).
+      Witness Patrol, MergeQueue Patrol).
 
   ## Keepers
 
@@ -128,10 +128,10 @@ defmodule Arbiter.Beads.DecommissionSweep do
 
   @doc false
   def patrol_note?(%Issue{title: t}) when is_binary(t) do
-    # Match e.g. "Deacon Patrol", "Witness Patrol", "Refinery Patrol" as
+    # Match e.g. "Deacon Patrol", "Witness Patrol", "MergeQueue Patrol" as
     # standalone or short titles. Avoid matching legitimate sentences that
     # happen to include "patrol".
-    Regex.match?(~r/\b(Deacon|Witness|Refinery|Idle|Mayor)\s+Patrol\b/, t)
+    Regex.match?(~r/\b(Deacon|Witness|MergeQueue|Idle|Mayor)\s+Patrol\b/, t)
   end
 
   def patrol_note?(_), do: false
@@ -139,7 +139,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
   @doc false
   def daemon_role?(%Issue{title: t}) when is_binary(t) do
     cond do
-      String.starts_with?(t, "Refinery for ") -> true
+      String.starts_with?(t, "MergeQueue for ") -> true
       String.starts_with?(t, "Witness for ") -> true
       Regex.match?(~r/^Crew worker .* in /, t) -> true
       String.starts_with?(t, "Deacon (daemon beacon)") -> true

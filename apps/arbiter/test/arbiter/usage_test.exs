@@ -360,7 +360,7 @@ defmodule Arbiter.UsageTest do
       assert ev.step == :work
     end
 
-    test "tribunal reviewer session writes a :review row" do
+    test "review_gate reviewer session writes a :review row" do
       reviewer_id = "bd-reviewer-#{System.unique_integer([:positive])}#review"
 
       {:ok, pid} =
@@ -426,7 +426,7 @@ defmodule Arbiter.UsageTest do
       cwd = tmp_dir!("usage-gemini")
 
       # Simulate agy plain-text output (no stream-json). Pass provider: "gemini"
-      # as ClaudeSession opt, mirroring what the Tribunal does when it resolves
+      # as ClaudeSession opt, mirroring what the ReviewGate does when it resolves
       # the Gemini adapter for the workspace.
       command = ["sh", "-c", "echo 'Reviewing code...'; echo 'VERDICT: APPROVE'; echo 'arb done'"]
 

@@ -129,16 +129,16 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     end
   end
 
-  describe "POST /api/polecats/sling" do
+  describe "POST /api/polecats/dispatch" do
     # --no-agent preserves the manual-attach path: the bead parks in
     # `:in_progress` with no Driver, so the no-op Work workflow never races
-    # to a bogus `:closed`. Regression against the old dry-sling footgun.
+    # to a bogus `:closed`. Regression against the old dry-dispatch footgun.
     test "--no-agent parks the bead and does NOT close it",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "dry-sling-me", workspace_id: ws.id})
+      {:ok, bead} = Ash.create(Issue, %{title: "dry-dispatch-me", workspace_id: ws.id})
 
       conn =
-        post(conn, ~p"/api/polecats/sling", %{
+        post(conn, ~p"/api/polecats/dispatch", %{
           "bead_id" => bead.id,
           "rig" => "test/rig",
           "no_agent" => true
@@ -167,7 +167,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, bead} = Ash.create(Issue, %{title: "gem-provider", workspace_id: ws.id})
 
       conn =
-        post(conn, ~p"/api/polecats/sling", %{
+        post(conn, ~p"/api/polecats/dispatch", %{
           "bead_id" => bead.id,
           "provider" => "gemini",
           "rig" => "no-such-rig"
@@ -178,12 +178,12 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     end
 
     test "returns 404 for an unknown bead_id", %{conn: conn} do
-      conn = post(conn, ~p"/api/polecats/sling", %{"bead_id" => "no-such-bead"})
+      conn = post(conn, ~p"/api/polecats/dispatch", %{"bead_id" => "no-such-bead"})
       assert json_response(conn, 404)
     end
 
     test "requires a bead_id", %{conn: conn} do
-      conn = post(conn, ~p"/api/polecats/sling", %{})
+      conn = post(conn, ~p"/api/polecats/dispatch", %{})
       assert json_response(conn, 400)
     end
   end
@@ -237,7 +237,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       assert body["bead"]["status"] == "in_progress"
       assert is_nil(body["worktree_path"])
 
-      # The polecat is tagged review_only so completion bypasses the Crucible.
+      # The polecat is tagged review_only so completion bypasses the MergeQueue.
       pid = Polecat.whereis(bead.id)
       assert is_pid(pid)
       snap = Polecat.state(pid)

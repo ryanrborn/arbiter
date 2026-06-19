@@ -1,15 +1,15 @@
-defmodule Arbiter.Polecat.WardenFailureTest do
+defmodule Arbiter.Polecat.WatchdogFailureTest do
   @moduledoc """
   Regression test for bd-91rnwq.
 
-  Root cause: when `Arbiter.Polecat.Warden.start/1` returns `{:error, reason}`
-  (Warden startup failure), `start_warden/3` returns `:error`. The `try/rescue`
+  Root cause: when `Arbiter.Polecat.Watchdog.start/1` returns `{:error, reason}`
+  (Watchdog startup failure), `start_watchdog/3` returns `:error`. The `try/rescue`
   block in `do_open_mr` only handled exceptions and exits — a plain `:error`
   return value was silently discarded. The MR was already open on the forge but
-  the polecat had no Warden watching it, so the bead hung at `:awaiting_review`
+  the polecat had no Watchdog watching it, so the bead hung at `:awaiting_review`
   indefinitely with no path to completion.
 
-  The fix captures the `start_warden` result and escalates to the Admiral when
+  The fix captures the `start_watchdog` result and escalates to the Admiral when
   it is not `:ok`, so the orphaned MR is surfaced rather than silently lost.
   The polecat still parks at `:awaiting_review` (the MR is real and must be
   preserved), but the Admiral can manually complete or fail the polecat once
@@ -31,7 +31,7 @@ defmodule Arbiter.Polecat.WardenFailureTest do
   defp new_workspace do
     {:ok, ws} =
       Ash.create(Workspace, %{
-        name: "warden-fail-ws-#{System.unique_integer([:positive])}",
+        name: "watchdog-fail-ws-#{System.unique_integer([:positive])}",
         prefix: "wf"
       })
 
@@ -41,7 +41,7 @@ defmodule Arbiter.Polecat.WardenFailureTest do
   defp new_bead(ws) do
     {:ok, bead} =
       Ash.create(Issue, %{
-        title: "warden failure bead",
+        title: "watchdog failure bead",
         workspace_id: ws.id,
         issue_type: :feature
       })
@@ -62,8 +62,8 @@ defmodule Arbiter.Polecat.WardenFailureTest do
     pid
   end
 
-  describe "Warden startup failure (bd-91rnwq)" do
-    test "polecat stays :awaiting_review when Warden fails to start" do
+  describe "Watchdog startup failure (bd-91rnwq)" do
+    test "polecat stays :awaiting_review when Watchdog fails to start" do
       ws = new_workspace()
       bead = new_bead(ws)
       pid = running_polecat(bead, ws)
@@ -81,7 +81,7 @@ defmodule Arbiter.Polecat.WardenFailureTest do
                    workspace: nil,
                    interval_ms: 1_000_000,
                    initial_delay_ms: 1_000_000,
-                   warden_start_error: true
+                   watchdog_start_error: true
                  }
                )
 
@@ -90,7 +90,7 @@ defmodule Arbiter.Polecat.WardenFailureTest do
       assert snap.mr_ref == "!orphan"
     end
 
-    test "Admiral is escalated with the MR ref when Warden fails to start" do
+    test "Admiral is escalated with the MR ref when Watchdog fails to start" do
       ws = new_workspace()
       bead = new_bead(ws)
       pid = running_polecat(bead, ws)
@@ -107,7 +107,7 @@ defmodule Arbiter.Polecat.WardenFailureTest do
           workspace: nil,
           interval_ms: 1_000_000,
           initial_delay_ms: 1_000_000,
-          warden_start_error: true
+          watchdog_start_error: true
         }
       )
 
@@ -121,7 +121,7 @@ defmodule Arbiter.Polecat.WardenFailureTest do
         Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
 
       assert escalation, "expected an Admiral escalation for the orphaned MR"
-      assert escalation.subject =~ "Warden startup failed"
+      assert escalation.subject =~ "Watchdog startup failed"
       assert escalation.body =~ "!orphan2"
       assert escalation.body =~ bead.id
     end

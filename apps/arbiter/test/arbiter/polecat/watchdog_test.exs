@@ -1,10 +1,10 @@
-defmodule Arbiter.Polecat.WardenTest do
+defmodule Arbiter.Polecat.WatchdogTest do
   # async: false — shares the singleton Polecat registry/supervisor and the
   # named StubMerger Agent. Unique bead_ids keep cases independent.
   use ExUnit.Case, async: false
 
   alias Arbiter.Polecat
-  alias Arbiter.Polecat.Warden
+  alias Arbiter.Polecat.Watchdog
   alias Arbiter.Test.StubMerger
 
   setup do
@@ -12,9 +12,9 @@ defmodule Arbiter.Polecat.WardenTest do
     :ok
   end
 
-  defp new_bead_id, do: "warden-test-#{System.unique_integer([:positive])}"
+  defp new_bead_id, do: "watchdog-test-#{System.unique_integer([:positive])}"
 
-  # A :running polecat the Warden can drive to a terminal state.
+  # A :running polecat the Watchdog can drive to a terminal state.
   defp running_polecat do
     bead_id = new_bead_id()
     {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter")
@@ -24,7 +24,7 @@ defmodule Arbiter.Polecat.WardenTest do
     {pid, bead_id}
   end
 
-  defp start_warden(polecat_pid, bead_id, mr_ref, opts) do
+  defp start_watchdog(polecat_pid, bead_id, mr_ref, opts) do
     base = [
       bead_id: bead_id,
       polecat: polecat_pid,
@@ -35,7 +35,7 @@ defmodule Arbiter.Polecat.WardenTest do
       initial_delay_ms: 0
     ]
 
-    {:ok, wpid} = Warden.start(Keyword.merge(base, opts))
+    {:ok, wpid} = Watchdog.start(Keyword.merge(base, opts))
     on_exit(fn -> if Process.alive?(wpid), do: GenServer.stop(wpid, :normal) end)
     wpid
   end
@@ -61,30 +61,30 @@ defmodule Arbiter.Polecat.WardenTest do
 
   describe "classify/1" do
     test "merged wins, even if also approved" do
-      assert Warden.classify(%{status: :merged}) == :merged
-      assert Warden.classify(%{status: :merged, approved: true}) == :merged
+      assert Watchdog.classify(%{status: :merged}) == :merged
+      assert Watchdog.classify(%{status: :merged, approved: true}) == :merged
     end
 
     test "closed is terminal-fail" do
-      assert Warden.classify(%{status: :closed}) == :closed
+      assert Watchdog.classify(%{status: :closed}) == :closed
     end
 
     test "approved (not merged) is :approved" do
-      assert Warden.classify(%{status: :open, approved: true}) == :approved
+      assert Watchdog.classify(%{status: :open, approved: true}) == :approved
     end
 
     test "everything else is :pending" do
-      assert Warden.classify(%{status: :open, approved: false}) == :pending
-      assert Warden.classify(%{}) == :pending
+      assert Watchdog.classify(%{status: :open, approved: false}) == :pending
+      assert Watchdog.classify(%{}) == :pending
     end
   end
 
   describe "poll outcomes" do
-    test "merged MR completes the polecat and stops the warden" do
+    test "merged MR completes the polecat and stops the watchdog" do
       {pid, bead_id} = running_polecat()
       StubMerger.queue_get("!1", [%{status: :merged}])
 
-      wpid = start_warden(pid, bead_id, "!1", [])
+      wpid = start_watchdog(pid, bead_id, "!1", [])
       ref = Process.monitor(wpid)
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
@@ -92,11 +92,11 @@ defmodule Arbiter.Polecat.WardenTest do
       assert_receive {:DOWN, ^ref, :process, ^wpid, :normal}, 1_000
     end
 
-    test "closed MR fails the polecat with :mr_closed and stops the warden" do
+    test "closed MR fails the polecat with :mr_closed and stops the watchdog" do
       {pid, bead_id} = running_polecat()
       StubMerger.queue_get("!2", [%{status: :closed}])
 
-      wpid = start_warden(pid, bead_id, "!2", [])
+      wpid = start_watchdog(pid, bead_id, "!2", [])
       ref = Process.monitor(wpid)
 
       wait_until(fn -> Polecat.state(pid).status == :failed end)
@@ -108,7 +108,7 @@ defmodule Arbiter.Polecat.WardenTest do
       {pid, bead_id} = running_polecat()
       StubMerger.queue_get("!3", [%{status: :open, approved: true}])
 
-      start_warden(pid, bead_id, "!3", auto_merge: true)
+      start_watchdog(pid, bead_id, "!3", auto_merge: true)
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
       assert StubMerger.merge_count("!3") == 1
@@ -120,7 +120,7 @@ defmodule Arbiter.Polecat.WardenTest do
       # Second poll: merged -> complete.
       StubMerger.queue_get("!4", [%{status: :open, approved: true}, %{status: :merged}])
 
-      start_warden(pid, bead_id, "!4", auto_merge: false)
+      start_watchdog(pid, bead_id, "!4", auto_merge: false)
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
       assert StubMerger.merge_count("!4") == 0
@@ -128,10 +128,10 @@ defmodule Arbiter.Polecat.WardenTest do
 
     test "records the last merger status + checked timestamp on the polecat" do
       {pid, bead_id} = running_polecat()
-      # Stay pending so the warden keeps polling and we can observe the record.
+      # Stay pending so the watchdog keeps polling and we can observe the record.
       StubMerger.queue_get("!5", [%{status: :open, approved: false}])
 
-      start_warden(pid, bead_id, "!5", [])
+      start_watchdog(pid, bead_id, "!5", [])
 
       wait_until(fn ->
         meta = Polecat.state(pid).meta
@@ -145,30 +145,30 @@ defmodule Arbiter.Polecat.WardenTest do
     end
   end
 
-  describe "via_tribunal short-circuits forge approval (bd-66ey1o)" do
+  describe "via_review_gate short-circuits forge approval (bd-66ey1o)" do
     test "treats :pending as :approved and force-auto-merges on first poll" do
       {pid, bead_id} = running_polecat()
-      # No approval — pure :pending sequence — but via_tribunal must flip it
+      # No approval — pure :pending sequence — but via_review_gate must flip it
       # to :approved so the merge fires anyway.
       StubMerger.queue_get("!t1", [%{status: :open, approved: false}])
 
-      start_warden(pid, bead_id, "!t1", via_tribunal: true)
+      start_watchdog(pid, bead_id, "!t1", via_review_gate: true)
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
       assert Polecat.state(pid).meta.result == :merged
       assert StubMerger.merge_count("!t1") >= 1
     end
 
-    test "via_tribunal still defers to :merged and :closed terminal status" do
+    test "via_review_gate still defers to :merged and :closed terminal status" do
       {pid, bead_id} = running_polecat()
       StubMerger.queue_get("!t2", [%{status: :closed}])
 
-      start_warden(pid, bead_id, "!t2", via_tribunal: true)
+      start_watchdog(pid, bead_id, "!t2", via_review_gate: true)
 
       wait_until(fn -> Polecat.state(pid).status == :failed end)
       assert Polecat.state(pid).meta.failure_reason == {:mr_closed, "!t2"}
       # Importantly: we did NOT call merge/1 on a closed MR even though
-      # via_tribunal was on. Approval overriding is for :pending only.
+      # via_review_gate was on. Approval overriding is for :pending only.
       assert StubMerger.merge_count("!t2") == 0
     end
   end
@@ -178,7 +178,7 @@ defmodule Arbiter.Polecat.WardenTest do
       {pid, bead_id} = running_polecat()
       # auto_merge ON: if the forge never auto-merges after cap polls something
       # is broken — fail loudly so the bead surfaces in the notification feed.
-      start_warden(pid, bead_id, "!w1",
+      start_watchdog(pid, bead_id, "!w1",
         interval_ms: 10,
         initial_delay_ms: 0,
         max_polls: 2,
@@ -193,9 +193,9 @@ defmodule Arbiter.Polecat.WardenTest do
       {pid, bead_id} = running_polecat()
       # auto_merge OFF (human-merge): a reviewer may take hours or overnight.
       # Hitting the poll cap must NOT fail the bead — the polecat stays parked
-      # at :awaiting_review and the Warden stops to free resources (bd-akr4il).
+      # at :awaiting_review and the Watchdog stops to free resources (bd-akr4il).
       wpid =
-        start_warden(pid, bead_id, "!w3",
+        start_watchdog(pid, bead_id, "!w3",
           interval_ms: 10,
           initial_delay_ms: 0,
           max_polls: 2,
@@ -204,17 +204,17 @@ defmodule Arbiter.Polecat.WardenTest do
 
       wref = Process.monitor(wpid)
 
-      # Warden stops without failing the polecat.
+      # Watchdog stops without failing the polecat.
       assert_receive {:DOWN, ^wref, :process, ^wpid, :normal}, 2_000
       refute Polecat.state(pid).status == :failed
       refute match?({:awaiting_review_timeout, _}, Polecat.state(pid).meta[:failure_reason])
     end
 
-    test "does not fire when via_tribunal: true (merge happens before cap)" do
+    test "does not fire when via_review_gate: true (merge happens before cap)" do
       {pid, bead_id} = running_polecat()
 
-      start_warden(pid, bead_id, "!w2",
-        via_tribunal: true,
+      start_watchdog(pid, bead_id, "!w2",
+        via_review_gate: true,
         interval_ms: 10,
         initial_delay_ms: 0,
         max_polls: 2
@@ -235,7 +235,7 @@ defmodule Arbiter.Polecat.WardenTest do
         %{status: :merged}
       ])
 
-      start_warden(pid, bead_id, "!p1", [])
+      start_watchdog(pid, bead_id, "!p1", [])
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
       # The key assertion: with watch_pipeline off, a :failed pipeline must not
@@ -253,7 +253,7 @@ defmodule Arbiter.Polecat.WardenTest do
         %{status: :merged}
       ])
 
-      start_warden(pid, bead_id, "!p2", watch_pipeline: true)
+      start_watchdog(pid, bead_id, "!p2", watch_pipeline: true)
 
       # Wait until merged — the pipeline failure must not have failed the bead.
       wait_until(fn -> Polecat.state(pid).status == :completed end)
@@ -265,7 +265,7 @@ defmodule Arbiter.Polecat.WardenTest do
       {pid, bead_id} = running_polecat()
       StubMerger.queue_get("!p3", [%{status: :merged, pipeline: :success}])
 
-      start_warden(pid, bead_id, "!p3", watch_pipeline: true)
+      start_watchdog(pid, bead_id, "!p3", watch_pipeline: true)
 
       wait_until(fn -> Polecat.state(pid).status == :completed end)
       assert Polecat.state(pid).status == :completed
@@ -277,7 +277,7 @@ defmodule Arbiter.Polecat.WardenTest do
       {pid, bead_id} = running_polecat()
       StubMerger.queue_get("!6", [%{status: :open, approved: false}])
 
-      wpid = start_warden(pid, bead_id, "!6", [])
+      wpid = start_watchdog(pid, bead_id, "!6", [])
       ref = Process.monitor(wpid)
 
       GenServer.stop(pid, :normal)
@@ -285,7 +285,7 @@ defmodule Arbiter.Polecat.WardenTest do
     end
 
     test "init returns :ignore when the polecat is already gone" do
-      assert Warden.start_link(
+      assert Watchdog.start_link(
                bead_id: "gone",
                polecat: "no-such-bead",
                mr_ref: "!7",
@@ -294,11 +294,11 @@ defmodule Arbiter.Polecat.WardenTest do
     end
 
     # bd-91rnwq: DynamicSupervisor.start_child propagates :ignore from
-    # Warden.init directly (not wrapped in {:error, ...}). The unhandled :ignore
-    # in start_warden/3's case clause was the root cause of the CaseClauseError
+    # Watchdog.init directly (not wrapped in {:error, ...}). The unhandled :ignore
+    # in start_watchdog/3's case clause was the root cause of the CaseClauseError
     # that crashed the polecat after a successful MR creation.
     test "start/1 via DynamicSupervisor returns :ignore when polecat is already gone" do
-      assert Warden.start(
+      assert Watchdog.start(
                bead_id: "gone-ds",
                polecat: "no-such-bead",
                mr_ref: "!ignore-ds",
@@ -311,8 +311,8 @@ defmodule Arbiter.Polecat.WardenTest do
   describe "open_mr resilience (bd-91rnwq)" do
     test "Polecat.open_mr/5 transitions to :awaiting_review on successful MR creation" do
       # Regression guard: open_mr must always reach :awaiting_review when
-      # safe_open succeeds, regardless of what start_warden does internally.
-      # Before the fix, a CaseClauseError in start_warden propagated uncaught
+      # safe_open succeeds, regardless of what start_watchdog does internally.
+      # Before the fix, a CaseClauseError in start_watchdog propagated uncaught
       # through handle_call and crashed the polecat, orphaning the MR.
       {pid, _bead_id} = running_polecat()
       StubMerger.next_open_ref("!oom1")

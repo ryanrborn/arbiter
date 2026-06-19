@@ -5,22 +5,22 @@ defmodule Arbiter.Polecat.TargetBranch do
   diverge, or a worktree cut from `integration/dolphin` would open a PR against
   `main`, producing a wrong diff and spurious conflicts (bd-b6rzoc).
 
-  Both `Arbiter.Polecat.Sling` (which provisions the worktree) and
-  `Arbiter.Workflows.Refinery` (which opens the PR) call `resolve/2`, so the
+  Both `Arbiter.Polecat.Dispatch` (which provisions the worktree) and
+  `Arbiter.Workflows.MergeQueue` (which opens the PR) call `resolve/2`, so the
   worktree base and the PR base are computed by the *same* chain from the *same*
   inputs.
 
   ## Resolution order
 
     1. `:base_branch` opt — an explicit, top-priority override. The escape hatch
-       for callers (and tests) that know better than any config. `Sling` exposes
+       for callers (and tests) that know better than any config. `Dispatch` exposes
        this as its `:base_branch` opt.
     2. Bead's own `:target_branch` field — the per-bead override.
     3. Per-rig default in workspace config — the `rig_paths` map entry can be a
        string (the path) or a `{"path" => ..., "target_branch" => ...}` map for
        an integration branch shared by every bead worked in that rig. Requires
        the caller to pass the resolved `:rig`.
-    4. `:workspace_base` opt — a queue-level base. The `Refinery` passes its
+    4. `:workspace_base` opt — a queue-level base. The `MergeQueue` passes its
        explicitly-configured `state.base` here so it sits *below* the per-bead
        and per-rig config rather than short-circuiting them. nil when unset.
     5. Workspace merge config (`workspace.config["merge"]["base"]`).

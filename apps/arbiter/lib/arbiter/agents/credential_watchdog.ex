@@ -1,10 +1,10 @@
-defmodule Arbiter.Agents.CredentialWarden do
+defmodule Arbiter.Agents.CredentialWatchdog do
   @moduledoc """
   Fleet-level credential liveness monitor (bd-5wchp1).
 
   Runs as a singleton named GenServer and periodically probes each configured
   agent adapter via `Arbiter.Agents.Preflight.check/2`. When a probe returns
-  `:auth_expired` the Warden:
+  `:auth_expired` the Watchdog:
 
     1. Records the adapter as credential-expired in its own state.
     2. Escalates to the Admiral across every active workspace so the operator
@@ -12,21 +12,21 @@ defmodule Arbiter.Agents.CredentialWarden do
 
   The stored state feeds two guards:
 
-    * **Dispatch guard** — `Arbiter.Polecat.Sling` calls `expired?/1` before
+    * **Dispatch guard** — `Arbiter.Polecat.Dispatch` calls `expired?/1` before
       dispatching a real worker. A known-expired adapter is refused immediately
       without re-running the probe, preventing a wave of identical 401 failures.
     * **Early mark** — `Arbiter.Polecat` calls `mark_expired/2` when a polecat
-      dies with `:auth_expired`, so the Warden records the failure immediately
+      dies with `:auth_expired`, so the Watchdog records the failure immediately
       rather than waiting for the next periodic probe.
 
   A successful probe on a previously-expired adapter clears the expired flag
   and schedules the next poll at the normal interval. While an adapter is
-  known-expired the Warden polls at the shorter `:recovery_interval_ms` so it
+  known-expired the Watchdog polls at the shorter `:recovery_interval_ms` so it
   detects credential restoration promptly.
 
   ## Configuration
 
-  Via `config :arbiter, :credential_warden`:
+  Via `config :arbiter, :credential_watchdog`:
 
     * `:interval_ms`          — normal probe interval (default 5 minutes).
     * `:recovery_interval_ms` — re-probe interval while expired (default 1 min).
@@ -60,7 +60,7 @@ defmodule Arbiter.Agents.CredentialWarden do
   @doc """
   Returns `true` if `adapter`'s credentials are known to be expired.
 
-  Safe to call from any process. Returns `false` if the Warden is not running
+  Safe to call from any process. Returns `false` if the Watchdog is not running
   (e.g. in test with `:enabled` false, or before it has started).
   Pass a `server` pid/name to target a specific instance (useful in tests).
   """
@@ -77,7 +77,7 @@ defmodule Arbiter.Agents.CredentialWarden do
   Immediately mark `adapter` as credential-expired and raise Admiral escalations.
 
   Called by `Arbiter.Polecat.fail_stopped/2` when an worker dies with category
-  `:auth_expired`, so the Warden records the failure and blocks future dispatches
+  `:auth_expired`, so the Watchdog records the failure and blocks future dispatches
   without waiting for the next periodic probe. Fire-and-forget; best-effort.
   Pass a `server` pid/name to target a specific instance (useful in tests).
   """
@@ -93,7 +93,7 @@ defmodule Arbiter.Agents.CredentialWarden do
   end
 
   @doc """
-  Reset the Warden's per-adapter state to `:ok` (all credentials considered valid).
+  Reset the Watchdog's per-adapter state to `:ok` (all credentials considered valid).
   Intended for test isolation only. The probe interval timer is unaffected.
   """
   @spec reset(GenServer.server()) :: :ok
@@ -105,10 +105,10 @@ defmodule Arbiter.Agents.CredentialWarden do
 
   @impl true
   def init(opts) do
-    interval_ms = warden_config(:interval_ms, opts, @default_interval_ms)
-    recovery_ms = warden_config(:recovery_interval_ms, opts, @default_recovery_interval_ms)
-    adapters = warden_config(:adapters, opts, nil) || default_adapters()
-    enabled = warden_config(:enabled, opts, true)
+    interval_ms = watchdog_config(:interval_ms, opts, @default_interval_ms)
+    recovery_ms = watchdog_config(:recovery_interval_ms, opts, @default_recovery_interval_ms)
+    adapters = watchdog_config(:adapters, opts, nil) || default_adapters()
+    enabled = watchdog_config(:enabled, opts, true)
 
     state = %{
       adapters: Map.new(adapters, &{&1, :ok}),
@@ -177,7 +177,7 @@ defmodule Arbiter.Agents.CredentialWarden do
       {:error, %StopReason{category: :auth_expired} = reason} ->
         if already_expired?(state, adapter) do
           Logger.debug(
-            "CredentialWarden: #{adapter_name(adapter)} still expired (periodic re-check)"
+            "CredentialWatchdog: #{adapter_name(adapter)} still expired (periodic re-check)"
           )
 
           state
@@ -193,7 +193,7 @@ defmodule Arbiter.Agents.CredentialWarden do
   end
 
   defp on_probe_ok(state, adapter, {:expired, _}) do
-    Logger.info("CredentialWarden: #{adapter_name(adapter)} credentials recovered")
+    Logger.info("CredentialWatchdog: #{adapter_name(adapter)} credentials recovered")
     %{state | adapters: Map.put(state.adapters, adapter, :ok)}
   end
 
@@ -203,7 +203,7 @@ defmodule Arbiter.Agents.CredentialWarden do
     source_label = if source == :periodic_probe, do: "periodic probe", else: "polecat report"
 
     Logger.warning(
-      "CredentialWarden: #{adapter_name(adapter)} credentials expired " <>
+      "CredentialWatchdog: #{adapter_name(adapter)} credentials expired " <>
         "(detected via #{source_label}) — #{reason.summary}"
     )
 
@@ -219,7 +219,7 @@ defmodule Arbiter.Agents.CredentialWarden do
   end
 
   # Send an Admiral escalation to every active workspace. Best-effort — a DB
-  # hiccup or an empty workspace table must not crash the Warden.
+  # hiccup or an empty workspace table must not crash the Watchdog.
   defp escalate_all(adapter, %StopReason{} = reason) do
     safe(fn ->
       workspaces = Ash.read!(Arbiter.Beads.Workspace)
@@ -260,7 +260,7 @@ defmodule Arbiter.Agents.CredentialWarden do
     fun.()
   rescue
     e ->
-      Logger.debug("CredentialWarden.escalate_all swallowed: #{Exception.message(e)}")
+      Logger.debug("CredentialWatchdog.escalate_all swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
@@ -272,13 +272,13 @@ defmodule Arbiter.Agents.CredentialWarden do
     adapter |> Module.split() |> List.last()
   end
 
-  defp warden_config(key, opts, default) do
+  defp watchdog_config(key, opts, default) do
     case Keyword.fetch(opts, key) do
       {:ok, val} ->
         val
 
       :error ->
-        case get_in(Application.get_env(:arbiter, :credential_warden, []), [key]) do
+        case get_in(Application.get_env(:arbiter, :credential_watchdog, []), [key]) do
           nil -> default
           val -> val
         end

@@ -5,7 +5,7 @@ defmodule Arbiter.Polecat.DriverTest do
   alias Arbiter.Beads.Workspace
   alias Arbiter.Polecat
   alias Arbiter.Polecat.Driver
-  alias Arbiter.Polecat.Sling
+  alias Arbiter.Polecat.Dispatch
   alias Arbiter.TestWorkflows
   alias Arbiter.Workflows.Machine
 
@@ -144,11 +144,11 @@ defmodule Arbiter.Polecat.DriverTest do
     end
   end
 
-  describe "integration via Sling" do
-    test "Sling with default opts starts a driver that closes the bead", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "via-sling", workspace_id: ws.id})
+  describe "integration via Dispatch" do
+    test "Dispatch with default opts starts a driver that closes the bead", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "via-dispatch", workspace_id: ws.id})
 
-      {:ok, result} = Sling.sling(bead.id, rig: "r", interval_ms: 1)
+      {:ok, result} = Dispatch.dispatch(bead.id, rig: "r", interval_ms: 1)
       assert is_pid(result.driver_pid)
 
       ref = Process.monitor(result.driver_pid)
@@ -248,9 +248,9 @@ defmodule Arbiter.Polecat.DriverTest do
     end
 
     # bd-d1jp4r: ticks must not consume budget while the polecat is parked at
-    # :awaiting_review (Warden) or :awaiting_tribunal (Tribunal). A long worker
+    # :awaiting_review (Watchdog) or :awaiting_review_gate (ReviewGate). A long worker
     # run + review gate was exhausting the 30-minute tick budget before the
-    # Warden called Polecat.complete, leaving the bead stranded at :in_progress.
+    # Watchdog called Polecat.complete, leaving the bead stranded at :in_progress.
     test "does not count ticks while polecat is :awaiting_review", %{ws: ws} do
       alias Arbiter.Test.StubMerger
       StubMerger.reset()
@@ -276,7 +276,7 @@ defmodule Arbiter.Polecat.DriverTest do
         )
 
       # Advance polecat to :running then open an MR to park it at :awaiting_review.
-      # The StubMerger opens synchronously and the Warden polls on a long interval
+      # The StubMerger opens synchronously and the Watchdog polls on a long interval
       # so it won't call Polecat.complete during this test.
       :ok = Polecat.advance(polecat_pid, :running)
 
@@ -294,7 +294,7 @@ defmodule Arbiter.Polecat.DriverTest do
       assert Process.alive?(driver_pid),
              "driver should still be alive (ticks frozen at :awaiting_review)"
 
-      # Now simulate the Warden calling Polecat.complete.
+      # Now simulate the Watchdog calling Polecat.complete.
       :ok = Polecat.complete(polecat_pid, :merged)
 
       ref = Process.monitor(driver_pid)
@@ -306,7 +306,7 @@ defmodule Arbiter.Polecat.DriverTest do
     end
 
     # bd-d1jp4r: driver must close the bead even when max_ticks fires at the
-    # exact moment the polecat transitions to :completed (the Warden race).
+    # exact moment the polecat transitions to :completed (the Watchdog race).
     test "closes the bead at max_ticks if polecat is already :completed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "cd-maxtick-done", workspace_id: ws.id})
 
@@ -315,7 +315,7 @@ defmodule Arbiter.Polecat.DriverTest do
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
 
-      # Complete the polecat BEFORE the driver even starts — simulates the Warden
+      # Complete the polecat BEFORE the driver even starts — simulates the Watchdog
       # completing the polecat in the same moment max_ticks fires.
       :ok = Polecat.advance(polecat_pid, :running)
       :ok = Polecat.complete(polecat_pid, :merged)
@@ -343,7 +343,7 @@ defmodule Arbiter.Polecat.DriverTest do
 
     # bd-7b46wd: if the tick budget is exhausted by active worker work and the
     # max_ticks guard fires while the polecat has *already handed off* to the
-    # Warden (:awaiting_review) or Tribunal (:awaiting_tribunal), the driver must
+    # Watchdog (:awaiting_review) or ReviewGate (:awaiting_review_gate), the driver must
     # NOT stop — those states are owned by watchdogs that will drive the polecat
     # to terminal. Stopping here was stranding beads that were legitimately
     # mid-merge, and the bd-d1jp4r fix only covered the already-:completed case.
@@ -358,7 +358,7 @@ defmodule Arbiter.Polecat.DriverTest do
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
 
-      # Park the polecat at :awaiting_review with a Warden that won't poll during
+      # Park the polecat at :awaiting_review with a Watchdog that won't poll during
       # the test (long interval), so completion is driven explicitly below.
       :ok = Polecat.advance(polecat_pid, :running)
 
@@ -389,7 +389,7 @@ defmodule Arbiter.Polecat.DriverTest do
 
       {:ok, %Issue{status: :in_progress}} = Ash.get(Issue, bead.id)
 
-      # The Warden (here, us) completes the polecat — the driver's next guarded
+      # The Watchdog (here, us) completes the polecat — the driver's next guarded
       # check must close the bead rather than stranding it.
       :ok = Polecat.complete(polecat_pid, :merged)
 
@@ -559,11 +559,11 @@ defmodule Arbiter.Polecat.DriverTest do
     end
   end
 
-  describe "Warden auto-close (Bd-191)" do
-    test "closes bead when polecat completes with an mr_ref (Warden merge)", %{ws: ws} do
+  describe "Watchdog auto-close (Bd-191)" do
+    test "closes bead when polecat completes with an mr_ref (Watchdog merge)", %{ws: ws} do
       {:ok, bead} =
         Ash.create(Issue, %{
-          title: "warden-close",
+          title: "watchdog-close",
           workspace_id: ws.id
         })
 
@@ -582,9 +582,9 @@ defmodule Arbiter.Polecat.DriverTest do
           claude_driven: true
         )
 
-      # Simulate a polecat completion with mr_ref (from Warden merge)
+      # Simulate a polecat completion with mr_ref (from Watchdog merge)
       :ok = Polecat.advance(polecat_pid, :running)
-      # Directly set the mr_ref via the polecat's meta to simulate Warden completion
+      # Directly set the mr_ref via the polecat's meta to simulate Watchdog completion
       :ok = Polecat.report(polecat_pid, :mr_ref, "direct:test-branch")
       # Now complete the polecat
       :ok = Polecat.complete(polecat_pid, :merged)

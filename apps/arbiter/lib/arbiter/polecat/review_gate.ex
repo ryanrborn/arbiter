@@ -1,6 +1,6 @@
-defmodule Arbiter.Polecat.Tribunal do
+defmodule Arbiter.Polecat.ReviewGate do
   @moduledoc """
-  The review gate ("Tribunal") that sits between an worker's `arb done` and the
+  The review gate ("ReviewGate") that sits between an worker's `arb done` and the
   merger. A standing order: an worker must not merge its own work — a separate
   reviewer mind code-reviews the diff first.
 
@@ -8,10 +8,10 @@ defmodule Arbiter.Polecat.Tribunal do
 
   When an worker signals done (`arb done`), the author `Arbiter.Polecat` checks
   whether its workspace requires review (`Workspace.review_required?/1`). If so it
-  parks at `:awaiting_tribunal` and spawns a Tribunal **instead of** calling the
-  merger. The Tribunal then runs the review — and, on a request-changes verdict,
+  parks at `:awaiting_review_gate` and spawns a ReviewGate **instead of** calling the
+  merger. The ReviewGate then runs the review — and, on a request-changes verdict,
   the **revise-and-rediscuss loop** — and reports a single, terminal verdict back
-  to the author (`Arbiter.Polecat.tribunal_verdict/2`):
+  to the author (`Arbiter.Polecat.review_gate_verdict/2`):
 
     * APPROVE → the author proceeds to the merger (`do_open_mr`).
     * REQUEST_CHANGES (after the loop is exhausted) / inconclusive / timed-out →
@@ -27,7 +27,7 @@ defmodule Arbiter.Polecat.Tribunal do
   It is handed the bead's acceptance criteria + description and asked to review
   the branch diff for correctness / regressions, **without booting the app** (the
   second-instance hazard, bd-9rouwh — the reviewer only reads the diff). Its
-  stdout is captured (via the polecat output PubSub topic); from it the Tribunal
+  stdout is captured (via the polecat output PubSub topic); from it the ReviewGate
   parses a structured verdict — a sentinel line `VERDICT: APPROVE` or
   `VERDICT: REQUEST_CHANGES` plus findings.
 
@@ -48,7 +48,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   The loop is **hard-capped** at `config["review"]["rounds"]` rounds (default 2;
   one round = one reviewer pass). If it has not converged on APPROVE after the
-  cap, the Tribunal **escalates to Darth Gnosis** — reporting a REQUEST_CHANGES
+  cap, the ReviewGate **escalates to Darth Gnosis** — reporting a REQUEST_CHANGES
   whose findings are the FULL implementer↔reviewer transcript (every message,
   both directions, all rounds, in order), the unresolved findings, and the
   current diff. He judges with the complete argument in hand, not a summary.
@@ -59,8 +59,8 @@ defmodule Arbiter.Polecat.Tribunal do
   ## Reviewer commit gate and HEAD-SHA anchoring (bd-1mksks)
 
   Before spawning the reviewer (both on first review and on each re-review after a
-  revise round), the Tribunal verifies that the branch has at least one commit
-  ahead of the target branch. If it does not, the Tribunal escalates immediately as
+  revise round), the ReviewGate verifies that the branch has at least one commit
+  ahead of the target branch. If it does not, the ReviewGate escalates immediately as
   `REQUEST_CHANGES` rather than spawning a reviewer that would see an empty diff and
   conclude "no work was done." This is a second layer of defence on top of the
   polecat commit gate (bd-ofql8k): the polecat gate fires for the initial
@@ -69,11 +69,11 @@ defmodule Arbiter.Polecat.Tribunal do
 
   The current HEAD SHA is captured at reviewer-spawn time and embedded in the
   review prompt so the reviewer can verify it is on the correct commit before
-  diffing. After each revise round, the Tribunal checks whether HEAD advanced (new
+  diffing. After each revise round, the ReviewGate checks whether HEAD advanced (new
   commits → reviewer sees an updated diff) or stayed the same (implementer only
   rebutted → reviewer evaluates the rebuttal). The observation is recorded in the
   in-memory thread (and therefore in the escalation payload and the re-review
-  prompt) but is NOT persisted to the durable mailbox — it is Tribunal
+  prompt) but is NOT persisted to the durable mailbox — it is ReviewGate
   bookkeeping, not part of the implementer↔reviewer conversation.
 
   ## Stage 3 — same-mind continuity (bd-1na62i)
@@ -105,12 +105,12 @@ defmodule Arbiter.Polecat.Tribunal do
 
   A reviewer that produces a substantive review but simply *forgets* the sentinel
   line is a common, costly failure: the work is good but `:no_verdict` escalates
-  it as inconclusive, wasting the whole pass. Before giving up, the Tribunal
+  it as inconclusive, wasting the whole pass. Before giving up, the ReviewGate
   **re-prompts for a verdict** within the same round: on a `:no_verdict` result
   it spawns one more minimal follow-up pass (a fresh reviewer + session — there
   is no live Claude session resume yet — that re-supplies the diff context but
   demands the sentinel). Only if that pass *also* yields no parseable verdict
-  does the Tribunal report `:no_verdict` and let the author escalate as
+  does the ReviewGate report `:no_verdict` and let the author escalate as
   inconclusive. The number of re-prompts is capped (default 1) via the
   `:verdict_retries` opt and is a **per-round budget** — it resets at the start
   of each new revise round so that a reprompt used in round N does not prevent a
@@ -195,7 +195,7 @@ defmodule Arbiter.Polecat.Tribunal do
           | {:rounds, pos_integer()}
 
   @doc """
-  Start a Tribunal under `Arbiter.Polecat.Supervisor`.
+  Start a ReviewGate under `Arbiter.Polecat.Supervisor`.
 
   Required opts: `:author` (the author polecat pid to report back to),
   `:bead_id`, `:rig`, `:branch`. Optional: `:workspace_id`, `:worktree_path`,
@@ -242,7 +242,7 @@ defmodule Arbiter.Polecat.Tribunal do
   | nil        | unknown  | 3 (D2)        |
 
   Used by `Arbiter.Polecat.resolve_review_rounds/1` to derive the default cap
-  from the bead's difficulty when no workspace `config["tribunal"]["max_rounds"]`
+  from the bead's difficulty when no workspace `config["review_gate"]["max_rounds"]`
   override is set.
   """
   @spec rounds_for_difficulty(0..4 | nil) :: pos_integer()
@@ -309,7 +309,7 @@ defmodule Arbiter.Polecat.Tribunal do
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
       retries_left: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
       # Stored so finish_revise/1 can reset retries_left at the start of each
-      # new round — the retry budget is per-round, not Tribunal-lifetime.
+      # new round — the retry budget is per-round, not ReviewGate-lifetime.
       initial_retries: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
       max_rounds: max(Keyword.get(opts, :rounds, @default_rounds), 1),
       # phase: :reviewing while a reviewer pass is in flight, :revising while an
@@ -350,7 +350,7 @@ defmodule Arbiter.Polecat.Tribunal do
     # bug this bead fixes.
     case reviewer_commit_check(state) do
       {:error, reason} ->
-        Logger.warning("Tribunal: branch has no commits for bead=#{state.bead_id}: #{reason}")
+        Logger.warning("ReviewGate: branch has no commits for bead=#{state.bead_id}: #{reason}")
 
         report(state, {:request_changes, reason})
         {:stop, :normal, %{state | reported?: true}}
@@ -370,12 +370,12 @@ defmodule Arbiter.Polecat.Tribunal do
 
           {:error, reason} ->
             Logger.warning(
-              "Tribunal: failed to spawn reviewer for bead=#{state.bead_id}: #{inspect(reason)}"
+              "ReviewGate: failed to spawn reviewer for bead=#{state.bead_id}: #{inspect(reason)}"
             )
 
             report(
               state,
-              {:request_changes, "Tribunal could not spawn a reviewer: #{inspect(reason)}"}
+              {:request_changes, "ReviewGate could not spawn a reviewer: #{inspect(reason)}"}
             )
 
             {:stop, :normal, %{state | reported?: true}}
@@ -383,10 +383,10 @@ defmodule Arbiter.Polecat.Tribunal do
     end
   end
 
-  # A Tribunal is NOT a polecat, but it lives under Arbiter.Polecat.Supervisor —
+  # A ReviewGate is NOT a polecat, but it lives under Arbiter.Polecat.Supervisor —
   # so a stray enumeration (dashboard / list_children) could probe it with the
   # polecat `:snapshot` call. Answer gracefully instead of crashing the gate and
-  # stranding the author at :awaiting_tribunal. See bd-2y0gd5.
+  # stranding the author at :awaiting_review_gate. See bd-2y0gd5.
   @impl true
   def handle_call(:snapshot, _from, state) do
     {:reply, snapshot(state), state}
@@ -430,11 +430,11 @@ defmodule Arbiter.Polecat.Tribunal do
 
   def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
     Logger.warning(
-      "Tribunal: #{state.phase} pass timed out for bead=#{state.bead_id} (round #{state.round})"
+      "ReviewGate: #{state.phase} pass timed out for bead=#{state.bead_id} (round #{state.round})"
     )
 
     msg =
-      "Tribunal #{state.phase} pass timed out after #{div(state.timeout_ms, 1000)}s " <>
+      "ReviewGate #{state.phase} pass timed out after #{div(state.timeout_ms, 1000)}s " <>
         "with no verdict (round #{state.round})."
 
     payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
@@ -543,7 +543,7 @@ defmodule Arbiter.Polecat.Tribunal do
     state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
 
     Logger.info(
-      "Tribunal: bead=#{state.bead_id} not converged after #{max} round(s); escalating with transcript"
+      "ReviewGate: bead=#{state.bead_id} not converged after #{max} round(s); escalating with transcript"
     )
 
     {:done, finish(state, {:request_changes, escalation_payload(state)})}
@@ -575,7 +575,7 @@ defmodule Arbiter.Polecat.Tribunal do
          ) do
       {:ok, state} ->
         Logger.info(
-          "Tribunal: bead=#{state.bead_id} round #{state.round} requested changes; revising"
+          "ReviewGate: bead=#{state.bead_id} round #{state.round} requested changes; revising"
         )
 
         {:revise, state}
@@ -653,7 +653,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # bd-1mksks: compare HEAD SHA before and after a revise round to detect whether
   # the implementer committed new changes. Appends a system entry to the in-memory
   # thread (for the escalation payload / re-review prompt context) but does NOT
-  # persist it to the durable mailbox — HEAD-change notes are internal Tribunal
+  # persist it to the durable mailbox — HEAD-change notes are internal ReviewGate
   # bookkeeping, not part of the implementer↔reviewer conversation. Returns
   # {updated_state, new_head_sha}.
   defp note_head_change(state) do
@@ -711,7 +711,7 @@ defmodule Arbiter.Polecat.Tribunal do
     # not produce a legitimate review result for this round. Extend the round cap
     # by 1 so the re-prompt's real findings can still reach the implementer: the
     # empty verdict must not rob the bead of a revision opportunity (bd-79goxj).
-    # Only extend when the Tribunal has a revise loop (max_rounds > 1): a
+    # Only extend when the ReviewGate has a revise loop (max_rounds > 1): a
     # single-pass setup (max_rounds == 1) has no revise loop by design and the
     # extension would incorrectly trigger enter_revise for that configuration.
     max_ext = if reason == :empty_findings and state.max_rounds > 1, do: 1, else: 0
@@ -725,14 +725,14 @@ defmodule Arbiter.Polecat.Tribunal do
          ) do
       {:ok, state} ->
         Logger.info(
-          "Tribunal: reviewer for bead=#{state.bead_id} returned #{reason}; re-prompting (attempt #{state.attempt})"
+          "ReviewGate: reviewer for bead=#{state.bead_id} returned #{reason}; re-prompting (attempt #{state.attempt})"
         )
 
         {:reprompt, state}
 
       {:error, spawn_error} ->
         Logger.warning(
-          "Tribunal: verdict re-prompt failed to spawn for bead=#{state.bead_id}: #{inspect(spawn_error)}"
+          "ReviewGate: verdict re-prompt failed to spawn for bead=#{state.bead_id}: #{inspect(spawn_error)}"
         )
 
         {:done,
@@ -775,8 +775,8 @@ defmodule Arbiter.Polecat.Tribunal do
   # (`:no_verdict`) is forwarded as such; the author's safe default for it is to
   # escalate without merging.
   defp report(state, verdict) do
-    safe(fn -> Polecat.report(state.author, :tribunal_rounds, state.round) end)
-    safe(fn -> Polecat.tribunal_verdict(state.author, normalize_verdict(verdict)) end)
+    safe(fn -> Polecat.report(state.author, :review_gate_rounds, state.round) end)
+    safe(fn -> Polecat.review_gate_verdict(state.author, normalize_verdict(verdict)) end)
     :ok
   end
 
@@ -802,7 +802,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # Persist one thread entry as an inter-agent `:flag` message scoped to the
   # bead's workspace. directive_ref = the author bead id, so `Messages.thread/2`
   # reconstructs the ordered conversation for the bead. Best-effort: a workspace-
-  # less Tribunal (ad-hoc run) or a DB hiccup never breaks the loop.
+  # less ReviewGate (ad-hoc run) or a DB hiccup never breaks the loop.
   defp persist_message(%{workspace_id: ws} = state, role, subject, body) when is_binary(ws) do
     {from_ref, to_ref} = thread_refs(state, role)
 
@@ -825,7 +825,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   # reviewer findings travel review_id -> bead (the implementer); the
   # implementer's response travels bead -> review_id; system notes are attributed
-  # to the Tribunal (review_id) and addressed at the bead.
+  # to the ReviewGate (review_id) and addressed at the bead.
   defp thread_refs(state, :reviewer), do: {state.review_id, state.bead_id}
   defp thread_refs(state, :implementer), do: {state.bead_id, state.review_id}
   defp thread_refs(state, :system), do: {state.review_id, state.bead_id}
@@ -834,7 +834,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # transcript, plus the current diff of the branch under review.
   defp escalation_payload(state) do
     """
-    Tribunal escalation — not converged after #{state.round} round(s) of review
+    ReviewGate escalation — not converged after #{state.round} round(s) of review
     (cap #{state.max_rounds}). The implementer and reviewer did not reach
     agreement; the full argument follows for your judgement.
 
@@ -869,7 +869,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   defp role_label(:reviewer), do: "Reviewer → Implementer"
   defp role_label(:implementer), do: "Implementer → Reviewer"
-  defp role_label(:system), do: "Tribunal"
+  defp role_label(:system), do: "ReviewGate"
 
   # The current diff of the branch under review, capped. Best-effort: the
   # escalation is still useful without it.
@@ -918,7 +918,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # (bd-ofql8k). It covers two cases the polecat gate misses:
   #   (B) the revise-round implementer polecat has no worktree_path in meta,
   #       so the polecat commit gate does not fire for revise rounds; and
-  #   (C) the Tribunal is started in an ad-hoc configuration without going
+  #   (C) the ReviewGate is started in an ad-hoc configuration without going
   #       through the normal polecat dispatch path.
   #
   # When worktree_path is nil or git fails, the check is skipped (fail-open):
@@ -1003,7 +1003,7 @@ defmodule Arbiter.Polecat.Tribunal do
 
   # Start an worker as a distinct polecat + claude session under `id`. The
   # worker gets workspace_id: nil so its completion stays silent — no Admiral
-  # notification, no Refinery pickup for the synthetic id — while still recording
+  # notification, no MergeQueue pickup for the synthetic id — while still recording
   # its own run row.
   defp spawn_acolyte(state, id, role, prompt, command) do
     with {:ok, pid} <- start_acolyte_polecat(state, id, role),
@@ -1050,7 +1050,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # the provided argv verbatim. Otherwise we route through `Arbiter.Agents` so
   # the reviewer role honors `workspace.config["review_agent"]["config"]`
   # (model + api keys), and the implementer role honors the worker `agent`
-  # block. A workspace-less Tribunal (ad-hoc run) falls back to today's
+  # block. A workspace-less ReviewGate (ad-hoc run) falls back to today's
   # behaviour — `ClaudeSession`'s built-in default argv, no model flag.
   defp build_session_opts(state, pid, _role, _prompt, command) when is_list(command) do
     {:ok, [owner: pid, worktree_path: state.worktree_path, command: command]}
@@ -1218,7 +1218,7 @@ defmodule Arbiter.Polecat.Tribunal do
     if String.valid?(bin), do: bin, else: valid_prefix(binary_part(bin, 0, byte_size(bin) - 1))
   end
 
-  # Minimal snapshot for a Tribunal probed as if it were a polecat. The Tribunal
+  # Minimal snapshot for a ReviewGate probed as if it were a polecat. The ReviewGate
   # is a review gate, not an worker; this exists only so an accidental
   # :snapshot call gets a sane reply rather than crashing it. See bd-2y0gd5.
   defp snapshot(state) do
@@ -1226,9 +1226,9 @@ defmodule Arbiter.Polecat.Tribunal do
       bead_id: state.bead_id,
       review_id: state.review_id,
       status: :reviewing,
-      current_step: "tribunal",
+      current_step: "review_gate",
       rig: state.rig,
-      role: :tribunal,
+      role: :review_gate,
       phase: state.phase,
       round: state.round,
       max_rounds: state.max_rounds,
@@ -1256,7 +1256,7 @@ defmodule Arbiter.Polecat.Tribunal do
     bead = load_bead(state.bead_id)
 
     """
-    You are a REVIEWER worker — a Tribunal. You did NOT write this code; a
+    You are a REVIEWER worker — a ReviewGate. You did NOT write this code; a
     different worker did. Your job is to code-review its work before it merges.
     You must reach an independent verdict — do not rubber-stamp.
 
@@ -1368,7 +1368,7 @@ defmodule Arbiter.Polecat.Tribunal do
     bead = load_bead(state.bead_id)
 
     """
-    You are an IMPLEMENTER worker. A reviewer (a Tribunal) has reviewed the work
+    You are an IMPLEMENTER worker. A reviewer (a ReviewGate) has reviewed the work
     on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
     finding so the work can pass review.
 
@@ -1414,7 +1414,7 @@ defmodule Arbiter.Polecat.Tribunal do
   # pauses/crashes), so we hand it the git-derived picture of what the prior
   # round(s) actually did — commits since the branch cut + any uncommitted work —
   # exactly as the `arb resume` path (bd-auma3z) briefs a resumed worker. Skipped
-  # (empty string) for a worktree-less Tribunal: an ad-hoc / test run with nothing
+  # (empty string) for a worktree-less ReviewGate: an ad-hoc / test run with nothing
   # on disk to summarize falls back to today's directive-only prompt.
   defp work_so_far_briefing(%{worktree_path: wt, target_branch: tb})
        when is_binary(wt) and is_binary(tb) do
@@ -1436,7 +1436,7 @@ defmodule Arbiter.Polecat.Tribunal do
   defp head_sha_instruction(%{head_sha: sha, branch: branch, target_branch: target})
        when is_binary(sha) do
     """
-    The Tribunal verified before dispatching this review that branch `#{branch}`
+    The ReviewGate verified before dispatching this review that branch `#{branch}`
     has commits ahead of `#{target}`. The implementer's HEAD at dispatch time was
     commit `#{sha}`. Before running `git diff`, confirm you are on the correct
     commit:

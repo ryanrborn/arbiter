@@ -162,7 +162,7 @@ defmodule Arbiter.Beads.Issue do
 
       # Best-effort teardown: stop the bead's polecat (if any) and remove
       # its worktree (if clean). Failures never fail the :close itself.
-      # Runs for every :close path — CLI, Driver, Refinery.
+      # Runs for every :close path — CLI, Driver, MergeQueue.
       change {Arbiter.Beads.Issue.Changes.StopPolecat, []}
       change {Arbiter.Beads.Issue.Changes.CleanupWorktree, []}
 
@@ -234,7 +234,7 @@ defmodule Arbiter.Beads.Issue do
       public? true
       # Pattern allows uppercase to accommodate phase markers (gte-P1),
       # Verus-style mixed-case IDs from the Dolt import, AND legacy IDs
-      # with underscores or multiple hyphens (e.g. `ac-access_control-refinery`,
+      # with underscores or multiple hyphens (e.g. `ac-access_control-merge_queue`,
       # `vs-server-polecat-chrome`). Without that tolerance,
       # AshPaperTrail's Version row creation rejects those IDs and any
       # close/update on a legacy bead fails. Newly generated IDs are
@@ -364,7 +364,7 @@ defmodule Arbiter.Beads.Issue do
       description """
       Markdown. The worker-authored PR/MR description, written at completion
       (Summary / Test plan / References) reflecting the change that actually
-      landed — and filling the repo's PR template when one exists. The Refinery
+      landed — and filling the repo's PR template when one exists. The MergeQueue
       opens the single canonical PR with this body, so the worker never opens
       its own PR. Distinct from `description` (the originating ticket spec).
       """

@@ -22,8 +22,8 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     * If `"routing.policy"` is present, it must be one of the values in
       `Arbiter.Agents.Routing.valid_policies/0` (`"static"`, `"by_priority"`,
       `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
-    * If `"tribunal"` is present, it must be a map.
-    * If `"tribunal.max_rounds"` is present, it must be a positive integer.
+    * If `"review_gate"` is present, it must be a map.
+    * If `"review_gate.max_rounds"` is present, it must be a positive integer.
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -49,7 +49,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     |> validate_agent_block("agent", Map.get(config, "agent"))
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
-    |> validate_tribunal(Map.get(config, "tribunal"))
+    |> validate_review_gate(Map.get(config, "review_gate"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -112,7 +112,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
       end
     end)
     |> then(fn cs ->
-      case Map.get(merge, "warden_max_polls") do
+      case Map.get(merge, "watchdog_max_polls") do
         nil ->
           cs
 
@@ -131,7 +131,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
               Changeset.add_error(cs,
                 field: :config,
                 message:
-                  "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
+                  "merge.watchdog_max_polls must be a positive integer or \"infinity\"; got: #{inspect(s)}"
               )
           end
 
@@ -139,7 +139,7 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
           Changeset.add_error(cs,
             field: :config,
             message:
-              "merge.warden_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
+              "merge.watchdog_max_polls must be a positive integer or \"infinity\"; got: #{inspect(other)}"
           )
       end
     end)
@@ -239,10 +239,10 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset, field: :config, message: "routing must be a map")
   end
 
-  defp validate_tribunal(changeset, nil), do: changeset
+  defp validate_review_gate(changeset, nil), do: changeset
 
-  defp validate_tribunal(changeset, tribunal) when is_map(tribunal) do
-    case Map.get(tribunal, "max_rounds") do
+  defp validate_review_gate(changeset, review_gate) when is_map(review_gate) do
+    case Map.get(review_gate, "max_rounds") do
       nil ->
         changeset
 
@@ -257,19 +257,19 @@ defmodule Arbiter.Beads.Workspace.Changes.ValidateConfig do
           _ ->
             Changeset.add_error(changeset,
               field: :config,
-              message: "tribunal.max_rounds must be a positive integer; got: #{inspect(s)}"
+              message: "review_gate.max_rounds must be a positive integer; got: #{inspect(s)}"
             )
         end
 
       other ->
         Changeset.add_error(changeset,
           field: :config,
-          message: "tribunal.max_rounds must be a positive integer; got: #{inspect(other)}"
+          message: "review_gate.max_rounds must be a positive integer; got: #{inspect(other)}"
         )
     end
   end
 
-  defp validate_tribunal(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "tribunal must be a map")
+  defp validate_review_gate(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "review_gate must be a map")
   end
 end

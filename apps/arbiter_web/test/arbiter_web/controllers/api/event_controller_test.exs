@@ -116,7 +116,7 @@ defmodule ArbiterWeb.Api.EventControllerTest do
     test "valid_topics/0 returns the expected topic list" do
       topics = Arbiter.Events.valid_topics()
       assert "inbox" in topics
-      assert "tribunal" in topics
+      assert "review_gate" in topics
       assert "polecat_failed" in topics
       assert "polecat_done" in topics
       assert "bead_state" in topics
