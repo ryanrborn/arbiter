@@ -578,6 +578,145 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
     end
   end
 
+  describe "gemini stream-json parsing" do
+    test "gemini events render display lines and summarize init/result" do
+      {pid, bead_id} = start_polecat()
+      cwd = tmp_dir!("gem-sj-text")
+      topic = "polecat:#{bead_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{"type" => "init", "session_id" => "g-1", "model" => "gemini-2.5-pro"},
+        %{"type" => "message", "role" => "user", "content" => "the prompt — arb done"},
+        %{"type" => "message", "role" => "assistant", "content" => "doing the work"},
+        %{
+          "type" => "result",
+          "status" => "success",
+          "stats" => %{"duration_ms" => 1500, "total_tokens" => 42, "models" => %{}}
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          topic: topic,
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+      lines = Polecat.state(pid).meta.output_lines
+
+      assert "doing the work" in lines
+      assert Enum.any?(lines, &String.contains?(&1, "gemini session started"))
+      assert Enum.any?(lines, &String.contains?(&1, "gemini session success"))
+      # The user prompt echo is not displayed (and must not arm completion).
+      refute Enum.any?(lines, &String.contains?(&1, "the prompt"))
+      refute Polecat.state(pid).status == :completed
+    end
+
+    test "arb done in gemini assistant text completes the polecat" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("gem-sj-done")
+
+      events = [
+        %{"type" => "message", "role" => "assistant", "content" => "wrapping up\narb done"}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Polecat.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+
+    test "arb done split across two assistant deltas still completes (rolling buffer)" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("gem-sj-split")
+
+      # The sentinel straddles a `delta: true` chunk boundary — per-line
+      # detection would miss it; the rolling buffer must still fire.
+      events = [
+        %{
+          "type" => "message",
+          "role" => "assistant",
+          "content" => "all good now arb ",
+          "delta" => true
+        },
+        %{"type" => "message", "role" => "assistant", "content" => "done\n", "delta" => true}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      status =
+        eventually(fn ->
+          case Polecat.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+
+    test "arb done in a gemini tool result is displayed but does NOT complete" do
+      {pid, _bead_id} = start_polecat()
+      cwd = tmp_dir!("gem-sj-toolresult")
+      :ok = Polecat.advance(pid, :implement)
+
+      events = [
+        %{
+          "type" => "tool_use",
+          "tool_name" => "search_file_content",
+          "parameters" => %{"pattern" => "arb done"}
+        },
+        %{
+          "type" => "tool_result",
+          "status" => "success",
+          "output" => "match: 'arb done' in claude_session.ex"
+        },
+        %{"type" => "result", "status" => "success", "stats" => %{"models" => %{}}}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "gemini",
+          model: "gemini-2.5-pro"
+        )
+
+      wait_for_exit(pid)
+
+      refute Polecat.state(pid).status == :completed
+      lines = Polecat.state(pid).meta.output_lines
+      assert Enum.any?(lines, &String.contains?(&1, "match:"))
+    end
+  end
+
   describe "concurrent polecats" do
     test "each polecat sees only its own output" do
       {pid_a, bead_a} = start_polecat()

@@ -318,10 +318,13 @@ defmodule Arbiter.Polecat.ClaudeSession do
   defp process_line(%{} = session, line) do
     case decode_event(line) do
       {:ok, event} ->
-        session = absorb_usage(session, event)
+        session =
+          session
+          |> absorb_usage(event)
+          |> scan_split_done(event)
 
         event
-        |> format_event()
+        |> format_event(session)
         |> Enum.reduce(maybe_update_activity(session, event), fn {text, detect?}, acc ->
           emit_line(acc, text, detect?)
         end)
@@ -331,11 +334,57 @@ defmodule Arbiter.Polecat.ClaudeSession do
     end
   end
 
+  # Gemini streams assistant output as `delta: true` chunks, so the `arb done`
+  # sentinel can straddle two events that the per-line check in emit_line/3 would
+  # miss. Keep a small rolling tail of assistant text and fire completion as soon
+  # as the concatenation matches — a safety net alongside (not a replacement for)
+  # the per-line detection. The done handler is idempotent, so the belt-and-
+  # suspenders double-fire on the common (single-chunk) case is harmless; the
+  # `:split_done_fired` flag stops the buffer re-matching on every later chunk.
+  # Claude turns aren't chunked this way, so this only engages for Gemini.
+  defp scan_split_done(%{provider: "gemini", split_done_fired: true} = session, _event),
+    do: session
+
+  defp scan_split_done(
+         %{provider: "gemini"} = session,
+         %{"type" => "message", "role" => "assistant", "content" => content}
+       )
+       when is_binary(content) do
+    buf = scan_tail(Map.get(session, :split_done_buf, "") <> content)
+    session = Map.put(session, :split_done_buf, buf)
+
+    if Regex.match?(session.done_regex, buf) do
+      send(self(), {:__claude_session_done__, buf})
+      Map.put(session, :split_done_fired, true)
+    else
+      session
+    end
+  end
+
+  defp scan_split_done(session, _event), do: session
+
+  # Keep only the last 256 graphemes — enough to span a sentinel split across a
+  # chunk boundary without growing unbounded on a long turn.
+  defp scan_tail(text) when is_binary(text) do
+    if String.length(text) > 256, do: String.slice(text, -256, 256), else: text
+  end
+
   # Capture structured usage off the two events that carry it. The `init` event
   # tells us the model and session_id up front; the terminal `result` event
   # carries tokens + cost + duration. Both update an in-session `:usage` map
   # that the polecat reads on exit. Best-effort — missing keys leave their slot
   # nil and the row is still persisted (graceful degradation).
+  # Gemini sessions carry a different stream-json schema, so route their events
+  # to the Gemini stream parser (which also derives cost from a price table,
+  # since the gemini CLI emits no dollar figure). Provider is set on the session
+  # config at spawn time; the `init`/`result` event clauses below are Claude's.
+  defp absorb_usage(%{provider: "gemini"} = session, event) do
+    update_usage(
+      session,
+      Arbiter.Agents.Gemini.Stream.usage_fields(event, Map.get(session, :model))
+    )
+  end
+
   defp absorb_usage(session, %{"type" => "system", "subtype" => "init"} = event) do
     update_usage(session, %{
       model: event["model"],
@@ -395,7 +444,13 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # unknown types) leave the prior activity in place — so "editing run.ex"
   # persists across the tool-result turn until the next action.
   defp maybe_update_activity(%{} = session, event) do
-    case activity_for_event(event) do
+    label =
+      case Map.get(session, :provider) do
+        "gemini" -> Arbiter.Agents.Gemini.Stream.activity_for_event(event)
+        _ -> activity_for_event(event)
+      end
+
+    case label do
       nil ->
         session
 
@@ -454,6 +509,14 @@ defmodule Arbiter.Polecat.ClaudeSession do
       _ -> :error
     end
   end
+
+  # Provider-aware dispatch: Gemini's stream-json events have a different shape,
+  # so they're formatted by the Gemini parser. Claude (and the nil/default
+  # provider) use the clauses below.
+  defp format_event(event, %{provider: "gemini"}),
+    do: Arbiter.Agents.Gemini.Stream.format_event(event)
+
+  defp format_event(event, _session), do: format_event(event)
 
   # Expand a stream-json event into `{display_line, detect_done?}` tuples.
   # Only assistant *text* opts into completion detection (see moduledoc).
