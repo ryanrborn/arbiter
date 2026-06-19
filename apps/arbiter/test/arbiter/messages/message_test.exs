@@ -41,6 +41,32 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  describe "PubSub broadcast on mark_read" do
+    test "broadcasts {:message_read, message} on the workspace topic" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
+
+      {:ok, m} =
+        Message.send_mail(%{
+          workspace_id: @ws,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          kind: :completion,
+          subject: "bd-soren complete",
+          body: "done"
+        })
+
+      # Drain the :new_message that fires on create so the assert_receive below
+      # is unambiguous.
+      assert_receive {:new_message, _}
+
+      {:ok, read} = Message.mark_read(m)
+
+      assert_receive {:message_read, received}
+      assert received.id == read.id
+      assert %DateTime{} = received.read_at
+    end
+  end
+
   describe "send_mail/1 + inbox/2 + mark_read/1" do
     test "mailbox messages addressed to a bead show up unread in the inbox" do
       {:ok, _m} =

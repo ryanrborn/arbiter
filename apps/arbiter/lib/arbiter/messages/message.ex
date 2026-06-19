@@ -75,6 +75,11 @@ defmodule Arbiter.Messages.Message do
       accept []
       require_atomic? false
       change set_attribute(:read_at, &DateTime.utc_now/0)
+
+      change after_action(fn _changeset, message, _context ->
+               Arbiter.Messages.Message.broadcast_read(message)
+               {:ok, message}
+             end)
     end
   end
 
@@ -176,6 +181,25 @@ defmodule Arbiter.Messages.Message do
   end
 
   def broadcast_new(_message), do: :ok
+
+  @doc """
+  Broadcast `{:message_read, message}` on the message's workspace topic.
+
+  Called by the `mark_read` action so that all paths that read/clear a message
+  (CLI, MCP, HTTP API, another dashboard session) push a live update. Silent-
+  on-failure, mirroring `broadcast_new/1`.
+  """
+  def broadcast_read(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:message_read, message})
+    :ok
+  rescue
+    e ->
+      require Logger
+      Logger.debug("Messages.Message.broadcast_read/1 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  def broadcast_read(_message), do: :ok
 
   # ---- convenience helpers -------------------------------------------------
 
