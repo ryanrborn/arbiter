@@ -367,7 +367,7 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "bead_id" => %{"type" => "string", "description" => "Bead to dispatch (required)."},
-          "rig" => %{"type" => "string", "description" => "Rig to run in (optional)."},
+          "repo" => %{"type" => "string", "description" => "Repo to run in (optional)."},
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "provider" => %{
             "type" => "string",
@@ -397,9 +397,9 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "bead_id" => %{"type" => "string", "description" => "Bead to resume (required)."},
-          "rig" => %{
+          "repo" => %{
             "type" => "string",
-            "description" => "Rig to run in (optional; inherited from the bead's last run)."
+            "description" => "Repo to run in (optional; inherited from the bead's last run)."
           },
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."}
         },
@@ -419,7 +419,7 @@ defmodule Arbiter.MCP.Catalog do
         "type" => "object",
         "properties" => %{
           "bead_id" => %{"type" => "string", "description" => "Bead to review (required)."},
-          "rig" => %{
+          "repo" => %{
             "type" => "string",
             "description" => "Local checkout the reviewer runs in (needs `gh`/`git`)."
           },
@@ -494,7 +494,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "polecat_list",
       tiers: @coordinator,
       description:
-        "List active polecats in the workspace: bead_id, status, rig, started_at, activity, " <>
+        "List active polecats in the workspace: bead_id, status, repo, started_at, activity, " <>
           "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the bead).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.polecat_list/2
@@ -584,7 +584,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Roll up the token/cost usage ledger for the workspace. `by` is required (day, bead, " <>
-          "campaign, workspace, rig, model, step, provider); optional `since` (ISO-8601) and `limit`.",
+          "campaign, workspace, repo, model, step, provider); optional `since` (ISO-8601) and `limit`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

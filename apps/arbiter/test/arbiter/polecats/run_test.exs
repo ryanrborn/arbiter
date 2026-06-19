@@ -13,7 +13,7 @@ defmodule Arbiter.Polecats.RunTest do
         Ash.create(Run, %{
           bead_id: "bd-aaa",
           bead_title: "do a thing",
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: @ws,
           status: :running,
           started_at: now
@@ -29,7 +29,7 @@ defmodule Arbiter.Polecats.RunTest do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Run, %{
                  bead_id: "bd-x",
-                 rig: "arbiter",
+                 repo: "arbiter",
                  status: :bogus,
                  started_at: DateTime.utc_now()
                })
@@ -38,7 +38,7 @@ defmodule Arbiter.Polecats.RunTest do
     test "rejects a missing bead_id" do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Run, %{
-                 rig: "arbiter",
+                 repo: "arbiter",
                  status: :running,
                  started_at: DateTime.utc_now()
                })
@@ -50,7 +50,7 @@ defmodule Arbiter.Polecats.RunTest do
       {:ok, run} =
         Ash.create(Run, %{
           bead_id: "bd-bbb",
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: @ws,
           status: :running,
           started_at: DateTime.utc_now()

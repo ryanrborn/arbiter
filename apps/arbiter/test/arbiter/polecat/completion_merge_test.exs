@@ -20,11 +20,11 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
   defp init_rig(dir) do
-    repo = Path.join(dir, "rig")
+    repo = Path.join(dir, "repo")
     bare = Path.join(dir, "origin.git")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-    {_, 0} = git(["config", "user.email", "rig@example.com"], repo)
+    {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
     {_, 0} = git(["config", "user.name", "Rig"], repo)
     {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
     File.write!(Path.join(repo, "README.md"), "seed\n")
@@ -62,7 +62,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     repo = init_rig(tmp)
 
     Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
-    Application.put_env(:arbiter, :rig_paths, %{"merge/rig" => repo})
+    Application.put_env(:arbiter, :repo_paths, %{"merge/repo" => repo})
 
     on_exit(fn ->
       Application.delete_env(:arbiter, :worktree_root)
@@ -87,7 +87,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
 
     {:ok, result} =
       Dispatch.dispatch(bead.id,
-        rig: "merge/rig",
+        repo: "merge/repo",
         start_claude: true,
         claude_command: [@fixture],
         interval_ms: 10,
@@ -134,7 +134,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     }
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead.id, rig: "merge/rig", workspace_id: ws.id, meta: meta)
+      Polecat.start(bead_id: bead.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Polecat.advance(pid, :claude)
@@ -178,7 +178,7 @@ defmodule Arbiter.Polecat.CompletionMergeTest do
     }
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead.id, rig: "merge/rig", workspace_id: ws.id, meta: meta)
+      Polecat.start(bead_id: bead.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Polecat.advance(pid, :claude)

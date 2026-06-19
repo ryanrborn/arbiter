@@ -22,7 +22,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     test "returns the snapshot including output_lines for a running polecat",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "show-me", workspace_id: ws.id})
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
 
       # Simulate Claude output flowing through the polecat.
       :ok = Polecat.report(polecat_pid, :output_lines, ["hello", "world", "arb done"])
@@ -31,7 +31,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       body = json_response(conn, 200)
 
       assert body["bead_id"] == bead.id
-      assert body["rig"] == "test/rig"
+      assert body["repo"] == "test/repo"
       assert body["status"] in ["idle", "running", "awaiting", "completed", "failed"]
       assert body["output_lines"] == ["hello", "world", "arb done"]
     end
@@ -50,7 +50,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, _old} =
         Ash.create(Run, %{
           bead_id: bead_id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: ws.id,
           status: :completed,
           started_at: older,
@@ -61,7 +61,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, _recent} =
         Ash.create(Run, %{
           bead_id: bead_id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: ws.id,
           status: :failed,
           started_at: newer,
@@ -91,20 +91,20 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, _run} =
         Ash.create(Run, %{
           bead_id: bead.id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: ws.id,
           status: :completed,
           started_at: DateTime.add(DateTime.utc_now(), -60, :second)
         })
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       :ok = Polecat.report(polecat_pid, :output_lines, ["live-line"])
 
       conn = get(conn, ~p"/api/polecats/#{bead.id}")
       body = json_response(conn, 200)
 
       assert body["source"] == "live"
-      assert body["rig"] == "test/rig"
+      assert body["repo"] == "test/repo"
       assert body["output_lines"] == ["live-line"]
     end
 
@@ -117,7 +117,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     test "snapshot includes failure_reason when the polecat failed",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "failed-pol", workspace_id: ws.id})
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
 
       :ok = Polecat.fail(polecat_pid, {:claude_crashed, "bad token"})
 
@@ -140,7 +140,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       conn =
         post(conn, ~p"/api/polecats/dispatch", %{
           "bead_id" => bead.id,
-          "rig" => "test/rig",
+          "repo" => "test/repo",
           "no_agent" => true
         })
 
@@ -159,10 +159,10 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
     end
 
     # A `provider` takes the real-work dispatch path (start_claude: true) rather
-    # than parking. With an unconfigured rig that path returns a 400 rig error —
+    # than parking. With an unconfigured repo that path returns a 400 repo error —
     # the signal that the provider was honored as a worker dispatch (a park would
     # 201 with the bead in_progress and no agent).
-    test "provider routes to a real worker dispatch (rig error rather than park)",
+    test "provider routes to a real worker dispatch (repo error rather than park)",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "gem-provider", workspace_id: ws.id})
 
@@ -170,11 +170,11 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
         post(conn, ~p"/api/polecats/dispatch", %{
           "bead_id" => bead.id,
           "provider" => "gemini",
-          "rig" => "no-such-rig"
+          "repo" => "no-such-repo"
         })
 
       body = json_response(conn, 400)
-      assert body["error"]["message"] =~ "rig"
+      assert body["error"]["message"] =~ "repo"
     end
 
     test "returns 404 for an unknown bead_id", %{conn: conn} do
@@ -194,19 +194,19 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       assert json_response(conn, 404)
     end
 
-    test "a bead with no prior run nor rig can't be resumed (400)", %{conn: conn, ws: ws} do
+    test "a bead with no prior run nor repo can't be resumed (400)", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
 
       conn = post(conn, ~p"/api/polecats/#{bead.id}/resume", %{})
       body = json_response(conn, 400)
-      assert body["error"]["message"] =~ "rig"
+      assert body["error"]["message"] =~ "repo"
     end
 
     test "a closed bead can't be resumed (400)", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "closed", workspace_id: ws.id})
       {:ok, _} = Ash.update(bead, %{}, action: :close)
 
-      conn = post(conn, ~p"/api/polecats/#{bead.id}/resume", %{"rig" => "test/rig"})
+      conn = post(conn, ~p"/api/polecats/#{bead.id}/resume", %{"repo" => "test/repo"})
       body = json_response(conn, 400)
       assert body["error"]["message"] =~ "closed"
     end
@@ -228,7 +228,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
           "bead_id" => bead.id,
           # Drop the Claude session — the test only cares about wiring.
           "with_claude" => false,
-          "rig" => "no-such-rig"
+          "repo" => "no-such-repo"
         })
 
       body = json_response(conn, 201)
@@ -261,7 +261,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
   describe "POST /api/polecats/:bead_id/stop" do
     test "terminates a running polecat", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       ref = Process.monitor(polecat_pid)
 
       conn = post(conn, ~p"/api/polecats/#{bead.id}/stop", %{})
@@ -304,7 +304,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, run} =
         Ash.create(Run, %{
           bead_id: bead_id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: ws.id,
           status: :completed,
           started_at: DateTime.utc_now(),
@@ -335,7 +335,7 @@ defmodule ArbiterWeb.Api.PolecatControllerTest do
       {:ok, run} =
         Ash.create(Run, %{
           bead_id: bead_id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: ws.id,
           status: :running,
           started_at: DateTime.utc_now()

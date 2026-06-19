@@ -13,7 +13,7 @@ defmodule Arbiter.UsageTest do
   defp create_event!(attrs) do
     base = %{
       bead_id: "bd-usage-#{System.unique_integer([:positive])}",
-      rig: "arbiter",
+      repo: "arbiter",
       workspace_id: "ws-usage",
       step: :work,
       occurred_at: DateTime.utc_now()
@@ -63,7 +63,7 @@ defmodule Arbiter.UsageTest do
       assert {:error, _} =
                Ash.create(Event, %{
                  bead_id: "bd-bad",
-                 rig: "arbiter",
+                 repo: "arbiter",
                  step: :sideways,
                  occurred_at: DateTime.utc_now()
                })
@@ -259,7 +259,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-cs-usage-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-usage")
+        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -328,7 +328,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-cs-nores-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-usage")
+        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -366,7 +366,7 @@ defmodule Arbiter.UsageTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: reviewer_id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: nil,
           meta: %{role: :reviewer, reviews: "bd-author"}
         )
@@ -419,7 +419,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-gemini-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-usage")
+        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -461,7 +461,7 @@ defmodule Arbiter.UsageTest do
       bead_id = "bd-gemini-sj-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-usage")
+        Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -535,7 +535,7 @@ defmodule Arbiter.UsageTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: reviewer_id,
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: nil,
           meta: %{role: :reviewer, reviews: "bd-author"}
         )

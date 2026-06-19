@@ -18,7 +18,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "drives a Three workflow to :completed and closes the bead", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "three", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
 
@@ -53,7 +53,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "marks polecat :failed and leaves bead :in_progress on workflow error", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "fail", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Failing, bead.id, %{})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -82,7 +82,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "stops and fails the polecat when max_ticks is exceeded", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "loop", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -114,7 +114,7 @@ defmodule Arbiter.Polecat.DriverTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "mdied", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -148,7 +148,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "Dispatch with default opts starts a driver that closes the bead", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "via-dispatch", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, rig: "r", interval_ms: 1)
+      {:ok, result} = Dispatch.dispatch(bead.id, repo: "r", interval_ms: 1)
       assert is_pid(result.driver_pid)
 
       ref = Process.monitor(result.driver_pid)
@@ -163,7 +163,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "closes the bead when the polecat transitions to :completed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "cd-complete", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -196,7 +196,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "leaves the bead :in_progress when the polecat transitions to :failed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "cd-fail", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -223,7 +223,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "max_ticks backstop stops the driver if the polecat never completes", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "cd-stuck", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -257,7 +257,7 @@ defmodule Arbiter.Polecat.DriverTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "cd-ar-freeze", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -310,7 +310,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "closes the bead at max_ticks if polecat is already :completed", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "cd-maxtick-done", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -353,7 +353,7 @@ defmodule Arbiter.Polecat.DriverTest do
 
       {:ok, bead} = Ash.create(Issue, %{title: "cd-maxtick-awaiting", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -447,7 +447,7 @@ defmodule Arbiter.Polecat.DriverTest do
     } do
       {:ok, bead} = Ash.create(Issue, %{title: "cw", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -472,7 +472,7 @@ defmodule Arbiter.Polecat.DriverTest do
     test "leaves the worktree alone by default", %{ws: ws, wt_path: wt_path} do
       {:ok, bead} = Ash.create(Issue, %{title: "no-cw", workspace_id: ws.id})
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -499,7 +499,7 @@ defmodule Arbiter.Polecat.DriverTest do
       File.write!(Path.join(wt_path, "scratch.txt"), "dirty\n")
 
       {:ok, bead} = Ash.create(Issue, %{title: "dirty", workspace_id: ws.id})
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -534,7 +534,7 @@ defmodule Arbiter.Polecat.DriverTest do
       {:ok, true} = Arbiter.Polecat.Worktree.has_commits_ahead?(wt_path, "main")
 
       {:ok, bead} = Ash.create(Issue, %{title: "ahead", workspace_id: ws.id})
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "r")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "r")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})
@@ -567,7 +567,7 @@ defmodule Arbiter.Polecat.DriverTest do
           workspace_id: ws.id
         })
 
-      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, rig: "test/rig")
+      {:ok, polecat_pid} = Polecat.start(bead_id: bead.id, repo: "test/repo")
       {:ok, machine_id} = Machine.attach(TestWorkflows.Three, bead.id, %{x: "v"})
       {:ok, machine_pid} = Machine.start(machine_id)
       {:ok, _} = Ash.update(bead, %{status: :in_progress})

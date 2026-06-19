@@ -1,12 +1,12 @@
 import Config
 config :ash, policies: [show_policy_breakdowns?: true]
 
-# Rig → git-repo path mapping consumed by `Arbiter.Polecat.Sling` when it
-# provisions a worktree for a freshly-slung polecat. Beads slung with a rig
-# string not in this map skip worktree provisioning entirely.
-# Rigs can also be configured per-workspace via the dashboard
-# (Workspace → config["rig_paths"]) so you don't have to redeploy to add one.
-config :arbiter, :rig_paths, %{}
+# Repo → git-repo path mapping consumed by `Arbiter.Polecat.Dispatch` when it
+# provisions a worktree for a freshly-dispatched polecat. Beads dispatched with
+# a repo string not in this map skip worktree provisioning entirely.
+# Repos can also be configured per-workspace via the dashboard
+# (Workspace → config["repo_paths"]) so you don't have to redeploy to add one.
+config :arbiter, :repo_paths, %{}
 config :arbiter, :worktree_root, Path.expand("~/dev/arbiter-worktrees")
 
 # Root for durable, append-only per-run acolyte transcripts

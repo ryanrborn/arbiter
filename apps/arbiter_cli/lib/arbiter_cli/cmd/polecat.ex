@@ -91,7 +91,7 @@ defmodule ArbiterCli.Cmd.Polecat do
       IO.puts("Step:       #{snap["current_step"]}")
     end
 
-    IO.puts("Repo:        #{snap["rig"]}")
+    IO.puts("Repo:        #{snap["repo"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
@@ -154,7 +154,7 @@ defmodule ArbiterCli.Cmd.Polecat do
       cost_part = format_cost(p["cost_usd"])
 
       IO.puts(
-        "  #{p["bead_id"]}  status=#{p["status"]}  #{step}  rig=#{p["rig"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
+        "  #{p["bead_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
       )
     end)
   end

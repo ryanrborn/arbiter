@@ -60,8 +60,8 @@ defmodule ArbiterWeb.Router do
     post("/dependencies", DependencyController, :create)
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
-    # Rigs (repo/project checkouts polecats operate on)
-    get("/rigs", RigController, :index)
+    # Repos (repo/project checkouts polecats operate on)
+    get("/repos", RepoController, :index)
 
     # Workspaces
     get("/workspaces", WorkspaceController, :index)

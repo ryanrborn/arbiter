@@ -187,7 +187,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
                  %{
                    bead_id: bead_id,
                    workspace_id: ws,
-                   rig: "team/repo",
+                   repo: "team/repo",
                    meta: %{activity: %{label: "editing run.ex"}}
                  },
                  reason
@@ -199,7 +199,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       assert escalation.directive_ref == bead_id
       assert escalation.subject =~ bead_id
       assert escalation.subject =~ "credentials expired"
-      assert escalation.body =~ "Rig: team/repo"
+      assert escalation.body =~ "Repo: team/repo"
       assert escalation.body =~ "Last activity: editing run.ex"
       assert escalation.body =~ "Exit code: 1"
       assert escalation.body =~ "Re-authenticate"
@@ -212,7 +212,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
-                 %{bead_id: bead_id, workspace_id: ws, rig: "r", meta: %{}},
+                 %{bead_id: bead_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
 
@@ -226,7 +226,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
-                 %{bead_id: bead_id, workspace_id: ws, rig: "r", meta: %{}},
+                 %{bead_id: bead_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
 
@@ -238,7 +238,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
-                 %{bead_id: "bd-noworkspace", workspace_id: nil, rig: "r", meta: %{}},
+                 %{bead_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
                  reason
                )
 
@@ -256,7 +256,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
       assert :ok =
                AdmiralNotifier.preflight_failed(
-                 %{bead_id: bead_id, workspace_id: ws, rig: "r", meta: %{}},
+                 %{bead_id: bead_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
 

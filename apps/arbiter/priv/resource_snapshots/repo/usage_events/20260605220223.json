@@ -34,7 +34,7 @@
       "default": "nil",
       "size": null,
       "type": "text",
-      "source": "rig",
+      "source": "repo",
       "references": null,
       "allow_nil?": true,
       "primary_key?": false,

@@ -17,7 +17,7 @@ defmodule Arbiter.Polecat.WatchdogTest do
   # A :running polecat the Watchdog can drive to a terminal state.
   defp running_polecat do
     bead_id = new_bead_id()
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter")
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter")
     :ok = Polecat.advance(pid, :implement)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)

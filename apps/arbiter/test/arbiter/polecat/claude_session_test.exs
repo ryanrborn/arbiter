@@ -14,7 +14,7 @@ defmodule Arbiter.Polecat.ClaudeSessionTest do
     bead_id = new_bead_id()
 
     {:ok, pid} =
-      Polecat.start(Keyword.merge([bead_id: bead_id, rig: "arbiter"], extra_opts))
+      Polecat.start(Keyword.merge([bead_id: bead_id, repo: "arbiter"], extra_opts))
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)

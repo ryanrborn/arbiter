@@ -15,7 +15,7 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
 
   defp running_polecat(opts \\ []) do
     bead_id = Keyword.get(opts, :bead_id, new_bead_id())
-    {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter")
+    {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter")
     :ok = Polecat.advance(pid, :implement)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     {pid, bead_id}
@@ -83,7 +83,7 @@ defmodule Arbiter.PolecatAwaitingReviewTest do
 
     test "is rejected from :idle" do
       bead_id = new_bead_id()
-      {:ok, pid} = Polecat.start(bead_id: bead_id, rig: "arbiter")
+      {:ok, pid} = Polecat.start(bead_id: bead_id, repo: "arbiter")
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
       assert {:error, {:invalid_transition, :idle, :awaiting_review}} =

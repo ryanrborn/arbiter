@@ -17,17 +17,17 @@ defmodule ArbiterCli.Main do
                                   [--pr-body text]
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
-      arb issue claim     <issue#> [--force] [--rig <rig>]
+      arb issue claim     <issue#> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready
-      arb issue dispatch  <id> [<rig>] [--with-claude] [--model <name>]
+      arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>]
 
       arb worker list
       arb worker show     <bead-id>
       arb worker log      <bead-id>
       arb worker stop     <bead-id>
-      arb worker resume   <bead-id> [<rig>] [--model <name>]
-      arb worker review   <bead-id> [--rig <rig>] [--model <name>]
+      arb worker resume   <bead-id> [<repo>] [--model <name>]
+      arb worker review   <bead-id> [--repo <repo>] [--model <name>]
 
       arb repo list
       arb repo show       <name>
@@ -53,7 +53,7 @@ defmodule ArbiterCli.Main do
       arb message send    <recipient> <body> [--subject ...] [--directive bd-x] [--kind ...]
       arb message notify  [--limit N]
 
-      arb usage show      [--by day|bead|campaign|workspace|rig|model|step|provider]
+      arb usage show      [--by day|bead|campaign|workspace|repo|model|step|provider]
                                   [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
       arb usage events    [--bead <bead-id>] [--workspace <id>] [--step work|review]
                                   [--since ...] [--limit N]

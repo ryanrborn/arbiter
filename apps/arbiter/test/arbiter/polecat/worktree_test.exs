@@ -92,10 +92,10 @@ defmodule Arbiter.Polecat.WorktreeTest do
              "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
     end
 
-    test "aborts when the rig has no `origin` remote configured",
+    test "aborts when the repo has no `origin` remote configured",
          %{tmp: tmp} do
-      # Build a rig with NO origin remote. We MUST refuse to provision rather
-      # than silently branching from the rig's (potentially stale) local base.
+      # Build a repo with NO origin remote. We MUST refuse to provision rather
+      # than silently branching from the repo's (potentially stale) local base.
       local_only = Path.join(tmp, "local-only")
       File.mkdir_p!(local_only)
       {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local_only])
@@ -112,10 +112,10 @@ defmodule Arbiter.Polecat.WorktreeTest do
       assert msg =~ "origin"
     end
 
-    test "fetches origin: worktree starts from upstream tip, NOT the rig's stale local base",
+    test "fetches origin: worktree starts from upstream tip, NOT the repo's stale local base",
          %{repo: repo, remote: remote, tmp: tmp} do
-      # Simulate the failure case from the bead: the rig's local `main` is
-      # behind origin/main. A second clone advances origin; the rig's local
+      # Simulate the failure case from the bead: the repo's local `main` is
+      # behind origin/main. A second clone advances origin; the repo's local
       # `main` stays put. The new worktree must start from origin/main (sees
       # the new file), not from the stale local ref.
       clone = Path.join(tmp, "advance-clone")
@@ -128,7 +128,7 @@ defmodule Arbiter.Polecat.WorktreeTest do
       {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance origin"])
       {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
 
-      # The rig's local `main` has NOT been fetched yet — it's stale.
+      # The repo's local `main` has NOT been fetched yet — it's stale.
       refute File.exists?(Path.join(repo, "UPSTREAM_ADVANCE.md"))
 
       assert {:ok, path} = Worktree.create(repo, "feature/from-upstream", "main")
@@ -138,30 +138,30 @@ defmodule Arbiter.Polecat.WorktreeTest do
       assert File.exists?(Path.join(path, "UPSTREAM_ADVANCE.md"))
     end
 
-    test "dirty rig working tree does not block worktree provisioning",
+    test "dirty repo working tree does not block worktree provisioning",
          %{repo: repo} do
-      # Per the bead's guards: the rig is read but a separate worktree is
-      # created, so a dirty rig must NOT prevent provisioning.
-      File.write!(Path.join(repo, "scratch.txt"), "wip in rig\n")
+      # Per the bead's guards: the repo is read but a separate worktree is
+      # created, so a dirty repo must NOT prevent provisioning.
+      File.write!(Path.join(repo, "scratch.txt"), "wip in repo\n")
 
-      assert {:ok, path} = Worktree.create(repo, "feature/dirty-rig", "main")
+      assert {:ok, path} = Worktree.create(repo, "feature/dirty-repo", "main")
       assert File.dir?(path)
-      assert {:ok, "feature/dirty-rig"} = Worktree.current_branch(path)
+      assert {:ok, "feature/dirty-repo"} = Worktree.current_branch(path)
     end
 
-    test "fetches origin even when the rig's HEAD is on an unrelated branch",
+    test "fetches origin even when the repo's HEAD is on an unrelated branch",
          %{repo: repo} do
-      # The rig's HEAD is on a side branch — `main` exists but the working
+      # The repo's HEAD is on a side branch — `main` exists but the working
       # tree is checked out elsewhere. The new worktree should still start
-      # from `origin/main`, not blow up over the rig's HEAD state.
-      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "rig-side"])
+      # from `origin/main`, not blow up over the repo's HEAD state.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "repo-side"])
       File.write!(Path.join(repo, "SIDE.md"), "side branch\n")
       {_, 0} = System.cmd("git", ["-C", repo, "add", "SIDE.md"])
       {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "side"])
 
       assert {:ok, path} = Worktree.create(repo, "feature/from-main", "main")
 
-      # The new worktree is on `main`, not the rig's `rig-side`.
+      # The new worktree is on `main`, not the repo's `repo-side`.
       assert {:ok, "feature/from-main"} = Worktree.current_branch(path)
       refute File.exists?(Path.join(path, "SIDE.md"))
     end

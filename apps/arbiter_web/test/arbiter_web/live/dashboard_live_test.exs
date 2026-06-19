@@ -119,7 +119,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
     test "counts active polecats per workspace", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "polly-ws", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
       # The workspace row should reflect the active polecat. Hard to assert
@@ -130,45 +130,45 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "rigs section" do
+  describe "repos section" do
     setup do
-      prior = Application.get_env(:arbiter, :rig_paths)
-      Application.put_env(:arbiter, :rig_paths, %{"dashboard-test-rig" => "/tmp/dash-rig"})
+      prior = Application.get_env(:arbiter, :repo_paths)
+      Application.put_env(:arbiter, :repo_paths, %{"dashboard-test-repo" => "/tmp/dash-repo"})
 
       on_exit(fn ->
         if prior,
-          do: Application.put_env(:arbiter, :rig_paths, prior),
-          else: Application.delete_env(:arbiter, :rig_paths)
+          do: Application.put_env(:arbiter, :repo_paths, prior),
+          else: Application.delete_env(:arbiter, :repo_paths)
       end)
 
       :ok
     end
 
-    test "lists rigs configured via Application env", %{conn: conn} do
+    test "lists repos configured via Application env", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
-      # Rigs render as compact cards now (was a raw table).
-      assert html =~ "rigs-section"
-      assert html =~ "dashboard-test-rig"
-      assert html =~ "/tmp/dash-rig"
+      # Repos render as compact cards now (was a raw table).
+      assert html =~ "repos-section"
+      assert html =~ "dashboard-test-repo"
+      assert html =~ "/tmp/dash-repo"
       assert html =~ "(app)"
     end
 
-    test "counts active polecats per rig", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "rig-pol", workspace_id: ws.id})
+    test "counts active polecats per repo", %{conn: conn, ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "repo-pol", workspace_id: ws.id})
 
       {:ok, _pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "dashboard-test-rig",
+          repo: "dashboard-test-repo",
           workspace_id: ws.id
         )
 
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ "dashboard-test-rig"
-      # Row should show 1 active polecat for the rig.
-      # Hard to assert specific cell content; check the rig name + a 1
+      assert html =~ "dashboard-test-repo"
+      # Row should show 1 active polecat for the repo.
+      # Hard to assert specific cell content; check the repo name + a 1
       # appear on the same page render.
-      assert html =~ "dashboard-test-rig"
+      assert html =~ "dashboard-test-repo"
     end
 
     test "renders without error when a workspace rig_paths entry is in object form",
@@ -180,8 +180,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
         Ash.update(ws, %{
           config: %{
             "rig_paths" => %{
-              "object-form-rig" => %{
-                "path" => "/tmp/object-form-rig",
+              "object-form-repo" => %{
+                "path" => "/tmp/object-form-repo",
                 "target_branch" => "integration/dolphin"
               }
             }
@@ -189,18 +189,18 @@ defmodule ArbiterWeb.DashboardLiveTest do
         })
 
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ "rigs-section"
-      assert html =~ "object-form-rig"
-      assert html =~ "/tmp/object-form-rig"
+      assert html =~ "repos-section"
+      assert html =~ "object-form-repo"
+      assert html =~ "/tmp/object-form-repo"
     end
 
-    test "surfaces a polecat using an unconfigured rig under (unconfigured)",
+    test "surfaces a polecat using an unconfigured repo under (unconfigured)",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "weird-rig", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "no-such-rig", workspace_id: ws.id)
+      {:ok, bead} = Ash.create(Issue, %{title: "weird-repo", workspace_id: ws.id})
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "no-such-repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ "no-such-rig"
+      assert html =~ "no-such-repo"
       assert html =~ "(unconfigured)"
     end
   end
@@ -208,7 +208,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
   describe "active polecats workspace column" do
     test "shows the workspace name on each polecat row", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "ws-col", workspace_id: ws.id})
-      {:ok, _pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      {:ok, _pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -304,7 +304,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert render(view) =~ "No active"
 
       {:ok, _pid} =
-        Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+        Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
       # PubSub fires :started — re-render now lists the polecat in the
       # active table (count goes from 0 to 1, and the empty message is gone).
@@ -334,7 +334,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
         Ash.create(Run, %{
           bead_id: "bd-done",
           bead_title: "the-completed-title",
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: "ws-1",
           status: :completed,
           started_at: DateTime.add(DateTime.utc_now(), -120, :second),
@@ -345,7 +345,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
         Ash.create(Run, %{
           bead_id: "bd-bust",
           bead_title: "the-failed-title",
-          rig: "arbiter",
+          repo: "arbiter",
           workspace_id: "ws-1",
           status: :failed,
           started_at: DateTime.add(DateTime.utc_now(), -240, :second),
@@ -371,7 +371,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "an in-flight merge surfaces with MR link, merger type and Watchdog activity",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "merging-bead", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
       :ok = Polecat.advance(pid, :integrate)
 
       {:ok, "!99"} =
@@ -393,7 +393,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
     test "a recorded approval drives the status badge label", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "approved-bead", workspace_id: ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
       :ok = Polecat.advance(pid, :integrate)
       {:ok, _} = Polecat.open_mr(pid, "feature/y", "Integrate y", "", merge_opts())
 
@@ -415,7 +415,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
         })
 
       {:ok, bead} = Ash.create(Issue, %{title: "gl-bead", workspace_id: gl_ws.id})
-      {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: gl_ws.id)
+      {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: gl_ws.id)
       :ok = Polecat.advance(pid, :integrate)
       {:ok, _} = Polecat.open_mr(pid, "feature/z", "Integrate z", "", merge_opts())
 
@@ -481,7 +481,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "test/rig",
+          repo: "test/repo",
           workspace_id: ws.id,
           meta: %{
             branch: "feature/under-review",

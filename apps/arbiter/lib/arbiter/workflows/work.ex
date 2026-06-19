@@ -26,7 +26,7 @@ defmodule Arbiter.Workflows.Work do
 
     * `:bead_id` — string. The bead this polecat is working on.
     * `:worktree_path` — string. Where the branch lives.
-    * `:rig` — string. The repo / project key.
+    * `:repo` — string. The repo / project key.
 
   Each step appends `:<step>_done` to the state for downstream steps to
   inspect; `:submit_result` carries the Trackers.transition return.
@@ -56,7 +56,7 @@ defmodule Arbiter.Workflows.Work do
   step(:load_context,
     description: "Load the bead + acceptance criteria into state",
     needs: [],
-    vars: [:bead_id, :worktree_path, :rig]
+    vars: [:bead_id, :worktree_path, :repo]
   )
 
   step(:design,

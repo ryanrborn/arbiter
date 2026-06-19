@@ -132,8 +132,8 @@ defmodule ArbiterCli.Cmd.Mcp do
       IO.puts("bead_id:      #{resp["bead_id"]}")
     end
 
-    if resp["rig"] do
-      IO.puts("rig:          #{resp["rig"]}")
+    if resp["repo"] do
+      IO.puts("repo:         #{resp["repo"]}")
     end
 
     IO.puts("can_dispatch:    #{resp["can_dispatch"]}")

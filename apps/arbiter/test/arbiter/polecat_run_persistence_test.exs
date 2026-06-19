@@ -21,13 +21,13 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-runstart-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     [run] = runs_for(bead_id)
     assert run.status == :running
-    assert run.rig == "arbiter"
+    assert run.repo == "arbiter"
     assert run.workspace_id == "ws-runs"
     assert %DateTime{} = run.started_at
     assert run.completed_at == nil
@@ -37,7 +37,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -57,7 +57,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-runclaude-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -80,7 +80,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-runterm-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     :ok = Polecat.advance(pid, :run_claude)
     :ok = Polecat.report(pid, :output_lines, ["working", "arb done"])
@@ -107,7 +107,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-runterm2-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     :ok = Polecat.advance(pid, :implement)
     :ok = Polecat.report(pid, :exit_status, 0)
@@ -128,7 +128,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-runfail-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -148,7 +148,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-sessionlines-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -179,7 +179,7 @@ defmodule Arbiter.PolecatRunPersistenceTest do
     bead_id = "bd-linesclip-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead_id, rig: "arbiter", workspace_id: "ws-runs")
+      Polecat.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 

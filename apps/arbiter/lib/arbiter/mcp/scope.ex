@@ -16,7 +16,7 @@ defmodule Arbiter.MCP.Scope do
         tier:         :polecat | :coordinator,
         workspace_id: "uuid" | nil,    # polecat: the bound workspace; coordinator: nil (workspace-agnostic)
         bead_id:      "bd-…" | nil,    # polecat tier: the one bead it may read/progress
-        rig:          "shipyard" | nil,# polecat tier: its rig
+        repo:         "shipyard" | nil,# polecat tier: its repo
         can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
         depth:        0                # dispatch-recursion depth (Phase 2 guardrail)
       }
@@ -50,7 +50,7 @@ defmodule Arbiter.MCP.Scope do
   defstruct tier: nil,
             workspace_id: nil,
             bead_id: nil,
-            rig: nil,
+            repo: nil,
             can_dispatch: false,
             depth: 0
 
@@ -60,7 +60,7 @@ defmodule Arbiter.MCP.Scope do
           tier: tier(),
           workspace_id: String.t() | nil,
           bead_id: String.t() | nil,
-          rig: String.t() | nil,
+          repo: String.t() | nil,
           can_dispatch: boolean(),
           depth: non_neg_integer()
         }
@@ -73,20 +73,20 @@ defmodule Arbiter.MCP.Scope do
 
   @doc """
   Mint a `:polecat`-tier scope token for a slung bead. The bead's id, workspace,
-  and rig are baked into the claims, so the token *is* the polecat's identity —
+  and repo are baked into the claims, so the token *is* the polecat's identity —
   it can only ever read/progress that one bead. Never carries `can_dispatch`.
 
   `bead` is anything exposing `:id` and `:workspace_id` (an `Arbiter.Beads.Issue`).
   """
   @spec mint_polecat(%{id: String.t(), workspace_id: String.t()}, String.t() | nil, keyword()) ::
           String.t()
-  def mint_polecat(%{id: bead_id, workspace_id: ws_id}, rig \\ nil, opts \\ [])
+  def mint_polecat(%{id: bead_id, workspace_id: ws_id}, repo \\ nil, opts \\ [])
       when is_binary(bead_id) and is_binary(ws_id) do
     %{
       tier: :polecat,
       workspace_id: ws_id,
       bead_id: bead_id,
-      rig: rig,
+      repo: repo,
       can_dispatch: false,
       depth: Keyword.get(opts, :depth, 0)
     }
@@ -112,7 +112,7 @@ defmodule Arbiter.MCP.Scope do
       tier: :coordinator,
       workspace_id: workspace_id,
       bead_id: nil,
-      rig: nil,
+      repo: nil,
       can_dispatch: Keyword.get(opts, :can_dispatch, true),
       depth: Keyword.get(opts, :depth, 0)
     }
@@ -143,7 +143,7 @@ defmodule Arbiter.MCP.Scope do
        tier: :polecat,
        workspace_id: ws,
        bead_id: bead,
-       rig: nilable_string(c[:rig]),
+       repo: nilable_string(c[:repo]),
        can_dispatch: false,
        depth: depth(c[:depth])
      }}
@@ -158,7 +158,7 @@ defmodule Arbiter.MCP.Scope do
        tier: :coordinator,
        workspace_id: nilable_string(c[:workspace_id]),
        bead_id: nil,
-       rig: nil,
+       repo: nil,
        can_dispatch: c[:can_dispatch] == true,
        depth: depth(c[:depth])
      }}

@@ -49,7 +49,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       assert decoded["bead"]["id"] == "bd-rev1"
     end
 
-    test "passes --rig and --model in body when provided" do
+    test "passes --repo and --model in body when provided" do
       parent = self()
       name = Process.get(:bd2_stub_name)
 
@@ -74,13 +74,13 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
       {_out, _err, code} =
         capture(fn ->
-          ArbiterCli.Cmd.Review.run(["bd-rev1", "--rig", "verus_server", "--model", "haiku"])
+          ArbiterCli.Cmd.Review.run(["bd-rev1", "--repo", "verus_server", "--model", "haiku"])
         end)
 
       assert code == 0
       assert_receive {:body, body}
       assert body["bead_id"] == "bd-rev1"
-      assert body["rig"] == "verus_server"
+      assert body["repo"] == "verus_server"
       assert body["model"] == "haiku"
     end
 

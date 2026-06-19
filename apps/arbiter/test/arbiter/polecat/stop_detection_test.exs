@@ -24,7 +24,7 @@ defmodule Arbiter.Polecat.StopDetectionTest do
     {:ok, bead} = Ash.create(Issue, %{title: "detect my death", workspace_id: ws.id})
 
     {:ok, pid} =
-      Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+      Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     {pid, bead}

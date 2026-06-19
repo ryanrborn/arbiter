@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "bead_id" => "bd-001",
             "status" => "running",
             "current_step" => "implement",
-            "rig" => "test/rig"
+            "repo" => "test/repo"
           }
         ],
         [

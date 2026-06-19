@@ -376,7 +376,7 @@ defmodule Arbiter.Beads.Issue do
 
       description """
       The branch this bead's work is based on AND the PR merge target.
-      Nullable; when unset the effective target is resolved from the rig's
+      Nullable; when unset the effective target is resolved from the repo's
       default, then the workspace's `merge.base`, then `"main"`.
       """
     end

@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb dispatch <bead-id> [<rig>] [--provider claude|gemini | --no-agent] [--model <name>]`
+  `arb dispatch <bead-id> [<repo>] [--provider claude|gemini | --no-agent] [--model <name>]`
   — spawn a polecat to work on a bead.
 
   POSTs to `/api/polecats/dispatch`. The server transitions the bead to
@@ -51,12 +51,12 @@ defmodule ArbiterCli.Cmd.Dispatch do
       mode = if opts[:json], do: :json, else: :text
       model = opts[:model]
 
-      {bead_id, rig} =
+      {bead_id, repo} =
         case rest do
           [id] -> {id, nil}
-          [id, rig] -> {id, rig}
+          [id, repo] -> {id, repo}
           [] -> Output.die("dispatch requires an issue id (e.g. `arb dispatch gte-006`)")
-          _ -> Output.die("dispatch takes at most two positional arguments: <bead-id> [<rig>]")
+          _ -> Output.die("dispatch takes at most two positional arguments: <bead-id> [<repo>]")
         end
 
       worker =
@@ -73,7 +73,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
       body =
         %{"bead_id" => bead_id}
         |> Map.merge(worker)
-        |> maybe_put("rig", rig)
+        |> maybe_put("repo", repo)
         |> maybe_put("model", model)
 
       case Client.post("/api/polecats/dispatch", body) do

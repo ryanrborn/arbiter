@@ -70,7 +70,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   MR (the next tick still sees `conflicting: true`), the conflict is almost
   certainly semantic and the MergeQueue posts an `:escalation` mail (via
   `Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved/4`)
-  and parks the item `:failed`. Spawn failures (no rig configured,
+  and parks the item `:failed`. Spawn failures (no repo configured,
   worktree creation failed, workspace gone, resolver already running)
   take the same escalation path. Better a loud escalation than a silent
   stall.
@@ -151,9 +151,9 @@ defmodule Arbiter.Workflows.MergeQueue do
     * `:name` — process name (default `__MODULE__`).
     * `:poll_interval_ms` — how often `:tick` fires (default 30_000).
     * `:base` — an explicit *queue-level* base override. It sits **below** a
-      bead's own `target_branch` and the per-rig default (so those still win),
+      bead's own `target_branch` and the per-repo default (so those still win),
       but above the workspace `merge.base`. Defaults to `nil`, in which case the
-      base is resolved entirely from bead/rig/workspace config via
+      base is resolved entirely from bead/repo/workspace config via
       `Arbiter.Polecat.TargetBranch`. Convenient for tests.
     * `:auto_tick` — when `false` (default `true`), the periodic `:tick`
       timer is not scheduled. Tests use `false` and drive ticks via
@@ -432,26 +432,26 @@ defmodule Arbiter.Workflows.MergeQueue do
   # Resolve the PR base for a bead via the shared resolver, identical to the
   # chain `Arbiter.Polecat.Dispatch` uses for the worktree base, so the two can
   # never diverge (bd-b6rzoc). `state.base` is threaded in as the queue-level
-  # `:workspace_base` — below the bead/rig config, never short-circuiting it.
+  # `:workspace_base` — below the bead/repo config, never short-circuiting it.
   defp resolve_base(%State{} = state, %Issue{} = bead) do
     TargetBranch.resolve(bead,
       workspace_base: state.base,
-      rig: resolve_bead_rig(bead)
+      repo: resolve_bead_repo(bead)
     )
   end
 
-  # The rig the bead was actually worked in — drawn from its most recent
-  # polecat run, the same rig `Dispatch` cut the worktree with. nil when the bead
+  # The repo the bead was actually worked in — drawn from its most recent
+  # polecat run, the same repo `Dispatch` cut the worktree with. nil when the bead
   # has no run on record (e.g. a bead enqueued without ever being slung), in
-  # which case the per-rig default simply doesn't apply.
-  defp resolve_bead_rig(%Issue{id: bead_id}) do
+  # which case the per-repo default simply doesn't apply.
+  defp resolve_bead_repo(%Issue{id: bead_id}) do
     Run
     |> Ash.Query.filter(bead_id == ^bead_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read()
     |> case do
-      {:ok, [%Run{rig: rig} | _]} when is_binary(rig) and rig != "" -> rig
+      {:ok, [%Run{repo: repo} | _]} when is_binary(repo) and repo != "" -> repo
       _ -> nil
     end
   rescue

@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.Repo do
       arb repo list             registered repos with source + path
       arb repo show <name>      one repo's detail (active workers, worktrees)
 
-  Both read from `GET /api/rigs`.
+  Both read from `GET /api/repos`.
   """
 
   alias ArbiterCli.{Client, Cmd, Output}
@@ -34,15 +34,15 @@ defmodule ArbiterCli.Cmd.Repo do
         _ -> Output.die("repo show takes exactly one argument: the repo name")
       end
 
-    case Client.get("/api/rigs") do
-      {:ok, %{"data" => rigs}} -> emit_show(find_rig(rigs, name), name, mode)
+    case Client.get("/api/repos") do
+      {:ok, %{"data" => repos}} -> emit_show(find_repo(repos, name), name, mode)
       {:ok, _} -> emit_show(nil, name, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp find_rig(rigs, name) when is_list(rigs) do
-    Enum.find(rigs, fn rig -> rig["name"] == name end)
+  defp find_repo(repos, name) when is_list(repos) do
+    Enum.find(repos, fn repo -> repo["name"] == name end)
   end
 
   defp emit_show(nil, name, :json),
@@ -52,13 +52,13 @@ defmodule ArbiterCli.Cmd.Repo do
     Output.die("no repo named #{inspect(name)} (try `arb repo list`)")
   end
 
-  defp emit_show(rig, _name, :json), do: IO.puts(Jason.encode!(rig))
+  defp emit_show(repo, _name, :json), do: IO.puts(Jason.encode!(repo))
 
-  defp emit_show(rig, _name, :text) do
-    IO.puts("Repo:       #{rig["name"]}")
-    IO.puts("Source:    #{rig["source"]}")
-    IO.puts("Path:      #{rig["path"] || "(unknown)"}")
-    IO.puts("Workers:   #{rig["polecats"] || 0}")
-    IO.puts("Worktrees: #{rig["worktrees"] || 0}")
+  defp emit_show(repo, _name, :text) do
+    IO.puts("Repo:       #{repo["name"]}")
+    IO.puts("Source:    #{repo["source"]}")
+    IO.puts("Path:      #{repo["path"] || "(unknown)"}")
+    IO.puts("Workers:   #{repo["polecats"] || 0}")
+    IO.puts("Worktrees: #{repo["worktrees"] || 0}")
   end
 end

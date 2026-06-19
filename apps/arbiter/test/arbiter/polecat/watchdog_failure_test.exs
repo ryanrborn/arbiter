@@ -53,7 +53,7 @@ defmodule Arbiter.Polecat.WatchdogFailureTest do
     {:ok, pid} =
       Polecat.start(
         bead_id: bead.id,
-        rig: "wf/rig",
+        repo: "wf/repo",
         workspace_id: ws.id
       )
 

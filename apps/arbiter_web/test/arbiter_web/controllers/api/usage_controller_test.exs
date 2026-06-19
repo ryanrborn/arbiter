@@ -12,7 +12,7 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
   defp insert_event!(attrs) do
     base = %{
       bead_id: "bd-#{System.unique_integer([:positive])}",
-      rig: "arbiter",
+      repo: "arbiter",
       workspace_id: @ws,
       step: :work,
       occurred_at: DateTime.utc_now()

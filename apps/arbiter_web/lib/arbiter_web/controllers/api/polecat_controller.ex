@@ -6,12 +6,12 @@ defmodule ArbiterWeb.Api.PolecatController do
 
   Routes:
 
-    * `POST /api/polecats/dispatch`           — :dispatch (body: `bead_id`, optional `rig`, `provider`).
+    * `POST /api/polecats/dispatch`           — :dispatch (body: `bead_id`, optional `repo`, `provider`).
       `provider` is `"claude"` | `"gemini"` (deprecated aliases: `with_claude` /
       `with_gemini` booleans). With a provider a worker subprocess works the bead
       and the Driver closes it on `arb done`; with `no_agent` the bead parks in
       `:in_progress` (no Driver).
-    * `POST /api/polecats/review`          — :review (body: `bead_id`, optional `rig`).
+    * `POST /api/polecats/review`          — :review (body: `bead_id`, optional `repo`).
       Dispatches a review-only worker: no worktree, no per-bead branch, no
       route through the merge queue/merger. Always claude-driven.
     * `GET  /api/polecats`                 — :index (list active polecats)
@@ -57,26 +57,26 @@ defmodule ArbiterWeb.Api.PolecatController do
               "bead is already awaiting review; the Watchdog will close it on MR merge",
               %{bead_id: bead_id}}}
 
-          {:error, :no_rig_configured} ->
+          {:error, :no_repo_configured} ->
             {:error,
              {:invalid_request,
-              "no rigs configured — add at least one rig to your workspace config " <>
-                "(rig_paths) or application env (:arbiter, :rig_paths), " <>
-                "or pass a rig explicitly: `arb issue dispatch #{bead_id} <rig>`",
+              "no repos configured — add at least one repo to your workspace config " <>
+                "(repo_paths) or application env (:arbiter, :repo_paths), " <>
+                "or pass a repo explicitly: `arb issue dispatch #{bead_id} <repo>`",
               %{bead_id: bead_id}}}
 
-          {:error, {:rig_not_found, rig}} ->
+          {:error, {:repo_not_found, repo}} ->
             {:error,
              {:invalid_request,
-              "rig #{inspect(rig)} is not in :rig_paths — check your workspace config or " <>
-                "application env (:arbiter, :rig_paths)", %{bead_id: bead_id, rig: rig}}}
+              "repo #{inspect(repo)} is not in :repo_paths — check your workspace config or " <>
+                "application env (:arbiter, :repo_paths)", %{bead_id: bead_id, repo: repo}}}
 
-          {:error, {:ambiguous_rig, rigs}} ->
+          {:error, {:ambiguous_repo, repos}} ->
             {:error,
              {:invalid_request,
-              "multiple rigs available (#{Enum.join(rigs, ", ")}) — specify one: " <>
-                "`arb issue dispatch #{bead_id} <rig>`",
-              %{bead_id: bead_id, available_rigs: rigs}}}
+              "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
+                "`arb issue dispatch #{bead_id} <repo>`",
+              %{bead_id: bead_id, available_repos: repos}}}
 
           {:error, reason} ->
             {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
@@ -158,10 +158,10 @@ defmodule ArbiterWeb.Api.PolecatController do
           "no preserved worktree for this bead — nothing to resume; dispatch it fresh instead",
           %{bead_id: bead_id}}}
 
-      {:error, :rig_unknown} ->
+      {:error, :repo_unknown} ->
         {:error,
          {:invalid_request,
-          "could not resolve the rig for this bead; pass it explicitly: `arb worker resume <bead> <rig>`",
+          "could not resolve the repo for this bead; pass it explicitly: `arb worker resume <bead> <repo>`",
           %{bead_id: bead_id}}}
 
       {:error, {:acolyte_active, status}} ->
@@ -285,7 +285,7 @@ defmodule ArbiterWeb.Api.PolecatController do
   #     is configured for.
   defp dispatch_opts(params) do
     base =
-      [rig: params["rig"]]
+      [repo: params["repo"]]
       |> add_model_override(params["model"])
 
     worker_opts =
@@ -317,11 +317,11 @@ defmodule ArbiterWeb.Api.PolecatController do
   defp normalize_provider("gemini"), do: :gemini
   defp normalize_provider(_), do: nil
 
-  # Map request params onto `Dispatch.resume/2` opts. Rig is optional — resume
-  # falls back to the bead's most recent run's rig when omitted. `--model` is an
+  # Map request params onto `Dispatch.resume/2` opts. Repo is optional — resume
+  # falls back to the bead's most recent run's repo when omitted. `--model` is an
   # optional per-dispatch override, same as dispatch.
   defp resume_opts(params) do
-    [rig: params["rig"]]
+    [repo: params["repo"]]
     |> add_model_override(params["model"])
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
@@ -344,7 +344,7 @@ defmodule ArbiterWeb.Api.PolecatController do
   # do. Tests pass `with_claude: false` to dispatch a review without spawning
   # a Claude subprocess.
   defp review_opts(params) do
-    base = [rig: params["rig"], review: true]
+    base = [repo: params["repo"], review: true]
 
     start_claude =
       case truthy(params["with_claude"]) do

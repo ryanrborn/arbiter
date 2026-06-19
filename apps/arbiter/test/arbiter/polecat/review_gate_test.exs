@@ -108,15 +108,15 @@ defmodule Arbiter.Polecat.ReviewGateTest do
     end
   end
 
-  # ---- git rig helpers (mirrors CompletionMergeTest) -----------------------
+  # ---- git repo helpers (mirrors CompletionMergeTest) -----------------------
 
   defp git(args, repo), do: System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
 
   defp init_rig(dir) do
-    repo = Path.join(dir, "rig")
+    repo = Path.join(dir, "repo")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-    {_, 0} = git(["config", "user.email", "rig@example.com"], repo)
+    {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
     {_, 0} = git(["config", "user.name", "Rig"], repo)
     {_, 0} = git(["config", "commit.gpgsign", "false"], repo)
     File.write!(Path.join(repo, "README.md"), "seed\n")
@@ -165,7 +165,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
     repo = init_rig(tmp)
 
     Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "worktrees"))
-    Application.put_env(:arbiter, :rig_paths, %{"trib/rig" => repo})
+    Application.put_env(:arbiter, :repo_paths, %{"trib/repo" => repo})
 
     on_exit(fn ->
       Application.delete_env(:arbiter, :worktree_root)
@@ -206,7 +206,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
     {:ok, pid} =
       Polecat.start(
         bead_id: bead.id,
-        rig: "trib/rig",
+        repo: "trib/repo",
         workspace_id: bead.workspace_id,
         meta: meta
       )
@@ -402,7 +402,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: meta
         )
@@ -447,7 +447,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -516,7 +516,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -556,7 +556,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -595,7 +595,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -629,7 +629,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -670,7 +670,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -710,7 +710,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Polecat.advance(pid, :claude)
@@ -737,7 +737,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
@@ -788,7 +788,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
@@ -840,7 +840,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
@@ -901,7 +901,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
@@ -967,7 +967,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
@@ -1120,7 +1120,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       }
 
       {:ok, author} =
-        Polecat.start(bead_id: bead.id, rig: "trib/rig", workspace_id: ws.id, meta: meta)
+        Polecat.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
       :ok = Polecat.advance(author, :claude)
@@ -1151,7 +1151,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
           author: author,
           bead_id: bead.id,
           workspace_id: ws.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           worktree_path: sub_wt,
           branch: branch,
           target_branch: "main",
@@ -1275,7 +1275,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
     {:ok, pid} =
       Polecat.start(
         bead_id: bead.id,
-        rig: "trib/rig",
+        repo: "trib/repo",
         workspace_id: ws.id,
         meta: %{
           branch: branch,
@@ -1333,7 +1333,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
@@ -1381,7 +1381,7 @@ defmodule Arbiter.Polecat.ReviewGateTest do
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
-          rig: "trib/rig",
+          repo: "trib/repo",
           workspace_id: ws_capped.id,
           meta: %{
             branch: branch,

@@ -19,7 +19,7 @@ defmodule ArbiterWeb.RunDetailLive do
       |> assign(:run_id, id)
       |> assign(:worker_label, "worker")
       |> assign(:issue_label, "issue")
-      |> assign(:rig_label, "repo")
+      |> assign(:repo_label, "repo")
       |> assign(:workspace_label, "workspace")
       |> load_run(id)
 
@@ -151,8 +151,8 @@ defmodule ArbiterWeb.RunDetailLive do
                   </.link>
                   <span :if={@run.bead_title} class="text-base-content/70">— {@run.bead_title}</span>
                 </dd>
-                <dt class="font-medium text-base-content/60">{String.capitalize(@rig_label)}:</dt>
-                <dd><code class="font-mono text-xs">{@run.rig}</code></dd>
+                <dt class="font-medium text-base-content/60">{String.capitalize(@repo_label)}:</dt>
+                <dd><code class="font-mono text-xs">{@run.repo}</code></dd>
                 <dt class="font-medium text-base-content/60">
                   {String.capitalize(@workspace_label)}:
                 </dt>

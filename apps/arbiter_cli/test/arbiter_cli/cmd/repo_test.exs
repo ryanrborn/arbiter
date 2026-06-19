@@ -22,15 +22,15 @@ defmodule ArbiterCli.Cmd.RepoTest do
     ]
   }
 
-  test "list delegates to the rigs endpoint" do
-    stub_get("/api/rigs", @rigs)
+  test "list delegates to the repos endpoint" do
+    stub_get("/api/repos", @rigs)
     {out, _err, code} = capture(fn -> Repo.run(["list", "--json"]) end)
     assert code == 0
     assert out =~ "arbiter"
   end
 
-  test "show finds a rig by name" do
-    stub_get("/api/rigs", @rigs)
+  test "show finds a repo by name" do
+    stub_get("/api/repos", @rigs)
     {out, _err, code} = capture(fn -> Repo.run(["show", "arbiter", "--json"]) end)
     assert code == 0
     assert out =~ "arbiter"
@@ -38,7 +38,7 @@ defmodule ArbiterCli.Cmd.RepoTest do
   end
 
   test "show renders detail in text mode" do
-    stub_get("/api/rigs", @rigs)
+    stub_get("/api/repos", @rigs)
     {out, _err, code} = capture(fn -> Repo.run(["show", "arbiter"]) end)
     assert code == 0
     assert out =~ "arbiter"
@@ -46,7 +46,7 @@ defmodule ArbiterCli.Cmd.RepoTest do
   end
 
   test "show errors when the repo is unknown" do
-    stub_get("/api/rigs", @rigs)
+    stub_get("/api/repos", @rigs)
     {_out, err, code} = capture(fn -> Repo.run(["show", "ghost"]) end)
     assert code == 1
     assert err =~ "no repo named"

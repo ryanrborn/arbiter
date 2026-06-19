@@ -14,7 +14,7 @@ defmodule Arbiter.Beads.DecommissionSweep do
       session-handoff protocol artifacts.
     * **Daemon role definition**: `MergeQueue for X`, `Witness for X`,
       `Crew worker N in X`, `mayor`/`deacon` titles. The GT identity
-      beads for daemon roles per rig.
+      beads for daemon roles per repo.
     * **Polecat identity**: bead IDs matching `<prefix>-...-polecat-...`.
     * **Workflow definition**: bead IDs starting with `hq-wf-` or
       `vs-wfs-` — workflow step beads from GT's "molecule" system.

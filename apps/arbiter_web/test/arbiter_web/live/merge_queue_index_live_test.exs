@@ -61,7 +61,7 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   test "an in-flight merge surfaces with its MR link and links to the polecat detail",
        %{conn: conn, ws: ws} do
     {:ok, bead} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-    {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
+    {:ok, pid} = Polecat.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
     :ok = Polecat.advance(pid, :integrate)
     {:ok, "!77"} = Polecat.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
 

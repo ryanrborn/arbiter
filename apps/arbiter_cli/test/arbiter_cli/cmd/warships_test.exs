@@ -3,8 +3,8 @@ defmodule ArbiterCli.Cmd.WarshipsTest do
 
   alias ArbiterCli.Cmd.Warships
 
-  test "prints one row per rig" do
-    stub_get("/api/rigs", %{
+  test "prints one row per repo" do
+    stub_get("/api/repos", %{
       "data" => [
         %{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"},
         %{"name" => "tonic", "path" => "/home/ryan/dev/tonic", "source" => "config"}
@@ -19,14 +19,14 @@ defmodule ArbiterCli.Cmd.WarshipsTest do
   end
 
   test "empty list prints placeholder" do
-    stub_get("/api/rigs", %{"data" => []})
+    stub_get("/api/repos", %{"data" => []})
     {out, _err, exit_code} = capture(fn -> Warships.run([]) end)
     assert exit_code == 0
     assert out =~ "(no warships registered)"
   end
 
   test "--json emits {\"data\": [...]}" do
-    stub_get("/api/rigs", %{
+    stub_get("/api/repos", %{
       "data" => [%{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"}]
     })
 

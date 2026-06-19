@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Review do
   @moduledoc """
-  `arb review <bead-id> [--rig <rig>] [--model <name>] [--json]` — dispatch a
+  `arb review <bead-id> [--repo <repo>] [--model <name>] [--json]` — dispatch a
   review-only worker against the PR/MR linked to a bead.
 
   POSTs to `/api/polecats/review`. The server transitions the bead to
@@ -13,7 +13,7 @@ defmodule ArbiterCli.Cmd.Review do
 
   ## Flags
 
-    --rig <rig>      Local checkout the reviewer runs in. Required when the
+    --repo <repo>    Local checkout the reviewer runs in. Required when the
                      reviewer needs `gh` / `glab` / `git` against a real repo
                      (i.e. almost always — without it the reviewer has
                      nowhere to `cd` to).
@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.Review do
 
   alias ArbiterCli.{Client, Output}
 
-  @switches [json: :boolean, rig: :string, model: :string]
+  @switches [json: :boolean, repo: :string, model: :string]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -53,7 +53,7 @@ defmodule ArbiterCli.Cmd.Review do
 
       body =
         %{"bead_id" => bead_id}
-        |> maybe_put("rig", opts[:rig])
+        |> maybe_put("repo", opts[:repo])
         |> maybe_put("model", opts[:model])
 
       case Client.post("/api/polecats/review", body) do

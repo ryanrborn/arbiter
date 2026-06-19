@@ -43,7 +43,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
       |> assign(:compose_body, "")
       |> assign(:worker_label, "worker")
       |> assign(:issue_label, "issue")
-      |> assign(:rig_label, "repo")
+      |> assign(:repo_label, "repo")
       |> assign(:workspace_label, "workspace")
       |> assign(:pr_label, "pull request")
       |> refresh_all()
@@ -480,8 +480,8 @@ defmodule ArbiterWeb.PolecatDetailLive do
                       </code>
                     </dd>
                   <% end %>
-                  <dt class="font-medium text-base-content/60">{String.capitalize(@rig_label)}:</dt>
-                  <dd><code class="font-mono text-xs">{@snapshot.rig}</code></dd>
+                  <dt class="font-medium text-base-content/60">{String.capitalize(@repo_label)}:</dt>
+                  <dd><code class="font-mono text-xs">{@snapshot.repo}</code></dd>
                   <dt class="font-medium text-base-content/60">
                     {String.capitalize(@workspace_label)}:
                   </dt>

@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
         "bead_id" => "bd-001",
         "status" => "running",
         "current_step" => "implement",
-        "rig" => "test/rig",
+        "repo" => "test/repo",
         "started_at" => "2026-05-20T19:00:00Z",
         "output_lines" => ["hello", "world", "arb done"]
       })
@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
         "bead_id" => "bd-003",
         "status" => "failed",
         "current_step" => nil,
-        "rig" => "arbiter",
+        "repo" => "arbiter",
         "started_at" => "2026-05-20T19:00:00Z",
         "completed_at" => "2026-05-20T19:05:00Z",
         "exit_status" => 2,
@@ -55,7 +55,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
         "source" => "history",
         "bead_id" => "bd-004",
         "status" => "failed",
-        "rig" => "arbiter",
+        "repo" => "arbiter",
         "started_at" => "2026-05-20T19:00:00Z",
         "output_lines" => []
       })
@@ -88,7 +88,7 @@ defmodule ArbiterCli.Cmd.PolecatTest do
             "bead_id" => "bd-001",
             "status" => "running",
             "current_step" => "implement",
-            "rig" => "test/rig",
+            "repo" => "test/repo",
             "started_at" => "2026-05-20T19:00:00Z"
           }
         ]

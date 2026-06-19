@@ -58,7 +58,7 @@ defmodule Arbiter.Usage.Event do
       accept [
         :bead_id,
         :workspace_id,
-        :rig,
+        :repo,
         :step,
         :model,
         :provider,
@@ -92,7 +92,7 @@ defmodule Arbiter.Usage.Event do
       constraints max_length: 255, trim?: true
     end
 
-    attribute :rig, :string do
+    attribute :repo, :string do
       public? true
       constraints max_length: 255, trim?: true
     end

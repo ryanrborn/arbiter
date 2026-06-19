@@ -662,39 +662,39 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
-  describe "per-rig repo derivation (workspace cfg without :repo)" do
+  describe "per-repo repo derivation (workspace cfg without :repo)" do
     setup do
       # Build a tmp git repo whose origin remote is set so the adapter can
       # derive owner/repo from it. The repo never has any commits — only the
       # remote URL is exercised by `git remote get-url origin`.
       tmp = System.tmp_dir!()
-      rig = Path.join(tmp, "arbiter_github_perrig_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(rig)
-      {_, 0} = System.cmd("git", ["init", "-q", "--initial-branch=main", rig])
+      repo_dir = Path.join(tmp, "arbiter_github_perrepo_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(repo_dir)
+      {_, 0} = System.cmd("git", ["init", "-q", "--initial-branch=main", repo_dir])
 
       {_, 0} =
         System.cmd("git", [
           "-C",
-          rig,
+          repo_dir,
           "remote",
           "add",
           "origin",
           "git@github.com:leo-technologies-llc/verus_server.git"
         ])
 
-      # Workspace cfg has owner + token but no repo — the multi-rig shape.
+      # Workspace cfg has owner + token but no repo — the multi-repo shape.
       Config.put_active(%{
         "owner" => "leo-technologies-llc",
         "credentials_ref" => "env:#{@env_var}",
         "default_target_branch" => "main"
       })
 
-      on_exit(fn -> File.rm_rf!(rig) end)
+      on_exit(fn -> File.rm_rf!(repo_dir) end)
 
-      {:ok, rig: rig}
+      {:ok, repo_dir: repo_dir}
     end
 
-    test "open/4 derives owner/repo from :repo_path and embeds them in mr_ref", %{rig: rig} do
+    test "open/4 derives owner/repo from :repo_path and embeds them in mr_ref", %{repo_dir: repo_dir} do
       stub(fn conn ->
         assert {conn.method, conn.request_path} ==
                  {"POST", "/repos/leo-technologies-llc/verus_server/pulls"}
@@ -703,7 +703,7 @@ defmodule Arbiter.Mergers.GithubTest do
       end)
 
       assert {:ok, "leo-technologies-llc/verus_server#7"} =
-               Github.open("feature/x", "T", "B", %{repo_path: rig})
+               Github.open("feature/x", "T", "B", %{repo_path: repo_dir})
     end
 
     test "get/1 routes to the embedded owner/repo, not the cfg one" do
@@ -747,10 +747,10 @@ defmodule Arbiter.Mergers.GithubTest do
     end
 
     test "open/4 with NO owner in cfg still derives both owner and repo from :repo_path (bd-a53kv2)",
-         %{rig: rig} do
+         %{repo_dir: repo_dir} do
       # Workspace cfg carries only credentials — both owner and repo are absent.
-      # This is the "single-rig workspace after merge.config.repo + owner removal"
-      # shape: everything is derived per-rig from the git remote.
+      # This is the "single-repo workspace after merge.config.repo + owner removal"
+      # shape: everything is derived per-repo from the git remote.
       Config.put_active(%{"credentials_ref" => "env:#{@env_var}"})
 
       stub(fn conn ->
@@ -761,7 +761,7 @@ defmodule Arbiter.Mergers.GithubTest do
       end)
 
       assert {:ok, "leo-technologies-llc/verus_server#5"} =
-               Github.open("feature/x", "T", "B", %{repo_path: rig})
+               Github.open("feature/x", "T", "B", %{repo_path: repo_dir})
     end
 
     test "open/4 errors when cfg has no repo AND opts has no :repo_path" do
@@ -784,8 +784,8 @@ defmodule Arbiter.Mergers.GithubTest do
                "https://github.com/leo-technologies-llc/verus_server/pull/7"
     end
 
-    test "workspace cfg repo wins over per-rig derivation when both are present", %{rig: rig} do
-      # Re-pin the workspace cfg to include `repo` — the rig's remote points
+    test "workspace cfg repo wins over per-repo derivation when both are present", %{repo_dir: repo_dir} do
+      # Re-pin the workspace cfg to include `repo` — the repo dir's remote points
       # at verus_server, but the cfg should still win (single-repo workspace
       # backwards-compat).
       Config.put_active(%{
@@ -799,7 +799,7 @@ defmodule Arbiter.Mergers.GithubTest do
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 9})
       end)
 
-      assert {:ok, "#9"} = Github.open("feature/x", "T", "B", %{repo_path: rig})
+      assert {:ok, "#9"} = Github.open("feature/x", "T", "B", %{repo_path: repo_dir})
     end
   end
 

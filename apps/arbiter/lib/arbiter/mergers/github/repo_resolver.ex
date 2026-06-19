@@ -1,12 +1,12 @@
 defmodule Arbiter.Mergers.Github.RepoResolver do
   @moduledoc """
-  Derives a GitHub `{owner, repo}` pair from a local rig's `origin` remote.
+  Derives a GitHub `{owner, repo}` pair from a local repo's `origin` remote.
 
   Used by `Arbiter.Mergers.Github` when the workspace's `merge.config` does
-  not pin a single `repo` — a multi-rig workspace whose rigs live in
-  *different* repos (e.g. the `leotech` workspace, whose four rigs are four
-  separate `leo-technologies-llc/*` repos) resolves the target repo per-rig
-  from each rig's git remote.
+  not pin a single `repo` — a multi-repo workspace whose repos live in
+  *different* repos (e.g. the `leotech` workspace, whose four repos are four
+  separate `leo-technologies-llc/*` repos) resolves the target repo per-repo
+  from each repo's git remote.
 
   Parses both common remote forms:
 
@@ -40,7 +40,7 @@ defmodule Arbiter.Mergers.Github.RepoResolver do
   end
 
   def from_remote(_),
-    do: {:error, remote_error("repo_path missing for per-rig repo derivation", nil)}
+    do: {:error, remote_error("repo_path missing for per-repo repo derivation", nil)}
 
   @doc """
   Parse an `origin` URL into `{owner, repo}`. Public for tests.

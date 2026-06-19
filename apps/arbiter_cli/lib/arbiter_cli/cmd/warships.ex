@@ -2,8 +2,8 @@ defmodule ArbiterCli.Cmd.Warships do
   @moduledoc """
   `arb warships [--json]`
 
-  Lists registered warships (rigs) from the active workspace config.
-  Calls `GET /api/rigs` and formats the result as a table or JSON.
+  Lists registered repos from the active workspace config.
+  Calls `GET /api/repos` and formats the result as a table or JSON.
   """
 
   alias ArbiterCli.{Client, Output}
@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.Warships do
       {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
       mode = if opts[:json], do: :json, else: :text
 
-      case Client.get("/api/rigs") do
+      case Client.get("/api/repos") do
         {:ok, %{"data" => rigs}} ->
           case mode do
             :json ->
@@ -36,11 +36,11 @@ defmodule ArbiterCli.Cmd.Warships do
                   String.duplicate("-", 40)
                 ])
 
-                Enum.each(rigs, fn rig ->
+                Enum.each(rigs, fn repo ->
                   :io.format(fmt, [
-                    rig["name"] || "",
-                    rig["source"] || "",
-                    rig["path"] || ""
+                    repo["name"] || "",
+                    repo["source"] || "",
+                    repo["path"] || ""
                   ])
                 end)
               end

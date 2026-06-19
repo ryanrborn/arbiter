@@ -534,7 +534,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
           bead_id: bead.id,
           workspace_id: ws.id,
           repo_path: repo,
-          rig: "test/rig",
+          repo: "test/repo",
           start_claude: false
         })
 
@@ -576,7 +576,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
         Arbiter.Polecat.start(
           bead_id: bead.id,
           registry_key: bead.id <> ":conflict",
-          rig: "test/rig",
+          repo: "test/repo",
           workspace_id: ws.id
         )
 
@@ -585,7 +585,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
           bead_id: bead.id,
           workspace_id: ws.id,
           repo_path: repo,
-          rig: "test/rig",
+          repo: "test/repo",
           start_claude: false
         })
 
@@ -605,7 +605,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
           bead_id: bead.id,
           workspace_id: ws.id,
           repo_path: repo,
-          rig: "test/rig",
+          repo: "test/repo",
           start_claude: false
         })
 

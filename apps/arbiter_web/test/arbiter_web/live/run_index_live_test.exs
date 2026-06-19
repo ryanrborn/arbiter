@@ -11,7 +11,7 @@ defmodule ArbiterWeb.RunIndexLiveTest do
         Run,
         Map.merge(
           %{
-            rig: "arbiter",
+            repo: "arbiter",
             workspace_id: "ws-1",
             started_at: DateTime.add(DateTime.utc_now(), -120, :second),
             completed_at: DateTime.utc_now()

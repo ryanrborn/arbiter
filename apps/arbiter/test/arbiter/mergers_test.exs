@@ -43,7 +43,7 @@ defmodule Arbiter.MergersTest do
       assert Mergers.prepare(nil) == :ok
     end
 
-    test "seeds Github.Config without owner/repo — per-rig derivation shape (bd-a53kv2)" do
+    test "seeds Github.Config without owner/repo — per-repo derivation shape (bd-a53kv2)" do
       ws = %Workspace{
         config: %{
           "merge" => %{

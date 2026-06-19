@@ -32,7 +32,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       assert out =~ "#PID<0.123.0>"
     end
 
-    test "passes rig in body when provided" do
+    test "passes repo in body when provided" do
       stub_post("/api/polecats/dispatch", %{
         "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
         "polecat" => %{"bead_id" => "gte-017", "pid" => "x"},
