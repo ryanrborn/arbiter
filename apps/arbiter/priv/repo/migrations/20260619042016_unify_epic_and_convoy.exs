@@ -11,16 +11,16 @@ defmodule Arbiter.Repo.Migrations.UnifyEpicAndConvoy do
     rollup is now computed over `:parent_of` dependency edges (see
     `Arbiter.Beads.Issue.Calcs`).
 
-  The `auto_close` column follows this schema's convention of carrying attribute
-  defaults at the Ash application layer rather than as DB-level defaults; it is
-  added to the (empty in fresh installs) `issues` table as `null: false`.
+  The `auto_close` column is added with `DEFAULT false` to support SQLite
+  (which cannot add NOT NULL columns without a DB default on populated tables).
+  The default matches the Ash application layer (see `Arbiter.Beads.Issue`).
   """
 
   use Ecto.Migration
 
   def up do
     alter table(:issues) do
-      add :auto_close, :boolean, null: false
+      add :auto_close, :boolean, null: false, default: false
     end
 
     drop_if_exists unique_index(:convoy_memberships, [:convoy_id, :issue_id],
