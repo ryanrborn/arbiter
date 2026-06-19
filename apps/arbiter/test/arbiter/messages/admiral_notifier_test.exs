@@ -205,7 +205,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       assert escalation.body =~ "Re-authenticate"
     end
 
-    test "offers `arb resume` to continue from the preserved outpost (bd-auma3z)" do
+    test "offers `arb resume` to continue from the preserved worktree (bd-auma3z)" do
       ws = uniq("ws")
       bead_id = uniq("bd")
       reason = StopReason.classify(1, ["boom"])

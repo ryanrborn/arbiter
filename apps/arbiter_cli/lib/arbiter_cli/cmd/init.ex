@@ -12,14 +12,14 @@ defmodule ArbiterCli.Cmd.Init do
                                  checklist (`arb doctor` / `arb prime`), the
                                  arb command reference, core concepts, and
                                  memory discipline. Rendered with this
-                                 install's active vernacular, domain, and
-                                 host. Contains NO persona — that is the
-                                 operator's private layer.
+                                 install's domain and host. Contains NO
+                                 persona — that is the operator's private
+                                 layer.
     * `ARBITER_OPERATOR.md`    — the operator field guide: hard-won operating
                                  knowledge (concurrency discipline, config
                                  safety, deploy protocol, trust-but-verify
-                                 patterns, and the full vernacular table).
-                                 Generic and transferable; edit freely.
+                                 patterns). Generic and transferable; edit
+                                 freely.
     * `memory/MEMORY.md`       — a clean memory index skeleton (and an
                                  otherwise empty `memory/` dir).
     * `notes/README.md`        — explains the surface-to-operator drop.
@@ -28,10 +28,8 @@ defmodule ArbiterCli.Cmd.Init do
                                  persona / local identity.
     * `.gitignore`             — ignores `AGENTS.local.md`.
 
-  The terms in the generated docs follow the active workspace's vernacular
-  (`/api/settings`), so it reads as the stock coordinator term on a default
-  install and the customised one (e.g. "Admiral") on a customised one. The
-  command name itself is deliberately vernacular-neutral: `arb init`.
+  The generated docs use the plain code terms (coordinator, worker, issue,
+  repo, workspace) directly.
 
   Non-destructive: existing files are skipped and reported. Pass `--force`
   to overwrite them.
@@ -44,14 +42,13 @@ defmodule ArbiterCli.Cmd.Init do
 
     * dashboard / host URL (`ARB_HOST`, default `http://127.0.0.1:4848`)
     * active domain name + prefix (from `Workspace.resolve/0`)
-    * the active vernacular terms (from `/api/settings`)
     * an Arbiter install-path hint (`ARB_HOME`, else best-effort)
 
   When the server is unreachable the command still scaffolds, falling back
-  to the default gas-town vernacular and a generic install-path hint.
+  to a generic install-path hint.
   """
 
-  alias ArbiterCli.{Client, Output, Vernacular, Workspace}
+  alias ArbiterCli.{Client, Output, Workspace}
 
   require EEx
 
@@ -142,31 +139,27 @@ defmodule ArbiterCli.Cmd.Init do
   # ---- runtime values ----------------------------------------------------
 
   defp build_assigns do
-    vern = Vernacular.fetch()
     {domain_name, domain_prefix} = resolve_domain()
 
-    label = &Vernacular.label(vern, &1)
-    cap = &Vernacular.cap(vern, &1)
-
     %{
-      coordinator: label.("coordinator"),
-      coordinator_cap: cap.("coordinator"),
-      worker: label.("worker"),
-      worker_cap: cap.("worker"),
-      worker_plural: plural(label.("worker")),
-      worker_plural_cap: plural(cap.("worker")),
-      worker_article: article(label.("worker")),
-      issue: label.("issue"),
-      issue_cap: cap.("issue"),
-      issue_article: article(label.("issue")),
-      issue_plural: plural(label.("issue")),
-      issue_plural_cap: plural(cap.("issue")),
-      epic_cap: cap.("epic"),
-      rig: label.("rig"),
-      rig_cap: cap.("rig"),
-      rig_plural: plural(label.("rig")),
-      workspace: label.("workspace"),
-      workspace_cap: cap.("workspace"),
+      coordinator: "coordinator",
+      coordinator_cap: "Coordinator",
+      worker: "worker",
+      worker_cap: "Worker",
+      worker_plural: "workers",
+      worker_plural_cap: "Workers",
+      worker_article: "a",
+      issue: "issue",
+      issue_cap: "Issue",
+      issue_article: "an",
+      issue_plural: "issues",
+      issue_plural_cap: "Issues",
+      epic_cap: "Epic",
+      rig: "repo",
+      rig_cap: "Repo",
+      rig_plural: "repos",
+      workspace: "workspace",
+      workspace_cap: "Workspace",
       host: Client.base_url(),
       domain_name: domain_name,
       domain_prefix: domain_prefix,
@@ -179,15 +172,6 @@ defmodule ArbiterCli.Cmd.Init do
       {:ok, ws} -> {ws["name"] || "default", ws["prefix"] || "bd"}
       {:error, _} -> {"default", "bd"}
     end
-  end
-
-  defp plural(term), do: term <> "s"
-
-  # Pick the indefinite article for a vernacular term so the rendered docs read
-  # correctly whatever the install calls things ("a bead", "an issue").
-  defp article(term) do
-    first = term |> String.first() |> to_string() |> String.downcase()
-    if first in ~w(a e i o u), do: "an", else: "a"
   end
 
   # Best-effort Arbiter checkout path for the "Starting the server" section.
@@ -233,7 +217,7 @@ defmodule ArbiterCli.Cmd.Init do
     IO.puts("")
 
     IO.puts(
-      "vernacular: coordinator=#{assigns.coordinator} worker=#{assigns.worker} " <>
+      "terms: coordinator=#{assigns.coordinator} worker=#{assigns.worker} " <>
         "issue=#{assigns.issue}  (#{assigns.workspace}: #{assigns.domain_name}/#{assigns.domain_prefix})"
     )
 
@@ -247,7 +231,7 @@ defmodule ArbiterCli.Cmd.Init do
   defp emit_json(dir, assigns, results) do
     payload = %{
       dir: dir,
-      vernacular: %{
+      terms: %{
         coordinator: assigns.coordinator,
         worker: assigns.worker,
         issue: assigns.issue,

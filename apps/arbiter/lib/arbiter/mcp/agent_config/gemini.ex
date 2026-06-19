@@ -2,7 +2,7 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   @moduledoc """
   Gemini CLI's `Arbiter.MCP.AgentConfig` adapter (Phase 3).
 
-  Writes a per-spawn `.gemini/settings.json` into the acolyte's worktree,
+  Writes a per-spawn `.gemini/settings.json` into the worker's worktree,
   declaring the Arbiter MCP server as a remote HTTP server with the spawn's
   scope token in a bearer header:
 

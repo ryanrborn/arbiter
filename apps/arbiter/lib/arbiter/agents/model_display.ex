@@ -4,7 +4,7 @@ defmodule Arbiter.Agents.ModelDisplay do
   dashboards and CLI output.
 
   Model ids are long and version-stamped (`claude-sonnet-4-6`,
-  `gemini-2.5-pro`); operators scanning a list of running acolytes want the
+  `gemini-2.5-pro`); operators scanning a list of running workers want the
   family name. `short/1` collapses an id to its family ("Sonnet", "Pro", …) by
   prefix match, falling back to the raw id when nothing matches so an
   unrecognised model still renders something useful rather than blank.

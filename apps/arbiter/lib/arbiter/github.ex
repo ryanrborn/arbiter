@@ -252,7 +252,7 @@ defmodule Arbiter.GitHub do
   Classify a `pr_get/3` payload as CONFLICTING — i.e. the head branch can't
   be merged into the base because of textual conflicts. Used by
   `Arbiter.Workflows.Refinery` to decide when to spawn the conflict-
-  resolution acolyte.
+  resolution worker.
 
   Two signals from GitHub:
 

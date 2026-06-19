@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture: simulates a --with-claude acolyte that does real work. Runs with the
+# Fixture: simulates a --with-claude worker that does real work. Runs with the
 # polecat's worktree as cwd, makes a commit on the per-bead branch, then emits
 # the "arb done" completion marker. Used by CompletionMergeTest to prove the
 # completion path integrates the branch (git merge --no-ff) into main.

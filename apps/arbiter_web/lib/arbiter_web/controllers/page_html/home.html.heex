@@ -3,8 +3,8 @@
     <header>
       <h1 class="text-3xl font-bold mb-2">Arbiter</h1>
       <p class="text-base-content/70">
-        An Ash + Phoenix umbrella for directive tracking, acolyte orchestration,
-        and operational dashboards. Vocabulary is configurable via vernacular settings.
+        An Ash + Phoenix umbrella for issue tracking, worker orchestration,
+        and operational dashboards.
       </p>
     </header>
 
@@ -20,21 +20,21 @@
 
         <dt class="font-semibold">{@acolytes_label}</dt>
         <dd>
-          Workflow runners — long-lived processes that walk a directive through its
-          steps (crucible, code review, deployment, etc.) and broadcast
+          Workflow runners — long-lived processes that walk an issue through its
+          steps (merge queue, code review, deployment, etc.) and broadcast
           lifecycle events.
         </dd>
 
         <dt class="font-semibold">{@domains_label}</dt>
         <dd>
-          Per-team scoping: directive prefix, tracker integration (GitHub / Jira /
-          none), warship paths, and the vernacular vocabulary used in the UI.
+          Per-team scoping: issue prefix, tracker integration (GitHub / Jira /
+          none), and repo paths.
         </dd>
 
         <dt class="font-semibold">REST API</dt>
         <dd>
-          JSON endpoints under <code>/api</code> for directives, dependencies,
-          domains, and acolyte dispatches. Used by the CLI and external
+          JSON endpoints under <code>/api</code> for issues, dependencies,
+          workspaces, and worker dispatches. Used by the CLI and external
           integrations.
         </dd>
 
@@ -51,15 +51,11 @@
       <ul class="list-disc list-inside text-sm space-y-1">
         <li>
           <.link navigate={~p"/"} class="link link-hover">Dashboard</.link>
-          — live view of domains, warships, active acolytes, and recent directives.
+          — live view of workspaces, repos, active workers, and recent issues.
         </li>
         <li>
           <.link navigate={~p"/audit"} class="link link-hover">Audit log</.link>
-          — the 500 most recent directive changes with filtering and CSV export.
-        </li>
-        <li>
-          <.link navigate={~p"/settings/vernacular"} class="link link-hover">Vernacular</.link>
-          — configure the vocabulary used throughout the UI and CLI.
+          — the 500 most recent issue changes with filtering and CSV export.
         </li>
       </ul>
     </section>

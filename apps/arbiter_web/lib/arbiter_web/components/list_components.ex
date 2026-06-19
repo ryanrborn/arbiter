@@ -2,7 +2,7 @@ defmodule ArbiterWeb.ListComponents do
   @moduledoc """
   Shared building blocks for the uniform list / index / detail pattern.
 
-  Every entity type (directives, acolytes, campaigns, the merge queue, …)
+  Every entity type (issues, workers, the merge queue, …)
   presents the same shape:
 
     * the **dashboard** shows only the *current* slice of a section, each with

@@ -37,7 +37,7 @@ defmodule Arbiter.Agents.Gemini.Pricing do
 
     * **Long-context premium not modelled.** Gemini charges a higher rate once a
       prompt exceeds 200k tokens. We always apply the base (`<= 200k`) tier; a
-      session that blows past 200k will be *under*-costed. Acolyte runs rarely
+      session that blows past 200k will be *under*-costed. Worker runs rarely
       approach that ceiling.
     * **Estimate, not a billing source of truth.** The CLI gives us no dollar
       figure, so this is a derived approximation for the ledger/dashboards.

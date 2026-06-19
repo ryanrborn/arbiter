@@ -2,7 +2,7 @@ defmodule Arbiter.Polecat.OutputLog do
   @default_root "/home/rborn/dev/arbiter-polecat-logs"
 
   @moduledoc """
-  Durable, append-only, per-run transcript of an acolyte's output.
+  Durable, append-only, per-run transcript of an worker's output.
 
   The live path keeps the dashboard responsive but lossy: the in-memory buffer
   is capped at `Arbiter.Polecat.ClaudeSession.line_cap/0` lines, and only the

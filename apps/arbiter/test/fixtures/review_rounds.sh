@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture: a reviewer (Tribunal) acolyte for the Stage 2 revise-and-rediscuss
+# Fixture: a reviewer (Tribunal) worker for the Stage 2 revise-and-rediscuss
 # loop (bd-3jm700). It REQUEST_CHANGES on its first pass, then emits $1 on every
 # later pass — so a test can drive "reject once, then converge / keep rejecting".
 #

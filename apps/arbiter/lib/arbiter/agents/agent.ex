@@ -174,7 +174,7 @@ defmodule Arbiter.Agents.Agent do
   when the CLI can't be resolved.
 
   `Arbiter.Agents.Preflight` runs this through a port (with the adapter's
-  `spawn_env/1`) before a wave of acolytes is dispatched; a clean exit with no
+  `spawn_env/1`) before a wave of workers is dispatched; a clean exit with no
   auth/credit signature means the credentials are valid. Optional — an adapter
   that omits it is treated as unprobeable (pre-flight is skipped, never blocks).
   """

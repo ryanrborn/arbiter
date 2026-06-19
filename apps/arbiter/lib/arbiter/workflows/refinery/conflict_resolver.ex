@@ -1,18 +1,18 @@
 defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   @moduledoc """
-  Spawn a short-lived acolyte to rebase a CONFLICTING bead branch onto the
+  Spawn a short-lived worker to rebase a CONFLICTING bead branch onto the
   current head of its target branch, resolve conflicts, and force-push.
 
-  Invoked by `Arbiter.Workflows.Refinery` when a Crucible item enters the
+  Invoked by `Arbiter.Workflows.Refinery` when a merge queue item enters the
   CONFLICTING state (the merger reports `mergeable: false` on the PR).
   Before this, the queue froze the item and waited for a human to rebase —
   twice this morning that meant an Admiral page on a dispatcher-bead
-  collision (#117, #121). The resolver acolyte exists so that case unblocks
+  collision (#117, #121). The resolver worker exists so that case unblocks
   itself.
 
   ## Job scope
 
-  The acolyte is given a *narrowly* constrained prompt: rebase onto the
+  The worker is given a *narrowly* constrained prompt: rebase onto the
   current target branch, resolve mechanical conflicts, push back with
   `--force-with-lease`, and exit. It must NOT re-implement the change set
   or open a new PR. The original PR's history is preserved (force-push to
@@ -23,7 +23,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   command-alias tables) the rebase resolves itself with no semantic
   judgement needed. When the conflict is semantic — two waves both
   rewrote the same predicate or both changed a shared invariant — the
-  acolyte escalates via the workspace mailbox (an `:escalation` to
+  worker escalates via the workspace mailbox (an `:escalation` to
   `to_ref: "admiral"`) rather than silently failing.
 
   ## Merger/tracker-agnostic
@@ -31,7 +31,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   This module operates on raw git artefacts (a local checkout, a branch
   name, a target branch). It is unaware of GitHub/GitLab/etc — those live
   one layer up in the Refinery, which detects the CONFLICTING state from
-  whichever forge adapter it's wired to. A future Crucible variant that
+  whichever forge adapter it's wired to. A future merge queue variant that
   speaks GitLab MRs reuses this resolver unchanged.
 
   ## Behaviour
@@ -75,14 +75,14 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
           | {:error, term()}
 
   @doc """
-  Spawn an acolyte to rebase + resolve + push the bead's branch.
+  Spawn a worker to rebase + resolve + push the bead's branch.
 
   Resolves `branch`, `target_branch`, and `repo_path` from the bead +
   workspace when not supplied in `args`. Returns `{:ok, info}` once the
-  acolyte is spawned (the rebase runs asynchronously); the Refinery picks
+  worker is spawned (the rebase runs asynchronously); the Refinery picks
   up the resolution on its next poll when the PR turns mergeable again.
 
-  When the acolyte cannot be spawned (no local checkout, no branch,
+  When the worker cannot be spawned (no local checkout, no branch,
   workspace missing) returns `{:error, reason}`. The Refinery's escalation
   path handles that by mailing the Admiral so the bead does not sit in
   CONFLICTING limbo.
@@ -154,7 +154,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
     e -> {:error, {:bead_load_failed, Exception.message(e)}}
   end
 
-  # Resolve everything the acolyte needs: a local checkout to cut the worktree
+  # Resolve everything the worker needs: a local checkout to cut the worktree
   # from, the bead's branch name, and the target branch to rebase onto. Caller-
   # supplied args win over derived values so the Refinery and tests can override.
   defp resolve_context(%Issue{} = bead, args) do
@@ -216,7 +216,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   # Repo path lookup mirrors `Arbiter.Polecat.Sling`: workspace config first,
   # then application env. Without an explicit rig we take the first configured
   # rig path — the canonical "one rig per workspace" path covers every existing
-  # Crucible target.
+  # merge queue target.
   defp resolve_repo_path(workspace, rig) do
     workspace_rig_path(workspace, rig) || application_rig_path(rig) ||
       first_rig_path(workspace) || first_application_rig_path()
@@ -278,7 +278,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
 
   # Registry suffix the conflict-resolver polecat registers under. The original
   # work polecat is still registered (and sitting `:completed`) when the
-  # Crucible picks up the CONFLICTING signal — the registry key is keyed on
+  # merge queue picks up the CONFLICTING signal — the registry key is keyed on
   # bead_id and the original is only torn down on bead `:close`. Spawning under
   # `<bead_id>:conflict` gives the resolver its own slot so `Polecat.start`
   # doesn't return `:already_started` and we don't accidentally open a Claude
@@ -290,7 +290,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   # NOT use `Worktree.create/3` (that runs `git worktree add -b <branch> …`,
   # which fails when the branch already exists). `Worktree.attach/2` runs
   # `git worktree add <path> <existing-branch>` and is idempotent on the
-  # same-branch path. The resolver acolyte then fetches the latest target
+  # same-branch path. The resolver worker then fetches the latest target
   # branch and rebases onto it from that worktree.
   defp create_worktree(%{repo_path: repo_path, branch: branch}) do
     case Worktree.attach(repo_path, branch) do
@@ -371,15 +371,15 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   Resolver prompt. Public for tests + introspection.
 
   The prompt is intentionally narrow: rebase + resolve + force-push + exit.
-  It does NOT instruct the acolyte to re-implement the change set or open a
+  It does NOT instruct the worker to re-implement the change set or open a
   new PR — the original PR's history is preserved by force-pushing to the
-  same branch. The acolyte is told to escalate via the mailbox on semantic
+  same branch. The worker is told to escalate via the mailbox on semantic
   ambiguity rather than failing silently.
   """
   @spec prompt_for(map()) :: String.t()
   def prompt_for(%{bead: %Issue{id: bead_id}, branch: branch, target_branch: target}) do
     """
-    You are a conflict-resolution acolyte for bead #{bead_id}.
+    You are a conflict-resolution worker for bead #{bead_id}.
 
     Your branch (#{branch}) is CONFLICTING with the current head of
     #{target}. Your ONLY job is:
@@ -412,7 +412,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
   end
 
   def prompt_for(_) do
-    "You are a conflict-resolution acolyte. Rebase, resolve, force-push, exit."
+    "You are a conflict-resolution worker. Rebase, resolve, force-push, exit."
   end
 
   # ---- escalation helper ---------------------------------------------------
@@ -432,7 +432,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
       when is_binary(bead_id) and is_binary(workspace_id) do
     body =
       """
-      The Crucible detected a CONFLICTING PR for bead #{bead_id} (branch
+      The merge queue detected a CONFLICTING PR for bead #{bead_id} (branch
       #{branch}) and could not auto-resolve it (#{inspect_short(reason)}).
       Manual rebase + push required before the merge queue can proceed.
       """
@@ -443,7 +443,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
       from_ref: bead_id,
       workspace_id: workspace_id,
       directive_ref: bead_id,
-      subject: "Crucible: unresolved conflict on #{bead_id}",
+      subject: "Merge queue: unresolved conflict on #{bead_id}",
       body: body
     })
 
@@ -477,8 +477,8 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
       when is_binary(bead_id) and is_binary(workspace_id) do
     body =
       """
-      The Crucible auto-resolved a CONFLICTING PR for bead #{bead_id}
-      (branch #{branch}) — the conflict-resolver acolyte rebased onto the
+      The merge queue auto-resolved a CONFLICTING PR for bead #{bead_id}
+      (branch #{branch}) — the conflict-resolver worker rebased onto the
       current target branch, resolved the conflict, and force-pushed. The
       merge queue is resuming.
       """
@@ -486,7 +486,7 @@ defmodule Arbiter.Workflows.Refinery.ConflictResolver do
     Message.notify(%{
       from_ref: bead_id,
       workspace_id: workspace_id,
-      subject: "Crucible: auto-resolved conflict on #{bead_id}",
+      subject: "Merge queue: auto-resolved conflict on #{bead_id}",
       body: body
     })
 

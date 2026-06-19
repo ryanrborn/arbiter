@@ -1,5 +1,5 @@
 defmodule Arbiter.Polecat.StopDetectionTest do
-  # Detection of stopped/dead acolytes (bd-awi4nw). Drives a real port through a
+  # Detection of stopped/dead workers (bd-awi4nw). Drives a real port through a
   # polecat with commands that exit non-zero / print auth-failure / get killed,
   # and asserts the polecat flips OUT of a live state into :failed with a
   # classified stop reason — and that a normal `arb done` completion is NOT

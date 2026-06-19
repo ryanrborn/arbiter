@@ -17,8 +17,8 @@ defmodule Arbiter.Trackers.Jira do
        fallback for tools that run without a workspace context.
     3. With neither, callbacks return `{:error, %Error{kind: :config_missing}}`.
 
-  This mirrors `Arbiter.Vernacular.put_active/1`. Two alternatives were
-  considered and rejected:
+  This uses a per-process active config populated by the caller. Two
+  alternatives were considered and rejected:
 
     * **Extra `Workspace` argument**: breaks the behaviour signature and
       forces every caller to thread workspace through the stack.

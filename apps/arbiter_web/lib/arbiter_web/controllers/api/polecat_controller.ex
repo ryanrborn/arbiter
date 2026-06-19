@@ -12,8 +12,8 @@ defmodule ArbiterWeb.Api.PolecatController do
       and the Driver closes it on `arb done`; with `no_agent` the bead parks in
       `:in_progress` (no Driver).
     * `POST /api/polecats/review`          — :review (body: `bead_id`, optional `rig`).
-      Dispatches a review-only acolyte: no worktree, no per-bead branch, no
-      route through the Crucible/merger. Always claude-driven.
+      Dispatches a review-only worker: no worktree, no per-bead branch, no
+      route through the merge queue/merger. Always claude-driven.
     * `GET  /api/polecats`                 — :index (list active polecats)
     * `GET  /api/polecats/:bead_id`        — :show (full snapshot inc. recent output).
       When no live polecat exists for the bead, falls back to the most recent
@@ -88,10 +88,10 @@ defmodule ArbiterWeb.Api.PolecatController do
   end
 
   @doc """
-  Dispatch a review-only directive. The bead is slung with `review: true`,
+  Dispatch a review-only issue. The bead is slung with `review: true`,
   which forces the `CodeReview` workflow, skips worktree provisioning, swaps
   the work prompt for the review prompt, and tags the polecat as
-  `review_only` so completion does not fan out to the Crucible/merger.
+  `review_only` so completion does not fan out to the merge queue/merger.
 
   Always claude-driven (`start_claude: true`) — a review without an agent has
   nothing to do.
@@ -130,8 +130,8 @@ defmodule ArbiterWeb.Api.PolecatController do
   end
 
   @doc """
-  Resume a stopped acolyte (bd-auma3z). Re-attaches a fresh agent to the bead's
-  preserved outpost worktree with a git-derived briefing of the prior run's
+  Resume a stopped worker (bd-auma3z). Re-attaches a fresh agent to the bead's
+  preserved worktree with a git-derived briefing of the prior run's
   work, so it continues rather than restarting from scratch. Always
   claude-driven. Renders the same payload as `sling/2`.
   """
@@ -155,7 +155,7 @@ defmodule ArbiterWeb.Api.PolecatController do
       {:error, :no_outpost} ->
         {:error,
          {:invalid_request,
-          "no preserved outpost worktree for this bead — nothing to resume; sling it fresh instead",
+          "no preserved worktree for this bead — nothing to resume; sling it fresh instead",
           %{bead_id: bead_id}}}
 
       {:error, :rig_unknown} ->
@@ -167,7 +167,7 @@ defmodule ArbiterWeb.Api.PolecatController do
       {:error, {:acolyte_active, status}} ->
         {:error,
          {:invalid_request,
-          "an acolyte is still active for this bead (#{status}); stop it before resuming",
+          "a worker is still active for this bead (#{status}); stop it before resuming",
           %{bead_id: bead_id}}}
 
       {:error, reason} ->
@@ -338,7 +338,7 @@ defmodule ArbiterWeb.Api.PolecatController do
   # Review-only dispatch. `review: true` cascades into Sling: it pulls the
   # CodeReview workflow, suppresses worktree provisioning, swaps the prompt,
   # and stamps `review_only` into the polecat's meta so completion doesn't
-  # fan out to the Crucible.
+  # fan out to the merge queue.
   #
   # `with_claude` defaults to true — a reviewer with no agent has nothing to
   # do. Tests pass `with_claude: false` to dispatch a review without spawning

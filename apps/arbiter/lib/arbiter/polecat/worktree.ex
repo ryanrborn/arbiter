@@ -50,7 +50,7 @@ defmodule Arbiter.Polecat.Worktree do
   (`origin/<base_branch>`).
 
   Before creating the worktree, fetches `<base_branch>` from `origin` in
-  `repo_path`, so every acolyte starts on current upstream regardless of the
+  `repo_path`, so every worker starts on current upstream regardless of the
   rig checkout's drift (stale local base, dirty working tree, or HEAD on an
   unrelated branch). If `origin` is not configured or the ref cannot be
   resolved after the fetch, the call aborts with a clear error rather than
@@ -145,7 +145,7 @@ defmodule Arbiter.Polecat.Worktree do
 
   Counterpart to `create/3`. Use it when you need a worktree checked out on
   a branch that already exists in the repo — typically because a remote PR
-  was opened against it. The Crucible's conflict-resolver acolyte
+  was opened against it. The merge queue's conflict-resolver worker
   (`Arbiter.Workflows.Refinery.ConflictResolver`) is the primary caller: it
   rebases the existing PR branch in place, so it must NOT create a new
   branch that would shadow the PR's head ref.
@@ -302,9 +302,9 @@ defmodule Arbiter.Polecat.Worktree do
 
     * `:ready` — the worktree is clean AND the branch has commits ahead of base.
     * `:uncommitted` — the worktree has staged/unstaged/untracked changes (the
-      "acolyte edited but forgot to commit" case bd-ofql8k targets).
+      "worker edited but forgot to commit" case bd-ofql8k targets).
     * `:no_commits` — the worktree is clean but the branch has no commits
-      ahead of base (the "acolyte signalled done without doing any work" case).
+      ahead of base (the "worker signalled done without doing any work" case).
   """
   @type completion :: :ready | :uncommitted | :no_commits
 

@@ -31,7 +31,7 @@ defmodule Arbiter.Polecats.Run do
     repo Arbiter.Repo
 
     custom_indexes do
-      # Powers "completed acolytes for workspace W, optionally filtered by
+      # Powers "completed workers for workspace W, optionally filtered by
       # status, newest first" — the dashboard's primary query shape.
       index [:workspace_id, :status, :started_at]
     end
@@ -137,7 +137,7 @@ defmodule Arbiter.Polecats.Run do
       public? true
 
       description "The prior run this run resumed from (bd-auma3z). Nullable; set only " <>
-                    "when an acolyte was resumed via `arb resume` rather than slung fresh, " <>
+                    "when an worker was resumed via `arb resume` rather than slung fresh, " <>
                     "so the lineage of a stopped→resumed bead is traceable and metrics " <>
                     "don't double-count a single bead's work as two unrelated runs."
     end

@@ -4,22 +4,15 @@ defmodule ArbiterCli.Cmd.InitTest do
 
   alias ArbiterCli.Cmd.Init
 
-  # A customised install: gas-town is overridden with admiral-ish terms so we
-  # can prove the generated docs follow the active vernacular, not a hardcode.
-  defp stub_install(
-         vernacular \\ %{
-           "coordinator" => "Admiral",
-           "worker" => "acolyte",
-           "issue" => "directive"
-         }
-       ) do
+  # The generated docs use the plain code terms directly (coordinator, worker,
+  # issue, repo). The custom domain prefix proves the domain data is templated
+  # in rather than hardcoded.
+  defp stub_install do
     # Named "default" so Workspace.resolve/0 (which targets ARB_WORKSPACE,
-    # defaulting to "default") matches it; the custom prefix proves the
-    # domain data is templated in rather than hardcoded.
+    # defaulting to "default") matches it.
     stub_routes([
       {{"get", "/api/workspaces"},
-       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}},
-      {{"get", "/api/settings"}, {%{"data" => %{"vernacular" => vernacular}}, 200}}
+       {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "emr"}]}, 200}}
     ])
   end
 
@@ -61,10 +54,10 @@ defmodule ArbiterCli.Cmd.InitTest do
       capture(fn -> Init.run([dir]) end)
       guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
 
-      # Rendered with the active vernacular.
-      assert guide =~ "Admiral Operator Field Guide"
-      assert guide =~ "acolytes"
-      assert guide =~ "directive"
+      # Rendered with the plain code terms.
+      assert guide =~ "Coordinator Operator Field Guide"
+      assert guide =~ "workers"
+      assert guide =~ "issue"
 
       # Covers the required sections.
       assert guide =~ "Role & Loop"
@@ -80,29 +73,29 @@ defmodule ArbiterCli.Cmd.InitTest do
       refute guide =~ "Ryan"
     end
 
-    test "ARBITER_OPERATOR.md uses the active vernacular and domain prefix" do
+    test "ARBITER_OPERATOR.md uses the plain code terms and domain prefix" do
       stub_install()
       dir = tmp_dir()
 
       capture(fn -> Init.run([dir]) end)
       guide = File.read!(Path.join(dir, "ARBITER_OPERATOR.md"))
 
-      assert guide =~ "Admiral"
-      assert guide =~ "acolyte"
-      assert guide =~ "directive"
+      assert guide =~ "Coordinator"
+      assert guide =~ "worker"
+      assert guide =~ "issue"
     end
 
-    test "AGENTS.md uses the active vernacular and the domain name/prefix" do
+    test "AGENTS.md uses the plain code terms and the domain name/prefix" do
       stub_install()
       dir = tmp_dir()
 
       capture(fn -> Init.run([dir]) end)
       agents = File.read!(Path.join(dir, "AGENTS.md"))
 
-      # Coordinator term comes from vernacular, capitalised in the heading.
-      assert agents =~ "# Admiral — Arbiter command session"
-      assert agents =~ "acolytes"
-      assert agents =~ "directive"
+      # Plain coordinator term, capitalised in the heading.
+      assert agents =~ "# Coordinator — Arbiter command session"
+      assert agents =~ "workers"
+      assert agents =~ "issue"
 
       # Domain name + prefix templated from Workspace.resolve/0.
       assert agents =~ "**default** (prefix `emr`)"
@@ -152,7 +145,7 @@ defmodule ArbiterCli.Cmd.InitTest do
       capture(fn -> Init.run([dir]) end)
       memory = File.read!(Path.join(dir, "memory/MEMORY.md"))
 
-      assert memory =~ "Admiral Memory"
+      assert memory =~ "Coordinator Memory"
       assert memory =~ "Add entries below"
     end
 
@@ -202,16 +195,16 @@ defmodule ArbiterCli.Cmd.InitTest do
   end
 
   describe "resilience" do
-    test "scaffolds with gas-town defaults when the server is unreachable" do
-      stub_transport_error(:get, "/api/settings", :econnrefused)
+    test "scaffolds with the default domain when the server is unreachable" do
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
       dir = tmp_dir()
 
       {_out, _err, exit_code} = capture(fn -> Init.run([dir]) end)
       assert exit_code == 0
 
       agents = File.read!(Path.join(dir, "AGENTS.md"))
-      # Falls back to the CLI default vernacular and domain.
-      assert agents =~ "polecat"
+      # Plain code terms, with the fallback default domain prefix.
+      assert agents =~ "worker"
       assert agents =~ "bd-001"
     end
   end
@@ -226,7 +219,7 @@ defmodule ArbiterCli.Cmd.InitTest do
 
       {:ok, decoded} = Jason.decode(String.trim(out))
       assert decoded["dir"] == dir
-      assert decoded["vernacular"]["coordinator"] == "Admiral"
+      assert decoded["terms"]["coordinator"] == "coordinator"
       assert decoded["domain"]["prefix"] == "emr"
       assert is_list(decoded["files"])
       assert Enum.any?(decoded["files"], fn f -> f["path"] == "AGENTS.md" end)

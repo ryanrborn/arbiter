@@ -2,7 +2,7 @@ defmodule Arbiter.Polecat.Warden do
   @moduledoc """
   Watchdog process for a polecat parked at `:awaiting_review`.
 
-  When an acolyte finishes its work it opens a merge request and the paired
+  When an worker finishes its work it opens a merge request and the paired
   `Arbiter.Polecat` transitions `:running -> :awaiting_review`, spawning one
   Warden. The Warden polls `Arbiter.Mergers.get/1` on an interval and drives
   the polecat to its terminal state based on the MR's fate:

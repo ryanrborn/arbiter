@@ -7,7 +7,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
 
   setup do
     # A fake operator config dir (the "source") with the seed files, and a
-    # separate target the isolated acolyte dir is built in. Both under tmp.
+    # separate target the isolated worker dir is built in. Both under tmp.
     uniq = System.unique_integer([:positive])
     base = Path.join(System.tmp_dir!(), "arbiter-configdir-test-#{uniq}")
     source = Path.join(base, "source")
@@ -51,7 +51,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert File.dir?(target)
 
       memory = File.read!(Path.join(target, "CLAUDE.md"))
-      assert memory =~ "Arbiter Acolyte"
+      assert memory =~ "Arbiter Worker"
       # The operator's persona content must NOT be carried over.
       refute memory =~ "Darth"
       refute memory =~ "Always roleplay"
@@ -70,7 +70,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert {:error, :einval} = File.read_link(Path.join(target, "CLAUDE.md"))
 
       # settings.json is now *generated* (a real file), never symlinked from the
-      # operator's ~/.claude — so the acolyte doesn't inherit the host posture
+      # operator's ~/.claude — so the worker doesn't inherit the host posture
       # (bd-9u10op). The operator's source settings had an empty deny; ours
       # must carry a non-empty hardened deny list.
       settings_path = Path.join(target, "settings.json")
@@ -109,7 +109,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert {:ok, ^target} = ConfigDir.ensure()
 
       assert {:ok, _} = File.read_link(Path.join(target, ".credentials.json"))
-      assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Acolyte"
+      assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
     end
 
     test "env/0 returns the CLAUDE_CONFIG_DIR pair pointing at the isolated dir", %{
@@ -128,7 +128,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
       assert {:ok, ^target} = ConfigDir.ensure()
       # No link created for an absent source file; the dir + memory still exist.
       assert {:error, _} = File.read_link(Path.join(target, ".credentials.json"))
-      assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Acolyte"
+      assert File.read!(Path.join(target, "CLAUDE.md")) =~ "Arbiter Worker"
     end
   end
 

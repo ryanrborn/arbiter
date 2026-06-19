@@ -59,7 +59,7 @@ defmodule Arbiter.Workflows.Refinery do
       :conflict_resolving — spawn `Arbiter.Workflows.Refinery.ConflictResolver`
                             (a swappable behaviour, defaults to a Polecat +
                             ClaudeSession running rebase + force-push)
-        │   acolyte pushes resolved branch
+        │   worker pushes resolved branch
         ▼
       (next tick observes conflicting: false; restore_after_resolution/2
        returns the item to its prior status, posts a :notification so the
@@ -77,13 +77,13 @@ defmodule Arbiter.Workflows.Refinery do
 
   The resolver module is injected via `:conflict_resolver` (start_link opt)
   → `:arbiter, :refinery_conflict_resolver` (application env) → the default
-  real implementation. Tests pass a stub so they don't spawn real acolytes.
+  real implementation. Tests pass a stub so they don't spawn real workers.
 
   ## Auto-revise on requested changes (bd-95lsjb)
 
   When `adapter.get` reports a CHANGES_REQUESTED review (the latest verdict
   per reviewer) newer than the last one the queue handled, the Refinery
-  dispatches a single revise pass on the **existing outpost** instead of
+  dispatches a single revise pass on the **existing worktree** instead of
   idling at `:awaiting_approval`:
 
       :awaiting_approval
@@ -94,7 +94,7 @@ defmodule Arbiter.Workflows.Refinery do
                            (`adapter.list_review_feedback/1`), post a brief
                            acknowledging comment, then spawn
                            `Arbiter.Workflows.Refinery.ReviseDispatcher` (the
-                           `arb resume` path: a fresh acolyte on the bead's
+                           `arb resume` path: a fresh worker on the bead's
                            preserved worktree + `pr_ref`, briefed with the
                            reviewer feedback). It commits + pushes to the SAME
                            branch — no new PR (pairs with bd-53xrmi).
@@ -164,7 +164,7 @@ defmodule Arbiter.Workflows.Refinery do
       tests pass a stub.
     * `:revise_dispatcher` — module implementing the
       `Arbiter.Workflows.Refinery.ReviseDispatcher` behaviour (bd-95lsjb).
-      Defaults to the real implementation (which resumes the bead's outpost
+      Defaults to the real implementation (which resumes the bead's worktree
       via `Arbiter.Polecat.Sling.resume/2`); tests pass a stub.
   """
 
@@ -385,11 +385,11 @@ defmodule Arbiter.Workflows.Refinery do
             {:ok, state}
 
           existing_mr_ref(bead) ->
-            # bd-auma3z: the bead already has an open MR/PR (e.g. a prior acolyte
+            # bd-auma3z: the bead already has an open MR/PR (e.g. a prior worker
             # opened one before it stopped, and was then resumed). Adopt that MR
             # into the queue and poll it to completion rather than calling
             # `adapter.open` again — that would create a DUPLICATE for the same
-            # branch. The resumed acolyte's work lands on the same branch the MR
+            # branch. The resumed worker's work lands on the same branch the MR
             # already tracks.
             adopt_existing_mr(state, bead, strategy)
 
@@ -502,7 +502,7 @@ defmodule Arbiter.Workflows.Refinery do
   #
   #   1. the worker-authored `pr_body` (bd-53xrmi) — Summary / Test plan /
   #      References written *after* the change landed, filling the repo's PR
-  #      template when present. This is the canonical, acolyte-quality body.
+  #      template when present. This is the canonical, worker-quality body.
   #   2. the bead's originating `description` (the ticket spec) — a reasonable
   #      stand-in when no worker body was produced (older beads, review-only).
   #   3. `PRTemplate.default_body/1` — a minimal `## <title>` + description +
@@ -576,7 +576,7 @@ defmodule Arbiter.Workflows.Refinery do
 
     cond do
       # Top-priority guard: a CONFLICTING MR never advances state. The
-      # Crucible auto-spawns an acolyte to rebase + resolve + force-push
+      # merge queue auto-spawns a worker to rebase + resolve + force-push
       # (one attempt; the in-flight resolver parks the item at
       # :conflict_resolving so back-to-back ticks don't spawn duplicates).
       # A second observation of conflicting while parked means the rebase
@@ -611,7 +611,7 @@ defmodule Arbiter.Workflows.Refinery do
         {item, state}
 
       # A reviewer requested changes with a review we haven't actioned yet:
-      # dispatch exactly one revise pass on the existing outpost. Debounced on
+      # dispatch exactly one revise pass on the existing worktree. Debounced on
       # the review id so the same CHANGES_REQUESTED (still in the PR's review
       # history after the revise lands) is not actioned twice.
       unhandled_changes_requested?(item, mr_state) ->
@@ -726,7 +726,7 @@ defmodule Arbiter.Workflows.Refinery do
   end
 
   # Fetch the full review feedback, post a brief acknowledging comment, and
-  # dispatch a revise pass on the existing outpost (same branch, no new PR).
+  # dispatch a revise pass on the existing worktree (same branch, no new PR).
   # On success the item is parked at :changes_requested with the review id
   # recorded; the next tick returns it to :awaiting_approval to await re-review.
   # A dispatch failure parks the item :failed (no retry loop — the reviewer can

@@ -1,6 +1,6 @@
 defmodule Arbiter.PolecatPrRefTest do
   @moduledoc """
-  bd-7b46wd: when the polecat opens its own PR/MR (the acolyte finished and the
+  bd-7b46wd: when the polecat opens its own PR/MR (the worker finished and the
   branch is integrated through the configured merger), the opened ref must be
   persisted onto the bead's `pr_ref`.
 

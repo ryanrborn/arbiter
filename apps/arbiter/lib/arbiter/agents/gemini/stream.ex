@@ -77,7 +77,7 @@ defmodule Arbiter.Agents.Gemini.Stream do
     [{"⚙ gemini session started (model #{event["model"] || "?"})", false}]
   end
 
-  # Assistant text is the acolyte's own output — the only event class that may
+  # Assistant text is the worker's own output — the only event class that may
   # trip the `arb done` sentinel. (Deltas may split the marker across chunks;
   # the literal-line case — `arb done` on its own delta — is the common one.)
   def format_event(%{"type" => "message", "role" => "assistant", "content" => content})

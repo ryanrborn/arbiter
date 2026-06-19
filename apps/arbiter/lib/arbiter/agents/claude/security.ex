@@ -18,7 +18,7 @@ defmodule Arbiter.Agents.Claude.Security do
 
   The allow/deny rules ride on a generated settings document passed inline as
   `--settings '<json>'` (the CLI accepts a JSON string, not just a file — so
-  there is no shared-file race between concurrent acolytes, and nothing is
+  there is no shared-file race between concurrent workers, and nothing is
   read from the operator's `~/.claude`). The settings carry:
 
     * the expanded `safe_defaults` deny baseline (always non-empty unless the
@@ -39,7 +39,7 @@ defmodule Arbiter.Agents.Claude.Security do
 
   These are *permission-layer* guards inside the agent, not a kernel sandbox.
   They stop the agent's own tools from running a denied command, which is the
-  failure mode of the motivating incident (an acolyte's own `git merge` /
+  failure mode of the motivating incident (an worker's own `git merge` /
   destructive op). They do **not** jail the OS process — a determined escape
   (e.g. a sub-subprocess) is out of scope here; genuine OS isolation
   (`sandbox.enabled` at the kernel level) is a documented follow-up. Bash

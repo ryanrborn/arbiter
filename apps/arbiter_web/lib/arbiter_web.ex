@@ -88,7 +88,7 @@ defmodule ArbiterWeb do
       import ArbiterWeb.CoreComponents
       # Shared list / index / detail building blocks
       import ArbiterWeb.ListComponents
-      # Vernacular label pluralization (plural/1, cap_plural/1)
+      # Label pluralization (plural/1, cap_plural/1)
       import ArbiterWeb.Labels
 
       # Common modules used in templates

@@ -22,10 +22,8 @@ case existing do
     {:ok, _ws} =
       Ash.create(Workspace, %{
         name: default_name,
-        description:
-          "Default workspace shipped at boot. Gas-town vernacular, no external tracker.",
+        description: "Default workspace shipped at boot. No external tracker.",
         config: %{
-          "vernacular" => %{},
           "tracker" => %{"type" => "none"}
         }
       })

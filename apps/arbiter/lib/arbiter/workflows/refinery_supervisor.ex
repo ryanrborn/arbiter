@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.RefinerySupervisor do
   @moduledoc """
-  DynamicSupervisor for Crucible (Refinery) processes — one per workspace.
+  DynamicSupervisor for merge queue (Refinery) processes — one per workspace.
 
   Refineries are registered under `Arbiter.Workflows.RefineryRegistry` keyed by
   `workspace_id`, so duplicate starts collapse to `{:error, {:already_started,

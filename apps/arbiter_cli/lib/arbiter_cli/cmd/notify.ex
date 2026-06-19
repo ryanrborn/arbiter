@@ -2,7 +2,7 @@ defmodule ArbiterCli.Cmd.Notify do
   @moduledoc """
   `arb notify [--limit N]` — show the N most recent notifications (default 20).
 
-  Read-only: notifications are broadcast events (acolyte completion, progress
+  Read-only: notifications are broadcast events (worker completion, progress
   milestones, system events) and are never "consumed". This is the CLI window
   onto the same feed the dashboard renders live.
 

@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.Api.RunController do
   @moduledoc """
-  REST endpoints for `Arbiter.Polecats.Run` — the durable history of acolyte
+  REST endpoints for `Arbiter.Polecats.Run` — the durable history of worker
   runs (a polecat's lifecycle after the GenServer is gone).
 
   Routes:

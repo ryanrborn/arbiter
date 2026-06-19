@@ -21,7 +21,6 @@ defmodule ArbiterWeb.PolecatDetailLive do
   alias Arbiter.Polecat.Warden
   alias Arbiter.Polecats.Run
   alias Arbiter.Usage.Event, as: UsageEvent
-  alias Arbiter.Vernacular
   alias Arbiter.Workflows.MachineState
   require Ash.Query
   require Logger
@@ -42,11 +41,11 @@ defmodule ArbiterWeb.PolecatDetailLive do
       |> assign(:now, DateTime.utc_now())
       |> assign(:flash_message, nil)
       |> assign(:compose_body, "")
-      |> assign(:worker_label, Vernacular.label(:worker))
-      |> assign(:issue_label, Vernacular.label(:issue))
-      |> assign(:rig_label, Vernacular.label(:rig))
-      |> assign(:workspace_label, Vernacular.label(:workspace))
-      |> assign(:pr_label, Vernacular.label(:pr))
+      |> assign(:worker_label, "worker")
+      |> assign(:issue_label, "issue")
+      |> assign(:rig_label, "repo")
+      |> assign(:workspace_label, "workspace")
+      |> assign(:pr_label, "pull request")
       |> refresh_all()
       |> seed_output_lines()
 
@@ -95,7 +94,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
          socket
          |> put_flash(
            :info,
-           "Stopped #{Vernacular.label(:worker)} for #{Vernacular.label(:issue)} #{socket.assigns.bead_id}."
+           "Stopped worker for issue #{socket.assigns.bead_id}."
          )
          |> push_navigate(to: ~p"/")}
 
@@ -104,7 +103,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
          put_flash(
            socket,
            :error,
-           "#{String.capitalize(Vernacular.label(:worker))} not registered (already gone?)."
+           "Worker not registered (already gone?)."
          )}
     end
   end
@@ -125,7 +124,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
          put_flash(
            socket,
            :error,
-           "No #{Vernacular.label(:workspace)} known for this #{Vernacular.label(:issue)}; can't address a direction."
+           "No workspace known for this issue; can't address a direction."
          )}
 
       {text, ws_id} ->
@@ -656,7 +655,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
                     <dd><span class="badge badge-warning badge-sm">required</span></dd>
                   <% end %>
                   <%= if path = Map.get(@snapshot.meta || %{}, :worktree_path) do %>
-                    <dt class="font-medium text-base-content/60">Outpost:</dt>
+                    <dt class="font-medium text-base-content/60">Worktree:</dt>
                     <dd class="font-mono text-xs break-all">{path}</dd>
                   <% end %>
                   <%= if branch = Map.get(@snapshot.meta || %{}, :branch) do %>
@@ -730,7 +729,7 @@ defmodule ArbiterWeb.PolecatDetailLive do
           <% end %>
 
           <%!-- ── Live activity (claude-driven) ──────────────────────── --%>
-          <%!-- A claude-driven acolyte does the real work in a streaming --%>
+          <%!-- A claude-driven worker does the real work in a streaming --%>
           <%!-- subprocess; its Driver never ticks the workflow Machine, so --%>
           <%!-- the fixed load_context→submit steps would sit frozen. Show --%>
           <%!-- the live activity derived from the stream instead (bd-c919xj). --%>

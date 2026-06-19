@@ -20,7 +20,7 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       description: ws.description,
       prefix: ws.prefix,
       config: ws.config,
-      # The *resolved* acolyte security posture (install default + this
+      # The *resolved* worker security posture (install default + this
       # domain's overrides) — single source of truth for `arb prime` and the
       # dashboard, so neither re-derives it from raw config.
       # `policy_enforced` reflects whether the active adapter honors the policy

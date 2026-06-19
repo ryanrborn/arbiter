@@ -8,12 +8,12 @@ defmodule Arbiter.Agents.CredentialWarden do
 
     1. Records the adapter as credential-expired in its own state.
     2. Escalates to the Admiral across every active workspace so the operator
-       is notified before any acolyte has to fail first.
+       is notified before any worker has to fail first.
 
   The stored state feeds two guards:
 
     * **Dispatch guard** — `Arbiter.Polecat.Sling` calls `expired?/1` before
-      dispatching a real acolyte. A known-expired adapter is refused immediately
+      dispatching a real worker. A known-expired adapter is refused immediately
       without re-running the probe, preventing a wave of identical 401 failures.
     * **Early mark** — `Arbiter.Polecat` calls `mark_expired/2` when a polecat
       dies with `:auth_expired`, so the Warden records the failure immediately
@@ -76,7 +76,7 @@ defmodule Arbiter.Agents.CredentialWarden do
   @doc """
   Immediately mark `adapter` as credential-expired and raise Admiral escalations.
 
-  Called by `Arbiter.Polecat.fail_stopped/2` when an acolyte dies with category
+  Called by `Arbiter.Polecat.fail_stopped/2` when an worker dies with category
   `:auth_expired`, so the Warden records the failure and blocks future dispatches
   without waiting for the next periodic probe. Fire-and-forget; best-effort.
   Pass a `server` pid/name to target a specific instance (useful in tests).

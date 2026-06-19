@@ -33,7 +33,7 @@ defmodule Arbiter.Polecat.BranchNamer do
       and ref are never sacrificed)
 
   Per-workspace overrides of the prefix mapping and stopword list are a future
-  hook (gte-P2 Vernacular). For now the mapping is hard-coded.
+  hook. For now the mapping is hard-coded.
   """
 
   alias Arbiter.Beads.Issue

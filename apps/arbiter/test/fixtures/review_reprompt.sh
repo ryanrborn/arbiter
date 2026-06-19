@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fixture: a reviewer (Tribunal) acolyte that emits substantive review output but
+# Fixture: a reviewer (Tribunal) worker that emits substantive review output but
 # FORGETS the verdict sentinel on its first pass, then supplies one when the
 # Tribunal re-prompts. Exercises the verdict re-prompt path (bd-8v8ays).
 #

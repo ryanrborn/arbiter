@@ -1,18 +1,18 @@
 defmodule ArbiterCli.Cmd.Resume do
   @moduledoc """
-  `arb resume <bead-id> [<rig>] [--model <name>]` — resume a stopped acolyte
+  `arb resume <bead-id> [<rig>] [--model <name>]` — resume a stopped worker
   (bd-auma3z).
 
-  When an acolyte is stopped mid-work (token exhaustion, crash, kill) its
-  outpost — the per-bead git worktree with its committed and uncommitted
+  When a worker is stopped mid-work (token exhaustion, crash, kill) its
+  worktree — the per-bead git worktree with its committed and uncommitted
   progress — is preserved. `arb resume` re-attaches a **fresh** agent to that
   same worktree, briefed with a git-derived summary of the work so far, so it
   continues from where the stopped run left off instead of restarting from
   scratch.
 
   POSTs to `/api/polecats/:bead_id/resume`. The server validates the bead has a
-  preserved outpost and isn't being actively worked, stops the lingering
-  stopped polecat, and slings a fresh claude-driven acolyte onto the existing
+  preserved worktree and isn't being actively worked, stops the lingering
+  stopped polecat, and slings a fresh claude-driven worker onto the existing
   branch — reusing any already-open PR rather than opening a duplicate.
 
   The rig is optional: if omitted, it's inherited from the bead's most recent
@@ -24,7 +24,7 @@ defmodule ArbiterCli.Cmd.Resume do
     --json           emit JSON instead of human-readable text.
   """
 
-  alias ArbiterCli.{Client, Output, Vernacular}
+  alias ArbiterCli.{Client, Output}
 
   @switches [json: :boolean, model: :string]
 
@@ -62,20 +62,19 @@ defmodule ArbiterCli.Cmd.Resume do
   defp emit(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit(payload, :text) do
-    v = Vernacular.fetch()
     bead = payload["bead"] || %{}
     polecat = payload["polecat"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Resume:")
-    IO.puts("  #{Vernacular.cap(v, "issue")}:     #{bead["id"]} — #{bead["title"]}")
+    IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
     IO.puts("  Status:   #{bead["status"]}")
-    IO.puts("  #{Vernacular.cap(v, "worker")}:  #{polecat["pid"]}")
+    IO.puts("  Worker:  #{polecat["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
     case payload["worktree_path"] do
       nil -> :ok
-      path -> IO.puts("  #{Vernacular.cap(v, "worktree")}: #{path} (reused)")
+      path -> IO.puts("  Worktree: #{path} (reused)")
     end
 
     case payload["claude_started"] do

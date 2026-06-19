@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
   @moduledoc """
-  Dispatch an auto-revise pass on a bead's **existing** outpost when a human
+  Dispatch an auto-revise pass on a bead's **existing** worktree when a human
   reviewer requests changes (or leaves actionable review comments) on its PR
   (bd-95lsjb).
 
@@ -14,9 +14,9 @@ defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
   ## Job scope
 
   This reuses the `arb resume` path (`Arbiter.Polecat.Sling.resume/2`): it
-  re-attaches a fresh acolyte to the bead's **preserved outpost worktree** —
+  re-attaches a fresh worker to the bead's **preserved worktree** —
   the same branch the PR already tracks — briefed with the reviewer's feedback
-  prepended to the standard work prompt. The acolyte addresses the feedback,
+  prepended to the standard work prompt. The worker addresses the feedback,
   commits, and pushes to the **same branch**; the existing PR updates in place.
 
   It must NOT open a new PR (pairs with bd-53xrmi: single canonical PR, the
@@ -60,12 +60,12 @@ defmodule Arbiter.Workflows.Refinery.ReviseDispatcher do
   @type dispatch_result :: {:ok, map()} | {:error, term()}
 
   @doc """
-  Spawn an acolyte on the bead's existing outpost to address the review
+  Spawn a worker on the bead's existing worktree to address the review
   feedback and push to the same branch.
 
-  Returns `{:ok, info}` once the acolyte is spawned (the revise runs
+  Returns `{:ok, info}` once the worker is spawned (the revise runs
   asynchronously; the Refinery returns the item to `:awaiting_approval` to
-  await re-review). Returns `{:error, reason}` when the outpost can't be
+  await re-review). Returns `{:error, reason}` when the worktree can't be
   resumed (e.g. it was cleaned up, or a polecat is still actively working the
   bead) — the Refinery parks the item `:failed` so it doesn't spin.
   """

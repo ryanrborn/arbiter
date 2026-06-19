@@ -112,12 +112,12 @@ defmodule Arbiter.MCP.ToolsTest do
   describe "coordinator_inbox/2" do
     test "lists unread Admiral messages and marks them read", ctx do
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Summons!"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
 
       assert {:ok, %{messages: [msg], count: 1, cleared: 0}} =
                Tools.coordinator_inbox(ctx.coordinator, %{})
 
-      assert msg.body == "Summons!"
+      assert msg.body == "Escalation!"
       assert msg.to_ref == "admiral"
 
       # Second call is empty — the first marked them read.
@@ -560,14 +560,14 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.polecat_review(ctx.coordinator, %{"bead_id" => foreign.id})
     end
 
-    test "resume surfaces the no-outpost error for a bead never slung", ctx do
+    test "resume surfaces the no-worktree error for a bead never slung", ctx do
       {:ok, bead} = Ash.create(Issue, %{title: "never slung", workspace_id: ctx.ws.id})
 
       # can_sling + in-workspace + below depth, but no preserved worktree exists.
       assert {:error, {:invalid, msg}} =
                Tools.polecat_resume(ctx.coordinator, %{"bead_id" => bead.id, "rig" => "test/rig"})
 
-      assert msg =~ "outpost" or msg =~ "rig"
+      assert msg =~ "worktree" or msg =~ "rig"
     end
   end
 

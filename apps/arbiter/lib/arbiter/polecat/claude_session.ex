@@ -58,8 +58,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
   The regex is intentionally word-bounded so the substring "arb doneness"
   doesn't trip it — but a literal marker line like `arb done` (or
   `>> arb done <<`) does. Under stream-json, detection is scoped to the
-  acolyte's **assistant text** (and the raw-line fallback): tool calls and tool
-  *results* are displayed but never trip completion, so an acolyte that greps
+  worker's **assistant text** (and the raw-line fallback): tool calls and tool
+  *results* are displayed but never trip completion, so an worker that greps
   or cats "arb done" mid-task can't falsely complete itself.
 
   ## Output buffering
@@ -223,7 +223,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
       {:ok, claude} ->
         # Even this built-in path (workspace-less Tribunal runs, bare
         # ClaudeSession.start/1 callers) is hardened with the install-wide
-        # default security posture, so no acolyte spawn inherits the operator's
+        # default security posture, so no worker spawn inherits the operator's
         # personal ~/.claude permission posture (bd-9u10op). Workspace-aware
         # callers route through Arbiter.Agents.Claude.default_argv/2 instead,
         # which resolves a per-domain policy.
@@ -541,7 +541,7 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # ---- live activity derivation ------------------------------------------
   #
   # Reduce a stream-json event to a short, human-readable activity phrase — the
-  # coarse "what is the acolyte doing right now" signal a claude-driven view
+  # coarse "what is the worker doing right now" signal a claude-driven view
   # shows in place of a frozen workflow step. Returns nil for events that carry
   # no salient action (tool results, deltas, unknown types) so the caller keeps
   # the previous activity.
@@ -806,8 +806,8 @@ defmodule Arbiter.Polecat.ClaudeSession do
   # env config isolation is disabled, so this resolves to [] there.
   #
   # bd-crqku8: always inject ARB_ACOLYTE_BEAD_ID so any `arb restart/update/
-  # start` invoked from inside the acolyte session can detect it and refuse,
-  # preventing an acolyte from bouncing the live orchestrating server.
+  # start` invoked from inside the worker session can detect it and refuse,
+  # preventing an worker from bouncing the live orchestrating server.
   defp env_pairs(opts, bead_id) do
     base =
       case Keyword.fetch(opts, :env) do

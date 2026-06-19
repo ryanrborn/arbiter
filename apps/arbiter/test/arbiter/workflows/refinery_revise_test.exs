@@ -3,7 +3,7 @@ defmodule Arbiter.Workflows.RefineryReviseTest do
   Tests for the Refinery's CHANGES_REQUESTED → auto-revise path (bd-95lsjb).
 
   Drives the `Refinery` with a stub revise dispatcher so the dispatch
-  machinery is exercised without resuming a real outpost / spawning a Claude
+  machinery is exercised without resuming a real worktree / spawning a Claude
   session. GitHub PR + review fetches are mocked via `Req.Test`.
   """
 

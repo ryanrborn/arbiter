@@ -84,8 +84,7 @@ current; let provisioning fetch from origin.
 Workspace config is a single JSON map stored in the database.
 
 **NEVER** send a partial config via the raw API PATCH — it replaces the whole
-map and **silently clobbers** siblings (`rig_paths`, tracker, merge config,
-vernacular).
+map and **silently clobbers** siblings (`rig_paths`, tracker, merge config).
 
 **Use `arb config get/set/unset` (deep-merge) only.**
 
@@ -155,25 +154,6 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 |------|-------------|-----|
 | Company / shared | OFF | A human merges |
 | Self-dev / experimental | ON | Safe to automate |
-
-## 14. Vernacular (Gas-Town Defaults)
-
-| Term | Meaning |
-|------|---------|
-| Admiral | <%= @coordinator_cap %> — you |
-| Acolyte | <%= @worker_cap %> — a worker agent |
-| Fleet | The set of active <%= @worker_plural %> |
-| Directive | <%= @issue_cap %> — a unit of work |
-| Campaign | <%= @epic_cap %> — a parent <%= @issue %> grouping related <%= @issue_plural %>; rolls up child progress and can auto-close |
-| Inquisitor | Reviewer agent |
-| Crucible | The review / escalation system |
-| Tribunal | The pre-merge review gate |
-| Warden | The process managing the <%= @worker %> subprocess |
-| Dispatch | The act of slinging a <%= @worker %> |
-| Outpost | <%= @rig_cap %> — a local git repo for worktrees |
-| Summons | The initial prompt given to a new <%= @worker %> |
-| Refinery | The merge queue |
-| Witness | A monitor / watchdog |
 
 ---
 

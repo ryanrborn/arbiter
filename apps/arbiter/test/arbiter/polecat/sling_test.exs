@@ -362,7 +362,7 @@ defmodule Arbiter.Polecat.SlingTest do
           start_driver: false,
           start_claude: true,
           # Stand-in for a running `claude --print` session — stays alive (so it
-          # isn't caught by bd-awi4nw stop-detection as a died-early acolyte),
+          # isn't caught by bd-awi4nw stop-detection as a died-early worker),
           # but proves ClaudeSession.start was wired into Sling.
           claude_command: ["sleep", "2"]
         )
@@ -375,7 +375,7 @@ defmodule Arbiter.Polecat.SlingTest do
     # falls back to the rig's shared checkout. The per-spawn MCP config carries a
     # bearer scope token; writing `.mcp.json` into that canonical checkout leaks
     # the token into the working tree the live server + operator share (the
-    # "acolyte leaks into the main worktree" class). The spawn must NOT touch the
+    # "worker leaks into the main worktree" class). The spawn must NOT touch the
     # rig's working tree.
     test "review dispatch does not write .mcp.json into the shared rig checkout",
          %{ws: ws, tmp: tmp} do
@@ -555,7 +555,7 @@ defmodule Arbiter.Polecat.SlingTest do
           # A stand-in for a *running* Claude session: it must stay alive for the
           # duration of this test. A command that exits immediately would (since
           # bd-awi4nw) trip stop-detection and fail the polecat — exactly the
-          # "acolyte died without `arb done`" path we now catch.
+          # "worker died without `arb done`" path we now catch.
           claude_command: ["sleep", "2"],
           # Speed up the polecat-status polling for the assertion below.
           interval_ms: 5,
@@ -1140,7 +1140,7 @@ defmodule Arbiter.Polecat.SlingTest do
   end
 
   describe "work prompt completion notes (tracker-backed beads)" do
-    test "instructs a tracker-backed acolyte to produce QA + Deployment notes", %{ws: ws} do
+    test "instructs a tracker-backed worker to produce QA + Deployment notes", %{ws: ws} do
       {:ok, bead} =
         Ash.create(Issue, %{
           title: "tracked work",
@@ -1187,7 +1187,7 @@ defmodule Arbiter.Polecat.SlingTest do
   end
 
   describe "work prompt PR body authoring (bd-53xrmi)" do
-    test "instructs the acolyte to author a pr_body via MCP and NOT open its own PR",
+    test "instructs the worker to author a pr_body via MCP and NOT open its own PR",
          %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "author body", workspace_id: ws.id})
 
@@ -1262,7 +1262,7 @@ defmodule Arbiter.Polecat.SlingTest do
     end
 
     # Sling a bead, provisioning its worktree, then simulate a mid-work stop:
-    # the polecat fails (lingers in :failed, registered) with the outpost left
+    # the polecat fails (lingers in :failed, registered) with the worktree left
     # on disk — exactly the state `arb resume` is built to recover from.
     defp stop_acolyte_with_outpost(bead_id) do
       {:ok, first} = Sling.sling(bead_id, rig: "rs/rig", start_driver: false)
@@ -1271,7 +1271,7 @@ defmodule Arbiter.Polecat.SlingTest do
       first
     end
 
-    test "reuses the outpost, links the new run, and boots into :resuming", %{ws: ws} do
+    test "reuses the worktree, links the new run, and boots into :resuming", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "resume work", workspace_id: ws.id})
       first = stop_acolyte_with_outpost(bead.id)
 
@@ -1281,7 +1281,7 @@ defmodule Arbiter.Polecat.SlingTest do
       {:ok, result} =
         Sling.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
 
-      # Same outpost, fresh polecat.
+      # Same worktree, fresh polecat.
       assert result.worktree_path == first.worktree_path
       assert result.polecat_pid != first.polecat_pid
 
@@ -1296,29 +1296,29 @@ defmodule Arbiter.Polecat.SlingTest do
       assert new_run.resumed_from_run_id == prior_run.id
     end
 
-    test "the resumed acolyte's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
+    test "the resumed worker's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
       {:ok, bead} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
       first = stop_acolyte_with_outpost(bead.id)
 
-      # Commit some "prior work" into the outpost so the briefing has content.
+      # Commit some "prior work" into the worktree so the briefing has content.
       wt = first.worktree_path
       File.write!(Path.join(wt, "progress.ex"), "defmodule P, do: nil\n")
       {_, 0} = System.cmd("git", ["-C", wt, "add", "progress.ex"])
       {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "did half the work"])
       _ = repo
 
-      # The outpost was cut from main, so the briefing diffs against main.
+      # The worktree was cut from main, so the briefing diffs against main.
       {:ok, prefix} = Arbiter.Polecat.ResumeContext.build(bead, wt, "main")
 
       assert prefix =~ "did half the work"
       assert prefix =~ "RESUMING work on bead #{bead.id}"
     end
 
-    test "refuses when there is no preserved outpost", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no outpost", workspace_id: ws.id})
+    test "refuses when there is no preserved worktree", %{ws: ws} do
+      {:ok, bead} = Ash.create(Issue, %{title: "no worktree", workspace_id: ws.id})
       first = stop_acolyte_with_outpost(bead.id)
 
-      # Tear the outpost down — nothing left to resume.
+      # Tear the worktree down — nothing left to resume.
       Arbiter.Polecat.Worktree.cleanup(first.worktree_path)
       refute File.dir?(first.worktree_path)
 
@@ -1333,7 +1333,7 @@ defmodule Arbiter.Polecat.SlingTest do
       assert {:error, {:bead_closed, _}} = Sling.resume(bead.id, start_driver: false)
     end
 
-    test "refuses while an acolyte is still actively working", %{ws: ws} do
+    test "refuses while an worker is still actively working", %{ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
       # Sling but DON'T stop — the polecat is live (:idle/:running), not stopped.
       {:ok, _live} = Sling.sling(bead.id, rig: "rs/rig", start_driver: false)
@@ -1398,7 +1398,7 @@ defmodule Arbiter.Polecat.SlingTest do
       machine_state = Arbiter.Workflows.MachineState |> Ash.get!(result.machine_id)
       assert machine_state.workflow_module == inspect(Arbiter.Workflows.CodeReview)
 
-      # Polecat is tagged review_only so completion bypasses the Crucible.
+      # Polecat is tagged review_only so completion bypasses the merge queue.
       snap = Polecat.state(result.polecat_pid)
       assert snap.meta[:review_only] == true
       refute Map.has_key?(snap.meta, :branch)

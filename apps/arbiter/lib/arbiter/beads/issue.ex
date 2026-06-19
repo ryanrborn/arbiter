@@ -362,7 +362,7 @@ defmodule Arbiter.Beads.Issue do
       default ""
 
       description """
-      Markdown. The acolyte-authored PR/MR description, written at completion
+      Markdown. The worker-authored PR/MR description, written at completion
       (Summary / Test plan / References) reflecting the change that actually
       landed — and filling the repo's PR template when one exists. The Refinery
       opens the single canonical PR with this body, so the worker never opens

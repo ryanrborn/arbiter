@@ -113,7 +113,7 @@ defmodule Arbiter.Messages.MessageTest do
       end
     end
 
-    test "an acolyte's completion addressed to the admiral shows in the admiral inbox" do
+    test "an worker's completion addressed to the admiral shows in the admiral inbox" do
       {:ok, _} =
         Ash.create(Message, %{
           kind: :completion,

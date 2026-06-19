@@ -493,7 +493,7 @@ defmodule Arbiter.Workflows.RefineryTest do
       workspace: ws,
       bead: bead
     } do
-      # Simulate a resumed bead whose prior acolyte already opened PR #55.
+      # Simulate a resumed bead whose prior worker already opened PR #55.
       {:ok, bead} = Ash.update(bead, %{pr_ref: "#55"}, action: :update)
 
       test_pid = self()

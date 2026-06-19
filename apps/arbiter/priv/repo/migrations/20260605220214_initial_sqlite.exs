@@ -142,14 +142,6 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :id, :text, null: false, primary_key: true
     end
 
-    create table(:global_settings, primary_key: false) do
-      add :updated_at, :utc_datetime_usec, null: false
-      add :inserted_at, :utc_datetime_usec, null: false
-      add :branding, :map, null: false, default: %{}
-      add :vernacular, :map, null: false, default: %{}
-      add :id, :uuid, null: false, primary_key: true
-    end
-
     create table(:dependencies, primary_key: false) do
       add :updated_at, :utc_datetime_usec, null: false
       add :created_at, :utc_datetime_usec, null: false
@@ -259,8 +251,6 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
             "See https://www.techonthenet.com/sqlite/foreign_keys/drop.php for guidance."
 
     drop table(:dependencies)
-
-    drop table(:global_settings)
 
     raise "SQLite does not support dropping foreign key constraints. " <>
             "You will need to manually recreate the `issues` table without the `issues_workspace_id_fkey` constraint. " <>

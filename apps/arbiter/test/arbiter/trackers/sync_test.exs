@@ -1,11 +1,11 @@
 defmodule Arbiter.Trackers.SyncTest do
   @moduledoc """
-  Tests for the loud, Summons-raising tracker lifecycle orchestration
+  Tests for the loud, escalation-raising tracker lifecycle orchestration
   (`Arbiter.Trackers.Sync`) — the layer that drives the real VR workflow:
 
     * PR-open -> In Code Review + a PR-link comment + a remote link.
     * Tribunal-approved-but-parked -> Pending Merge.
-    * A genuine sync failure surfaces loudly as an Admiral Summons (the
+    * A genuine sync failure surfaces loudly as an escalation (the
       VR-17911 silent-failure regression guard).
 
   Jira HTTP is stubbed via `Req.Test` (`:jira_http_stub` is true in test env).
@@ -121,7 +121,7 @@ defmodule Arbiter.Trackers.SyncTest do
       assert_receive {:remotelink,
                       %{"object" => %{"url" => ^url}, "globalId" => "arbiter-pr=" <> _}}
 
-      # No spurious Summons on the happy path.
+      # No spurious escalation on the happy path.
       assert escalations_for(ws.id) == []
     end
   end
@@ -161,7 +161,7 @@ defmodule Arbiter.Trackers.SyncTest do
     end
   end
 
-  describe "loud failure -> Admiral Summons" do
+  describe "loud failure -> escalation" do
     test "an unreachable mapped status raises an escalation instead of failing silently" do
       # in_progress -> "Nowhere" is unreachable: no direct transition and no
       # graph path. This is exactly the VR-17911 silent-failure shape.
@@ -199,7 +199,7 @@ defmodule Arbiter.Trackers.SyncTest do
       assert summons.body =~ "status_map"
     end
 
-    test "a benign unmapped event is skipped without a Summons" do
+    test "a benign unmapped event is skipped without an escalation" do
       # The tracker explicitly does not model :merged (blank mapping overrides
       # the default). map_status -> :status_unmapped, which is a quiet skip.
       ws = jira_workspace(%{"in_progress" => "In Progress", "merged" => ""})

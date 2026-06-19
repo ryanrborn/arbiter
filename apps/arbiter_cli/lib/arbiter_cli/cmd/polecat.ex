@@ -18,7 +18,7 @@ defmodule ArbiterCli.Cmd.Polecat do
   of record, retaining every line however long the run.
   """
 
-  alias ArbiterCli.{Client, Output, Vernacular}
+  alias ArbiterCli.{Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -77,13 +77,11 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_show(snap, :json), do: IO.puts(Jason.encode!(snap))
 
   defp emit_show(snap, :text) do
-    v = Vernacular.fetch()
-
     if snap["source"] == "history" do
-      IO.puts("(no live #{Vernacular.label(v, "worker")} — showing most recent historical run)")
+      IO.puts("(no live worker — showing most recent historical run)")
     end
 
-    IO.puts("#{Vernacular.cap(v, "issue")}:       #{snap["bead_id"]}")
+    IO.puts("Issue:       #{snap["bead_id"]}")
     IO.puts("Status:     #{snap["status"]}")
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.
@@ -93,7 +91,7 @@ defmodule ArbiterCli.Cmd.Polecat do
       IO.puts("Step:       #{snap["current_step"]}")
     end
 
-    IO.puts("#{Vernacular.cap(v, "rig")}:        #{snap["rig"]}")
+    IO.puts("Repo:        #{snap["rig"]}")
     IO.puts("Started:    #{snap["started_at"]}")
     if snap["completed_at"], do: IO.puts("Completed:  #{snap["completed_at"]}")
     if snap["exit_status"], do: IO.puts("Exit:       #{snap["exit_status"]}")
@@ -113,8 +111,7 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
 
   defp emit_log(data, :text) do
-    v = Vernacular.fetch()
-    IO.puts("#{Vernacular.cap(v, "issue")}:       #{data["bead_id"]}")
+    IO.puts("Issue:       #{data["bead_id"]}")
     IO.puts("Run:        #{data["run_id"]}")
     IO.puts("Transcript: #{data["path"]}")
 
@@ -135,23 +132,17 @@ defmodule ArbiterCli.Cmd.Polecat do
   defp emit_stop(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit_stop(payload, :text) do
-    v = Vernacular.fetch()
-
-    IO.puts(
-      "Stopped #{Vernacular.label(v, "worker")} for #{Vernacular.label(v, "issue")} #{payload["bead_id"]}."
-    )
+    IO.puts("Stopped worker for issue #{payload["bead_id"]}.")
   end
 
   defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
 
   defp emit_list([], :text) do
-    v = Vernacular.fetch()
-    IO.puts("(no active #{Vernacular.label(v, "worker")}s)")
+    IO.puts("(no active workers)")
   end
 
   defp emit_list(list, :text) do
-    v = Vernacular.fetch()
-    IO.puts("Active #{Vernacular.label(v, "worker")}s (#{length(list)}):")
+    IO.puts("Active workers (#{length(list)}):")
 
     Enum.each(list, fn p ->
       step =

@@ -1,7 +1,7 @@
 defmodule Arbiter.Messages.AdmiralNotifier do
   @moduledoc """
-  Auto-posts Admiral notifications on acolyte (polecat) lifecycle events, so the
-  Admiral is informed without acolytes having to send messages by hand.
+  Auto-posts Admiral notifications on worker (polecat) lifecycle events, so the
+  Admiral is informed without workers having to send messages by hand.
 
   Wired into `Arbiter.Polecat`'s terminal/await transitions. Each event maps to
   a durable `:notification` `Arbiter.Messages.Message` — the broadcast kind that
@@ -18,7 +18,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   ## Actionable escalations (`acolyte_stopped`, `preflight_failed`)
 
-  A dead/stopped acolyte (token exhaustion, crash, external kill, auth expiry)
+  A dead/stopped worker (token exhaustion, crash, external kill, auth expiry)
   or a failed pre-flight auth probe is not just dashboard noise — it needs the
   operator to *act* (re-authenticate, top up credits, re-sling). Those go out as
   addressed `:escalation` **mailbox** messages (`to_ref: "admiral"`,
@@ -125,7 +125,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   end
 
   @doc """
-  Escalate a stopped/dead acolyte to the Admiral (bd-awi4nw).
+  Escalate a stopped/dead worker to the Admiral (bd-awi4nw).
 
   Unlike the lifecycle `:notification`s above, this is an addressed
   `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
@@ -142,7 +142,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   Escalate a failed pre-flight auth probe to the Admiral (bd-awi4nw).
 
   Fired by `Arbiter.Polecat.Sling` when the agent CLI fails its cheap
-  token-validity probe *before* any acolyte is dispatched — so a wave of spawns
+  token-validity probe *before* any worker is dispatched — so a wave of spawns
   that would all 401 is refused up front and the operator is told to
   re-authenticate. Same addressed `:escalation` shape as `acolyte_stopped/2`.
   Best-effort, returns `:ok`.
@@ -155,7 +155,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   Escalate a proactively-detected credential expiry to the Admiral (bd-5wchp1).
 
   Fired by `Arbiter.Agents.CredentialWarden` when a periodic liveness probe
-  detects that credentials are expired *before* any acolyte has been dispatched
+  detects that credentials are expired *before* any worker has been dispatched
   or failed. Unlike `acolyte_stopped/2` and `preflight_failed/2`, this has no
   associated bead — it names the adapter that failed instead.
 
@@ -295,7 +295,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
         "Proactive credential probe: #{adapter_label} failed authentication.",
         reason.summary,
         reason.remediation && "Remediation: #{reason.remediation}",
-        "Note: new acolyte dispatches for this adapter are suspended until credentials are restored."
+        "Note: new worker dispatches for this adapter are suspended until credentials are restored."
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -315,7 +315,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     lead =
       case event do
         :acolyte_stopped ->
-          "Acolyte for #{title_for(bead_id)} stopped: #{reason.summary}."
+          "Worker for #{title_for(bead_id)} stopped: #{reason.summary}."
 
         :preflight_failed ->
           "Refused to sling #{title_for(bead_id)} — agent pre-flight auth probe failed: " <>
@@ -338,13 +338,13 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     {subject, body}
   end
 
-  # bd-auma3z: a stopped acolyte's outpost (its worktree + committed/uncommitted
+  # bd-auma3z: a stopped worker's worktree (committed/uncommitted
   # progress) is preserved, so the operator can continue rather than re-slinging
   # from scratch. Offer the resume verb right in the escalation. Only for
   # `:acolyte_stopped` — a `:preflight_failed` refusal happens before any work,
-  # so there is no outpost to resume.
+  # so there is no worktree to resume.
   defp resume_hint(:acolyte_stopped, bead_id),
-    do: "Resume: run `arb worker resume #{bead_id}` to continue from the preserved outpost."
+    do: "Resume: run `arb worker resume #{bead_id}` to continue from the preserved worktree."
 
   defp resume_hint(_event, _bead_id), do: nil
 

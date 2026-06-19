@@ -1,7 +1,7 @@
 defmodule ArbiterCli.Cmd.Review do
   @moduledoc """
   `arb review <bead-id> [--rig <rig>] [--model <name>] [--json]` — dispatch a
-  review-only acolyte against the PR/MR linked to a bead.
+  review-only worker against the PR/MR linked to a bead.
 
   POSTs to `/api/polecats/review`. The server transitions the bead to
   `:in_progress`, attaches the `Arbiter.Workflows.CodeReview` workflow,
@@ -9,7 +9,7 @@ defmodule ArbiterCli.Cmd.Review do
   Claude subprocess with a review prompt. The reviewer reads the PR/MR diff,
   posts findings + a verdict via the configured tracker, and prints `arb
   done` — completion runs through the no-branch path
-  (`Polecat.complete_now(:claude_done)`), bypassing the Crucible/merger.
+  (`Polecat.complete_now(:claude_done)`), bypassing the merge queue/merger.
 
   ## Flags
 
@@ -28,7 +28,7 @@ defmodule ArbiterCli.Cmd.Review do
   would defeat the purpose — to dispatch authored work, use `arb sling`.
   """
 
-  alias ArbiterCli.{Client, Output, Vernacular}
+  alias ArbiterCli.{Client, Output}
 
   @switches [json: :boolean, rig: :string, model: :string]
 
@@ -69,15 +69,14 @@ defmodule ArbiterCli.Cmd.Review do
   defp emit(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit(payload, :text) do
-    v = Vernacular.fetch()
     bead = payload["bead"] || %{}
     polecat = payload["polecat"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Review dispatched:")
-    IO.puts("  #{Vernacular.cap(v, "issue")}:     #{bead["id"]} — #{bead["title"]}")
+    IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
     IO.puts("  Status:   #{bead["status"]}")
-    IO.puts("  #{Vernacular.cap(v, "worker")}:  #{polecat["pid"]}")
+    IO.puts("  Worker:  #{polecat["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 
     case payload["claude_started"] do

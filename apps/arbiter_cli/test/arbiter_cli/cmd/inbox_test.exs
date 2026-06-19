@@ -84,8 +84,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
       {out, _err, code} = capture(fn -> Inbox.run(["read", id]) end)
       assert code == 0
       assert out =~ "Full body text here."
-      # the directive label is routed through vernacular (default issue -> "Bead")
-      assert out =~ "Bead:"
+      assert out =~ "Issue:"
       assert out =~ "bd-1qx1nt"
     end
 
@@ -126,7 +125,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
     end
   end
 
-  describe "arb inbox <bead-id> (acolyte path)" do
+  describe "arb inbox <bead-id> (worker path)" do
     test "lists a bead's unread mail and marks each read" do
       stub_routes([
         {{"get", "/api/messages"},

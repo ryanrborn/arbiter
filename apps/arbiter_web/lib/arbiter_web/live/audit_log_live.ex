@@ -23,7 +23,7 @@ defmodule ArbiterWeb.AuditLogLive do
     - Polecat lifecycle events (no audit resource yet).
     - PR/merge events (gte-022/023 don't write to paper_trail).
 
-  The acceptance criterion's "filter by actor=mayor" is therefore
+  The acceptance criterion's "filter by actor=coordinator" is therefore
   approximated: the JSON `version_action_inputs` map sometimes contains
   bead fields with author names (e.g. assignee). MVP punts on this; once
   `belongs_to_actor` is wired (a separate Phase 5 bead), the filter form

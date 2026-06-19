@@ -159,7 +159,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "workspace_show",
       tiers: @both,
       description:
-        "Show the scope's own workspace: config, vernacular, and acolyte security posture.",
+        "Show the scope's own workspace: config and the resolved worker security posture.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.workspace_show/2
     },
@@ -186,7 +186,7 @@ defmodule Arbiter.MCP.Catalog do
           "pr_body" => %{
             "type" => "string",
             "description" =>
-              "The acolyte-authored PR/MR description (Summary / Test plan / References) the " <>
+              "The worker-authored PR/MR description (Summary / Test plan / References) the " <>
                 "Refinery opens the bead's single canonical PR with."
           }
         },
@@ -390,7 +390,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "polecat_resume",
       tiers: @coordinator,
       description:
-        "Re-attach a fresh acolyte to a bead's preserved outpost worktree (`arb resume`), continuing " <>
+        "Re-attach a fresh worker to a bead's preserved worktree (`arb resume`), continuing " <>
           "the stopped run rather than restarting. Requires a `can_sling` coordinator token and is " <>
           "depth-limited (the sling-recursion guardrail).",
       input_schema: %{
@@ -412,7 +412,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "polecat_review",
       tiers: @coordinator,
       description:
-        "Dispatch a review-only acolyte against the PR/MR linked to a bead (`arb review`): no worktree, " <>
+        "Dispatch a review-only worker against the PR/MR linked to a bead (`arb review`): no worktree, " <>
           "no branch, no merge. Requires a `can_sling` coordinator token and is depth-limited. " <>
           "Claude-driven by default; pass `with_claude: false` to dispatch without spawning an agent.",
       input_schema: %{

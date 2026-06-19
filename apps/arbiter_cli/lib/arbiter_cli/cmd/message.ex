@@ -14,7 +14,7 @@ defmodule ArbiterCli.Cmd.Message do
                          the recent notification feed.
 
   As a shorthand, `arb message <bead-id> <text>` (no verb) sends a
-  `:direction` from the Admiral down to a running acolyte — the acolyte picks
+  `:direction` from the Admiral down to a running worker — the worker picks
   it up next time it runs `arb message inbox <bead-id>`.
   """
 

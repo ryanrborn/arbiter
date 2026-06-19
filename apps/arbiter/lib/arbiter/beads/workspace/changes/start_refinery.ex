@@ -1,6 +1,6 @@
 defmodule Arbiter.Beads.Workspace.Changes.StartRefinery do
   @moduledoc """
-  After-action hook that starts a Refinery (Crucible) process for a newly
+  After-action hook that starts a Refinery (merge queue) process for a newly
   created workspace. Gated by `Arbiter.Workflows.RefinerySupervisor.auto_start?/0`
   so tests can opt out.
 

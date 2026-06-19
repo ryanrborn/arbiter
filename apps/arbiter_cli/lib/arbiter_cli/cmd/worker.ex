@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Worker do
   @moduledoc """
-  `arb worker <verb>` — the worker (vernacular: "polecat") resource.
+  `arb worker <verb>` — the worker resource.
 
       arb worker list             active workers with status + step
       arb worker show   <bead-id> full snapshot incl. recent Claude output
@@ -13,9 +13,7 @@ defmodule ArbiterCli.Cmd.Worker do
                                   dispatch a review-only worker against the
                                   PR/MR linked to a bead
 
-  Use `arb issue dispatch <id>` (vernacular: `arb sling <id>`) to start a
-  worker in the first place. In the default vernacular `worker` reads as
-  "polecat", so `arb polecat list` resolves here.
+  Use `arb issue dispatch <id>` to start a worker in the first place.
   """
 
   alias ArbiterCli.Cmd

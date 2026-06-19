@@ -36,11 +36,11 @@ defmodule Arbiter.Polecat do
 
   ## Review gate (`:awaiting_tribunal`)
 
-  A standing order: an acolyte must not merge its own work. When the acolyte's
+  A standing order: an worker must not merge its own work. When the worker's
   `arb done` fires and the workspace requires review
   (`Workspace.review_required?/1`), the polecat parks at `:awaiting_tribunal` and
   spawns an `Arbiter.Polecat.Tribunal` — which runs a **distinct** reviewer
-  acolyte over the diff — *instead of* calling the merger. The Tribunal reports a
+  worker over the diff — *instead of* calling the merger. The Tribunal reports a
   verdict back via `tribunal_verdict/2`: APPROVE proceeds to `do_open_mr` (the
   same merge path), REQUEST_CHANGES (or an inconclusive review) parks the bead
   with the findings and escalates to the Admiral without merging. When review is
@@ -48,12 +48,12 @@ defmodule Arbiter.Polecat do
 
   ## Merge-request review (`:awaiting_review`)
 
-  When an acolyte finishes its work the polecat opens a merge request via
+  When an worker finishes its work the polecat opens a merge request via
   `open_mr/5` instead of completing immediately. That call resolves the
   workspace's merger adapter (`Arbiter.Mergers.for_workspace/1`), opens the
   MR, stores the `mr_ref` + clickable `merger_url` on the polecat, transitions
   to `:awaiting_review`, and spawns an `Arbiter.Polecat.Warden` to poll for
-  approval. The Warden — not the acolyte's `arb done` — owns the terminal
+  approval. The Warden — not the worker's `arb done` — owns the terminal
   transition: it completes the polecat when the MR merges, or fails it when the
   MR is closed. See `Arbiter.Polecat.Warden`.
 
@@ -132,7 +132,7 @@ defmodule Arbiter.Polecat do
       :bead_id,
       # Registry name this polecat is registered under. Defaults to bead_id
       # but can be overridden via the `:registry_key` start opt so multiple
-      # polecats can coexist for the same bead (e.g. the Crucible's short-lived
+      # polecats can coexist for the same bead (e.g. the merge queue's short-lived
       # conflict-resolver runs alongside the original work polecat under a
       # `bead_id <> ":conflict"` key). `terminate/2` uses this when
       # unregistering so we don't accidentally wipe the bead's primary slot.
@@ -171,13 +171,13 @@ defmodule Arbiter.Polecat do
   # doesn't bloat the row to many MB.
   @max_output_lines 500
 
-  # Statuses in which a subprocess exit means "the acolyte stopped without
+  # Statuses in which a subprocess exit means "the worker stopped without
   # completing" — i.e. a stall to detect + escalate (bd-awi4nw). The review-gate
   # states (:awaiting_tribunal/:awaiting_review) and terminal states
   # (:completed/:failed) are excluded: there the subprocess SHOULD exit and the
   # next stage (Tribunal/Warden) owns the outcome, not the dead port.
   # `:resuming` is the initial status of a polecat re-attached to a preserved
-  # outpost via `arb resume` (bd-auma3z). It's live — a subprocess that exits
+  # worktree via `arb resume` (bd-auma3z). It's live — a subprocess that exits
   # before the resumed agent gets going is still a stop worth detecting — and it
   # advances to `:running` on the first step, exactly like `:idle`.
   @live_statuses [:idle, :resuming, :running, :awaiting]
@@ -204,7 +204,7 @@ defmodule Arbiter.Polecat do
     * `:meta`           — initial map of workflow-specific state.
     * `:registry_key`   — string. Overrides the registry key (defaults to
       `:bead_id`). Lets multiple polecats coexist for the same bead — the
-      Crucible's conflict-resolver acolyte uses `bead_id <> ":conflict"` so
+      merge queue's conflict-resolver worker uses `bead_id <> ":conflict"` so
       it doesn't collide with the completed-but-still-resident original
       work polecat (whose lifecycle is tied to bead `:close`).
   """
@@ -374,8 +374,8 @@ defmodule Arbiter.Polecat do
 
   @doc """
   Deliver a Tribunal (review-gate) verdict. Only valid from `:awaiting_tribunal`
-  — the state the polecat parks at after the acolyte's `arb done` when review is
-  required. Called by `Arbiter.Polecat.Tribunal` once the reviewer acolyte
+  — the state the polecat parks at after the worker's `arb done` when review is
+  required. Called by `Arbiter.Polecat.Tribunal` once the reviewer worker
   reaches its verdict.
 
     * `{:approve, findings}` → records the approval and proceeds to the merger
@@ -440,7 +440,7 @@ defmodule Arbiter.Polecat do
     {:ok, state}
   end
 
-  # A polecat re-attached to a preserved outpost via `arb resume` (bd-auma3z)
+  # A polecat re-attached to a preserved worktree via `arb resume` (bd-auma3z)
   # boots into `:resuming` rather than `:idle`, so the dashboard/CLI can tell a
   # resumed run apart from a fresh dispatch. It advances to `:running` on the
   # first step exactly like `:idle` does.
@@ -478,11 +478,11 @@ defmodule Arbiter.Polecat do
   end
 
   # Broadcast {:polecat_done, bead_id} to "polecat:done:<workspace_id>" so the
-  # workspace's Refinery (Crucible) can pick the bead up and drive it through
+  # workspace's Refinery (the merge queue) can pick the bead up and drive it through
   # the merge queue. A polecat without a workspace_id (e.g. ad-hoc local runs)
   # has no Refinery listening and so the broadcast is skipped.
   #
-  # Review-only polecats (`meta[:review_only] == true`) skip the Crucible
+  # Review-only polecats (`meta[:review_only] == true`) skip the merge queue
   # broadcast — they don't author code, so there's nothing for the merge queue
   # to do, and the bead they're reviewing may not even belong to the fleet.
   # The Admiral notification still fires so the dashboard / inbox feed picks
@@ -545,7 +545,7 @@ defmodule Arbiter.Polecat do
       started_at: state.started_at,
       output_lines: [],
       # bd-auma3z: when this polecat was resumed (re-attached to a preserved
-      # outpost), link the new run to the prior one so the stopped→resumed
+      # worktree), link the new run to the prior one so the stopped→resumed
       # lineage is traceable and metrics don't read it as two unrelated runs.
       resumed_from_run_id: resumed_from_run_id(state.meta)
     }
@@ -890,7 +890,7 @@ defmodule Arbiter.Polecat do
       # claude-driven Driver never ticks the Machine. See bd-c919xj.
       #
       # Also stash the spawn args so the commit-gate (bd-ofql8k) can re-launch
-      # the acolyte with a nudge prompt when arb-done arrives with uncommitted
+      # the worker with a nudge prompt when arb-done arrives with uncommitted
       # work, without round-tripping through the workspace-aware Sling builder
       # that does not know how to swap the prompt mid-session.
       meta =
@@ -928,7 +928,7 @@ defmodule Arbiter.Polecat do
         new_state = sync_session_meta(new_state, port)
 
         # bd-awi4nw: the port closing is the PRIMARY stop signal. If the polecat
-        # is still in a live state, the acolyte died/stopped without completing
+        # is still in a live state, the worker died/stopped without completing
         # (token exhaustion, crash, kill, flag-rejection). Don't strand the bead
         # at a silent in_progress — schedule a classify+escalate after a short
         # grace so an in-flight `arb done` (which the exit_status message can
@@ -985,7 +985,7 @@ defmodule Arbiter.Polecat do
   end
 
   def handle_info({:__acolyte_stopped__, _port}, %State{} = state) do
-    # The acolyte completed (arb done won the race) or already failed — the
+    # The worker completed (arb done won the race) or already failed — the
     # subprocess exit was expected. No escalation.
     {:noreply, state}
   end
@@ -998,7 +998,7 @@ defmodule Arbiter.Polecat do
     # accepting :idle here is intentional and critical for this signal to fire.
     #
     # :awaiting_tribunal and :awaiting_review are deliberately excluded: once the
-    # acolyte has signalled done, the review gate (Tribunal) and then the merger
+    # worker has signalled done, the review gate (Tribunal) and then the merger
     # / Warden decide completion — not a repeated "arb done" on the author's
     # stdout. A late marker is ignored (handled by the catch-all clause below).
     #
@@ -1094,7 +1094,7 @@ defmodule Arbiter.Polecat do
   #
   # complete_now/2 and fail_now/2 hold the terminal side effects (DB write +
   # broadcast/notify) in one place, shared by the public complete/2 + fail/2
-  # calls and the acolyte-completion (arb-done) path.
+  # calls and the worker-completion (arb-done) path.
 
   defp complete_now(%State{} = state, result) do
     meta = if is_nil(result), do: state.meta, else: Map.put(state.meta, :result, result)
@@ -1113,7 +1113,7 @@ defmodule Arbiter.Polecat do
     new_state
   end
 
-  # bd-awi4nw: a stopped/dead acolyte detected via the closed port. Classify the
+  # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
   # stop from the exit status + captured output, fail the polecat into an
   # obviously-stalled state (not silent in_progress), and raise an addressed
   # Admiral escalation naming the bead + cause + remediation. Distinct from
@@ -1129,7 +1129,7 @@ defmodule Arbiter.Polecat do
     reason = Arbiter.Polecat.StopReason.classify(exit_status, output_lines)
 
     Logger.warning(
-      "Polecat: acolyte for bead=#{state.bead_id} stopped — #{Arbiter.Polecat.StopReason.label(reason)}"
+      "Polecat: worker for bead=#{state.bead_id} stopped — #{Arbiter.Polecat.StopReason.label(reason)}"
     )
 
     if reason.category == :auth_expired do
@@ -1191,14 +1191,14 @@ defmodule Arbiter.Polecat do
   # word-bounded marker (claude_session.ex emits the done message exclusively for
   # assistant text / the raw-line fallback, never for tool calls or tool
   # results). Scanning the raw output buffer instead would re-admit the mid-task
-  # false positive the live detector guards against (an acolyte that cats/echoes
+  # false positive the live detector guards against (an worker that cats/echoes
   # "arb done"), so we deliberately rely on the already-scoped signal.
   defp run_signalled_done?(%State{meta: meta}), do: Map.get(meta || %{}, :done_seen, false)
 
   defp mark_done_seen(%State{meta: meta} = state),
     do: %State{state | meta: Map.put(meta || %{}, :done_seen, true)}
 
-  # Handle the acolyte's "arb done" marker. Before bd-7qq81g this closed the bead
+  # Handle the worker's "arb done" marker. Before bd-7qq81g this closed the bead
   # directly, bypassing the merger entirely — branches never reached the target
   # line. Completion now routes through the configured merger:
   #
@@ -1235,7 +1235,7 @@ defmodule Arbiter.Polecat do
           # bd-ofql8k: before routing to the Tribunal (which diffs the per-bead
           # branch's COMMITTED history) or the merger, check that the worktree is
           # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
-          # target. The repeated failure mode this guards against: the acolyte
+          # target. The repeated failure mode this guards against: the worker
           # edits files correctly but never `git commit`s them; HEAD stays at the
           # base branch with the work sitting uncommitted in the worktree; the
           # reviewer diffs `base..HEAD`, sees empty, and concludes "no code
@@ -1254,7 +1254,7 @@ defmodule Arbiter.Polecat do
   defp route_completion(%State{meta: meta} = state, branch) do
     if review_required?(state) do
       # Standing order: don't merge unreviewed work. Park at :awaiting_tribunal
-      # and let a distinct reviewer acolyte judge the diff first. The merge
+      # and let a distinct reviewer worker judge the diff first. The merge
       # fires only on tribunal_verdict/2 :approve.
       enter_tribunal(state, branch)
     else
@@ -1433,8 +1433,8 @@ defmodule Arbiter.Polecat do
     end
   end
 
-  # The acolyte signalled done but the worktree isn't in a reviewable state.
-  # First try a single bounded "send-back" nudge — relaunch the acolyte with a
+  # The worker signalled done but the worktree isn't in a reviewable state.
+  # First try a single bounded "send-back" nudge — relaunch the worker with a
   # short prompt telling it exactly what's missing (commit + push, or "you
   # printed `arb done` without making any commits") so the same mind that did
   # the work can fix the omission. Cap is `meta[:commit_nudge_cap]`, default 1;
@@ -1466,7 +1466,7 @@ defmodule Arbiter.Polecat do
   # Build a nudge prompt + port_args from the stashed claude_spawn and relaunch
   # a fresh claude session in the same worktree. The mailbox/nudge prompt is
   # short and direct: it names the gate-trip reason and the exact action
-  # required, then asks the acolyte to print `arb done` again only after the
+  # required, then asks the worker to print `arb done` again only after the
   # commit lands.
   #
   # The stashed argv must be the streaming `claude` invocation built by
@@ -1486,7 +1486,7 @@ defmodule Arbiter.Polecat do
 
       Logger.info(
         "Polecat: bd-ofql8k commit gate tripped (#{reason}) for bead=#{state.bead_id}; " <>
-          "relaunching acolyte with nudge (attempt #{next_attempts}/#{commit_nudge_cap(meta)})"
+          "relaunching worker with nudge (attempt #{next_attempts}/#{commit_nudge_cap(meta)})"
       )
 
       session_config = %{
@@ -1637,10 +1637,10 @@ defmodule Arbiter.Polecat do
   end
 
   defp commit_gate_failure_metadata(:uncommitted),
-    do: {:uncommitted_at_completion, "Acolyte signalled done with uncommitted work"}
+    do: {:uncommitted_at_completion, "Worker signalled done with uncommitted work"}
 
   defp commit_gate_failure_metadata(:no_commits),
-    do: {:no_commits_at_completion, "Acolyte signalled done with no commits on branch"}
+    do: {:no_commits_at_completion, "Worker signalled done with no commits on branch"}
 
   defp commit_gate_summary(%State{bead_id: bead_id, meta: meta}, reason, why) do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"
@@ -1659,7 +1659,7 @@ defmodule Arbiter.Polecat do
 
         :no_commits ->
           "branch `#{branch}` has zero commits ahead of `#{target}`. Either " <>
-            "the acolyte did no work, or its edits landed elsewhere."
+            "the worker did no work, or its edits landed elsewhere."
       end
 
     detail_blurb =
@@ -1669,7 +1669,7 @@ defmodule Arbiter.Polecat do
             "the worktree is still in the failed state."
 
         {:respawn_failed, sub} ->
-          "Could not relaunch the acolyte for a send-back nudge: #{inspect(sub)}."
+          "Could not relaunch the worker for a send-back nudge: #{inspect(sub)}."
 
         other ->
           "Detail: #{inspect(other)}."
@@ -2018,7 +2018,7 @@ defmodule Arbiter.Polecat do
     end
   end
 
-  # Spawn the Tribunal (which runs the distinct reviewer acolyte). The
+  # Spawn the Tribunal (which runs the distinct reviewer worker). The
   # `:review_spawn` meta flag (default true) lets tests park the polecat at
   # :awaiting_tribunal and drive tribunal_verdict/2 directly, in isolation from a
   # live reviewer subprocess. `:review_command` is the reviewer argv test escape
@@ -2181,7 +2181,7 @@ defmodule Arbiter.Polecat do
   def terminate(_reason, %State{} = state) do
     # Finalize the run row before we tear down. This is the normal-path
     # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
-    # real acolyte-completion path is `arb done` -> bead closes -> the bead
+    # real worker-completion path is `arb done` -> bead closes -> the bead
     # `:close` after-action StopPolecat calls `Polecat.stop` -> terminate/2
     # from a NON-terminal state (:running/:idle/:awaiting/:awaiting_review).
     # Nothing on that path ever marks the row terminal, so it stayed :running
@@ -2193,7 +2193,7 @@ defmodule Arbiter.Polecat do
     # monitor-based cleanup runs asynchronously and was the source of a flaky
     # test where `whereis/1` returned the dead pid briefly after stop.
     # Use the registry_key the polecat actually registered under — defaults
-    # to bead_id but the Crucible's conflict-resolver overrides it so its
+    # to bead_id but the merge queue's conflict-resolver overrides it so its
     # teardown doesn't accidentally unregister the original work polecat.
     PRegistry.unregister(state.registry_key || state.bead_id)
     broadcast_lifecycle(:stopped, state)
@@ -2262,7 +2262,7 @@ defmodule Arbiter.Polecat do
   # and spawn the Warden. Returns `{:ok, mr_ref, new_state}` on success or
   # `{:error, reason, unchanged_state}` on failure.
   #
-  # Shared by the explicit open_mr/5 API (handle_call) and the acolyte
+  # Shared by the explicit open_mr/5 API (handle_call) and the worker
   # completion path (the arb-done handler) so the branch is always integrated
   # through the same code, regardless of how completion was triggered. For the
   # default Direct strategy this performs the local `git merge --no-ff`

@@ -95,7 +95,7 @@ defmodule Arbiter.MCP.Scope do
 
   @doc """
   Mint a `:coordinator`-tier scope token. The first consumer is the operator's
-  own tooling; a future autonomous coordinator ("Mayor") presents the same token.
+  own tooling; a future autonomous coordinator presents the same token.
   Carries `can_sling: true` by default (override via opts) — the Phase 2
   sling-recursion guardrail reads it together with `:depth`.
 

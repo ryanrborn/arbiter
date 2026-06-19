@@ -135,9 +135,9 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   @doc """
-  Resume a stopped acolyte (bd-auma3z): re-attach a **fresh** agent to the
-  bead's **preserved** outpost worktree, briefed with a git-derived summary of
-  the prior acolyte's committed + uncommitted work, so it continues from where
+  Resume a stopped worker (bd-auma3z): re-attach a **fresh** agent to the
+  bead's **preserved** worktree, briefed with a git-derived summary of
+  the prior worker's committed + uncommitted work, so it continues from where
   the stopped run left off instead of restarting from scratch.
 
   This is the explicit `arb resume <bead>` path. It is provider-agnostic — no
@@ -150,9 +150,9 @@ defmodule Arbiter.Polecat.Sling do
 
   1. Load + validate the bead (must not be `:closed`).
   2. Refuse if a polecat is still **actively** working the bead — resume only
-     applies to a stopped/failed/dead acolyte. Stop the active one first.
+     applies to a stopped/failed/dead worker. Stop the active one first.
   3. Resolve the rig (explicit opt, else the bead's most recent run's rig).
-  4. Require the outpost worktree to still exist on disk — `{:error,
+  4. Require the worktree to still exist on disk — `{:error,
      :no_outpost}` if it was cleaned up (nothing to resume; re-`sling` instead).
   5. Build the resume briefing from the worktree's git state.
   6. Stop any prior (failed) polecat still resident for the bead so a fresh
@@ -181,15 +181,15 @@ defmodule Arbiter.Polecat.Sling do
 
       # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
       # reviewer's PR-side feedback. Prepend it to the git-derived resume
-      # briefing so the fresh acolyte addresses the feedback first, then
-      # continues from the preserved outpost.
+      # briefing so the fresh worker addresses the feedback first, then
+      # continues from the preserved worktree.
       context = prepend_revise_feedback(context, opts)
 
-      # Free the registry slot: a stopped acolyte's polecat lingers in :failed,
+      # Free the registry slot: a stopped worker's polecat lingers in :failed,
       # still registered under bead_id. Without stopping it, sling/2's
       # start_polecat would hit {:already_started, pid} and attach to the dead
       # one — no fresh run, no resumed_from_run_id. Stopping it does NOT touch
-      # the worktree (terminate/2 never cleans up), so the outpost is preserved.
+      # the worktree (terminate/2 never cleans up), so the worktree is preserved.
       _ = stop_prior_polecat(bead_id)
 
       resume_opts =
@@ -212,7 +212,7 @@ defmodule Arbiter.Polecat.Sling do
     end
   end
 
-  # Resume only applies to a stopped/failed/dead acolyte. If a polecat is still
+  # Resume only applies to a stopped/failed/dead worker. If a polecat is still
   # live in a working state, refuse rather than stomp in-flight work — the
   # operator should `arb polecat stop` it first. A :failed (the stopped state)
   # or :completed polecat, or no polecat at all, is resumable.
@@ -242,7 +242,7 @@ defmodule Arbiter.Polecat.Sling do
 
   # The rig: an explicit opt wins; otherwise inherit the bead's most recent run's
   # rig so `arb resume <bead>` works without re-specifying it. No run + no opt is
-  # an error — we can't resolve the outpost without knowing the rig.
+  # an error — we can't resolve the worktree without knowing the rig.
   defp resolve_resume_rig(%Issue{id: bead_id}, opts) do
     case Keyword.get(opts, :rig) do
       rig when is_binary(rig) and rig != "" ->
@@ -256,7 +256,7 @@ defmodule Arbiter.Polecat.Sling do
     end
   end
 
-  # Resolve the preserved outpost path for the bead's per-bead branch and require
+  # Resolve the preserved worktree path for the bead's per-bead branch and require
   # it to exist on disk. A missing worktree means there's nothing to resume.
   defp resume_worktree(%Issue{} = bead, rig) do
     case resolve_rig_path(bead, rig) do
@@ -388,7 +388,7 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Seed the polecat's :meta with everything its completion path needs to
-  # integrate the branch when the acolyte finishes (see the arb-done handler in
+  # integrate the branch when the worker finishes (see the arb-done handler in
   # `Arbiter.Polecat`).
   #
   # When a worktree was provisioned we know the per-bead branch and the rig
@@ -461,8 +461,8 @@ defmodule Arbiter.Polecat.Sling do
   # Provision a fresh git worktree on a per-bead branch, cut from the upstream
   # tip of the resolved target branch (`origin/<target>`).
   #
-  # The arbiter — not the acolyte — fetches from origin before creating the
-  # worktree. The acolyte then starts on a clean, current branch with no git
+  # The arbiter — not the worker — fetches from origin before creating the
+  # worktree. The worker then starts on a clean, current branch with no git
   # plumbing in its context.
   #
   # Behaviour:
@@ -628,7 +628,7 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Pre-flight auth check (bd-awi4nw): before transitioning the bead and
-  # dispatching a (paid, autonomous) acolyte, verify the agent CLI can
+  # dispatching a (paid, autonomous) worker, verify the agent CLI can
   # authenticate with a single cheap probe. If it can't — the confirmed
   # OAuth-expiry case where every spawn 401s — REFUSE to sling, escalate to the
   # Admiral with a re-auth remediation, and abort before any bead/worktree state
@@ -771,7 +771,7 @@ defmodule Arbiter.Polecat.Sling do
             # no worktree, so `path` falls back to the rig's shared checkout
             # (`review_cwd/2`). Writing the token-bearing `.mcp.json` there leaks
             # it into the canonical checkout the live server + operator share —
-            # the exact "acolyte leaks into the main worktree" class this fixes.
+            # the exact "worker leaks into the main worktree" class this fixes.
             # With a nil worktree the helper is a no-op, so reviews never touch
             # the rig's working tree.
             _ = maybe_write_mcp_config(bead, worktree_path, opts)
@@ -1059,8 +1059,8 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # When resuming (bd-auma3z) the work prompt is prefixed with a git-derived
-  # briefing of the prior acolyte's committed + uncommitted work, so the fresh
-  # agent continues from the preserved outpost instead of redoing finished
+  # briefing of the prior worker's committed + uncommitted work, so the fresh
+  # agent continues from the preserved worktree instead of redoing finished
   # steps. `:resume_context` is built by `Arbiter.Polecat.ResumeContext`; it's
   # absent (empty prefix) on a normal fresh sling.
   defp work_prompt(%Issue{} = bead, opts) do
@@ -1093,9 +1093,9 @@ defmodule Arbiter.Polecat.Sling do
 
         arb inbox #{bead.id}
 
-    This shows any direction from the Admiral or flags from sibling acolytes
+    This shows any direction from the Admiral or flags from sibling workers
     (e.g. an upstream API shape changed) and marks them read. To leave a flag
-    for another acolyte, use `arb message <their-bead-id> <text>`.
+    for another worker, use `arb message <their-bead-id> <text>`.
 
     When you are completely done, print the line:
 
@@ -1108,7 +1108,7 @@ defmodule Arbiter.Polecat.Sling do
 
   # The worker authors the PR/MR body and persists it on the bead; the
   # Refinery (not the worker) opens the one canonical PR with it (bd-53xrmi).
-  # Authoring it *after* implementing is what makes it acolyte-quality — the
+  # Authoring it *after* implementing is what makes it worker-quality — the
   # Test plan reflects what actually passed, not what the spec hoped for. If
   # the repo ships a PR template we fill it rather than discard it (GitHub
   # injects the bare template only when the body is empty — the empty-body
@@ -1140,7 +1140,7 @@ defmodule Arbiter.Polecat.Sling do
 
   # When a prior tribunal pass escalated with REQUEST_CHANGES, the reviewer's
   # findings are stored in bead.notes by record_tribunal_outcome/3 in Polecat.
-  # Surface them here so the re-slunged acolyte sees them immediately in its
+  # Surface them here so the re-slunged worker sees them immediately in its
   # prompt without having to call bead_show or gh pr view first.
   defp prior_review_findings_section(%Issue{notes: notes})
        when is_binary(notes) and notes != "" do
@@ -1153,7 +1153,7 @@ defmodule Arbiter.Polecat.Sling do
 
   defp prior_review_findings_section(_bead), do: ""
 
-  # When a PR is already open for this bead, the re-slunged acolyte must read
+  # When a PR is already open for this bead, the re-slunged worker must read
   # the PR review comments to find what changed. The findings in bead.notes
   # (above) are the primary source, but the PR reviews are the canonical record
   # — fetching them explicitly guards against notes being stale or missing.
@@ -1176,7 +1176,7 @@ defmodule Arbiter.Polecat.Sling do
   # For tracker-backed beads (an upstream Jira/etc. ticket), completing the
   # work includes producing the gated completion notes the tracker requires
   # before it will transition the ticket forward. We make this an explicit,
-  # non-optional step in the acolyte's prompt and tell it exactly how to
+  # non-optional step in the worker's prompt and tell it exactly how to
   # persist the notes on the bead (the `bead_update_progress` MCP tool), so the
   # downstream tracker-sync has the fields to push. We use the MCP tool rather
   # than the `arb` escript so completion never depends on `~/.local/bin/arb`

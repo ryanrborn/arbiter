@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Inbox do
   @moduledoc """
-  `arb inbox` — the Admiral's mailbox: messages acolytes (and the system) send
+  `arb inbox` — the Admiral's mailbox: messages workers (and the system) send
   *up* the chain — completions, failures, escalations, FYIs.
 
   Usage:
@@ -9,12 +9,12 @@ defmodule ArbiterCli.Cmd.Inbox do
       arb inbox --all           the 20 most recent (read + unread)
       arb inbox read <id>       show one message in full, mark it read
       arb inbox clear           destroy every already-read Admiral message
-      arb inbox <bead-id>       (acolyte path) a bead's unread mail; drained
+      arb inbox <bead-id>       (worker path) a bead's unread mail; drained
                                 — marked read on fetch
 
   The Admiral view is read-only triage: listing does NOT mark mail read. You
   drain it deliberately with `read <id>` (one) and `clear` (the read tail).
-  The bead path is the inverse — acolytes auto-drain their queue on fetch, so
+  The bead path is the inverse — workers auto-drain their queue on fetch, so
   `arb inbox <bead-id>` at the top of each workflow step shows new direction
   exactly once.
 
@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   @admiral "admiral"
   @all_limit 20
-  # Kinds the acolyte (bead) path surfaces — addressed, read-acknowledged.
+  # Kinds the worker (bead) path surfaces — addressed, read-acknowledged.
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)
 
   def run(argv) do
@@ -75,7 +75,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp admiral_label(false, list),
     do: {"Admiral inbox — #{length(list)} recent:", "(admiral inbox empty)"}
 
-  # ---- acolyte (bead) path -------------------------------------------------
+  # ---- worker (bead) path -------------------------------------------------
 
   defp bead_inbox(bead_id, mode) do
     case Client.get("/api/messages", to_ref: bead_id, unread: "true") do
@@ -172,7 +172,6 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp emit_full(message, :json), do: IO.puts(Jason.encode!(message))
 
   defp emit_full(m, :text) do
-    vern = ArbiterCli.Vernacular.fetch()
     directive = m["directive_ref"]
 
     fields =
@@ -180,7 +179,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         {"From", m["from_ref"]},
         {"To", m["to_ref"]},
         {"Kind", m["kind"]},
-        {ArbiterCli.Vernacular.cap(vern, "issue"), directive},
+        {"Issue", directive},
         {"Subject", m["subject"]},
         {"Sent", m["inserted_at"]}
       ]

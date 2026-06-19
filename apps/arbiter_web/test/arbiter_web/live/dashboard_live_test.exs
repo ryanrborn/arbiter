@@ -59,15 +59,14 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "renders all section headers", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
-      # Section titles derive from the (default) vernacular and are
-      # title-cased + correctly pluralized ("pull request" → "Pull requests").
+      # Section titles are title-cased + correctly pluralized
+      # ("pull request" → "Pull requests").
       assert html =~ "Dashboard"
       assert html =~ "Workspaces"
       assert html =~ "Active "
       assert html =~ "Current "
-      # Merge queue (Crucibles) section header, from the (default) merge_queue
-      # vernacular ("refinery" → "Refineries").
-      assert html =~ "Refineries"
+      # Merge queue section header ("merge queue" → "Merge queues").
+      assert html =~ "Merge queues"
       # Tribunal (review gate) section + its two subsections.
       assert html =~ "Tribunal"
       assert html =~ "In review"
@@ -310,7 +309,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # PubSub fires :started — re-render now lists the polecat in the
       # active table (count goes from 0 to 1, and the empty message is gone).
       html = render(view)
-      assert html =~ "Active Polecats (1)"
+      assert html =~ "Active Workers (1)"
       refute html =~ "No active polecats"
 
       Polecat.stop(bead.id)
@@ -318,8 +317,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
       Process.sleep(150)
 
       html = render(view)
-      assert html =~ "Active Polecats (0)"
-      assert html =~ "No active polecats"
+      assert html =~ "Active Workers (0)"
+      assert html =~ "No active workers"
     end
   end
 
@@ -540,8 +539,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # DaisyUI stats component with the live stats, including the live
       # Admiral-inbox unread count (empty here => "all clear").
       assert html =~ "stats"
-      assert html =~ "Open Beads"
-      assert html =~ "Active Polecats"
+      assert html =~ "Open Issues"
+      assert html =~ "Active Workers"
       assert html =~ "Admiral Inbox"
       assert html =~ "all clear"
     end

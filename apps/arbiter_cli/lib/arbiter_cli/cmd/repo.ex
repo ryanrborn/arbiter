@@ -1,13 +1,12 @@
 defmodule ArbiterCli.Cmd.Repo do
   @moduledoc """
-  `arb repo <verb>` — the repo (vernacular: "warship"/"rig") resource. A repo
-  is a named repository checkout that workers operate on.
+  `arb repo <verb>` — the repo resource. A repo is a named repository
+  checkout that workers operate on.
 
       arb repo list             registered repos with source + path
       arb repo show <name>      one repo's detail (active workers, worktrees)
 
-  Both read from `GET /api/rigs`. In the default vernacular `repo` reads as
-  "warship", so `arb warship list` resolves here.
+  Both read from `GET /api/rigs`.
   """
 
   alias ArbiterCli.{Client, Cmd, Output}
@@ -56,8 +55,7 @@ defmodule ArbiterCli.Cmd.Repo do
   defp emit_show(rig, _name, :json), do: IO.puts(Jason.encode!(rig))
 
   defp emit_show(rig, _name, :text) do
-    v = ArbiterCli.Vernacular.fetch()
-    IO.puts("#{ArbiterCli.Vernacular.cap(v, "rig")}:       #{rig["name"]}")
+    IO.puts("Repo:       #{rig["name"]}")
     IO.puts("Source:    #{rig["source"]}")
     IO.puts("Path:      #{rig["path"] || "(unknown)"}")
     IO.puts("Workers:   #{rig["polecats"] || 0}")
