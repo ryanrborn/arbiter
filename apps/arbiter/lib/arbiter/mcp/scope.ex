@@ -14,7 +14,7 @@ defmodule Arbiter.MCP.Scope do
 
       %Arbiter.MCP.Scope{
         tier:         :polecat | :coordinator,
-        workspace_id: "uuid",          # every call is filtered to this workspace
+        workspace_id: "uuid" | nil,    # polecat: the bound workspace; coordinator: nil (workspace-agnostic)
         bead_id:      "bd-…" | nil,    # polecat tier: the one bead it may read/progress
         rig:          "shipyard" | nil,# polecat tier: its rig
         can_sling:    false | true,    # coordinator-only; the recursion guardrail
@@ -24,17 +24,29 @@ defmodule Arbiter.MCP.Scope do
   | Tier | Reads | Writes | Sling |
   |---|---|---|---|
   | `:polecat` | its own bead, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
-  | `:coordinator` | across the workspace | create/update/close beads, deps (incl. `parent_of` grouping); sling | yes |
+  | `:coordinator` | across any workspace on the installation | create/update/close beads, deps (incl. `parent_of` grouping); sling | yes |
 
   The `:polecat` tier is deliberately narrow — it must not list arbitrary beads,
-  sling, or touch another bead's state. Tier-level tool visibility is declared
-  in `Arbiter.MCP.Catalog`; the data-level checks (own-bead, workspace isolation)
-  live here so handlers cannot accidentally skip them.
+  sling, or touch another bead's state, and it is **workspace-scoped**: a polecat
+  token carries the workspace it was dispatched into and can never reach another.
+  Tier-level tool visibility is declared in `Arbiter.MCP.Catalog`; the data-level
+  checks (own-bead, workspace isolation) live here so handlers cannot accidentally
+  skip them.
+
+  ## Workspace-agnostic coordinators
+
+  A coordinator token is **not** bound to a workspace at mint time (its
+  `workspace_id` is `nil`): a single coordinator token orchestrates across every
+  workspace on the installation. Coordinator-facing tools resolve the target
+  workspace per call (explicit `workspace` arg → the referenced entity's own
+  workspace → the installation default). Legacy workspace-bound coordinator
+  tokens (minted with an explicit workspace before this change) still decode and
+  stay scoped to that one workspace — `same_workspace?/2` honors both shapes.
   """
 
   alias Arbiter.MCP
 
-  @enforce_keys [:tier, :workspace_id]
+  @enforce_keys [:tier]
   defstruct tier: nil,
             workspace_id: nil,
             bead_id: nil,
@@ -46,7 +58,7 @@ defmodule Arbiter.MCP.Scope do
 
   @type t :: %__MODULE__{
           tier: tier(),
-          workspace_id: String.t(),
+          workspace_id: String.t() | nil,
           bead_id: String.t() | nil,
           rig: String.t() | nil,
           can_sling: boolean(),
@@ -82,13 +94,20 @@ defmodule Arbiter.MCP.Scope do
   end
 
   @doc """
-  Mint a `:coordinator`-tier scope token for a workspace. The first consumer is
-  the operator's own tooling; a future autonomous coordinator presents
-  the same token. Carries `can_sling: true` by default (override via opts) — the
-  Phase 2 sling-recursion guardrail reads it together with `:depth`.
+  Mint a `:coordinator`-tier scope token. The first consumer is the operator's
+  own tooling; a future autonomous coordinator presents the same token.
+  Carries `can_sling: true` by default (override via opts) — the Phase 2
+  sling-recursion guardrail reads it together with `:depth`.
+
+  `workspace_id` defaults to `nil`, minting a **workspace-agnostic** token valid
+  for any workspace on the installation — the path the `arb mcp token mint` /
+  `POST /api/mcp/tokens` callers take. An explicit workspace id may still be
+  passed to mint a legacy workspace-bound coordinator (used by some transport
+  tests); such a token stays scoped to that one workspace.
   """
-  @spec mint_coordinator(String.t(), keyword()) :: String.t()
-  def mint_coordinator(workspace_id, opts \\ []) when is_binary(workspace_id) do
+  @spec mint_coordinator(String.t() | nil, keyword()) :: String.t()
+  def mint_coordinator(workspace_id \\ nil, opts \\ [])
+      when is_binary(workspace_id) or is_nil(workspace_id) do
     %{
       tier: :coordinator,
       workspace_id: workspace_id,
@@ -130,11 +149,14 @@ defmodule Arbiter.MCP.Scope do
      }}
   end
 
-  defp from_claims(%{tier: :coordinator, workspace_id: ws} = c) when is_binary(ws) do
+  # A coordinator claim decodes whether or not it carries a workspace: a
+  # workspace-agnostic token (`workspace_id: nil`, the current mint shape) and a
+  # legacy workspace-bound token both land here.
+  defp from_claims(%{tier: :coordinator} = c) do
     {:ok,
      %__MODULE__{
        tier: :coordinator,
-       workspace_id: ws,
+       workspace_id: nilable_string(c[:workspace_id]),
        bead_id: nil,
        rig: nil,
        can_sling: c[:can_sling] == true,
@@ -171,12 +193,19 @@ defmodule Arbiter.MCP.Scope do
   def own_bead(%__MODULE__{tier: :coordinator}, _), do: {:error, :missing}
 
   @doc """
-  Whether a resource's `workspace_id` is the one this scope is bound to. Every
-  call is filtered to the scope's workspace; a cross-workspace resource is
-  treated as not-found by the handlers (so existence does not leak across
-  workspaces).
+  Whether this scope may act on a resource in `workspace_id`.
+
+    * A **workspace-bound** scope (every polecat, a legacy bound coordinator) may
+      act only within its own workspace; a cross-workspace resource is treated as
+      not-found by the handlers (so existence does not leak across workspaces).
+    * A **workspace-agnostic** coordinator (`workspace_id: nil`) may act in any
+      workspace — the per-call workspace resolution (`Arbiter.MCP.Tools`) decides
+      which one, this only answers "is the scope allowed to".
   """
   @spec same_workspace?(t(), String.t() | nil) :: boolean()
+  def same_workspace?(%__MODULE__{tier: :coordinator, workspace_id: nil}, ws) when is_binary(ws),
+    do: true
+
   def same_workspace?(%__MODULE__{workspace_id: ws}, ws) when is_binary(ws), do: true
   def same_workspace?(%__MODULE__{}, _), do: false
 end

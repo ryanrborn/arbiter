@@ -815,6 +815,127 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "workspace-agnostic coordinator" do
+    setup ctx do
+      # A coordinator token with no bound workspace (workspace_id: nil) — the
+      # shape `arb mcp token mint` / POST /api/mcp/tokens now produce.
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_sling: true}
+
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "agnostic-other-ws", prefix: "agw"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "in the other ws", workspace_id: other_ws.id})
+
+      {:ok, Map.merge(ctx, %{agnostic: agnostic, other_ws: other_ws, foreign: foreign})}
+    end
+
+    test "reads a bead in any workspace, inferring the workspace from the entity", ctx do
+      assert {:ok, here} = Tools.bead_show(ctx.agnostic, %{"id" => ctx.bead.id})
+      assert here.id == ctx.bead.id
+
+      assert {:ok, there} = Tools.bead_show(ctx.agnostic, %{"id" => ctx.foreign.id})
+      assert there.id == ctx.foreign.id
+      assert there.workspace_id == ctx.other_ws.id
+    end
+
+    test "creates a bead in the workspace named by the `workspace` param (by name)", ctx do
+      assert {:ok, data} =
+               Tools.bead_create(ctx.agnostic, %{
+                 "title" => "explicit by name",
+                 "workspace" => ctx.other_ws.name
+               })
+
+      assert data.workspace_id == ctx.other_ws.id
+    end
+
+    test "creates a bead in the workspace named by the `workspace` param (by id)", ctx do
+      assert {:ok, data} =
+               Tools.bead_create(ctx.agnostic, %{
+                 "title" => "explicit by id",
+                 "workspace" => ctx.other_ws.id
+               })
+
+      assert data.workspace_id == ctx.other_ws.id
+    end
+
+    test "an unknown `workspace` ref is a not-found tool error", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.bead_create(ctx.agnostic, %{"title" => "x", "workspace" => "nope-ws"})
+
+      assert msg =~ "workspace"
+    end
+
+    test "lists beads in the workspace named by the `workspace` param", ctx do
+      assert {:ok, %{beads: beads}} =
+               Tools.bead_list(ctx.agnostic, %{"workspace" => ctx.other_ws.name})
+
+      assert Enum.any?(beads, &(&1.id == ctx.foreign.id))
+      refute Enum.any?(beads, &(&1.id == ctx.bead.id))
+    end
+
+    test "shows the workspace named by the `workspace` param", ctx do
+      assert {:ok, data} = Tools.workspace_show(ctx.agnostic, %{"workspace" => ctx.other_ws.id})
+      assert data.id == ctx.other_ws.id
+      assert data.name == ctx.other_ws.name
+    end
+
+    test "directs a message to a bead in any workspace, pinned to that bead's workspace", ctx do
+      assert {:ok, _msg} =
+               Tools.message_send(ctx.agnostic, %{
+                 "bead_id" => ctx.foreign.id,
+                 "body" => "do this"
+               })
+
+      [mail] = Message.inbox(ctx.foreign.id, workspace_id: ctx.other_ws.id)
+      assert mail.workspace_id == ctx.other_ws.id
+      assert mail.from_ref == "coordinator"
+    end
+
+    test "with no `workspace` and multiple workspaces, create needs an explicit workspace", ctx do
+      # The setup created several workspaces and none is named "default", so the
+      # installation default is ambiguous.
+      assert {:error, {:invalid, msg}} =
+               Tools.bead_create(ctx.agnostic, %{"title" => "ambiguous"})
+
+      assert msg =~ "workspace"
+    end
+  end
+
+  describe "default workspace resolution" do
+    test "a workspace-agnostic coordinator with no `workspace` falls back to the lone workspace",
+         ctx do
+      # The module setup creates exactly one workspace (ctx.ws) in this sandbox,
+      # so it is unambiguously the installation default.
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_sling: true}
+
+      assert {:ok, data} = Tools.bead_create(agnostic, %{"title" => "lands in the only ws"})
+      assert data.workspace_id == ctx.ws.id
+    end
+
+    test "a coordinator falls back to the workspace named \"default\" when several exist" do
+      {:ok, default} = Ash.create(Workspace, %{name: "default", prefix: "def"})
+      {:ok, _other} = Ash.create(Workspace, %{name: "another-ws", prefix: "anow"})
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_sling: true}
+
+      assert {:ok, data} = Tools.bead_create(agnostic, %{"title" => "to default"})
+      assert data.workspace_id == default.id
+    end
+  end
+
+  describe "workspace-bound scope rejection" do
+    test "a bound coordinator naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "bound-other-ws", prefix: "bow"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.bead_create(ctx.coordinator, %{"title" => "x", "workspace" => other_ws.id})
+    end
+
+    test "a polecat naming a different workspace is unauthorized", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "pc-other-ws", prefix: "pco"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.bead_show(ctx.polecat, %{"id" => ctx.bead.id, "workspace" => other_ws.id})
+    end
+  end
+
   describe "Catalog.call/3 dispatch" do
     test "routes an authorized call to its handler and returns structured data", ctx do
       assert {:ok, data} = Catalog.call(ctx.polecat, "bead_show", %{})

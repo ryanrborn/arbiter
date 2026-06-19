@@ -22,29 +22,28 @@ defmodule ArbiterWeb.Api.McpController do
   @doc """
   Mint a coordinator-tier scope token.
 
+  Coordinator tokens are **workspace-agnostic**: a single token is valid for any
+  workspace on the installation, and coordinator API endpoints / MCP tools resolve
+  the target workspace per call (explicit `workspace` param → referenced entity →
+  installation default). No workspace is bound at mint time.
+
   Body parameters:
-    - `workspace_id` (required) — the workspace to bind the token to
-    - `ttl`          (optional) — token lifetime in seconds, default 30 days
+    - `ttl` (optional) — token lifetime in seconds, default 30 days
+
+  A `workspace_id` may still be supplied for backward compatibility; it is
+  ignored (the minted token is not bound to it).
   """
   def mint_token(conn, params) do
-    workspace_id = Map.get(params, "workspace_id")
     ttl = parse_ttl(Map.get(params, "ttl"))
+    token = Scope.mint_coordinator(nil, max_age: ttl)
 
-    if is_nil(workspace_id) or workspace_id == "" do
-      conn
-      |> put_status(:unprocessable_entity)
-      |> json(%{"error" => %{"message" => "workspace_id is required"}})
-    else
-      token = Scope.mint_coordinator(workspace_id, max_age: ttl)
-
-      json(conn, %{
-        "token" => token,
-        "tier" => "coordinator",
-        "workspace_id" => workspace_id,
-        "expires_in" => ttl,
-        "server_url" => MCP.server_url()
-      })
-    end
+    json(conn, %{
+      "token" => token,
+      "tier" => "coordinator",
+      "workspace_id" => nil,
+      "expires_in" => ttl,
+      "server_url" => MCP.server_url()
+    })
   end
 
   @doc """

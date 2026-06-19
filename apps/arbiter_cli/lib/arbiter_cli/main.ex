@@ -127,6 +127,20 @@ defmodule ArbiterCli.Main do
   end
 
   defp dispatch(cmd, args) do
+    # A `--workspace <name|id>` / `-w` flag anywhere in the invocation overrides
+    # the active workspace, exactly as `ARB_WORKSPACE` does. Strip it centrally —
+    # before any subcommand's own `OptionParser` runs — and seed the env so every
+    # subcommand honors it uniformly, without each declaring the switch.
+    args =
+      case ArbiterCli.Workspace.take_flag(args) do
+        {nil, rest} ->
+          rest
+
+        {name, rest} ->
+          System.put_env("ARB_WORKSPACE", name)
+          rest
+      end
+
     case ArbiterCli.AliasResolver.resolve(cmd) do
       {:ok, canonical} ->
         dispatch_known(canonical, args)
