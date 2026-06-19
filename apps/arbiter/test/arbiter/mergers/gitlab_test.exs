@@ -157,6 +157,45 @@ defmodule Arbiter.Mergers.GitlabTest do
 
       assert {:ok, @ref} = Gitlab.open("feature/x", "t", "d", %{})
     end
+
+    test "when repo_path is provided but branch doesn't exist: returns git_push_failed error" do
+      # Use a branch name that likely doesn't exist on the remote
+      bad_branch = "feature/nonexistent-branch-#{System.unique_integer()}"
+      repo_dir = File.cwd!()
+
+      # Don't stub the HTTP call — we should fail at the git push step before reaching it
+      result = Gitlab.open(bad_branch, "Test", "desc", %{repo_path: repo_dir})
+
+      # The push should fail because the branch doesn't exist
+      assert {:error, %Error{kind: :git_push_failed, message: msg}} = result
+      assert String.contains?(msg, "Failed to push branch")
+    end
+
+    test "when repo_path points to non-existent dir: returns git_push_failed error" do
+      stub(fn conn -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"iid" => @iid}) end)
+
+      non_existent = "/tmp/does_not_exist_#{System.unique_integer()}/repo"
+
+      assert {:error, %Error{kind: :git_push_failed, message: msg}} =
+               Gitlab.open("feature/x", "t", "d", %{repo_path: non_existent})
+
+      assert String.contains?(msg, "Failed to push branch")
+    end
+
+    test "when repo_path is not provided: skips push and creates MR normally" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == base_path()
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"iid" => @iid})
+      end)
+
+      # Call open without repo_path — should skip push and create MR
+      assert {:ok, @ref} =
+               Gitlab.open("feature/x", "t", "d", %{})
+    end
   end
 
   describe "get/1" do

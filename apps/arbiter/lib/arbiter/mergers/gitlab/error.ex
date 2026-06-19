@@ -18,6 +18,7 @@ defmodule Arbiter.Mergers.Gitlab.Error do
     * `:config_missing` — workspace config is missing host / project_id /
       credentials, or no active workspace is set
     * `:bad_ref` — an `mr_ref` could not be parsed into an iid
+    * `:git_push_failed` — local `git push` failed before MR creation
   """
 
   defstruct [:kind, :status, :message, :raw]
@@ -33,6 +34,7 @@ defmodule Arbiter.Mergers.Gitlab.Error do
           | :network
           | :config_missing
           | :bad_ref
+          | :git_push_failed
 
   @type t :: %__MODULE__{
           kind: kind,

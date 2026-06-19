@@ -61,7 +61,8 @@ defmodule Arbiter.Mergers.Gitlab do
   @impl true
   def open(branch, title, description, opts)
       when is_binary(branch) and is_binary(title) and is_binary(description) and is_map(opts) do
-    with {:ok, cfg} <- Config.resolve() do
+    with {:ok, cfg} <- Config.resolve(),
+         :ok <- maybe_push_branch(branch, opts) do
       target_branch = Map.get(opts, :target_branch) || cfg.default_target_branch
 
       payload =
@@ -536,6 +537,40 @@ defmodule Arbiter.Mergers.Gitlab do
 
     request(cfg, :post, "/merge_requests/#{iid}/notes", json: %{"body" => text})
     |> handle_json()
+  end
+
+  # ---- Internals: git operations ------------------------------------------
+
+  defp maybe_push_branch(branch, opts) do
+    case Map.get(opts, :repo_path) do
+      path when is_binary(path) ->
+        case System.cmd("git", ["push", "--set-upstream", "origin", branch],
+               stderr_to_stdout: true,
+               cd: path
+             ) do
+          {_output, 0} -> :ok
+          {output, _nonzero} ->
+            {:error,
+             %Error{
+               kind: :git_push_failed,
+               status: nil,
+               message: "Failed to push branch #{inspect(branch)}: #{String.trim(output)}",
+               raw: output
+             }}
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    e in ErlangError ->
+      {:error,
+       %Error{
+         kind: :git_push_failed,
+         status: nil,
+         message: "Failed to push branch #{inspect(branch)}: #{Exception.message(e)}",
+         raw: e
+       }}
   end
 
   # ---- Internals: HTTP ----------------------------------------------------
