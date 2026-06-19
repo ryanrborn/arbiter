@@ -129,7 +129,8 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
     end
 
-    test "clear: true destroys already-read messages (including the ones just marked read)", ctx do
+    test "clear: true destroys already-read messages (including the ones just marked read)",
+         ctx do
       {:ok, _} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
 

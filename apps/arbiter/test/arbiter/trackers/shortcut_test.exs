@@ -570,7 +570,10 @@ defmodule Arbiter.Trackers.ShortcutTest do
             |> Req.Test.json(%{"id" => 99})
 
           {"GET", "/api/v3/stories/" <> ref} ->
-            Req.Test.json(conn, %{"id" => String.to_integer(ref), "owner_ids" => ["existing-user"]})
+            Req.Test.json(conn, %{
+              "id" => String.to_integer(ref),
+              "owner_ids" => ["existing-user"]
+            })
 
           {"PUT", "/api/v3/stories/" <> _} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
