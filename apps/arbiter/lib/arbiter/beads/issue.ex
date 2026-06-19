@@ -208,6 +208,15 @@ defmodule Arbiter.Beads.Issue do
   def broadcast_lifecycle(event, issue)
       when event in [:created, :updated, :closed, :reopened] do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, "beads", {:bead_lifecycle, event, issue})
+
+    if ws_id = Map.get(issue, :workspace_id) do
+      Arbiter.Events.broadcast(ws_id, "bead_state", %{
+        bead_id: Map.get(issue, :id),
+        event: to_string(event),
+        status: to_string(Map.get(issue, :status) || "")
+      })
+    end
+
     :ok
   rescue
     _ -> :ok

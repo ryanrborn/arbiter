@@ -157,6 +157,16 @@ defmodule Arbiter.Messages.Message do
   """
   def broadcast_new(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:new_message, message})
+
+    if Map.get(message, :to_ref) == "admiral" do
+      Arbiter.Events.broadcast(ws_id, "inbox", %{
+        bead_id: Map.get(message, :directive_ref),
+        from_ref: Map.get(message, :from_ref),
+        subject: Map.get(message, :subject),
+        kind: to_string(Map.get(message, :kind) || "")
+      })
+    end
+
     :ok
   rescue
     e ->

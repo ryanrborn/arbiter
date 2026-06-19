@@ -496,6 +496,8 @@ defmodule Arbiter.Polecat do
         "polecat:done:" <> ws_id,
         {:polecat_done, bead_id}
       )
+
+      Arbiter.Events.broadcast(ws_id, "polecat_done", %{bead_id: bead_id})
     end
 
     # The message queue is the single source of truth for the notification
@@ -511,6 +513,16 @@ defmodule Arbiter.Polecat do
     e ->
       Logger.debug("Polecat.broadcast_done/1 swallowed: #{Exception.message(e)}")
       :ok
+  end
+
+  defp broadcast_polecat_failed(%State{workspace_id: nil}), do: :ok
+
+  defp broadcast_polecat_failed(%State{workspace_id: ws_id, bead_id: bead_id, meta: meta}) do
+    unless review_only?(meta) do
+      Arbiter.Events.broadcast(ws_id, "polecat_failed", %{bead_id: bead_id})
+    end
+
+    :ok
   end
 
   defp review_only?(%{review_only: true}), do: true
@@ -1096,6 +1108,7 @@ defmodule Arbiter.Polecat do
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
+    broadcast_polecat_failed(new_state)
     new_state
   end
 
@@ -1131,6 +1144,7 @@ defmodule Arbiter.Polecat do
     record_run_finished(new_state)
     Arbiter.Messages.AdmiralNotifier.acolyte_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
+    broadcast_polecat_failed(new_state)
     new_state
   end
 
@@ -2009,6 +2023,8 @@ defmodule Arbiter.Polecat do
       subject: subject,
       body: findings
     })
+
+    Arbiter.Events.broadcast(ws_id, "tribunal", %{bead_id: bead_id, message: subject})
 
     :ok
   rescue
