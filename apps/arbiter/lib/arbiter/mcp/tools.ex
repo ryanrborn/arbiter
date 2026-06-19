@@ -520,10 +520,14 @@ defmodule Arbiter.MCP.Tools do
   """
   @spec polecat_list(Scope.t(), map()) :: {:ok, map()}
   def polecat_list(%Scope{workspace_id: ws_id}, _args) do
-    polecats =
+    children =
       Arbiter.Polecat.list_children()
       |> Enum.filter(&(&1.workspace_id == ws_id))
-      |> Enum.map(&serialize_polecat_summary/1)
+
+    bead_ids = Enum.map(children, & &1.bead_id)
+    costs = Arbiter.Polecat.Stats.bead_costs_usd(bead_ids)
+
+    polecats = Enum.map(children, &serialize_polecat_summary(&1, Map.get(costs, &1.bead_id, 0.0)))
 
     {:ok, %{polecats: polecats, count: length(polecats)}}
   end
@@ -1185,9 +1189,10 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp serialize_polecat_summary(snap) do
+  defp serialize_polecat_summary(snap, cost_usd) do
     meta = Map.get(snap, :meta, %{}) || %{}
     routing = Map.get(meta, :routing_config) || %{}
+    model_id = Map.get(meta, :model) || Map.get(routing, :model)
 
     %{
       bead_id: snap.bead_id,
@@ -1195,11 +1200,9 @@ defmodule Arbiter.MCP.Tools do
       rig: snap.rig,
       started_at: iso(snap.started_at),
       activity: Map.get(meta, :activity),
-      # Provider/model: prefer the values synced from the live session, falling
-      # back to the routing config stamped at spawn time. Lets a coordinator see
-      # which agent (claude/gemini) and model each polecat is running.
       provider: Map.get(meta, :provider) || Map.get(routing, :provider),
-      model: Map.get(meta, :model) || Map.get(routing, :model)
+      model: Arbiter.Polecat.Stats.short_model_name(model_id),
+      cost_usd: cost_usd
     }
   end
 

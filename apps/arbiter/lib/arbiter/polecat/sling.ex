@@ -849,6 +849,12 @@ defmodule Arbiter.Polecat.Sling do
 
         Polecat.report(polecat_pid, :routing_config, routing_config)
 
+        # Stamp the resolved model onto the polecat's meta at sling time so
+        # polecat_list can show the model before any session output lands.
+        if model = Map.get(routing_config, :model) do
+          Polecat.report(polecat_pid, :model, model)
+        end
+
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)

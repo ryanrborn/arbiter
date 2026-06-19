@@ -516,7 +516,8 @@ defmodule Arbiter.MCP.Catalog do
       name: "polecat_list",
       tiers: @coordinator,
       description:
-        "List active polecats in the workspace: bead_id, status, rig, started_at, activity.",
+        "List active polecats in the workspace: bead_id, status, rig, started_at, activity, " <>
+          "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the bead).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.polecat_list/2
     },

@@ -178,7 +178,10 @@ defmodule ArbiterWeb.Api.PolecatController do
   def resume(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
 
   def index(conn, _params) do
-    render(conn, :index, children: Polecat.list_children())
+    children = Polecat.list_children()
+    bead_ids = Enum.map(children, & &1.bead_id)
+    costs = Arbiter.Polecat.Stats.bead_costs_usd(bead_ids)
+    render(conn, :index, children: children, costs: costs)
   end
 
   def show(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
