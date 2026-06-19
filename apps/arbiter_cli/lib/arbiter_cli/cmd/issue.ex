@@ -7,7 +7,7 @@ defmodule ArbiterCli.Cmd.Issue do
       arb issue show      <id>
       arb issue create    <title> [--description ...] [--priority ...]
                           [--type ...] [--deps id1,id2] [--labels a,b]
-                          [--vanguard <batch-id>]
+                          [--parent <parent-id>] [--auto-close]
       arb issue update    <id> [--title ...] [--priority N] [--difficulty N]
                           [--status s] [--description d] [--assignee a]
                           [--append-notes text] [--qa-notes text]

@@ -48,9 +48,6 @@ defmodule ArbiterWeb.Router do
       live("/beads", BeadIndexLive)
       live("/beads/:id", BeadDetailLive)
 
-      live("/convoys", ConvoyIndexLive)
-      live("/convoys/:id", ConvoyDetailLive)
-
       live("/crucible", CrucibleIndexLive)
 
       live("/polecats", PolecatIndexLive)
@@ -76,14 +73,6 @@ defmodule ArbiterWeb.Router do
     # Dependencies
     post("/dependencies", DependencyController, :create)
     delete("/dependencies/:from/:to", DependencyController, :delete)
-
-    # Convoys
-    get("/convoys", ConvoyController, :index)
-    post("/convoys", ConvoyController, :create)
-    get("/convoys/:id", ConvoyController, :show)
-    post("/convoys/:id/close", ConvoyController, :close)
-    post("/convoys/:id/members", ConvoyController, :add_member)
-    delete("/convoys/:id/members/:issue_id", ConvoyController, :remove_member)
 
     # Rigs (repo/project checkouts polecats operate on)
     get("/rigs", RigController, :index)

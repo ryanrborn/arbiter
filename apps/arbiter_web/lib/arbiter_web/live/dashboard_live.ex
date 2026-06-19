@@ -41,7 +41,6 @@ defmodule ArbiterWeb.DashboardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Beads.Convoy
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.RigConfig
   alias Arbiter.Beads.Workspace
@@ -66,9 +65,9 @@ defmodule ArbiterWeb.DashboardLive do
   # the full, filterable history lives on the `/beads` index ("See all").
   @recent_beads_limit 8
 
-  # Number of open campaigns (convoys) shown in the dashboard's current
-  # campaigns section, capped. Everything lives on the `/convoys` index.
-  @current_convoys_limit 6
+  # Number of open epics (parent beads) shown in the dashboard's current
+  # campaigns section, capped. Each is a bead with `:parent_of` children.
+  @current_epics_limit 6
 
   # Number of escalations (Tribunal verdicts) shown in the Tribunal view.
   @recent_escalations_limit 10
@@ -93,7 +92,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> assign(:rig_label, Vernacular.label(:rig))
      |> assign(:worktree_label, Vernacular.label(:worktree))
      |> assign(:issue_label, Vernacular.label(:issue))
-     |> assign(:convoy_label, Vernacular.label(:batch))
+     |> assign(:epic_label, Vernacular.label(:epic))
      |> assign(:workspace_label, Vernacular.label(:workspace))
      |> assign(:pr_label, Vernacular.label(:pr))
      |> assign(:merge_queue_label, Vernacular.label(:merge_queue))
@@ -109,7 +108,7 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_pending_reviews()
      |> refresh_escalations()
      |> refresh_recent_beads()
-     |> refresh_convoys()}
+     |> refresh_epics()}
   end
 
   @impl true
@@ -117,7 +116,7 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply,
      socket
      |> refresh_recent_beads()
-     |> refresh_convoys()
+     |> refresh_epics()
      |> refresh_workspaces()}
   end
 
@@ -347,23 +346,25 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :recent_beads, beads)
   end
 
-  # CURRENT campaigns only: open convoys, newest-updated first, capped. The
-  # full, filterable list (open + closed) lives on the `/convoys` index. Each
-  # convoy is loaded with its issue-progress aggregate for the inline bar.
-  defp refresh_convoys(socket) do
-    convoys =
+  # CURRENT campaigns only: open epic beads (issue_type == :epic), newest-updated
+  # first, capped. Each is loaded with its `:parent_of` child-progress rollup for
+  # the inline bar. The full, filterable bead list lives on the `/beads` index.
+  defp refresh_epics(socket) do
+    epic = :epic
+
+    epics =
       try do
-        Convoy
-        |> Ash.Query.filter(status == :open)
-        |> Ash.Query.load([:total_issues, :closed_issues])
+        Issue
+        |> Ash.Query.filter(issue_type == ^epic and status != :closed)
+        |> Ash.Query.load([:child_total, :child_closed])
         |> Ash.Query.sort(updated_at: :desc)
-        |> Ash.Query.limit(@current_convoys_limit)
+        |> Ash.Query.limit(@current_epics_limit)
         |> Ash.read!()
       rescue
         _ -> []
       end
 
-    assign(socket, :convoys, convoys)
+    assign(socket, :epics, epics)
   end
 
   # For the given bead ids, count how many of each bead's `:depends_on` edges
@@ -1128,52 +1129,53 @@ defmodule ArbiterWeb.DashboardLive do
           </section>
         </div>
 
-        <%!-- ── C2. Campaigns (open convoys) ─────────────────────────── --%>
-        <%!-- Only OPEN campaigns surface on the landing, capped. The full,
-             filterable list (open + closed) lives on the /convoys index. --%>
-        <section id="convoys-section" class="card bg-base-200 border border-base-300 shadow-sm">
+        <%!-- ── C2. Campaigns (open epics) ───────────────────────────── --%>
+        <%!-- Only OPEN epic beads surface on the landing, capped. The full,
+             filterable bead list lives on the /beads index. Each epic shows
+             its `:parent_of` child-progress rollup. --%>
+        <section id="epics-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <div class="flex items-center justify-between">
               <h2 class="text-lg font-semibold flex items-center gap-2">
                 <.icon name="hero-rectangle-stack" class="size-5 text-base-content/70" />
-                Open {cap_plural(@convoy_label)} ({length(@convoys)})
+                Open {cap_plural(@epic_label)} ({length(@epics)})
               </h2>
-              <.see_all_link navigate={~p"/convoys"} />
+              <.see_all_link navigate={~p"/beads"} />
             </div>
 
             <div
-              :if={@convoys == []}
-              id="convoys-empty"
+              :if={@epics == []}
+              id="epics-empty"
               class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
             >
               <.icon name="hero-rectangle-stack" class="size-8 mx-auto text-base-content/30" />
               <p class="mt-2 text-sm text-base-content/60">
-                No open {plural(@convoy_label)}. Batches of related {plural(@issue_label)} appear here while active.
+                No open {plural(@epic_label)}. Parent {plural(@issue_label)} grouping related work appear here while active.
               </p>
             </div>
 
-            <ul :if={@convoys != []} id="convoys" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <ul :if={@epics != []} id="epics" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <li
-                :for={c <- @convoys}
+                :for={e <- @epics}
                 class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-primary/40"
               >
-                <.link navigate={~p"/convoys/#{c.id}"} class="group block">
+                <.link navigate={~p"/beads/#{e.id}"} class="group block">
                   <div class="flex items-center gap-2">
                     <span
                       class="truncate text-sm font-medium group-hover:text-primary transition-colors"
-                      title={c.title}
+                      title={e.title}
                     >
-                      {c.title}
+                      {e.title}
                     </span>
                     <span class="text-xs font-mono tabular-nums text-base-content/60 shrink-0 ml-auto">
-                      {c.closed_issues}/{c.total_issues}
+                      {e.child_closed}/{e.child_total}
                     </span>
                   </div>
-                  <code class="text-xs text-base-content/50">{c.id}</code>
+                  <code class="text-xs text-base-content/50">{e.id}</code>
                   <progress
                     class="progress progress-success w-full mt-2 h-1.5"
-                    value={c.closed_issues}
-                    max={max(c.total_issues, 1)}
+                    value={e.child_closed}
+                    max={max(e.child_total, 1)}
                   >
                   </progress>
                 </.link>

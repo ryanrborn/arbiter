@@ -28,6 +28,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
       priority: issue.priority,
       difficulty: issue.difficulty,
       issue_type: to_string_atom(issue.issue_type),
+      auto_close: issue.auto_close,
       assignee: issue.assignee,
       tracker_type: to_string_atom(issue.tracker_type),
       tracker_ref: issue.tracker_ref,
@@ -39,7 +40,14 @@ defmodule ArbiterWeb.Api.IssueJSON do
       created_at: iso(issue.created_at),
       updated_at: iso(issue.updated_at)
     }
+    |> maybe_put(:child_total, issue.child_total)
+    |> maybe_put(:child_closed, issue.child_closed)
   end
+
+  # Child-progress rollup is included only when the calcs are loaded (the show
+  # endpoint loads them); index keeps them unloaded so the field is omitted.
+  defp maybe_put(map, _key, %Ash.NotLoaded{}), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp to_string_atom(nil), do: nil
   defp to_string_atom(a) when is_atom(a), do: Atom.to_string(a)

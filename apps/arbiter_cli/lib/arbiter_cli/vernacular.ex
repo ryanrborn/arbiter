@@ -5,7 +5,6 @@ defmodule ArbiterCli.Vernacular do
     "coordinator" => "coordinator",
     "worker" => "polecat",
     "issue" => "bead",
-    "batch" => "convoy",
     "rig" => "rig",
     "epic" => "mountain",
     "merge_queue" => "refinery",

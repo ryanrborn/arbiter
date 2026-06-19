@@ -54,7 +54,6 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert "inbox_check" in tools
       assert "message_send" in tools
       assert "workspace_show" in tools
-      assert "convoy_status" in tools
     end
 
     test "omits includeTools when include_tools: nil (coordinator scope)" do
