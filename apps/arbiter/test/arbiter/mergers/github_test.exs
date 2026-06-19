@@ -410,6 +410,136 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  # bd-95lsjb: the Refinery reads `changes_requested` + `latest_review_id` from
+  # get/1 to drive the auto-revise path. Derived from the reviews get/1 already
+  # fetches — no extra HTTP call.
+  describe "get/1 changes_requested signal" do
+    defp get_with_reviews(reviews) do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"state" => "open", "merged" => false, "html_url" => "u"})
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews)
+        end
+      end)
+
+      Github.get(@ref)
+    end
+
+    test "changes_requested true + latest_review_id set when latest verdict is CHANGES_REQUESTED" do
+      assert {:ok, %{changes_requested: true, latest_review_id: 100, approved: false}} =
+               get_with_reviews([
+                 %{"id" => 100, "state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}
+               ])
+    end
+
+    test "a later APPROVE from the same reviewer clears changes_requested (latest verdict wins)" do
+      # The CHANGES_REQUESTED review still lives in history, but alice's latest
+      # verdict is APPROVED — this is the post-revise re-approval the Refinery
+      # relies on to advance to merge.
+      assert {:ok, %{changes_requested: false, approved: true}} =
+               get_with_reviews([
+                 %{"id" => 100, "state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}},
+                 %{"id" => 200, "state" => "APPROVED", "user" => %{"login" => "alice"}}
+               ])
+    end
+
+    test "another reviewer's CHANGES_REQUESTED still blocks even with an APPROVE" do
+      assert {:ok, %{changes_requested: true, approved: false, latest_review_id: 201}} =
+               get_with_reviews([
+                 %{"id" => 200, "state" => "APPROVED", "user" => %{"login" => "alice"}},
+                 %{"id" => 201, "state" => "CHANGES_REQUESTED", "user" => %{"login" => "bob"}}
+               ])
+    end
+
+    test "no reviews → changes_requested false, latest_review_id nil" do
+      assert {:ok, %{changes_requested: false, latest_review_id: nil}} = get_with_reviews([])
+    end
+
+    test "COMMENTED-only reviews don't set changes_requested" do
+      assert {:ok, %{changes_requested: false, latest_review_id: nil}} =
+               get_with_reviews([%{"state" => "COMMENTED", "user" => %{"login" => "alice"}}])
+    end
+  end
+
+  describe "list_review_feedback/1" do
+    test "returns the latest verdict body + inline comments" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "id" => 100,
+                "state" => "CHANGES_REQUESTED",
+                "user" => %{"login" => "alice"},
+                "body" => "Please add tests and fix the naming."
+              },
+              # a bodiless review is dropped from the feedback list
+              %{"id" => 101, "state" => "COMMENTED", "user" => %{"login" => "bob"}, "body" => ""}
+            ])
+
+          {"GET", "/repos/octo/widget/pulls/42/comments"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "user" => %{"login" => "alice"},
+                "path" => "lib/foo.ex",
+                "line" => 12,
+                "body" => "rename this function"
+              }
+            ])
+        end
+      end)
+
+      assert {:ok, %{changes_requested: true, latest_review_id: 100, feedback: feedback}} =
+               Github.list_review_feedback(@ref)
+
+      assert [
+               %{kind: :review, author: "alice", state: "CHANGES_REQUESTED", body: review_body},
+               %{
+                 kind: :comment,
+                 author: "alice",
+                 path: "lib/foo.ex",
+                 line: 12,
+                 body: comment_body
+               }
+             ] = feedback
+
+      assert review_body =~ "add tests"
+      assert comment_body =~ "rename"
+    end
+
+    test "no reviews and no comments → empty feedback, changes_requested false" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/pulls/42/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}} =
+               Github.list_review_feedback(@ref)
+    end
+
+    test "404 on reviews surfaces {:error, %Error{}}" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found}} = Github.list_review_feedback(@ref)
+    end
+  end
+
   describe "merge/1" do
     test "PUTs /merge with the configured merge_method" do
       stub(fn conn ->

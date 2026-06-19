@@ -76,6 +76,47 @@ defmodule Arbiter.Mergers.Merger do
   @typedoc "Final review verdict."
   @type verdict :: :approve | :request_changes
 
+  @typedoc """
+  A single piece of human PR-side review feedback surfaced by
+  `list_review_feedback/1`.
+
+    * `:kind` — `:review` for a formal review's summary body,
+      `:comment` for an inline code-review comment.
+    * `:author` — the reviewer's handle (best-effort; may be `nil`).
+    * `:state` — the review verdict state (`"CHANGES_REQUESTED"`,
+      `"COMMENTED"`, …) for `:review` items; `nil` for comments.
+    * `:path` / `:line` — the file + line an inline `:comment` anchors to;
+      `nil` for review summaries.
+    * `:body` — the feedback text.
+  """
+  @type feedback_item :: %{
+          required(:kind) => :review | :comment,
+          required(:body) => String.t(),
+          optional(:author) => String.t() | nil,
+          optional(:state) => String.t() | nil,
+          optional(:path) => String.t() | nil,
+          optional(:line) => pos_integer() | nil
+        }
+
+  @typedoc """
+  Aggregated human PR-side review feedback (bd-95lsjb). Returned by
+  `list_review_feedback/1` and consumed by the Refinery to drive an
+  auto-revise pass on the existing outpost.
+
+    * `:changes_requested` — true when the latest verdict (per reviewer) on
+      the PR is CHANGES_REQUESTED.
+    * `:latest_review_id` — an opaque, monotonic-ish handle for the most
+      recent CHANGES_REQUESTED review (its id, else its timestamp). The
+      Refinery debounces on this so the same review is actioned at most once.
+    * `:feedback` — the review summaries (with bodies) and inline comments to
+      inject into the revise worker's prompt.
+  """
+  @type review_feedback :: %{
+          required(:changes_requested) => boolean(),
+          required(:latest_review_id) => term() | nil,
+          required(:feedback) => [feedback_item()]
+        }
+
   @callback open(
               branch :: String.t(),
               title :: String.t(),
@@ -95,4 +136,15 @@ defmodule Arbiter.Mergers.Merger do
               {:ok, term()} | {:error, term()}
   @callback submit_review(mr_ref, verdict, body :: String.t(), opts :: map()) ::
               {:ok, term()} | {:error, term()}
+
+  @doc """
+  Fetch the human PR-side review feedback for `mr_ref` — the latest review
+  verdict (with its body) and the inline review comments — so the Refinery
+  can dispatch an auto-revise pass when a reviewer requests changes
+  (bd-95lsjb).
+
+  Adapters with no forge review surface (e.g. `Direct`) no-op:
+  `{:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}`.
+  """
+  @callback list_review_feedback(mr_ref) :: {:ok, review_feedback()} | {:error, term()}
 end

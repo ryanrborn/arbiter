@@ -79,6 +79,41 @@ defmodule Arbiter.Workflows.Refinery do
   → `:arbiter, :refinery_conflict_resolver` (application env) → the default
   real implementation. Tests pass a stub so they don't spawn real acolytes.
 
+  ## Auto-revise on requested changes (bd-95lsjb)
+
+  When `adapter.get` reports a CHANGES_REQUESTED review (the latest verdict
+  per reviewer) newer than the last one the queue handled, the Refinery
+  dispatches a single revise pass on the **existing outpost** instead of
+  idling at `:awaiting_approval`:
+
+      :awaiting_approval
+        │   adapter.get reports changes_requested: true with a new
+        │   latest_review_id (not yet debounced)
+        ▼
+      :changes_requested — fetch the full feedback
+                           (`adapter.list_review_feedback/1`), post a brief
+                           acknowledging comment, then spawn
+                           `Arbiter.Workflows.Refinery.ReviseDispatcher` (the
+                           `arb resume` path: a fresh acolyte on the bead's
+                           preserved worktree + `pr_ref`, briefed with the
+                           reviewer feedback). It commits + pushes to the SAME
+                           branch — no new PR (pairs with bd-53xrmi).
+        │   next tick
+        ▼
+      :awaiting_approval (re-review) — the review id is recorded in
+                           `last_handled_review_id`, so the same
+                           CHANGES_REQUESTED (still in the PR's review history)
+                           is not actioned twice. A later APPROVE supersedes it
+                           (latest-verdict-per-reviewer) and advances to merge
+                           as today.
+
+  Each distinct CHANGES_REQUESTED review gets **exactly one** revise pass. A
+  dispatch failure parks the item `:failed` (no retry loop). The `Direct`
+  merger no-ops (no forge review surface), so direct-strategy beads are
+  unaffected. The dispatcher module is injected via `:revise_dispatcher`
+  (start_link opt) → `:arbiter, :refinery_revise_dispatcher` (application env)
+  → the default real implementation; tests pass a stub.
+
   ## Merge adapter
 
   The merge adapter is resolved from `workspace.config["merge"]["strategy"]`
@@ -127,6 +162,10 @@ defmodule Arbiter.Workflows.Refinery do
       `Arbiter.Workflows.Refinery.ConflictResolver` behaviour. Defaults to
       the real implementation (which spawns a Polecat + ClaudeSession);
       tests pass a stub.
+    * `:revise_dispatcher` — module implementing the
+      `Arbiter.Workflows.Refinery.ReviseDispatcher` behaviour (bd-95lsjb).
+      Defaults to the real implementation (which resumes the bead's outpost
+      via `Arbiter.Polecat.Sling.resume/2`); tests pass a stub.
   """
 
   use GenServer
@@ -153,6 +192,7 @@ defmodule Arbiter.Workflows.Refinery do
           | :ready_to_merge
           | :merging
           | :conflict_resolving
+          | :changes_requested
           | :done
           | :failed
 
@@ -167,7 +207,8 @@ defmodule Arbiter.Workflows.Refinery do
           last_polled_at: DateTime.t() | nil,
           last_error: term() | nil,
           resolver_spawned_at: DateTime.t() | nil,
-          prior_status: status() | nil
+          prior_status: status() | nil,
+          last_handled_review_id: term() | nil
         }
 
   defmodule State do
@@ -180,6 +221,7 @@ defmodule Arbiter.Workflows.Refinery do
       :auto_tick,
       :pubsub_topic,
       :conflict_resolver,
+      :revise_dispatcher,
       :worktree_module,
       items: []
     ]
@@ -263,6 +305,16 @@ defmodule Arbiter.Workflows.Refinery do
             :arbiter,
             :refinery_conflict_resolver,
             Arbiter.Workflows.Refinery.ConflictResolver
+          )
+        ),
+      revise_dispatcher:
+        Keyword.get(
+          opts,
+          :revise_dispatcher,
+          Application.get_env(
+            :arbiter,
+            :refinery_revise_dispatcher,
+            Arbiter.Workflows.Refinery.ReviseDispatcher
           )
         ),
       worktree_module: Keyword.get(opts, :worktree_module, Worktree),
@@ -538,14 +590,32 @@ defmodule Arbiter.Workflows.Refinery do
         restored = restore_after_resolution(state, item)
         advance_status(state, restored, mr_state)
 
+      # A revise pass was dispatched on a prior tick; the worker is addressing
+      # the feedback asynchronously on the same branch. Return the item to
+      # :awaiting_approval so it awaits re-review, then re-evaluate against the
+      # current MR state. The debounce on last_handled_review_id (below)
+      # prevents the same review from re-dispatching. Mirrors the
+      # :conflict_resolving restore (bd-95lsjb).
+      item.status == :changes_requested ->
+        advance_status(state, %{item | status: :awaiting_approval}, mr_state)
+
       # MR was already merged externally (e.g. the Warden merged it for a
       # Tribunal-approved bead before the Refinery processed the polecat_done
       # event). Close the bead directly without re-attempting adapter.merge/1
-      # — that call would fail on an already-closed PR. bd-d1jp4r.
+      # — that call would fail on an already-closed PR. bd-d1jp4r. Checked
+      # before the changes-requested branch so a merged PR never triggers a
+      # revise on a stale review.
       mr_state.status == :merged ->
         item = %{item | status: :done}
         state = close_bead_and_finalize(state, item)
         {item, state}
+
+      # A reviewer requested changes with a review we haven't actioned yet:
+      # dispatch exactly one revise pass on the existing outpost. Debounced on
+      # the review id so the same CHANGES_REQUESTED (still in the PR's review
+      # history after the revise lands) is not actioned twice.
+      unhandled_changes_requested?(item, mr_state) ->
+        dispatch_revise(state, item, mr_state)
 
       item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->
         try_merge(state, %{item | status: :ready_to_merge})
@@ -640,6 +710,104 @@ defmodule Arbiter.Workflows.Refinery do
   defp restore_after_resolution(state, %{prior_status: prior} = item) do
     safe_notify_resolution(state, item)
     %{item | status: prior, prior_status: nil, resolver_spawned_at: nil}
+  end
+
+  # ---- changes-requested → auto-revise (bd-95lsjb) ------------------------
+
+  # A CHANGES_REQUESTED review is actionable when it is newer than the last one
+  # we dispatched a revise for. The debounce key is the review id (the merger
+  # derives it from the review's id/timestamp). Only fire from a settled
+  # awaiting-review status — never mid-merge or while already revising.
+  defp unhandled_changes_requested?(item, mr_state) do
+    item.status in [:awaiting_approval, :ci_running] and
+      Map.get(mr_state, :changes_requested, false) and
+      not is_nil(Map.get(mr_state, :latest_review_id)) and
+      Map.get(mr_state, :latest_review_id) != item.last_handled_review_id
+  end
+
+  # Fetch the full review feedback, post a brief acknowledging comment, and
+  # dispatch a revise pass on the existing outpost (same branch, no new PR).
+  # On success the item is parked at :changes_requested with the review id
+  # recorded; the next tick returns it to :awaiting_approval to await re-review.
+  # A dispatch failure parks the item :failed (no retry loop — the reviewer can
+  # drive recovery), mirroring the conflict-resolver spawn-failure path.
+  defp dispatch_revise(state, item, mr_state) do
+    review_id = Map.get(mr_state, :latest_review_id)
+    feedback = fetch_review_feedback(state, item)
+
+    _ = post_revise_ack(state, item)
+
+    args = %{
+      bead_id: item.bead_id,
+      workspace_id: state.workspace_id,
+      target_branch: item.base || state.base,
+      pr_ref: item.mr_ref,
+      feedback: feedback
+    }
+
+    case safe_dispatch_revise(state.revise_dispatcher, args) do
+      {:ok, _info} ->
+        Logger.info(
+          "Refinery: dispatched revise pass for bead=#{item.bead_id} " <>
+            "(review=#{inspect(review_id)})"
+        )
+
+        item = %{
+          item
+          | status: :changes_requested,
+            last_handled_review_id: review_id,
+            resolver_spawned_at: DateTime.utc_now()
+        }
+
+        {item, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Refinery: revise dispatch failed for bead=#{item.bead_id}: #{inspect(reason)}"
+        )
+
+        {%{item | status: :failed, last_error: {:revise_dispatch_failed, reason}}, state}
+    end
+  end
+
+  # Best-effort fetch of the structured review feedback for the prompt. A
+  # failure (or an adapter without the callback) degrades to an empty list —
+  # the revise still dispatches; the worker re-reads the PR thread.
+  defp fetch_review_feedback(state, item) do
+    if function_exported?(state.adapter, :list_review_feedback, 1) do
+      case state.adapter.list_review_feedback(item.mr_ref) do
+        {:ok, %{feedback: feedback}} when is_list(feedback) -> feedback
+        _ -> []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  # Post a short acknowledgement on the PR so the reviewer sees the fleet is
+  # acting on the feedback. Best-effort: never fails the revise dispatch.
+  defp post_revise_ack(state, item) do
+    body =
+      "🤖 Addressing review feedback on the existing branch for bead " <>
+        "#{item.bead_id} — a revision will be pushed to this PR shortly."
+
+    state.adapter.add_comment(item.mr_ref, body)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp safe_dispatch_revise(dispatcher_module, args) when is_atom(dispatcher_module) do
+    dispatcher_module.dispatch(args)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp safe_resolve(resolver_module, args) when is_atom(resolver_module) do
@@ -741,7 +909,8 @@ defmodule Arbiter.Workflows.Refinery do
       last_polled_at: nil,
       last_error: nil,
       resolver_spawned_at: nil,
-      prior_status: nil
+      prior_status: nil,
+      last_handled_review_id: nil
     }
 
     Map.merge(base, Map.new(overrides))
