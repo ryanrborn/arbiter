@@ -410,7 +410,7 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
-  # bd-95lsjb: the Refinery reads `changes_requested` + `latest_review_id` from
+  # bd-95lsjb: the MergeQueue reads `changes_requested` + `latest_review_id` from
   # get/1 to drive the auto-revise path. Derived from the reviews get/1 already
   # fetches — no extra HTTP call.
   describe "get/1 changes_requested signal" do
@@ -439,7 +439,7 @@ defmodule Arbiter.Mergers.GithubTest do
 
     test "a later APPROVE from the same reviewer clears changes_requested (latest verdict wins)" do
       # The CHANGES_REQUESTED review still lives in history, but alice's latest
-      # verdict is APPROVED — this is the post-revise re-approval the Refinery
+      # verdict is APPROVED — this is the post-revise re-approval the MergeQueue
       # relies on to advance to merge.
       assert {:ok, %{changes_requested: false, approved: true}} =
                get_with_reviews([

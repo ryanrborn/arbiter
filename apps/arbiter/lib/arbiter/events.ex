@@ -11,7 +11,7 @@ defmodule Arbiter.Events do
   | Topic           | Fires when                                             |
   |-----------------|--------------------------------------------------------|
   | `inbox`         | A message arrives in the coordinator's mailbox          |
-  | `tribunal`      | A tribunal escalation requires Admiral ruling           |
+  | `review_gate`      | A review_gate escalation requires Admiral ruling           |
   | `polecat_failed`| An worker stops unexpectedly (status → failed)         |
   | `polecat_done`  | An worker completes (status → completed)               |
   | `bead_state`    | Any bead FSM transition (noisier — opt-in only)         |
@@ -21,7 +21,7 @@ defmodule Arbiter.Events do
   Called from:
     * `Arbiter.Polecat.fail_now/2` and `fail_stopped/2` → `:polecat_failed`
     * `Arbiter.Polecat.broadcast_done/1` → `:polecat_done`
-    * `Arbiter.Polecat.escalate_tribunal/3` → `:tribunal`
+    * `Arbiter.Polecat.escalate_review_gate/3` → `:review_gate`
     * `Arbiter.Messages.Message.broadcast_new/1` → `:inbox` (admiral-addressed only)
     * `Arbiter.Beads.Issue.broadcast_lifecycle/2` → `:bead_state`
 
@@ -30,7 +30,7 @@ defmodule Arbiter.Events do
 
   require Logger
 
-  @valid_topics ~w(inbox tribunal polecat_failed polecat_done bead_state)
+  @valid_topics ~w(inbox review_gate polecat_failed polecat_done bead_state)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics

@@ -50,7 +50,7 @@ defmodule ArbiterCli.Cmd.Issue do
       ["claim" | rest] -> Cmd.Claim.run(rest)
       ["sync" | rest] -> Cmd.Sync.run(rest)
       ["ready" | rest] -> Cmd.Ready.run(rest)
-      ["dispatch" | rest] -> Cmd.Sling.run(rest)
+      ["dispatch" | rest] -> Cmd.Dispatch.run(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
       ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("issue requires a subcommand", usage_hint())

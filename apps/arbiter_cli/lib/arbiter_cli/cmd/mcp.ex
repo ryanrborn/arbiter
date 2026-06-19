@@ -136,7 +136,7 @@ defmodule ArbiterCli.Cmd.Mcp do
       IO.puts("rig:          #{resp["rig"]}")
     end
 
-    IO.puts("can_sling:    #{resp["can_sling"]}")
+    IO.puts("can_dispatch:    #{resp["can_dispatch"]}")
   end
 
   defp ttl_human(nil), do: "?"

@@ -397,7 +397,7 @@ defmodule Arbiter.Mergers.Github do
   # outstanding CHANGES_REQUESTED. Using the latest-per-reviewer state (rather
   # than "any APPROVED ever") is what lets a re-review APPROVE clear an earlier
   # CHANGES_REQUESTED that still lives in the PR's review history — the
-  # post-revise re-approval the Refinery relies on (bd-95lsjb).
+  # post-revise re-approval the MergeQueue relies on (bd-95lsjb).
   defp approved?(reviews) when is_list(reviews) do
     states = latest_review_states(reviews)
     "APPROVED" in states and "CHANGES_REQUESTED" not in states
@@ -406,7 +406,7 @@ defmodule Arbiter.Mergers.Github do
   defp approved?(_), do: false
 
   # True when the latest verdict from any reviewer is CHANGES_REQUESTED — the
-  # signal the Refinery turns into an auto-revise pass.
+  # signal the MergeQueue turns into an auto-revise pass.
   defp changes_requested?(reviews) when is_list(reviews) do
     "CHANGES_REQUESTED" in latest_review_states(reviews)
   end
@@ -595,7 +595,7 @@ defmodule Arbiter.Mergers.Github do
         end
 
       [num_str] ->
-        # Bare integer string — backward compat with old Refinery pr_ref storage ("42").
+        # Bare integer string — backward compat with old MergeQueue pr_ref storage ("42").
         case parse_pos_int(num_str) do
           {:ok, n} -> {:bare, n}
           :error -> :invalid

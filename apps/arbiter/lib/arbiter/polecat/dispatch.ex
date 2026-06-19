@@ -1,12 +1,12 @@
-defmodule Arbiter.Polecat.Sling do
+defmodule Arbiter.Polecat.Dispatch do
   @moduledoc """
   Spawn a polecat for a bead and attach it to the `Arbiter.Workflows.Work`
   workflow via `Arbiter.Workflows.Machine`.
 
   This is the "go work this bead" entry point — called by:
 
-    * the `arb sling <bead-id>` CLI command (via the REST API),
-    * the `Refinery` GenServer (when re-dispatching follow-ups),
+    * the `arb dispatch <bead-id>` CLI command (via the REST API),
+    * the `MergeQueue` GenServer (when re-dispatching follow-ups),
     * Phoenix LiveView dashboards that have a "send polecat" button.
 
   Single responsibility: orchestrate the three steps needed to start a
@@ -72,7 +72,7 @@ defmodule Arbiter.Polecat.Sling do
 
   require Ash.Query
 
-  @type sling_opts :: [
+  @type dispatch_opts :: [
           rig: String.t() | nil,
           base_branch: String.t() | nil,
           workflow_module: module(),
@@ -91,7 +91,7 @@ defmodule Arbiter.Polecat.Sling do
           depth: non_neg_integer()
         ]
 
-  @type sling_result :: %{
+  @type dispatch_result :: %{
           bead: Issue.t(),
           polecat_pid: pid(),
           machine_id: String.t(),
@@ -101,8 +101,8 @@ defmodule Arbiter.Polecat.Sling do
           claude_port: port() | nil
         }
 
-  @spec sling(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
-  def sling(bead_id, opts \\ []) when is_binary(bead_id) do
+  @spec dispatch(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
+  def dispatch(bead_id, opts \\ []) when is_binary(bead_id) do
     opts = normalize_opts(opts)
 
     with {:ok, bead} <- load_bead(bead_id),
@@ -153,22 +153,22 @@ defmodule Arbiter.Polecat.Sling do
      applies to a stopped/failed/dead worker. Stop the active one first.
   3. Resolve the rig (explicit opt, else the bead's most recent run's rig).
   4. Require the worktree to still exist on disk — `{:error,
-     :no_outpost}` if it was cleaned up (nothing to resume; re-`sling` instead).
+     :no_outpost}` if it was cleaned up (nothing to resume; re-`dispatch` instead).
   5. Build the resume briefing from the worktree's git state.
   6. Stop any prior (failed) polecat still resident for the bead so a fresh
-     `polecat_run` starts cleanly rather than the new sling attaching to the
+     `polecat_run` starts cleanly rather than the new dispatch attaching to the
      dead one (which would skip the run row and collide on the registry key —
      the same class of bug fixed in the conflict-resolver).
-  7. Delegate to `sling/2` with the resume markers set: it reuses the existing
+  7. Delegate to `dispatch/2` with the resume markers set: it reuses the existing
      worktree (idempotent `Worktree.create`), prepends the briefing, links the
      new run to the prior via `resumed_from_run_id`, and passes the bead's
      existing `pr_ref` so completion reuses any open PR rather than duplicating.
 
-  Returns the same `{:ok, sling_result()}` / `{:error, reason}` shape as
-  `sling/2`. Resume-specific errors: `{:error, :no_outpost}`,
+  Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
+  `dispatch/2`. Resume-specific errors: `{:error, :no_outpost}`,
   `{:error, {:acolyte_active, status}}`, `{:error, :rig_unknown}`.
   """
-  @spec resume(String.t(), sling_opts()) :: {:ok, sling_result()} | {:error, term()}
+  @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
   def resume(bead_id, opts \\ []) when is_binary(bead_id) do
     with {:ok, bead} <- load_bead(bead_id),
          :ok <- ensure_not_closed(bead),
@@ -186,7 +186,7 @@ defmodule Arbiter.Polecat.Sling do
       context = prepend_revise_feedback(context, opts)
 
       # Free the registry slot: a stopped worker's polecat lingers in :failed,
-      # still registered under bead_id. Without stopping it, sling/2's
+      # still registered under bead_id. Without stopping it, dispatch/2's
       # start_polecat would hit {:already_started, pid} and attach to the dead
       # one — no fresh run, no resumed_from_run_id. Stopping it does NOT touch
       # the worktree (terminate/2 never cleans up), so the worktree is preserved.
@@ -201,7 +201,7 @@ defmodule Arbiter.Polecat.Sling do
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
         |> Keyword.put(:existing_pr_ref, bead.pr_ref)
 
-      sling(bead_id, resume_opts)
+      dispatch(bead_id, resume_opts)
     end
   end
 
@@ -327,10 +327,10 @@ defmodule Arbiter.Polecat.Sling do
   defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:bead_closed, id}}
   defp ensure_not_closed(_bead), do: :ok
 
-  # Guard against re-slinging a bead whose polecat is already parked at
-  # :awaiting_review with an active Warden. A second sling in this state
+  # Guard against re-dispatching a bead whose polecat is already parked at
+  # :awaiting_review with an active Watchdog. A second dispatch in this state
   # would attach a new machine/driver to the live polecat, disrupting the
-  # Warden's PID watch and preventing the auto-close on MR merge.
+  # Watchdog's PID watch and preventing the auto-close on MR merge.
   defp ensure_not_awaiting_review(bead_id) do
     case Polecat.whereis(bead_id) do
       nil ->
@@ -363,7 +363,7 @@ defmodule Arbiter.Polecat.Sling do
 
       {:error, {:already_started, pid}} ->
         # A polecat for this bead is already registered. If it ended in a
-        # terminal state (:failed / :completed) — the re-sling-a-failed-run
+        # terminal state (:failed / :completed) — the re-dispatch-a-failed-run
         # scenario (bd-d70whv) — stop the stale process so the registry slot
         # is freed, then start a fresh one. Without this, the new Claude
         # session runs inside a :failed polecat and the "arb done" marker is
@@ -423,7 +423,7 @@ defmodule Arbiter.Polecat.Sling do
   # GenServer boots into `:resuming` rather than `:idle`, (2) `record_run_started`
   # links the new run to the prior one via `resumed_from_run_id`, and (3) the
   # completion path can reuse an already-open PR (`existing_pr_ref`) instead of
-  # opening a duplicate. No-op on a normal fresh sling.
+  # opening a duplicate. No-op on a normal fresh dispatch.
   defp maybe_put_resume_meta(base, opts) do
     case Keyword.get(opts, :resume, false) do
       true ->
@@ -529,7 +529,7 @@ defmodule Arbiter.Polecat.Sling do
   # Resolve the integration branch — the branch the worktree is cut from and
   # the one the completed branch merges back into. Delegates to the shared
   # `Arbiter.Polecat.TargetBranch` resolver so the worktree base computed here
-  # and the PR base computed by the `Refinery` can never diverge (bd-b6rzoc).
+  # and the PR base computed by the `MergeQueue` can never diverge (bd-b6rzoc).
   defp resolve_target_branch(%Issue{} = bead, opts) do
     TargetBranch.resolve(bead,
       base_branch: Keyword.get(opts, :base_branch),
@@ -575,7 +575,7 @@ defmodule Arbiter.Polecat.Sling do
   #   * No rig, zero rigs in :rig_paths        → {:error, :no_rig_configured}.
   #   * No rig, multiple rigs in :rig_paths    → {:error, {:ambiguous_rig, rigs}}.
   #
-  # The check fires only for `start_claude: true` dispatches; a dry/manual sling
+  # The check fires only for `start_claude: true` dispatches; a dry/manual dispatch
   # (no agent) is allowed to park without a rig.
   defp maybe_resolve_rig_for_real_work(%Issue{} = bead, opts) do
     case Keyword.get(opts, :start_claude, false) do
@@ -630,7 +630,7 @@ defmodule Arbiter.Polecat.Sling do
   # Pre-flight auth check (bd-awi4nw): before transitioning the bead and
   # dispatching a (paid, autonomous) worker, verify the agent CLI can
   # authenticate with a single cheap probe. If it can't — the confirmed
-  # OAuth-expiry case where every spawn 401s — REFUSE to sling, escalate to the
+  # OAuth-expiry case where every spawn 401s — REFUSE to dispatch, escalate to the
   # Admiral with a re-auth remediation, and abort before any bead/worktree state
   # is mutated.
   #
@@ -659,10 +659,10 @@ defmodule Arbiter.Polecat.Sling do
     :ok = Agents.prepare(workspace, :agent)
     adapter = preflight_adapter(bead, workspace, opts)
 
-    # bd-5wchp1: if the CredentialWarden already knows this adapter's creds are
+    # bd-5wchp1: if the CredentialWatchdog already knows this adapter's creds are
     # expired, refuse immediately without re-running the expensive probe. The
-    # guard is skipped when the warden isn't running (returns false by default).
-    if Arbiter.Agents.CredentialWarden.expired?(adapter) do
+    # guard is skipped when the watchdog isn't running (returns false by default).
+    if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
       reason = known_expired_stop_reason()
       AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
       {:error, {:auth_check_failed, reason}}
@@ -686,10 +686,10 @@ defmodule Arbiter.Polecat.Sling do
   defp known_expired_stop_reason do
     %StopReason{
       category: :auth_expired,
-      summary: "credentials known-expired (CredentialWarden flagged expiry)",
+      summary: "credentials known-expired (CredentialWatchdog flagged expiry)",
       remediation:
         "Re-authenticate the agent CLI (Claude: `claude` login; Gemini: refresh GEMINI_API_KEY), " <>
-          "then re-sling. Check `arb inbox` for the original expiry escalation.",
+          "then re-dispatch. Check `arb inbox` for the original expiry escalation.",
       exit_status: nil,
       signal: nil
     }
@@ -731,7 +731,7 @@ defmodule Arbiter.Polecat.Sling do
   #
   # **Opt-in only.** Defaults to `start_claude: false` so callers must
   # explicitly authorize the (paid, autonomous) agent invocation. The CLI
-  # surfaces this via the `--with-claude` flag on `arb sling`.
+  # surfaces this via the `--with-claude` flag on `arb dispatch`.
   #
   # Requires a worktree (Layer 3) — returns `{:error, :missing_worktree}`
   # if start_claude is true but worktree_path is nil. This prevents
@@ -793,7 +793,7 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # Resolve a sensible cwd for a review session that has no per-bead worktree.
-  # Only fires when `review: true` is set so a regular sling without
+  # Only fires when `review: true` is set so a regular dispatch without
   # provision_worktree still surfaces `:missing_worktree` instead of silently
   # running Claude in the rig's main checkout.
   defp review_cwd(%Issue{} = bead, opts) do
@@ -835,7 +835,7 @@ defmodule Arbiter.Polecat.Sling do
         adapter = Agents.for_type(choice.type)
 
         # Resolve the spawn's security posture from the workspace (per-domain),
-        # with an optional per-dispatch override from sling opts. Threaded into
+        # with an optional per-dispatch override from dispatch opts. Threaded into
         # the adapter so it bakes the right permission-mode + deny/allow into
         # the argv — no inheritance of the operator's ~/.claude (bd-9u10op).
         policy = SecurityPolicy.resolve(workspace, security_override(opts))
@@ -862,7 +862,7 @@ defmodule Arbiter.Polecat.Sling do
 
         Polecat.report(polecat_pid, :routing_config, routing_config)
 
-        # Stamp the resolved model onto the polecat's meta at sling time so
+        # Stamp the resolved model onto the polecat's meta at dispatch time so
         # polecat_list can show the model before any session output lands.
         if model = Map.get(routing_config, :model) do
           Polecat.report(polecat_pid, :model, model)
@@ -898,7 +898,7 @@ defmodule Arbiter.Polecat.Sling do
     ]
   end
 
-  # A `:model` opt on `Sling.sling/2` is a one-shot, per-dispatch override —
+  # A `:model` opt on `Dispatch.dispatch/2` is a one-shot, per-dispatch override —
   # the bead might be P2 (routing → sonnet) but the caller wants to try it
   # on Opus once. We splat the override on top of the routed config so it
   # wins over both the workspace default and any routing rule. A `nil` /
@@ -909,7 +909,7 @@ defmodule Arbiter.Polecat.Sling do
 
   defp apply_model_override(choice, _), do: choice
 
-  # A `:agent_type` opt on `Sling.sling/2` is an explicit per-dispatch provider
+  # A `:agent_type` opt on `Dispatch.dispatch/2` is an explicit per-dispatch provider
   # override — the workspace may default to :claude but the caller wants :gemini
   # (or vice versa). Splatting the type onto the routed choice lets it win over
   # both the workspace default and any routing rule.
@@ -930,7 +930,7 @@ defmodule Arbiter.Polecat.Sling do
   defp apply_agent_type_override(choice, _), do: choice
 
   # Optional per-dispatch (per-bead) security override. Accepts a raw map under
-  # the `:security` sling opt (same shape as `workspace.config["agent"]["security"]`)
+  # the `:security` dispatch opt (same shape as `workspace.config["agent"]["security"]`)
   # or the `:security_mode` shorthand for the common "just change the mode" case.
   # Returns `%{}` (no override) when neither is set.
   defp security_override(opts) do
@@ -976,7 +976,7 @@ defmodule Arbiter.Polecat.Sling do
   #
   # Gated by `Arbiter.MCP.inject_config?/0` (off in test by default) and fully
   # best-effort: a missing signing secret or write failure is logged and swallowed
-  # so MCP config never blocks a sling.
+  # so MCP config never blocks a dispatch.
   # No isolated worktree (e.g. a review dispatch running in the rig's shared
   # checkout) → never write the token-bearing `.mcp.json`. Injecting it into the
   # canonical checkout would leak the scope token into the working tree the live
@@ -986,9 +986,9 @@ defmodule Arbiter.Polecat.Sling do
   defp maybe_write_mcp_config(%Issue{} = bead, worktree_path, opts)
        when is_binary(worktree_path) do
     if Arbiter.MCP.inject_config?() do
-      # `:depth` carries the sling-recursion depth (Phase 2 guardrail): a polecat
-      # slung *by a coordinator* via `polecat_sling` is minted one level deeper, so
-      # a chain of dispatches is tracked. Defaults to 0 for a plain operator sling.
+      # `:depth` carries the dispatch-recursion depth (Phase 2 guardrail): a polecat
+      # slung *by a coordinator* via `polecat_dispatch` is minted one level deeper, so
+      # a chain of dispatches is tracked. Defaults to 0 for a plain operator dispatch.
       token =
         Arbiter.MCP.Scope.mint_polecat(bead, Keyword.get(opts, :rig),
           depth: Keyword.get(opts, :depth, 0)
@@ -1005,19 +1005,19 @@ defmodule Arbiter.Polecat.Sling do
   rescue
     e ->
       require Logger
-      Logger.warning("Arbiter.Polecat.Sling: MCP config injection failed: #{inspect(e)}")
+      Logger.warning("Arbiter.Polecat.Dispatch: MCP config injection failed: #{inspect(e)}")
       :ok
   end
 
   # Resolve which agent-config adapter to inject (.mcp.json vs .gemini/settings.json
-  # vs .codex/config.toml). Resolution mirrors `preflight_adapter/3` so a sling that
+  # vs .codex/config.toml). Resolution mirrors `preflight_adapter/3` so a dispatch that
   # forces a provider (`--provider gemini` / `agent_type: :gemini`) writes *that*
   # provider's config rather than the workspace default:
   #   1. `:agent_adapter` test override.
   #   2. `:agent_type` explicit provider override.
   #   3. Workspace default via `Agents.for_workspace`.
   # Falls back to :claude on any error so a misconfigured workspace never blocks a
-  # sling.
+  # dispatch.
   defp resolve_mcp_provider(%Issue{} = bead, opts) do
     adapter =
       case Keyword.get(opts, :agent_adapter) do
@@ -1062,7 +1062,7 @@ defmodule Arbiter.Polecat.Sling do
   # briefing of the prior worker's committed + uncommitted work, so the fresh
   # agent continues from the preserved worktree instead of redoing finished
   # steps. `:resume_context` is built by `Arbiter.Polecat.ResumeContext`; it's
-  # absent (empty prefix) on a normal fresh sling.
+  # absent (empty prefix) on a normal fresh dispatch.
   defp work_prompt(%Issue{} = bead, opts) do
     resume_prefix = Keyword.get(opts, :resume_context) || ""
     resume_prefix <> base_work_prompt(bead)
@@ -1085,7 +1085,7 @@ defmodule Arbiter.Polecat.Sling do
     commit on this branch, and push it.
 
     Do NOT open a pull request yourself (no `gh pr create` / `glab mr
-    create`). The Refinery opens the single canonical PR for this bead, on
+    create`). The MergeQueue opens the single canonical PR for this bead, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
     #{pr_review_instruction(bead)}#{pr_body_step(bead)}#{completion_notes_step(bead)}
@@ -1107,19 +1107,19 @@ defmodule Arbiter.Polecat.Sling do
   end
 
   # The worker authors the PR/MR body and persists it on the bead; the
-  # Refinery (not the worker) opens the one canonical PR with it (bd-53xrmi).
+  # MergeQueue (not the worker) opens the one canonical PR with it (bd-53xrmi).
   # Authoring it *after* implementing is what makes it worker-quality — the
   # Test plan reflects what actually passed, not what the spec hoped for. If
   # the repo ships a PR template we fill it rather than discard it (GitHub
   # injects the bare template only when the body is empty — the empty-body
   # incident #3606). Persisted via the `bead_update_progress` MCP tool
-  # (`pr_body` field), which the Refinery reads back as `pr_body`. We use the
+  # (`pr_body` field), which the MergeQueue reads back as `pr_body`. We use the
   # MCP tool rather than the `arb` escript so completion never depends on
   # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
   defp pr_body_step(%Issue{id: id}) do
     """
 
-    Author the PR description and persist it on the bead — the Refinery opens
+    Author the PR description and persist it on the bead — the MergeQueue opens
     the PR with this exact body, so write it as the PR writeup, not a restatement
     of the ticket. Do this AFTER the work is implemented and tested, so it
     reflects what actually changed:
@@ -1138,8 +1138,8 @@ defmodule Arbiter.Polecat.Sling do
     """
   end
 
-  # When a prior tribunal pass escalated with REQUEST_CHANGES, the reviewer's
-  # findings are stored in bead.notes by record_tribunal_outcome/3 in Polecat.
+  # When a prior review_gate pass escalated with REQUEST_CHANGES, the reviewer's
+  # findings are stored in bead.notes by record_review_gate_outcome/3 in Polecat.
   # Surface them here so the re-slunged worker sees them immediately in its
   # prompt without having to call bead_show or gh pr view first.
   defp prior_review_findings_section(%Issue{notes: notes})
@@ -1304,8 +1304,8 @@ defmodule Arbiter.Polecat.Sling do
     end
   end
 
-  defp maybe_put_opt(driver_opts, sling_opts, key) do
-    case Keyword.fetch(sling_opts, key) do
+  defp maybe_put_opt(driver_opts, dispatch_opts, key) do
+    case Keyword.fetch(dispatch_opts, key) do
       {:ok, val} -> Keyword.put(driver_opts, key, val)
       :error -> driver_opts
     end

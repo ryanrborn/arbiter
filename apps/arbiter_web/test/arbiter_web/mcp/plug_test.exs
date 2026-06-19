@@ -204,22 +204,22 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert json_response(conn, 200)["error"]["code"] == -32_003
     end
 
-    test "polecat_sling without can_sling is a JSON-RPC not-permitted error", ctx do
-      no_sling = Scope.mint_coordinator(ctx.ws.id, can_sling: false)
+    test "polecat_dispatch without can_dispatch is a JSON-RPC not-permitted error", ctx do
+      no_dispatch = Scope.mint_coordinator(ctx.ws.id, can_dispatch: false)
 
       conn =
         rpc(
           ctx.conn,
-          no_sling,
+          no_dispatch,
           req("tools/call", %{
-            "name" => "polecat_sling",
+            "name" => "polecat_dispatch",
             "arguments" => %{"bead_id" => ctx.bead.id}
           })
         )
 
       body = json_response(conn, 200)
       assert body["error"]["code"] == -32_003
-      assert body["error"]["message"] =~ "can_sling"
+      assert body["error"]["message"] =~ "can_dispatch"
     end
   end
 

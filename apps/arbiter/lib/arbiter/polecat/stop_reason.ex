@@ -127,7 +127,7 @@ defmodule Arbiter.Polecat.StopReason do
           remediation:
             "Re-authenticate the agent CLI (Claude: refresh ~/.claude/.credentials.json " <>
               "via `claude` login; Gemini: refresh GEMINI_API_KEY / re-run `gemini` auth), " <>
-              "then re-sling.",
+              "then re-dispatch.",
           exit_status: exit_status,
           signal: signal
         }
@@ -137,7 +137,7 @@ defmodule Arbiter.Polecat.StopReason do
           category: :credit_exhausted,
           summary: "agent ran out of credits / quota",
           remediation:
-            "Top up the provider account or rotate to a funded API key, then re-sling.",
+            "Top up the provider account or rotate to a funded API key, then re-dispatch.",
           exit_status: exit_status,
           signal: signal
         }
@@ -156,7 +156,7 @@ defmodule Arbiter.Polecat.StopReason do
           category: :stalled,
           summary: "agent produced no output within the watchdog window (possible hang)",
           remediation:
-            "Inspect the worker's transcript; if genuinely hung, stop and re-sling the bead.",
+            "Inspect the worker's transcript; if genuinely hung, stop and re-dispatch the bead.",
           exit_status: nil,
           signal: nil
         }
@@ -166,7 +166,7 @@ defmodule Arbiter.Polecat.StopReason do
           category: :killed,
           summary: "agent subprocess was killed by signal #{signal}",
           remediation:
-            "External kill, OOM, or host restart. Check dmesg/host health, then re-sling.",
+            "External kill, OOM, or host restart. Check dmesg/host health, then re-dispatch.",
           exit_status: exit_status,
           signal: signal
         }
@@ -177,7 +177,7 @@ defmodule Arbiter.Polecat.StopReason do
           summary: "agent exited cleanly but never signalled `arb done` (quit before completing)",
           remediation:
             "The worker stopped early without finishing the bead. Review the transcript, " <>
-              "then re-sling.",
+              "then re-dispatch.",
           exit_status: 0,
           signal: nil
         }
@@ -188,7 +188,7 @@ defmodule Arbiter.Polecat.StopReason do
           summary: "agent subprocess crashed (exit code #{exit_status})",
           remediation:
             "Non-zero exit with no recognized cause — often a bad CLI flag or an immediate " <>
-              "subprocess error. Check the captured stderr/exit code, then re-sling.",
+              "subprocess error. Check the captured stderr/exit code, then re-dispatch.",
           exit_status: exit_status,
           signal: signal
         }

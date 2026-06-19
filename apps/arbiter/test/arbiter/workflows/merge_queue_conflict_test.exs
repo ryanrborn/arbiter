@@ -1,14 +1,14 @@
-defmodule Arbiter.Workflows.RefineryConflictTest do
+defmodule Arbiter.Workflows.MergeQueueConflictTest do
   @moduledoc """
   Tests for the merge queue's CONFLICTING-PR auto-resolution path (bd-dolcqq).
 
-  Drives the `Refinery` with a stub resolver so the conflict-spawn machinery
+  Drives the `MergeQueue` with a stub resolver so the conflict-spawn machinery
   is exercised without booting a real Polecat / ClaudeSession. Mocks GitHub
   PR fetches via `Req.Test` so we can simulate a PR flipping between
   CONFLICTING and clean across ticks.
   """
 
-  # async: false — same rationale as the parent refinery_test.
+  # async: false — same rationale as the parent merge_queue_test.
   use Arbiter.DataCase, async: false
 
   import Ash.Query, only: [filter: 2]
@@ -16,7 +16,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
   alias Arbiter.Beads.Issue
   alias Arbiter.Beads.Workspace
   alias Arbiter.Messages.Message
-  alias Arbiter.Workflows.Refinery
+  alias Arbiter.Workflows.MergeQueue
 
   @token "test-token-abc123"
 
@@ -33,12 +33,12 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
 
   # ---- stub resolver ------------------------------------------------------
 
-  # The Refinery resolves the stub by atom, so we can't pass closures through
+  # The MergeQueue resolves the stub by atom, so we can't pass closures through
   # opts. Instead the stub pulls a per-test target pid out of :persistent_term
-  # keyed on the bead id — the test seeds it before driving the Refinery.
+  # keyed on the bead id — the test seeds it before driving the MergeQueue.
   defmodule StubResolverWithCallback do
     @moduledoc false
-    @behaviour Arbiter.Workflows.Refinery.ConflictResolver
+    @behaviour Arbiter.Workflows.MergeQueue.ConflictResolver
 
     @impl true
     def resolve(args) do
@@ -120,8 +120,8 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
     %{workspace: workspace, bead: bead}
   end
 
-  defp start_refinery(workspace, opts \\ []) do
-    name = :"refinery_conflict_#{System.unique_integer([:positive])}"
+  defp start_merge_queue(workspace, opts \\ []) do
+    name = :"merge_queue_conflict_#{System.unique_integer([:positive])}"
 
     full_opts =
       [
@@ -133,7 +133,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       ]
       |> Keyword.merge(opts)
 
-    {:ok, pid} = Refinery.start_link(full_opts)
+    {:ok, pid} = MergeQueue.start_link(full_opts)
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
     Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, self(), pid)
     {pid, name}
@@ -223,9 +223,9 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       StubResolverWithCallback.register(bead.id, self(), :ok)
       conflicting_stub(901)
 
-      {_pid, name} = start_refinery(ws)
-      :ok = Refinery.enqueue(name, bead.id)
-      :ok = Refinery.tick(name)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.tick(name)
 
       assert_received {:resolver_called, args}
       assert args.bead_id == bead.id
@@ -233,7 +233,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       assert args.target_branch == "main"
       assert args.pr_ref == "#901"
 
-      %{items: [item]} = Refinery.state(name)
+      %{items: [item]} = MergeQueue.state(name)
       assert item.status == :conflict_resolving
       assert %DateTime{} = item.resolver_spawned_at
       assert item.prior_status == :awaiting_approval
@@ -249,19 +249,19 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       StubResolverWithCallback.register(bead.id, self(), :ok)
       conflicting_stub(902)
 
-      {_pid, name} = start_refinery(ws)
-      :ok = Refinery.enqueue(name, bead.id)
-      :ok = Refinery.tick(name)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.tick(name)
 
       assert_received {:resolver_called, _}
 
       # Second tick with the same conflict — must NOT spawn again, and must
       # escalate.
-      :ok = Refinery.tick(name)
+      :ok = MergeQueue.tick(name)
       refute_received {:resolver_called, _}
       assert_received {:escalate_called, _, _, _, :resolver_did_not_clear_conflict}
 
-      %{items: [item]} = Refinery.state(name)
+      %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
       assert item.last_error == :conflict_unresolved
     end
@@ -316,17 +316,17 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
         end
       end)
 
-      {_pid, name} = start_refinery(ws)
-      :ok = Refinery.enqueue(name, bead.id)
-      :ok = Refinery.tick(name)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.tick(name)
       assert_received {:resolver_called, _}
 
-      %{items: [item]} = Refinery.state(name)
+      %{items: [item]} = MergeQueue.state(name)
       assert item.status == :conflict_resolving
 
-      :ok = Refinery.tick(name)
+      :ok = MergeQueue.tick(name)
 
-      %{items: [item]} = Refinery.state(name)
+      %{items: [item]} = MergeQueue.state(name)
       assert item.status == :awaiting_approval
       assert item.prior_status == nil
       assert item.resolver_spawned_at == nil
@@ -349,19 +349,19 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       # One mechanical rebase pass per conflict — the first spawn happens on
       # the first tick, and a second consecutive CONFLICTING observation
       # means the rebase didn't clear it → escalate.
-      {_pid, name} = start_refinery(ws)
-      :ok = Refinery.enqueue(name, bead.id)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, bead.id)
 
-      :ok = Refinery.tick(name)
+      :ok = MergeQueue.tick(name)
       assert_received {:resolver_called, _}
 
-      :ok = Refinery.tick(name)
+      :ok = MergeQueue.tick(name)
       assert_received {:escalate_called, bead_id, ws_id, _branch, reason}
       assert bead_id == bead.id
       assert ws_id == ws.id
       assert reason == :resolver_did_not_clear_conflict
 
-      %{items: [item]} = Refinery.state(name)
+      %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
       assert item.last_error == :conflict_unresolved
     end
@@ -370,7 +370,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       workspace: ws,
       bead: bead
     } do
-      # The stub returns an error from resolve/1 — the Refinery escalates and
+      # The stub returns an error from resolve/1 — the MergeQueue escalates and
       # marks the item :failed. We assert the escalation lands in the message
       # queue (the real ConflictResolver.escalate_unresolved/4 path), since
       # the stub's escalate_unresolved is also wired and we want both layers
@@ -378,15 +378,15 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       StubResolverWithCallback.register(bead.id, self(), {:error, :no_repo_path})
       conflicting_stub(905)
 
-      {_pid, name} = start_refinery(ws)
-      :ok = Refinery.enqueue(name, bead.id)
-      :ok = Refinery.tick(name)
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.tick(name)
 
       assert_received {:resolver_called, _}
       assert_received {:escalate_called, bead_id, _ws_id, _branch, :no_repo_path}
       assert bead_id == bead.id
 
-      %{items: [item]} = Refinery.state(name)
+      %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
       assert match?({:resolver_spawn_failed, :no_repo_path}, item.last_error)
     end
@@ -400,7 +400,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       bead: bead
     } do
       :ok =
-        Arbiter.Workflows.Refinery.ConflictResolver.escalate_unresolved(
+        Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved(
           bead.id,
           ws.id,
           "feature/" <> bead.id,
@@ -421,7 +421,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
 
     test "missing workspace_id is a no-op (does not raise)", %{bead: bead} do
       assert :ok =
-               Arbiter.Workflows.Refinery.ConflictResolver.escalate_unresolved(
+               Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved(
                  bead.id,
                  nil,
                  "x",
@@ -438,7 +438,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       bead: bead
     } do
       :ok =
-        Arbiter.Workflows.Refinery.ConflictResolver.notify_resolution(
+        Arbiter.Workflows.MergeQueue.ConflictResolver.notify_resolution(
           bead.id,
           ws.id,
           "feature/" <> bead.id
@@ -456,7 +456,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
 
     test "missing workspace_id is a no-op (does not raise)", %{bead: bead} do
       assert :ok =
-               Arbiter.Workflows.Refinery.ConflictResolver.notify_resolution(
+               Arbiter.Workflows.MergeQueue.ConflictResolver.notify_resolution(
                  bead.id,
                  nil,
                  "x"
@@ -468,7 +468,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
 
   # The block below exercises the real `resolve/1` against a fixture git
   # repo with an existing conflicting branch. This is the path the round-2
-  # Tribunal flagged as untested — every other test in this file uses a
+  # ReviewGate flagged as untested — every other test in this file uses a
   # stub that short-circuits `Worktree.attach` and `Polecat.start`. We bypass
   # the real `claude` invocation via `start_claude: false` (the resolver's
   # documented test escape) but still exercise the worktree-attach +
@@ -530,7 +530,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       assert Arbiter.Polecat.whereis(bead.id <> ":conflict") == nil
 
       {:ok, info} =
-        Arbiter.Workflows.Refinery.ConflictResolver.resolve(%{
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
           bead_id: bead.id,
           workspace_id: ws.id,
           repo_path: repo,
@@ -581,7 +581,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
         )
 
       result =
-        Arbiter.Workflows.Refinery.ConflictResolver.resolve(%{
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
           bead_id: bead.id,
           workspace_id: ws.id,
           repo_path: repo,
@@ -601,7 +601,7 @@ defmodule Arbiter.Workflows.RefineryConflictTest do
       # is "attach to the existing branch" — anything else risks shadowing
       # the PR's head ref.
       result =
-        Arbiter.Workflows.Refinery.ConflictResolver.resolve(%{
+        Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
           bead_id: bead.id,
           workspace_id: ws.id,
           repo_path: repo,

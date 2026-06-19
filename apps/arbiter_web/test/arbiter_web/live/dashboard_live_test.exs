@@ -2,7 +2,7 @@ defmodule ArbiterWeb.DashboardLiveTest.QueueMerger do
   @moduledoc """
   Minimal `Arbiter.Mergers.Merger` stub for driving a polecat to
   `:awaiting_review` in the dashboard's merge-queue tests. `get/1` returns a
-  still-open MR so the Warden (if it ever polls) keeps the polecat parked.
+  still-open MR so the Watchdog (if it ever polls) keeps the polecat parked.
   """
   @behaviour Arbiter.Mergers.Merger
 
@@ -67,8 +67,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Current "
       # Merge queue section header ("merge queue" → "Merge queues").
       assert html =~ "Merge queues"
-      # Tribunal (review gate) section + its two subsections.
-      assert html =~ "Tribunal"
+      # ReviewGate (review gate) section + its two subsections.
+      assert html =~ "ReviewGate"
       assert html =~ "In review"
       assert html =~ "Escalations"
     end
@@ -361,14 +361,14 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "merge queue (Crucibles)" do
+  describe "merge queue (MergeQueues)" do
     test "empty state renders", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ ~s(id="merge-queue-empty")
       assert html =~ "No pull requests integrating right now"
     end
 
-    test "an in-flight merge surfaces with MR link, merger type and Warden activity",
+    test "an in-flight merge surfaces with MR link, merger type and Watchdog activity",
          %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "merging-bead", workspace_id: ws.id})
       {:ok, pid} = Polecat.start(bead_id: bead.id, rig: "test/rig", workspace_id: ws.id)
@@ -386,9 +386,9 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "https://example.test/mr/99"
       # Default workspace has no merge.strategy config → Direct.
       assert html =~ "Direct"
-      # Long initial poll delay means the Warden hasn't recorded a status yet.
+      # Long initial poll delay means the Watchdog hasn't recorded a status yet.
       assert html =~ "Awaiting first poll"
-      assert html =~ "Warden polling every"
+      assert html =~ "Watchdog polling every"
     end
 
     test "a recorded approval drives the status badge label", %{conn: conn, ws: ws} do
@@ -397,13 +397,13 @@ defmodule ArbiterWeb.DashboardLiveTest do
       :ok = Polecat.advance(pid, :integrate)
       {:ok, _} = Polecat.open_mr(pid, "feature/y", "Integrate y", "", merge_opts())
 
-      # Simulate the result of a Warden poll without waiting on its timer.
+      # Simulate the result of a Watchdog poll without waiting on its timer.
       :ok = Polecat.record_merger_status(pid, %{status: :open, approved: true})
 
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Approved"
-      assert html =~ "Warden checked"
+      assert html =~ "Watchdog checked"
     end
 
     test "the merger type reflects the workspace's gitlab strategy", %{conn: conn} do
@@ -425,12 +425,12 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "tribunal (review gate)" do
+  describe "review_gate (review gate)" do
     alias Arbiter.Messages.Message
 
     test "empty state renders both subsections", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ ~s(id="tribunal-section")
+      assert html =~ ~s(id="review_gate-section")
       assert html =~ ~s(id="pending-reviews-empty")
       assert html =~ ~s(id="escalations-empty")
       assert html =~ "No reviews in flight"
@@ -446,7 +446,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
           from_ref: "bd-rejected",
           directive_ref: "bd-rejected",
           workspace_id: ws.id,
-          subject: "Tribunal: changes requested for bd-rejected",
+          subject: "ReviewGate: changes requested for bd-rejected",
           body: "VERDICT: REQUEST_CHANGES\nThe migration is missing a down/0."
         })
 
@@ -457,7 +457,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
           from_ref: "bd-murky",
           directive_ref: "bd-murky",
           workspace_id: ws.id,
-          subject: "Tribunal: review inconclusive for bd-murky",
+          subject: "ReviewGate: review inconclusive for bd-murky",
           body: "Reviewer produced no parseable VERDICT line."
         })
 
@@ -476,8 +476,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "a review in flight surfaces under 'in review'", %{conn: conn, ws: ws} do
       {:ok, bead} = Ash.create(Issue, %{title: "under-review", workspace_id: ws.id})
 
-      # Drive an author polecat to :awaiting_tribunal without spawning a live
-      # reviewer (review_spawn: false) — the same seam the Tribunal tests use.
+      # Drive an author polecat to :awaiting_review_gate without spawning a live
+      # reviewer (review_spawn: false) — the same seam the ReviewGate tests use.
       {:ok, pid} =
         Polecat.start(
           bead_id: bead.id,
@@ -493,7 +493,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       :ok = Polecat.advance(pid, :claude)
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> match?(%{status: :awaiting_tribunal}, Polecat.state(pid)) end)
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Polecat.state(pid)) end)
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -504,7 +504,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   # Poll until `fun` returns true or a short deadline elapses. Mirrors the
-  # tribunal suite's helper for waiting on an async polecat transition.
+  # review_gate suite's helper for waiting on an async polecat transition.
   defp wait_until(fun, attempts \\ 100)
   defp wait_until(_fun, 0), do: flunk("condition not met before deadline")
 
@@ -517,7 +517,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  # open_mr opts that pin a stub adapter and push the Warden's first poll far
+  # open_mr opts that pin a stub adapter and push the Watchdog's first poll far
   # into the future, so the polecat parks at :awaiting_review deterministically
   # without the poll loop racing the assertions.
   defp merge_opts do
