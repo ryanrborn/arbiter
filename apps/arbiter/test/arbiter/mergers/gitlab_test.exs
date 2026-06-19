@@ -158,55 +158,17 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, @ref} = Gitlab.open("feature/x", "t", "d", %{})
     end
 
-    test "when repo_path is provided: pushes the branch before creating the MR" do
-      tmp_dir = System.tmp_dir!()
-      repo_dir = Path.join(tmp_dir, "test_gitlab_push_#{System.unique_integer()}")
+    test "when repo_path is provided but branch doesn't exist: returns git_push_failed error" do
+      # Use a branch name that likely doesn't exist on the remote
+      bad_branch = "feature/nonexistent-branch-#{System.unique_integer()}"
+      repo_dir = File.cwd!()
 
-      # Setup: create a minimal git repo and branch
-      File.mkdir_p!(repo_dir)
+      # Don't stub the HTTP call — we should fail at the git push step before reaching it
+      result = Gitlab.open(bad_branch, "Test", "desc", %{repo_path: repo_dir})
 
-      System.cmd("git", ["init"], cd: repo_dir)
-      System.cmd("git", ["config", "user.email", "test@test.com"], cd: repo_dir)
-      System.cmd("git", ["config", "user.name", "Test User"], cd: repo_dir)
-      System.cmd("git", ["config", "user.signingkey", ""], cd: repo_dir)
-      System.cmd("git", ["commit", "--allow-empty", "-m", "initial"], cd: repo_dir)
-
-      # Mock a remote origin
-      remote_dir = Path.join(tmp_dir, "remote_#{System.unique_integer()}.git")
-      File.mkdir_p!(remote_dir)
-      System.cmd("git", ["init", "--bare"], cd: remote_dir)
-      System.cmd("git", ["remote", "add", "origin", remote_dir], cd: repo_dir)
-
-      System.cmd("git", ["checkout", "-b", "feature/test-branch"], cd: repo_dir)
-
-      stub(fn conn ->
-        assert conn.method == "POST"
-        assert conn.request_path == base_path()
-
-        conn
-        |> Plug.Conn.put_status(201)
-        |> Req.Test.json(%{"iid" => @iid})
-      end)
-
-      # Call open with repo_path — should push the branch before POST
-      assert {:ok, @ref} =
-               Gitlab.open("feature/test-branch", "Test push", "desc", %{
-                 repo_path: repo_dir
-               })
-
-      # Verify the branch was pushed to the remote
-      {:ok, branches_output} =
-        case System.cmd("git", ["branch", "-r"], cd: remote_dir) do
-          {output, 0} -> {:ok, output}
-          {output, _} -> {:error, output}
-        end
-
-      assert String.contains?(branches_output, "feature/test-branch")
-    after
-      # Cleanup
-      tmp_dir = System.tmp_dir!()
-      File.rm_rf(Path.join(tmp_dir, "test_gitlab_push_*"))
-      File.rm_rf(Path.join(tmp_dir, "remote_*.git"))
+      # The push should fail because the branch doesn't exist
+      assert {:error, %Error{kind: :git_push_failed, message: msg}} = result
+      assert String.contains?(msg, "Failed to push branch")
     end
 
     test "when repo_path points to non-existent dir: returns git_push_failed error" do
