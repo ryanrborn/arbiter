@@ -159,6 +159,34 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert :ok = Shortcut.transition(@ref, :open)
     end
 
+    test "transition to closed uses workflow_state_id, never sends completed" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/workflows"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(workflows_payload())
+
+          {"PUT", "/api/v3/stories/" <> _} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            payload = Jason.decode!(body)
+
+            # Shortcut rejects "completed" as a disallowed key; we must use workflow_state_id
+            refute Map.has_key?(payload, "completed"),
+              "Must not send 'completed' key (disallowed by Shortcut API)"
+
+            assert payload == %{"workflow_state_id" => 502},
+              "Must send only workflow_state_id for Done state"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234})
+        end
+      end)
+
+      assert :ok = Shortcut.transition(@ref, :closed)
+    end
+
     test "returns {:error, :transition_not_found} when the task status has no mapping" do
       Config.put_active(%{
         "credentials_ref" => "env:#{@env_var}",
