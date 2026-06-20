@@ -33,6 +33,67 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.completed_at == nil
   end
 
+  test "worker_type is derived from meta (reviewer/implementer/main)" do
+    main_id = "bd-typemain-#{System.unique_integer([:positive])}"
+    review_id = "bd-typereview-#{System.unique_integer([:positive])}"
+    impl_id = "bd-typeimpl-#{System.unique_integer([:positive])}"
+    revonly_id = "bd-typerevonly-#{System.unique_integer([:positive])}"
+
+    {:ok, main} = Worker.start(task_id: main_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    {:ok, review} =
+      Worker.start(
+        task_id: review_id,
+        repo: "arbiter",
+        workspace_id: "ws-runs",
+        meta: %{role: :reviewer}
+      )
+
+    {:ok, impl} =
+      Worker.start(
+        task_id: impl_id,
+        repo: "arbiter",
+        workspace_id: "ws-runs",
+        meta: %{role: :implementer}
+      )
+
+    {:ok, revonly} =
+      Worker.start(
+        task_id: revonly_id,
+        repo: "arbiter",
+        workspace_id: "ws-runs",
+        meta: %{review_only: true}
+      )
+
+    on_exit(fn ->
+      for pid <- [main, review, impl, revonly],
+          Process.alive?(pid),
+          do: GenServer.stop(pid, :normal)
+    end)
+
+    assert [%{worker_type: :main}] = runs_for(main_id)
+    assert [%{worker_type: :review}] = runs_for(review_id)
+    assert [%{worker_type: :impl}] = runs_for(impl_id)
+    assert [%{worker_type: :review}] = runs_for(revonly_id)
+  end
+
+  test "the resolved model is persisted onto the Run row on completion" do
+    task_id = "bd-runmodel-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.report(pid, :model, "claude-opus-4-8")
+    :ok = Worker.complete(pid, :done)
+
+    [run] = runs_for(task_id)
+    assert run.status == :completed
+    assert run.model == "claude-opus-4-8"
+  end
+
   test "completing a worker stamps the Run row :completed with output_lines" do
     task_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 
