@@ -922,7 +922,7 @@ defmodule ArbiterWeb.DashboardLive do
             ]}>
               <.icon name="hero-envelope" class="size-7" />
             </div>
-            <div class="stat-title">Admiral Inbox</div>
+            <div class="stat-title">Coordinator Inbox</div>
             <div class={[
               "stat-value",
               if(@admiral_inbox == [], do: "text-base-content/40", else: "text-warning")
@@ -1193,7 +1193,7 @@ defmodule ArbiterWeb.DashboardLive do
           <div class="card-body p-4 gap-4">
             <div class="flex items-center justify-between gap-2">
               <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-envelope" class="size-5 text-base-content/70" /> Admiral Mailbox
+                <.icon name="hero-envelope" class="size-5 text-base-content/70" /> Coordinator Mailbox
                 <span class={[
                   "badge badge-sm",
                   if(@admiral_inbox == [], do: "badge-ghost", else: "badge-warning")
@@ -1204,7 +1204,7 @@ defmodule ArbiterWeb.DashboardLive do
               <button
                 phx-click="clear_admiral"
                 class="btn btn-xs btn-ghost gap-1"
-                data-confirm="Clear all already-read Admiral mail? (unread is kept)"
+                data-confirm="Clear all already-read Coordinator mail? (unread is kept)"
                 title="Drain the read tail — already-read mail is destroyed, unread is kept"
               >
                 <.icon name="hero-trash" class="size-3.5" /> Clear read
@@ -1219,7 +1219,7 @@ defmodule ArbiterWeb.DashboardLive do
               <.icon name="hero-inbox" class="size-8 mx-auto text-base-content/30" />
               <p class="mt-2 text-sm text-base-content/60">
                 Inbox clear. Worker completions, failures, and escalations addressed
-                to the Admiral land here in real time.
+                to the Coordinator land here in real time.
               </p>
             </div>
 
