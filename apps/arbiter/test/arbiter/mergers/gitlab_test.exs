@@ -202,16 +202,22 @@ defmodule Arbiter.Mergers.GitlabTest do
     test "200: returns the task-domain view of the MR" do
       stub(fn conn ->
         assert conn.method == "GET"
-        assert conn.request_path == "#{base_path()}/#{@iid}"
 
-        conn
-        |> Plug.Conn.put_status(200)
-        |> Req.Test.json(%{
-          "iid" => @iid,
-          "state" => "opened",
-          "approved" => true,
-          "web_url" => "https://gitlab.com/grp/proj/-/merge_requests/42"
-        })
+        cond do
+          conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "approved" => true,
+              "web_url" => "https://gitlab.com/grp/proj/-/merge_requests/42"
+            })
+
+          # get/1 also polls the MR's pipelines for CI status.
+          conn.request_path == "#{base_path()}/#{@iid}/pipelines" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
       end)
 
       assert {:ok,
@@ -313,6 +319,96 @@ defmodule Arbiter.Mergers.GitlabTest do
       end)
 
       assert {:ok, %{pipeline: nil}} = Gitlab.get(@ref)
+    end
+  end
+
+  # #354 Phase 1: get/1 classifies *why* an open MR can't merge so the Warden
+  # (Watchdog) can escalate a blocked merge instead of parking it silently.
+  describe "get/1 block_reason (#354)" do
+    defp block_get(mr_fields, pipelines \\ []) do
+      mr = Map.merge(%{"iid" => @iid, "state" => "opened"}, mr_fields)
+
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(mr)
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pipelines)
+        end
+      end)
+
+      {:ok, result} = Gitlab.get(@ref)
+      result
+    end
+
+    test "mergeable MR has no block reason" do
+      assert block_get(%{"detailed_merge_status" => "mergeable"}).block_reason == nil
+    end
+
+    test "has_conflicts classifies as :conflict" do
+      assert block_get(%{"has_conflicts" => true}).block_reason == :conflict
+    end
+
+    test "detailed_merge_status conflict classifies as :conflict" do
+      assert block_get(%{"detailed_merge_status" => "conflict"}).block_reason == :conflict
+    end
+
+    test "need_rebase classifies as :behind_base" do
+      assert block_get(%{"detailed_merge_status" => "need_rebase"}).block_reason == :behind_base
+    end
+
+    test "ci_must_pass is non-blocking (CI required but not yet failed)" do
+      # ci_must_pass means CI hasn't gone green yet — it may still be running.
+      # Only a resolved :failed pipeline is a CI block, so this is nil.
+      assert block_get(%{"detailed_merge_status" => "ci_must_pass"}).block_reason == nil
+    end
+
+    test "ci_still_running is non-blocking (pipeline in progress, not failed)" do
+      assert block_get(%{"detailed_merge_status" => "ci_still_running"}).block_reason == nil
+    end
+
+    test "ci_must_pass with a failed pipeline still classifies as :ci_failed" do
+      # When CI has actually failed, the resolved pipeline value wins regardless
+      # of the detailed-status string.
+      result =
+        block_get(%{"detailed_merge_status" => "ci_must_pass"}, [%{"id" => 9, "status" => "failed"}])
+
+      assert result.block_reason == :ci_failed
+    end
+
+    test "transient detailed statuses (preparing/checking/unchecked) are non-blocking" do
+      for status <- ["preparing", "checking", "unchecked"] do
+        assert block_get(%{"detailed_merge_status" => status}).block_reason == nil,
+               "expected #{status} to be non-blocking"
+      end
+    end
+
+    test "a failed pipeline classifies as :ci_failed" do
+      result = block_get(%{}, [%{"id" => 9, "status" => "failed"}])
+      assert result.block_reason == :ci_failed
+    end
+
+    test "not_approved classifies as :needs_approval" do
+      assert block_get(%{"detailed_merge_status" => "not_approved"}).block_reason ==
+               :needs_approval
+    end
+
+    test "draft classifies as :draft" do
+      assert block_get(%{"draft" => true}).block_reason == :draft
+    end
+
+    test "cannot_be_merged without detail falls back to :conflict" do
+      assert block_get(%{"merge_status" => "cannot_be_merged"}).block_reason == :conflict
+    end
+
+    test "an unresolved-discussions status classifies as :blocked_other" do
+      assert block_get(%{"detailed_merge_status" => "discussions_not_resolved"}).block_reason ==
+               :blocked_other
+    end
+
+    test "a merged MR carries no block reason" do
+      assert block_get(%{"state" => "merged"}).block_reason == nil
     end
   end
 

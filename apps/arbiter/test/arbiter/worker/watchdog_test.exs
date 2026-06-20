@@ -145,6 +145,76 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "block_reason/1" do
+    test "extracts the adapter's block reason, nil when absent" do
+      assert Watchdog.block_reason(%{block_reason: :conflict}) == :conflict
+      assert Watchdog.block_reason(%{status: :open}) == nil
+      assert Watchdog.block_reason(%{block_reason: nil}) == nil
+      assert Watchdog.block_reason(nil) == nil
+    end
+  end
+
+  describe "effective_block_reason/1 (gated on approval, #354)" do
+    test "an approved PR with a block reason reports it" do
+      assert Watchdog.effective_block_reason(%{status: :open, approved: true, block_reason: :conflict}) ==
+               :conflict
+    end
+
+    test "a not-yet-approved PR with a block reason reports nil (ordinary review window)" do
+      # A PR awaiting its required review routinely classifies as blocked
+      # (GitHub :needs_approval, GitLab not_approved). That is the normal
+      # pre-approval state, not a merge failure — so the gate suppresses it.
+      assert Watchdog.effective_block_reason(%{
+               status: :open,
+               approved: false,
+               block_reason: :needs_approval
+             }) == nil
+    end
+
+    test "an approved PR with no block reason reports nil" do
+      assert Watchdog.effective_block_reason(%{status: :open, approved: true}) == nil
+    end
+
+    test "merged/closed PRs report nil regardless of any stale block reason" do
+      assert Watchdog.effective_block_reason(%{status: :merged, block_reason: :conflict}) == nil
+      assert Watchdog.effective_block_reason(%{status: :closed, block_reason: :conflict}) == nil
+    end
+
+    test "non-map input is nil" do
+      assert Watchdog.effective_block_reason(nil) == nil
+    end
+  end
+
+  describe "blocked-merge detection (#354)" do
+    test "records the block reason on the worker and keeps the PR parked (no fail)" do
+      {pid, task_id} = running_worker()
+      # An approved-but-conflicting PR: the merger can't merge it. The Warden
+      # must detect + record the reason within one poll and NOT fail the worker.
+      StubMerger.queue_get("!b1", [
+        %{status: :open, approved: true, block_reason: :conflict}
+      ])
+
+      start_watchdog(pid, task_id, "!b1", auto_merge: false)
+
+      wait_until(fn ->
+        status = Map.get(Worker.state(pid).meta, :last_merger_status)
+        is_map(status) and Map.get(status, :block_reason) == :conflict
+      end)
+
+      # Detection must not fail the worker — it stays parked for a human/Phase 2.
+      refute Worker.state(pid).status == :failed
+    end
+
+    test "a clear block reason (nil) leaves the normal flow untouched" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!b2", [%{status: :merged, block_reason: nil}])
+
+      start_watchdog(pid, task_id, "!b2", [])
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+    end
+  end
+
   describe "via_review_gate short-circuits forge approval (bd-66ey1o)" do
     test "treats :pending as :approved and force-auto-merges on first poll" do
       {pid, task_id} = running_worker()
