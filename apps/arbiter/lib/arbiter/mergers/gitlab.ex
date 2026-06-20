@@ -113,11 +113,12 @@ defmodule Arbiter.Mergers.Gitlab do
         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
           merge_status = Map.get(body, "merge_status", "")
           pipeline = fetch_pipeline_status(cfg, iid)
+          status = map_state(Map.get(body, "state"))
 
           {:ok,
            %{
              ref: ref_for(iid),
-             status: map_state(Map.get(body, "state")),
+             status: status,
              approved: approved?(body),
              changes_requested: false,
              latest_review_id: nil,
@@ -126,6 +127,7 @@ defmodule Arbiter.Mergers.Gitlab do
              conflicting:
                Map.get(body, "has_conflicts", false) == true or
                  merge_status == "cannot_be_merged",
+             block_reason: block_reason(body, status, pipeline),
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
            }}
 
@@ -445,6 +447,74 @@ defmodule Arbiter.Mergers.Gitlab do
   defp approved?(%{"approved" => approved}) when is_boolean(approved), do: approved
   defp approved?(_), do: false
 
+  # Classify *why* an open MR can't merge, or nil when it is mergeable (or
+  # already terminal). The block-reason surface Phase 1 (#354) escalates on so an
+  # approved-but-unmergeable MR never parks silently. Prefers GitLab's
+  # `detailed_merge_status` (richest signal); falls back to `merge_status` /
+  # `has_conflicts` on older GitLab versions that omit it.
+  #
+  #   :conflict       — merge conflict with the target branch
+  #   :behind_base    — fast-forward-only target needs a rebase
+  #   :ci_failed      — required pipeline actually failed
+  #   :needs_approval — required approvals not yet satisfied
+  #   :draft          — MR is a draft / work in progress
+  #   :blocked_other  — blocked by some other settled rule (unresolved threads, …)
+  #
+  # In-progress / transient statuses map to `nil` (not a block): "ci_still_running"
+  # / "ci_must_pass" mean CI is required but not yet green — it may still be
+  # running — so a CI block is keyed off the *resolved* `pipeline == :failed`,
+  # never the detailed-status string; and "preparing" / "checking" / "unchecked"
+  # mean GitLab is still computing the merge status. Escalating any of these
+  # would fire while the MR is merely being prepared, not genuinely blocked.
+  defp block_reason(_body, status, _pipeline) when status in [:merged, :closed], do: nil
+
+  defp block_reason(body, _status, pipeline) do
+    draft? = Map.get(body, "draft") == true or Map.get(body, "work_in_progress") == true
+    detailed = Map.get(body, "detailed_merge_status")
+    merge_status = Map.get(body, "merge_status")
+    conflicts? = Map.get(body, "has_conflicts") == true
+
+    cond do
+      draft? or detailed == "draft_status" ->
+        :draft
+
+      conflicts? or detailed in ["conflict", "broken_status"] ->
+        :conflict
+
+      detailed == "need_rebase" ->
+        :behind_base
+
+      # Only a settled, failed pipeline is a CI block. "ci_must_pass" /
+      # "ci_still_running" are handled in the in-progress bucket below.
+      pipeline == :failed ->
+        :ci_failed
+
+      detailed in ["not_approved", "approvals_syncing", "requested_changes"] ->
+        :needs_approval
+
+      detailed == "mergeable" ->
+        nil
+
+      # In-progress / transient — CI not yet green, or merge status still being
+      # computed. Non-blocking until it settles (findings: ci_still_running is
+      # not a failure; preparing/checking/unchecked are not a block).
+      detailed in ["ci_must_pass", "ci_still_running", "preparing", "checking", "unchecked"] ->
+        nil
+
+      is_nil(detailed) and merge_status == "cannot_be_merged" ->
+        :conflict
+
+      is_nil(detailed) and merge_status in ["can_be_merged", "unchecked", "checking", nil, ""] ->
+        nil
+
+      is_nil(detailed) ->
+        nil
+
+      true ->
+        :blocked_other
+    end
+  end
+
   # Fetch the latest pipeline for the MR and map its status to a domain atom.
   # Returns nil when there are no pipelines (no CI configured) or the request
   # fails (best-effort — a transient API error must not block the MR poll).
@@ -548,7 +618,9 @@ defmodule Arbiter.Mergers.Gitlab do
                stderr_to_stdout: true,
                cd: path
              ) do
-          {_output, 0} -> :ok
+          {_output, 0} ->
+            :ok
+
           {output, _nonzero} ->
             {:error,
              %Error{

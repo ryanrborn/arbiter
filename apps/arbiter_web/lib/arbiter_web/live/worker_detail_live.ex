@@ -959,20 +959,52 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp status_label(other), do: to_string(other)
 
   # Badge color + text for the last Mergers.get/1 result the Watchdog recorded.
+  # An *approved* MR that still can't merge (#354, Phase 1) surfaces the *why*
+  # ahead of the generic approval state. The block reason is read through
+  # `Watchdog.effective_block_reason/1`, which only reports a block once the MR
+  # is approved — so the ordinary pre-approval review window never shows a red
+  # "Blocked" badge.
   defp approval_class(%{status: :merged}), do: "badge-success"
   defp approval_class(%{status: :closed}), do: "badge-error"
-  defp approval_class(%{approved: true}), do: "badge-success"
+
+  defp approval_class(status) when is_map(status) do
+    cond do
+      Watchdog.effective_block_reason(status) -> "badge-error"
+      Map.get(status, :approved) == true -> "badge-success"
+      true -> "badge-warning"
+    end
+  end
+
   defp approval_class(_), do: "badge-warning"
 
   defp approval_label(%{status: :merged}), do: "Merged"
   defp approval_label(%{status: :closed}), do: "Closed"
-  defp approval_label(%{approved: true}), do: "Approved"
-  defp approval_label(%{status: :open}), do: "Open · awaiting approval"
 
-  defp approval_label(%{status: status}) when is_atom(status),
-    do: status |> Atom.to_string() |> String.capitalize()
+  defp approval_label(status) when is_map(status) and not is_struct(status) do
+    case Watchdog.effective_block_reason(status) do
+      nil -> approval_label_default(status)
+      reason -> block_reason_label(reason)
+    end
+  end
 
   defp approval_label(_), do: "Pending"
+
+  defp approval_label_default(%{approved: true}), do: "Approved"
+  defp approval_label_default(%{status: :open}), do: "Open · awaiting approval"
+
+  defp approval_label_default(%{status: status}) when is_atom(status),
+    do: status |> Atom.to_string() |> String.capitalize()
+
+  defp approval_label_default(_), do: "Pending"
+
+  # Human label for a Watchdog block reason (#354, Phase 1).
+  defp block_reason_label(:conflict), do: "Blocked · conflict"
+  defp block_reason_label(:behind_base), do: "Blocked · behind base"
+  defp block_reason_label(:ci_failed), do: "Blocked · CI failed"
+  defp block_reason_label(:needs_approval), do: "Blocked · needs approval"
+  defp block_reason_label(:draft), do: "Blocked · draft"
+  defp block_reason_label(:blocked_other), do: "Blocked"
+  defp block_reason_label(other), do: "Blocked · #{other}"
 
   # A claude-driven worker (a streaming Claude subprocess does the real work).
   # Flagged on meta at session-open. Such a worker's workflow Machine is never

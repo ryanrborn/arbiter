@@ -466,6 +466,68 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  # #354 Phase 1: get/1 classifies *why* an open PR can't merge so the Warden
+  # (Watchdog) can escalate a blocked merge instead of parking it silently.
+  describe "get/1 block_reason (#354)" do
+    defp block_get(pr_fields, check_runs \\ []) do
+      pr = Map.merge(%{"state" => "open", "merged" => false, "html_url" => "u"}, pr_fields)
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/octo/widget/pulls/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr)
+
+          conn.request_path == "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          String.contains?(conn.request_path, "/check-runs") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => check_runs})
+        end
+      end)
+
+      {:ok, result} = Github.get(@ref)
+      result
+    end
+
+    test "clean / mergeable PR has no block reason" do
+      assert block_get(%{"mergeable_state" => "clean", "mergeable" => true}).block_reason == nil
+    end
+
+    test "dirty merge state classifies as :conflict" do
+      assert block_get(%{"mergeable_state" => "dirty"}).block_reason == :conflict
+    end
+
+    test "mergeable=false classifies as :conflict even without a merge-state string" do
+      assert block_get(%{"mergeable" => false}).block_reason == :conflict
+    end
+
+    test "behind classifies as :behind_base" do
+      assert block_get(%{"mergeable_state" => "behind"}).block_reason == :behind_base
+    end
+
+    test "blocked classifies as :needs_approval" do
+      assert block_get(%{"mergeable_state" => "blocked"}).block_reason == :needs_approval
+    end
+
+    test "draft classifies as :draft" do
+      assert block_get(%{"draft" => true, "mergeable_state" => "draft"}).block_reason == :draft
+    end
+
+    test "a failing check-run classifies as :ci_failed" do
+      result =
+        block_get(
+          %{"mergeable_state" => "unstable", "head" => %{"sha" => "abc123"}},
+          [%{"status" => "completed", "conclusion" => "failure"}]
+        )
+
+      assert result.block_reason == :ci_failed
+    end
+
+    test "a merged PR carries no block reason" do
+      assert block_get(%{"state" => "closed", "merged" => true}).block_reason == nil
+    end
+  end
+
   describe "list_review_feedback/1" do
     test "returns the latest verdict body + inline comments" do
       stub(fn conn ->
@@ -694,7 +756,9 @@ defmodule Arbiter.Mergers.GithubTest do
       {:ok, repo_dir: repo_dir}
     end
 
-    test "open/4 derives owner/repo from :repo_path and embeds them in mr_ref", %{repo_dir: repo_dir} do
+    test "open/4 derives owner/repo from :repo_path and embeds them in mr_ref", %{
+      repo_dir: repo_dir
+    } do
       stub(fn conn ->
         assert {conn.method, conn.request_path} ==
                  {"POST", "/repos/leo-technologies-llc/verus_server/pulls"}
@@ -784,7 +848,9 @@ defmodule Arbiter.Mergers.GithubTest do
                "https://github.com/leo-technologies-llc/verus_server/pull/7"
     end
 
-    test "workspace cfg repo wins over per-repo derivation when both are present", %{repo_dir: repo_dir} do
+    test "workspace cfg repo wins over per-repo derivation when both are present", %{
+      repo_dir: repo_dir
+    } do
       # Re-pin the workspace cfg to include `repo` — the repo dir's remote points
       # at verus_server, but the cfg should still win (single-repo workspace
       # backwards-compat).
