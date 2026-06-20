@@ -6,6 +6,7 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker show <task-id>   — full snapshot incl. recent Claude output
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
+      arb worker review <task-id> [--repo <repo>] [--model <name>] — spawn a review worker
 
   Use `arb dispatch` to start a worker in the first place.
 
@@ -16,9 +17,14 @@ defmodule ArbiterCli.Cmd.Worker do
   bounded UI tail (capped); `log` returns the **full, uncapped** transcript of
   the task's most recent run from the durable on-disk store — the audit source
   of record, retaining every line however long the run.
+
+  `review` spawns a worker specialized for review tasks, optionally overriding
+  the repo and model.
   """
 
   alias ArbiterCli.{Client, Output}
+
+  @switches [json: :boolean, repo: :string, model: :string]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -36,7 +42,9 @@ defmodule ArbiterCli.Cmd.Worker do
         ["log" | _] -> Output.die("worker log requires: <task-id>")
         ["stop", task_id | _] -> stop(task_id, mode)
         ["stop" | _] -> Output.die("worker stop requires: <task-id>")
-        [] -> Output.die("worker requires a subcommand: `list`, `show`, `log`, or `stop`")
+        ["review", task_id | opts] -> review(task_id, opts, mode)
+        ["review" | _] -> Output.die("worker review requires: <task-id>")
+        [] -> Output.die("worker requires a subcommand: `list`, `show`, `log`, `stop`, or `review`")
         [unknown | _] -> Output.die("unknown worker subcommand: #{unknown}")
       end
     end
@@ -71,6 +79,23 @@ defmodule ArbiterCli.Cmd.Worker do
       {:error, err} -> Output.die(err)
     end
   end
+
+  defp review(task_id, opts, mode) do
+    {flags, _rest, _invalid} = OptionParser.parse(opts, switches: @switches)
+
+    body =
+      %{"task_id" => task_id}
+      |> maybe_put("repo", flags[:repo])
+      |> maybe_put("model", flags[:model])
+
+    case Client.post("/api/workers/review", body) do
+      {:ok, payload} -> emit_review(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # ---- render ---------------------------------------------------------
 
@@ -133,6 +158,22 @@ defmodule ArbiterCli.Cmd.Worker do
 
   defp emit_stop(payload, :text) do
     IO.puts("Stopped worker for issue #{payload["task_id"]}.")
+  end
+
+  defp emit_review(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_review(payload, :text) do
+    task = payload["task"] || %{}
+    worker = payload["worker"] || %{}
+
+    IO.puts("Review worker spawned:")
+    IO.puts("  Issue:  #{task["id"]}")
+    IO.puts("  Worker: #{worker["pid"]}")
+
+    case payload["worktree_path"] do
+      nil -> :ok
+      path -> IO.puts("  Worktree: #{path}")
+    end
   end
 
   defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
