@@ -388,7 +388,10 @@ defmodule Arbiter.Worker do
       (escalate, do not merge) since the safe default is never to merge unreviewed
       work.
   """
-  @spec review_gate_verdict(ref(), Arbiter.Worker.ReviewGate.verdict() | {:no_verdict, String.t()}) ::
+  @spec review_gate_verdict(
+          ref(),
+          Arbiter.Worker.ReviewGate.verdict() | {:no_verdict, String.t()}
+        ) ::
           :ok | {:error, term()}
   def review_gate_verdict(ref, verdict), do: call(ref, {:review_gate_verdict, verdict})
 
@@ -541,6 +544,7 @@ defmodule Arbiter.Worker do
       task_title: lookup_task_title(state.task_id),
       repo: state.repo,
       workspace_id: state.workspace_id,
+      worker_type: worker_type_from_meta(state.meta),
       status: :running,
       started_at: state.started_at,
       output_lines: [],
@@ -569,6 +573,23 @@ defmodule Arbiter.Worker do
 
   defp resumed_from_run_id(_), do: nil
 
+  # Classify the worker that owns this run from its meta, mirroring the role
+  # tags the ReviewGate and Dispatch stamp:
+  #   * role == :reviewer  → :review  (review-gate reviewer)
+  #   * role == :implementer → :impl  (review-gate revise-round implementer)
+  #   * review_only == true → :review (coordinator-dispatched review-only worker)
+  #   * otherwise           → :main   (the authoring worker)
+  defp worker_type_from_meta(meta) when is_map(meta) do
+    cond do
+      Map.get(meta, :role) == :reviewer -> :review
+      Map.get(meta, :role) == :implementer -> :impl
+      review_only?(meta) -> :review
+      true -> :main
+    end
+  end
+
+  defp worker_type_from_meta(_), do: :main
+
   # Best-effort: stamp the terminal status / output / exit fields onto the
   # Run row created at init. No-op (with a debug breadcrumb) when run_id is
   # nil — the original create failed, so there's nothing to update and the
@@ -582,6 +603,7 @@ defmodule Arbiter.Worker do
   defp record_run_finished(%State{run_id: run_id} = state) do
     attrs = %{
       status: state.status,
+      model: Map.get(state.meta || %{}, :model),
       completed_at: DateTime.utc_now(),
       exit_code: Map.get(state.meta || %{}, :exit_status),
       output_lines: capture_output_lines(state),
@@ -850,7 +872,11 @@ defmodule Arbiter.Worker do
     {:reply, {:error, {:invalid_transition, status, :failed}}, state}
   end
 
-  def handle_call({:review_gate_verdict, verdict}, _from, %State{status: :awaiting_review_gate} = state) do
+  def handle_call(
+        {:review_gate_verdict, verdict},
+        _from,
+        %State{status: :awaiting_review_gate} = state
+      ) do
     {:reply, :ok, apply_review_gate_verdict(state, verdict)}
   end
 
@@ -1030,7 +1056,8 @@ defmodule Arbiter.Worker do
     {:noreply,
      apply_review_gate_verdict(
        state,
-       {:no_verdict, "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
+       {:no_verdict,
+        "ReviewGate process exited before delivering a verdict (#{inspect(reason)})."}
      )}
   end
 
@@ -1323,7 +1350,8 @@ defmodule Arbiter.Worker do
   # is found so the caller can fall through to INCONCLUSIVE.
   defp derive_verdict_from_adapter(%State{task_id: task_id} = state) do
     with {:ok, pr_ref} <- fetch_task_pr_ref(task_id),
-         {:ok, adapter, _workspace} <- resolve_merger(state, merge_opts_from_meta(state.meta, %{})),
+         {:ok, adapter, _workspace} <-
+           resolve_merger(state, merge_opts_from_meta(state.meta, %{})),
          {:ok, feedback} <- safe_list_review_feedback(adapter, pr_ref) do
       reviews = Enum.filter(Map.get(feedback, :feedback, []), &(&1[:kind] == :review))
 
@@ -2564,7 +2592,10 @@ defmodule Arbiter.Worker do
       ]
       |> maybe_opt(:interval_ms, Map.get(opts, :interval_ms))
       |> maybe_opt(:initial_delay_ms, Map.get(opts, :initial_delay_ms))
-      |> maybe_opt(:max_polls, Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace))
+      |> maybe_opt(
+        :max_polls,
+        Map.get(opts, :max_polls) || workspace_watchdog_max_polls(workspace)
+      )
 
     case Arbiter.Worker.Watchdog.start(watchdog_opts) do
       {:ok, _pid} ->

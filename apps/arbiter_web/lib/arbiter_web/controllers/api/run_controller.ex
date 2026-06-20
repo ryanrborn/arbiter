@@ -5,12 +5,13 @@ defmodule ArbiterWeb.Api.RunController do
 
   Routes:
 
-    * `GET /api/workers/history`      — :index (filters: workspace_id, status,
-                                          limit [default 20], before [ISO8601
-                                          started_at cursor])
+    * `GET /api/workers/history`      — :index (filters: task_id, workspace_id,
+                                          status, limit [default 20], before
+                                          [ISO8601 started_at cursor])
     * `GET /api/workers/history/:id`  — :show (single run with full output)
 
-  Newest first.
+  Newest first. Pass `task_id` to list every historical run for a single task
+  (the per-task run history surfaced by `arb worker runs <task-id>`).
   """
 
   use ArbiterWeb, :controller
@@ -28,6 +29,7 @@ defmodule ArbiterWeb.Api.RunController do
          {:ok, before} <- parse_before(params["before"]) do
       runs =
         Run
+        |> filter_eq(:task_id, params["task_id"])
         |> filter_eq(:workspace_id, params["workspace_id"])
         |> filter_eq(:status, status)
         |> filter_before(before)
@@ -51,6 +53,9 @@ defmodule ArbiterWeb.Api.RunController do
   # ---- query helpers ----
 
   defp filter_eq(query, _field, value) when value in [nil, ""], do: query
+
+  defp filter_eq(query, :task_id, value),
+    do: Ash.Query.filter(query, task_id == ^value)
 
   defp filter_eq(query, :workspace_id, value),
     do: Ash.Query.filter(query, workspace_id == ^value)
