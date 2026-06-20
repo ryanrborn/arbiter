@@ -544,6 +544,8 @@ defmodule Arbiter.Trackers.Shortcut do
   # ---- Internals: field translation ---------------------------------------
 
   # Task-domain field keys -> Shortcut story attributes.
+  # Note: status is NOT included here because it requires workflow state lookup
+  # and should be handled via transition/2, not update_fields/2.
   @field_map %{
     title: "name",
     description: "description"
@@ -553,9 +555,14 @@ defmodule Arbiter.Trackers.Shortcut do
     Enum.reduce(fields_map, %{}, fn {key, value}, acc ->
       atom_key = if is_atom(key), do: key, else: safe_atom(key)
 
-      case Map.fetch(@field_map, atom_key) do
-        {:ok, sc_key} -> Map.put(acc, sc_key, value)
-        :error -> acc
+      # Status fields must go through transition/2, not update_fields/2. Drop them.
+      case atom_key do
+        :status -> acc
+        _ ->
+          case Map.fetch(@field_map, atom_key) do
+            {:ok, sc_key} -> Map.put(acc, sc_key, value)
+            :error -> acc
+          end
       end
     end)
   end
