@@ -220,22 +220,44 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp merge_status_label(nil), do: "Awaiting first poll"
 
   defp merge_status_label(status) when is_map(status) do
-    case Watchdog.classify(status) do
-      :merged -> "Merged"
-      :approved -> "Approved"
-      :closed -> "Closed / rejected"
-      :pending -> "In review"
+    case Watchdog.block_reason(status) do
+      nil ->
+        case Watchdog.classify(status) do
+          :merged -> "Merged"
+          :approved -> "Approved"
+          :closed -> "Closed / rejected"
+          :pending -> "In review"
+        end
+
+      reason ->
+        block_reason_label(reason)
     end
   end
 
   defp merge_status_class(nil), do: "badge-ghost"
 
   defp merge_status_class(status) when is_map(status) do
-    case Watchdog.classify(status) do
-      :merged -> "badge-success"
-      :approved -> "badge-success"
-      :closed -> "badge-error"
-      :pending -> "badge-info"
+    case Watchdog.block_reason(status) do
+      nil ->
+        case Watchdog.classify(status) do
+          :merged -> "badge-success"
+          :approved -> "badge-success"
+          :closed -> "badge-error"
+          :pending -> "badge-info"
+        end
+
+      _reason ->
+        "badge-error"
     end
   end
+
+  # A blocked merge surfaces the *why* (#354, Phase 1) so an unmergeable PR is
+  # never indistinguishable from one merely "in review".
+  defp block_reason_label(:conflict), do: "Blocked · conflict"
+  defp block_reason_label(:behind_base), do: "Blocked · behind base"
+  defp block_reason_label(:ci_failed), do: "Blocked · CI failed"
+  defp block_reason_label(:needs_approval), do: "Blocked · needs approval"
+  defp block_reason_label(:draft), do: "Blocked · draft"
+  defp block_reason_label(:blocked_other), do: "Blocked"
+  defp block_reason_label(other), do: "Blocked · #{other}"
 end

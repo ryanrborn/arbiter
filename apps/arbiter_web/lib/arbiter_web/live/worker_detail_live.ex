@@ -959,13 +959,20 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp status_label(other), do: to_string(other)
 
   # Badge color + text for the last Mergers.get/1 result the Watchdog recorded.
+  # A non-terminal MR with a classified block reason (#354, Phase 1) surfaces the
+  # *why* it can't merge ahead of the generic approval state.
   defp approval_class(%{status: :merged}), do: "badge-success"
   defp approval_class(%{status: :closed}), do: "badge-error"
+  defp approval_class(%{block_reason: reason}) when not is_nil(reason), do: "badge-error"
   defp approval_class(%{approved: true}), do: "badge-success"
   defp approval_class(_), do: "badge-warning"
 
   defp approval_label(%{status: :merged}), do: "Merged"
   defp approval_label(%{status: :closed}), do: "Closed"
+
+  defp approval_label(%{block_reason: reason}) when not is_nil(reason),
+    do: block_reason_label(reason)
+
   defp approval_label(%{approved: true}), do: "Approved"
   defp approval_label(%{status: :open}), do: "Open · awaiting approval"
 
@@ -973,6 +980,15 @@ defmodule ArbiterWeb.WorkerDetailLive do
     do: status |> Atom.to_string() |> String.capitalize()
 
   defp approval_label(_), do: "Pending"
+
+  # Human label for a Watchdog block reason (#354, Phase 1).
+  defp block_reason_label(:conflict), do: "Blocked · conflict"
+  defp block_reason_label(:behind_base), do: "Blocked · behind base"
+  defp block_reason_label(:ci_failed), do: "Blocked · CI failed"
+  defp block_reason_label(:needs_approval), do: "Blocked · needs approval"
+  defp block_reason_label(:draft), do: "Blocked · draft"
+  defp block_reason_label(:blocked_other), do: "Blocked"
+  defp block_reason_label(other), do: "Blocked · #{other}"
 
   # A claude-driven worker (a streaming Claude subprocess does the real work).
   # Flagged on meta at session-open. Such a worker's workflow Machine is never
