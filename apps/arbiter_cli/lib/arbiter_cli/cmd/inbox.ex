@@ -9,13 +9,13 @@ defmodule ArbiterCli.Cmd.Inbox do
       arb inbox --all           the 20 most recent (read + unread)
       arb inbox read <id>       show one message in full, mark it read
       arb inbox clear           destroy every already-read Admiral message
-      arb inbox <bead-id>       (worker path) a bead's unread mail; drained
+      arb inbox <task-id>       (worker path) a task's unread mail; drained
                                 — marked read on fetch
 
   The Admiral view is read-only triage: listing does NOT mark mail read. You
   drain it deliberately with `read <id>` (one) and `clear` (the read tail).
-  The bead path is the inverse — workers auto-drain their queue on fetch, so
-  `arb inbox <bead-id>` at the top of each workflow step shows new direction
+  The task path is the inverse — workers auto-drain their queue on fetch, so
+  `arb inbox <task-id>` at the top of each workflow step shows new direction
   exactly once.
 
   Line format:
@@ -33,7 +33,7 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   @admiral "admiral"
   @all_limit 20
-  # Kinds the worker (bead) path surfaces — addressed, read-acknowledged.
+  # Kinds the worker (task) path surfaces — addressed, read-acknowledged.
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)
 
   def run(argv) do
@@ -48,7 +48,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         ["read", id] -> read_one(id, mode)
         ["read"] -> Output.die("inbox read requires a message id: `arb inbox read <id>`")
         ["clear"] -> clear(mode)
-        [bead_id] -> bead_inbox(bead_id, mode)
+        [task_id] -> task_inbox(task_id, mode)
         _ -> Output.die("inbox: unrecognized arguments. See `arb help`.")
       end
     end
@@ -75,10 +75,10 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp admiral_label(false, list),
     do: {"Admiral inbox — #{length(list)} recent:", "(admiral inbox empty)"}
 
-  # ---- worker (bead) path -------------------------------------------------
+  # ---- worker (task) path -------------------------------------------------
 
-  defp bead_inbox(bead_id, mode) do
-    case Client.get("/api/messages", to_ref: bead_id, unread: "true") do
+  defp task_inbox(task_id, mode) do
+    case Client.get("/api/messages", to_ref: task_id, unread: "true") do
       {:ok, %{"data" => list}} ->
         mail = Enum.filter(list, &(&1["kind"] in @mailbox_kinds))
         Enum.each(mail, &mark_read/1)
@@ -86,7 +86,7 @@ defmodule ArbiterCli.Cmd.Inbox do
         emit_list(
           mail,
           mode,
-          {"Unread mail for #{bead_id} (#{length(mail)}):", "(no unread mail)"}
+          {"Unread mail for #{task_id} (#{length(mail)}):", "(no unread mail)"}
         )
 
       {:ok, _} ->

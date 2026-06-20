@@ -13,7 +13,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
   alias ArbiterWeb.Paging
@@ -58,7 +58,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
         meta = p.meta || %{}
 
         %{
-          bead_id: p.bead_id,
+          task_id: p.task_id,
           workspace_name: workspace_name(workspaces_by_id, p.workspace_id),
           merger_type: merger_type(workspaces_by_id, p.workspace_id),
           mr_ref: p.mr_ref,
@@ -141,7 +141,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
               >
                 <div class="flex items-center justify-between gap-2">
                   <.link
-                    navigate={~p"/workers/#{m.bead_id}"}
+                    navigate={~p"/workers/#{m.task_id}"}
                     class="flex items-center gap-2 min-w-0 group"
                   >
                     <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -150,7 +150,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
                       <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>
                     </span>
                     <code class="text-xs font-semibold group-hover:text-primary transition-colors truncate">
-                      {m.bead_id}
+                      {m.task_id}
                     </code>
                   </.link>
                   <div class="flex items-center gap-1.5 shrink-0">

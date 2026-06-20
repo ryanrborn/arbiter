@@ -10,14 +10,14 @@ defmodule ArbiterCli.Cmd.List do
 
   With `--tracker`, the workspace's external tracker is also queried (e.g.
   open GitHub issues assigned to the workspace user) and merged into the
-  listing. Local beads and tracker issues are deduplicated by `tracker_ref`
-  — a tracker issue already represented by a bead is shown as the bead row
+  listing. Local tasks and tracker issues are deduplicated by `tracker_ref`
+  — a tracker issue already represented by a task is shown as the task row
   and not duplicated. Unclaimed tracker issues are visually distinct (no
-  bead id, prefixed with `(unclaimed)`).
+  task id, prefixed with `(unclaimed)`).
 
   If the workspace's tracker doesn't support listing (e.g. `:none`), the
   flag is a no-op and we emit a stderr notice but still print the local
-  beads — the CLI degrades cleanly rather than failing.
+  tasks — the CLI degrades cleanly rather than failing.
   """
 
   alias ArbiterCli.{Client, Output, Workspace}
@@ -55,11 +55,11 @@ defmodule ArbiterCli.Cmd.List do
         |> put_if(:assignee, opts[:assignee])
         |> put_if(:workspace_id, opts[:workspace_id])
 
-      with {:ok, beads} <- fetch_beads(params) do
+      with {:ok, tasks} <- fetch_tasks(params) do
         if opts[:tracker] do
-          emit_with_tracker(beads, mode)
+          emit_with_tracker(tasks, mode)
         else
-          Output.emit_issue_list(beads, mode)
+          Output.emit_issue_list(tasks, mode)
         end
       else
         {:error, err} -> Output.die(err)
@@ -67,7 +67,7 @@ defmodule ArbiterCli.Cmd.List do
     end
   end
 
-  defp fetch_beads(params) do
+  defp fetch_tasks(params) do
     case Client.get("/api/issues", params) do
       {:ok, %{"data" => issues}} -> {:ok, issues}
       {:ok, other} -> {:ok, List.wrap(other)}
@@ -75,51 +75,51 @@ defmodule ArbiterCli.Cmd.List do
     end
   end
 
-  defp emit_with_tracker(beads, mode) do
+  defp emit_with_tracker(tasks, mode) do
     workspace_id = Workspace.id_or_halt()
 
     case Client.get("/api/workspaces/#{workspace_id}/tracker/issues") do
       {:ok, %{"supported" => true, "data" => issues}} ->
-        emit_combined(beads, issues, mode)
+        emit_combined(tasks, issues, mode)
 
       {:ok, %{"supported" => false}} ->
         if mode == :text do
           IO.puts(
             :stderr,
-            "arb: notice: workspace tracker doesn't support listing — showing local beads only."
+            "arb: notice: workspace tracker doesn't support listing — showing local tasks only."
           )
         end
 
-        emit_combined(beads, [], mode)
+        emit_combined(tasks, [], mode)
 
       {:ok, _unexpected} ->
-        emit_combined(beads, [], mode)
+        emit_combined(tasks, [], mode)
 
       {:error, err} ->
         Output.die(err)
     end
   end
 
-  defp emit_combined(beads, tracker_issues, mode) do
-    bead_refs =
-      beads
+  defp emit_combined(tasks, tracker_issues, mode) do
+    task_refs =
+      tasks
       |> Enum.map(& &1["tracker_ref"])
       |> Enum.reject(&(&1 in [nil, ""]))
       |> MapSet.new()
 
-    unclaimed = Enum.reject(tracker_issues, &MapSet.member?(bead_refs, &1["ref"]))
+    unclaimed = Enum.reject(tracker_issues, &MapSet.member?(task_refs, &1["ref"]))
 
     case mode do
       :json ->
         IO.puts(
           Jason.encode!(%{
-            data: beads,
+            data: tasks,
             tracker_issues: Enum.map(unclaimed, &Map.put(&1, "unclaimed", true))
           })
         )
 
       :text ->
-        emit_text_combined(beads, unclaimed)
+        emit_text_combined(tasks, unclaimed)
     end
   end
 
@@ -127,8 +127,8 @@ defmodule ArbiterCli.Cmd.List do
     IO.puts("(no issues)")
   end
 
-  defp emit_text_combined(beads, unclaimed) do
-    Enum.each(beads, fn bead -> IO.puts(Output.format_issue_line(bead)) end)
+  defp emit_text_combined(tasks, unclaimed) do
+    Enum.each(tasks, fn task -> IO.puts(Output.format_issue_line(task)) end)
 
     if unclaimed != [] do
       Enum.each(unclaimed, fn issue ->
@@ -137,9 +137,9 @@ defmodule ArbiterCli.Cmd.List do
     end
   end
 
-  # Format mirrors the bead line shape so the columns line up, but with an
+  # Format mirrors the task line shape so the columns line up, but with an
   # `(unclaimed)` marker in the id slot and the tracker ref where the
-  # priority would be — these rows don't *have* a bead id or priority yet.
+  # priority would be — these rows don't *have* a task id or priority yet.
   defp format_unclaimed_line(issue) do
     id = String.pad_trailing("(unclaimed)", 12)
     status = "[#{issue["status"] || "open"}]" |> String.pad_trailing(14)

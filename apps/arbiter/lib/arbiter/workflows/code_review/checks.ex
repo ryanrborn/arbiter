@@ -111,19 +111,19 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   defp build_prompt(diff, state) do
-    bead_line =
-      case Map.get(state, :bead) do
-        %{id: id, title: title} -> "Bead being reviewed: #{id} — #{title}\n\n"
-        %{"id" => id, "title" => title} -> "Bead being reviewed: #{id} — #{title}\n\n"
+    task_line =
+      case Map.get(state, :task) do
+        %{id: id, title: title} -> "Task being reviewed: #{id} — #{title}\n\n"
+        %{"id" => id, "title" => title} -> "Task being reviewed: #{id} — #{title}\n\n"
         _ -> ""
       end
 
     """
     You are a code reviewer. Review the unified diff below for correctness,
-    safety, and adherence to the bead's intent. Be concise and focus on
+    safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{bead_line}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [

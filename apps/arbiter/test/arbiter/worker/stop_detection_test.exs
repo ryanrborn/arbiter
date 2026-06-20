@@ -9,7 +9,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
   # sandbox the Admiral escalation write needs.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
 
@@ -21,13 +21,13 @@ defmodule Arbiter.Worker.StopDetectionTest do
   end
 
   defp start_worker(ws) do
-    {:ok, bead} = Ash.create(Issue, %{title: "detect my death", workspace_id: ws.id})
+    {:ok, task} = Ash.create(Issue, %{title: "detect my death", workspace_id: ws.id})
 
     {:ok, pid} =
-      Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
-    {pid, bead}
+    {pid, task}
   end
 
   defp tmp_dir!(tag) do
@@ -68,7 +68,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
 
   describe "subprocess exit while running → fail + classify" do
     test "non-zero crash flips the worker to :failed with a stop reason", %{ws: ws} do
-      {pid, _bead} = start_worker(ws)
+      {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-crash")
 
@@ -86,7 +86,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
     end
 
     test "simulated credit exhaustion is classified as :credit_exhausted", %{ws: ws} do
-      {pid, _bead} = start_worker(ws)
+      {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-credit")
 
@@ -102,7 +102,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
     end
 
     test "simulated auth expiry (401) is classified as :auth_expired", %{ws: ws} do
-      {pid, _bead} = start_worker(ws)
+      {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-auth")
 
@@ -122,7 +122,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
     end
 
     test "a killed subprocess is classified as :killed", %{ws: ws} do
-      {pid, _bead} = start_worker(ws)
+      {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-kill")
 
@@ -139,8 +139,8 @@ defmodule Arbiter.Worker.StopDetectionTest do
       assert state.meta.stop_reason.signal == 9
     end
 
-    test "an Admiral escalation is raised naming the bead + cause", %{ws: ws} do
-      {pid, bead} = start_worker(ws)
+    test "an Admiral escalation is raised naming the task + cause", %{ws: ws} do
+      {pid, task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-escalate")
 
@@ -156,10 +156,10 @@ defmodule Arbiter.Worker.StopDetectionTest do
       escalation =
         eventually(fn ->
           Message.inbox("admiral", workspace_id: ws.id)
-          |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == bead.id))
+          |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
         end)
 
-      assert escalation.subject =~ bead.id
+      assert escalation.subject =~ task.id
       assert escalation.subject =~ "credentials expired"
       assert escalation.body =~ "Remediation:"
       assert escalation.body =~ "Re-authenticate"
@@ -168,7 +168,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
 
   describe "normal completion is not misclassified as a stop" do
     test "the arb-done fixture completes, never fails", %{ws: ws} do
-      {pid, _bead} = start_worker(ws)
+      {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-done")
 
@@ -212,7 +212,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
       #   * continuation — stays alive past the exit grace, then prints `arb done`.
       # The whole-run stop check must see the continuation is still live, no-op,
       # and let the continuation drive completion.
-      {pid, _bead} = start_worker(ws)
+      {pid, _task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-continuation")
 

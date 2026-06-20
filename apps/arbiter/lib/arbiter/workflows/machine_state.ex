@@ -2,7 +2,7 @@ defmodule Arbiter.Workflows.MachineState do
   @moduledoc """
   Persistent state for a single `Arbiter.Workflows.Machine` instance.
 
-  Each row binds a `Arbiter.Workflow` behaviour module to a bead (issue),
+  Each row binds a `Arbiter.Workflow` behaviour module to a task (issue),
   along with the threaded state passed between `run_step/2` calls. The row
   is updated on every transition so a crashed machine can resume by
   re-reading its row.
@@ -28,12 +28,12 @@ defmodule Arbiter.Workflows.MachineState do
                             └─ pause ⇄ resume ──────┘
                                   (:paused)
 
-  ## Bead ↔ workflow_module cardinality
+  ## Task ↔ workflow_module cardinality
 
-  **1-to-many on a bead.** A single bead may have multiple machines bound to
+  **1-to-many on a task.** A single task may have multiple machines bound to
   it over time (different workflows applied sequentially, or one re-run
   after failure). Each is a distinct row with a unique `id`. We do not
-  enforce a uniqueness constraint on `(bead_id, workflow_module)`; the
+  enforce a uniqueness constraint on `(task_id, workflow_module)`; the
   caller decides whether to re-attach or resume.
   """
 
@@ -57,7 +57,7 @@ defmodule Arbiter.Workflows.MachineState do
 
       accept [
         :workflow_module,
-        :bead_id,
+        :task_id,
         :vars,
         :current_step,
         :status,
@@ -92,11 +92,11 @@ defmodule Arbiter.Workflows.MachineState do
       description "Fully-qualified module name. Re-hydrated via Module.safe_concat/1."
     end
 
-    attribute :bead_id, :string do
+    attribute :task_id, :string do
       allow_nil? false
       public? true
 
-      description "Issue id this machine is bound to. Not an Ash relationship to avoid coupling the Workflows domain to Beads — the Machine reads beads at runtime when needed."
+      description "Issue id this machine is bound to. Not an Ash relationship to avoid coupling the Workflows domain to Tasks — the Machine reads tasks at runtime when needed."
     end
 
     attribute :vars, :map do

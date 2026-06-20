@@ -5,16 +5,16 @@ defmodule Arbiter.Usage do
   Every Claude session — work worker or ReviewGate reviewer — emits a final
   `result` event carrying tokens (input / output / cache), `total_cost_usd`,
   `duration_ms`, and model. The worker captures that and inserts an
-  `Arbiter.Usage.Event` row keyed by bead + step (`:work | :review`) +
+  `Arbiter.Usage.Event` row keyed by task + step (`:work | :review`) +
   optional `workspace_id` and `worker_run_id` for joinability.
 
-  Multiple rows per bead are deliberate: a re-slung bead writes a second
+  Multiple rows per task are deliberate: a re-slung task writes a second
   `:work` row, a ReviewGate review adds a `:review` row, etc. Rework is then
-  visible as the spend across rows for the same bead.
+  visible as the spend across rows for the same task.
 
   ## Aggregation
 
-  `summarize/1` rolls events up by one of `:day`, `:bead`, `:campaign`
+  `summarize/1` rolls events up by one of `:day`, `:task`, `:campaign`
   (parent/epic), `:workspace`, `:repo`, `:model`, or `:step`. It returns a list
   of maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
 
@@ -25,7 +25,7 @@ defmodule Arbiter.Usage do
 
   use Ash.Domain
 
-  alias Arbiter.Beads.Dependency
+  alias Arbiter.Tasks.Dependency
   alias Arbiter.Usage.Event
   require Ash.Query
 
@@ -34,7 +34,7 @@ defmodule Arbiter.Usage do
   end
 
   @type group_by ::
-          :day | :bead | :campaign | :workspace | :repo | :model | :step | :provider
+          :day | :task | :campaign | :workspace | :repo | :model | :step | :provider
 
   @type since :: DateTime.t() | nil
 
@@ -49,7 +49,7 @@ defmodule Arbiter.Usage do
           required(:duration_ms) => non_neg_integer()
         }
 
-  @valid_by ~w(day bead campaign workspace repo model step provider)a
+  @valid_by ~w(day task campaign workspace repo model step provider)a
 
   @doc """
   Roll up usage events into a list of summary rows.
@@ -64,9 +64,9 @@ defmodule Arbiter.Usage do
   Returns `{:ok, [rollup]}` or `{:error, reason}`. Rows are sorted by
   `total_cost_usd` desc (or chronologically for `:by :day`).
 
-  `:campaign` groups by a bead's `:parent_of` parent(s) — a bead with more than
+  `:campaign` groups by a task's `:parent_of` parent(s) — a task with more than
   one parent is counted in each, mirroring the parent-with-progress rollup.
-  Beads with *no* parent don't disappear; they fall into the catch-all sentinel
+  Tasks with *no* parent don't disappear; they fall into the catch-all sentinel
   `(no_campaign)` so spend isn't silently lost.
   """
   @spec summarize(keyword()) :: {:ok, [rollup()]} | {:error, term()}
@@ -114,13 +114,13 @@ defmodule Arbiter.Usage do
   end
 
   # Group events by the requested dimension. For :campaign we resolve each
-  # event's bead's `:parent_of` parents at read time (a join would be cleaner
+  # event's task's `:parent_of` parents at read time (a join would be cleaner
   # but the data volume is small for now; this is plain in-memory grouping).
   defp group_events(events, :day) do
     Enum.group_by(events, fn ev -> Date.to_iso8601(DateTime.to_date(ev.occurred_at)) end)
   end
 
-  defp group_events(events, :bead), do: Enum.group_by(events, & &1.bead_id)
+  defp group_events(events, :task), do: Enum.group_by(events, & &1.task_id)
 
   defp group_events(events, :workspace),
     do: Enum.group_by(events, &(&1.workspace_id || "(none)"))
@@ -134,9 +134,9 @@ defmodule Arbiter.Usage do
     parents = load_parent_edges(events)
 
     Enum.reduce(events, %{}, fn ev, acc ->
-      base_bead = base_bead_id(ev.bead_id)
+      base_task = base_task_id(ev.task_id)
 
-      case Map.get(parents, base_bead, []) do
+      case Map.get(parents, base_task, []) do
         [] -> Map.update(acc, "(no_campaign)", [ev], &[ev | &1])
         ids -> Enum.reduce(ids, acc, fn pid, a -> Map.update(a, pid, [ev], &[ev | &1]) end)
       end
@@ -144,25 +144,25 @@ defmodule Arbiter.Usage do
   end
 
   # Drop the "#review" suffix used by ReviewGate reviewers so a review event is
-  # still attributable to the author bead for campaign lookup.
-  defp base_bead_id(<<id::binary>>) do
+  # still attributable to the author task for campaign lookup.
+  defp base_task_id(<<id::binary>>) do
     case String.split(id, "#", parts: 2) do
       [base | _] -> base
       _ -> id
     end
   end
 
-  # Map each event's bead to the parent bead(s) it hangs under via `:parent_of`
-  # edges (the bead is the `to_issue`; its parents are the `from_issue`s).
+  # Map each event's task to the parent task(s) it hangs under via `:parent_of`
+  # edges (the task is the `to_issue`; its parents are the `from_issue`s).
   defp load_parent_edges(events) do
     parent_of = :parent_of
 
-    bead_ids =
+    task_ids =
       events
-      |> Enum.map(&base_bead_id(&1.bead_id))
+      |> Enum.map(&base_task_id(&1.task_id))
       |> Enum.uniq()
 
-    case bead_ids do
+    case task_ids do
       [] ->
         %{}
 

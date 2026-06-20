@@ -11,21 +11,21 @@ defmodule Arbiter.WorkerRunPersistenceTest do
 
   @fixture Path.expand("../fixtures/echo_with_done.sh", __DIR__)
 
-  defp runs_for(bead_id) do
+  defp runs_for(task_id) do
     Run
-    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.read!()
   end
 
   test "starting a worker creates a :running Run row" do
-    bead_id = "bd-runstart-#{System.unique_integer([:positive])}"
+    task_id = "bd-runstart-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :running
     assert run.repo == "arbiter"
     assert run.workspace_id == "ws-runs"
@@ -34,10 +34,10 @@ defmodule Arbiter.WorkerRunPersistenceTest do
   end
 
   test "completing a worker stamps the Run row :completed with output_lines" do
-    bead_id = "bd-runcomp-#{System.unique_integer([:positive])}"
+    task_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -46,7 +46,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.report(pid, :exit_status, 0)
     :ok = Worker.complete(pid, :done)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :completed
     assert run.exit_code == 0
     assert run.output_lines == ["line one", "line two"]
@@ -54,10 +54,10 @@ defmodule Arbiter.WorkerRunPersistenceTest do
   end
 
   test "claude __claude_session_done__ also persists :completed" do
-    bead_id = "bd-runclaude-#{System.unique_integer([:positive])}"
+    task_id = "bd-runclaude-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -65,28 +65,28 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     send(pid, {:__claude_session_done__, "arb done"})
 
     # Wait briefly for the cast-like handle_info to land + write.
-    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(bead_id)) end)
+    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(task_id)) end)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :completed
   end
 
   test "terminate from a non-terminal state finalizes the Run row :completed" do
     # Mirror the REAL worker-completion teardown: a claude-driven worker sits
-    # at a non-terminal status (:running) and is torn down by the bead `:close`
+    # at a non-terminal status (:running) and is torn down by the task `:close`
     # after-action (StopWorker -> Worker.stop -> terminate/2) WITHOUT any
     # explicit Worker.complete/2 ever firing. Before bd-39q7sk this left the
     # row stuck :running until the next boot reconcile.
-    bead_id = "bd-runterm-#{System.unique_integer([:positive])}"
+    task_id = "bd-runterm-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     :ok = Worker.advance(pid, :run_claude)
     :ok = Worker.report(pid, :output_lines, ["working", "arb done"])
     :ok = Worker.report(pid, :exit_status, 0)
 
-    [running] = runs_for(bead_id)
+    [running] = runs_for(task_id)
     assert running.status == :running
     assert running.completed_at == nil
 
@@ -94,7 +94,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     # row write has landed by the time this returns.
     :ok = Worker.stop(pid, :normal)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :completed
     assert %DateTime{} = run.completed_at
     assert run.exit_code == 0
@@ -104,38 +104,38 @@ defmodule Arbiter.WorkerRunPersistenceTest do
   test "terminate after an explicit :completed does not double-write the Run row" do
     # complete_now/2 already stamped the row; terminate/2 must no-op so it does
     # not clobber the completed_at / exit fields written at completion time.
-    bead_id = "bd-runterm2-#{System.unique_integer([:positive])}"
+    task_id = "bd-runterm2-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     :ok = Worker.advance(pid, :implement)
     :ok = Worker.report(pid, :exit_status, 0)
     :ok = Worker.complete(pid, :done)
 
-    [completed] = runs_for(bead_id)
+    [completed] = runs_for(task_id)
     assert completed.status == :completed
     first_completed_at = completed.completed_at
 
     :ok = Worker.stop(pid, :normal)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :completed
     assert run.completed_at == first_completed_at
   end
 
   test "failing a worker stamps the Run row :failed with failure_reason" do
-    bead_id = "bd-runfail-#{System.unique_integer([:positive])}"
+    task_id = "bd-runfail-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     :ok = Worker.advance(pid, :verify)
     :ok = Worker.fail(pid, :max_ticks_exceeded)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :failed
     assert run.failure_reason == ":max_ticks_exceeded"
     assert %DateTime{} = run.completed_at
@@ -144,11 +144,11 @@ defmodule Arbiter.WorkerRunPersistenceTest do
   test "ClaudeSession output lines flow end-to-end into the Run row on completion" do
     # Exercises the full path from port data through the worker's session
     # tracking, sync_session_meta, and record_run_finished into the DB, so that
-    # `arb worker show <bead-id>` on a closed bead shows real output.
-    bead_id = "bd-sessionlines-#{System.unique_integer([:positive])}"
+    # `arb worker show <task-id>` on a closed task shows real output.
+    task_id = "bd-sessionlines-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -160,9 +160,9 @@ defmodule Arbiter.WorkerRunPersistenceTest do
       )
 
     # Wait for the fixture's "arb done" to land and the Run row to be stamped.
-    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(bead_id)) end, 2000)
+    :ok = wait_until(fn -> match?([%{status: :completed}], runs_for(task_id)) end, 2000)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert run.status == :completed
     assert %DateTime{} = run.completed_at
     # The fixture emits these lines; they must survive into the DB row.
@@ -176,10 +176,10 @@ defmodule Arbiter.WorkerRunPersistenceTest do
   test "output_lines capped to last #{500} lines when session is very chatty" do
     # Verifies that a session producing more than @max_output_lines (500) lines
     # only persists the last 500 rather than bloating the row indefinitely.
-    bead_id = "bd-linesclip-#{System.unique_integer([:positive])}"
+    task_id = "bd-linesclip-#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
-      Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-runs")
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -190,7 +190,7 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     :ok = Worker.report(pid, :output_lines, lines)
     :ok = Worker.complete(pid, :done)
 
-    [run] = runs_for(bead_id)
+    [run] = runs_for(task_id)
     assert length(run.output_lines) == 500
     # The LAST 500 lines (101–600) should be retained, not the first 500.
     assert "line 101" in run.output_lines

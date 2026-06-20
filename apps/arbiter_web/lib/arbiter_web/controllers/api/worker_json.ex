@@ -4,9 +4,9 @@ defmodule ArbiterWeb.Api.WorkerJSON do
 
   def dispatch(%{result: result}) do
     %{
-      bead: IssueJSON.data(result.bead),
+      task: IssueJSON.data(result.task),
       worker: %{
-        bead_id: result.bead.id,
+        task_id: result.task.id,
         pid: inspect(result.worker_pid)
       },
       machine: %{
@@ -26,7 +26,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
           model_id = Map.get(meta, :model) || get_in(meta, [:routing_config, :model])
 
           %{
-            bead_id: snap.bead_id,
+            task_id: snap.task_id,
             workspace_id: snap.workspace_id,
             repo: snap.repo,
             current_step: snap.current_step,
@@ -38,7 +38,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
             merger_url: Map.get(snap, :merger_url),
             pid: inspect(snap.pid),
             model: Arbiter.Worker.Stats.short_model_name(model_id),
-            cost_usd: Map.get(costs, snap.bead_id, 0.0)
+            cost_usd: Map.get(costs, snap.task_id, 0.0)
           }
         end)
     }
@@ -49,7 +49,7 @@ defmodule ArbiterWeb.Api.WorkerJSON do
 
     %{
       source: "live",
-      bead_id: snap.bead_id,
+      task_id: snap.task_id,
       workspace_id: snap.workspace_id,
       repo: snap.repo,
       current_step: snap.current_step,
@@ -78,8 +78,8 @@ defmodule ArbiterWeb.Api.WorkerJSON do
   def show(%{run: %Run{} = run}) do
     %{
       source: "history",
-      bead_id: run.bead_id,
-      bead_title: run.bead_title,
+      task_id: run.task_id,
+      task_title: run.task_title,
       workspace_id: run.workspace_id,
       repo: run.repo,
       current_step: nil,

@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.AuditLogLive do
   @moduledoc """
-  LiveView at `/audit` — timeline of bead state transitions sourced from
-  `AshPaperTrail` versions on `Arbiter.Beads.Issue`.
+  LiveView at `/audit` — timeline of task state transitions sourced from
+  `AshPaperTrail` versions on `Arbiter.Tasks.Issue`.
 
   ## What's in scope (MVP)
 
@@ -13,7 +13,7 @@ defmodule ArbiterWeb.AuditLogLive do
 
   Filters:
     - **Date range** (`since` / `until` — ISO date strings, both inclusive).
-    - **Entity ID** (bead id; partial match against `version_source_id`).
+    - **Entity ID** (task id; partial match against `version_source_id`).
     - **Action name** (create | update | close | reopen | all).
 
   ## What's NOT in scope (Phase 5)
@@ -25,8 +25,8 @@ defmodule ArbiterWeb.AuditLogLive do
 
   The acceptance criterion's "filter by actor=coordinator" is therefore
   approximated: the JSON `version_action_inputs` map sometimes contains
-  bead fields with author names (e.g. assignee). MVP punts on this; once
-  `belongs_to_actor` is wired (a separate Phase 5 bead), the filter form
+  task fields with author names (e.g. assignee). MVP punts on this; once
+  `belongs_to_actor` is wired (a separate Phase 5 task), the filter form
   here will be extended.
 
   ## Export
@@ -37,7 +37,7 @@ defmodule ArbiterWeb.AuditLogLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Beads.Issue.Version
+  alias Arbiter.Tasks.Issue.Version
   require Ash.Query
 
   @impl true
@@ -161,7 +161,7 @@ defmodule ArbiterWeb.AuditLogLive do
     Enum.map(versions, fn v ->
       %{
         id: v.id,
-        bead_id: v.version_source_id,
+        task_id: v.version_source_id,
         action: v.version_action_name,
         action_type: v.version_action_type,
         inputs: v.version_action_inputs,
@@ -186,7 +186,7 @@ defmodule ArbiterWeb.AuditLogLive do
           <p class="text-sm text-base-content/60 mt-1">
             {length(@versions)} most recent directive changes (max 500), sourced from
             <code class="text-xs">ash_paper_trail</code>
-            versions on <code class="text-xs">Arbiter.Beads.Issue</code>.
+            versions on <code class="text-xs">Arbiter.Tasks.Issue</code>.
           </p>
         </div>
 
@@ -222,7 +222,7 @@ defmodule ArbiterWeb.AuditLogLive do
               </label>
               <label class="form-control">
                 <span class="label-text text-xs font-medium text-base-content/60 mb-1 flex items-center gap-1">
-                  <.icon name="hero-hashtag" class="size-3.5" /> Bead id contains
+                  <.icon name="hero-hashtag" class="size-3.5" /> Task id contains
                 </span>
                 <input
                   type="text"

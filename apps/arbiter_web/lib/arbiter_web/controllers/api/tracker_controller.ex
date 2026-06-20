@@ -12,7 +12,7 @@ defmodule ArbiterWeb.Api.TrackerController do
       cleanly without treating it as an error.
 
     * `POST /api/workspaces/:workspace_id/tracker/tickets` — create an
-      upstream tracker ticket WITHOUT creating a local bead. Used by
+      upstream tracker ticket WITHOUT creating a local task. Used by
       `arb create --ticket-only` to post unclaimed work to the shared
       tracker so any fleet contributor can pick it up via `arb claim`.
       Requires a configured tracker (`tracker_type != :none`).
@@ -28,7 +28,7 @@ defmodule ArbiterWeb.Api.TrackerController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -98,7 +98,7 @@ defmodule ArbiterWeb.Api.TrackerController do
       :none ->
         {:error,
          {:invalid_request,
-          "workspace has no tracker configured; use arb create (without --ticket-only) for a local bead"}}
+          "workspace has no tracker configured; use arb create (without --ticket-only) for a local task"}}
 
       _ ->
         :ok

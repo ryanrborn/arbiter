@@ -1,7 +1,7 @@
 defmodule Arbiter.Worker.BranchNamerTest do
   use ExUnit.Case, async: true
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker.BranchNamer
 
   defp issue(opts) do

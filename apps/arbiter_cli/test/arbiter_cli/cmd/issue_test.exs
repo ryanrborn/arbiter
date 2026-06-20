@@ -32,7 +32,7 @@ defmodule ArbiterCli.Cmd.IssueTest do
 
     test "dispatch routes to the dispatch endpoint" do
       stub_post("/api/workers/dispatch", %{
-        "bead" => %{"id" => "bd-1"},
+        "task" => %{"id" => "bd-1"},
         "worker" => %{},
         "machine" => %{}
       })

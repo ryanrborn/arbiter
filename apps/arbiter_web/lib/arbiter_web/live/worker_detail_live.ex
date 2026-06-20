@@ -1,21 +1,21 @@
 defmodule ArbiterWeb.WorkerDetailLive do
   @moduledoc """
-  Per-worker detail view at `/workers/:bead_id`. The richest single
+  Per-worker detail view at `/workers/:task_id`. The richest single
   view of a worker: snapshot, captured Claude stdout (terminal-style
   with auto-scroll), the paired workflow Machine's step progress, the
-  bead's workspace context, and a Stop action.
+  task's workspace context, and a Stop action.
 
   Subscribes to:
     * `"workers"`          — lifecycle events (started / stopped).
-    * `"worker:<bead-id>"`  — per-line stdout events.
+    * `"worker:<task-id>"`  — per-line stdout events.
     * `"messages:<ws_id>"`   — `{:new_message, _}` so the mailbox panel
                                updates live when direction/flags arrive.
   """
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
@@ -33,10 +33,10 @@ defmodule ArbiterWeb.WorkerDetailLive do
   @output_cap 200
 
   @impl true
-  def mount(%{"bead_id" => bead_id}, _session, socket) do
+  def mount(%{"task_id" => task_id}, _session, socket) do
     socket =
       socket
-      |> assign(:bead_id, bead_id)
+      |> assign(:task_id, task_id)
       |> assign(:live, connected?(socket))
       |> assign(:now, DateTime.utc_now())
       |> assign(:flash_message, nil)
@@ -51,7 +51,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, output_topic(bead_id))
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, output_topic(task_id))
       # Drives the live elapsed-time counter in the header. Only reassigns
       # :now — no DB reads or GenServer hops in the tick handler.
       :timer.send_interval(1000, self(), :tick)
@@ -70,7 +70,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply, refresh_all(socket)}
   end
 
-  def handle_info({:worker_output, _bead_id, line}, socket) do
+  def handle_info({:worker_output, _task_id, line}, socket) do
     {:noreply, append_output_line(socket, line)}
   end
 
@@ -88,13 +88,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
 
   @impl true
   def handle_event("stop", _params, socket) do
-    case Worker.stop(socket.assigns.bead_id, :normal) do
+    case Worker.stop(socket.assigns.task_id, :normal) do
       :ok ->
         {:noreply,
          socket
          |> put_flash(
            :info,
-           "Stopped worker for issue #{socket.assigns.bead_id}."
+           "Stopped worker for issue #{socket.assigns.task_id}."
          )
          |> push_navigate(to: ~p"/")}
 
@@ -113,7 +113,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   def handle_event("send_direction", %{"body" => body}, socket) do
-    bead_id = socket.assigns.bead_id
+    task_id = socket.assigns.task_id
 
     case {String.trim(body || ""), workspace_id(socket)} do
       {"", _} ->
@@ -131,7 +131,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
         case Message.send_mail(%{
                kind: :direction,
                from_ref: "admiral",
-               to_ref: bead_id,
+               to_ref: task_id,
                workspace_id: ws_id,
                body: text
              }) do
@@ -139,7 +139,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
             {:noreply,
              socket
              |> assign(:compose_body, "")
-             |> put_flash(:info, "Direction sent to #{bead_id}.")
+             |> put_flash(:info, "Direction sent to #{task_id}.")
              |> refresh_mailbox()}
 
           {:error, _} ->
@@ -158,7 +158,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   defp refresh_all(socket) do
     socket
     |> refresh_snapshot()
-    |> refresh_bead()
+    |> refresh_task()
     |> refresh_workspace()
     |> refresh_machine_state()
     |> refresh_mailbox()
@@ -166,14 +166,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
     |> refresh_usage()
   end
 
-  # Most-recent Run row for this bead, if any. Used to surface a link from
+  # Most-recent Run row for this task, if any. Used to surface a link from
   # the live worker view to the historical post-mortem of a previous run on
-  # the same bead.
+  # the same task.
   defp refresh_latest_run(socket) do
     run =
       try do
         Run
-        |> Ash.Query.filter(bead_id == ^socket.assigns.bead_id)
+        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
         |> Ash.Query.sort(started_at: :desc)
         |> Ash.Query.limit(1)
         |> Ash.read!()
@@ -185,14 +185,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
     assign(socket, :latest_run, run)
   end
 
-  # Latest usage event(s) for this bead — used to surface cost/tokens on the
-  # detail page. Queries by bead_id, ordered newest-first, capped at 5 rows
+  # Latest usage event(s) for this task — used to surface cost/tokens on the
+  # detail page. Queries by task_id, ordered newest-first, capped at 5 rows
   # (one per recent session: work + optional review). Best-effort — nil on error.
   defp refresh_usage(socket) do
     events =
       try do
         UsageEvent
-        |> Ash.Query.filter(bead_id == ^socket.assigns.bead_id)
+        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
         |> Ash.Query.sort(occurred_at: :desc)
         |> Ash.Query.limit(5)
         |> Ash.read!()
@@ -204,11 +204,11 @@ defmodule ArbiterWeb.WorkerDetailLive do
   end
 
   # Unread mailbox-family messages (mailbox / direction / flag) addressed to
-  # this bead. Pure read — the operator marks them read explicitly.
+  # this task. Pure read — the operator marks them read explicitly.
   defp refresh_mailbox(socket) do
     mailbox =
       try do
-        Message.inbox(socket.assigns.bead_id)
+        Message.inbox(socket.assigns.task_id)
       rescue
         _ -> []
       end
@@ -216,14 +216,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
     assign(socket, :mailbox, mailbox)
   end
 
-  # The bead's workspace, needed to scope/address messages. nil when the bead
+  # The task's workspace, needed to scope/address messages. nil when the task
   # row is gone (worker outlived its Issue, or a fresh ad-hoc run).
-  defp workspace_id(%{assigns: %{bead: %Issue{workspace_id: ws}}}) when is_binary(ws), do: ws
+  defp workspace_id(%{assigns: %{task: %Issue{workspace_id: ws}}}) when is_binary(ws), do: ws
   defp workspace_id(_socket), do: nil
 
   defp refresh_snapshot(socket) do
     snap =
-      case Worker.whereis(socket.assigns.bead_id) do
+      case Worker.whereis(socket.assigns.task_id) do
         nil ->
           nil
 
@@ -237,14 +237,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
     assign(socket, :snapshot, snap)
   end
 
-  defp refresh_bead(socket) do
-    case Ash.get(Issue, socket.assigns.bead_id) do
-      {:ok, bead} -> assign(socket, :bead, bead)
-      _ -> assign(socket, :bead, nil)
+  defp refresh_task(socket) do
+    case Ash.get(Issue, socket.assigns.task_id) do
+      {:ok, task} -> assign(socket, :task, task)
+      _ -> assign(socket, :task, nil)
     end
   end
 
-  defp refresh_workspace(%{assigns: %{bead: %Issue{workspace_id: ws_id}}} = socket)
+  defp refresh_workspace(%{assigns: %{task: %Issue{workspace_id: ws_id}}} = socket)
        when is_binary(ws_id) do
     case Ash.get(Workspace, ws_id) do
       {:ok, ws} -> assign(socket, :workspace, ws)
@@ -258,7 +258,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     ms =
       try do
         MachineState
-        |> Ash.Query.filter(bead_id == ^socket.assigns.bead_id)
+        |> Ash.Query.filter(task_id == ^socket.assigns.task_id)
         |> Ash.Query.sort(updated_at: :desc)
         |> Ash.Query.limit(1)
         |> Ash.read!()
@@ -298,7 +298,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
     :exit, _ -> nil
   end
 
-  defp output_topic(bead_id), do: "worker:" <> bead_id
+  defp output_topic(task_id), do: "worker:" <> task_id
 
   # Seed the live output buffer from the worker's snapshot. Called on mount
   # (and whenever we deliberately want to resync from the source of truth);
@@ -341,7 +341,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
             </div>
             <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2 mt-0.5">
               {String.capitalize(@worker_label)}
-              <code class="text-base font-mono text-base-content/80">{@bead_id}</code>
+              <code class="text-base font-mono text-base-content/80">{@task_id}</code>
             </h1>
           </div>
 
@@ -516,7 +516,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                 </dl>
 
                 <div class="flex flex-col gap-2 shrink-0">
-                  <.link navigate={~p"/beads/#{@bead_id}"} class="btn btn-sm btn-ghost gap-1.5">
+                  <.link navigate={~p"/tasks/#{@task_id}"} class="btn btn-sm btn-ghost gap-1.5">
                     <.icon name="hero-arrow-top-right-on-square" class="size-4" />
                     {String.capitalize(@issue_label)} detail
                   </.link>
@@ -531,7 +531,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
                   <%= if @snapshot.status in [:idle, :resuming, :running, :awaiting, :awaiting_review_gate, :awaiting_review] do %>
                     <button
                       phx-click="stop"
-                      data-confirm={"Stop #{@worker_label} for #{@bead_id}? Any active Claude subprocess will be terminated."}
+                      data-confirm={"Stop #{@worker_label} for #{@task_id}? Any active Claude subprocess will be terminated."}
                       class="btn btn-sm btn-error gap-1.5 transition-all duration-200 active:scale-95"
                     >
                       <.icon name="hero-stop-circle" class="size-4" /> Stop {@worker_label}
@@ -592,46 +592,46 @@ defmodule ArbiterWeb.WorkerDetailLive do
             </div>
           </section>
 
-          <%!-- ── Assigned bead summary ─────────────────────────────── --%>
-          <%= if @bead do %>
+          <%!-- ── Assigned task summary ─────────────────────────────── --%>
+          <%= if @task do %>
             <section class="card bg-base-200 border border-base-300 shadow-sm">
               <div class="card-body p-4 gap-3">
                 <h2 class="text-sm font-medium text-base-content/70 flex items-center gap-2">
                   <.icon name="hero-bookmark" class="size-4" />
-                  {String.capitalize(@issue_label)}: {@bead.title}
+                  {String.capitalize(@issue_label)}: {@task.title}
                 </h2>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-sm">
-                  <%= if @bead.target_branch do %>
+                  <%= if @task.target_branch do %>
                     <dt class="font-medium text-base-content/60">Target branch:</dt>
-                    <dd><code class="font-mono text-xs">{@bead.target_branch}</code></dd>
+                    <dd><code class="font-mono text-xs">{@task.target_branch}</code></dd>
                   <% end %>
-                  <%= if @bead.difficulty do %>
+                  <%= if @task.difficulty do %>
                     <dt class="font-medium text-base-content/60">Difficulty:</dt>
                     <dd>
                       <span class="badge badge-ghost badge-sm font-mono">
-                        D{@bead.difficulty}
+                        D{@task.difficulty}
                       </span>
                     </dd>
                   <% end %>
-                  <%= if @bead.priority do %>
+                  <%= if @task.priority do %>
                     <dt class="font-medium text-base-content/60">Priority:</dt>
                     <dd>
                       <span class="badge badge-ghost badge-sm font-mono">
-                        P{@bead.priority}
+                        P{@task.priority}
                       </span>
                     </dd>
                   <% end %>
-                  <%= if @bead.issue_type do %>
+                  <%= if @task.issue_type do %>
                     <dt class="font-medium text-base-content/60">Type:</dt>
                     <dd>
                       <span class="badge badge-ghost badge-sm">
-                        {@bead.issue_type}
+                        {@task.issue_type}
                       </span>
                     </dd>
                   <% end %>
-                  <%= if tracker_display(@bead) do %>
+                  <%= if tracker_display(@task) do %>
                     <dt class="font-medium text-base-content/60">Tracker:</dt>
-                    <dd class="font-mono text-xs">{tracker_display(@bead)}</dd>
+                    <dd class="font-mono text-xs">{tracker_display(@task)}</dd>
                   <% end %>
                 </dl>
               </div>
@@ -838,7 +838,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
             <div class="card-body p-8 items-center text-center gap-2">
               <.icon name="hero-signal-slash" class="size-10 text-base-content/30" />
               <p class="text-sm text-base-content/70">
-                No {@worker_label} registered for {@issue_label} <code class="font-mono">{@bead_id}</code>.
+                No {@worker_label} registered for {@issue_label} <code class="font-mono">{@task_id}</code>.
               </p>
               <p class="text-xs text-base-content/50">
                 It may have stopped, or the Phoenix node was restarted since it ran.
@@ -902,7 +902,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
             >
               <label class="text-sm font-medium flex items-center gap-1.5">
                 <.icon name="hero-paper-airplane" class="size-4 text-base-content/60" />
-                Send direction to <code class="font-mono">{@bead_id}</code>
+                Send direction to <code class="font-mono">{@task_id}</code>
                 (from admiral)
               </label>
               <textarea

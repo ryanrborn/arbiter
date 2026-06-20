@@ -2,9 +2,9 @@ defmodule ArbiterCli.Cmd.ReviewTest do
   use ArbiterCli.CliCase, async: false
 
   describe "arb review" do
-    test "missing bead-id fails with usage hint" do
+    test "missing task-id fails with usage hint" do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Review.run([]) end)
-      assert err =~ "review requires a bead id"
+      assert err =~ "review requires a task id"
       assert code != 0
     end
 
@@ -18,8 +18,8 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       stub_post(
         "/api/workers/review",
         %{
-          "bead" => %{"id" => "bd-rev1", "title" => "review me", "status" => "in_progress"},
-          "worker" => %{"bead_id" => "bd-rev1", "pid" => "#PID<0.123.0>"},
+          "task" => %{"id" => "bd-rev1", "title" => "review me", "status" => "in_progress"},
+          "worker" => %{"task_id" => "bd-rev1", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
           "worktree_path" => nil,
           "claude_started" => true
@@ -36,8 +36,8 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
     test "--json mode emits JSON" do
       stub_post("/api/workers/review", %{
-        "bead" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
-        "worker" => %{"bead_id" => "bd-rev1", "pid" => "x"},
+        "task" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
+        "worker" => %{"task_id" => "bd-rev1", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
@@ -46,7 +46,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
       assert code == 0
       assert {:ok, decoded} = Jason.decode(out)
-      assert decoded["bead"]["id"] == "bd-rev1"
+      assert decoded["task"]["id"] == "bd-rev1"
     end
 
     test "passes --repo and --model in body when provided" do
@@ -62,8 +62,8 @@ defmodule ArbiterCli.Cmd.ReviewTest do
             conn
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
-              "bead" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
-              "worker" => %{"bead_id" => "bd-rev1", "pid" => "x"},
+              "task" => %{"id" => "bd-rev1", "title" => "t", "status" => "in_progress"},
+              "worker" => %{"task_id" => "bd-rev1", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
 
@@ -79,7 +79,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
 
       assert code == 0
       assert_receive {:body, body}
-      assert body["bead_id"] == "bd-rev1"
+      assert body["task_id"] == "bd-rev1"
       assert body["repo"] == "verus_server"
       assert body["model"] == "haiku"
     end
@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.ReviewTest do
     test "404 propagates as die" do
       stub_post(
         "/api/workers/review",
-        %{"error" => %{"type" => "not_found", "message" => "bead not found"}},
+        %{"error" => %{"type" => "not_found", "message" => "task not found"}},
         404
       )
 

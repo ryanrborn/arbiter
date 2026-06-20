@@ -15,16 +15,16 @@ defmodule Arbiter.Worker.ReviewGate do
 
     * APPROVE → the author proceeds to the merger (`do_open_mr`).
     * REQUEST_CHANGES (after the loop is exhausted) / inconclusive / timed-out →
-      the author parks the bead with the findings and escalates to the Admiral;
+      the author parks the task with the findings and escalates to the Admiral;
       the branch is **not** merged.
 
   ## The reviewer
 
   Each review pass spawns a **distinct** reviewer worker — a second
-  `Arbiter.Worker` with a `#review`-suffixed bead id and its own
+  `Arbiter.Worker` with a `#review`-suffixed task id and its own
   `Arbiter.Worker.ClaudeSession`, running in the same worktree. A different
   process = a different Claude invocation = a different mind (no self-grading).
-  It is handed the bead's acceptance criteria + description and asked to review
+  It is handed the task's acceptance criteria + description and asked to review
   the branch diff for correctness / regressions, **without booting the app** (the
   second-instance hazard, bd-9rouwh — the reviewer only reads the diff). Its
   stdout is captured (via the worker output PubSub topic); from it the ReviewGate
@@ -37,12 +37,12 @@ defmodule Arbiter.Worker.ReviewGate do
   verdict. Stage 2 turns a REQUEST_CHANGES into a bounded conversation:
 
     1. The reviewer's structured findings are posted to the implementer **via the
-       mailbox** (`Arbiter.Messages`, kind `:flag`, reviewer id → author bead id)
+       mailbox** (`Arbiter.Messages`, kind `:flag`, reviewer id → author task id)
        — a durable row, so the thread survives the workers that wrote it.
     2. A **fresh implementer** worker (a new mind, same branch/worktree)
        addresses each finding: fix it (and commit) or rebut it with
        justification. Its transcript is captured and posted back over the mailbox
-       (author bead id → reviewer id).
+       (author task id → reviewer id).
     3. The reviewer re-reviews the updated diff (its prompt carries the prior
        thread so it can accept each rebuttal or hold the line).
 
@@ -148,8 +148,8 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ResumeContext
@@ -182,7 +182,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   @type opt ::
           {:author, pid()}
-          | {:bead_id, String.t()}
+          | {:task_id, String.t()}
           | {:workspace_id, String.t() | nil}
           | {:repo, String.t()}
           | {:worktree_path, String.t() | nil}
@@ -198,7 +198,7 @@ defmodule Arbiter.Worker.ReviewGate do
   Start a ReviewGate under `Arbiter.Worker.Supervisor`.
 
   Required opts: `:author` (the author worker pid to report back to),
-  `:bead_id`, `:repo`, `:branch`. Optional: `:workspace_id`, `:worktree_path`,
+  `:task_id`, `:repo`, `:branch`. Optional: `:workspace_id`, `:worktree_path`,
   `:target_branch` (default `"main"`), `:command` (test override for the reviewer
   argv), `:revise_command` (test override for the implementer argv), `:rounds`
   (the revise-loop cap), `:timeout_ms`.
@@ -222,15 +222,15 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   @doc """
-  The bead id used for the reviewer worker — the author bead id with a
+  The task id used for the reviewer worker — the author task id with a
   `#review` suffix so it registers as a distinct worker and records its own run
   row without colliding with the author.
   """
-  @spec reviewer_bead_id(String.t()) :: String.t()
-  def reviewer_bead_id(bead_id) when is_binary(bead_id), do: bead_id <> "#review"
+  @spec reviewer_task_id(String.t()) :: String.t()
+  def reviewer_task_id(task_id) when is_binary(task_id), do: task_id <> "#review"
 
   @doc """
-  The default revise-and-rediscuss round cap for a bead's difficulty level.
+  The default revise-and-rediscuss round cap for a task's difficulty level.
 
   | Difficulty | Label    | Default rounds |
   |------------|----------|---------------|
@@ -242,7 +242,7 @@ defmodule Arbiter.Worker.ReviewGate do
   | nil        | unknown  | 3 (D2)        |
 
   Used by `Arbiter.Worker.resolve_review_rounds/1` to derive the default cap
-  from the bead's difficulty when no workspace `config["review_gate"]["max_rounds"]`
+  from the task's difficulty when no workspace `config["review_gate"]["max_rounds"]`
   override is set.
   """
   @spec rounds_for_difficulty(0..4 | nil) :: pos_integer()
@@ -293,12 +293,12 @@ defmodule Arbiter.Worker.ReviewGate do
   @impl true
   def init(opts) do
     author = Keyword.fetch!(opts, :author)
-    bead_id = Keyword.fetch!(opts, :bead_id)
+    task_id = Keyword.fetch!(opts, :task_id)
 
     state = %{
       author: author,
-      bead_id: bead_id,
-      review_id: reviewer_bead_id(bead_id),
+      task_id: task_id,
+      review_id: reviewer_task_id(task_id),
       workspace_id: Keyword.get(opts, :workspace_id),
       repo: Keyword.get(opts, :repo, "unknown"),
       worktree_path: Keyword.get(opts, :worktree_path),
@@ -347,10 +347,10 @@ defmodule Arbiter.Worker.ReviewGate do
     # revise-loop case (the revise implementer's worker has no worktree_path in
     # meta, so its commit gate does not fire). If we spawned a reviewer over a
     # zero-commit branch it would see an empty diff and report "no work" — the
-    # bug this bead fixes.
+    # bug this task fixes.
     case reviewer_commit_check(state) do
       {:error, reason} ->
-        Logger.warning("ReviewGate: branch has no commits for bead=#{state.bead_id}: #{reason}")
+        Logger.warning("ReviewGate: branch has no commits for task=#{state.task_id}: #{reason}")
 
         report(state, {:request_changes, reason})
         {:stop, :normal, %{state | reported?: true}}
@@ -370,7 +370,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
           {:error, reason} ->
             Logger.warning(
-              "ReviewGate: failed to spawn reviewer for bead=#{state.bead_id}: #{inspect(reason)}"
+              "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
             )
 
             report(
@@ -430,7 +430,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
     Logger.warning(
-      "ReviewGate: #{state.phase} pass timed out for bead=#{state.bead_id} (round #{state.round})"
+      "ReviewGate: #{state.phase} pass timed out for task=#{state.task_id} (round #{state.round})"
     )
 
     msg =
@@ -543,7 +543,7 @@ defmodule Arbiter.Worker.ReviewGate do
     state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
 
     Logger.info(
-      "ReviewGate: bead=#{state.bead_id} not converged after #{max} round(s); escalating with transcript"
+      "ReviewGate: task=#{state.task_id} not converged after #{max} round(s); escalating with transcript"
     )
 
     {:done, finish(state, {:request_changes, escalation_payload(state)})}
@@ -564,7 +564,7 @@ defmodule Arbiter.Worker.ReviewGate do
     # (it may not have self-completed if it never printed `arb done`).
     stop_acolyte(state)
 
-    impl_id = implementer_bead_id(state.review_id, state.round)
+    impl_id = implementer_task_id(state.review_id, state.round)
 
     case launch_acolyte(
            %{state | phase: :revising},
@@ -575,7 +575,7 @@ defmodule Arbiter.Worker.ReviewGate do
          ) do
       {:ok, state} ->
         Logger.info(
-          "ReviewGate: bead=#{state.bead_id} round #{state.round} requested changes; revising"
+          "ReviewGate: task=#{state.task_id} round #{state.round} requested changes; revising"
         )
 
         {:revise, state}
@@ -705,12 +705,12 @@ defmodule Arbiter.Worker.ReviewGate do
   defp maybe_reprompt(%{retries_left: budget} = state, reason) when budget > 0 do
     stop_acolyte(state)
 
-    retry_id = reprompt_bead_id(state.review_id, state.attempt)
+    retry_id = reprompt_task_id(state.review_id, state.attempt)
 
     # A content-free REQUEST_CHANGES is a malformed verdict — the reviewer did
     # not produce a legitimate review result for this round. Extend the round cap
     # by 1 so the re-prompt's real findings can still reach the implementer: the
-    # empty verdict must not rob the bead of a revision opportunity (bd-79goxj).
+    # empty verdict must not rob the task of a revision opportunity (bd-79goxj).
     # Only extend when the ReviewGate has a revise loop (max_rounds > 1): a
     # single-pass setup (max_rounds == 1) has no revise loop by design and the
     # extension would incorrectly trigger enter_revise for that configuration.
@@ -725,14 +725,14 @@ defmodule Arbiter.Worker.ReviewGate do
          ) do
       {:ok, state} ->
         Logger.info(
-          "ReviewGate: reviewer for bead=#{state.bead_id} returned #{reason}; re-prompting (attempt #{state.attempt})"
+          "ReviewGate: reviewer for task=#{state.task_id} returned #{reason}; re-prompting (attempt #{state.attempt})"
         )
 
         {:reprompt, state}
 
       {:error, spawn_error} ->
         Logger.warning(
-          "ReviewGate: verdict re-prompt failed to spawn for bead=#{state.bead_id}: #{inspect(spawn_error)}"
+          "ReviewGate: verdict re-prompt failed to spawn for task=#{state.task_id}: #{inspect(spawn_error)}"
         )
 
         {:done,
@@ -800,8 +800,8 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   # Persist one thread entry as an inter-agent `:flag` message scoped to the
-  # bead's workspace. directive_ref = the author bead id, so `Messages.thread/2`
-  # reconstructs the ordered conversation for the bead. Best-effort: a workspace-
+  # task's workspace. directive_ref = the author task id, so `Messages.thread/2`
+  # reconstructs the ordered conversation for the task. Best-effort: a workspace-
   # less ReviewGate (ad-hoc run) or a DB hiccup never breaks the loop.
   defp persist_message(%{workspace_id: ws} = state, role, subject, body) when is_binary(ws) do
     {from_ref, to_ref} = thread_refs(state, role)
@@ -812,7 +812,7 @@ defmodule Arbiter.Worker.ReviewGate do
         from_ref: from_ref,
         to_ref: to_ref,
         workspace_id: ws,
-        directive_ref: state.bead_id,
+        directive_ref: state.task_id,
         subject: cap(subject, 500),
         body: body
       })
@@ -823,12 +823,12 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp persist_message(_state, _role, _subject, _body), do: :ok
 
-  # reviewer findings travel review_id -> bead (the implementer); the
-  # implementer's response travels bead -> review_id; system notes are attributed
-  # to the ReviewGate (review_id) and addressed at the bead.
-  defp thread_refs(state, :reviewer), do: {state.review_id, state.bead_id}
-  defp thread_refs(state, :implementer), do: {state.bead_id, state.review_id}
-  defp thread_refs(state, :system), do: {state.review_id, state.bead_id}
+  # reviewer findings travel review_id -> task (the implementer); the
+  # implementer's response travels task -> review_id; system notes are attributed
+  # to the ReviewGate (review_id) and addressed at the task.
+  defp thread_refs(state, :reviewer), do: {state.review_id, state.task_id}
+  defp thread_refs(state, :implementer), do: {state.task_id, state.review_id}
+  defp thread_refs(state, :system), do: {state.review_id, state.task_id}
 
   # Compose the escalation payload Darth Gnosis judges with: the FULL ordered
   # transcript, plus the current diff of the branch under review.
@@ -926,12 +926,12 @@ defmodule Arbiter.Worker.ReviewGate do
   defp reviewer_commit_check(%{worktree_path: wt, branch: branch, target_branch: target})
        when is_binary(wt) do
     # Mirror the worker commit gate's branch guard (bd-ofql8k): only check
-    # for commits when the worktree is actually checked out on the per-bead
+    # for commits when the worktree is actually checked out on the per-task
     # branch. Some test setups and ad-hoc runs reuse the repo as the
     # "worktree" with HEAD on `main`; in that case `rev-list main..HEAD` is
     # meaningless (always 0) and the check would manufacture a false positive.
     # Production worktrees provisioned via Worktree.create/3 are always on the
-    # per-bead branch, so the gate fires correctly in production.
+    # per-task branch, so the gate fires correctly in production.
     case Arbiter.Worker.Worktree.current_branch(wt) do
       {:ok, ^branch} ->
         # Worktree IS on the expected branch — verify commits exist.
@@ -1015,7 +1015,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp start_acolyte_worker(state, id, role) do
     case Worker.start(
-           bead_id: id,
+           task_id: id,
            repo: state.repo,
            workspace_id: nil,
            meta: acolyte_meta(state, role)
@@ -1026,8 +1026,8 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp acolyte_meta(state, :reviewer), do: %{role: :reviewer, reviews: state.bead_id}
-  defp acolyte_meta(state, :implementer), do: %{role: :implementer, revises: state.bead_id}
+  defp acolyte_meta(state, :reviewer), do: %{role: :reviewer, reviews: state.task_id}
+  defp acolyte_meta(state, :implementer), do: %{role: :implementer, revises: state.task_id}
 
   defp step_for(:reviewer), do: :reviewing
   defp step_for(:implementer), do: :revising
@@ -1071,7 +1071,7 @@ defmodule Arbiter.Worker.ReviewGate do
         # posture as a worker spawn — resolved from the workspace, never the
         # operator's ~/.claude (bd-9u10op).
         agent_opts =
-          agent_opts_for_role(ws, role_atom, state.bead_id) ++
+          agent_opts_for_role(ws, role_atom, state.task_id) ++
             [security: SecurityPolicy.resolve(ws)]
 
         case adapter.default_argv(prompt, agent_opts) do
@@ -1094,9 +1094,9 @@ defmodule Arbiter.Worker.ReviewGate do
   # (falls back to the worker `agent` block so a workspace that names only
   # `agent` still spawns a reviewer). The model/tier/thinking knobs are
   # read directly from the configured block — the reviewer doesn't route
-  # by difficulty (the bead's difficulty drives the *worker*; the reviewer
+  # by difficulty (the task's difficulty drives the *worker*; the reviewer
   # has its own fixed config).
-  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, _bead_id) do
+  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, _task_id) do
     block =
       get_in(config || %{}, ["review_agent", "config"]) ||
         get_in(config || %{}, ["agent", "config"]) || %{}
@@ -1109,13 +1109,13 @@ defmodule Arbiter.Worker.ReviewGate do
     ]
   end
 
-  # The implementer slot is a worker session on the same bead — route it
+  # The implementer slot is a worker session on the same task — route it
   # through the configured policy (`:static` / `:by_priority` /
   # `:by_difficulty` / ...) so a revise round picks the same model the
   # initial dispatch would have, not a flat workspace default. Best-effort:
-  # a missing bead falls back to the workspace's `agent.config`.
-  defp agent_opts_for_role(%Workspace{} = ws, :agent, bead_id) do
-    case load_issue(bead_id) do
+  # a missing task falls back to the workspace's `agent.config`.
+  defp agent_opts_for_role(%Workspace{} = ws, :agent, task_id) do
+    case load_issue(task_id) do
       nil ->
         block = get_in(ws.config || %{}, ["agent", "config"]) || %{}
 
@@ -1126,8 +1126,8 @@ defmodule Arbiter.Worker.ReviewGate do
           config: block
         ]
 
-      %Issue{} = bead ->
-        config = bead |> Routing.choose(ws, %{}) |> Map.get(:config) || %{}
+      %Issue{} = task ->
+        config = task |> Routing.choose(ws, %{}) |> Map.get(:config) || %{}
 
         [
           model: Map.get(config, "model"),
@@ -1138,9 +1138,9 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp load_issue(bead_id) when is_binary(bead_id) do
-    case Ash.get(Issue, bead_id) do
-      {:ok, %Issue{} = bead} -> bead
+  defp load_issue(task_id) when is_binary(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{} = task} -> task
       _ -> nil
     end
   rescue
@@ -1181,16 +1181,16 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # ---- synthetic worker ids ----------------------------------------------
 
-  # The synthetic bead id for a re-prompt reviewer: a fresh, distinct id per
+  # The synthetic task id for a re-prompt reviewer: a fresh, distinct id per
   # attempt so it registers as its own worker / run row and never collides with
   # the original (possibly still-terminating) reviewer.
-  defp reprompt_bead_id(review_id, attempt), do: review_id <> "#v#{attempt + 1}"
+  defp reprompt_task_id(review_id, attempt), do: review_id <> "#v#{attempt + 1}"
 
   # The reviewer id for a later round (round >= 2): distinct per round.
   defp reviewer_round_id(review_id, round), do: review_id <> "#r#{round}"
 
   # The implementer id for a given round's revision: distinct per round.
-  defp implementer_bead_id(review_id, round), do: review_id <> "#impl#{round}"
+  defp implementer_task_id(review_id, round), do: review_id <> "#impl#{round}"
 
   # ---- misc ---------------------------------------------------------------
 
@@ -1223,7 +1223,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # :snapshot call gets a sane reply rather than crashing it. See bd-2y0gd5.
   defp snapshot(state) do
     %{
-      bead_id: state.bead_id,
+      task_id: state.task_id,
       review_id: state.review_id,
       status: :reviewing,
       current_step: "review_gate",
@@ -1247,27 +1247,27 @@ defmodule Arbiter.Worker.ReviewGate do
   # ---- prompts ------------------------------------------------------------
 
   @doc """
-  Build the reviewer's prompt: the bead's acceptance criteria + description, the
+  Build the reviewer's prompt: the task's acceptance criteria + description, the
   branch under review, the verdict protocol, and the hard no-boot constraint.
   Public so it can be inspected in tests.
   """
   @spec review_prompt(map()) :: String.t()
   def review_prompt(state) do
-    bead = load_bead(state.bead_id)
+    task = load_task(state.task_id)
 
     """
     You are a REVIEWER worker — a ReviewGate. You did NOT write this code; a
     different worker did. Your job is to code-review its work before it merges.
     You must reach an independent verdict — do not rubber-stamp.
 
-    Bead under review: #{state.bead_id}
-    Title: #{bead.title}
+    Task under review: #{state.task_id}
+    Title: #{task.title}
 
     Description:
-    #{bead.description}
+    #{task.description}
 
     Acceptance criteria:
-    #{bead.acceptance}
+    #{task.acceptance}
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
     #{head_sha_instruction(state)}
@@ -1359,27 +1359,27 @@ defmodule Arbiter.Worker.ReviewGate do
   (`ResumeContext.work_so_far/2`) so this fresh implementer mind continues the
   prior round's thread with full context — the same provider-agnostic
   continuity the `arb resume` path uses — instead of re-deriving what was done
-  from a raw diff. Combined with the reviewer findings and the bead directive
+  from a raw diff. Combined with the reviewer findings and the task directive
   below, that approximates the original implementer resuming its own session.
   Public for inspection in tests.
   """
   @spec revise_prompt(map(), String.t()) :: String.t()
   def revise_prompt(state, findings) do
-    bead = load_bead(state.bead_id)
+    task = load_task(state.task_id)
 
     """
     You are an IMPLEMENTER worker. A reviewer (a ReviewGate) has reviewed the work
     on branch `#{state.branch}` and REQUESTED CHANGES. Your job is to address each
     finding so the work can pass review.
 
-    Bead: #{state.bead_id}
-    Title: #{bead.title}
+    Task: #{state.task_id}
+    Title: #{task.title}
 
     Description:
-    #{bead.description}
+    #{task.description}
 
     Acceptance criteria:
-    #{bead.acceptance}
+    #{task.acceptance}
     #{work_so_far_briefing(state)}
     Reviewer findings (round #{state.round}):
     #{clean_findings(findings)}
@@ -1474,13 +1474,13 @@ defmodule Arbiter.Worker.ReviewGate do
     """ <> review_prompt(state)
   end
 
-  defp load_bead(bead_id) do
-    case Ash.get(Issue, bead_id) do
-      {:ok, %Issue{} = bead} ->
+  defp load_task(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, %Issue{} = task} ->
         %{
-          title: bead.title || "(untitled)",
-          description: bead.description || "(none)",
-          acceptance: bead.acceptance || "(none)"
+          title: task.title || "(untitled)",
+          description: task.description || "(none)",
+          acceptance: task.acceptance || "(none)"
         }
 
       _ ->

@@ -24,7 +24,7 @@ defmodule Arbiter.Worker.CommitGateTest do
 
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Worktree
@@ -100,7 +100,7 @@ defmodule Arbiter.Worker.CommitGateTest do
     %{repo: repo, ws: ws}
   end
 
-  # Provision a fresh worktree on a per-bead branch using the same helper Dispatch
+  # Provision a fresh worktree on a per-task branch using the same helper Dispatch
   # uses in production. Tests want to drive the worker directly (cap: 0 → fail
   # path), but the worktree on disk has to be real so the gate's git inspection
   # is exercised, not stubbed.
@@ -112,27 +112,27 @@ defmodule Arbiter.Worker.CommitGateTest do
     path
   end
 
-  defp new_bead(ws) do
-    {:ok, bead} =
+  defp new_task(ws) do
+    {:ok, task} =
       Ash.create(Issue, %{
-        title: "commit-gate bead",
+        title: "commit-gate task",
         workspace_id: ws.id,
         issue_type: :feature
       })
 
-    {:ok, bead} = Ash.update(bead, %{status: :in_progress})
-    bead
+    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task
   end
 
-  defp start_worker(bead, repo, worktree_path, extra_meta) do
+  defp start_worker(task, repo, worktree_path, extra_meta) do
     meta =
       Map.merge(
         %{
-          branch: "bd-gate/#{bead.id}",
+          branch: "bd-gate/#{task.id}",
           repo_path: repo,
           worktree_path: worktree_path,
           target_branch: "main",
-          merge_title: "Merge #{bead.id}",
+          merge_title: "Merge #{task.id}",
           # Skip the live ReviewGate subprocess — a tripped gate must NOT route
           # to a ReviewGate at all, so a stubbed-out spawn would prove nothing.
           # If the gate fails, status moves to :failed before this even matters.
@@ -143,9 +143,9 @@ defmodule Arbiter.Worker.CommitGateTest do
 
     {:ok, pid} =
       Worker.start(
-        bead_id: bead.id,
+        task_id: task.id,
         repo: "gate/repo",
-        workspace_id: ws_id(bead),
+        workspace_id: ws_id(task),
         meta: meta
       )
 
@@ -203,11 +203,11 @@ defmodule Arbiter.Worker.CommitGateTest do
       # assert the structural gate without the retry layer), the worker must
       # park as :failed with a bd-ofql8k-specific failure reason and surface
       # the uncommitted state to the Admiral.
-      bead = new_bead(ws)
-      path = provision_worktree(repo, "bd-gate/#{bead.id}")
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
       File.write!(Path.join(path, "forgotten_work.txt"), "edited but not committed\n")
 
-      pid = start_worker(bead, repo, path, %{commit_nudge_cap: 0})
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -221,8 +221,8 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert snap.meta.failure_reason == :uncommitted_at_completion
       assert snap.meta.commit_gate_reason == :uncommitted
 
-      # The bead is not closed; notes carry the gate diagnostic.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      # The task is not closed; notes carry the gate diagnostic.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       refute reloaded.status == :closed
       assert reloaded.notes =~ "Commit gate tripped"
       assert reloaded.notes =~ "forgotten_work.txt"
@@ -231,7 +231,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =
-        Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
+        Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
 
       assert escalation
       assert escalation.subject =~ "uncommitted"
@@ -248,13 +248,13 @@ defmodule Arbiter.Worker.CommitGateTest do
     test "an arb-done with ZERO commits ahead of base fails + escalates",
          %{repo: repo, ws: ws} do
       # The other half of the gate: a clean worktree but no commits on the
-      # per-bead branch is also unreviewable — there is literally nothing on
+      # per-task branch is also unreviewable — there is literally nothing on
       # `base..HEAD` to diff. Distinct failure reason so the operator can
       # tell the two cases apart in the run log.
-      bead = new_bead(ws)
-      path = provision_worktree(repo, "bd-gate/#{bead.id}")
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
 
-      pid = start_worker(bead, repo, path, %{commit_nudge_cap: 0})
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -265,7 +265,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert snap.meta.failure_reason == :no_commits_at_completion
       assert snap.meta.commit_gate_reason == :no_commits
 
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.notes =~ "Commit gate tripped"
       assert reloaded.notes =~ "zero commits ahead"
     end
@@ -274,14 +274,14 @@ defmodule Arbiter.Worker.CommitGateTest do
          %{repo: repo, ws: ws} do
       # The happy-path counterpart: the gate must let real work through to
       # the review gate. Without this assertion, a too-strict gate would
-      # silently regress every bead.
-      bead = new_bead(ws)
-      path = provision_worktree(repo, "bd-gate/#{bead.id}")
+      # silently regress every task.
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
       File.write!(Path.join(path, "real_work.txt"), "real\n")
       {_, 0} = git(["add", "real_work.txt"], path)
       {_, 0} = git(["commit", "-q", "-m", "real work"], path)
 
-      pid = start_worker(bead, repo, path, %{commit_nudge_cap: 0})
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -302,11 +302,11 @@ defmodule Arbiter.Worker.CommitGateTest do
       # Before this fix, they would be marked :failed with :no_commits_at_completion
       # because the commit gate checked all workers. The fix skips the gate for
       # reviewers so they complete successfully.
-      bead = new_bead(ws)
-      path = provision_worktree(repo, "bd-gate/#{bead.id}")
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
 
       pid =
-        start_worker(bead, repo, path, %{
+        start_worker(task, repo, path, %{
           commit_nudge_cap: 0,
           review_only: true
         })

@@ -224,7 +224,7 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   # Top-level build-artifact paths that git may report as untracked even though
-  # they should be ignored. Per-bead worktrees symlink `deps` (and sometimes
+  # they should be ignored. Per-task worktrees symlink `deps` (and sometimes
   # `_build`) to a shared cache; the repo's directory-only `/deps/` `/_build/`
   # ignore patterns do NOT match a symlink, so `git status --porcelain` emits
   # `?? deps`. Counting that as "uncommitted" false-fails the commit gate on
@@ -316,7 +316,7 @@ defmodule Arbiter.Worker.Worktree do
 
     * `{:ok, :ready}` — clean tree AND ≥1 commit ahead of `base_ref`.
     * `{:ok, :uncommitted}` — the worktree has uncommitted changes; the
-      review gate / merger must NOT see it (the per-bead branch HEAD does
+      review gate / merger must NOT see it (the per-task branch HEAD does
       not yet include those edits, so they're invisible to `git diff
       base..HEAD`). This is the bd-ofql8k root cause.
     * `{:ok, :no_commits}` — clean tree but the branch has no commits

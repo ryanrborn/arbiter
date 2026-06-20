@@ -125,8 +125,8 @@ defmodule ArbiterCli.Cmd.InboxTest do
     end
   end
 
-  describe "arb inbox <bead-id> (worker path)" do
-    test "lists a bead's unread mail and marks each read" do
+  describe "arb inbox <task-id> (worker path)" do
+    test "lists a task's unread mail and marks each read" do
       stub_routes([
         {{"get", "/api/messages"},
          {%{

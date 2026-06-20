@@ -3,8 +3,8 @@ defmodule Arbiter.AgentsTest do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Claude
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   describe "for_workspace/1 and for_type/1" do
     test "returns Claude for the default workspace (no `agent` key)" do
@@ -32,11 +32,11 @@ defmodule Arbiter.AgentsTest do
     end
   end
 
-  describe "for_bead/2" do
-    test "falls back to the workspace adapter when bead has no per-bead override" do
-      bead = %Issue{}
+  describe "for_task/2" do
+    test "falls back to the workspace adapter when task has no per-task override" do
+      task = %Issue{}
       ws = %Workspace{config: %{}}
-      assert Agents.for_bead(bead, ws) == Claude
+      assert Agents.for_task(task, ws) == Claude
     end
   end
 

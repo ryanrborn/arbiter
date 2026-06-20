@@ -1,15 +1,15 @@
 defmodule Arbiter.Workflows.MachineTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.TestWorkflows
   alias Arbiter.Workflows.Machine
   alias Arbiter.Workflows.MachineState
 
   setup do
     {:ok, ws} = Ash.create(Workspace, %{name: "wf-test-ws", prefix: "wf"})
-    {:ok, issue} = Ash.create(Issue, %{title: "wf bead", workspace_id: ws.id})
+    {:ok, issue} = Ash.create(Issue, %{title: "wf task", workspace_id: ws.id})
     {:ok, ws: ws, issue: issue}
   end
 
@@ -28,7 +28,7 @@ defmodule Arbiter.Workflows.MachineTest do
       {:ok, id} = attach(issue, %{x: "hello"})
 
       {:ok, row} = Ash.get(MachineState, id)
-      assert row.bead_id == issue.id
+      assert row.task_id == issue.id
       assert row.status == :idle
       assert row.current_step == "a"
       assert row.completed_steps == []
@@ -182,7 +182,7 @@ defmodule Arbiter.Workflows.MachineTest do
       assert Machine.whereis(id) == pid
     end
 
-    test "two machines for different beads coexist", %{ws: ws, issue: issue1} do
+    test "two machines for different tasks coexist", %{ws: ws, issue: issue1} do
       {:ok, issue2} = Ash.create(Issue, %{title: "second", workspace_id: ws.id})
 
       %{id: id1, pid: pid1} = attach_and_start(issue1)

@@ -4,26 +4,26 @@ defmodule Arbiter.Worker.PRTemplate do
 
   A repo's PR template lives at `.github/pull_request_template.md` by
   convention. `read/1` returns its contents or `nil`. `fill/3` substitutes
-  `{{key}}` placeholders against the bead and its resolved tracker; lines
+  `{{key}}` placeholders against the task and its resolved tracker; lines
   whose substituted value is empty get dropped entirely (so a `:none`-tracked
-  bead doesn't leave behind an empty "Tracker:" line).
+  task doesn't leave behind an empty "Tracker:" line).
 
   ## Placeholder keys
 
-    * `{{bead.id}}` — e.g. `"gte-020"`
-    * `{{bead.title}}` — `issue.title`
-    * `{{bead.description}}` — `issue.description` (Markdown verbatim)
-    * `{{bead.acceptance}}` — `issue.acceptance`
-    * `{{bead.notes}}` — `issue.notes`
-    * `{{bead.qa_notes}}` — `issue.qa_notes`
-    * `{{bead.deployment_notes}}` — `issue.deployment_notes`
-    * `{{bead.priority}}` — `"P\#{issue.priority}"` (e.g. `"P0"`)
-    * `{{bead.issue_type}}` — `"task"`, `"bug"`, etc.
+    * `{{task.id}}` — e.g. `"gte-020"`
+    * `{{task.title}}` — `issue.title`
+    * `{{task.description}}` — `issue.description` (Markdown verbatim)
+    * `{{task.acceptance}}` — `issue.acceptance`
+    * `{{task.notes}}` — `issue.notes`
+    * `{{task.qa_notes}}` — `issue.qa_notes`
+    * `{{task.deployment_notes}}` — `issue.deployment_notes`
+    * `{{task.priority}}` — `"P\#{issue.priority}"` (e.g. `"P0"`)
+    * `{{task.issue_type}}` — `"task"`, `"bug"`, etc.
     * `{{tracker.link}}` — resolved via `Arbiter.Trackers.link_for/1`. Empty
       string for `Tracker.None`.
     * `{{tracker.ref}}` — `issue.tracker_ref` (e.g. `"VR-17585"` or `""`).
     * `{{tracker.type}}` — `"jira" | "linear" | "github" | "none"`.
-    * `{{tracker.closes}}` — `"Closes #N"` for `:github` beads with a bare
+    * `{{tracker.closes}}` — `"Closes #N"` for `:github` tasks with a bare
       numeric `tracker_ref`; `""` (line-dropped) for all others.
 
   Unknown placeholders are left in the output verbatim so templates can use
@@ -43,7 +43,7 @@ defmodule Arbiter.Worker.PRTemplate do
   header before it stays).
   """
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
 
   @template_path ".github/pull_request_template.md"
@@ -67,37 +67,37 @@ defmodule Arbiter.Worker.PRTemplate do
 
   Produces a clean description containing: title (as a Markdown heading),
   description (if present), tracker link (if present), and — for
-  `:github`-tracked beads with a bare numeric `tracker_ref` — a
+  `:github`-tracked tasks with a bare numeric `tracker_ref` — a
   `Closes #N` keyword so GitHub auto-closes the issue on merge.
   """
   @spec default_body(Issue.t()) :: String.t()
-  def default_body(%Issue{} = bead) do
-    link = safe_link_for(bead)
+  def default_body(%Issue{} = task) do
+    link = safe_link_for(task)
 
-    parts = ["## #{bead.title}"]
+    parts = ["## #{task.title}"]
 
     parts =
-      if bead.description && String.trim(bead.description) != "",
-        do: parts ++ [String.trim(bead.description)],
+      if task.description && String.trim(task.description) != "",
+        do: parts ++ [String.trim(task.description)],
         else: parts
 
     parts = if link != "", do: parts ++ [link], else: parts
 
-    closing = closing_keyword(bead)
+    closing = closing_keyword(task)
     parts = if closing != "", do: parts ++ [closing], else: parts
 
     Enum.join(parts, "\n\n")
   end
 
   @doc """
-  Substitute placeholders in `template` using `bead` (an `%Issue{}`).
+  Substitute placeholders in `template` using `task` (an `%Issue{}`).
 
   Drops lines whose only placeholder resolves to empty (typical: a `:none`
   tracker leaves `{{tracker.link}}` empty and that line vanishes).
   """
   @spec fill(String.t(), Issue.t(), keyword()) :: String.t()
-  def fill(template, %Issue{} = bead, _opts \\ []) when is_binary(template) do
-    placeholders = placeholders_for(bead)
+  def fill(template, %Issue{} = task, _opts \\ []) when is_binary(template) do
+    placeholders = placeholders_for(task)
 
     body =
       template
@@ -105,7 +105,7 @@ defmodule Arbiter.Worker.PRTemplate do
       |> Enum.flat_map(&render_line(&1, placeholders))
       |> Enum.join("\n")
 
-    closing = closing_keyword(bead)
+    closing = closing_keyword(task)
 
     if closing != "" do
       body <> "\n\n" <> closing
@@ -150,25 +150,25 @@ defmodule Arbiter.Worker.PRTemplate do
     end)
   end
 
-  defp placeholders_for(%Issue{} = bead) do
+  defp placeholders_for(%Issue{} = task) do
     %{
-      "bead.id" => bead.id || "",
-      "bead.title" => bead.title || "",
-      "bead.description" => bead.description || "",
-      "bead.acceptance" => bead.acceptance || "",
-      "bead.notes" => bead.notes || "",
-      "bead.qa_notes" => bead.qa_notes || "",
-      "bead.deployment_notes" => bead.deployment_notes || "",
-      "bead.priority" => "P#{bead.priority}",
-      "bead.issue_type" => Atom.to_string(bead.issue_type || :task),
-      "tracker.link" => safe_link_for(bead),
-      "tracker.ref" => bead.tracker_ref || "",
-      "tracker.type" => Atom.to_string(bead.tracker_type || :none),
-      "tracker.closes" => closing_keyword(bead)
+      "task.id" => task.id || "",
+      "task.title" => task.title || "",
+      "task.description" => task.description || "",
+      "task.acceptance" => task.acceptance || "",
+      "task.notes" => task.notes || "",
+      "task.qa_notes" => task.qa_notes || "",
+      "task.deployment_notes" => task.deployment_notes || "",
+      "task.priority" => "P#{task.priority}",
+      "task.issue_type" => Atom.to_string(task.issue_type || :task),
+      "tracker.link" => safe_link_for(task),
+      "tracker.ref" => task.tracker_ref || "",
+      "tracker.type" => Atom.to_string(task.tracker_type || :none),
+      "tracker.closes" => closing_keyword(task)
     }
   end
 
-  # Returns "Closes #N" for :github-tracked beads whose tracker_ref is a bare
+  # Returns "Closes #N" for :github-tracked tasks whose tracker_ref is a bare
   # integer string (e.g. "42"), so GitHub auto-closes the issue on merge.
   # Returns "" for all other tracker types — Jira/Linear/etc. have no such
   # native close keyword.
@@ -177,12 +177,12 @@ defmodule Arbiter.Worker.PRTemplate do
     if Regex.match?(~r/^\d+$/, ref), do: "Closes ##{ref}", else: ""
   end
 
-  defp closing_keyword(_bead), do: ""
+  defp closing_keyword(_task), do: ""
 
   # Trackers.link_for/1 may raise for unregistered types; we don't want a
   # template-fill to crash the worker. Treat any failure as no-link.
-  defp safe_link_for(bead) do
-    Trackers.link_for(bead)
+  defp safe_link_for(task) do
+    Trackers.link_for(task)
   rescue
     _ -> ""
   end

@@ -12,7 +12,7 @@ defmodule Arbiter.Mergers.Gitlab.Config do
 
   This mirrors `Arbiter.Trackers.Jira.Config`. The merger abstraction
   discriminates on `config["merge"]["strategy"]` (see
-  `Arbiter.Beads.Workspace.merger_strategy/1`); the adapter-specific shape
+  `Arbiter.Tasks.Workspace.merger_strategy/1`); the adapter-specific shape
   lives under `config["merge"]["config"]`, parallel to how a tracker nests
   its config under `config["tracker"]["config"]`.
 
@@ -36,7 +36,7 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   literal token (discouraged outside of tests).
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.Gitlab.Error
 
   @pdict_key {__MODULE__, :active_workspace_config}

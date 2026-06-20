@@ -3,13 +3,13 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
 
   setup do
     for snap <- Worker.list_children() do
-      Worker.stop(snap.bead_id)
+      Worker.stop(snap.task_id)
     end
 
     Process.sleep(50)
@@ -49,31 +49,31 @@ defmodule ArbiterWeb.MessagesLiveTest do
   end
 
   describe "per-acolyte mailbox" do
-    test "lists unread mailbox messages addressed to the bead", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "mbx", workspace_id: ws.id})
-      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "r", workspace_id: ws.id)
+    test "lists unread mailbox messages addressed to the task", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "mbx", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
       {:ok, _} =
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :flag,
           from_ref: "bd-varek",
-          to_ref: bead.id,
+          to_ref: task.id,
           body: "the API shape changed"
         })
 
-      {:ok, _view, html} = live(conn, ~p"/workers/#{bead.id}")
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
 
       assert html =~ "Mailbox"
       assert html =~ "the API shape changed"
       assert html =~ "bd-varek"
     end
 
-    test "compose form sends a direction to the bead", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "compose", workspace_id: ws.id})
-      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "r", workspace_id: ws.id)
+    test "compose form sends a direction to the task", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "compose", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{bead.id}")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
 
       view
       |> form("#mailbox form", %{"body" => "check the API contract"})
@@ -81,19 +81,19 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
       assert render(view) =~ "the API contract"
 
-      # The direction landed as a real mailbox-family message addressed to the bead.
+      # The direction landed as a real mailbox-family message addressed to the task.
       assert [%Message{kind: :direction, from_ref: "admiral", body: "check the API contract"}] =
-               Message.inbox(bead.id, workspace_id: ws.id)
+               Message.inbox(task.id, workspace_id: ws.id)
     end
 
     test "marking a message read removes it from the unread list", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "read", workspace_id: ws.id})
-      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "r", workspace_id: ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "read", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
 
       {:ok, msg} =
-        Message.send_mail(%{workspace_id: ws.id, to_ref: bead.id, body: "ack me"})
+        Message.send_mail(%{workspace_id: ws.id, to_ref: task.id, body: "ack me"})
 
-      {:ok, view, _html} = live(conn, ~p"/workers/#{bead.id}")
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
       assert render(view) =~ "ack me"
 
       view

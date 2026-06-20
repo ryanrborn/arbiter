@@ -1,7 +1,7 @@
 # arbiter
 
 A local-first project coordination system. Track work as Directives
-(beads), group them into Strike Forces (convoys), and dispatch Acolyte
+(tasks), group them into Strike Forces (convoys), and dispatch Acolyte
 (worker) agents to work them — with a LiveView dashboard and a CLI
 (`arb`) for interacting with everything.
 
@@ -127,7 +127,7 @@ Restart the server after editing `dev.exs`.
 
 The CLI uses an `arb <resource> <verb>` grammar. The resources are neutral
 base terms — `issue`, `worker`, `batch`, `repo` — and themed vocabularies
-(the Sith "polecat", "bead", "convoy", "warship", "sling", …) layer on top as
+(the Sith "polecat", "task", "convoy", "warship", "sling", …) layer on top as
 aliases.
 
 ```
@@ -159,7 +159,7 @@ vocabulary gives:
 | canonical  | default label | example                                        |
 |------------|---------------|------------------------------------------------|
 | `worker`   | `polecat`     | `arb polecat list` → `arb worker list`         |
-| `issue`    | `bead`        | `arb bead show <id>` → `arb issue show <id>`    |
+| `issue`    | `task`        | `arb task show <id>` → `arb issue show <id>`    |
 | `batch`    | `convoy`      | `arb convoy create …` → `arb batch create …`    |
 | `repo`     | `warship`     | `arb warship list` → `arb repo list`            |
 | `dispatch` | `sling`       | `arb sling <id>` → `arb issue dispatch <id>`    |

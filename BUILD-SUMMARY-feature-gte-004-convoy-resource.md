@@ -1,36 +1,36 @@
 # Build summary: feature/gte-004-convoy-resource
 
-**Bead:** gte-004
+**Task:** gte-004
 **Builder:** Mayor (interactive session, 2026-05-19; parallel with Agent on gte-003)
 **Branch:** feature/gte-004-convoy-resource
 **Commit:** 864c5ff
 
 ## What I built
 
-A `Arbiter.Beads.Convoy` resource for batches of related Issues, plus the `ConvoyMembership` join, plus a minimal hook on `Issue.close` so system-managed convoys auto-close when their last member is closed.
+A `Arbiter.Tasks.Convoy` resource for batches of related Issues, plus the `ConvoyMembership` join, plus a minimal hook on `Issue.close` so system-managed convoys auto-close when their last member is closed.
 
 ### Files added/changed
 
 ```
-apps/arbiter/lib/arbiter/beads/convoy.ex                        (+) main resource (~180 LOC)
-apps/arbiter/lib/arbiter/beads/convoy_membership.ex             (+) join resource
-apps/arbiter/lib/arbiter/beads/convoy/changes/generate_id.ex    (+) "{prefix}-cv-{short_id}" PK
-apps/arbiter/lib/arbiter/beads/convoy/changes/set_closed_reason.ex (+) :close action arg → attr
-apps/arbiter/lib/arbiter/beads/issue.ex                         (M) added has_many :convoys + after_action on :close
-apps/arbiter/lib/arbiter/beads.ex                               (M) registered Convoy + ConvoyMembership
+apps/arbiter/lib/arbiter/tasks/convoy.ex                        (+) main resource (~180 LOC)
+apps/arbiter/lib/arbiter/tasks/convoy_membership.ex             (+) join resource
+apps/arbiter/lib/arbiter/tasks/convoy/changes/generate_id.ex    (+) "{prefix}-cv-{short_id}" PK
+apps/arbiter/lib/arbiter/tasks/convoy/changes/set_closed_reason.ex (+) :close action arg → attr
+apps/arbiter/lib/arbiter/tasks/issue.ex                         (M) added has_many :convoys + after_action on :close
+apps/arbiter/lib/arbiter/tasks.ex                               (M) registered Convoy + ConvoyMembership
 apps/arbiter/priv/repo/migrations/20260519195621_add_convoy_resources.exs (+) creates both tables + unique index
 apps/arbiter/priv/resource_snapshots/...                          (+) snapshots
-apps/arbiter/test/arbiter/beads/convoy_test.exs                 (+) 16 tests
+apps/arbiter/test/arbiter/tasks/convoy_test.exs                 (+) 16 tests
 ```
 
-## Acceptance check (from bead gte-004)
+## Acceptance check (from task gte-004)
 
 | Criterion | Status |
 |---|---|
 | Create convoy with 3 issues; close 2; convoy still open | ✅ "convoy stays open while some issues remain open" |
 | Close 3rd; convoy auto-closes | ✅ "convoy auto-closes when the last issue is closed (acceptance)" — verifies `status == :closed`, `closed_at` set, `closed_reason == "all members closed"` |
 | `:owned` convoys don't auto-close | ✅ "remains open even when all members are closed" |
-| Audit trail captures closure | ⚠️ Convoy doesn't have ash_paper_trail (skipped to keep this bead small; can add as a small follow-up bead if needed). Issue's audit trail captures the :close action that triggers the convoy close. |
+| Audit trail captures closure | ⚠️ Convoy doesn't have ash_paper_trail (skipped to keep this task small; can add as a small follow-up task if needed). Issue's audit trail captures the :close action that triggers the convoy close. |
 | Reviewer verifies: relationships work both directions | ✅ Issue's `:convoys` and Convoy's `:issues` are both loadable; aggregates `total_issues` / `closed_issues` work via the membership join |
 
 ## Design choices worth flagging
@@ -47,7 +47,7 @@ apps/arbiter/test/arbiter/beads/convoy_test.exs                 (+) 16 tests
 
 ## What I punted on (with reasons)
 
-1. **No paper_trail on Convoy** — extending the bead's scope. Add as a 1-2 line follow-up bead if audit matters here.
+1. **No paper_trail on Convoy** — extending the task's scope. Add as a 1-2 line follow-up task if audit matters here.
 2. **No `:reopen` action.** Convoys close once. If we ever want them revivable, add later.
 3. **Convoy progress as a derived field/calculation.** Aggregates are sufficient; callers compose.
 4. **No bulk-membership action** (`Convoy.add_issues/2`). Callers create memberships one at a time via `Ash.create(ConvoyMembership, ...)`. Add bulk later if the CLI flow demands it.
@@ -72,7 +72,7 @@ MIX_ENV=test mix ecto.migrate
 mix compile --warnings-as-errors           # clean
 mix format --check-formatted               # clean
 
-mix test apps/arbiter/test/arbiter/beads/convoy_test.exs
+mix test apps/arbiter/test/arbiter/tasks/convoy_test.exs
 # Expect: 16 tests, 0 failures
 
 mix test
@@ -80,7 +80,7 @@ mix test
 
 # Acceptance smoke from iex
 iex -S mix
-> alias Arbiter.Beads.{Workspace, Issue, Convoy, ConvoyMembership}
+> alias Arbiter.Tasks.{Workspace, Issue, Convoy, ConvoyMembership}
 > {:ok, ws} = Ash.create(Workspace, %{name: "smoke", prefix: "smk"})
 > {:ok, c} = Ash.create(Convoy, %{title: "batch", workspace_id: ws.id})
 > {:ok, i1} = Ash.create(Issue, %{title: "a", workspace_id: ws.id})
@@ -97,7 +97,7 @@ iex -S mix
 
 Ready to merge. Merge order with gte-003 (in flight via parallel Agent) is:
 - Either order works since both branched from main at the same commit (5a5c62e)
-- Both touch `apps/arbiter/lib/arbiter/beads.ex` (domain `resources` block) and `apps/arbiter/lib/arbiter/beads/issue.ex` (relationships block + actions) — **conflicts likely on these two files at merge**
+- Both touch `apps/arbiter/lib/arbiter/tasks.ex` (domain `resources` block) and `apps/arbiter/lib/arbiter/tasks/issue.ex` (relationships block + actions) — **conflicts likely on these two files at merge**
 - I'll handle the conflicts at merge time; trivially mergeable since the additions are non-overlapping (gte-003 adds Dependency resource + Issue.ready/0, gte-004 adds Convoy resources + Issue.convoys + Issue.close hook)
 
 After merge, unblocked: **gte-005 (REST API for CLI)**.

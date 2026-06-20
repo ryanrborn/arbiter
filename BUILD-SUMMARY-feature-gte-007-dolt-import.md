@@ -1,6 +1,6 @@
 # gte-007 — Dolt-to-Postgres import script
 
-Bead: gte-007
+Task: gte-007
 Branch: `feature/gte-007-dolt-import`
 
 ## What
@@ -30,12 +30,12 @@ Per source the task:
 
 - `apps/arbiter/lib/mix/tasks/arbiter.import_from_dolt.ex` — mix task,
   Dolt I/O, workspace lookup, bulk inserts.
-- `apps/arbiter/lib/arbiter/beads/dolt_import/mapper.ex` — pure field
+- `apps/arbiter/lib/arbiter/tasks/dolt_import/mapper.ex` — pure field
   mappers, kept separate so they can be unit-tested without a live Dolt DB.
   Functions: `map_status/1`, `map_issue_type/1`, `parse_priority/1`,
   `parse_external_ref/1`, `map_dep_type/1`, `parse_dt/1`, `compose_description/1`,
   `derive_prefix/1`, `nonempty/1`.
-- `apps/arbiter/test/arbiter/beads/dolt_import/mapper_test.exs` — 30 unit
+- `apps/arbiter/test/arbiter/tasks/dolt_import/mapper_test.exs` — 30 unit
   tests covering every mapper function and its edge cases.
 
 ## Verified end-to-end
@@ -60,8 +60,8 @@ Re-running is a no-op (all rows already present).
 
 ### 1. The cross-rig FK filter
 
-Dolt's `dependencies` table sometimes references beads that don't live in the
-same Dolt DB (e.g. server has `vs-e5m → vs-wisp-ddn1` where the wisp bead
+Dolt's `dependencies` table sometimes references tasks that don't live in the
+same Dolt DB (e.g. server has `vs-e5m → vs-wisp-ddn1` where the wisp task
 exists transiently in the mayor's runtime but never made it back to the server
 Dolt). Postgres has a `FOREIGN KEY` on both `from_issue_id` and `to_issue_id`,
 so these orphan refs would crash the entire batch insert.
@@ -98,8 +98,8 @@ spelled out. Saved here so the next person doesn't repeat it.
 
 Falls back to `Mapper.derive_prefix/1` for unknown sources (reads prefix from
 the first row's ID). Reason for hardcoding: the hq Dolt's `issues` table
-contains beads from other rigs (mail bodies and escalations are stored as
-beads), so `derive_prefix` would pick whatever's first by insertion order —
+contains tasks from other rigs (mail bodies and escalations are stored as
+tasks), so `derive_prefix` would pick whatever's first by insertion order —
 returned `"ac"` during testing. Hardcoding by source-name is the safer call.
 
 ### 3. `Ecto.insert_all` raw-type quirks
@@ -120,7 +120,7 @@ Consequences:
 - No `InheritTrackerType` change runs → we explicitly parse `external_ref` and
   set `tracker_type` from that.
 - No paper_trail versions are written → these are imports, not edits. If we
-  want a synthetic "imported" version row per bead later, that's a follow-up.
+  want a synthetic "imported" version row per task later, that's a follow-up.
 - No `GuardStatus` enforcement → fine, imports can land in any status.
 
 ### 5. Issue-set snapshot for filter
@@ -129,8 +129,8 @@ Consequences:
 that batch's issues are already inserted. So within a single source-import,
 deps can reference issues just inserted from that same source. **Across
 sources** (running hq then server), the server filter sees both hq + server
-issue IDs and correctly accepts cross-workspace deps (e.g. an hq bead blocked
-by a server bead).
+issue IDs and correctly accepts cross-workspace deps (e.g. an hq task blocked
+by a server task).
 
 This is the right semantics — cross-workspace deps are real, cross-orphan deps
 are not.

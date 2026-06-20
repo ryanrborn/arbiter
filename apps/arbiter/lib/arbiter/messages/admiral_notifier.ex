@@ -22,18 +22,18 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   or a failed pre-flight auth probe is not just dashboard noise — it needs the
   operator to *act* (re-authenticate, top up credits, re-dispatch). Those go out as
   addressed `:escalation` **mailbox** messages (`to_ref: "admiral"`,
-  `directive_ref: <bead>`) so they land in `arb inbox` rather than scrolling off
+  `directive_ref: <task>`) so they land in `arb inbox` rather than scrolling off
   the broadcast feed. The classified cause + remediation
   (`Arbiter.Worker.StopReason`) is baked into the subject/body. See bd-awi4nw.
 
-  ## Reconciliation with the bead spec
+  ## Reconciliation with the task spec
 
-  The originating bead (bd-25ftl0) imagined dedicated `:completion` / `:failure`
-  kinds and a `to="admiral"` / `directive_ref=bead_id` shape. The Message
+  The originating task (bd-25ftl0) imagined dedicated `:completion` / `:failure`
+  kinds and a `to="admiral"` / `directive_ref=task_id` shape. The Message
   resource that actually shipped (bd-bduz2k) settled on a leaner taxonomy:
   broadcast `:notification`s (the Admiral feed) vs. addressed mailbox kinds.
   We honour the realised design — every lifecycle auto-post is a
-  `:notification` with `from_ref` set to the directive's bead id; the
+  `:notification` with `from_ref` set to the directive's task id; the
   completed/failed/awaiting distinction lives in the subject + body.
 
   ## Configuration
@@ -52,8 +52,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   require Logger
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker.StopReason
 
@@ -64,7 +64,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   full snapshot map is fine — extra keys are ignored.
   """
   @type snapshot :: %{
-          required(:bead_id) => String.t(),
+          required(:task_id) => String.t(),
           optional(:workspace_id) => String.t() | nil,
           optional(:repo) => String.t() | nil,
           optional(:started_at) => DateTime.t() | nil,
@@ -86,7 +86,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @doc """
   Post a `:pipeline_failed` notification. Best-effort, returns `:ok`. Fired by
   `Arbiter.Worker.Watchdog` when a CI pipeline fails and `watch_pipeline` is
-  enabled. The bead is NOT failed — a human may force-merge or rerun.
+  enabled. The task is NOT failed — a human may force-merge or rerun.
   """
   @spec pipeline_failed(snapshot(), String.t() | nil) :: :ok
   def pipeline_failed(snapshot, mr_ref \\ nil) do
@@ -130,7 +130,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   Unlike the lifecycle `:notification`s above, this is an addressed
   `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
   `arb inbox` as an actionable item. The `Arbiter.Worker.StopReason` carries
-  the classified cause + remediation; the subject names the bead + cause and
+  the classified cause + remediation; the subject names the task + cause and
   the body spells out the repo, last activity, exit code, and fix. Best-effort,
   returns `:ok`.
   """
@@ -157,7 +157,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   Fired by `Arbiter.Agents.CredentialWatchdog` when a periodic liveness probe
   detects that credentials are expired *before* any worker has been dispatched
   or failed. Unlike `acolyte_stopped/2` and `preflight_failed/2`, this has no
-  associated bead — it names the adapter that failed instead.
+  associated task — it names the adapter that failed instead.
 
   `snapshot` must contain `:workspace_id`; `adapter` is the module whose probe
   failed. Same addressed `:escalation` shape as the other escalations.
@@ -175,29 +175,29 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   @doc """
   Escalate a failed external-tracker sync to the Admiral (bd-c4cfuv).
 
-  Fired by `Arbiter.Trackers.Sync` / `Arbiter.Beads.Issue.Changes.SyncTracker`
+  Fired by `Arbiter.Trackers.Sync` / `Arbiter.Tasks.Issue.Changes.SyncTracker`
   when a lifecycle transition (dispatch → In Progress, PR-open → In Code Review,
   merge → Done, …) can't be resolved or fails on the wire. The original
   incident (VR-17911) was invisible precisely because such failures were
   swallowed; this surfaces a `status_map`/workflow mismatch as an actionable
   inbox item instead. Best-effort, returns `:ok`.
 
-  `snapshot` carries `:bead_id` + `:workspace_id` (and optionally
+  `snapshot` carries `:task_id` + `:workspace_id` (and optionally
   `:tracker_type` / `:tracker_ref`); `event` is the lifecycle atom; `reason` is
   the adapter's error term.
   """
   @spec tracker_sync_failed(map(), atom(), term()) :: :ok
   def tracker_sync_failed(%{workspace_id: ws_id} = snapshot, event, reason)
       when is_binary(ws_id) do
-    bead_id = Map.get(snapshot, :bead_id, "system")
+    task_id = Map.get(snapshot, :task_id, "system")
     tracker = Map.get(snapshot, :tracker_type)
     ref = Map.get(snapshot, :tracker_ref)
 
-    subject = "#{bead_id} tracker sync failed — #{event}"
+    subject = "#{task_id} tracker sync failed — #{event}"
 
     body =
       [
-        "Failed to sync #{title_for(bead_id)} to its external tracker on the " <>
+        "Failed to sync #{title_for(task_id)} to its external tracker on the " <>
           "`#{event}` lifecycle event.",
         tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
         "Error: #{describe_reason(reason)}",
@@ -211,9 +211,9 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: bead_id,
+      directive_ref: task_id,
       subject: subject,
       body: body
     })
@@ -265,9 +265,9 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: Map.get(snapshot, :bead_id, "system"),
+      from_ref: Map.get(snapshot, :task_id, "system"),
       workspace_id: ws_id,
-      directive_ref: Map.get(snapshot, :bead_id),
+      directive_ref: Map.get(snapshot, :task_id),
       subject: subject,
       body: body
     })
@@ -303,34 +303,34 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     {subject, body}
   end
 
-  defp escalation_payload(event, %{bead_id: bead_id} = snapshot, %StopReason{} = reason) do
+  defp escalation_payload(event, %{task_id: task_id} = snapshot, %StopReason{} = reason) do
     verb =
       case event do
         :acolyte_stopped -> "stopped"
         :preflight_failed -> "pre-flight auth failed"
       end
 
-    subject = "#{bead_id} #{verb} — #{StopReason.label(reason)}"
+    subject = "#{task_id} #{verb} — #{StopReason.label(reason)}"
 
     lead =
       case event do
         :acolyte_stopped ->
-          "Worker for #{title_for(bead_id)} stopped: #{reason.summary}."
+          "Worker for #{title_for(task_id)} stopped: #{reason.summary}."
 
         :preflight_failed ->
-          "Refused to dispatch #{title_for(bead_id)} — agent pre-flight auth probe failed: " <>
+          "Refused to dispatch #{title_for(task_id)} — agent pre-flight auth probe failed: " <>
             "#{reason.summary}."
       end
 
     body =
       [
         lead,
-        "Bead: #{bead_id}",
+        "Task: #{task_id}",
         "Repo: #{repo(snapshot)}",
         exit_line(reason),
         activity_line(snapshot),
         reason.remediation && "Remediation: #{reason.remediation}",
-        resume_hint(event, bead_id)
+        resume_hint(event, task_id)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -343,10 +343,10 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   # from scratch. Offer the resume verb right in the escalation. Only for
   # `:acolyte_stopped` — a `:preflight_failed` refusal happens before any work,
   # so there is no worktree to resume.
-  defp resume_hint(:acolyte_stopped, bead_id),
-    do: "Resume: run `arb worker resume #{bead_id}` to continue from the preserved worktree."
+  defp resume_hint(:acolyte_stopped, task_id),
+    do: "Resume: run `arb worker resume #{task_id}` to continue from the preserved worktree."
 
-  defp resume_hint(_event, _bead_id), do: nil
+  defp resume_hint(_event, _task_id), do: nil
 
   defp repo(%{repo: repo}) when is_binary(repo) and repo != "", do: repo
   defp repo(_), do: "unknown"
@@ -372,16 +372,16 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   # ---- payload construction ----------------------------------------------
 
-  defp build(:completed, %{bead_id: bead_id} = snapshot) do
-    base(bead_id, snapshot, "completed", fn title ->
+  defp build(:completed, %{task_id: task_id} = snapshot) do
+    base(task_id, snapshot, "completed", fn title ->
       "#{title} completed in #{format_duration(elapsed_seconds(snapshot))}"
     end)
   end
 
-  defp build(:failed, %{bead_id: bead_id} = snapshot) do
+  defp build(:failed, %{task_id: task_id} = snapshot) do
     duration = format_duration(elapsed_seconds(snapshot))
 
-    base(bead_id, snapshot, "failed", fn title ->
+    base(task_id, snapshot, "failed", fn title ->
       case exit_code(snapshot) do
         nil -> "#{title} failed after #{duration}"
         code -> "#{title} failed after #{duration} — exit code #{code}"
@@ -389,8 +389,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     end)
   end
 
-  defp build(:awaiting_review, %{bead_id: bead_id} = snapshot) do
-    base(bead_id, snapshot, "awaiting review", fn title ->
+  defp build(:awaiting_review, %{task_id: task_id} = snapshot) do
+    base(task_id, snapshot, "awaiting review", fn title ->
       case mr_ref(snapshot) do
         nil -> "#{title} — awaiting review"
         ref -> "#{title} opened MR #{ref} — awaiting review"
@@ -398,8 +398,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     end)
   end
 
-  defp build(:pipeline_failed, %{bead_id: bead_id} = snapshot) do
-    base(bead_id, snapshot, "CI pipeline failed", fn title ->
+  defp build(:pipeline_failed, %{task_id: task_id} = snapshot) do
+    base(task_id, snapshot, "CI pipeline failed", fn title ->
       case mr_ref(snapshot) do
         nil ->
           "#{title} — CI pipeline failed (parked; human action required)"
@@ -410,8 +410,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     end)
   end
 
-  defp build(:awaiting_review_stuck, %{bead_id: bead_id} = snapshot) do
-    base(bead_id, snapshot, "stuck awaiting review", fn title ->
+  defp build(:awaiting_review_stuck, %{task_id: task_id} = snapshot) do
+    base(task_id, snapshot, "stuck awaiting review", fn title ->
       case mr_ref(snapshot) do
         nil ->
           "#{title} stuck at awaiting_review — escalated (no terminal MR outcome)"
@@ -422,28 +422,28 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     end)
   end
 
-  defp base(bead_id, snapshot, subject_suffix, body_fun) do
-    title = title_for(bead_id)
+  defp base(task_id, snapshot, subject_suffix, body_fun) do
+    title = title_for(task_id)
 
     %{
       workspace_id: snapshot.workspace_id,
-      from_ref: bead_id,
-      subject: "#{bead_id} #{subject_suffix}",
+      from_ref: task_id,
+      subject: "#{task_id} #{subject_suffix}",
       body: body_fun.(title)
     }
   end
 
   # ---- lookups ------------------------------------------------------------
 
-  # The bead's human-readable title, falling back to the bead id when the Issue
+  # The task's human-readable title, falling back to the task id when the Issue
   # row can't be read (e.g. ad-hoc runs, or a workspace with no tracker row).
-  defp title_for(bead_id) do
-    case Ash.get(Issue, bead_id) do
+  defp title_for(task_id) do
+    case Ash.get(Issue, task_id) do
       {:ok, %{title: title}} when is_binary(title) and title != "" -> title
-      _ -> bead_id
+      _ -> task_id
     end
   rescue
-    _ -> bead_id
+    _ -> task_id
   end
 
   # Default-on: only an explicit `false` disables auto-posts. A missing or

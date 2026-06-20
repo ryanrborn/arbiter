@@ -126,7 +126,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       conn = delete(conn, ~p"/api/messages", %{to_ref: "admiral"})
       assert %{"data" => %{"deleted" => 1}} = json_response(conn, 200)
 
-      # The unread admiral message and the other bead's read message survive.
+      # The unread admiral message and the other task's read message survive.
       remaining = Ash.read!(Message) |> Enum.map(& &1.id) |> MapSet.new()
       assert MapSet.member?(remaining, unread.id)
       assert MapSet.member?(remaining, other.id)

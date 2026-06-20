@@ -51,7 +51,7 @@ config :spark,
 config :arbiter,
   ecto_repos: [Arbiter.Repo],
   ash_domains: [
-    Arbiter.Beads,
+    Arbiter.Tasks,
     Arbiter.Messages,
     Arbiter.Workers,
     Arbiter.Usage,

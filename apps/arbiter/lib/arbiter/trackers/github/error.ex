@@ -14,7 +14,7 @@ defmodule Arbiter.Trackers.GitHub.Error do
     * `:server_error` — 5xx
     * `:http` — any other 4xx not covered above
     * `:network` — transport-level failure
-    * `:transition_not_found` — the requested bead status had no mapping to a
+    * `:transition_not_found` — the requested task status had no mapping to a
       GitHub state/label in the workspace's `status_map`
     * `:config_missing` — workspace config is missing owner / repo /
       credentials, or no active workspace is set

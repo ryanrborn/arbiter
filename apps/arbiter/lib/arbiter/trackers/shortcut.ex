@@ -4,12 +4,12 @@ defmodule Arbiter.Trackers.Shortcut do
 
   Wraps Shortcut's REST API v3 (`api.app.shortcut.com/api/v3`) for story
   fetch/update/transition flows. Used by the Emricare domains (Varek/tonic,
-  Soren/tonic_device) to sync beads with their Shortcut board.
+  Soren/tonic_device) to sync tasks with their Shortcut board.
 
   ## Active-workspace contract
 
   Like the Jira adapter, the `Tracker` callbacks take only a `ref` (a story id)
-  with no workspace context. Shortcut needs an API token and a bead-status →
+  with no workspace context. Shortcut needs an API token and a task-status →
   workflow-state mapping, both workspace-scoped. We resolve those through
   `Arbiter.Trackers.Shortcut.Config`:
 
@@ -27,7 +27,7 @@ defmodule Arbiter.Trackers.Shortcut do
 
   ## Status mapping
 
-  Bead-vocabulary atoms (`:open | :in_progress | :closed`) map to Shortcut
+  Task-vocabulary atoms (`:open | :in_progress | :closed`) map to Shortcut
   workflow *state names*. Shortcut moves a story between states by PUT-ing its
   `workflow_state_id`, so we resolve the mapped state name to a concrete state
   id via `GET /workflows`. Defaults are conservative ("Unstarted", "In
@@ -265,7 +265,7 @@ defmodule Arbiter.Trackers.Shortcut do
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, workflows} <- list_workflows(cfg) do
-      # Reverse-map Shortcut state names to bead-status atoms via the
+      # Reverse-map Shortcut state names to task-status atoms via the
       # workspace's status_map (which maps atom -> state name).
       reverse = Enum.into(cfg.status_map, %{}, fn {k, v} -> {v, k} end)
 
@@ -299,14 +299,14 @@ defmodule Arbiter.Trackers.Shortcut do
   end
 
   @impl true
-  def signal_claim(ref, bead_id, %{
+  def signal_claim(ref, task_id, %{
         workspace_name: name,
         workspace_prefix: prefix,
         current_user: member_id,
         host: host
       }) do
     body =
-      "Claimed as #{bead_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+      "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
 
     post_comment(ref, body)
     assign_user(ref, member_id)
@@ -357,7 +357,7 @@ defmodule Arbiter.Trackers.Shortcut do
   Convenience: set the active workspace for the current process and run `fun`,
   clearing the config when `fun` returns. Useful in tests and one-shot scripts.
   """
-  @spec with_workspace(map() | Arbiter.Beads.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(map() | Arbiter.Tasks.Workspace.t(), (-> result)) :: result
         when result: any()
   def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
     prev = Process.get({Config, :active_workspace_config})
@@ -515,7 +515,7 @@ defmodule Arbiter.Trackers.Shortcut do
          %Error{
            kind: :transition_not_found,
            status: nil,
-           message: "no Shortcut state name mapped for bead status #{inspect(status)}",
+           message: "no Shortcut state name mapped for task status #{inspect(status)}",
            raw: nil
          }}
     end
@@ -543,7 +543,7 @@ defmodule Arbiter.Trackers.Shortcut do
 
   # ---- Internals: field translation ---------------------------------------
 
-  # Bead-domain field keys -> Shortcut story attributes.
+  # Task-domain field keys -> Shortcut story attributes.
   @field_map %{
     title: "name",
     description: "description"

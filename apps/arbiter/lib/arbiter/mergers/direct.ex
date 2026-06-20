@@ -62,7 +62,7 @@ defmodule Arbiter.Mergers.Direct do
       {:error, {:merge_conflict, %{branch: branch, files: [path, ...], output: raw_git_output}}}
 
   so the caller (the worker lifecycle) can escalate to the Admiral inbox with
-  the conflicting files and park the bead for rebase — without ever marking it
+  the conflicting files and park the task for rebase — without ever marking it
   merged. Any other (non-conflict) git failure still returns
   `{:error, {:git_failed, output}}`, and the abort runs defensively regardless
   (a no-op when no merge is in progress).
@@ -140,7 +140,7 @@ defmodule Arbiter.Mergers.Direct do
         branch = branch_from_ref(mr_ref)
         file_path = review_file_path(path, branch)
         File.mkdir_p!(Path.dirname(file_path))
-        ensure_header(file_path, branch, Map.get(opts, :bead))
+        ensure_header(file_path, branch, Map.get(opts, :task))
         File.write!(file_path, render_finding(finding), [:append])
         {:ok, %{path: file_path}}
 
@@ -157,7 +157,7 @@ defmodule Arbiter.Mergers.Direct do
         branch = branch_from_ref(mr_ref)
         file_path = review_file_path(path, branch)
         File.mkdir_p!(Path.dirname(file_path))
-        ensure_header(file_path, branch, Map.get(opts, :bead))
+        ensure_header(file_path, branch, Map.get(opts, :task))
         rewrite_verdict(file_path, verdict, body)
         {:ok, %{path: file_path, verdict: verdict}}
 
@@ -176,24 +176,24 @@ defmodule Arbiter.Mergers.Direct do
     Path.join([repo_path, "reviews", leaf])
   end
 
-  defp ensure_header(file_path, branch, bead) do
+  defp ensure_header(file_path, branch, task) do
     unless File.exists?(file_path) do
-      File.write!(file_path, render_header(branch, bead))
+      File.write!(file_path, render_header(branch, task))
     end
   end
 
-  defp render_header(branch, bead) do
-    bead_line =
-      case bead do
-        %{id: id, title: title} -> "**Bead:** #{id} — #{title}"
-        %{"id" => id, "title" => title} -> "**Bead:** #{id} — #{title}"
-        _ -> "**Bead:** (none)"
+  defp render_header(branch, task) do
+    task_line =
+      case task do
+        %{id: id, title: title} -> "**Task:** #{id} — #{title}"
+        %{"id" => id, "title" => title} -> "**Task:** #{id} — #{title}"
+        _ -> "**Task:** (none)"
       end
 
     """
     # Code review: #{branch}
 
-    #{bead_line}
+    #{task_line}
     **Mode:** direct
     **Verdict (pending):** _to be set in submit_review_
 

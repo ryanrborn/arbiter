@@ -17,7 +17,7 @@ defmodule Arbiter.Trackers.JiraTest do
       "project_key" => @project,
       "credentials_ref" => "env:#{@env_var}",
       "email" => "tester@example.com",
-      # status_map now maps bead lifecycle atoms -> target STATUS names (the
+      # status_map now maps task lifecycle atoms -> target STATUS names (the
       # adapter path-finds the transitions to reach them).
       "status_map" => %{
         "open" => "To Do",
@@ -359,7 +359,7 @@ defmodule Arbiter.Trackers.JiraTest do
   describe "add_remote_link/3" do
     test "POSTs a remote link with the url, title, and an idempotent globalId" do
       url = "https://github.com/leo/voice-id-core/pull/42"
-      title = "PR leo/voice-id-core#42 (bead bd-abc)"
+      title = "PR leo/voice-id-core#42 (task bd-abc)"
 
       stub(fn conn ->
         assert conn.method == "POST"
@@ -434,7 +434,7 @@ defmodule Arbiter.Trackers.JiraTest do
   end
 
   describe "list_transitions/1" do
-    test "parses the transitions response and maps to bead-status atoms" do
+    test "parses the transitions response and maps to task-status atoms" do
       stub(fn conn ->
         assert conn.method == "GET"
         assert conn.request_path == "/rest/api/3/issue/#{@ref}/transitions"

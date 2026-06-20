@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.Api.IssueController do
   @moduledoc """
-  REST endpoints for `Arbiter.Beads.Issue`.
+  REST endpoints for `Arbiter.Tasks.Issue`.
 
   Routes:
 
@@ -16,7 +16,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   require Ash.Query
 
   action_fallback(ArbiterWeb.Api.FallbackController)
@@ -67,7 +67,7 @@ defmodule ArbiterWeb.Api.IssueController do
     with :ok <- dedup_check(attrs, force?) do
       case Ash.create(Issue, attrs) do
         {:ok, issue} ->
-          case Arbiter.Beads.Issue.Changes.CreateUpstream.last_error() do
+          case Arbiter.Tasks.Issue.Changes.CreateUpstream.last_error() do
             nil ->
               conn
               |> put_status(:created)
@@ -88,9 +88,9 @@ defmodule ArbiterWeb.Api.IssueController do
         |> put_status(409)
         |> json(%{
           "error" => %{
-            "type" => "duplicate_bead",
+            "type" => "duplicate_task",
             "message" =>
-              "an open bead with this title already exists (#{ids}); use --force to proceed anyway",
+              "an open task with this title already exists (#{ids}); use --force to proceed anyway",
             "details" => %{
               "matches" =>
                 Enum.map(matches, fn i ->
@@ -155,7 +155,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   defp check_tracker_dedup(%{"title" => title, "workspace_id" => workspace_id})
        when is_binary(title) and is_binary(workspace_id) do
-    case Ash.get(Arbiter.Beads.Workspace, workspace_id) do
+    case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
       {:ok, workspace} ->
         case Arbiter.Trackers.search_by_title_for_workspace(workspace, title) do
           {:ok, []} -> :ok
@@ -172,15 +172,15 @@ defmodule ArbiterWeb.Api.IssueController do
 
   defp normalize_title(title), do: title |> String.downcase() |> String.trim()
 
-  # The bead was created locally but the upstream create (or write-back of
+  # The task was created locally but the upstream create (or write-back of
   # the returned ref) failed. We return 502 Bad Gateway so the CLI exits
-  # non-zero, but we include the bead body in the response so the user can
+  # non-zero, but we include the task body in the response so the user can
   # see what got persisted and re-link manually if needed.
-  defp upstream_failure_response(conn, bead_id, err) do
+  defp upstream_failure_response(conn, task_id, err) do
     issue_body =
-      case Ash.get(Issue, bead_id) do
+      case Ash.get(Issue, task_id) do
         {:ok, issue} -> ArbiterWeb.Api.IssueJSON.data(issue)
-        _ -> %{id: bead_id}
+        _ -> %{id: task_id}
       end
 
     conn
@@ -191,7 +191,7 @@ defmodule ArbiterWeb.Api.IssueController do
         "type" => to_string(err.kind),
         "message" => err.message,
         "details" => %{
-          "bead_id" => bead_id,
+          "task_id" => task_id,
           "tracker_type" => err |> Map.get(:tracker_type) |> tracker_type_str(),
           "tracker_ref" => Map.get(err, :tracker_ref)
         }

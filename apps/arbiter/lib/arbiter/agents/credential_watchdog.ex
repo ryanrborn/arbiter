@@ -222,7 +222,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   # hiccup or an empty workspace table must not crash the Watchdog.
   defp escalate_all(adapter, %StopReason{} = reason) do
     safe(fn ->
-      workspaces = Ash.read!(Arbiter.Beads.Workspace)
+      workspaces = Ash.read!(Arbiter.Tasks.Workspace)
 
       Enum.each(workspaces, fn ws ->
         AdmiralNotifier.credential_expired(%{workspace_id: ws.id}, adapter, reason)

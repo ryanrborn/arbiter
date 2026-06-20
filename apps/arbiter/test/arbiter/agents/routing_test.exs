@@ -3,8 +3,8 @@ defmodule Arbiter.Agents.RoutingTest do
 
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.Routing.{ByBudget, ByDifficulty, ByPriority, RoundRobin, Static}
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   describe "policy_for_workspace/1" do
     test "defaults to Static when workspace has no routing block" do
@@ -46,13 +46,13 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{priority: 2}
-      assert Routing.choose(bead, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
     end
 
     test "nil workspace → default {:claude, %{}}" do
-      bead = %Issue{priority: 2}
-      assert Routing.choose(bead, nil, %{}) == %{type: :claude, config: %{}}
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, nil, %{}) == %{type: :claude, config: %{}}
     end
   end
 
@@ -79,18 +79,18 @@ defmodule Arbiter.Agents.RoutingTest do
     end
 
     test "P0 routes to opus", %{ws: ws} do
-      bead = %Issue{priority: 0}
-      assert Routing.choose(bead, ws, %{}) == %{type: :claude, config: %{"model" => "opus"}}
+      task = %Issue{priority: 0}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "opus"}}
     end
 
     test "P4 routes to haiku", %{ws: ws} do
-      bead = %Issue{priority: 4}
-      assert Routing.choose(bead, ws, %{}) == %{type: :claude, config: %{"model" => "haiku"}}
+      task = %Issue{priority: 4}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "haiku"}}
     end
 
     test "P2 (no rule) falls back to the workspace default", %{ws: ws} do
-      bead = %Issue{priority: 2}
-      assert Routing.choose(bead, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
     end
 
     test "rule overrides only the keys it specifies (default keys survive)" do
@@ -107,9 +107,9 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{priority: 0}
+      task = %Issue{priority: 0}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model" => "opus", "tool_budget" => 100}
              }
@@ -132,54 +132,54 @@ defmodule Arbiter.Agents.RoutingTest do
     end
 
     test "D0 → economy / none (default mapping)", %{ws: ws} do
-      bead = %Issue{difficulty: 0}
+      task = %Issue{difficulty: 0}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "economy", "thinking" => "none"}
              }
     end
 
     test "D1 → economy / low (default mapping)", %{ws: ws} do
-      bead = %Issue{difficulty: 1}
+      task = %Issue{difficulty: 1}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "economy", "thinking" => "low"}
              }
     end
 
     test "D2 → standard / medium (default mapping)", %{ws: ws} do
-      bead = %Issue{difficulty: 2}
+      task = %Issue{difficulty: 2}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "standard", "thinking" => "medium"}
              }
     end
 
     test "D3 → premium / high (default mapping)", %{ws: ws} do
-      bead = %Issue{difficulty: 3}
+      task = %Issue{difficulty: 3}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "premium", "thinking" => "high"}
              }
     end
 
     test "D4 → premium / high (default mapping)", %{ws: ws} do
-      bead = %Issue{difficulty: 4}
+      task = %Issue{difficulty: 4}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "premium", "thinking" => "high"}
              }
     end
 
     test "unset difficulty falls back to D2 (standard / medium)", %{ws: ws} do
-      bead = %Issue{difficulty: nil}
+      task = %Issue{difficulty: nil}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "standard", "thinking" => "medium"}
              }
@@ -199,9 +199,9 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{difficulty: 3}
+      task = %Issue{difficulty: 3}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{"model_tier" => "premium", "thinking" => "medium"}
              }
@@ -220,9 +220,9 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{difficulty: 4}
+      task = %Issue{difficulty: 4}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{
                  "model" => "opus",
@@ -243,9 +243,9 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{difficulty: 0}
+      task = %Issue{difficulty: 0}
 
-      assert Routing.choose(bead, ws, %{}) == %{
+      assert Routing.choose(task, ws, %{}) == %{
                type: :claude,
                config: %{
                  "tool_budget" => 100,
@@ -284,23 +284,23 @@ defmodule Arbiter.Agents.RoutingTest do
     end
 
     test "behaves like :by_priority below the budget", %{ws: ws} do
-      bead = %Issue{priority: 0}
+      task = %Issue{priority: 0}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 0.10}) ==
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) ==
                %{type: :claude, config: %{"model" => "opus"}}
     end
 
     test "degrades one tier when daily spend has crossed the budget", %{ws: ws} do
-      bead = %Issue{priority: 0}
+      task = %Issue{priority: 0}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 9.99}) ==
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) ==
                %{type: :claude, config: %{"model" => "sonnet"}}
     end
 
     test "treats an empty ledger snapshot as not-over-budget", %{ws: ws} do
-      bead = %Issue{priority: 0}
+      task = %Issue{priority: 0}
 
-      assert Routing.choose(bead, ws, %{}) ==
+      assert Routing.choose(task, ws, %{}) ==
                %{type: :claude, config: %{"model" => "opus"}}
     end
 
@@ -314,9 +314,9 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{priority: 2}
+      task = %Issue{priority: 2}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 999.0}) ==
+      assert Routing.choose(task, ws, %{cost_usd_today: 999.0}) ==
                %{type: :claude, config: %{}}
     end
   end
@@ -338,36 +338,36 @@ defmodule Arbiter.Agents.RoutingTest do
     end
 
     test "below budget: passes through the difficulty default", %{ws: ws} do
-      bead = %Issue{difficulty: 3}
+      task = %Issue{difficulty: 3}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 0.10}) == %{
+      assert Routing.choose(task, ws, %{cost_usd_today: 0.10}) == %{
                type: :claude,
                config: %{"model_tier" => "premium", "thinking" => "high"}
              }
     end
 
     test "over budget: degrades premium → standard", %{ws: ws} do
-      bead = %Issue{difficulty: 3}
+      task = %Issue{difficulty: 3}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 9.99}) == %{
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
                type: :claude,
                config: %{"model_tier" => "standard", "thinking" => "high"}
              }
     end
 
     test "over budget: standard → economy", %{ws: ws} do
-      bead = %Issue{difficulty: 2}
+      task = %Issue{difficulty: 2}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 9.99}) == %{
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
                type: :claude,
                config: %{"model_tier" => "economy", "thinking" => "medium"}
              }
     end
 
     test "over budget: economy stays at economy (floor)", %{ws: ws} do
-      bead = %Issue{difficulty: 0}
+      task = %Issue{difficulty: 0}
 
-      assert Routing.choose(bead, ws, %{cost_usd_today: 9.99}) == %{
+      assert Routing.choose(task, ws, %{cost_usd_today: 9.99}) == %{
                type: :claude,
                config: %{"model_tier" => "economy", "thinking" => "none"}
              }
@@ -391,12 +391,12 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{priority: 2}
+      task = %Issue{priority: 2}
 
-      first = Routing.choose(bead, ws, %{})
-      second = Routing.choose(bead, ws, %{})
-      third = Routing.choose(bead, ws, %{})
-      fourth = Routing.choose(bead, ws, %{})
+      first = Routing.choose(task, ws, %{})
+      second = Routing.choose(task, ws, %{})
+      third = Routing.choose(task, ws, %{})
+      fourth = Routing.choose(task, ws, %{})
 
       assert first.config["model"] == "opus"
       assert second.config["model"] == "sonnet"
@@ -414,8 +414,8 @@ defmodule Arbiter.Agents.RoutingTest do
         }
       }
 
-      bead = %Issue{priority: 2}
-      assert Routing.choose(bead, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
+      task = %Issue{priority: 2}
+      assert Routing.choose(task, ws, %{}) == %{type: :claude, config: %{"model" => "sonnet"}}
     end
   end
 

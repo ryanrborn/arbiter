@@ -1,22 +1,22 @@
 defmodule Arbiter.WorkerTest do
   # async: false because the worker registry + dynamic supervisor are
-  # singletons shared across tests; we use unique bead_ids per test to keep
+  # singletons shared across tests; we use unique task_ids per test to keep
   # cases independent, but we still don't want parallel runs racing on the
   # registry itself.
   use ExUnit.Case, async: false
 
   alias Arbiter.Worker
 
-  # Generate a unique bead_id per test so tests don't collide on the registry.
-  defp new_bead_id, do: "gte-test-#{System.unique_integer([:positive])}"
+  # Generate a unique task_id per test so tests don't collide on the registry.
+  defp new_task_id, do: "gte-test-#{System.unique_integer([:positive])}"
 
   defp start_worker(opts \\ []) do
-    bead_id = Keyword.get(opts, :bead_id, new_bead_id())
+    task_id = Keyword.get(opts, :task_id, new_task_id())
     repo = Keyword.get(opts, :repo, "arbiter")
 
     opts =
       opts
-      |> Keyword.put_new(:bead_id, bead_id)
+      |> Keyword.put_new(:task_id, task_id)
       |> Keyword.put_new(:repo, repo)
 
     {:ok, pid} = Worker.start(opts)
@@ -25,17 +25,17 @@ defmodule Arbiter.WorkerTest do
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)
     end)
 
-    {pid, bead_id}
+    {pid, task_id}
   end
 
   describe "start/1 + lifecycle" do
     test "starts, registers in the registry, exposes defaults via state/1" do
-      {pid, bead_id} = start_worker(workspace_id: "ws-1")
+      {pid, task_id} = start_worker(workspace_id: "ws-1")
 
-      assert Worker.whereis(bead_id) == pid
+      assert Worker.whereis(task_id) == pid
 
       snap = Worker.state(pid)
-      assert snap.bead_id == bead_id
+      assert snap.task_id == task_id
       assert snap.repo == "arbiter"
       assert snap.workspace_id == "ws-1"
       assert snap.current_step == :idle
@@ -45,28 +45,28 @@ defmodule Arbiter.WorkerTest do
       assert snap.meta == %{}
     end
 
-    test "state/1 accepts bead_id strings" do
-      {_pid, bead_id} = start_worker()
-      assert %{bead_id: ^bead_id} = Worker.state(bead_id)
+    test "state/1 accepts task_id strings" do
+      {_pid, task_id} = start_worker()
+      assert %{task_id: ^task_id} = Worker.state(task_id)
     end
 
-    test "state/1 on unknown bead_id returns nil (doesn't crash)" do
+    test "state/1 on unknown task_id returns nil (doesn't crash)" do
       assert Worker.state("gte-nope-#{System.unique_integer([:positive])}") == nil
     end
 
-    test "start_link/1 without :bead_id returns {:error, :missing_bead_id}" do
-      assert Worker.start_link(repo: "arbiter") == {:error, :missing_bead_id}
+    test "start_link/1 without :task_id returns {:error, :missing_task_id}" do
+      assert Worker.start_link(repo: "arbiter") == {:error, :missing_task_id}
     end
 
     test "start_link/1 without :repo returns {:error, :missing_repo}" do
-      assert Worker.start_link(bead_id: new_bead_id()) == {:error, :missing_repo}
+      assert Worker.start_link(task_id: new_task_id()) == {:error, :missing_repo}
     end
 
-    test "starting a second worker for the same bead_id returns :already_started" do
-      {pid, bead_id} = start_worker()
+    test "starting a second worker for the same task_id returns :already_started" do
+      {pid, task_id} = start_worker()
 
       assert {:error, {:already_started, ^pid}} =
-               Worker.start(bead_id: bead_id, repo: "arbiter")
+               Worker.start(task_id: task_id, repo: "arbiter")
     end
   end
 
@@ -95,13 +95,13 @@ defmodule Arbiter.WorkerTest do
       assert DateTime.compare(snap.step_started_at, first) == :gt
     end
 
-    test "advance/2 by bead_id works too" do
-      {_pid, bead_id} = start_worker()
-      assert :ok = Worker.advance(bead_id, :load)
-      assert Worker.state(bead_id).current_step == :load
+    test "advance/2 by task_id works too" do
+      {_pid, task_id} = start_worker()
+      assert :ok = Worker.advance(task_id, :load)
+      assert Worker.state(task_id).current_step == :load
     end
 
-    test "advance/2 on unknown bead_id returns {:error, :not_found}" do
+    test "advance/2 on unknown task_id returns {:error, :not_found}" do
       assert {:error, :not_found} = Worker.advance("nope-#{System.unique_integer()}", :load)
     end
 
@@ -166,19 +166,19 @@ defmodule Arbiter.WorkerTest do
       assert snap.meta[:result] == %{pr: "https://example.com/pr/1"}
     end
 
-    test "complete/2 broadcasts {:worker_done, bead_id} on the workspace topic" do
+    test "complete/2 broadcasts {:worker_done, task_id} on the workspace topic" do
       ws_id = "ws-broadcast-#{System.unique_integer([:positive])}"
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:done:" <> ws_id)
 
-      {pid, bead_id} = start_worker(workspace_id: ws_id)
+      {pid, task_id} = start_worker(workspace_id: ws_id)
       :ok = Worker.advance(pid, :submit)
       :ok = Worker.complete(pid)
 
-      assert_receive {:worker_done, ^bead_id}, 500
+      assert_receive {:worker_done, ^task_id}, 500
     end
 
     test "complete/2 without a workspace_id does not broadcast (no topic)" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       :ok = Worker.advance(pid, :submit)
       # Just assert this doesn't crash; with no workspace_id there's no
       # well-defined topic and the broadcast is skipped.
@@ -189,12 +189,12 @@ defmodule Arbiter.WorkerTest do
       ws_id = "ws-claude-#{System.unique_integer([:positive])}"
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:done:" <> ws_id)
 
-      {pid, bead_id} = start_worker(workspace_id: ws_id)
+      {pid, task_id} = start_worker(workspace_id: ws_id)
       :ok = Worker.advance(pid, :run_claude)
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      assert_receive {:worker_done, ^bead_id}, 500
+      assert_receive {:worker_done, ^task_id}, 500
       assert Worker.state(pid).status == :completed
     end
 
@@ -246,49 +246,49 @@ defmodule Arbiter.WorkerTest do
 
   describe "stop/2" do
     test "terminates the worker and the registry forgets it" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       ref = Process.monitor(pid)
       assert :ok = Worker.stop(pid)
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
-      assert Worker.whereis(bead_id) == nil
-      assert Worker.state(bead_id) == nil
+      assert Worker.whereis(task_id) == nil
+      assert Worker.state(task_id) == nil
     end
 
-    test "stop/2 by bead_id works too" do
-      {pid, bead_id} = start_worker()
+    test "stop/2 by task_id works too" do
+      {pid, task_id} = start_worker()
       ref = Process.monitor(pid)
-      assert :ok = Worker.stop(bead_id)
+      assert :ok = Worker.stop(task_id)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
     end
 
-    test "stop/2 on unknown bead_id returns {:error, :not_found}" do
+    test "stop/2 on unknown task_id returns {:error, :not_found}" do
       assert {:error, :not_found} = Worker.stop("nope-#{System.unique_integer()}")
     end
   end
 
   describe "supervisor behavior" do
     test "workers are :temporary children — a crash does not restart them" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       ref = Process.monitor(pid)
       Process.exit(pid, :kill)
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
       # Give the supervisor a beat to (not) restart.
       Process.sleep(50)
-      assert Worker.whereis(bead_id) == nil
+      assert Worker.whereis(task_id) == nil
     end
   end
 
   describe "list_children/0" do
     test "lists active worker snapshots; crashed entries are omitted" do
-      {_pid_a, bead_a} = start_worker()
-      {_pid_b, bead_b} = start_worker()
-      {pid_c, _bead_c} = start_worker()
+      {_pid_a, task_a} = start_worker()
+      {_pid_b, task_b} = start_worker()
+      {pid_c, _task_c} = start_worker()
 
-      ids = Worker.list_children() |> Enum.map(& &1.bead_id) |> Enum.sort()
-      assert bead_a in ids
-      assert bead_b in ids
+      ids = Worker.list_children() |> Enum.map(& &1.task_id) |> Enum.sort()
+      assert task_a in ids
+      assert task_b in ids
       assert length(ids) >= 3
 
       ref = Process.monitor(pid_c)
@@ -296,17 +296,17 @@ defmodule Arbiter.WorkerTest do
       assert_receive {:DOWN, ^ref, :process, ^pid_c, :killed}, 1_000
       Process.sleep(50)
 
-      after_ids = Worker.list_children() |> Enum.map(& &1.bead_id)
-      assert bead_a in after_ids
-      assert bead_b in after_ids
-      # crashed worker (bead_c) is gone
+      after_ids = Worker.list_children() |> Enum.map(& &1.task_id)
+      assert task_a in after_ids
+      assert task_b in after_ids
+      # crashed worker (task_c) is gone
     end
 
     test "snapshots include :pid and the standard state keys" do
-      {pid, _bead} = start_worker()
+      {pid, _task} = start_worker()
       [entry | _] = Worker.list_children() |> Enum.filter(&(&1.pid == pid))
 
-      for key <- [:bead_id, :workspace_id, :repo, :current_step, :status, :started_at, :meta] do
+      for key <- [:task_id, :workspace_id, :repo, :current_step, :status, :started_at, :meta] do
         assert Map.has_key?(entry, key), "missing #{inspect(key)} in #{inspect(entry)}"
       end
     end

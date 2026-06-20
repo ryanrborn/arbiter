@@ -12,7 +12,7 @@ defmodule Arbiter.Trackers.Jira.Error do
     * `:server_error` — 5xx
     * `:http` — any other 4xx not covered above
     * `:network` — transport-level failure
-    * `:transition_not_found` — the requested bead status had no mapping to
+    * `:transition_not_found` — the requested task status had no mapping to
       a Jira transition available in the issue's current state
     * `:config_missing` — workspace config is missing host / project_key /
       credentials, or no active workspace is set

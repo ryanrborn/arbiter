@@ -114,7 +114,7 @@ defmodule Arbiter.Worker.WorktreeTest do
 
     test "fetches origin: worktree starts from upstream tip, NOT the repo's stale local base",
          %{repo: repo, remote: remote, tmp: tmp} do
-      # Simulate the failure case from the bead: the repo's local `main` is
+      # Simulate the failure case from the task: the repo's local `main` is
       # behind origin/main. A second clone advances origin; the repo's local
       # `main` stays put. The new worktree must start from origin/main (sees
       # the new file), not from the stale local ref.
@@ -140,7 +140,7 @@ defmodule Arbiter.Worker.WorktreeTest do
 
     test "dirty repo working tree does not block worktree provisioning",
          %{repo: repo} do
-      # Per the bead's guards: the repo is read but a separate worktree is
+      # Per the task's guards: the repo is read but a separate worktree is
       # created, so a dirty repo must NOT prevent provisioning.
       File.write!(Path.join(repo, "scratch.txt"), "wip in repo\n")
 
@@ -183,7 +183,7 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert {:ok, true} = Worktree.has_uncommitted?(path)
     end
 
-    # Regression for bd-dg0gs6 / #172: per-bead worktrees symlink `deps`
+    # Regression for bd-dg0gs6 / #172: per-task worktrees symlink `deps`
     # (and sometimes `_build`) to a shared cache. The repo's directory-only
     # `/deps/` `/_build/` ignore patterns don't match a symlink, so git emits
     # `?? deps` — which previously false-tripped the commit gate on committed

@@ -18,7 +18,7 @@ requests changes.
 Hard cap on the number of revise-and-rediscuss rounds before the Tribunal
 escalates to the Admiral. Must be a positive integer (≥ 1).
 
-When absent, the cap is derived from the bead's difficulty:
+When absent, the cap is derived from the task's difficulty:
 
 | Difficulty | Label    | Default rounds |
 |------------|----------|---------------|
@@ -32,7 +32,7 @@ When both a difficulty default and a workspace cap are set, the **lower** value
 wins: `min(difficulty_default, max_rounds)`. The workspace cap can only tighten
 the limit — it cannot raise it above the difficulty ceiling.
 
-**Example** — cap all beads at 2 rounds regardless of difficulty:
+**Example** — cap all tasks at 2 rounds regardless of difficulty:
 
 ```json
 {
@@ -48,7 +48,7 @@ the limit — it cannot raise it above the difficulty ceiling.
 
 #### `review.required` (boolean, optional, default `false`)
 
-Enable the Tribunal gate for this workspace. When `true`, a bead's `arb done`
+Enable the Tribunal gate for this workspace. When `true`, a task's `arb done`
 parks at `:awaiting_tribunal` and a distinct reviewer acolyte runs before
 anything merges.
 

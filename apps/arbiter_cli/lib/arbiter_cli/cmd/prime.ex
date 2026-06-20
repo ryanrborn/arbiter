@@ -16,8 +16,8 @@ defmodule ArbiterCli.Cmd.Prime do
        for the full operator field guide.
     4. **Admiral Inbox** — up to 5 most recent unread messages addressed to
        the Admiral. Omitted entirely when there are none.
-    5. **Active workers** — bead_id, status, current_step, runtime.
-    6. **Ready beads** — `Issue.ready/0` view (issues with all deps closed).
+    5. **Active workers** — task_id, status, current_step, runtime.
+    6. **Ready tasks** — `Issue.ready/0` view (issues with all deps closed).
 
   ## Standing Orders are data, not code
 
@@ -31,7 +31,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
     * MergeQueue merge-queue items (no server-side endpoint yet).
     * Recent audit-log entries (no server-side endpoint yet).
-    * Open epic / parent-bead progress (no dedicated endpoint yet).
+    * Open epic / parent-task progress (no dedicated endpoint yet).
 
   Those need REST endpoints landed before they can be surfaced here. v1
   covers the highest-value subset: what's running, what's actionable,
@@ -122,7 +122,7 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
-  # Scope ready beads to the active workspace when we know it, so prime
+  # Scope ready tasks to the active workspace when we know it, so prime
   # doesn't drown the user in imported-from-other-workspaces noise.
   defp gather_ready({:ok, %{"id" => ws_id}}) do
     do_gather_ready(workspace_id: ws_id)
@@ -300,7 +300,7 @@ defmodule ArbiterCli.Cmd.Prime do
           do: "activity=#{activity_label(p)}",
           else: "step=#{p["current_step"]}"
 
-      IO.puts("  #{p["bead_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}")
+      IO.puts("  #{p["task_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}")
     end)
   end
 

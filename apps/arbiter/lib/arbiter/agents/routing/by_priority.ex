@@ -1,6 +1,6 @@
 defmodule Arbiter.Agents.Routing.ByPriority do
   @moduledoc """
-  Routing policy: pick an agent config based on the bead's priority.
+  Routing policy: pick an agent config based on the task's priority.
 
   Reads `workspace.config["routing"]["rules"]` — a map from priority key
   (`"P0".."P4"`) to a partial agent-config map. The matched rule is
@@ -24,24 +24,24 @@ defmodule Arbiter.Agents.Routing.ByPriority do
         }
       }
 
-  A bead with `priority: 0` (P0) routes to Opus; a bead with `priority: 2`
+  A task with `priority: 0` (P0) routes to Opus; a task with `priority: 2`
   (P2) has no rule and falls back to the default `"sonnet"`.
 
-  Priority semantics match `Arbiter.Beads.Issue.priority` — an integer
+  Priority semantics match `Arbiter.Tasks.Issue.priority` — an integer
   `0..4` where `0` is highest (P0) and `4` is lowest (P4).
   """
 
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Routing
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   @impl true
-  def choose(%Issue{} = bead, workspace, _ledger_snapshot) do
+  def choose(%Issue{} = task, workspace, _ledger_snapshot) do
     default = Routing.default_choice(workspace)
 
-    case rule_for(workspace, bead.priority) do
+    case rule_for(workspace, task.priority) do
       nil -> default
       rule -> %{default | config: Map.merge(default.config, rule)}
     end

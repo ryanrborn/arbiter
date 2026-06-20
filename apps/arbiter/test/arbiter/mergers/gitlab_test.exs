@@ -199,7 +199,7 @@ defmodule Arbiter.Mergers.GitlabTest do
   end
 
   describe "get/1" do
-    test "200: returns the bead-domain view of the MR" do
+    test "200: returns the task-domain view of the MR" do
       stub(fn conn ->
         assert conn.method == "GET"
         assert conn.request_path == "#{base_path()}/#{@iid}"

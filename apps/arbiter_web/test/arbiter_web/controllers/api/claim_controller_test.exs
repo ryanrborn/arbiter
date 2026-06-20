@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.ClaimControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Trackers.GitHub.Config
 
   @viewer "ctrl-acolyte"
@@ -43,7 +43,7 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       %{
         "number" => 43,
         "title" => "Wire up the thing",
-        "body" => "Mirror me into a bead.",
+        "body" => "Mirror me into a task.",
         "state" => "open",
         "html_url" => "https://github.com/ryanrborn/arbiter/issues/43",
         "assignees" => [%{"login" => @viewer}]
@@ -53,7 +53,7 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
   end
 
   describe "POST /api/workspaces/:workspace_id/claim" do
-    test "creates a bead linked to #43 when assigned to viewer", %{conn: conn, gh: ws} do
+    test "creates a task linked to #43 when assigned to viewer", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
@@ -76,12 +76,12 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "43"})
       body = json_response(conn, 201)
       assert body["status"] == "created"
-      assert body["bead"]["tracker_type"] == "github"
-      assert body["bead"]["tracker_ref"] == "43"
-      assert body["bead"]["title"] == "Wire up the thing"
+      assert body["task"]["tracker_type"] == "github"
+      assert body["task"]["tracker_ref"] == "43"
+      assert body["task"]["title"] == "Wire up the thing"
     end
 
-    test "200 when bead already exists (idempotent)", %{conn: conn, gh: ws} do
+    test "200 when task already exists (idempotent)", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
@@ -172,9 +172,9 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       body = json_response(conn, 200)
       assert [%{"action" => "create", "ref" => "43"}] = body["data"]
 
-      # And no bead was actually created.
-      beads = Ash.read!(Issue) |> Enum.filter(&(&1.workspace_id == ws.id))
-      assert beads == []
+      # And no task was actually created.
+      tasks = Ash.read!(Issue) |> Enum.filter(&(&1.workspace_id == ws.id))
+      assert tasks == []
     end
 
     test "empty plan when tracker is none", %{conn: conn, none: ws} do
@@ -184,7 +184,7 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
   end
 
   describe "POST /api/workspaces/:workspace_id/sync" do
-    test "applies the plan (creates the assigned bead)", %{conn: conn, gh: ws} do
+    test "applies the plan (creates the assigned task)", %{conn: conn, gh: ws} do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->

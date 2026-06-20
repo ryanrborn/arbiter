@@ -45,7 +45,7 @@ defmodule Arbiter.Mergers.Github.Config do
   back to `:squash`.
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.Github.Error
 
   @pdict_key {__MODULE__, :active_workspace_config}

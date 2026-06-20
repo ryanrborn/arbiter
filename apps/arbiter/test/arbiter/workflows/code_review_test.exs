@@ -486,7 +486,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
         mode: :local,
         worktree_path: repo,
         branch: "feature/x",
-        bead: %{id: "gte-021", title: "code review"},
+        task: %{id: "gte-021", title: "code review"},
         findings: findings
       }
 
@@ -496,7 +496,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
       contents = File.read!(path)
       assert contents =~ "# Code review: feature/x"
-      assert contents =~ "**Bead:** gte-021 — code review"
+      assert contents =~ "**Task:** gte-021 — code review"
       assert contents =~ "**Mode:** local"
       assert contents =~ "(2 findings)"
       assert contents =~ "lib/foo.ex:10 — error"
@@ -627,7 +627,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
         mode: :local,
         worktree_path: repo,
         base: "main",
-        bead: %{id: "gte-021", title: "code review"},
+        task: %{id: "gte-021", title: "code review"},
         check_runner: runner
       }
 
@@ -671,7 +671,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
         adapter: Arbiter.Mergers.Direct,
         mr_ref: "direct:feature/x",
         adapter_opts: %{repo_path: repo, target_branch: "main"},
-        bead: %{id: "gte-021", title: "code review"},
+        task: %{id: "gte-021", title: "code review"},
         check_runner: runner
       }
 
@@ -696,7 +696,7 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
       contents = File.read!(review_path)
       assert contents =~ "# Code review: feature/x"
-      assert contents =~ "**Bead:** gte-021 — code review"
+      assert contents =~ "**Task:** gte-021 — code review"
       assert contents =~ "**Verdict:** REQUEST_CHANGES"
       assert contents =~ "added.txt:1 — error"
       assert contents =~ "stub error"

@@ -105,7 +105,7 @@ defmodule ArbiterCli.Cmd.InitTest do
       # Host templated from ARB_HOST default.
       assert agents =~ "http://127.0.0.1:4848"
 
-      # Tells the agent to read standing orders from `arb prime` (sibling bead).
+      # Tells the agent to read standing orders from `arb prime` (sibling task).
       assert agents =~ "arb prime"
       assert agents =~ "standing orders"
     end

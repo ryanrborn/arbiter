@@ -23,11 +23,11 @@ defmodule ArbiterCli.Main do
       arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>]
 
       arb worker list
-      arb worker show     <bead-id>
-      arb worker log      <bead-id>
-      arb worker stop     <bead-id>
-      arb worker resume   <bead-id> [<repo>] [--model <name>]
-      arb worker review   <bead-id> [--repo <repo>] [--model <name>]
+      arb worker show     <task-id>
+      arb worker log      <task-id>
+      arb worker stop     <task-id>
+      arb worker resume   <task-id> [<repo>] [--model <name>]
+      arb worker review   <task-id> [--repo <repo>] [--model <name>]
 
       arb repo list
       arb repo show       <name>
@@ -49,13 +49,13 @@ defmodule ArbiterCli.Main do
       arb workspace list
       arb workspace show  <id>
 
-      arb message inbox   [--all | read <id> | clear | <bead-id>]
+      arb message inbox   [--all | read <id> | clear | <task-id>]
       arb message send    <recipient> <body> [--subject ...] [--directive bd-x] [--kind ...]
       arb message notify  [--limit N]
 
-      arb usage show      [--by day|bead|campaign|workspace|repo|model|step|provider]
+      arb usage show      [--by day|task|campaign|workspace|repo|model|step|provider]
                                   [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
-      arb usage events    [--bead <bead-id>] [--workspace <id>] [--step work|review]
+      arb usage events    [--task <task-id>] [--workspace <id>] [--step work|review]
                                   [--since ...] [--limit N]
 
       arb install cli     [--json]

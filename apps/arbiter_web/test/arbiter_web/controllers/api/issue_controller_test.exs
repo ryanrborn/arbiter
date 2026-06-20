@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.IssueControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
 
   setup %{conn: conn} do
     {:ok, ws} = Ash.create(Workspace, %{name: "api-test-ws", prefix: "api"})
@@ -61,7 +61,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
 
-    test "returns 502 when upstream-create fails (bead body + structured error)",
+    test "returns 502 when upstream-create fails (task body + structured error)",
          %{conn: conn} do
       env_var = "GTE_CONTROLLER_OUTBOUND_TEST_TOKEN"
       System.put_env(env_var, "tok")
@@ -94,19 +94,19 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       body = json_response(conn, 502)
 
       assert %{
-               "issue" => %{"id" => bead_id, "title" => "half"},
+               "issue" => %{"id" => task_id, "title" => "half"},
                "error" => %{
                  "type" => "upstream_create_failed",
                  "message" => msg,
-                 "details" => %{"bead_id" => bead_id, "tracker_type" => "github"}
+                 "details" => %{"task_id" => task_id, "tracker_type" => "github"}
                }
              } = body
 
-      assert is_binary(bead_id)
+      assert is_binary(task_id)
       assert msg =~ "upstream github create failed"
     end
 
-    test "returns 409 when an open bead with the same title exists", %{conn: conn, ws: ws} do
+    test "returns 409 when an open task with the same title exists", %{conn: conn, ws: ws} do
       {:ok, _existing} = Ash.create(Issue, %{title: "Duplicate Title", workspace_id: ws.id})
 
       conn = post(conn, ~p"/api/issues", %{title: "Duplicate Title", workspace_id: ws.id})
@@ -115,7 +115,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       assert %{
                "error" => %{
-                 "type" => "duplicate_bead",
+                 "type" => "duplicate_task",
                  "message" => msg,
                  "details" => %{"matches" => [%{"title" => "Duplicate Title"}]}
                }
@@ -129,10 +129,10 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
 
       conn = post(conn, ~p"/api/issues", %{title: "  foo bar  ", workspace_id: ws.id})
 
-      assert %{"error" => %{"type" => "duplicate_bead"}} = json_response(conn, 409)
+      assert %{"error" => %{"type" => "duplicate_task"}} = json_response(conn, 409)
     end
 
-    test "no dedup for beads in a different workspace", %{conn: conn, ws: ws} do
+    test "no dedup for tasks in a different workspace", %{conn: conn, ws: ws} do
       {:ok, ws2} = Ash.create(Workspace, %{name: "other-dedup", prefix: "oth2"})
       {:ok, _existing} = Ash.create(Issue, %{title: "Unique Title", workspace_id: ws2.id})
 
@@ -141,11 +141,11 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
       assert json_response(conn, 201)
     end
 
-    test "no dedup when the matching bead is closed", %{conn: conn, ws: ws} do
-      {:ok, existing} = Ash.create(Issue, %{title: "Closed Bead", workspace_id: ws.id})
+    test "no dedup when the matching task is closed", %{conn: conn, ws: ws} do
+      {:ok, existing} = Ash.create(Issue, %{title: "Closed Task", workspace_id: ws.id})
       {:ok, _} = Ash.update(existing, %{}, action: :close)
 
-      conn = post(conn, ~p"/api/issues", %{title: "Closed Bead", workspace_id: ws.id})
+      conn = post(conn, ~p"/api/issues", %{title: "Closed Task", workspace_id: ws.id})
 
       assert json_response(conn, 201)
     end
@@ -308,7 +308,7 @@ defmodule ArbiterWeb.Api.IssueControllerTest do
         end
       end)
 
-      conn = post(conn, ~p"/api/issues", %{title: "search error bead", workspace_id: gh_ws.id})
+      conn = post(conn, ~p"/api/issues", %{title: "search error task", workspace_id: gh_ws.id})
 
       assert json_response(conn, 201)
     end

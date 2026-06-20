@@ -3,7 +3,7 @@ defmodule Arbiter.Workflows.CodeReview do
   Peer-review workflow (gte-021). The Elixir port of Go GT's
   `mol-worker-code-review` formula.
 
-  Reviews a PR/MR's diff against a bead's acceptance criteria and produces
+  Reviews a PR/MR's diff against a task's acceptance criteria and produces
   a verdict (`:approve` or `:request_changes`). Two modes:
 
     * `:local`    — writes `reviews/<branch>.md` in a local worktree.
@@ -36,7 +36,7 @@ defmodule Arbiter.Workflows.CodeReview do
         adapter_opts: %{...},        # forwarded to every adapter call
 
         # Common:
-        bead: %{id: _, title: _},    # optional, included in the file/notes
+        task: %{id: _, title: _},    # optional, included in the file/notes
         check_runner: fun | nil,     # 2-arity (diff, state) -> {:ok, findings}
 
         # Populated as steps run:
@@ -97,7 +97,7 @@ defmodule Arbiter.Workflows.CodeReview do
   step(:file_findings,
     description: "Write review file (local) or post comments (adapter)",
     needs: [:run_checks],
-    vars: [:bead]
+    vars: [:task]
   )
 
   step(:verdict,
@@ -126,7 +126,7 @@ defmodule Arbiter.Workflows.CodeReview do
         {:ok, state |> Map.put(:pr, info) |> Map.put(:branch, branch)}
 
       # Adapters whose `get/1` doesn't surface a branch (Direct, GitLab in
-      # the abbreviated bead-domain view) still let the workflow proceed —
+      # the abbreviated task-domain view) still let the workflow proceed —
       # the branch isn't load-bearing for any later step in :adapter mode.
       {:error, _} ->
         {:ok, state |> Map.put(:pr, nil) |> Map.put(:branch, nil)}
@@ -189,8 +189,8 @@ defmodule Arbiter.Workflows.CodeReview do
 
   def run_step(:file_findings, %{mode: :local, worktree_path: wt, branch: branch} = state) do
     findings = Map.get(state, :findings, [])
-    bead = Map.get(state, :bead)
-    :ok = LocalMode.write_findings(wt, branch, bead, findings)
+    task = Map.get(state, :task)
+    :ok = LocalMode.write_findings(wt, branch, task, findings)
     {:ok, Map.put(state, :review_path, LocalMode.review_path(wt, branch))}
   end
 
@@ -283,7 +283,7 @@ defmodule Arbiter.Workflows.CodeReview do
   defp adapter_opts(state) do
     state
     |> Map.get(:adapter_opts, %{})
-    |> Map.put_new(:bead, Map.get(state, :bead))
+    |> Map.put_new(:task, Map.get(state, :task))
   end
 
   # Adapters that need workspace-scoped per-process state (Github, Gitlab)

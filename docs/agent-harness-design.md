@@ -2,7 +2,7 @@
 
 **Status:** design proposal (this is the spike deliverable; not yet approved)
 **Date:** 2026-06-03
-**Bead:** bd-c6xf18
+**Task:** bd-c6xf18
 **Author:** acolyte
 **Reviewer of record:** Tribunal (this branch)
 **Depends on:** bd-3rdlgp (usage ledger — landed on `feature/77`, not yet on `main`)
@@ -33,7 +33,7 @@ wins legible, not to onboard a second vendor.
 
 ## 1. Motivation, restated
 
-The bead description names three motivations:
+The task description names three motivations:
 
 | Motivation | Cheapest lever | Lever cost | Lever ceiling |
 |---|---|---|---|
@@ -54,7 +54,7 @@ without committing to it.
 - **Owner:** the parent `Arbiter.Polecat` GenServer.
 - **Stream:** per-line JSON events (`system/init`, `assistant`, `user`/tool_result,
   `result`). The session module parses these into display lines and pushes to
-  PubSub topic `polecat:<bead_id>`.
+  PubSub topic `polecat:<task_id>`.
 - **Completion sentinel:** a regex `~r/\barb done\b/` matched only against
   assistant text (not tool output) — so an acolyte that greps for "arb done"
   can't false-complete.
@@ -73,7 +73,7 @@ the model used.
 
 ## 3. Why this is not a config flag (and why that bound matters less than it sounds)
 
-The bead description argues that swapping providers means swapping the harness:
+The task description argues that swapping providers means swapping the harness:
 different CLIs, different stream formats, different tool protocols. That is
 correct for *vendor* swaps (Gemini/Codex/Aider). It is **not** correct for
 *model* swaps inside Anthropic — `claude --model haiku` is the same harness.
@@ -162,9 +162,9 @@ defmodule Arbiter.Agents do
   @spec for_workspace(Workspace.t()) :: module()
   def for_workspace(%Workspace{} = ws), do: for_type(workspace_agent_type(ws))
 
-  @spec for_bead(Issue.t(), Workspace.t()) :: module()
-  def for_bead(%Issue{agent_type: type}, _ws) when not is_nil(type), do: for_type(type)
-  def for_bead(_bead, %Workspace{} = ws), do: for_workspace(ws)
+  @spec for_task(Issue.t(), Workspace.t()) :: module()
+  def for_task(%Issue{agent_type: type}, _ws) when not is_nil(type), do: for_type(type)
+  def for_task(_task, %Workspace{} = ws), do: for_workspace(ws)
 
   @spec prepare(Workspace.t() | nil) :: :ok
   # mirrors Trackers.prepare/2 — seed adapter Config from workspace
@@ -224,12 +224,12 @@ asymmetric config. Same shape for both, so a workspace could also flip it
 
 ### 4.4 Routing policy as a separate concern
 
-Routing is a *function from bead + workspace + ledger → agent config*. It's
+Routing is a *function from task + workspace + ledger → agent config*. It's
 small enough to live as its own behaviour:
 
 ```elixir
 defmodule Arbiter.Agents.Routing.Policy do
-  @callback choose(bead :: Issue.t(), workspace :: Workspace.t(), ledger_snapshot :: map()) ::
+  @callback choose(task :: Issue.t(), workspace :: Workspace.t(), ledger_snapshot :: map()) ::
               %{type: atom(), config: map()}
 end
 ```
@@ -239,9 +239,9 @@ Initial policies:
 | Policy | What it does | Reads |
 |---|---|---|
 | `:static` | Always returns `workspace.config["agent"]`. | Workspace only |
-| `:by_priority` | Maps `bead.priority` (P0..P4) → `rules[<priority>]`. | Workspace + bead |
-| `:by_difficulty` | Maps `bead.difficulty` (D0..D4) → abstract `{model_tier, thinking}` via `rules[<difficulty>]` with a built-in default mapping. Provider-agnostic — adapters resolve tier/thinking to their own knobs. | Workspace + bead |
-| `:by_budget` | Wraps `:by_priority` (default) or `:by_difficulty` (set `routing.base_policy = "by_difficulty"`) until daily/weekly USD threshold; then degrade one tier on `"model_tier"` and/or `"model"`. | Workspace + bead + ledger |
+| `:by_priority` | Maps `task.priority` (P0..P4) → `rules[<priority>]`. | Workspace + task |
+| `:by_difficulty` | Maps `task.difficulty` (D0..D4) → abstract `{model_tier, thinking}` via `rules[<difficulty>]` with a built-in default mapping. Provider-agnostic — adapters resolve tier/thinking to their own knobs. | Workspace + task |
+| `:by_budget` | Wraps `:by_priority` (default) or `:by_difficulty` (set `routing.base_policy = "by_difficulty"`) until daily/weekly USD threshold; then degrade one tier on `"model_tier"` and/or `"model"`. | Workspace + task + ledger |
 | `:round_robin` | Cycle adapter list per dispatch. Useful for A/B. | Workspace + dispatch counter |
 
 `:static`, `:by_priority`, and `:by_difficulty` ship for the worker
@@ -252,7 +252,7 @@ into a per-dispatch snapshot.
 ### 4.3.1 `:by_difficulty` — provider-agnostic tier + thinking routing
 
 Priority answers "how urgent?"; difficulty answers "how hard?". The two
-are orthogonal — both can be set on a bead, and a workspace picks one
+are orthogonal — both can be set on a task, and a workspace picks one
 policy (or wraps it in `:by_budget`).
 
 The policy emits **abstract** knobs only:
@@ -281,7 +281,7 @@ without re-litigation):
 | D3 (hard) | premium | high |
 | D4 (extreme) | premium | high |
 
-Bead with `difficulty = nil` is treated as D2.
+Task with `difficulty = nil` is treated as D2.
 
 Workspace override example:
 
@@ -306,10 +306,10 @@ rule omits keep their defaults.
 Today (sling.ex:309–343):
 
 ```elixir
-defp maybe_start_claude(%Issue{} = bead, polecat_pid, worktree_path, opts) do
+defp maybe_start_claude(%Issue{} = task, polecat_pid, worktree_path, opts) do
   case Keyword.get(opts, :start_claude, false) do
     true ->
-      session_opts = [...prompt: prompt_for(bead)]
+      session_opts = [...prompt: prompt_for(task)]
       ClaudeSession.start(session_opts)
     ...
   end
@@ -319,17 +319,17 @@ end
 After Phase B:
 
 ```elixir
-defp maybe_start_agent(%Issue{} = bead, polecat_pid, worktree_path, opts) do
+defp maybe_start_agent(%Issue{} = task, polecat_pid, worktree_path, opts) do
   case Keyword.get(opts, :start_agent, false) do
     true ->
-      workspace = load_workspace(bead)
-      agent_choice = Agents.Routing.choose(bead, workspace, ledger_snapshot())
+      workspace = load_workspace(task)
+      agent_choice = Agents.Routing.choose(task, workspace, ledger_snapshot())
       Agents.prepare(workspace)
       AgentSession.start(
         owner: polecat_pid,
         worktree_path: worktree_path,
         agent: agent_choice,                # %{type:, config:}
-        prompt: prompt_for(bead),
+        prompt: prompt_for(task),
         command: Keyword.get(opts, :agent_command)  # test escape hatch
       )
     ...
@@ -352,7 +352,7 @@ the same knob from `review_agent.model`.
 
 **Where it shines:** captures most of the cost win. Haiku is roughly 5× cheaper
 than Sonnet on input tokens (per Anthropic's public pricing — verify before
-committing), so a workspace that routes P3/P4 beads to Haiku can plausibly halve
+committing), so a workspace that routes P3/P4 tasks to Haiku can plausibly halve
 its acolyte spend with zero new harness code. The Tribunal already spawns a
 distinct second session, so making *that* one Opus while keeping the worker on
 Sonnet is asymmetric routing for free.
@@ -379,20 +379,20 @@ doesn't help resilience (single vendor still).
 
 **Cost:** ~0.5 day inside the Claude adapter, including a smoke test.
 
-### 5.3 Full multi-vendor (the bead's headline proposal)
+### 5.3 Full multi-vendor (the task's headline proposal)
 
 **What it is:** a second adapter, then a third — Codex, Aider, Gemini.
 
 **Where it shines:** real resilience (a Claude outage stops being a stop-the-
 world event). Real quota expansion (different vendors, different quotas). And
 in principle, real cost optionality (if an OSS local model on Aider were good
-enough for trivial beads, the per-token cost is ~zero).
+enough for trivial tasks, the per-token cost is ~zero).
 
 **Where it fails:** quality variance is the silent tax. Claude Code is, today,
 the strongest autonomous coding harness — that is the explicit framing in the
-bead description and matches every benchmark we've seen. A bead that fails
+task description and matches every benchmark we've seen. A task that fails
 Tribunal once costs two Claude-Code-Opus reviewer sessions plus one acolyte
-session of whatever-we-routed-to. If routing a P3 bead to a weaker harness
+session of whatever-we-routed-to. If routing a P3 task to a weaker harness
 raises the Tribunal-rejection rate from, say, 10% to 30%, the rework dominates
 the per-token savings.
 
@@ -405,7 +405,7 @@ delta without running the experiment**.
 
 | Risk | Treatment |
 |---|---|
-| Quality variance — weaker agent → more Tribunal rejections → *more* tokens, not fewer | **Cannot estimate without running the experiment.** Recommendation: gate any non-Claude adapter on a measured A/B: same set of representative beads, two cohorts, compare *cost-per-merged-bead* (not raw cost-per-token), using the existing `:work` + `:review` ledger split. |
+| Quality variance — weaker agent → more Tribunal rejections → *more* tokens, not fewer | **Cannot estimate without running the experiment.** Recommendation: gate any non-Claude adapter on a measured A/B: same set of representative tasks, two cohorts, compare *cost-per-merged-task* (not raw cost-per-token), using the existing `:work` + `:review` ledger split. |
 | Maintenance cost of N adapters | Materially real. Each adapter is a CLI we don't own, a stream format that can change, a tool protocol that can change. Mitigation: do not ship an adapter for a vendor whose CLI doesn't have a stable stream-events flag and a versioned release cadence. |
 | Normalized cost model | The Usage.Event schema (already shipped on `feature/77`) has `provider`, `tokens_in/out`, `cache_*`, `cost_usd`, `duration_ms`. That is the right shape — adapters just need to fill it. Normalization is a *write-time* concern in each adapter, not a runtime concern in the dispatcher. |
 | Cheaper levers first | Adopted as the recommendation. Both ship before the first non-Claude adapter. |
@@ -451,7 +451,7 @@ dispatcher and the `:by_priority` policy.
   credential refs.
 - Claude adapter selects per-session by round-robin (or
   least-recently-used; round-robin is fine for MVP).
-- Smoke test that we can in fact run two beads concurrently with two keys.
+- Smoke test that we can in fact run two tasks concurrently with two keys.
 
 ### Phase D — second vendor (gated by Phase A+B+C ledger data)
 
@@ -462,9 +462,9 @@ dispatcher and the `:by_priority` policy.
   - **Aider**: open-source, well-instrumented, but its CLI is conversation-
     oriented; would need a non-trivial adapter shim.
   - **gemini-cli**: a moving target; assess at the time.
-- Build the adapter. Run the A/B (~10–20 representative beads each cohort).
+- Build the adapter. Run the A/B (~10–20 representative tasks each cohort).
 - **Stop here** if the second adapter shows >20% Tribunal-rejection-rate delta
-  on cohort beads — that is the "more tokens, not fewer" outcome and the
+  on cohort tasks — that is the "more tokens, not fewer" outcome and the
   recommendation is to revert.
 
 ### Phase E — `:by_budget` and `:round_robin` policies (gated by Phase D)
@@ -484,7 +484,7 @@ Only meaningful once there are two adapters in flight.
   per-sling decision. If we later want capacity controls, a `Task.Supervisor`
   with `max_children` slots in cleanly — see decision-doc Tier 3.
 - **Does not solve "rework attribution"** beyond what the ledger already gives
-  us. The ledger writes a new `:work` row on every re-sling, so per-bead spend
+  us. The ledger writes a new `:work` row on every re-sling, so per-task spend
   *including* rework is already queryable. Routing policy can read that — it
   just isn't useful until we have two adapters to swing between.
 
@@ -498,9 +498,9 @@ These do not block Phase A or Phase B. They block Phase D.
    The ledger schema supports `cost_usd`; adapters compute it. Per-cached-token
    semantics differ across vendors — we eat that complexity inside each
    adapter's `usage_attrs/1`.
-3. **Should the routing policy be per-workspace, per-bead-type, or per-bead?**
+3. **Should the routing policy be per-workspace, per-task-type, or per-task?**
    Stage 1: workspace-level + per-priority. Stage 2 (only if needed):
-   `bead.agent_type` override column, mirroring `bead.tracker_type`.
+   `task.agent_type` override column, mirroring `task.tracker_type`.
 4. **Failover semantics.** If the active agent's CLI is missing, do we fall
    back to a different agent or fail the sling? Recommendation: *fail* — silent
    fallback is a footgun for cost-routing decisions.

@@ -3,8 +3,8 @@ defmodule ArbiterWeb.UsageLive do
   LiveView at `/usage` — spend dashboard over the token-cost ledger.
 
   Renders per-day, per-provider, per-model, and per-step rollups sourced from
-  `Arbiter.Usage.summarize/1`. Also surfaces the top beads by cost and the
-  rework signal (beads with more than one `:work` row — re-dispatchs).
+  `Arbiter.Usage.summarize/1`. Also surfaces the top tasks by cost and the
+  rework signal (tasks with more than one `:work` row — re-dispatchs).
 
   Refresh-on-load only for v1; PubSub live updates are a Phase 5 add-on once
   spend events are broadcast.
@@ -69,18 +69,18 @@ defmodule ArbiterWeb.UsageLive do
         _ -> []
       end
 
-    top_beads =
-      case Usage.summarize(by: :bead, since: since, limit: 20) do
+    top_tasks =
+      case Usage.summarize(by: :task, since: since, limit: 20) do
         {:ok, rows} -> rows
         _ -> []
       end
 
-    rework_beads = load_rework_beads(since)
+    rework_tasks = load_rework_tasks(since)
 
     socket
     |> assign(:main_rollup, main_rollup)
-    |> assign(:top_beads, top_beads)
-    |> assign(:rework_beads, rework_beads)
+    |> assign(:top_tasks, top_tasks)
+    |> assign(:rework_tasks, rework_tasks)
     |> assign(:grand_cost, sum_cost(main_rollup))
     |> assign(:grand_tokens, sum_tokens(main_rollup))
   end
@@ -91,10 +91,10 @@ defmodule ArbiterWeb.UsageLive do
     DateTime.utc_now() |> DateTime.add(-days * 86_400, :second)
   end
 
-  # Beads with more than one :work row — re-dispatchs, which is the rework story
+  # Tasks with more than one :work row — re-dispatchs, which is the rework story
   # #77 was built to expose. Queries :work events directly rather than going
-  # through summarize/1 because summarize groups all steps together per bead.
-  defp load_rework_beads(since) do
+  # through summarize/1 because summarize groups all steps together per task.
+  defp load_rework_tasks(since) do
     base_query = Ash.Query.filter(Event, step == :work)
 
     query =
@@ -106,12 +106,12 @@ defmodule ArbiterWeb.UsageLive do
     query
     |> Ash.read!()
     |> Enum.group_by(fn ev ->
-      ev.bead_id |> String.split("#", parts: 2) |> hd()
+      ev.task_id |> String.split("#", parts: 2) |> hd()
     end)
-    |> Enum.filter(fn {_bead_id, events} -> length(events) > 1 end)
-    |> Enum.map(fn {bead_id, events} ->
+    |> Enum.filter(fn {_task_id, events} -> length(events) > 1 end)
+    |> Enum.map(fn {task_id, events} ->
       %{
-        bead_id: bead_id,
+        task_id: task_id,
         work_sessions: length(events),
         total_cost_usd: Enum.reduce(events, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
       }
@@ -143,7 +143,7 @@ defmodule ArbiterWeb.UsageLive do
           </h1>
           <p class="text-sm text-base-content/60 mt-1">
             Token cost ledger — per-session spend rolled up from <code class="text-xs">Arbiter.Usage.Event</code>.
-            Multiple rows per bead expose rework spend (re-dispatchs).
+            Multiple rows per task expose rework spend (re-dispatchs).
           </p>
         </div>
 
@@ -220,19 +220,19 @@ defmodule ArbiterWeb.UsageLive do
           <div class="stat">
             <div class={[
               "stat-figure",
-              if(@rework_beads == [], do: "text-base-content/40", else: "text-warning")
+              if(@rework_tasks == [], do: "text-base-content/40", else: "text-warning")
             ]}>
               <.icon name="hero-arrow-path" class="size-7" />
             </div>
-            <div class="stat-title">Rework beads</div>
+            <div class="stat-title">Rework tasks</div>
             <div class={[
               "stat-value",
-              if(@rework_beads == [], do: "text-base-content/40", else: "text-warning")
+              if(@rework_tasks == [], do: "text-base-content/40", else: "text-warning")
             ]}>
-              {length(@rework_beads)}
+              {length(@rework_tasks)}
             </div>
             <div class="stat-desc">
-              {if @rework_beads == [], do: "none re-slung", else: "re-slung ≥ twice"}
+              {if @rework_tasks == [], do: "none re-slung", else: "re-slung ≥ twice"}
             </div>
           </div>
         </div>
@@ -320,20 +320,20 @@ defmodule ArbiterWeb.UsageLive do
           </div>
         </section>
 
-        <%!-- ── Top beads by cost + Rework ────────────────────────────── --%>
+        <%!-- ── Top tasks by cost + Rework ────────────────────────────── --%>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <%!-- Top beads by cost --%>
+          <%!-- Top tasks by cost --%>
           <section class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
               <h2 class="text-lg font-semibold flex items-center gap-2">
-                <.icon name="hero-trophy" class="size-5 text-base-content/70" /> Top beads by cost
+                <.icon name="hero-trophy" class="size-5 text-base-content/70" /> Top tasks by cost
                 <span class="badge badge-ghost badge-sm font-normal">
-                  top {length(@top_beads)}
+                  top {length(@top_tasks)}
                 </span>
               </h2>
 
               <div
-                :if={@top_beads == []}
+                :if={@top_tasks == []}
                 class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
               >
                 <p class="text-sm text-base-content/60">
@@ -341,9 +341,9 @@ defmodule ArbiterWeb.UsageLive do
                 </p>
               </div>
 
-              <ul :if={@top_beads != []} class="flex flex-col gap-1.5">
+              <ul :if={@top_tasks != []} class="flex flex-col gap-1.5">
                 <li
-                  :for={{row, rank} <- Enum.with_index(@top_beads, 1)}
+                  :for={{row, rank} <- Enum.with_index(@top_tasks, 1)}
                   class="rounded-box bg-base-100 border border-base-300 px-3 py-2 transition-colors duration-150 hover:border-primary/40"
                 >
                   <div class="flex items-center gap-2">
@@ -351,7 +351,7 @@ defmodule ArbiterWeb.UsageLive do
                       {rank}.
                     </span>
                     <.link
-                      navigate={~p"/beads/#{row.group}"}
+                      navigate={~p"/tasks/#{row.group}"}
                       class="flex-1 min-w-0 group"
                     >
                       <code class="text-xs text-base-content/70 group-hover:text-primary transition-colors truncate block">
@@ -378,51 +378,51 @@ defmodule ArbiterWeb.UsageLive do
                   name="hero-arrow-path"
                   class={[
                     "size-5",
-                    if(@rework_beads == [], do: "text-base-content/40", else: "text-warning")
+                    if(@rework_tasks == [], do: "text-base-content/40", else: "text-warning")
                   ]}
                 /> Rework signal
                 <span class="text-sm font-normal text-base-content/50">
-                  — re-slung beads
+                  — re-slung tasks
                 </span>
                 <span class={[
                   "badge badge-sm font-normal",
-                  if(@rework_beads == [], do: "badge-ghost", else: "badge-warning")
+                  if(@rework_tasks == [], do: "badge-ghost", else: "badge-warning")
                 ]}>
-                  {length(@rework_beads)}
+                  {length(@rework_tasks)}
                 </span>
               </h2>
 
               <div
-                :if={@rework_beads == []}
+                :if={@rework_tasks == []}
                 class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
               >
                 <.icon name="hero-check-circle" class="size-8 mx-auto text-success/50" />
                 <p class="mt-2 text-sm text-base-content/60">
-                  No re-slung beads {since_label_lower(@since_days)}.
+                  No re-slung tasks {since_label_lower(@since_days)}.
                 </p>
                 <p class="text-xs text-base-content/40 mt-1">
-                  Beads with more than one <code>:work</code> session appear here —
+                  Tasks with more than one <code>:work</code> session appear here —
                   each additional session is spend on rework.
                 </p>
               </div>
 
-              <ul :if={@rework_beads != []} class="flex flex-col gap-1.5">
+              <ul :if={@rework_tasks != []} class="flex flex-col gap-1.5">
                 <li
-                  :for={r <- @rework_beads}
+                  :for={r <- @rework_tasks}
                   class="rounded-box bg-base-100 border border-warning/30 border-l-4 px-3 py-2 transition-colors duration-150 hover:border-warning/60"
                 >
                   <div class="flex items-center gap-2">
                     <.link
-                      navigate={~p"/beads/#{r.bead_id}"}
+                      navigate={~p"/tasks/#{r.task_id}"}
                       class="flex-1 min-w-0 group"
                     >
                       <code class="text-xs text-base-content/70 group-hover:text-warning transition-colors truncate block">
-                        {r.bead_id}
+                        {r.task_id}
                       </code>
                     </.link>
                     <span
                       class="badge badge-warning badge-sm gap-1 shrink-0"
-                      title="Number of :work sessions for this bead"
+                      title="Number of :work sessions for this task"
                     >
                       <.icon name="hero-arrow-path" class="size-3" />
                       {r.work_sessions}× work

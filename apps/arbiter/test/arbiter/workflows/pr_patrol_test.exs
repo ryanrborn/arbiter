@@ -1,7 +1,7 @@
 defmodule Arbiter.Workflows.PRPatrolTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Workflows.PRPatrol
   require Ash.Query
@@ -63,7 +63,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — no actionable PRs" do
-    test "empty PR list → no beads created", %{ws: ws} do
+    test "empty PR list → no tasks created", %{ws: ws} do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
       end)
@@ -72,10 +72,10 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert :ok = PRPatrol.tick(name)
       assert PRPatrol.state(name).ticks == 1
 
-      assert beads_for_repo() == []
+      assert tasks_for_repo() == []
     end
 
-    test "PR with all-APPROVED reviews → no bead", %{ws: ws} do
+    test "PR with all-APPROVED reviews → no task", %{ws: ws} do
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
@@ -95,12 +95,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       {_pid, name} = start_patrol(ws)
       assert :ok = PRPatrol.tick(name)
-      assert beads_for_repo() == []
+      assert tasks_for_repo() == []
     end
   end
 
   describe "tick/1 — actionable PRs" do
-    test "CHANGES_REQUESTED → 1 bead created, worker spawned", %{ws: ws} do
+    test "CHANGES_REQUESTED → 1 task created, worker spawned", %{ws: ws} do
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
@@ -123,17 +123,17 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)
 
-      [bead] = beads_for_repo()
-      assert bead.tracker_type == :github
-      assert bead.tracker_ref == "42"
-      assert bead.title =~ "PR #42"
-      assert bead.workspace_id == ws.id
+      [task] = tasks_for_repo()
+      assert task.tracker_type == :github
+      assert task.tracker_ref == "42"
+      assert task.title =~ "PR #42"
+      assert task.workspace_id == ws.id
 
-      # Worker is registered for this bead
-      assert is_pid(Worker.whereis(bead.id))
+      # Worker is registered for this task
+      assert is_pid(Worker.whereis(task.id))
     end
 
-    test "dedup: second tick with the same actionable PR does NOT create another bead", %{ws: ws} do
+    test "dedup: second tick with the same actionable PR does NOT create another task", %{ws: ws} do
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
@@ -155,12 +155,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
       :ok = PRPatrol.tick(name)
 
-      assert length(beads_for_repo()) == 1
+      assert length(tasks_for_repo()) == 1
     end
 
-    test "closed follow-up bead does not block re-dispatch on a new CHANGES_REQUESTED",
+    test "closed follow-up task does not block re-dispatch on a new CHANGES_REQUESTED",
          %{ws: ws} do
-      # Bead exists but is closed → dedup must not skip the dispatch.
+      # Task exists but is closed → dedup must not skip the dispatch.
       {:ok, old} =
         Ash.create(Issue, %{
           title: "old PR follow-up",
@@ -191,8 +191,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)
 
-      open_beads = beads_for_repo() |> Enum.filter(&(&1.status != :closed))
-      assert length(open_beads) == 1
+      open_tasks = tasks_for_repo() |> Enum.filter(&(&1.status != :closed))
+      assert length(open_tasks) == 1
     end
   end
 
@@ -221,13 +221,13 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       {_pid, name} = start_patrol(ws)
       assert :ok = PRPatrol.tick(name)
       assert PRPatrol.state(name).ticks == 1
-      assert beads_for_repo() == []
+      assert tasks_for_repo() == []
     end
   end
 
   # ---- helpers ----
 
-  defp beads_for_repo do
+  defp tasks_for_repo do
     Issue
     |> Ash.Query.filter(tracker_type == :github)
     |> Ash.read!()

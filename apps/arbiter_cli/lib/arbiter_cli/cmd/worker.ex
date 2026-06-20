@@ -3,18 +3,18 @@ defmodule ArbiterCli.Cmd.Worker do
   Worker subcommand router:
 
       arb worker list             — list active workers with status + step
-      arb worker show <bead-id>   — full snapshot incl. recent Claude output
-      arb worker log <bead-id>    — full uncapped durable transcript (audit)
-      arb worker stop <bead-id>   — terminate a running worker cleanly
+      arb worker show <task-id>   — full snapshot incl. recent Claude output
+      arb worker log <task-id>    — full uncapped durable transcript (audit)
+      arb worker stop <task-id>   — terminate a running worker cleanly
 
   Use `arb dispatch` to start a worker in the first place.
 
   `show` reports a live worker's full snapshot when one is running. When no
-  live worker exists for the bead it falls back to the most recent historical
+  live worker exists for the task it falls back to the most recent historical
   run (status, started/completed times, failure reason, and any retained
   output), so finished or exited runs stay inspectable. `show`'s output is the
   bounded UI tail (capped); `log` returns the **full, uncapped** transcript of
-  the bead's most recent run from the durable on-disk store — the audit source
+  the task's most recent run from the durable on-disk store — the audit source
   of record, retaining every line however long the run.
   """
 
@@ -30,12 +30,12 @@ defmodule ArbiterCli.Cmd.Worker do
       case rest do
         ["list" | _] -> list(mode)
         ["ls" | _] -> list(mode)
-        ["show", bead_id | _] -> show(bead_id, mode)
-        ["show" | _] -> Output.die("worker show requires: <bead-id>")
-        ["log", bead_id | _] -> log(bead_id, mode)
-        ["log" | _] -> Output.die("worker log requires: <bead-id>")
-        ["stop", bead_id | _] -> stop(bead_id, mode)
-        ["stop" | _] -> Output.die("worker stop requires: <bead-id>")
+        ["show", task_id | _] -> show(task_id, mode)
+        ["show" | _] -> Output.die("worker show requires: <task-id>")
+        ["log", task_id | _] -> log(task_id, mode)
+        ["log" | _] -> Output.die("worker log requires: <task-id>")
+        ["stop", task_id | _] -> stop(task_id, mode)
+        ["stop" | _] -> Output.die("worker stop requires: <task-id>")
         [] -> Output.die("worker requires a subcommand: `list`, `show`, `log`, or `stop`")
         [unknown | _] -> Output.die("unknown worker subcommand: #{unknown}")
       end
@@ -50,23 +50,23 @@ defmodule ArbiterCli.Cmd.Worker do
     end
   end
 
-  defp show(bead_id, mode) do
-    case Client.get("/api/workers/#{bead_id}") do
+  defp show(task_id, mode) do
+    case Client.get("/api/workers/#{task_id}") do
       {:ok, snap} -> emit_show(snap, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp log(bead_id, mode) do
-    case Client.get("/api/workers/#{bead_id}/log") do
+  defp log(task_id, mode) do
+    case Client.get("/api/workers/#{task_id}/log") do
       {:ok, %{"data" => data}} -> emit_log(data, mode)
       {:ok, payload} -> emit_log(payload, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp stop(bead_id, mode) do
-    case Client.post("/api/workers/#{bead_id}/stop", %{}) do
+  defp stop(task_id, mode) do
+    case Client.post("/api/workers/#{task_id}/stop", %{}) do
       {:ok, payload} -> emit_stop(payload, mode)
       {:error, err} -> Output.die(err)
     end
@@ -81,7 +81,7 @@ defmodule ArbiterCli.Cmd.Worker do
       IO.puts("(no live worker — showing most recent historical run)")
     end
 
-    IO.puts("Issue:       #{snap["bead_id"]}")
+    IO.puts("Issue:       #{snap["task_id"]}")
     IO.puts("Status:     #{snap["status"]}")
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.
@@ -111,7 +111,7 @@ defmodule ArbiterCli.Cmd.Worker do
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))
 
   defp emit_log(data, :text) do
-    IO.puts("Issue:       #{data["bead_id"]}")
+    IO.puts("Issue:       #{data["task_id"]}")
     IO.puts("Run:        #{data["run_id"]}")
     IO.puts("Transcript: #{data["path"]}")
 
@@ -132,7 +132,7 @@ defmodule ArbiterCli.Cmd.Worker do
   defp emit_stop(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit_stop(payload, :text) do
-    IO.puts("Stopped worker for issue #{payload["bead_id"]}.")
+    IO.puts("Stopped worker for issue #{payload["task_id"]}.")
   end
 
   defp emit_list(list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
@@ -154,7 +154,7 @@ defmodule ArbiterCli.Cmd.Worker do
       cost_part = format_cost(p["cost_usd"])
 
       IO.puts(
-        "  #{p["bead_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
+        "  #{p["task_id"]}  status=#{p["status"]}  #{step}  repo=#{p["repo"]}  started=#{p["started_at"]}#{model_part}#{cost_part}"
       )
     end)
   end

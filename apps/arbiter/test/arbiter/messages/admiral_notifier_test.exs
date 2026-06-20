@@ -14,36 +14,36 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   end
 
   describe "completed/1" do
-    test "formats a multi-minute duration and falls back to the bead id as title" do
+    test "formats a multi-minute duration and falls back to the task id as title" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.completed(%{
-                 bead_id: bead_id,
+                 task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(125),
                  meta: %{}
                })
 
       notification = only_notification(ws)
-      assert notification.from_ref == bead_id
-      assert notification.subject == "#{bead_id} completed"
-      assert notification.body == "#{bead_id} completed in 2m 5s"
+      assert notification.from_ref == task_id
+      assert notification.subject == "#{task_id} completed"
+      assert notification.body == "#{task_id} completed in 2m 5s"
     end
 
     test "uses the directive title when the Issue row exists" do
-      {:ok, workspace} = Ash.create(Arbiter.Beads.Workspace, %{name: uniq("ws")})
+      {:ok, workspace} = Ash.create(Arbiter.Tasks.Workspace, %{name: uniq("ws")})
 
       {:ok, issue} =
-        Ash.create(Arbiter.Beads.Issue, %{
+        Ash.create(Arbiter.Tasks.Issue, %{
           title: "Wire the admiral mailbox",
           workspace_id: workspace.id
         })
 
       assert :ok =
                AdmiralNotifier.completed(%{
-                 bead_id: issue.id,
+                 task_id: issue.id,
                  workspace_id: workspace.id,
                  started_at: started_ago(5),
                  meta: %{}
@@ -57,101 +57,101 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   describe "failed/1" do
     test "includes the exit code when present" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.failed(%{
-                 bead_id: bead_id,
+                 task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(3661),
                  meta: %{exit_status: 1}
                })
 
       notification = only_notification(ws)
-      assert notification.subject == "#{bead_id} failed"
-      assert notification.body == "#{bead_id} failed after 1h 1m — exit code 1"
+      assert notification.subject == "#{task_id} failed"
+      assert notification.body == "#{task_id} failed after 1h 1m — exit code 1"
     end
 
     test "omits the exit code when unknown" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.failed(%{
-                 bead_id: bead_id,
+                 task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(30),
                  meta: %{}
                })
 
-      assert only_notification(ws).body == "#{bead_id} failed after 30s"
+      assert only_notification(ws).body == "#{task_id} failed after 30s"
     end
   end
 
   describe "awaiting_review/1" do
     test "names the MR ref when present" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.awaiting_review(%{
-                 bead_id: bead_id,
+                 task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(10),
                  meta: %{mr_ref: "!7"}
                })
 
-      assert only_notification(ws).body == "#{bead_id} opened MR !7 — awaiting review"
+      assert only_notification(ws).body == "#{task_id} opened MR !7 — awaiting review"
     end
 
     test "falls back gracefully when no MR ref is recorded" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.awaiting_review(%{
-                 bead_id: bead_id,
+                 task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(10),
                  meta: %{}
                })
 
-      assert only_notification(ws).body == "#{bead_id} — awaiting review"
+      assert only_notification(ws).body == "#{task_id} — awaiting review"
     end
   end
 
   describe "awaiting_review_stuck/2 (bd-66ey1o)" do
     test "names the MR ref passed explicitly even when meta has none" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.awaiting_review_stuck(
-                 %{bead_id: bead_id, workspace_id: ws, started_at: started_ago(900), meta: %{}},
+                 %{task_id: task_id, workspace_id: ws, started_at: started_ago(900), meta: %{}},
                  "#76"
                )
 
       notification = only_notification(ws)
-      assert notification.subject == "#{bead_id} stuck awaiting review"
+      assert notification.subject == "#{task_id} stuck awaiting review"
 
       assert notification.body ==
-               "#{bead_id} stuck at awaiting_review (MR #76) — escalated (no terminal MR outcome)"
+               "#{task_id} stuck at awaiting_review (MR #76) — escalated (no terminal MR outcome)"
     end
 
     test "falls back to the meta mr_ref when no override is passed" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
 
       assert :ok =
                AdmiralNotifier.awaiting_review_stuck(%{
-                 bead_id: bead_id,
+                 task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(60),
                  meta: %{mr_ref: "!42"}
                })
 
       assert only_notification(ws).body ==
-               "#{bead_id} stuck at awaiting_review (MR !42) — escalated (no terminal MR outcome)"
+               "#{task_id} stuck at awaiting_review (MR !42) — escalated (no terminal MR outcome)"
     end
   end
 
@@ -159,7 +159,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
     test "a worker with no workspace posts nothing" do
       assert :ok =
                AdmiralNotifier.completed(%{
-                 bead_id: "bd-x",
+                 task_id: "bd-x",
                  workspace_id: nil,
                  started_at: started_ago(1),
                  meta: %{}
@@ -177,15 +177,15 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       escalation
     end
 
-    test "raises an addressed escalation naming the bead + cause + remediation" do
+    test "raises an addressed escalation naming the task + cause + remediation" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
                  %{
-                   bead_id: bead_id,
+                   task_id: task_id,
                    workspace_id: ws,
                    repo: "team/repo",
                    meta: %{activity: %{label: "editing run.ex"}}
@@ -196,8 +196,8 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       escalation = only_escalation(ws)
       assert escalation.kind == :escalation
       assert escalation.to_ref == "admiral"
-      assert escalation.directive_ref == bead_id
-      assert escalation.subject =~ bead_id
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ task_id
       assert escalation.subject =~ "credentials expired"
       assert escalation.body =~ "Repo: team/repo"
       assert escalation.body =~ "Last activity: editing run.ex"
@@ -207,26 +207,26 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
     test "offers `arb resume` to continue from the preserved worktree (bd-auma3z)" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
-                 %{bead_id: bead_id, workspace_id: ws, repo: "r", meta: %{}},
+                 %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
 
-      assert only_escalation(ws).body =~ "arb worker resume #{bead_id}"
+      assert only_escalation(ws).body =~ "arb worker resume #{task_id}"
     end
 
     test "names the kill signal when present" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
       reason = StopReason.classify(137, [])
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
-                 %{bead_id: bead_id, workspace_id: ws, repo: "r", meta: %{}},
+                 %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
 
@@ -238,7 +238,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
       assert :ok =
                AdmiralNotifier.acolyte_stopped(
-                 %{bead_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
+                 %{task_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
                  reason
                )
 
@@ -251,12 +251,12 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
     test "raises a 'refused to dispatch' escalation" do
       ws = uniq("ws")
-      bead_id = uniq("bd")
+      task_id = uniq("bd")
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
                AdmiralNotifier.preflight_failed(
-                 %{bead_id: bead_id, workspace_id: ws, repo: "r", meta: %{}},
+                 %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
 

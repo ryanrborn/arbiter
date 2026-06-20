@@ -9,7 +9,7 @@ defmodule Arbiter.Workers.Reconciler do
   no active workers, but the durable history lies: it claims work is still in
   flight when the process that owned it is long gone.
 
-  This module sweeps those orphans. A `:running` row whose `bead_id` has no live
+  This module sweeps those orphans. A `:running` row whose `task_id` has no live
   worker registered under `Arbiter.Worker.Registry` is marked `:failed` with a
   `failure_reason` of `"server restarted"`. Run on application start (see
   `Arbiter.Application`) after the Repo and the Worker Registry are online.
@@ -33,7 +33,7 @@ defmodule Arbiter.Workers.Reconciler do
   require Ash.Query
   require Logger
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
@@ -109,17 +109,17 @@ defmodule Arbiter.Workers.Reconciler do
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
       When `false`, skips and returns `{:ok, :skipped}`.
   """
-  @spec reconcile_open_pr_beads(keyword()) ::
+  @spec reconcile_open_pr_tasks(keyword()) ::
           {:ok, non_neg_integer() | :skipped} | {:error, term()}
-  def reconcile_open_pr_beads(opts \\ []) do
+  def reconcile_open_pr_tasks(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
-      do_reconcile_open_pr_beads()
+      do_reconcile_open_pr_tasks()
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_open_pr_beads do
+  defp do_reconcile_open_pr_tasks do
     stuck =
       Issue
       |> Ash.Query.filter(status == :in_progress and not is_nil(pr_ref))
@@ -130,35 +130,35 @@ defmodule Arbiter.Workers.Reconciler do
 
     if escalated > 0 do
       Logger.warning(
-        "Workers.Reconciler: found #{escalated} in_progress bead(s) with open PR but no live worker — escalated to Admiral"
+        "Workers.Reconciler: found #{escalated} in_progress task(s) with open PR but no live worker — escalated to Admiral"
       )
     end
 
     {:ok, escalated}
   rescue
     e ->
-      Logger.warning("Workers.Reconciler: open-PR bead sweep failed: #{Exception.message(e)}")
+      Logger.warning("Workers.Reconciler: open-PR task sweep failed: #{Exception.message(e)}")
 
       {:error, e}
   end
 
-  defp live_worker_for_issue?(%Issue{id: bead_id}), do: not is_nil(Worker.whereis(bead_id))
+  defp live_worker_for_issue?(%Issue{id: task_id}), do: not is_nil(Worker.whereis(task_id))
 
-  defp escalate_stuck_issue(%Issue{id: bead_id, pr_ref: pr_ref, workspace_id: workspace_id}) do
-    subject = "#{bead_id} stuck — PR ##{pr_ref} open but no live worker"
+  defp escalate_stuck_issue(%Issue{id: task_id, pr_ref: pr_ref, workspace_id: workspace_id}) do
+    subject = "#{task_id} stuck — PR ##{pr_ref} open but no live worker"
 
     body =
-      "Bead #{bead_id} has an open PR (#{pr_ref}) but no live worker to drive the merge.\n" <>
+      "Task #{task_id} has an open PR (#{pr_ref}) but no live worker to drive the merge.\n" <>
         "The server was likely restarted between `arb done` and the Watchdog being established.\n" <>
-        "Action: verify the PR is ready to merge, then run `arb issue dispatch #{bead_id}` to re-drive " <>
-        "or manually merge and close the bead."
+        "Action: verify the PR is ready to merge, then run `arb issue dispatch #{task_id}` to re-drive " <>
+        "or manually merge and close the task."
 
     Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
       from_ref: "system",
       workspace_id: workspace_id,
-      directive_ref: bead_id,
+      directive_ref: task_id,
       subject: subject,
       body: body
     })
@@ -167,16 +167,16 @@ defmodule Arbiter.Workers.Reconciler do
   rescue
     e ->
       Logger.warning(
-        "Workers.Reconciler: failed to escalate stuck bead #{bead_id}: #{Exception.message(e)}"
+        "Workers.Reconciler: failed to escalate stuck task #{task_id}: #{Exception.message(e)}"
       )
 
       false
   end
 
-  # A run is live iff a worker GenServer is registered for its bead_id. After a
+  # A run is live iff a worker GenServer is registered for its task_id. After a
   # boot the registry is empty, so every :running row is an orphan; mid-life this
   # guards against racing a worker that is legitimately still working.
-  defp live_worker?(%Run{bead_id: bead_id}), do: not is_nil(Worker.whereis(bead_id))
+  defp live_worker?(%Run{task_id: task_id}), do: not is_nil(Worker.whereis(task_id))
 
   # Returns true when the row was successfully reconciled (so the caller can
   # count it), false on a per-row write failure that we've logged and skipped.
@@ -193,7 +193,7 @@ defmodule Arbiter.Workers.Reconciler do
 
       {:error, reason} ->
         Logger.warning(
-          "Workers.Reconciler: failed to reconcile run for bead=#{run.bead_id}: #{inspect(reason)}"
+          "Workers.Reconciler: failed to reconcile run for task=#{run.task_id}: #{inspect(reason)}"
         )
 
         false

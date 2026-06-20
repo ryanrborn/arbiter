@@ -1,17 +1,17 @@
 defmodule Arbiter.Worker.DispatchTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Run
   require Ash.Query
 
-  # The most recent worker_run for a bead — used by the resume tests to assert
+  # The most recent worker_run for a task — used by the resume tests to assert
   # run lineage (resumed_from_run_id) and terminal status.
-  defp latest_run(bead_id) do
+  defp latest_run(task_id) do
     Run
-    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
@@ -25,28 +25,28 @@ defmodule Arbiter.Worker.DispatchTest do
 
   describe "dispatch/2 happy path" do
     test "spawns a worker and starts a workflow machine", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "hello world", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "hello world", workspace_id: ws.id})
 
-      assert {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", start_driver: false)
-      assert result.bead.status == :in_progress
+      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false)
+      assert result.task.status == :in_progress
       assert is_pid(result.worker_pid)
       assert is_pid(result.machine_pid)
       assert is_binary(result.machine_id)
       assert result.driver_pid == nil
 
       # worker is registered
-      assert Worker.whereis(bead.id) == result.worker_pid
+      assert Worker.whereis(task.id) == result.worker_pid
     end
 
-    test "idempotent for already-in_progress beads", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
-      {:ok, _first} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
+    test "idempotent for already-in_progress tasks", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      {:ok, _first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
 
-      # Second dispatch: bead is already :in_progress; worker already exists.
+      # Second dispatch: task is already :in_progress; worker already exists.
       # Should NOT crash; should return the existing worker pid.
-      assert {:ok, second} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
-      assert second.bead.status == :in_progress
-      assert Worker.whereis(bead.id) == second.worker_pid
+      assert {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      assert second.task.status == :in_progress
+      assert Worker.whereis(task.id) == second.worker_pid
     end
 
     # bd-d70whv: redispatch a failed worker must start a fresh worker rather than
@@ -54,16 +54,16 @@ defmodule Arbiter.Worker.DispatchTest do
     # existing pid on {:already_started, pid} regardless of status, and the
     # :failed status caused the "arb done" FSM guard to silently no-op.
     test "redispatch a :failed worker starts a fresh :idle worker (bd-d70whv)", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "redispatch failed", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "redispatch failed", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
       first_pid = first.worker_pid
 
       :ok = Worker.fail(first_pid, :credentials_expired)
       assert Worker.state(first_pid).status == :failed
 
       # Re-dispatch: must evict the stale worker and start a new one.
-      {:ok, second} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
 
       assert second.worker_pid != first_pid
       refute Process.alive?(first_pid)
@@ -71,26 +71,26 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     test "redispatch a :completed worker also starts fresh (bd-d70whv)", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "redispatch completed", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "redispatch completed", workspace_id: ws.id})
 
-      {:ok, first} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
       first_pid = first.worker_pid
 
       :ok = Worker.advance(first_pid, :work)
       :ok = Worker.complete(first_pid, :done)
       assert Worker.state(first_pid).status == :completed
 
-      {:ok, second} = Dispatch.dispatch(bead.id, repo: "r", start_driver: false)
+      {:ok, second} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
 
       assert second.worker_pid != first_pid
       refute Process.alive?(first_pid)
       assert Worker.state(second.worker_pid).status == :idle
     end
 
-    test "starts a Driver by default and drives bead to :closed", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "drive me", workspace_id: ws.id})
+    test "starts a Driver by default and drives task to :closed", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "drive me", workspace_id: ws.id})
 
-      assert {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", interval_ms: 5)
+      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", interval_ms: 5)
       assert is_pid(result.driver_pid)
       assert Process.alive?(result.driver_pid)
 
@@ -100,34 +100,34 @@ defmodule Arbiter.Worker.DispatchTest do
       ref = Process.monitor(result.driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :closed
     end
   end
 
   describe "dispatch/2 error cases" do
-    test "non-existent bead returns {:error, {:bead_not_found, _}}" do
-      assert {:error, {:bead_not_found, "no-such-bead-123"}} =
-               Dispatch.dispatch("no-such-bead-123")
+    test "non-existent task returns {:error, {:task_not_found, _}}" do
+      assert {:error, {:task_not_found, "no-such-task-123"}} =
+               Dispatch.dispatch("no-such-task-123")
     end
 
-    test "closed beads cannot be slung", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
-      {:ok, _closed} = Ash.update(bead, %{}, action: :close)
+    test "closed tasks cannot be slung", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "t", workspace_id: ws.id})
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
 
-      assert {:error, {:bead_closed, _}} = Dispatch.dispatch(bead.id)
+      assert {:error, {:task_closed, _}} = Dispatch.dispatch(task.id)
     end
 
-    test "beads already awaiting review cannot be re-slung (bd-appwsh)", %{ws: ws} do
+    test "tasks already awaiting review cannot be re-slung (bd-appwsh)", %{ws: ws} do
       alias Arbiter.Test.StubMerger
 
       StubMerger.reset()
-      {:ok, bead} = Ash.create(Issue, %{title: "awaiting-review guard", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "awaiting-review guard", workspace_id: ws.id})
 
       # Boot a worker and park it at :awaiting_review via open_mr/5 with a
       # stub merger. Use a far-future Watchdog interval so the auto-started Watchdog
       # does not poll or transition the worker during the assertion window.
-      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "arbiter")
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter")
       :ok = Worker.advance(pid, :implement)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -143,7 +143,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert {:ok, "!test"} = Worker.open_mr(pid, "feature/guard", "Guard", "", open_opts)
       assert Worker.state(pid).status == :awaiting_review
 
-      assert {:error, {:bead_awaiting_review, _}} = Dispatch.dispatch(bead.id, start_driver: false)
+      assert {:error, {:task_awaiting_review, _}} = Dispatch.dispatch(task.id, start_driver: false)
     end
   end
 
@@ -165,11 +165,11 @@ defmodule Arbiter.Worker.DispatchTest do
       end)
     end
 
-    test "a failing auth probe REFUSES to dispatch and leaves the bead untouched", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "auth gate", workspace_id: ws.id})
+    test "a failing auth probe REFUSES to dispatch and leaves the task untouched", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "auth gate", workspace_id: ws.id})
 
       assert {:error, {:auth_check_failed, reason}} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -183,17 +183,17 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert reason.category == :auth_expired
 
-      # Refused BEFORE any state mutation: bead is still :open, no worker spawned.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      # Refused BEFORE any state mutation: task is still :open, no worker spawned.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :open
-      assert Worker.whereis(bead.id) == nil
+      assert Worker.whereis(task.id) == nil
     end
 
     test "a failed pre-flight escalates to the Admiral with a re-auth message", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "auth escalate", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "auth escalate", workspace_id: ws.id})
 
       {:error, {:auth_check_failed, _}} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "test/repo",
           start_driver: false,
           start_claude: true,
@@ -203,37 +203,37 @@ defmodule Arbiter.Worker.DispatchTest do
 
       assert [escalation] =
                Message.inbox("admiral", workspace_id: ws.id)
-               |> Enum.filter(&(&1.directive_ref == bead.id))
+               |> Enum.filter(&(&1.directive_ref == task.id))
 
       assert escalation.subject =~ "pre-flight auth failed"
       assert escalation.body =~ "Re-authenticate"
     end
 
     test "pre-flight is skipped when start_claude is false (default path unaffected)", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no preflight", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "no preflight", workspace_id: ws.id})
 
       # Even with a probe_command that would 401, no start_claude means no probe.
       # provision_worktree: false so we don't try to git-fetch /tmp.
       assert {:ok, result} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
                  provision_worktree: false,
                  probe_command: ["sh", "-c", "exit 1"]
                )
 
-      assert result.bead.status == :in_progress
+      assert result.task.status == :in_progress
     end
 
     test "preflight: false bypasses the probe even with start_claude", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "bypass", workspace_id: ws.id})
 
       # start_claude + preflight: false + provision_worktree: false errors at the
       # claude-start step (:missing_worktree) — proving we got PAST the (disabled)
       # preflight rather than being refused by it. The repo must be valid so the
       # repo-resolution guard (bd-1ziw04) passes before reaching the preflight gate.
       assert {:error, :missing_worktree} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  repo: "test/repo",
                  start_driver: false,
                  start_claude: true,
@@ -246,10 +246,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
   describe "dispatch/2 result shape" do
     test "returns a map with the standard keys", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", start_driver: false)
+      {:ok, task} = Ash.create(Issue, %{title: "shape", workspace_id: ws.id})
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false)
 
-      for key <- [:bead, :worker_pid, :machine_id, :machine_pid, :driver_pid, :worktree_path] do
+      for key <- [:task, :worker_pid, :machine_id, :machine_pid, :driver_pid, :worktree_path] do
         assert Map.has_key?(result, key), "missing #{key}"
       end
     end
@@ -332,15 +332,15 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "test/repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "test/repo", start_driver: false)
       assert result.claude_port == nil
     end
 
     test "start_claude: true with claude_command spawns a subprocess in the worktree",
          %{ws: ws, tmp: tmp} do
-      {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
       # Use the tmp dir as a stand-in worktree by passing it through manually.
       # Dispatch.maybe_provision_worktree returns nil when repo is unmapped, but
@@ -357,7 +357,7 @@ defmodule Arbiter.Worker.DispatchTest do
       end)
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "claude/repo",
           start_driver: false,
           start_claude: true,
@@ -371,7 +371,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert is_binary(result.worktree_path)
     end
 
-    # bd-dlv3no: a review dispatch has no per-bead worktree, so its Claude cwd
+    # bd-dlv3no: a review dispatch has no per-task worktree, so its Claude cwd
     # falls back to the repo's shared checkout. The per-spawn MCP config carries a
     # bearer scope token; writing `.mcp.json` into that canonical checkout leaks
     # the token into the working tree the live server + operator share (the
@@ -386,10 +386,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
       on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
 
-      {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "rv/repo",
           review: true,
           start_driver: false,
@@ -420,10 +420,10 @@ defmodule Arbiter.Worker.DispatchTest do
         Application.delete_env(:arbiter, :repo_paths)
       end)
 
-      {:ok, bead} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "do work", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "work/repo",
           start_driver: false,
           start_claude: true,
@@ -491,10 +491,10 @@ defmodule Arbiter.Worker.DispatchTest do
         Application.delete_env(:arbiter, :repo_paths)
       end)
 
-      {:ok, bead} = Ash.create(Issue, %{title: "check ignore", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "check ignore", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "gic/repo",
           start_driver: false,
           start_claude: true,
@@ -523,10 +523,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "start_claude: true with an unresolvable repo returns {:error, {:repo_not_found, repo}}",
          %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "no wt", workspace_id: ws.id})
 
       assert {:error, {:repo_not_found, "no-such-repo"}} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  repo: "no-such-repo",
                  start_driver: false,
                  start_claude: true,
@@ -536,7 +536,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "start_claude: true implies claude_driven Driver mode (no workflow ticking)",
          %{ws: ws, tmp: tmp} do
-      {:ok, bead} = Ash.create(Issue, %{title: "drvr-mode", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "drvr-mode", workspace_id: ws.id})
 
       repo = seed_repo!(tmp, "drvrepo")
 
@@ -549,7 +549,7 @@ defmodule Arbiter.Worker.DispatchTest do
       end)
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "drvr/repo",
           start_claude: true,
           # A stand-in for a *running* Claude session: it must stay alive for the
@@ -573,11 +573,11 @@ defmodule Arbiter.Worker.DispatchTest do
       assert snap.current_step == :claude
 
       # If the Driver were in workflow mode, the no-op steps would close
-      # the bead in ~500ms. Wait that long and verify the bead is still
+      # the task in ~500ms. Wait that long and verify the task is still
       # :in_progress — the Driver is waiting on the worker instead.
       Process.sleep(150)
 
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
 
       # Now simulate Claude completion and let the Driver react.
@@ -586,7 +586,7 @@ defmodule Arbiter.Worker.DispatchTest do
       ref = Process.monitor(result.driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :closed
     end
 
@@ -611,10 +611,10 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "model bead", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "model task", workspace_id: ws.id})
 
       {:ok, _result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "m/repo",
           start_driver: false,
           start_claude: true,
@@ -650,10 +650,10 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "override", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "override", workspace_id: ws.id})
 
       {:ok, _result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "o/repo",
           start_driver: false,
           start_claude: true,
@@ -690,10 +690,10 @@ defmodule Arbiter.Worker.DispatchTest do
           config: %{"agent" => %{"type" => "claude"}}
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "gemini bead", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "gemini task", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "g/repo",
           start_driver: false,
           start_claude: true,
@@ -741,11 +741,11 @@ defmodule Arbiter.Worker.DispatchTest do
         })
 
       # priority 4 → routing rule fires → haiku.
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{title: "trivial", workspace_id: ws.id, priority: 4})
 
       {:ok, _result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "p/repo",
           start_driver: false,
           start_claude: true,
@@ -847,7 +847,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "creates a worktree on a derived branch when repo is configured",
          %{ws: ws, worktree_root: root} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "implement the thing",
           workspace_id: ws.id,
@@ -855,21 +855,21 @@ defmodule Arbiter.Worker.DispatchTest do
         })
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
+        Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
 
       assert is_binary(result.worktree_path)
       assert String.starts_with?(result.worktree_path, root)
       assert File.dir?(result.worktree_path)
 
       # Branch matches BranchNamer's derivation.
-      branch = Arbiter.Worker.BranchNamer.derive(bead)
+      branch = Arbiter.Worker.BranchNamer.derive(task)
       assert {:ok, ^branch} = Arbiter.Worker.Worktree.current_branch(result.worktree_path)
     end
 
     test "skips worktree when repo is not in repo_paths", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "unmapped", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "unmapped", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "no-such-repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "no-such-repo", start_driver: false)
       assert result.worktree_path == nil
     end
 
@@ -881,11 +881,11 @@ defmodule Arbiter.Worker.DispatchTest do
           config: %{"repo_paths" => %{"per-ws/repo" => repo}}
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id})
+      {:ok, task} = Ash.create(Issue, %{title: "per-ws", workspace_id: ws_local.id})
 
       # `per-ws/repo` is NOT in Application env — only in this workspace's
       # config. Dispatch must still find it.
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "per-ws/repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "per-ws/repo", start_driver: false)
       assert is_binary(result.worktree_path)
       assert File.dir?(result.worktree_path)
     end
@@ -916,9 +916,9 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id})
+      {:ok, task} = Ash.create(Issue, %{title: "non-main base", workspace_id: ws_local.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "bb/repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "bb/repo", start_driver: false)
 
       # Worktree was cut from `develop`: the develop-only file is present.
       assert is_binary(result.worktree_path)
@@ -930,26 +930,26 @@ defmodule Arbiter.Worker.DispatchTest do
     end
 
     test "skips worktree when provision_worktree: false", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false, provision_worktree: false)
+        Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false, provision_worktree: false)
 
       assert result.worktree_path == nil
     end
 
-    test "attaches to existing branch when re-dispatching a reopened bead", %{repo: repo, ws: ws} do
-      # Reproduces bd-4tta5n: bead is slung once (branch created), the worktree
-      # is cleaned up but the branch remains, then the bead is reopened and
+    test "attaches to existing branch when re-dispatching a reopened task", %{repo: repo, ws: ws} do
+      # Reproduces bd-4tta5n: task is slung once (branch created), the worktree
+      # is cleaned up but the branch remains, then the task is reopened and
       # re-slung. Worktree.create fails with "already exists"; dispatch must fall
       # back to Worktree.attach and succeed.
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{title: "re-dispatch after review", workspace_id: ws.id})
 
       # First dispatch — provisions the worktree, creating the branch locally.
-      {:ok, first} = Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
+      {:ok, first} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
       assert is_binary(first.worktree_path)
-      branch = Arbiter.Worker.BranchNamer.derive(bead)
+      branch = Arbiter.Worker.BranchNamer.derive(task)
 
       # Simulate Driver cleanup: remove the worktree directory but leave the
       # branch (Worktree.cleanup removes the worktree, not the branch).
@@ -960,11 +960,11 @@ defmodule Arbiter.Worker.DispatchTest do
       {branches, 0} = System.cmd("git", ["-C", repo, "branch", "--list", branch])
       assert String.contains?(branches, branch)
 
-      # Reopen bead so it can be re-slung.
-      {:ok, bead} = Ash.update(bead, %{status: :open})
+      # Reopen task so it can be re-slung.
+      {:ok, task} = Ash.update(task, %{status: :open})
 
       # Second dispatch — branch already exists; must attach instead of creating.
-      assert {:ok, second} = Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
+      assert {:ok, second} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
       assert is_binary(second.worktree_path)
       assert File.dir?(second.worktree_path)
       assert {:ok, ^branch} = Arbiter.Worker.Worktree.current_branch(second.worktree_path)
@@ -987,9 +987,9 @@ defmodule Arbiter.Worker.DispatchTest do
 
       refute File.exists?(Path.join(repo, "UPSTREAM.md"))
 
-      {:ok, bead} = Ash.create(Issue, %{title: "stale local base", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "stale local base", workspace_id: ws.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "st/repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "UPSTREAM.md"))
     end
@@ -1013,16 +1013,16 @@ defmodule Arbiter.Worker.DispatchTest do
 
       Application.put_env(:arbiter, :repo_paths, %{"broken/repo" => broken})
 
-      {:ok, bead} = Ash.create(Issue, %{title: "fetch failure", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "fetch failure", workspace_id: ws.id})
 
       assert {:error, {:worktree_failed, reason}} =
-               Dispatch.dispatch(bead.id, repo: "broken/repo", start_driver: false)
+               Dispatch.dispatch(task.id, repo: "broken/repo", start_driver: false)
 
       assert match?({:fetch_failed, _}, reason) or match?({:missing_origin_ref, _}, reason),
              "expected fetch_failed or missing_origin_ref, got: #{inspect(reason)}"
     end
 
-    test "per-bead target_branch overrides the workspace default", %{repo: repo, remote: remote} do
+    test "per-task target_branch overrides the workspace default", %{repo: repo, remote: remote} do
       # Push a `dolphin` branch to origin so Worktree.create can fetch it.
       {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "dolphin"])
       File.write!(Path.join(repo, "DOLPHIN.md"), "dolphin\n")
@@ -1035,28 +1035,28 @@ defmodule Arbiter.Worker.DispatchTest do
 
       {:ok, ws_local} =
         Ash.create(Workspace, %{
-          name: "per-bead-target-#{System.unique_integer([:positive])}",
+          name: "per-task-target-#{System.unique_integer([:positive])}",
           prefix: "pb",
-          # Workspace default is the bare "main"; the bead overrides to dolphin.
+          # Workspace default is the bare "main"; the task overrides to dolphin.
           config: %{"repo_paths" => %{"pb/repo" => repo}, "merge" => %{"base" => "main"}}
         })
 
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
-          title: "per-bead target",
+          title: "per-task target",
           workspace_id: ws_local.id,
           target_branch: "dolphin"
         })
 
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "pb/repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "pb/repo", start_driver: false)
 
-      # The bead-specified target wins: the worktree carries the dolphin file
+      # The task-specified target wins: the worktree carries the dolphin file
       # and the worker's meta records dolphin as the merge target.
       assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
       assert %{target_branch: "dolphin"} = Worker.state(result.worker_pid).meta
     end
 
-    test "per-repo target_branch default applies when bead has none", %{repo: repo} do
+    test "per-repo target_branch default applies when task has none", %{repo: repo} do
       # Push a `dolphin` branch and configure the repo to default to it.
       {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "dolphin"])
       File.write!(Path.join(repo, "DOLPHIN.md"), "dolphin\n")
@@ -1078,9 +1078,9 @@ defmodule Arbiter.Worker.DispatchTest do
           }
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "repo default", workspace_id: ws_local.id})
+      {:ok, task} = Ash.create(Issue, %{title: "repo default", workspace_id: ws_local.id})
 
-      {:ok, result} = Dispatch.dispatch(bead.id, repo: "rd/repo", start_driver: false)
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "rd/repo", start_driver: false)
 
       assert File.exists?(Path.join(result.worktree_path, "DOLPHIN.md"))
       assert %{target_branch: "dolphin"} = Worker.state(result.worker_pid).meta
@@ -1088,60 +1088,60 @@ defmodule Arbiter.Worker.DispatchTest do
   end
 
   describe "work prompt fix-pass sections (bd-bw93c3)" do
-    test "includes prior review findings when bead has notes", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "fix pass bead", workspace_id: ws.id})
+    test "includes prior review findings when task has notes", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "fix pass task", workspace_id: ws.id})
 
-      {:ok, bead} =
-        Ash.update(bead, %{notes: "## ReviewGate verdict: REQUEST_CHANGES\n\nFix the null guard."},
+      {:ok, task} =
+        Ash.update(task, %{notes: "## ReviewGate verdict: REQUEST_CHANGES\n\nFix the null guard."},
           action: :update
         )
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       assert prompt =~ "Prior review findings"
       assert prompt =~ "Fix the null guard."
     end
 
-    test "omits prior review findings section when bead has no notes", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "fresh bead", workspace_id: ws.id})
+    test "omits prior review findings section when task has no notes", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "fresh task", workspace_id: ws.id})
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       refute prompt =~ "Prior review findings"
     end
 
-    test "includes PR review instruction when bead has a pr_ref", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "fix pass with pr", workspace_id: ws.id})
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "319"}, action: :update)
+    test "includes PR review instruction when task has a pr_ref", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "fix pass with pr", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{pr_ref: "319"}, action: :update)
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       assert prompt =~ "existing PR (#319)"
       assert prompt =~ "gh pr view 319 --json reviews,reviewComments"
       assert prompt =~ "Do NOT open a new PR"
     end
 
-    test "omits PR review instruction when bead has no pr_ref", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no pr bead", workspace_id: ws.id})
+    test "omits PR review instruction when task has no pr_ref", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "no pr task", workspace_id: ws.id})
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       refute prompt =~ "gh pr view"
     end
 
     test "review prompt is unaffected by notes or pr_ref in work mode", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "review bead", workspace_id: ws.id})
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "42", notes: "some notes"}, action: :update)
+      {:ok, task} = Ash.create(Issue, %{title: "review task", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{pr_ref: "42", notes: "some notes"}, action: :update)
 
-      review_prompt = Dispatch.prompt_for_bead(bead, review: true)
+      review_prompt = Dispatch.prompt_for_task(task, review: true)
       refute review_prompt =~ "Prior review findings"
       refute review_prompt =~ "existing PR"
     end
   end
 
-  describe "work prompt completion notes (tracker-backed beads)" do
+  describe "work prompt completion notes (tracker-backed tasks)" do
     test "instructs a tracker-backed worker to produce QA + Deployment notes", %{ws: ws} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "tracked work",
           workspace_id: ws.id,
@@ -1150,28 +1150,28 @@ defmodule Arbiter.Worker.DispatchTest do
           skip_upstream_create: true
         })
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       # Notes persist via the MCP tool, never the arb escript (bd-53xrmi).
       assert prompt =~ "backed by an external tracker"
-      assert prompt =~ "bead_update_progress"
+      assert prompt =~ "task_update_progress"
       assert prompt =~ "qa_notes"
       assert prompt =~ "deployment_notes"
       refute prompt =~ "arb issue update"
     end
 
-    test "untracked beads get no completion-notes step", %{ws: ws} do
-      {:ok, bead} =
+    test "untracked tasks get no completion-notes step", %{ws: ws} do
+      {:ok, task} =
         Ash.create(Issue, %{title: "local work", workspace_id: ws.id, tracker_type: "none"})
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       refute prompt =~ "qa_notes"
       refute prompt =~ "backed by an external tracker"
     end
 
     test "a tracker type without a tracker_ref gets no completion-notes step", %{ws: ws} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "tracked but unlinked",
           workspace_id: ws.id,
@@ -1180,7 +1180,7 @@ defmodule Arbiter.Worker.DispatchTest do
           skip_upstream_create: true
         })
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       refute prompt =~ "qa_notes"
     end
@@ -1189,12 +1189,12 @@ defmodule Arbiter.Worker.DispatchTest do
   describe "work prompt PR body authoring (bd-53xrmi)" do
     test "instructs the worker to author a pr_body via MCP and NOT open its own PR",
          %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "author body", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "author body", workspace_id: ws.id})
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
 
       # Authors the body and persists it via the MCP tool, never the arb escript.
-      assert prompt =~ "bead_update_progress"
+      assert prompt =~ "task_update_progress"
       assert prompt =~ "pr_body"
       assert prompt =~ "Summary"
       assert prompt =~ "Test plan"
@@ -1206,13 +1206,13 @@ defmodule Arbiter.Worker.DispatchTest do
       assert prompt =~ "gh pr create"
     end
 
-    test "the PR-body step is present for untracked beads too", %{ws: ws} do
-      {:ok, bead} =
+    test "the PR-body step is present for untracked tasks too", %{ws: ws} do
+      {:ok, task} =
         Ash.create(Issue, %{title: "local body", workspace_id: ws.id, tracker_type: "none"})
 
-      prompt = Dispatch.prompt_for_bead(bead, [])
+      prompt = Dispatch.prompt_for_task(task, [])
       assert prompt =~ "pr_body"
-      assert prompt =~ "bead_update_progress"
+      assert prompt =~ "task_update_progress"
     end
   end
 
@@ -1261,25 +1261,25 @@ defmodule Arbiter.Worker.DispatchTest do
       %{repo: repo, worktree_root: worktree_root}
     end
 
-    # Dispatch a bead, provisioning its worktree, then simulate a mid-work stop:
+    # Dispatch a task, provisioning its worktree, then simulate a mid-work stop:
     # the worker fails (lingers in :failed, registered) with the worktree left
     # on disk — exactly the state `arb resume` is built to recover from.
-    defp stop_acolyte_with_outpost(bead_id) do
-      {:ok, first} = Dispatch.dispatch(bead_id, repo: "rs/repo", start_driver: false)
+    defp stop_acolyte_with_outpost(task_id) do
+      {:ok, first} = Dispatch.dispatch(task_id, repo: "rs/repo", start_driver: false)
       assert is_binary(first.worktree_path)
       :ok = Worker.fail(first.worker_pid, :token_exhausted)
       first
     end
 
     test "reuses the worktree, links the new run, and boots into :resuming", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "resume work", workspace_id: ws.id})
-      first = stop_acolyte_with_outpost(bead.id)
+      {:ok, task} = Ash.create(Issue, %{title: "resume work", workspace_id: ws.id})
+      first = stop_acolyte_with_outpost(task.id)
 
-      prior_run = latest_run(bead.id)
+      prior_run = latest_run(task.id)
       assert prior_run.status == :failed
 
       {:ok, result} =
-        Dispatch.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
+        Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
 
       # Same worktree, fresh worker.
       assert result.worktree_path == first.worktree_path
@@ -1291,14 +1291,14 @@ defmodule Arbiter.Worker.DispatchTest do
       assert snap.status == :running
 
       # The new run is linked to the prior one.
-      new_run = latest_run(bead.id)
+      new_run = latest_run(task.id)
       assert new_run.id != prior_run.id
       assert new_run.resumed_from_run_id == prior_run.id
     end
 
     test "the resumed worker's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
-      {:ok, bead} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
-      first = stop_acolyte_with_outpost(bead.id)
+      {:ok, task} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
+      first = stop_acolyte_with_outpost(task.id)
 
       # Commit some "prior work" into the worktree so the briefing has content.
       wt = first.worktree_path
@@ -1308,47 +1308,47 @@ defmodule Arbiter.Worker.DispatchTest do
       _ = repo
 
       # The worktree was cut from main, so the briefing diffs against main.
-      {:ok, prefix} = Arbiter.Worker.ResumeContext.build(bead, wt, "main")
+      {:ok, prefix} = Arbiter.Worker.ResumeContext.build(task, wt, "main")
 
       assert prefix =~ "did half the work"
-      assert prefix =~ "RESUMING work on bead #{bead.id}"
+      assert prefix =~ "RESUMING work on task #{task.id}"
     end
 
     test "refuses when there is no preserved worktree", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no worktree", workspace_id: ws.id})
-      first = stop_acolyte_with_outpost(bead.id)
+      {:ok, task} = Ash.create(Issue, %{title: "no worktree", workspace_id: ws.id})
+      first = stop_acolyte_with_outpost(task.id)
 
       # Tear the worktree down — nothing left to resume.
       Arbiter.Worker.Worktree.cleanup(first.worktree_path)
       refute File.dir?(first.worktree_path)
 
-      assert {:error, :no_outpost} = Dispatch.resume(bead.id, start_driver: false)
+      assert {:error, :no_outpost} = Dispatch.resume(task.id, start_driver: false)
     end
 
-    test "refuses to resume a closed bead", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "closed resume", workspace_id: ws.id})
-      _ = stop_acolyte_with_outpost(bead.id)
-      {:ok, _} = Ash.update(bead, %{}, action: :close)
+    test "refuses to resume a closed task", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "closed resume", workspace_id: ws.id})
+      _ = stop_acolyte_with_outpost(task.id)
+      {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      assert {:error, {:bead_closed, _}} = Dispatch.resume(bead.id, start_driver: false)
+      assert {:error, {:task_closed, _}} = Dispatch.resume(task.id, start_driver: false)
     end
 
     test "refuses while an worker is still actively working", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "active resume", workspace_id: ws.id})
       # Dispatch but DON'T stop — the worker is live (:idle/:running), not stopped.
-      {:ok, _live} = Dispatch.dispatch(bead.id, repo: "rs/repo", start_driver: false)
+      {:ok, _live} = Dispatch.dispatch(task.id, repo: "rs/repo", start_driver: false)
 
       assert {:error, {:acolyte_active, _status}} =
-               Dispatch.resume(bead.id, start_driver: false)
+               Dispatch.resume(task.id, start_driver: false)
     end
 
     test "inherits the repo from the prior run when omitted", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "repo inherit", workspace_id: ws.id})
-      _ = stop_acolyte_with_outpost(bead.id)
+      {:ok, task} = Ash.create(Issue, %{title: "repo inherit", workspace_id: ws.id})
+      _ = stop_acolyte_with_outpost(task.id)
 
       # No repo passed — must inherit "rs/repo" from the prior run record.
       {:ok, result} =
-        Dispatch.resume(bead.id, start_driver: false, claude_command: ["sleep", "2"])
+        Dispatch.resume(task.id, start_driver: false, claude_command: ["sleep", "2"])
 
       assert is_binary(result.worktree_path)
     end
@@ -1386,12 +1386,12 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "review: true skips the worktree and attaches the CodeReview workflow",
          %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "review me", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id, repo: "rv/repo", review: true, start_driver: false)
+        Dispatch.dispatch(task.id, repo: "rv/repo", review: true, start_driver: false)
 
-      # No per-bead branch, no worktree.
+      # No per-task branch, no worktree.
       assert result.worktree_path == nil
 
       # Workflow attached is CodeReview, not Work.
@@ -1404,9 +1404,9 @@ defmodule Arbiter.Worker.DispatchTest do
       refute Map.has_key?(snap.meta, :branch)
     end
 
-    test "review prompt mentions the bead's tracker ref and bans pushes/merges",
+    test "review prompt mentions the task's tracker ref and bans pushes/merges",
          %{ws: ws} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "external pr review",
           workspace_id: ws.id,
@@ -1415,7 +1415,7 @@ defmodule Arbiter.Worker.DispatchTest do
         })
 
       prompt =
-        Arbiter.Worker.Dispatch.prompt_for_bead(bead, review: true)
+        Arbiter.Worker.Dispatch.prompt_for_task(task, review: true)
 
       assert prompt =~ "reviewer worker"
       assert prompt =~ "github:999"
@@ -1424,14 +1424,14 @@ defmodule Arbiter.Worker.DispatchTest do
       assert prompt =~ "arb done"
 
       # The work prompt is still produced by default for non-review dispatches.
-      work = Arbiter.Worker.Dispatch.prompt_for_bead(bead, [])
+      work = Arbiter.Worker.Dispatch.prompt_for_task(task, [])
       assert work =~ "working autonomously"
       refute work =~ "reviewer worker"
     end
 
     test "review prompt uses pr_ref when set, not tracker_ref (issue vs PR number fix)",
          %{ws: ws} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "pr ref takes precedence",
           workspace_id: ws.id,
@@ -1439,9 +1439,9 @@ defmodule Arbiter.Worker.DispatchTest do
           tracker_ref: "93"
         })
 
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "123"}, action: :update)
+      {:ok, task} = Ash.update(task, %{pr_ref: "123"}, action: :update)
 
-      prompt = Arbiter.Worker.Dispatch.prompt_for_bead(bead, review: true)
+      prompt = Arbiter.Worker.Dispatch.prompt_for_task(task, review: true)
 
       assert prompt =~ "github:123"
       refute prompt =~ "github:93"
@@ -1449,10 +1449,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "review with start_claude: true uses the repo path as cwd when no worktree",
          %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(bead.id,
+        Dispatch.dispatch(task.id,
           repo: "rv/repo",
           review: true,
           start_claude: true,
@@ -1468,10 +1468,10 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "review with start_claude: true and an unresolvable repo errors",
          %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "no cwd", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "no cwd", workspace_id: ws.id})
 
       assert {:error, {:repo_not_found, "no-such-repo"}} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  repo: "no-such-repo",
                  review: true,
                  start_claude: true,
@@ -1530,29 +1530,29 @@ defmodule Arbiter.Worker.DispatchTest do
     test "0 repos: start_claude: true with no repo and empty :repo_paths fails loudly",
          %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
-      {:ok, bead} = Ash.create(Issue, %{title: "no repos", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "no repos", workspace_id: ws.id})
 
       assert {:error, :no_repo_configured} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
                  preflight: false
                )
 
-      # Refused BEFORE any state mutation: bead still :open, no worker.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      # Refused BEFORE any state mutation: task still :open, no worker.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :open
-      assert Worker.whereis(bead.id) == nil
+      assert Worker.whereis(task.id) == nil
     end
 
     test "1 repo: start_claude: true with no repo auto-selects the sole configured repo",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"sole/repo" => repo})
-      {:ok, bead} = Ash.create(Issue, %{title: "auto-select", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "auto-select", workspace_id: ws.id})
 
       assert {:ok, result} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["sleep", "2"],
@@ -1567,10 +1567,10 @@ defmodule Arbiter.Worker.DispatchTest do
     test "multi-repo: start_claude: true with no repo and multiple :repo_paths fails loudly",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"repo/a" => repo, "repo/b" => repo})
-      {:ok, bead} = Ash.create(Issue, %{title: "multi repos", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "multi repos", workspace_id: ws.id})
 
       assert {:error, {:ambiguous_repo, repos}} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  start_driver: false,
                  start_claude: true,
                  claude_command: ["true"],
@@ -1581,18 +1581,18 @@ defmodule Arbiter.Worker.DispatchTest do
       assert "repo/b" in repos
 
       # Refused before any state mutation.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :open
-      assert Worker.whereis(bead.id) == nil
+      assert Worker.whereis(task.id) == nil
     end
 
     test "explicit repo not in :repo_paths fails with {:repo_not_found, repo}",
          %{ws: ws, repo: repo} do
       Application.put_env(:arbiter, @env_key, %{"real/repo" => repo})
-      {:ok, bead} = Ash.create(Issue, %{title: "bad repo", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "bad repo", workspace_id: ws.id})
 
       assert {:error, {:repo_not_found, "no-such/repo"}} =
-               Dispatch.dispatch(bead.id,
+               Dispatch.dispatch(task.id,
                  repo: "no-such/repo",
                  start_driver: false,
                  start_claude: true,
@@ -1601,18 +1601,18 @@ defmodule Arbiter.Worker.DispatchTest do
                )
 
       # Refused before any state mutation.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :open
-      assert Worker.whereis(bead.id) == nil
+      assert Worker.whereis(task.id) == nil
     end
 
     test "dry dispatch (no start_claude) is unaffected — still parks without a repo", %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
-      {:ok, bead} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
 
       # No --with-claude → no repo required → succeeds and parks as :in_progress.
-      assert {:ok, result} = Dispatch.dispatch(bead.id, start_driver: false)
-      assert result.bead.status == :in_progress
+      assert {:ok, result} = Dispatch.dispatch(task.id, start_driver: false)
+      assert result.task.status == :in_progress
       assert result.worktree_path == nil
     end
   end

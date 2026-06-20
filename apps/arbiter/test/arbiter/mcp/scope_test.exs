@@ -10,7 +10,7 @@ defmodule Arbiter.MCP.ScopeTest do
       assert {:ok, scope} = Scope.from_token(token)
       assert scope.tier == :worker
       assert scope.workspace_id == "ws-1"
-      assert scope.bead_id == "bd-1"
+      assert scope.task_id == "bd-1"
       assert scope.repo == "shipyard"
       refute scope.can_dispatch
       assert scope.depth == 0
@@ -34,7 +34,7 @@ defmodule Arbiter.MCP.ScopeTest do
       assert {:ok, scope} = Scope.from_token(token)
       assert scope.tier == :coordinator
       assert scope.workspace_id == nil
-      assert scope.bead_id == nil
+      assert scope.task_id == nil
       assert scope.can_dispatch
     end
 
@@ -44,7 +44,7 @@ defmodule Arbiter.MCP.ScopeTest do
       assert {:ok, scope} = Scope.from_token(token)
       assert scope.tier == :coordinator
       assert scope.workspace_id == "ws-9"
-      assert scope.bead_id == nil
+      assert scope.task_id == nil
       assert scope.can_dispatch
     end
 
@@ -71,30 +71,30 @@ defmodule Arbiter.MCP.ScopeTest do
     end
   end
 
-  describe "own_bead/2" do
+  describe "own_task/2" do
     setup do
       %{
-        worker: %Scope{tier: :worker, workspace_id: "w", bead_id: "bd-1"},
+        worker: %Scope{tier: :worker, workspace_id: "w", task_id: "bd-1"},
         coordinator: %Scope{tier: :coordinator, workspace_id: "w"}
       }
     end
 
-    test "worker defaults to its bound bead when the arg is nil", %{worker: pc} do
-      assert Scope.own_bead(pc, nil) == {:ok, "bd-1"}
+    test "worker defaults to its bound task when the arg is nil", %{worker: pc} do
+      assert Scope.own_task(pc, nil) == {:ok, "bd-1"}
     end
 
-    test "worker allows its own bead id explicitly", %{worker: pc} do
-      assert Scope.own_bead(pc, "bd-1") == {:ok, "bd-1"}
+    test "worker allows its own task id explicitly", %{worker: pc} do
+      assert Scope.own_task(pc, "bd-1") == {:ok, "bd-1"}
     end
 
-    test "worker rejects any other bead id", %{worker: pc} do
-      assert Scope.own_bead(pc, "bd-2") == {:error, :unauthorized}
+    test "worker rejects any other task id", %{worker: pc} do
+      assert Scope.own_task(pc, "bd-2") == {:error, :unauthorized}
     end
 
     test "coordinator requires an explicit id", %{coordinator: co} do
-      assert Scope.own_bead(co, nil) == {:error, :missing}
-      assert Scope.own_bead(co, "") == {:error, :missing}
-      assert Scope.own_bead(co, "bd-2") == {:ok, "bd-2"}
+      assert Scope.own_task(co, nil) == {:error, :missing}
+      assert Scope.own_task(co, "") == {:error, :missing}
+      assert Scope.own_task(co, "bd-2") == {:ok, "bd-2"}
     end
   end
 
@@ -107,7 +107,7 @@ defmodule Arbiter.MCP.ScopeTest do
     end
 
     test "a worker matches only its bound workspace" do
-      pc = %Scope{tier: :worker, workspace_id: "w", bead_id: "bd-1"}
+      pc = %Scope{tier: :worker, workspace_id: "w", task_id: "bd-1"}
       assert Scope.same_workspace?(pc, "w")
       refute Scope.same_workspace?(pc, "other")
     end

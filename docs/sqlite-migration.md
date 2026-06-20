@@ -1,6 +1,6 @@
 # SQLite Migration: Dropping Postgres
 
-**Bead:** bd-tbslcb  
+**Task:** bd-tbslcb  
 **Date:** 2026-06-05
 
 ## Decision
@@ -66,7 +66,7 @@ the test API.
 blocks on resources are not supported. The Convoy resource used two aggregates (`total_issues`,
 `closed_issues`) over the `many_to_many :issues` relationship.
 
-These were replaced with module-based calculations in `Arbiter.Beads.Convoy.Calcs`. The
+These were replaced with module-based calculations in `Arbiter.Tasks.Convoy.Calcs`. The
 calculations batch-load `ConvoyMembership` rows filtered to the current convoy set, then count
 in Elixir — no N+1 queries. `Ash.count!` with `{:query_aggregate, :count}` still works; only
 inline resource aggregates are restricted.

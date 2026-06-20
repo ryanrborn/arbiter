@@ -8,7 +8,7 @@ defmodule ArbiterWeb.RunDetailLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
 
@@ -32,7 +32,7 @@ defmodule ArbiterWeb.RunDetailLive do
         socket
         |> assign(:run, run)
         |> assign(:workspace, lookup_workspace(run.workspace_id))
-        |> assign(:live_worker?, !is_nil(Worker.whereis(run.bead_id)))
+        |> assign(:live_worker?, !is_nil(Worker.whereis(run.task_id)))
 
       _ ->
         socket
@@ -67,7 +67,7 @@ defmodule ArbiterWeb.RunDetailLive do
               </div>
               <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2 mt-0.5">
                 {String.capitalize(@worker_label)} run
-                <code class="text-base font-mono text-base-content/80">{@run.bead_id}</code>
+                <code class="text-base font-mono text-base-content/80">{@run.task_id}</code>
               </h1>
             </div>
 
@@ -146,10 +146,10 @@ defmodule ArbiterWeb.RunDetailLive do
               <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
                 <dt class="font-medium text-base-content/60">{String.capitalize(@issue_label)}:</dt>
                 <dd>
-                  <.link navigate={~p"/beads/#{@run.bead_id}"} class="link link-hover">
-                    <code class="font-mono text-xs">{@run.bead_id}</code>
+                  <.link navigate={~p"/tasks/#{@run.task_id}"} class="link link-hover">
+                    <code class="font-mono text-xs">{@run.task_id}</code>
                   </.link>
-                  <span :if={@run.bead_title} class="text-base-content/70">— {@run.bead_title}</span>
+                  <span :if={@run.task_title} class="text-base-content/70">— {@run.task_title}</span>
                 </dd>
                 <dt class="font-medium text-base-content/60">{String.capitalize(@repo_label)}:</dt>
                 <dd><code class="font-mono text-xs">{@run.repo}</code></dd>
@@ -174,7 +174,7 @@ defmodule ArbiterWeb.RunDetailLive do
 
               <div :if={@live_worker?} class="rounded-box bg-info/10 border border-info/30 p-3">
                 <.link
-                  navigate={~p"/workers/#{@run.bead_id}"}
+                  navigate={~p"/workers/#{@run.task_id}"}
                   class="link link-primary text-sm flex items-center gap-1.5 w-fit"
                 >
                   <.icon name="hero-arrow-top-right-on-square" class="size-4" />

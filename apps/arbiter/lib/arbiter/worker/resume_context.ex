@@ -3,7 +3,7 @@ defmodule Arbiter.Worker.ResumeContext do
   Build the "work so far" briefing for a **resumed** worker (bd-auma3z).
 
   When a worker is stopped mid-work (token exhaustion, crash, kill) its
-  per-bead git worktree is preserved on disk: any commits it
+  per-task git worktree is preserved on disk: any commits it
   made are on the branch, and any in-flight edits sit uncommitted in the tree.
   Re-dispatching from scratch would discard that history from the agent's context
   and risk redoing or duplicating completed steps.
@@ -33,7 +33,7 @@ defmodule Arbiter.Worker.ResumeContext do
   at `@max_diff_lines` lines.
   """
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker.Worktree
 
   # Cap the embedded `git diff HEAD` so a resumed worker that left a huge
@@ -43,7 +43,7 @@ defmodule Arbiter.Worker.ResumeContext do
   @max_diff_lines 400
 
   @doc """
-  Build the resume briefing for `bead` from the worktree at `worktree_path`,
+  Build the resume briefing for `task` from the worktree at `worktree_path`,
   diffing against `base_branch`.
 
   Returns `{:ok, prefix}` where `prefix` is the Markdown block to prepend to
@@ -53,10 +53,10 @@ defmodule Arbiter.Worker.ResumeContext do
   """
   @spec build(Issue.t(), String.t(), String.t()) ::
           {:ok, String.t()} | {:error, :no_outpost}
-  def build(%Issue{} = bead, worktree_path, base_branch)
+  def build(%Issue{} = task, worktree_path, base_branch)
       when is_binary(worktree_path) and is_binary(base_branch) do
     if File.dir?(worktree_path) do
-      {:ok, render(bead, worktree_path, base_branch)}
+      {:ok, render(task, worktree_path, base_branch)}
     else
       {:error, :no_outpost}
     end
@@ -64,14 +64,14 @@ defmodule Arbiter.Worker.ResumeContext do
 
   defp render(%Issue{id: id}, worktree_path, base_branch) do
     """
-    You are RESUMING work on bead #{id}. A prior worker was working this bead
+    You are RESUMING work on task #{id}. A prior worker was working this task
     in this same git worktree (your current directory) but stopped before
     finishing. Its work is preserved here — DO NOT start over or redo steps that
     are already done. Read the state below, verify it, and continue from there.
 
     #{work_so_far(worktree_path, base_branch)}
     Continue from where the prior worker left off: finish the remaining work,
-    commit it on this branch, and complete the bead as usual. If commits or
+    commit it on this branch, and complete the task as usual. If commits or
     uncommitted changes above already satisfy part of the acceptance, do not
     redo them — build on them.
 
@@ -107,7 +107,7 @@ defmodule Arbiter.Worker.ResumeContext do
   end
 
   # `git log --oneline <base>..HEAD` — the commits the prior worker made on the
-  # per-bead branch since it diverged from the integration branch.
+  # per-task branch since it diverged from the integration branch.
   defp commits_block(worktree_path, base_branch) do
     case run_git(["log", "--oneline", "#{base_branch}..HEAD"], worktree_path) do
       {:ok, ""} -> "(no commits yet — the prior worker committed nothing)"

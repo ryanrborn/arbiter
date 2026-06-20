@@ -1,6 +1,6 @@
 # Postgres setup for local development
 
-arbiter uses Postgres (via ash_postgres) for the bead store, audit log, workspace config, and everything else.
+arbiter uses Postgres (via ash_postgres) for the task store, audit log, workspace config, and everything else.
 
 ## Quick start
 

@@ -298,7 +298,7 @@ defmodule ArbiterCli.Cmd.Restart do
 
   A worker must never be able to bounce or kill the live orchestrating
   server — doing so would kill the worker that owns the worker and leave
-  the bead stuck. Shared with `arb update` (deploy), `arb start`, and
+  the task stuck. Shared with `arb update` (deploy), `arb start`, and
   `arb install-service`.
   """
   @spec guard_acolyte_session!() :: :ok
@@ -307,8 +307,8 @@ defmodule ArbiterCli.Cmd.Restart do
       id when is_binary(id) and id != "" ->
         Output.die(
           "this command cannot be run from inside a worker session",
-          "Bead #{id} is the active worker. Running arb restart/update/start/install-service\n" <>
-            "from within a worker would kill the orchestrating server and leave the bead stuck.\n" <>
+          "Task #{id} is the active worker. Running arb restart/update/start/install-service\n" <>
+            "from within a worker would kill the orchestrating server and leave the task stuck.\n" <>
             "Run this command from a normal shell outside the worker worktree."
         )
 
@@ -342,7 +342,7 @@ defmodule ArbiterCli.Cmd.Restart do
         if active != [] and not force do
           list =
             Enum.map_join(active, "\n", fn p ->
-              "  #{p["bead_id"]}  (#{p["status"]})"
+              "  #{p["task_id"]}  (#{p["status"]})"
             end)
 
           Output.die(

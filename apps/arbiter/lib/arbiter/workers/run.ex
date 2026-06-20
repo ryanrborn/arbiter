@@ -7,7 +7,7 @@ defmodule Arbiter.Workers.Run do
   treats both writes as best-effort: a DB hiccup logs a warning but never
   crashes the workflow runner.
 
-  `bead_title` is denormalised so the dashboard's history list never needs to
+  `task_title` is denormalised so the dashboard's history list never needs to
   join against `issues` on every render.
 
   `output_lines` stores the captured Claude / subprocess stdout, capped at
@@ -15,8 +15,8 @@ defmodule Arbiter.Workers.Run do
   is the bounded *tail* for the UI — the **full, uncapped** transcript is
   persisted append-only to an on-disk per-run file by
   `Arbiter.Worker.OutputLog` (path `<output_log_root>/<id>.log`) and is the
-  audit source of record. Retrieve it with `arb worker log <bead-id>` or
-  `GET /api/workers/:bead_id/log`.
+  audit source of record. Retrieve it with `arb worker log <task-id>` or
+  `GET /api/workers/:task_id/log`.
   """
 
   use Ash.Resource,
@@ -44,8 +44,8 @@ defmodule Arbiter.Workers.Run do
       primary? true
 
       accept [
-        :bead_id,
-        :bead_title,
+        :task_id,
+        :task_title,
         :repo,
         :workspace_id,
         :status,
@@ -68,7 +68,7 @@ defmodule Arbiter.Workers.Run do
         :exit_code,
         :output_lines,
         :failure_reason,
-        :bead_title
+        :task_title
       ]
     end
   end
@@ -76,17 +76,17 @@ defmodule Arbiter.Workers.Run do
   attributes do
     uuid_primary_key :id
 
-    attribute :bead_id, :string do
+    attribute :task_id, :string do
       allow_nil? false
       public? true
       constraints max_length: 255, trim?: true
-      description "The bead this worker worked."
+      description "The task this worker worked."
     end
 
-    attribute :bead_title, :string do
+    attribute :task_title, :string do
       public? true
       constraints max_length: 1000
-      description "Denormalised bead title; nil if the bead was already gone."
+      description "Denormalised task title; nil if the task was already gone."
     end
 
     attribute :repo, :string do
@@ -138,8 +138,8 @@ defmodule Arbiter.Workers.Run do
 
       description "The prior run this run resumed from (bd-auma3z). Nullable; set only " <>
                     "when an worker was resumed via `arb resume` rather than slung fresh, " <>
-                    "so the lineage of a stopped→resumed bead is traceable and metrics " <>
-                    "don't double-count a single bead's work as two unrelated runs."
+                    "so the lineage of a stopped→resumed task is traceable and metrics " <>
+                    "don't double-count a single task's work as two unrelated runs."
     end
 
     create_timestamp :inserted_at

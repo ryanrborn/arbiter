@@ -10,17 +10,17 @@
 
 | Module                                       | Role                                                                                       |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `Arbiter.Workflows`                         | Ash domain (sibling of `Arbiter.Beads` — workflows are not beads).                        |
+| `Arbiter.Workflows`                         | Ash domain (sibling of `Arbiter.Tasks` — workflows are not tasks).                        |
 | `Arbiter.Workflows.MachineState`            | Ash resource. One row per workflow instance. Stores status, current step, threaded state. |
 | `Arbiter.Workflows.Machine`                 | The driver. `GenStateMachine` (`:handle_event_function`).                                  |
 | `Arbiter.Workflows.MachineRegistry`         | Thin `Registry` wrapper. Keyed by MachineState id.                                         |
-| Migration `20260520144412`                   | `workflow_machine_states` table + indexes on `bead_id`, `status`.                          |
+| Migration `20260520144412`                   | `workflow_machine_states` table + indexes on `task_id`, `status`.                          |
 | Dep                                          | `{:gen_state_machine, "~> 3.0"}`                                                           |
 
 ## Public API
 
 ```elixir
-Machine.attach(workflow_module, bead_id, vars) :: {:ok, id} | {:error, :not_a_workflow | :unknown_module | ash_err}
+Machine.attach(workflow_module, task_id, vars) :: {:ok, id} | {:error, :not_a_workflow | :unknown_module | ash_err}
 Machine.start(id)                              :: {:ok, pid} | {:error, term}
 Machine.whereis(id)                            :: pid | nil
 Machine.current_step(ref)                      :: atom
@@ -82,11 +82,11 @@ Used `gen_state_machine` (`:handle_event_function` callback mode) rather than `G
 
 The single user-visible cost is two warnings in the `gen_state_machine` dep itself (deprecated `List.zip/1`, charlist syntax). These are deps, not us, so they don't trip `--warnings-as-errors`.
 
-## Bead ↔ workflow_module cardinality
+## Task ↔ workflow_module cardinality
 
-**1 bead : N machines.** A bead can have multiple machine rows over time (different workflows applied sequentially, one re-run after a failure, etc.). Each is a distinct `id`. We do not enforce a `unique (bead_id, workflow_module)` constraint — the caller decides whether re-attaching makes sense in their domain. Documented on `MachineState`'s moduledoc.
+**1 task : N machines.** A task can have multiple machine rows over time (different workflows applied sequentially, one re-run after a failure, etc.). Each is a distinct `id`. We do not enforce a `unique (task_id, workflow_module)` constraint — the caller decides whether re-attaching makes sense in their domain. Documented on `MachineState`'s moduledoc.
 
-We also did not make `bead_id` an Ash relationship. The Workflows domain stays independent of Beads — a Machine that needs to read its bead does so at runtime via `Ash.get(Issue, bead_id)`. If the bead row is later deleted, the Machine row survives; reads will fail loudly. Acceptable since beads are append-only in practice.
+We also did not make `task_id` an Ash relationship. The Workflows domain stays independent of Tasks — a Machine that needs to read its task does so at runtime via `Ash.get(Issue, task_id)`. If the task row is later deleted, the Machine row survives; reads will fail loudly. Acceptable since tasks are append-only in practice.
 
 ## Test coverage (14 tests, all DB-backed via `Arbiter.DataCase, async: false`)
 
@@ -102,7 +102,7 @@ We also did not make `bead_id` an Ash relationship. The Workflows domain stays i
 - crash + restart: `Process.exit(pid, :kill)`, then `start(id)` with same id resumes at the right step with the right state
 - unmet needs: forging `completed_steps == []` while `current_step == :b` → `{:error, {:unmet_needs, [:a]}}`
 - whereis: nil for unknown, pid for running
-- registry: two machines for different beads coexist
+- registry: two machines for different tasks coexist
 - start: `{:error, {:already_started, pid}}` when called twice with same id
 
 ## Constraints honored

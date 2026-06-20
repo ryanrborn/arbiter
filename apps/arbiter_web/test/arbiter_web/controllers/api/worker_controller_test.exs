@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.WorkerControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Workers.Run
@@ -9,7 +9,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
   setup %{conn: conn} do
     # Clean slate — other tests in the umbrella may have left workers running.
     for snap <- Worker.list_children() do
-      Worker.stop(snap.bead_id)
+      Worker.stop(snap.task_id)
     end
 
     Process.sleep(50)
@@ -18,38 +18,38 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     {:ok, conn: put_req_header(conn, "accept", "application/json"), ws: ws}
   end
 
-  describe "GET /api/workers/:bead_id" do
+  describe "GET /api/workers/:task_id" do
     test "returns the snapshot including output_lines for a running worker",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "show-me", workspace_id: ws.id})
-      {:ok, worker_pid} = Worker.start(bead_id: bead.id, repo: "test/repo")
+      {:ok, task} = Ash.create(Issue, %{title: "show-me", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
 
       # Simulate Claude output flowing through the worker.
       :ok = Worker.report(worker_pid, :output_lines, ["hello", "world", "arb done"])
 
-      conn = get(conn, ~p"/api/workers/#{bead.id}")
+      conn = get(conn, ~p"/api/workers/#{task.id}")
       body = json_response(conn, 200)
 
-      assert body["bead_id"] == bead.id
+      assert body["task_id"] == task.id
       assert body["repo"] == "test/repo"
       assert body["status"] in ["idle", "running", "awaiting", "completed", "failed"]
       assert body["output_lines"] == ["hello", "world", "arb done"]
     end
 
-    test "returns 404 for an unknown bead_id", %{conn: conn} do
-      conn = get(conn, ~p"/api/workers/no-such-bead")
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = get(conn, ~p"/api/workers/no-such-task")
       assert json_response(conn, 404)
     end
 
     test "falls back to the most recent historical run when no live worker exists",
          %{conn: conn, ws: ws} do
-      bead_id = "bd-hist-#{System.unique_integer([:positive])}"
+      task_id = "bd-hist-#{System.unique_integer([:positive])}"
       older = DateTime.add(DateTime.utc_now(), -60, :second)
       newer = DateTime.utc_now()
 
       {:ok, _old} =
         Ash.create(Run, %{
-          bead_id: bead_id,
+          task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
           status: :completed,
@@ -60,7 +60,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       {:ok, _recent} =
         Ash.create(Run, %{
-          bead_id: bead_id,
+          task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
           status: :failed,
@@ -71,11 +71,11 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
           output_lines: ["a", "b", "boom"]
         })
 
-      conn = get(conn, ~p"/api/workers/#{bead_id}")
+      conn = get(conn, ~p"/api/workers/#{task_id}")
       body = json_response(conn, 200)
 
       assert body["source"] == "history"
-      assert body["bead_id"] == bead_id
+      assert body["task_id"] == task_id
       # Most-recent run wins (failed, not the older completed one).
       assert body["status"] == "failed"
       assert body["exit_status"] == 2
@@ -86,21 +86,21 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
     test "live snapshot is marked source=live and wins over history",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "live-wins", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "live-wins", workspace_id: ws.id})
 
       {:ok, _run} =
         Ash.create(Run, %{
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "arbiter",
           workspace_id: ws.id,
           status: :completed,
           started_at: DateTime.add(DateTime.utc_now(), -60, :second)
         })
 
-      {:ok, worker_pid} = Worker.start(bead_id: bead.id, repo: "test/repo")
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "test/repo")
       :ok = Worker.report(worker_pid, :output_lines, ["live-line"])
 
-      conn = get(conn, ~p"/api/workers/#{bead.id}")
+      conn = get(conn, ~p"/api/workers/#{task.id}")
       body = json_response(conn, 200)
 
       assert body["source"] == "live"
@@ -116,12 +116,12 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
     test "snapshot includes failure_reason when the worker failed",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "failed-pol", workspace_id: ws.id})
-      {:ok, worker_pid} = Worker.start(bead_id: bead.id, repo: "r")
+      {:ok, task} = Ash.create(Issue, %{title: "failed-pol", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
 
       :ok = Worker.fail(worker_pid, {:claude_crashed, "bad token"})
 
-      conn = get(conn, ~p"/api/workers/#{bead.id}")
+      conn = get(conn, ~p"/api/workers/#{task.id}")
       body = json_response(conn, 200)
 
       assert body["status"] == "failed"
@@ -130,30 +130,30 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
   end
 
   describe "POST /api/workers/dispatch" do
-    # --no-agent preserves the manual-attach path: the bead parks in
+    # --no-agent preserves the manual-attach path: the task parks in
     # `:in_progress` with no Driver, so the no-op Work workflow never races
     # to a bogus `:closed`. Regression against the old dry-dispatch footgun.
-    test "--no-agent parks the bead and does NOT close it",
+    test "--no-agent parks the task and does NOT close it",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "dry-dispatch-me", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "dry-dispatch-me", workspace_id: ws.id})
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{
-          "bead_id" => bead.id,
+          "task_id" => task.id,
           "repo" => "test/repo",
           "no_agent" => true
         })
 
       body = json_response(conn, 201)
 
-      assert body["bead"]["id"] == bead.id
-      assert body["bead"]["status"] == "in_progress"
+      assert body["task"]["id"] == task.id
+      assert body["task"]["status"] == "in_progress"
 
       # Wait well past the old ~500ms Driver-close race window. Under the old
-      # behaviour the bead would be `:closed` by now; it must remain parked.
+      # behaviour the task would be `:closed` by now; it must remain parked.
       Process.sleep(900)
 
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
       refute reloaded.status == :closed
     end
@@ -161,14 +161,14 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
     # A `provider` takes the real-work dispatch path (start_claude: true) rather
     # than parking. With an unconfigured repo that path returns a 400 repo error —
     # the signal that the provider was honored as a worker dispatch (a park would
-    # 201 with the bead in_progress and no agent).
+    # 201 with the task in_progress and no agent).
     test "provider routes to a real worker dispatch (repo error rather than park)",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "gem-provider", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "gem-provider", workspace_id: ws.id})
 
       conn =
         post(conn, ~p"/api/workers/dispatch", %{
-          "bead_id" => bead.id,
+          "task_id" => task.id,
           "provider" => "gemini",
           "repo" => "no-such-repo"
         })
@@ -177,36 +177,36 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert body["error"]["message"] =~ "repo"
     end
 
-    test "returns 404 for an unknown bead_id", %{conn: conn} do
-      conn = post(conn, ~p"/api/workers/dispatch", %{"bead_id" => "no-such-bead"})
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/dispatch", %{"task_id" => "no-such-task"})
       assert json_response(conn, 404)
     end
 
-    test "requires a bead_id", %{conn: conn} do
+    test "requires a task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/dispatch", %{})
       assert json_response(conn, 400)
     end
   end
 
-  describe "POST /api/workers/:bead_id/resume" do
-    test "returns 404 for an unknown bead_id", %{conn: conn} do
-      conn = post(conn, ~p"/api/workers/no-such-bead/resume", %{})
+  describe "POST /api/workers/:task_id/resume" do
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/no-such-task/resume", %{})
       assert json_response(conn, 404)
     end
 
-    test "a bead with no prior run nor repo can't be resumed (400)", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
+    test "a task with no prior run nor repo can't be resumed (400)", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ws.id})
 
-      conn = post(conn, ~p"/api/workers/#{bead.id}/resume", %{})
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{})
       body = json_response(conn, 400)
       assert body["error"]["message"] =~ "repo"
     end
 
-    test "a closed bead can't be resumed (400)", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "closed", workspace_id: ws.id})
-      {:ok, _} = Ash.update(bead, %{}, action: :close)
+    test "a closed task can't be resumed (400)", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "closed", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{}, action: :close)
 
-      conn = post(conn, ~p"/api/workers/#{bead.id}/resume", %{"repo" => "test/repo"})
+      conn = post(conn, ~p"/api/workers/#{task.id}/resume", %{"repo" => "test/repo"})
       body = json_response(conn, 400)
       assert body["error"]["message"] =~ "closed"
     end
@@ -215,7 +215,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
   describe "POST /api/workers/review" do
     test "dispatches a review-only worker: no worktree, CodeReview workflow attached",
          %{conn: conn, ws: ws} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "review me",
           workspace_id: ws.id,
@@ -225,7 +225,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       conn =
         post(conn, ~p"/api/workers/review", %{
-          "bead_id" => bead.id,
+          "task_id" => task.id,
           # Drop the Claude session — the test only cares about wiring.
           "with_claude" => false,
           "repo" => "no-such-repo"
@@ -233,54 +233,54 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       body = json_response(conn, 201)
 
-      assert body["bead"]["id"] == bead.id
-      assert body["bead"]["status"] == "in_progress"
+      assert body["task"]["id"] == task.id
+      assert body["task"]["status"] == "in_progress"
       assert is_nil(body["worktree_path"])
 
       # The worker is tagged review_only so completion bypasses the MergeQueue.
-      pid = Worker.whereis(bead.id)
+      pid = Worker.whereis(task.id)
       assert is_pid(pid)
       snap = Worker.state(pid)
       assert snap.meta[:review_only] == true
 
       # Cleanup so the next test isn't tripped by a lingering worker.
-      Worker.stop(bead.id)
+      Worker.stop(task.id)
     end
 
-    test "returns 404 for an unknown bead_id", %{conn: conn} do
-      conn = post(conn, ~p"/api/workers/review", %{"bead_id" => "no-such-bead"})
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/review", %{"task_id" => "no-such-task"})
       assert json_response(conn, 404)
     end
 
-    test "requires a bead_id", %{conn: conn} do
+    test "requires a task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/review", %{})
       assert json_response(conn, 400)
     end
   end
 
-  describe "POST /api/workers/:bead_id/stop" do
+  describe "POST /api/workers/:task_id/stop" do
     test "terminates a running worker", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})
-      {:ok, worker_pid} = Worker.start(bead_id: bead.id, repo: "r")
+      {:ok, task} = Ash.create(Issue, %{title: "stop-me", workspace_id: ws.id})
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
       ref = Process.monitor(worker_pid)
 
-      conn = post(conn, ~p"/api/workers/#{bead.id}/stop", %{})
+      conn = post(conn, ~p"/api/workers/#{task.id}/stop", %{})
       body = json_response(conn, 200)
 
-      assert body["bead_id"] == bead.id
+      assert body["task_id"] == task.id
       assert body["stopped"] == true
 
       assert_receive {:DOWN, ^ref, :process, _pid, _reason}, 1_000
-      assert Worker.whereis(bead.id) == nil
+      assert Worker.whereis(task.id) == nil
     end
 
-    test "returns 404 for an unknown bead_id", %{conn: conn} do
-      conn = post(conn, ~p"/api/workers/no-such-bead/stop", %{})
+    test "returns 404 for an unknown task_id", %{conn: conn} do
+      conn = post(conn, ~p"/api/workers/no-such-task/stop", %{})
       assert json_response(conn, 404)
     end
   end
 
-  describe "GET /api/workers/:bead_id/log" do
+  describe "GET /api/workers/:task_id/log" do
     setup do
       root = Path.join(System.tmp_dir!(), "pol-log-ctrl-#{System.unique_integer([:positive])}")
       prev = Application.get_env(:arbiter, :output_log_root)
@@ -299,11 +299,11 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
     test "returns the full, uncapped durable transcript for the most recent run",
          %{conn: conn, ws: ws} do
-      bead_id = "bd-log-#{System.unique_integer([:positive])}"
+      task_id = "bd-log-#{System.unique_integer([:positive])}"
 
       {:ok, run} =
         Ash.create(Run, %{
-          bead_id: bead_id,
+          task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
           status: :completed,
@@ -315,10 +315,10 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       Enum.each(1..1500, fn i -> OutputLog.append(handle, "line-#{i}") end)
       OutputLog.close(handle)
 
-      conn = get(conn, ~p"/api/workers/#{bead_id}/log")
+      conn = get(conn, ~p"/api/workers/#{task_id}/log")
       data = json_response(conn, 200)["data"]
 
-      assert data["bead_id"] == bead_id
+      assert data["task_id"] == task_id
       assert data["run_id"] == run.id
       assert data["path"] == OutputLog.path_for(run.id)
       assert data["exists"] == true
@@ -330,18 +330,18 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
     test "exists=false with empty lines when the run has no transcript on disk",
          %{conn: conn, ws: ws} do
-      bead_id = "bd-nolog-#{System.unique_integer([:positive])}"
+      task_id = "bd-nolog-#{System.unique_integer([:positive])}"
 
       {:ok, run} =
         Ash.create(Run, %{
-          bead_id: bead_id,
+          task_id: task_id,
           repo: "arbiter",
           workspace_id: ws.id,
           status: :running,
           started_at: DateTime.utc_now()
         })
 
-      conn = get(conn, ~p"/api/workers/#{bead_id}/log")
+      conn = get(conn, ~p"/api/workers/#{task_id}/log")
       data = json_response(conn, 200)["data"]
 
       assert data["run_id"] == run.id
@@ -350,7 +350,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert data["line_count"] == 0
     end
 
-    test "returns 404 when no run was ever recorded for the bead", %{conn: conn} do
+    test "returns 404 when no run was ever recorded for the task", %{conn: conn} do
       conn = get(conn, ~p"/api/workers/bd-never-#{System.unique_integer([:positive])}/log")
       assert json_response(conn, 404)
     end

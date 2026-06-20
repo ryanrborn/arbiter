@@ -90,7 +90,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
     2. `Application.get_env(:arbiter, :acolyte_security_policy)` — the
        install-wide default override.
     3. `workspace.config["agent"]["security"]` — the per-domain posture.
-    4. an explicit per-dispatch / per-bead `override` map.
+    4. an explicit per-dispatch / per-task `override` map.
 
   For `permissions.allow` / `permissions.deny` each layer **unions** onto the
   previous (a domain adds to the baseline rather than dropping it). `mode`,

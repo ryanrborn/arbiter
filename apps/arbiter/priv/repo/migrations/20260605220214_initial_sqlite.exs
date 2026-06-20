@@ -27,7 +27,7 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :status, :text, null: false
       add :current_step, :text, null: false
       add :vars, :map, default: %{}
-      add :bead_id, :text, null: false
+      add :task_id, :text, null: false
       add :workflow_module, :text, null: false
       add :id, :uuid, null: false, primary_key: true
     end
@@ -51,11 +51,11 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :step, :text, null: false
       add :repo, :text
       add :workspace_id, :text
-      add :bead_id, :text, null: false
+      add :task_id, :text, null: false
       add :id, :uuid, null: false, primary_key: true
     end
 
-    create index(:usage_events, ["bead_id", "occurred_at"])
+    create index(:usage_events, ["task_id", "occurred_at"])
 
     create index(:usage_events, ["workspace_id", "occurred_at"])
 
@@ -71,8 +71,8 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
       add :status, :text, null: false
       add :workspace_id, :text
       add :repo, :text, null: false
-      add :bead_title, :text
-      add :bead_id, :text, null: false
+      add :task_title, :text
+      add :task_id, :text, null: false
       add :id, :uuid, null: false, primary_key: true
     end
 
@@ -280,8 +280,8 @@ defmodule Arbiter.Repo.Migrations.InitialSqlite do
                      name: "usage_events_workspace_id_occurred_at_index"
                    )
 
-    drop_if_exists index(:usage_events, ["bead_id", "occurred_at"],
-                     name: "usage_events_bead_id_occurred_at_index"
+    drop_if_exists index(:usage_events, ["task_id", "occurred_at"],
+                     name: "usage_events_task_id_occurred_at_index"
                    )
 
     drop table(:usage_events)

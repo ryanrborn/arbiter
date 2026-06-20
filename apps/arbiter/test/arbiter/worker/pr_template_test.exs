@@ -1,7 +1,7 @@
 defmodule Arbiter.Worker.PRTemplateTest do
   use ExUnit.Case, async: true
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker.PRTemplate
 
   describe "read/1" do
@@ -25,7 +25,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
 
   describe "fill/3 — basic substitutions" do
     test "substitutes known placeholders" do
-      bead = %Issue{
+      task = %Issue{
         id: "gte-020",
         title: "PRTemplate module",
         description: "Tracker-agnostic template helper.",
@@ -38,24 +38,24 @@ defmodule Arbiter.Worker.PRTemplateTest do
       template = """
       ## Summary
 
-      {{bead.title}} ({{bead.id}}, {{bead.priority}})
+      {{task.title}} ({{task.id}}, {{task.priority}})
 
-      {{bead.description}}
+      {{task.description}}
       """
 
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       assert out =~ "PRTemplate module (gte-020, P1)"
       assert out =~ "Tracker-agnostic template helper."
     end
 
     test "unknown placeholders are left verbatim" do
-      bead = %Issue{id: "x-1", title: "t", priority: 2, issue_type: :task, tracker_type: :none}
-      template = "{{bead.title}} / {{not.a.key}}"
-      assert PRTemplate.fill(template, bead) == "t / {{not.a.key}}"
+      task = %Issue{id: "x-1", title: "t", priority: 2, issue_type: :task, tracker_type: :none}
+      template = "{{task.title}} / {{not.a.key}}"
+      assert PRTemplate.fill(template, task) == "t / {{not.a.key}}"
     end
 
-    test "nil bead fields render as empty strings" do
-      bead = %Issue{
+    test "nil task fields render as empty strings" do
+      task = %Issue{
         id: "x-1",
         title: "t",
         description: nil,
@@ -65,15 +65,15 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_type: :none
       }
 
-      template = "[{{bead.description}}]"
-      assert PRTemplate.fill(template, bead) == ""
+      template = "[{{task.description}}]"
+      assert PRTemplate.fill(template, task) == ""
       # ^^ the only placeholder is empty so the whole line drops
     end
   end
 
   describe "fill/3 — tracker integration" do
     test ":none tracker produces empty tracker.link and the line is dropped" do
-      bead = %Issue{
+      task = %Issue{
         id: "gte-020",
         title: "T",
         priority: 2,
@@ -90,14 +90,14 @@ defmodule Arbiter.Worker.PRTemplateTest do
       Body here.
       """
 
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       refute out =~ "Tracker:"
       refute out =~ "{{tracker.link}}"
       assert out =~ "Body here."
     end
 
     test ":none tracker leaves multi-placeholder lines partially blank, not dropped" do
-      bead = %Issue{
+      task = %Issue{
         id: "gte-020",
         title: "T",
         priority: 2,
@@ -106,14 +106,14 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: nil
       }
 
-      # tracker.link is empty, but bead.id is non-empty → line stays.
-      template = "{{bead.id}} — {{tracker.link}}"
-      out = PRTemplate.fill(template, bead)
+      # tracker.link is empty, but task.id is non-empty → line stays.
+      template = "{{task.id}} — {{tracker.link}}"
+      out = PRTemplate.fill(template, task)
       assert out == "gte-020 — "
     end
 
-    test "tracker.ref renders empty for :none-tracked beads" do
-      bead = %Issue{
+    test "tracker.ref renders empty for :none-tracked tasks" do
+      task = %Issue{
         id: "gte-020",
         title: "T",
         priority: 2,
@@ -122,11 +122,11 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: nil
       }
 
-      assert PRTemplate.fill("{{tracker.ref}}", bead) == ""
+      assert PRTemplate.fill("{{tracker.ref}}", task) == ""
     end
 
     test "tracker.type renders the atom as string" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "t",
         priority: 2,
@@ -134,14 +134,14 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_type: :none
       }
 
-      assert PRTemplate.fill("type: {{tracker.type}}", bead) == "type: none"
+      assert PRTemplate.fill("type: {{tracker.type}}", task) == "type: none"
     end
 
     test "unregistered tracker type (:linear / :github pre-Phase-5) — safe_link_for catches the raise" do
       # Trackers.link_for raises ArgumentError for unregistered tracker types.
       # PRTemplate should treat that as no-link and drop the line, not crash.
       # (:jira is registered as of gte-029; :linear and :github remain Phase 5.)
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "t",
         priority: 2,
@@ -151,13 +151,13 @@ defmodule Arbiter.Worker.PRTemplateTest do
       }
 
       template = "Link: {{tracker.link}}"
-      assert PRTemplate.fill(template, bead) == ""
+      assert PRTemplate.fill(template, task) == ""
     end
   end
 
   describe "fill/3 — line-granularity dropping" do
     test "trailing whitespace doesn't prevent line drop" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "t",
         priority: 2,
@@ -167,11 +167,11 @@ defmodule Arbiter.Worker.PRTemplateTest do
 
       # The line contains just the placeholder. It should drop entirely.
       template = "before\n{{tracker.link}}\nafter"
-      assert PRTemplate.fill(template, bead) == "before\nafter"
+      assert PRTemplate.fill(template, task) == "before\nafter"
     end
 
     test "headings without placeholders are preserved verbatim" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "t",
         priority: 2,
@@ -180,7 +180,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
       }
 
       template = "## Header\n\n{{tracker.link}}\n\n## Next"
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       assert out =~ "## Header"
       assert out =~ "## Next"
       refute out =~ "{{"
@@ -188,8 +188,8 @@ defmodule Arbiter.Worker.PRTemplateTest do
   end
 
   describe "default_body/1" do
-    test "produces a heading from the bead title" do
-      bead = %Issue{
+    test "produces a heading from the task title" do
+      task = %Issue{
         id: "x-1",
         title: "Add widget",
         priority: 2,
@@ -197,12 +197,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_type: :none
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       assert out =~ "## Add widget"
     end
 
     test "includes description when present" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Add widget",
         description: "Adds a new widget to the dashboard.",
@@ -211,13 +211,13 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_type: :none
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       assert out =~ "## Add widget"
       assert out =~ "Adds a new widget to the dashboard."
     end
 
     test "omits description section when nil" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Add widget",
         description: nil,
@@ -226,12 +226,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_type: :none
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       assert out == "## Add widget"
     end
 
     test "omits description section when empty string" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Add widget",
         description: "   ",
@@ -240,12 +240,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_type: :none
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       assert out == "## Add widget"
     end
 
-    test "omits tracker link for :none-tracked beads" do
-      bead = %Issue{
+    test "omits tracker link for :none-tracked tasks" do
+      task = %Issue{
         id: "x-1",
         title: "T",
         priority: 2,
@@ -254,12 +254,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: nil
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       refute out =~ "http"
     end
 
     test ":github tracker with bare numeric ref appends Closes #N" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Fix bug",
         priority: 2,
@@ -268,12 +268,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: "42"
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       assert out =~ "Closes #42"
     end
 
     test ":github tracker with non-numeric ref does not append closing keyword" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Fix bug",
         priority: 2,
@@ -282,12 +282,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: "gh-42"
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       refute out =~ "Closes"
     end
 
     test ":jira tracker does not append closing keyword" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Fix bug",
         priority: 2,
@@ -296,12 +296,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: "VR-17585"
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       refute out =~ "Closes"
     end
 
     test ":none tracker does not append closing keyword" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Fix bug",
         priority: 2,
@@ -310,14 +310,14 @@ defmodule Arbiter.Worker.PRTemplateTest do
         tracker_ref: nil
       }
 
-      out = PRTemplate.default_body(bead)
+      out = PRTemplate.default_body(task)
       refute out =~ "Closes"
     end
   end
 
-  describe "fill/3 — Closes keyword for github beads" do
-    test "appends Closes #N for :github bead with numeric ref" do
-      bead = %Issue{
+  describe "fill/3 — Closes keyword for github tasks" do
+    test "appends Closes #N for :github task with numeric ref" do
+      task = %Issue{
         id: "x-1",
         title: "Fix thing",
         priority: 2,
@@ -327,12 +327,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
       }
 
       template = "## Summary\n\nSome body."
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       assert out =~ "Closes #99"
     end
 
-    test "does not append Closes for :jira bead" do
-      bead = %Issue{
+    test "does not append Closes for :jira task" do
+      task = %Issue{
         id: "x-1",
         title: "Fix thing",
         priority: 2,
@@ -342,12 +342,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
       }
 
       template = "## Summary\n\nSome body."
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       refute out =~ "Closes"
     end
 
-    test "does not append Closes for :none bead" do
-      bead = %Issue{
+    test "does not append Closes for :none task" do
+      task = %Issue{
         id: "x-1",
         title: "Fix thing",
         priority: 2,
@@ -357,12 +357,12 @@ defmodule Arbiter.Worker.PRTemplateTest do
       }
 
       template = "## Summary\n\nSome body."
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       refute out =~ "Closes"
     end
 
     test "tracker.closes placeholder resolves to Closes #N for github and is droppable" do
-      bead = %Issue{
+      task = %Issue{
         id: "x-1",
         title: "Fix thing",
         priority: 2,
@@ -373,13 +373,13 @@ defmodule Arbiter.Worker.PRTemplateTest do
 
       # A template that explicitly places {{tracker.closes}} inline
       template = "## Summary\n\n{{tracker.closes}}"
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       # The explicit placeholder expands + the auto-append adds it too
       assert out =~ "Closes #7"
     end
 
-    test "tracker.closes placeholder is line-dropped for :none bead" do
-      bead = %Issue{
+    test "tracker.closes placeholder is line-dropped for :none task" do
+      task = %Issue{
         id: "x-1",
         title: "Fix thing",
         priority: 2,
@@ -389,7 +389,7 @@ defmodule Arbiter.Worker.PRTemplateTest do
       }
 
       template = "before\n{{tracker.closes}}\nafter"
-      out = PRTemplate.fill(template, bead)
+      out = PRTemplate.fill(template, task)
       refute out =~ "Closes"
       assert out =~ "before"
       assert out =~ "after"

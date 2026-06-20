@@ -5,8 +5,8 @@ defmodule Arbiter.MCP.Tools do
   `arb` subcommands take) and returns plain, JSON-friendly maps.
 
   Phase 1 ships the read tools plus the one narrowed worker write
-  (`bead_update_progress`); Phase 2 adds the coordinator-only mutating tools —
-  `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_add` /
+  (`task_update_progress`); Phase 2 adds the coordinator-only mutating tools —
+  `task_create` / `task_update` / `task_close` / `task_reopen`, `dep_add` /
   `dep_remove` (grouping/epics use a `parent_of` edge), the `worker_*` lifecycle family
   (`worker_dispatch` / `worker_resume` / `worker_review` / `worker_stop` /
   `worker_list`), `message_send`, `notify_list`, the `tracker_*` bridge
@@ -27,14 +27,14 @@ defmodule Arbiter.MCP.Tools do
 
   Tier-level visibility (which tier may call which tool) is enforced upstream in
   `Arbiter.MCP.Catalog`; these handlers enforce the *data-level* rules —
-  own-bead and workspace isolation — via `Arbiter.MCP.Scope`.
+  own-task and workspace isolation — via `Arbiter.MCP.Scope`.
   """
 
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Beads.Claim
-  alias Arbiter.Beads.Dependency
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Claim
+  alias Arbiter.Tasks.Dependency
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.MCP
   alias Arbiter.MCP.Scope
   alias Arbiter.Messages.Message
@@ -47,53 +47,53 @@ defmodule Arbiter.MCP.Tools do
 
   @progress_fields ~w(notes qa_notes deployment_notes pr_body)
 
-  # ---- bead_show ----------------------------------------------------------
+  # ---- task_show ----------------------------------------------------------
 
-  @doc "Read a single bead. Worker: its own bead only. Coordinator: any in its workspace."
-  @spec bead_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_show(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, args, id) do
-      {:ok, serialize_bead(load_progress(issue))}
+  @doc "Read a single task. Worker: its own task only. Coordinator: any in its workspace."
+  @spec task_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_show(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_task_id(scope, args),
+         {:ok, issue} <- fetch_task(scope, args, id) do
+      {:ok, serialize_task(load_progress(issue))}
     end
   end
 
-  # ---- bead_ready ---------------------------------------------------------
+  # ---- task_ready ---------------------------------------------------------
 
   @doc """
-  List ready (unblocked, open) beads in a workspace. Coordinator only. The
+  List ready (unblocked, open) tasks in a workspace. Coordinator only. The
   workspace is resolved from the optional `workspace` arg, else the scope's bound
   workspace, else the installation default.
   """
-  @spec bead_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_ready(%Scope{} = scope, args) do
+  @spec task_ready(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_ready(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      beads =
+      tasks =
         [workspace_id: ws_id]
         |> Issue.ready()
-        |> Enum.map(&serialize_bead_summary/1)
+        |> Enum.map(&serialize_task_summary/1)
 
-      {:ok, %{beads: beads, count: length(beads)}}
+      {:ok, %{tasks: tasks, count: length(tasks)}}
     end
   end
 
   # ---- inbox_check --------------------------------------------------------
 
   @doc """
-  The unread mailbox for a bead, marked read on read (the structured replacement
-  for `arb inbox <bead>`). Worker: its own bead. Coordinator: the `bead_id`
+  The unread mailbox for a task, marked read on read (the structured replacement
+  for `arb inbox <task>`). Worker: its own task. Coordinator: the `task_id`
   argument, within its workspace.
   """
   @spec inbox_check(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def inbox_check(%Scope{} = scope, args) do
-    with {:ok, to_ref} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, bead} <- fetch_bead(scope, args, to_ref) do
-      messages = Message.inbox(to_ref, workspace_id: bead.workspace_id)
+    with {:ok, to_ref} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, task} <- fetch_task(scope, args, to_ref) do
+      messages = Message.inbox(to_ref, workspace_id: task.workspace_id)
       _ = Enum.each(messages, &Message.mark_read/1)
 
       {:ok,
        %{
-         bead_id: to_ref,
+         task_id: to_ref,
          messages: Enum.map(messages, &serialize_message/1),
          count: length(messages)
        }}
@@ -148,21 +148,21 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # ---- bead_update_progress ----------------------------------------------
+  # ---- task_update_progress ----------------------------------------------
 
   @doc """
   The worker's one write: record `notes` / `qa_notes` / `deployment_notes` /
-  `pr_body` on its own bead (the structured replacement for `arb issue update
+  `pr_body` on its own task (the structured replacement for `arb issue update
   <id> --qa-notes …`). It cannot flip status, reprioritize, or touch another
-  bead. Coordinator: the same narrow write against any bead in its workspace.
+  task. Coordinator: the same narrow write against any task in its workspace.
   """
-  @spec bead_update_progress(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_update_progress(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, args, id),
+  @spec task_update_progress(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_update_progress(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_task_id(scope, args),
+         {:ok, issue} <- fetch_task(scope, args, id),
          {:ok, attrs} <- progress_attrs(args) do
       case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, serialize_bead(updated)}
+        {:ok, updated} -> {:ok, serialize_task(updated)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
@@ -172,89 +172,89 @@ defmodule Arbiter.MCP.Tools do
   # Phase 2 — coordinator-only mutating tools (docs/mcp-server-design.md §8)
   # ======================================================================
 
-  # ---- bead_create --------------------------------------------------------
+  # ---- task_create --------------------------------------------------------
 
   @doc """
-  Create a bead in a workspace. Coordinator only. The target workspace is
+  Create a task in a workspace. Coordinator only. The target workspace is
   resolved from the optional `workspace` arg (name or id), else the scope's bound
   workspace, else the installation default — and `workspace_id` is then forced
-  onto the bead. Backs onto `Ash.create(Issue, …)` (the same path `arb create` /
+  onto the task. Backs onto `Ash.create(Issue, …)` (the same path `arb create` /
   the REST `POST /api/issues` take), so a workspace with a tracker configured
-  still mirrors the new bead upstream.
+  still mirrors the new task upstream.
   """
-  @spec bead_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_create(%Scope{} = scope, args) do
+  @spec task_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_create(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
          {:ok, title} <- require_string(args, "title"),
-         {:ok, attrs} <- collect_attrs(args, bead_create_spec()) do
+         {:ok, attrs} <- collect_attrs(args, task_create_spec()) do
       attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
 
       case Ash.create(Issue, attrs) do
-        {:ok, issue} -> {:ok, serialize_bead(issue)}
+        {:ok, issue} -> {:ok, serialize_task(issue)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
   end
 
-  # ---- bead_update --------------------------------------------------------
+  # ---- task_update --------------------------------------------------------
 
   @doc """
-  Update a bead in the scope's workspace (status / priority / title / …).
+  Update a task in the scope's workspace (status / priority / title / …).
   Coordinator only. The `:closed` status is rejected here — closing goes through
-  `bead_close`, which runs the close FSM + teardown. Backs onto the bead's
+  `task_close`, which runs the close FSM + teardown. Backs onto the task's
   `:update` action.
   """
-  @spec bead_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_update(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, args, id),
-         {:ok, attrs} <- collect_attrs(args, bead_update_spec()),
+  @spec task_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_update(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_task_id(scope, args),
+         {:ok, issue} <- fetch_task(scope, args, id),
+         {:ok, attrs} <- collect_attrs(args, task_update_spec()),
          :ok <- require_some(attrs, "provide at least one field to update") do
       case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, serialize_bead(updated)}
+        {:ok, updated} -> {:ok, serialize_task(updated)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
   end
 
-  # ---- bead_close ---------------------------------------------------------
+  # ---- task_close ---------------------------------------------------------
 
   @doc """
-  Close a bead in the scope's workspace via the `:close` action (sets status,
+  Close a task in the scope's workspace via the `:close` action (sets status,
   runs the worker/worktree teardown, and optionally syncs the close upstream
   when `close_upstream: true`). Coordinator only.
   """
-  @spec bead_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_close(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, args, id),
+  @spec task_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_close(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_task_id(scope, args),
+         {:ok, issue} <- fetch_task(scope, args, id),
          {:ok, close_upstream} <- fetch_bool(args, "close_upstream", false) do
       attrs =
         %{close_upstream: close_upstream}
         |> maybe_put(:reason, fetch_string(args, "reason"))
 
       case Ash.update(issue, attrs, action: :close) do
-        {:ok, closed} -> {:ok, serialize_bead(closed)}
+        {:ok, closed} -> {:ok, serialize_task(closed)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
   end
 
-  # ---- bead_reopen --------------------------------------------------------
+  # ---- task_reopen --------------------------------------------------------
 
   @doc """
-  Reopen a closed bead in the scope's workspace via the `:reopen` action (clears
+  Reopen a closed task in the scope's workspace via the `:reopen` action (clears
   `closed_at`, returns it to `:open` and the ready queue, and best-effort
   reopens the linked tracker issue). Coordinator only. Reopening is the only
   supported path out of `:closed` — the `:update` FSM rejects that transition —
-  so a non-closed bead is reported as an operational error.
+  so a non-closed task is reported as an operational error.
   """
-  @spec bead_reopen(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_reopen(%Scope{} = scope, args) do
-    with {:ok, id} <- resolve_bead_id(scope, args),
-         {:ok, issue} <- fetch_bead(scope, args, id) do
+  @spec task_reopen(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_reopen(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_task_id(scope, args),
+         {:ok, issue} <- fetch_task(scope, args, id) do
       case Ash.update(issue, %{}, action: :reopen) do
-        {:ok, reopened} -> {:ok, serialize_bead(reopened)}
+        {:ok, reopened} -> {:ok, serialize_task(reopened)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
@@ -263,7 +263,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- dep_add ------------------------------------------------------------
 
   @doc """
-  Add a dependency edge between two beads in the scope's workspace. Coordinator
+  Add a dependency edge between two tasks in the scope's workspace. Coordinator
   only. Both endpoints must resolve inside the workspace (a cross-workspace id is
   reported not-found). Backs onto `Ash.create(Dependency, …)`.
   """
@@ -272,8 +272,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, from} <- require_string(args, "from_issue_id"),
          {:ok, to} <- require_string(args, "to_issue_id"),
          {:ok, type} <- require_enum(args, "type", Dependency.types()),
-         {:ok, from_bead} <- fetch_bead(scope, args, from),
-         {:ok, _to_bead} <- fetch_bead_in_workspace(from_bead.workspace_id, to) do
+         {:ok, from_task} <- fetch_task(scope, args, from),
+         {:ok, _to_task} <- fetch_task_in_workspace(from_task.workspace_id, to) do
       attrs =
         %{"from_issue_id" => from, "to_issue_id" => to, "type" => type}
         |> maybe_put("notes", fetch_string(args, "notes"))
@@ -289,7 +289,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- dep_remove ---------------------------------------------------------
 
   @doc """
-  Remove dependency edges between two beads in the scope's workspace. Coordinator
+  Remove dependency edges between two tasks in the scope's workspace. Coordinator
   only. With no `type` every edge between the pair is removed; with a `type`
   only that edge. Idempotent — removing an absent edge reports `removed: 0`.
   """
@@ -298,8 +298,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, from} <- require_string(args, "from_issue_id"),
          {:ok, to} <- require_string(args, "to_issue_id"),
          {:ok, type} <- optional_enum(args, "type", Dependency.types()),
-         {:ok, from_bead} <- fetch_bead(scope, args, from),
-         {:ok, _to_bead} <- fetch_bead_in_workspace(from_bead.workspace_id, to) do
+         {:ok, from_task} <- fetch_task(scope, args, from),
+         {:ok, _to_task} <- fetch_task_in_workspace(from_task.workspace_id, to) do
       edges = find_dep_edges(from, to, type)
       _ = Enum.each(edges, &Ash.destroy!/1)
       {:ok, %{from_issue_id: from, to_issue_id: to, removed: length(edges)}}
@@ -309,21 +309,21 @@ defmodule Arbiter.MCP.Tools do
   # ---- message_send -------------------------------------------------------
 
   @doc """
-  Send a message to a bead's mailbox — the structured replacement for
-  `arb message <bead> <text>`. Available to **both** tiers, with the envelope
+  Send a message to a task's mailbox — the structured replacement for
+  `arb message <task> <text>`. Available to **both** tiers, with the envelope
   set from the scope so the sender identity cannot be spoofed:
 
     * a **coordinator** sends a `:direction` from `"coordinator"` down to any
-      bead in its workspace;
-    * a **worker** raises a `:flag` from its own bound bead to a sibling.
+      task in its workspace;
+    * a **worker** raises a `:flag` from its own bound task to a sibling.
 
-  `workspace_id` is pinned to the recipient bead's own workspace (a worker to
+  `workspace_id` is pinned to the recipient task's own workspace (a worker to
   its bound workspace), so a message can only ever be created alongside its
   recipient. Backs onto `Messages.send_mail/1`.
   """
   @spec message_send(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def message_send(%Scope{} = scope, args) do
-    with {:ok, to_ref} <- require_string(args, "bead_id"),
+    with {:ok, to_ref} <- require_string(args, "task_id"),
          {:ok, body} <- require_string(args, "body"),
          {:ok, ws_id} <- message_workspace(scope, args, to_ref) do
       attrs =
@@ -340,19 +340,19 @@ defmodule Arbiter.MCP.Tools do
   end
 
   # The workspace a message lands in. A worker is pinned to its bound workspace.
-  # A coordinator infers it from the recipient bead itself (entity inference,
+  # A coordinator infers it from the recipient task itself (entity inference,
   # honoring an explicit `workspace` arg), which also validates the recipient
   # exists and is reachable by the scope.
   defp message_workspace(%Scope{tier: :worker, workspace_id: ws_id}, _args, _to_ref),
     do: {:ok, ws_id}
 
   defp message_workspace(%Scope{tier: :coordinator} = scope, args, to_ref) do
-    with {:ok, bead} <- fetch_bead(scope, args, to_ref), do: {:ok, bead.workspace_id}
+    with {:ok, task} <- fetch_task(scope, args, to_ref), do: {:ok, task.workspace_id}
   end
 
   # The sender identity + kind are derived from the scope, never the client: a
   # coordinator directs (`from: "coordinator"`); a worker flags from its own
-  # bound bead. Both are pinned to the resolved workspace.
+  # bound task. Both are pinned to the resolved workspace.
   defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref) do
     %{
       kind: :direction,
@@ -363,11 +363,11 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp message_envelope(%Scope{tier: :worker, bead_id: bead_id}, ws_id, to_ref) do
+  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref) do
     %{
       kind: :flag,
       workspace_id: ws_id,
-      from_ref: bead_id,
+      from_ref: task_id,
       to_ref: to_ref,
       directive_ref: to_ref
     }
@@ -376,7 +376,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- worker_dispatch ------------------------------------------------------
 
   @doc """
-  Dispatch a worker to work a bead in the scope's workspace. **Coordinator only,
+  Dispatch a worker to work a task in the scope's workspace. **Coordinator only,
   and the strongest-gated tool.** It enforces the dispatch-recursion guardrail
   (`docs/mcp-server-design.md` §4.3):
 
@@ -388,16 +388,16 @@ defmodule Arbiter.MCP.Tools do
   The slung worker's own scope token is minted one level deeper (`depth + 1`),
   so a chain of dispatches is tracked. With a `provider` (`"claude"` | `"gemini"`,
   or the deprecated `with_claude: true` alias) a worker session is started;
-  without one the bead simply parks `:in_progress` (no agent spawned).
+  without one the task simply parks `:in_progress` (no agent spawned).
   Backs onto `Arbiter.Worker.Dispatch.dispatch/2`.
   """
   @spec worker_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_dispatch(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
-         {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
-      case Dispatch.dispatch(bead_id, worker_dispatch_opts(scope, args)) do
+         {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id) do
+      case Dispatch.dispatch(task_id, worker_dispatch_opts(scope, args)) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
@@ -407,7 +407,7 @@ defmodule Arbiter.MCP.Tools do
   # ---- worker_resume -----------------------------------------------------
 
   @doc """
-  Re-attach a fresh worker to a bead's **preserved** worktree
+  Re-attach a fresh worker to a task's **preserved** worktree
   (`arb resume`). Coordinator only, and — like `worker_dispatch` — gated by the
   dispatch-recursion guardrail (`can_dispatch` + `depth`): resume spawns a worker, so
   the same recursion concerns apply. The child worker's scope is minted one
@@ -417,9 +417,9 @@ defmodule Arbiter.MCP.Tools do
   def worker_resume(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
-         {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
-      case Dispatch.resume(bead_id, dispatch_opts(scope, args)) do
+         {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id) do
+      case Dispatch.resume(task_id, dispatch_opts(scope, args)) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
@@ -429,8 +429,8 @@ defmodule Arbiter.MCP.Tools do
   # ---- worker_review -----------------------------------------------------
 
   @doc """
-  Dispatch a **review-only** worker against the PR/MR linked to a bead
-  (`arb review`): no worktree, no per-bead branch, no route through the
+  Dispatch a **review-only** worker against the PR/MR linked to a task
+  (`arb review`): no worktree, no per-task branch, no route through the
   merge queue/merger. Coordinator only, and gated by the dispatch-recursion guardrail
   (`can_dispatch` + `depth`) — a review dispatch spawns an agent. The child
   worker's scope is minted one level deeper. Backs onto
@@ -440,15 +440,15 @@ defmodule Arbiter.MCP.Tools do
   def worker_review(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
-         {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
+         {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id) do
       opts =
         scope
         |> dispatch_opts(args)
         |> Keyword.put(:review, true)
         |> review_claude_flag(args)
 
-      case Dispatch.dispatch(bead_id, opts) do
+      case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
@@ -458,19 +458,19 @@ defmodule Arbiter.MCP.Tools do
   # ---- worker_stop -------------------------------------------------------
 
   @doc """
-  Stop the worker currently working a bead (`arb worker stop`). Coordinator
-  only. The bead is resolved through `fetch_bead`, so a coordinator can only
-  stop workers for beads in its own workspace; a bead with no live worker is
+  Stop the worker currently working a task (`arb worker stop`). Coordinator
+  only. The task is resolved through `fetch_task`, so a coordinator can only
+  stop workers for tasks in its own workspace; a task with no live worker is
   reported as not-found. Stopping is teardown — it never spawns — so it does not
   require `can_dispatch`. Backs onto `Arbiter.Worker.stop/2`.
   """
   @spec worker_stop(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_stop(%Scope{} = scope, args) do
-    with {:ok, bead_id} <- resolve_bead_id(scope, args, "bead_id"),
-         {:ok, _bead} <- fetch_bead(scope, args, bead_id) do
-      case Worker.stop(bead_id, :normal) do
-        :ok -> {:ok, %{bead_id: bead_id, stopped: true}}
-        {:error, :not_found} -> {:error, {:not_found, "no running worker for bead #{bead_id}"}}
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id) do
+      case Worker.stop(task_id, :normal) do
+        :ok -> {:ok, %{task_id: task_id, stopped: true}}
+        {:error, :not_found} -> {:error, {:not_found, "no running worker for task #{task_id}"}}
       end
     end
   end
@@ -489,25 +489,25 @@ defmodule Arbiter.MCP.Tools do
         Arbiter.Worker.list_children()
         |> Enum.filter(&(&1.workspace_id == ws_id))
 
-      bead_ids = Enum.map(children, & &1.bead_id)
-      costs = Arbiter.Worker.Stats.bead_costs_usd(bead_ids)
+      task_ids = Enum.map(children, & &1.task_id)
+      costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
 
       workers =
-        Enum.map(children, &serialize_worker_summary(&1, Map.get(costs, &1.bead_id, 0.0)))
+        Enum.map(children, &serialize_worker_summary(&1, Map.get(costs, &1.task_id, 0.0)))
 
       {:ok, %{workers: workers, count: length(workers)}}
     end
   end
 
-  # ---- bead_list ----------------------------------------------------------
+  # ---- task_list ----------------------------------------------------------
 
   @doc """
-  List beads in the scope's workspace with optional filters. Coordinator only.
+  List tasks in the scope's workspace with optional filters. Coordinator only.
   Accepts optional `status`, `priority`, and `issue_type` filters. Always
   scoped to the coordinator's workspace. Backs onto `Ash.read(Issue, ...)`.
   """
-  @spec bead_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
-  def bead_list(%Scope{} = scope, args) do
+  @spec task_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_list(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
          {:ok, status} <- optional_enum(args, "status", Issue.statuses()),
          {:ok, issue_type} <- optional_enum(args, "issue_type", Issue.issue_types()),
@@ -519,12 +519,12 @@ defmodule Arbiter.MCP.Tools do
         |> maybe_filter_issue_type(issue_type)
         |> maybe_filter_priority(priority)
 
-      beads =
+      tasks =
         query
         |> Ash.read!()
-        |> Enum.map(&serialize_bead_summary/1)
+        |> Enum.map(&serialize_task_summary/1)
 
-      {:ok, %{beads: beads, count: length(beads)}}
+      {:ok, %{tasks: tasks, count: length(tasks)}}
     end
   end
 
@@ -596,11 +596,11 @@ defmodule Arbiter.MCP.Tools do
   # ---- tracker_claim ------------------------------------------------------
 
   @doc """
-  Claim an external tracker issue into a bead (`arb claim`). Coordinator only.
+  Claim an external tracker issue into a task (`arb claim`). Coordinator only.
   Fetches the issue by `ref` via the workspace's tracker, verifies it is
   assigned to the workspace user (the claim signal; skip with `force: true`),
-  and creates a linked bead. Idempotent — returns the existing bead if one
-  already references the issue. Backs onto `Arbiter.Beads.Claim.claim/3`.
+  and creates a linked task. Idempotent — returns the existing task if one
+  already references the issue. Backs onto `Arbiter.Tasks.Claim.claim/3`.
   """
   @spec tracker_claim(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def tracker_claim(%Scope{} = scope, args) do
@@ -609,7 +609,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, force} <- fetch_bool(args, "force", false),
          {:ok, workspace} <- fetch_workspace(ws_id) do
       case Claim.claim(workspace, ref, force: force) do
-        {:ok, status, bead} -> {:ok, Map.put(serialize_bead(bead), :claim_status, to_str(status))}
+        {:ok, status, task} -> {:ok, Map.put(serialize_task(task), :claim_status, to_str(status))}
         {:error, reason} -> {:error, {:invalid, claim_error_message(reason)}}
       end
     end
@@ -618,11 +618,11 @@ defmodule Arbiter.MCP.Tools do
   # ---- tracker_sync -------------------------------------------------------
 
   @doc """
-  Reconcile the workspace's beads against its external tracker (`arb sync`): open
-  assigned issues with no bead get a linked bead; open beads whose issue is
+  Reconcile the workspace's tasks against its external tracker (`arb sync`): open
+  assigned issues with no task get a linked task; open tasks whose issue is
   unassigned/closed get closed. Coordinator only. With `dry: true` the plan is
   returned without acting. No-ops cleanly when the tracker does not support
-  reconciliation. Backs onto `Arbiter.Beads.Claim.plan/1` + `apply_plan/2`.
+  reconciliation. Backs onto `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2`.
   """
   @spec tracker_sync(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def tracker_sync(%Scope{} = scope, args) do
@@ -670,53 +670,53 @@ defmodule Arbiter.MCP.Tools do
 
   # ---- shared resolution / fetch -----------------------------------------
 
-  # Resolve + authorize the target bead id for this scope from the named arg
-  # (default "id"). Worker: own bead only; coordinator: id required.
-  defp resolve_bead_id(scope, args, key \\ "id") do
-    case Scope.own_bead(scope, fetch_string(args, key)) do
+  # Resolve + authorize the target task id for this scope from the named arg
+  # (default "id"). Worker: own task only; coordinator: id required.
+  defp resolve_task_id(scope, args, key \\ "id") do
+    case Scope.own_task(scope, fetch_string(args, key)) do
       {:ok, id} ->
         {:ok, id}
 
       {:error, :unauthorized} ->
-        {:error, {:unauthorized, "this scope may only act on its own bead"}}
+        {:error, {:unauthorized, "this scope may only act on its own task"}}
 
       {:error, :missing} ->
         {:error, {:invalid, "`#{key}` is required"}}
     end
   end
 
-  # Fetch a bead and enforce workspace isolation. Honors an optional `workspace`
+  # Fetch a task and enforce workspace isolation. Honors an optional `workspace`
   # arg (name or id): a workspace-bound scope may only ever reach its own
   # workspace; a workspace-agnostic coordinator either targets the named
-  # workspace or, with no arg, infers it from the bead itself (entity inference).
-  # A bead outside the resolved workspace is reported not-found so existence does
+  # workspace or, with no arg, infers it from the task itself (entity inference).
+  # A task outside the resolved workspace is reported not-found so existence does
   # not leak across workspaces.
-  defp fetch_bead(scope, args, id) do
+  defp fetch_task(scope, args, id) do
     with {:ok, target_ws} <- authorized_workspace(scope, args) do
       case Ash.get(Issue, id) do
         {:ok, %Issue{} = issue} ->
           if workspace_match?(issue.workspace_id, target_ws),
             do: {:ok, issue},
-            else: {:error, {:not_found, "bead #{id} not found"}}
+            else: {:error, {:not_found, "task #{id} not found"}}
 
         _ ->
-          {:error, {:not_found, "bead #{id} not found"}}
+          {:error, {:not_found, "task #{id} not found"}}
       end
     end
   end
 
-  # Fetch a bead and require it to live in `ws_id` exactly — the second-endpoint
+  # Fetch a task and require it to live in `ws_id` exactly — the second-endpoint
   # check for dependency tools, so both endpoints of an edge stay in one
   # workspace even for a workspace-agnostic coordinator inferring from the first.
-  defp fetch_bead_in_workspace(ws_id, id) do
+  defp fetch_task_in_workspace(ws_id, id) do
     case Ash.get(Issue, id) do
       {:ok, %Issue{workspace_id: ^ws_id} = issue} -> {:ok, issue}
-      _ -> {:error, {:not_found, "bead #{id} not found"}}
+      _ -> {:error, {:not_found, "task #{id} not found"}}
     end
   end
 
   # A `nil` target means "any workspace" (a workspace-agnostic coordinator that
-  # named no workspace — the bead's own workspace stands).
+  # named no workspace — the task's own workspace stands).
   defp workspace_match?(_ws, nil), do: true
   defp workspace_match?(ws, ws), do: true
   defp workspace_match?(_ws, _target), do: false
@@ -803,8 +803,8 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Load the child-progress rollup calcs for a bead so the serializer can emit
-  # `child_total` / `child_closed`. Best-effort: on any load error the bead is
+  # Load the child-progress rollup calcs for a task so the serializer can emit
+  # `child_total` / `child_closed`. Best-effort: on any load error the task is
   # returned unchanged (the serializer then omits the progress fields).
   defp load_progress(%Issue{} = issue) do
     Ash.load!(issue, [:child_total, :child_closed])
@@ -970,7 +970,7 @@ defmodule Arbiter.MCP.Tools do
 
   # ---- Phase 2 field specs (arg key → coercion type) ---------------------
 
-  defp bead_create_spec do
+  defp task_create_spec do
     [
       {"description", :string},
       {"acceptance", :string},
@@ -988,7 +988,7 @@ defmodule Arbiter.MCP.Tools do
     ]
   end
 
-  defp bead_update_spec do
+  defp task_update_spec do
     [
       {"title", :string},
       {"description", :string},
@@ -1034,7 +1034,7 @@ defmodule Arbiter.MCP.Tools do
   # `POST /api/workers/dispatch` contract: a `provider` dispatches a real worker
   # session (forcing that agent via `agent_type`); the deprecated `with_claude`
   # boolean is still honored as an alias for `provider: "claude"`; otherwise the
-  # bead parks `:in_progress` (no Driver).
+  # task parks `:in_progress` (no Driver).
   defp worker_dispatch_opts(scope, args) do
     base = dispatch_opts(scope, args)
 
@@ -1050,7 +1050,7 @@ defmodule Arbiter.MCP.Tools do
   # Resolve the worker provider from `worker_dispatch` args. Prefers the explicit
   # `provider` field (`"claude"` | `"gemini"`), falling back to the deprecated
   # `with_claude: true` alias. Returns `nil` when neither selects a worker — the
-  # bead then parks in_progress.
+  # task then parks in_progress.
   defp dispatch_provider(args) do
     case Map.get(args, "provider") do
       "claude" ->
@@ -1077,8 +1077,8 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp dispatch_error_message({:bead_closed, id}),
-    do: "bead #{id} is closed; reopen it before dispatching"
+  defp dispatch_error_message({:task_closed, id}),
+    do: "task #{id} is closed; reopen it before dispatching"
 
   defp dispatch_error_message(:no_repo_configured), do: "no repos configured for this workspace"
   defp dispatch_error_message({:repo_not_found, repo}), do: "repo #{inspect(repo)} is not configured"
@@ -1086,18 +1086,18 @@ defmodule Arbiter.MCP.Tools do
   defp dispatch_error_message({:ambiguous_repo, repos}),
     do: "multiple repos available (#{Enum.join(repos, ", ")}); pass `repo` explicitly"
 
-  defp dispatch_error_message({:bead_awaiting_review, id}),
-    do: "bead #{id} is already awaiting review"
+  defp dispatch_error_message({:task_awaiting_review, id}),
+    do: "task #{id} is already awaiting review"
 
   # Resume-specific (`Dispatch.resume/2`).
   defp dispatch_error_message(:no_outpost),
-    do: "no preserved worktree for this bead — nothing to resume; dispatch it fresh instead"
+    do: "no preserved worktree for this task — nothing to resume; dispatch it fresh instead"
 
   defp dispatch_error_message(:repo_unknown),
-    do: "could not resolve the repo for this bead; pass `repo` explicitly"
+    do: "could not resolve the repo for this task; pass `repo` explicitly"
 
   defp dispatch_error_message({:acolyte_active, status}),
-    do: "a worker is still active for this bead (#{status}); stop it before resuming"
+    do: "a worker is still active for this task (#{status}); stop it before resuming"
 
   defp dispatch_error_message(other), do: "dispatch failed: #{inspect(other)}"
 
@@ -1162,7 +1162,7 @@ defmodule Arbiter.MCP.Tools do
 
   # ---- serializers (JSON-friendly, mirroring the REST shapes) -------------
 
-  defp serialize_bead(%Issue{} = i) do
+  defp serialize_task(%Issue{} = i) do
     %{
       id: i.id,
       title: i.title,
@@ -1190,7 +1190,7 @@ defmodule Arbiter.MCP.Tools do
     |> put_progress(i)
   end
 
-  # Include the child-progress rollup when the calcs are loaded (bead_show loads
+  # Include the child-progress rollup when the calcs are loaded (task_show loads
   # them). Omitted when not loaded so other serialize paths stay cheap.
   defp put_progress(map, %Issue{child_total: t, child_closed: c})
        when is_integer(t) and is_integer(c) do
@@ -1199,7 +1199,7 @@ defmodule Arbiter.MCP.Tools do
 
   defp put_progress(map, _i), do: map
 
-  defp serialize_bead_summary(%Issue{} = i) do
+  defp serialize_task_summary(%Issue{} = i) do
     %{
       id: i.id,
       title: i.title,
@@ -1227,8 +1227,8 @@ defmodule Arbiter.MCP.Tools do
   # is the slung worker's scope depth (parent + 1).
   defp serialize_dispatch(result, depth) do
     %{
-      bead: serialize_bead(result.bead),
-      worker: %{bead_id: result.bead.id, pid: inspect(result.worker_pid)},
+      task: serialize_task(result.task),
+      worker: %{task_id: result.task.id, pid: inspect(result.worker_pid)},
       machine: %{id: result.machine_id, pid: inspect(result.machine_pid)},
       worktree_path: result.worktree_path,
       claude_started: not is_nil(result.claude_port),
@@ -1242,7 +1242,7 @@ defmodule Arbiter.MCP.Tools do
     model_id = Map.get(meta, :model) || Map.get(routing, :model)
 
     %{
-      bead_id: snap.bead_id,
+      task_id: snap.task_id,
       status: to_str(snap.status),
       repo: snap.repo,
       started_at: iso(snap.started_at),
@@ -1293,14 +1293,14 @@ defmodule Arbiter.MCP.Tools do
   defp serialize_claim_action({:create, ref, summary}),
     do: %{action: "create", ref: ref, title: summary[:title], html_url: summary[:html_url]}
 
-  defp serialize_claim_action({:close, bead_id, reason}),
-    do: %{action: "close", bead_id: bead_id, reason: reason}
+  defp serialize_claim_action({:close, task_id, reason}),
+    do: %{action: "close", task_id: task_id, reason: reason}
 
-  defp serialize_claim_result({:created, bead}),
-    do: %{outcome: "created", bead: serialize_bead_summary(bead)}
+  defp serialize_claim_result({:created, task}),
+    do: %{outcome: "created", task: serialize_task_summary(task)}
 
-  defp serialize_claim_result({:closed, bead}),
-    do: %{outcome: "closed", bead: serialize_bead_summary(bead)}
+  defp serialize_claim_result({:closed, task}),
+    do: %{outcome: "closed", task: serialize_task_summary(task)}
 
   defp serialize_claim_result({:error, action, reason}),
     do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}

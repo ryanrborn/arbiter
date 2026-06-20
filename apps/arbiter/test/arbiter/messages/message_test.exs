@@ -68,7 +68,7 @@ defmodule Arbiter.Messages.MessageTest do
   end
 
   describe "send_mail/1 + inbox/2 + mark_read/1" do
-    test "mailbox messages addressed to a bead show up unread in the inbox" do
+    test "mailbox messages addressed to a task show up unread in the inbox" do
       {:ok, _m} =
         Message.send_mail(%{
           workspace_id: @ws,
@@ -87,7 +87,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert Message.inbox("bd-soren", workspace_id: @ws) == []
     end
 
-    test "inbox excludes notifications and other beads' mail" do
+    test "inbox excludes notifications and other tasks' mail" do
       {:ok, _} = Message.notify(%{workspace_id: @ws, body: "noise"})
       {:ok, _} = Message.send_mail(%{workspace_id: @ws, to_ref: "bd-other", body: "not yours"})
 

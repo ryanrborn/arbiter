@@ -1,6 +1,6 @@
 # Acolyte security: configurable permissions & sandboxing
 
-**Bead:** bd-9u10op · **Builds on:** bd-c6xf18 (pluggable agent harness),
+**Task:** bd-9u10op · **Builds on:** bd-c6xf18 (pluggable agent harness),
 bd-3y2mda (config-dir isolation)
 
 ## The problem this fixes
@@ -151,7 +151,7 @@ config :arbiter, :acolyte_security_policy, %{
 
 The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 
-### Per-bead / per-dispatch override
+### Per-task / per-dispatch override
 
 `Arbiter.Polecat.Sling.sling/2` accepts a `:security` map (same shape as
 `agent.security`) or a `:security_mode` shorthand, layered last.

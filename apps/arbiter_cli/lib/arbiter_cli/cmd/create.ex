@@ -12,7 +12,7 @@ defmodule ArbiterCli.Cmd.Create do
 
   Sets how hard the task is. Orthogonal to `--priority`: priority answers
   "how urgent?"; difficulty answers "how hard?" and drives the model +
-  thinking budget routed to workers that work the bead. Classify by the
+  thinking budget routed to workers that work the task. Classify by the
   MAX over: scope (files/modules touched), design uncertainty, reasoning
   depth (mechanical vs concurrency/correctness), blast radius, breadth of
   context required.
@@ -31,28 +31,28 @@ defmodule ArbiterCli.Cmd.Create do
                     or multiple passes.
 
   The Admiral / filing session sets `--difficulty` at create time with a
-  one-line justification in the bead's description. Routing maps the value
+  one-line justification in the task's description. Routing maps the value
   to abstract `{model_tier, thinking}` (see `Arbiter.Agents.Routing.ByDifficulty`).
 
   `--parent <parent-id>` attaches the new issue as a child of an existing parent
-  bead immediately after creation, by adding a `parent_of` dependency edge
+  task immediately after creation, by adding a `parent_of` dependency edge
   (`<parent-id> parent_of <new-id>`). The parent then rolls up child progress
-  and can auto-close. Like `--deps`, the bead is durable even if the attach
+  and can auto-close. Like `--deps`, the task is durable even if the attach
   fails — the failure is surfaced and arb exits non-zero.
 
   When the workspace has a tracker configured (`config["tracker"]["type"] !=
   none`), the server **also creates a corresponding upstream issue** and
   writes the returned ref back into `tracker_ref`. To opt out of that:
 
-    * `--tracker-ref REF` — bind the new bead to an *existing* upstream
+    * `--tracker-ref REF` — bind the new task to an *existing* upstream
       issue (skip outbound create). The ref is passed through to the create
       action as `tracker_ref`; the server's after-transaction hook sees the
       ref is already set and skips the API call.
-    * `--no-tracker` / `--local-only` — create a purely local bead even on a
+    * `--no-tracker` / `--local-only` — create a purely local task even on a
       tracker-configured workspace. Forwards `skip_upstream_create=true` as
       the action argument.
-    * `--ticket-only` / `--no-bead` / `--unclaimed` — create ONLY the upstream
-      tracker ticket, with NO local bead. The ticket sits unclaimed on the
+    * `--ticket-only` / `--no-task` / `--unclaimed` — create ONLY the upstream
+      tracker ticket, with NO local task. The ticket sits unclaimed on the
       shared tracker; anyone can pick it up via `arb claim <ref>`. The workspace
       must have a tracker configured. Mutually exclusive with `--no-tracker` /
       `--local-only` (opposite intent).
@@ -64,7 +64,7 @@ defmodule ArbiterCli.Cmd.Create do
   each listed issue (each becomes `<dep_id> blocks <new_id>`) AFTER the issue
   itself is created. If any dependency creation fails the new issue is left
   in place — the failure is reported and arb exits non-zero. Mirrors the
-  upstream-create failure semantics: the bead is durable, the failure is
+  upstream-create failure semantics: the task is durable, the failure is
   surfaced.
 
   `--labels` is accepted for interface parity with `bd` but the current Issue
@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.Create do
     no_tracker: :boolean,
     local_only: :boolean,
     ticket_only: :boolean,
-    no_bead: :boolean,
+    no_task: :boolean,
     unclaimed: :boolean,
     parent: :string,
     auto_close: :boolean,
@@ -110,7 +110,7 @@ defmodule ArbiterCli.Cmd.Create do
         end
 
       ticket_only? =
-        opts[:ticket_only] == true or opts[:no_bead] == true or opts[:unclaimed] == true
+        opts[:ticket_only] == true or opts[:no_task] == true or opts[:unclaimed] == true
 
       skip_upstream? = opts[:no_tracker] == true or opts[:local_only] == true
 
@@ -124,7 +124,7 @@ defmodule ArbiterCli.Cmd.Create do
       if ticket_only? do
         run_ticket_only(opts, title, mode)
       else
-        run_bead_create(opts, rest, title, skip_upstream?, mode)
+        run_task_create(opts, rest, title, skip_upstream?, mode)
       end
     end
   end
@@ -147,7 +147,7 @@ defmodule ArbiterCli.Cmd.Create do
     if ignored != [] and mode == :text do
       IO.puts(
         :stderr,
-        "arb: warning: --ticket-only ignores #{Enum.join(ignored, ", ")} (no local bead is created)."
+        "arb: warning: --ticket-only ignores #{Enum.join(ignored, ", ")} (no local task is created)."
       )
     end
 
@@ -167,7 +167,7 @@ defmodule ArbiterCli.Cmd.Create do
     Output.emit_ticket(ticket, mode)
   end
 
-  defp run_bead_create(opts, _rest, title, skip_upstream?, mode) do
+  defp run_task_create(opts, _rest, title, skip_upstream?, mode) do
     workspace_id = Workspace.id_or_halt()
     force? = opts[:force] == true
 
@@ -199,9 +199,9 @@ defmodule ArbiterCli.Cmd.Create do
           body
 
         {:error, err} ->
-          # Includes the upstream-create-failed (HTTP 502) path: the bead was
+          # Includes the upstream-create-failed (HTTP 502) path: the task was
           # created locally but the upstream tracker call failed. The error
-          # message embeds the bead id so the user can recover via
+          # message embeds the task id so the user can recover via
           # `arb update <id> --tracker-ref N`.
           Output.die(err)
       end
@@ -251,8 +251,8 @@ defmodule ArbiterCli.Cmd.Create do
     end)
   end
 
-  # Attach the freshly-created issue as a child of an existing parent bead via a
-  # `parent_of` edge (`parent_id parent_of new_id`). The bead is durable; a
+  # Attach the freshly-created issue as a child of an existing parent task via a
+  # `parent_of` edge (`parent_id parent_of new_id`). The task is durable; a
   # failed attach is surfaced and arb exits non-zero, mirroring `attach_deps/2`.
   defp attach_parent(new_id, parent_id) do
     body = %{"from_issue_id" => parent_id, "to_issue_id" => new_id, "type" => "parent_of"}

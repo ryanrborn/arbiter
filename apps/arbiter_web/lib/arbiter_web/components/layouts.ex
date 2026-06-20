@@ -50,7 +50,7 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
-            <.link navigate={~p"/beads"} class={nav_class(@current_path, "/beads")}>
+            <.link navigate={~p"/tasks"} class={nav_class(@current_path, "/tasks")}>
               {cap_plural("issue")}
             </.link>
           </li>

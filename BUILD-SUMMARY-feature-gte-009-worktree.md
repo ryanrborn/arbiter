@@ -1,6 +1,6 @@
 # gte-009 — Polecat.Worktree module
 
-Bead: gte-009
+Task: gte-009
 Branch: `feature/gte-009-worktree`
 
 ## What
@@ -70,7 +70,7 @@ Single private wrapper for all `System.cmd` calls:
 
 ## Tests
 
-Built against a real fixture (no `System.cmd` mocks), per the bead spec:
+Built against a real fixture (no `System.cmd` mocks), per the task spec:
 
 - `setup` builds a real `git init -b main` repo with one commit and a bare
   `remote.git` to push to, all inside `System.tmp_dir!()`.
@@ -111,7 +111,7 @@ $ mix test apps/arbiter/test/arbiter/polecat/worktree_test.exs
 ```
 
 (There are pre-existing `mix format` diffs in an unrelated migration file
-under `priv/repo/migrations/` — not touched by this bead.)
+under `priv/repo/migrations/` — not touched by this task.)
 
 ## Followups
 

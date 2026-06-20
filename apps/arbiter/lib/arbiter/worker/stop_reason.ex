@@ -20,7 +20,7 @@ defmodule Arbiter.Worker.StopReason do
     * `:auth_expired` — the agent CLI could not authenticate (401 / "invalid
       authentication credentials" / OAuth expiry). Remediation: re-authenticate.
       Distinct from a generic failure because the fix is operator credentials,
-      not the bead. Provider-agnostic (Claude OAuth, Gemini API key).
+      not the task. Provider-agnostic (Claude OAuth, Gemini API key).
     * `:credit_exhausted` — out of credits / insufficient balance / quota /
       billing. Remediation: top up credits or rotate to a funded key.
     * `:rate_limited` — 429 / rate-limit / overloaded / resource exhausted.
@@ -32,7 +32,7 @@ defmodule Arbiter.Worker.StopReason do
       non-zero exit) lands here unless its stderr matches a more specific
       signature.
     * `:exited_without_done` — clean exit (status 0) but the worker never
-      emitted `arb done`. It quit early without completing the bead.
+      emitted `arb done`. It quit early without completing the task.
     * `:stalled` — no exit at all; the subprocess is alive but produced no
       output within the watchdog window (caller passes `exit_status: nil`).
 
@@ -156,7 +156,7 @@ defmodule Arbiter.Worker.StopReason do
           category: :stalled,
           summary: "agent produced no output within the watchdog window (possible hang)",
           remediation:
-            "Inspect the worker's transcript; if genuinely hung, stop and re-dispatch the bead.",
+            "Inspect the worker's transcript; if genuinely hung, stop and re-dispatch the task.",
           exit_status: nil,
           signal: nil
         }
@@ -176,7 +176,7 @@ defmodule Arbiter.Worker.StopReason do
           category: :exited_without_done,
           summary: "agent exited cleanly but never signalled `arb done` (quit before completing)",
           remediation:
-            "The worker stopped early without finishing the bead. Review the transcript, " <>
+            "The worker stopped early without finishing the task. Review the transcript, " <>
               "then re-dispatch.",
           exit_status: 0,
           signal: nil

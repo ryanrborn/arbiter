@@ -2,7 +2,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
   use ArbiterCli.CliCase, async: false
 
   describe "arb dispatch" do
-    test "missing bead-id fails with usage hint" do
+    test "missing task-id fails with usage hint" do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Dispatch.run([]) end)
       assert err =~ "dispatch requires an issue id"
       assert code != 0
@@ -18,8 +18,8 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       stub_post(
         "/api/workers/dispatch",
         %{
-          "bead" => %{"id" => "gte-017", "title" => "dispatch cmd", "status" => "in_progress"},
-          "worker" => %{"bead_id" => "gte-017", "pid" => "#PID<0.123.0>"},
+          "task" => %{"id" => "gte-017", "title" => "dispatch cmd", "status" => "in_progress"},
+          "worker" => %{"task_id" => "gte-017", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"}
         }
       )
@@ -34,8 +34,8 @@ defmodule ArbiterCli.Cmd.DispatchTest do
 
     test "passes repo in body when provided" do
       stub_post("/api/workers/dispatch", %{
-        "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
-        "worker" => %{"bead_id" => "gte-017", "pid" => "x"},
+        "task" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+        "worker" => %{"task_id" => "gte-017", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
@@ -48,15 +48,15 @@ defmodule ArbiterCli.Cmd.DispatchTest do
 
     test "--json mode emits JSON" do
       stub_post("/api/workers/dispatch", %{
-        "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
-        "worker" => %{"bead_id" => "gte-017", "pid" => "x"},
+        "task" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+        "worker" => %{"task_id" => "gte-017", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--json"]) end)
       assert code == 0
       assert {:ok, decoded} = Jason.decode(out)
-      assert decoded["bead"]["id"] == "gte-017"
+      assert decoded["task"]["id"] == "gte-017"
     end
 
     # Stubs POST /api/workers/dispatch, captures the request body, and forwards
@@ -74,8 +74,8 @@ defmodule ArbiterCli.Cmd.DispatchTest do
             conn
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
-              "bead" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
-              "worker" => %{"bead_id" => "gte-017", "pid" => "x"},
+              "task" => %{"id" => "gte-017", "title" => "t", "status" => "in_progress"},
+              "worker" => %{"task_id" => "gte-017", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
 
@@ -88,7 +88,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
     test "404 propagates as die" do
       stub_post(
         "/api/workers/dispatch",
-        %{"error" => %{"type" => "not_found", "message" => "bead not found"}},
+        %{"error" => %{"type" => "not_found", "message" => "task not found"}},
         404
       )
 
@@ -107,7 +107,7 @@ defmodule ArbiterCli.Cmd.DispatchTest do
 
       assert code == 0
       assert_receive {:body, body}
-      assert body["bead_id"] == "gte-017"
+      assert body["task_id"] == "gte-017"
       assert body["with_claude"] == true
       assert body["model"] == "haiku"
     end

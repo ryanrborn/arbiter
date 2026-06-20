@@ -8,7 +8,7 @@
 
 require Ash.Query
 
-alias Arbiter.Beads.Workspace
+alias Arbiter.Tasks.Workspace
 
 default_name = "default"
 

@@ -1,6 +1,6 @@
 # BUILD SUMMARY — bugfix/158-tribunal-reviewer-must-review-implementer-s
 
-**Bead:** bd-1mksks  
+**Task:** bd-1mksks  
 **Branch:** bugfix/158-tribunal-reviewer-must-review-implementer-s
 
 ## What was done
@@ -28,7 +28,7 @@ commit to verify it's on.
    review or re-review), verify the branch has ≥1 commit ahead of the target
    branch. If not, escalate immediately as REQUEST_CHANGES. Uses the same
    branch-guard as the polecat gate: only fires when the worktree is checked
-   out on the per-bead branch, avoiding false positives from test setups that
+   out on the per-task branch, avoiding false positives from test setups that
    reuse the rig repo with HEAD on main.
 
 2. **`head_sha: nil` in state**: the HEAD SHA at reviewer-spawn time is

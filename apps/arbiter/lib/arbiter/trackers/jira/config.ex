@@ -19,7 +19,7 @@ defmodule Arbiter.Trackers.Jira.Config do
         "email" => "ryan.born@leotechnologies.com",
         # optional:
         "status_map" => %{
-          # Bead lifecycle event -> Jira target STATUS name (NOT a transition
+          # Task lifecycle event -> Jira target STATUS name (NOT a transition
           # name). `Arbiter.Trackers.Jira.transition/2` resolves a path of
           # transitions to reach the target status, walking the workflow graph
           # for multi-hop moves (e.g. Backlog -> … -> In Progress).
@@ -59,12 +59,12 @@ defmodule Arbiter.Trackers.Jira.Config do
   this should be avoided outside of tests.
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.Jira.Error
 
   @pdict_key {__MODULE__, :active_workspace_config}
 
-  # Bead lifecycle event -> Jira target STATUS name. The adapter path-finds a
+  # Task lifecycle event -> Jira target STATUS name. The adapter path-finds a
   # sequence of transitions to reach the target (see `Jira.transition/2`).
   # Events with no entry here are treated as "this tracker doesn't model that
   # state" and are skipped silently — only a *mapped* status that can't be

@@ -47,7 +47,7 @@ defmodule ArbiterCli.Cmd.Update do
   Notes on the Jira ticket). They overwrite the field (unlike `--append-notes`).
 
   `--pr-body` sets the worker-authored PR/MR description the MergeQueue opens
-  the bead's single canonical PR with (Summary / Test plan / References). It
+  the task's single canonical PR with (Summary / Test plan / References). It
   overwrites the field.
 
   `--append-notes` appends the given string to the existing `notes` field

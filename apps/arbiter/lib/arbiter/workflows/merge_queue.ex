@@ -3,7 +3,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   Per-workspace merge-queue GenServer. Picks up "worker done" events,
   opens MRs/PRs (or merges directly per workspace config), polls them for
   approval + CI, merges with the configured strategy, and transitions
-  beads to `:closed` when the merge lands.
+  tasks to `:closed` when the merge lands.
 
   ## Lifecycle
 
@@ -13,13 +13,13 @@ defmodule Arbiter.Workflows.MergeQueue do
       subscribes to PubSub topic "worker:done:" <> workspace_id
         │
         ▼
-      receives {:worker_done, bead_id}
+      receives {:worker_done, task_id}
         │
         ▼
-      loads bead → resolves merge adapter → opens MR (or skips for :direct)
+      loads task → resolves merge adapter → opens MR (or skips for :direct)
         │
         ▼
-      tick/0 (every poll_interval_ms) → polls in-flight MRs → merges → closes bead
+      tick/0 (every poll_interval_ms) → polls in-flight MRs → merges → closes task
 
   ## State machine (per in-flight item)
 
@@ -40,17 +40,17 @@ defmodule Arbiter.Workflows.MergeQueue do
       :merging
         │   merge confirmed
         ▼
-      :done   →   bead transitioned to :closed, item removed
+      :done   →   task transitioned to :closed, item removed
 
   Errors anywhere set status to `:failed` and stop further polling on that
-  item; the bead is NOT closed on failure. The reviewer can drive recovery
+  item; the task is NOT closed on failure. The reviewer can drive recovery
   manually.
 
   ## Auto-resolved merge conflicts (bd-dolcqq)
 
   When `adapter.get` reports `conflicting: true` we used to
   freeze the item and wait for a human rebase — twice in one morning that
-  meant an Admiral page on parallel dispatcher-bead waves. Now the MergeQueue
+  meant an Admiral page on parallel dispatcher-task waves. Now the MergeQueue
   side-steps that:
 
       :awaiting_approval (or any non-terminal status)
@@ -94,7 +94,7 @@ defmodule Arbiter.Workflows.MergeQueue do
                            (`adapter.list_review_feedback/1`), post a brief
                            acknowledging comment, then spawn
                            `Arbiter.Workflows.MergeQueue.ReviseDispatcher` (the
-                           `arb resume` path: a fresh worker on the bead's
+                           `arb resume` path: a fresh worker on the task's
                            preserved worktree + `pr_ref`, briefed with the
                            reviewer feedback). It commits + pushes to the SAME
                            branch — no new PR (pairs with bd-53xrmi).
@@ -109,7 +109,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   Each distinct CHANGES_REQUESTED review gets **exactly one** revise pass. A
   dispatch failure parks the item `:failed` (no retry loop). The `Direct`
-  merger no-ops (no forge review surface), so direct-strategy beads are
+  merger no-ops (no forge review surface), so direct-strategy tasks are
   unaffected. The dispatcher module is injected via `:revise_dispatcher`
   (start_link opt) → `:arbiter, :merge_queue_revise_dispatcher` (application env)
   → the default real implementation; tests pass a stub.
@@ -122,7 +122,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     * `"github"` — `Arbiter.Mergers.Github` adapter (PR-based)
     * `"gitlab"` — `Arbiter.Mergers.Gitlab` adapter (MR-based)
     * `"direct"` — `Arbiter.Mergers.Direct` adapter. **Never opens a
-      MR/PR**. The bead is immediately transitioned to `:done` (and then
+      MR/PR**. The task is immediately transitioned to `:done` (and then
       `:closed`). This is the "personal project" path; the worker is
       assumed to have already pushed + merged its branch out-of-band.
 
@@ -135,7 +135,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   workflow completes successfully.
 
   Subscribers to `"merge_queue:" <> workspace_id` will receive
-  `{:bead_closed_by_merge_queue, bead_id}` once the merge lands.
+  `{:task_closed_by_merge_queue, task_id}` once the merge lands.
 
   ## Supervision
 
@@ -151,9 +151,9 @@ defmodule Arbiter.Workflows.MergeQueue do
     * `:name` — process name (default `__MODULE__`).
     * `:poll_interval_ms` — how often `:tick` fires (default 30_000).
     * `:base` — an explicit *queue-level* base override. It sits **below** a
-      bead's own `target_branch` and the per-repo default (so those still win),
+      task's own `target_branch` and the per-repo default (so those still win),
       but above the workspace `merge.base`. Defaults to `nil`, in which case the
-      base is resolved entirely from bead/repo/workspace config via
+      base is resolved entirely from task/repo/workspace config via
       `Arbiter.Worker.TargetBranch`. Convenient for tests.
     * `:auto_tick` — when `false` (default `true`), the periodic `:tick`
       timer is not scheduled. Tests use `false` and drive ticks via
@@ -164,7 +164,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       tests pass a stub.
     * `:revise_dispatcher` — module implementing the
       `Arbiter.Workflows.MergeQueue.ReviseDispatcher` behaviour (bd-95lsjb).
-      Defaults to the real implementation (which resumes the bead's worktree
+      Defaults to the real implementation (which resumes the task's worktree
       via `Arbiter.Worker.Dispatch.resume/2`); tests pass a stub.
   """
 
@@ -173,8 +173,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   require Logger
   require Ash.Query
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.TargetBranch
@@ -198,7 +198,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   @typedoc "An in-flight merge queue item."
   @type item :: %{
-          bead_id: String.t(),
+          task_id: String.t(),
           mr_ref: String.t() | nil,
           status: status(),
           strategy: String.t(),
@@ -239,15 +239,15 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   @doc """
-  Synchronously enqueue a bead for merging. Behaves the same as receiving
-  a `{:worker_done, bead_id}` PubSub message. Returns `:ok` on enqueue
+  Synchronously enqueue a task for merging. Behaves the same as receiving
+  a `{:worker_done, task_id}` PubSub message. Returns `:ok` on enqueue
   even if the actual MR open / merge hasn't happened yet (it runs inside
   the GenServer's `handle_call` though, so by the time this returns the
   initial state transition has been recorded).
   """
   @spec enqueue(GenServer.server(), String.t()) :: :ok | {:error, term()}
-  def enqueue(server \\ __MODULE__, bead_id) when is_binary(bead_id) do
-    GenServer.call(server, {:enqueue, bead_id})
+  def enqueue(server \\ __MODULE__, task_id) when is_binary(task_id) do
+    GenServer.call(server, {:enqueue, task_id})
   end
 
   @doc """
@@ -327,8 +327,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   @impl true
-  def handle_call({:enqueue, bead_id}, _from, %State{} = state) do
-    {reply, state} = do_enqueue(state, bead_id)
+  def handle_call({:enqueue, task_id}, _from, %State{} = state) do
+    {reply, state} = do_enqueue(state, task_id)
     {:reply, reply, state}
   end
 
@@ -341,8 +341,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   @impl true
-  def handle_info({:worker_done, bead_id}, %State{} = state) when is_binary(bead_id) do
-    {_reply, state} = do_enqueue(state, bead_id)
+  def handle_info({:worker_done, task_id}, %State{} = state) when is_binary(task_id) do
+    {_reply, state} = do_enqueue(state, task_id)
     {:noreply, state}
   end
 
@@ -356,45 +356,45 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # ---- enqueue + state-machine driver -------------------------------------
 
-  defp do_enqueue(state, bead_id) do
-    case Ash.get(Issue, bead_id) do
-      {:ok, bead} ->
+  defp do_enqueue(state, task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, task} ->
         # Reload workspace to pick up the merge config block. Issue belongs_to
         # workspace but the relationship isn't always loaded.
-        {:ok, bead} = Ash.load(bead, [:workspace])
+        {:ok, task} = Ash.load(task, [:workspace])
 
         # Re-seed the adapter's per-process config from the latest workspace
         # state, then resolve the adapter module.
-        Mergers.prepare(bead.workspace)
-        adapter = Mergers.for_workspace(bead.workspace)
+        Mergers.prepare(task.workspace)
+        adapter = Mergers.for_workspace(task.workspace)
         state = %{state | adapter: adapter}
 
-        strategy = Atom.to_string(Workspace.merger_strategy(bead.workspace))
+        strategy = Atom.to_string(Workspace.merger_strategy(task.workspace))
 
         cond do
-          already_queued?(state, bead_id) ->
+          already_queued?(state, task_id) ->
             {{:ok, :already_queued}, state}
 
           strategy == "direct" ->
             # direct: never call MR/PR APIs. The worker owned the push + merge;
-            # we just transition the bead. This is the explicit escape hatch
+            # we just transition the task. This is the explicit escape hatch
             # for personal projects that don't use the PR/MR workflow.
-            item = new_item(bead_id, strategy, status: :done)
+            item = new_item(task_id, strategy, status: :done)
             state = %{state | items: [item | state.items]}
-            state = close_bead_and_finalize(state, item)
+            state = close_task_and_finalize(state, item)
             {:ok, state}
 
-          existing_mr_ref(bead) ->
-            # bd-auma3z: the bead already has an open MR/PR (e.g. a prior worker
+          existing_mr_ref(task) ->
+            # bd-auma3z: the task already has an open MR/PR (e.g. a prior worker
             # opened one before it stopped, and was then resumed). Adopt that MR
             # into the queue and poll it to completion rather than calling
             # `adapter.open` again — that would create a DUPLICATE for the same
             # branch. The resumed worker's work lands on the same branch the MR
             # already tracks.
-            adopt_existing_mr(state, bead, strategy)
+            adopt_existing_mr(state, task, strategy)
 
           true ->
-            open_mr_for(state, bead, strategy)
+            open_mr_for(state, task, strategy)
         end
 
       {:error, _} = err ->
@@ -402,51 +402,51 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  # The bead's recorded MR ref, if any — set by `maybe_record_mr_ref/2` when
+  # The task's recorded MR ref, if any — set by `maybe_record_mr_ref/2` when
   # an MR was opened. nil/blank means no open MR to adopt.
   defp existing_mr_ref(%Issue{pr_ref: ref}) when is_binary(ref) and ref != "", do: ref
   defp existing_mr_ref(_), do: nil
 
-  # Adopt a bead's already-open MR into the merge queue without opening a new
+  # Adopt a task's already-open MR into the merge queue without opening a new
   # one (bd-auma3z no-duplicate guard). Slots it in at `:awaiting_approval`
   # so the normal poll loop drives it the rest of the way.
-  defp adopt_existing_mr(state, bead, strategy) do
-    mr_ref = existing_mr_ref(bead)
+  defp adopt_existing_mr(state, task, strategy) do
+    mr_ref = existing_mr_ref(task)
 
     Logger.info(
-      "MergeQueue: bead #{bead.id} already has MR #{mr_ref}; adopting it " <>
+      "MergeQueue: task #{task.id} already has MR #{mr_ref}; adopting it " <>
         "instead of opening a duplicate"
     )
 
     item =
-      new_item(bead.id, strategy,
+      new_item(task.id, strategy,
         mr_ref: mr_ref,
         status: :awaiting_approval,
-        base: resolve_base(state, bead),
+        base: resolve_base(state, task),
         opened_at: DateTime.utc_now()
       )
 
     {:ok, %{state | items: [item | state.items]}}
   end
 
-  # Resolve the PR base for a bead via the shared resolver, identical to the
+  # Resolve the PR base for a task via the shared resolver, identical to the
   # chain `Arbiter.Worker.Dispatch` uses for the worktree base, so the two can
   # never diverge (bd-b6rzoc). `state.base` is threaded in as the queue-level
-  # `:workspace_base` — below the bead/repo config, never short-circuiting it.
-  defp resolve_base(%State{} = state, %Issue{} = bead) do
-    TargetBranch.resolve(bead,
+  # `:workspace_base` — below the task/repo config, never short-circuiting it.
+  defp resolve_base(%State{} = state, %Issue{} = task) do
+    TargetBranch.resolve(task,
       workspace_base: state.base,
-      repo: resolve_bead_repo(bead)
+      repo: resolve_task_repo(task)
     )
   end
 
-  # The repo the bead was actually worked in — drawn from its most recent
-  # worker run, the same repo `Dispatch` cut the worktree with. nil when the bead
-  # has no run on record (e.g. a bead enqueued without ever being slung), in
+  # The repo the task was actually worked in — drawn from its most recent
+  # worker run, the same repo `Dispatch` cut the worktree with. nil when the task
+  # has no run on record (e.g. a task enqueued without ever being slung), in
   # which case the per-repo default simply doesn't apply.
-  defp resolve_bead_repo(%Issue{id: bead_id}) do
+  defp resolve_task_repo(%Issue{id: task_id}) do
     Run
-    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read()
@@ -458,12 +458,12 @@ defmodule Arbiter.Workflows.MergeQueue do
     _ -> nil
   end
 
-  defp open_mr_for(state, bead, strategy) do
-    base = resolve_base(state, bead)
+  defp open_mr_for(state, task, strategy) do
+    base = resolve_base(state, task)
 
-    branch = strategy_for(bead.workspace, "merge", "branch_prefix", "") <> bead.id
-    title = bead.title
-    description = pr_description_for(bead)
+    branch = strategy_for(task.workspace, "merge", "branch_prefix", "") <> task.id
+    title = task.title
+    description = pr_description_for(task)
 
     worktree_path = state.worktree_module.worktree_path(branch)
 
@@ -471,29 +471,29 @@ defmodule Arbiter.Workflows.MergeQueue do
          {:ok, mr_ref} when is_binary(mr_ref) <-
            state.adapter.open(branch, title, description, %{target_branch: base}) do
       item =
-        new_item(bead.id, strategy,
+        new_item(task.id, strategy,
           mr_ref: mr_ref,
           status: :awaiting_approval,
           base: base,
           opened_at: DateTime.utc_now()
         )
 
-      # Record MR ref on the bead's pr_ref field. Best-effort: failure
-      # to update the bead doesn't fail the whole enqueue.
-      _ = maybe_record_mr_ref(bead, mr_ref)
+      # Record MR ref on the task's pr_ref field. Best-effort: failure
+      # to update the task doesn't fail the whole enqueue.
+      _ = maybe_record_mr_ref(task, mr_ref)
 
       # Link the MR back onto the upstream tracker ticket. Best-effort and
       # tracker-agnostic — a no-op for trackers without remote links.
-      _ = maybe_link_mr_to_tracker(bead, state.adapter, mr_ref)
+      _ = maybe_link_mr_to_tracker(task, state.adapter, mr_ref)
 
       {:ok, %{state | items: [item | state.items]}}
     else
       {:error, {:push_failed, _} = reason} ->
-        item = new_item(bead.id, strategy, status: :failed, last_error: reason)
+        item = new_item(task.id, strategy, status: :failed, last_error: reason)
         {{:error, reason}, %{state | items: [item | state.items]}}
 
       {:error, reason} ->
-        item = new_item(bead.id, strategy, status: :failed, last_error: reason)
+        item = new_item(task.id, strategy, status: :failed, last_error: reason)
         {{:error, reason}, %{state | items: [item | state.items]}}
     end
   end
@@ -503,22 +503,22 @@ defmodule Arbiter.Workflows.MergeQueue do
   #   1. the worker-authored `pr_body` (bd-53xrmi) — Summary / Test plan /
   #      References written *after* the change landed, filling the repo's PR
   #      template when present. This is the canonical, worker-quality body.
-  #   2. the bead's originating `description` (the ticket spec) — a reasonable
-  #      stand-in when no worker body was produced (older beads, review-only).
+  #   2. the task's originating `description` (the ticket spec) — a reasonable
+  #      stand-in when no worker body was produced (older tasks, review-only).
   #   3. `PRTemplate.default_body/1` — a minimal `## <title>` + description +
   #      tracker-link body.
   #
   # The final fallback is what root-causes the empty-body incident (#3606):
-  # `bead.description || ""` returned `""` whenever the local bead's
+  # `task.description || ""` returned `""` whenever the local task's
   # description was empty/nil (e.g. the spec lived only upstream), and GitHub
   # injects the repo's bare PR template whenever the body is empty. `pr_body ||
   # description || default_body` is *always* non-empty (default_body always
   # carries the title), so the MergeQueue can never again open a bare-template PR.
-  # The bead is fetched fresh via `Ash.get/2` in `do_enqueue/2`, which selects
+  # The task is fetched fresh via `Ash.get/2` in `do_enqueue/2`, which selects
   # all attributes — so `pr_body` and `description` are loaded, never silently
   # nil from a partial select.
-  defp pr_description_for(%Issue{} = bead) do
-    present(bead.pr_body) || present(bead.description) || PRTemplate.default_body(bead)
+  defp pr_description_for(%Issue{} = task) do
+    present(task.pr_body) || present(task.description) || PRTemplate.default_body(task)
   end
 
   # A string is "present" when it's a non-blank binary; nil/""/whitespace-only
@@ -600,14 +600,14 @@ defmodule Arbiter.Workflows.MergeQueue do
         advance_status(state, %{item | status: :awaiting_approval}, mr_state)
 
       # MR was already merged externally (e.g. the Watchdog merged it for a
-      # ReviewGate-approved bead before the MergeQueue processed the worker_done
-      # event). Close the bead directly without re-attempting adapter.merge/1
+      # ReviewGate-approved task before the MergeQueue processed the worker_done
+      # event). Close the task directly without re-attempting adapter.merge/1
       # — that call would fail on an already-closed PR. bd-d1jp4r. Checked
       # before the changes-requested branch so a merged PR never triggers a
       # revise on a stale review.
       mr_state.status == :merged ->
         item = %{item | status: :done}
-        state = close_bead_and_finalize(state, item)
+        state = close_task_and_finalize(state, item)
         {item, state}
 
       # A reviewer requested changes with a review we haven't actioned yet:
@@ -643,7 +643,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp handle_conflict(state, %{status: :conflict_resolving} = item) do
     safe_escalate(
       state.conflict_resolver,
-      item.bead_id,
+      item.task_id,
       state.workspace_id,
       item_branch_label(item),
       :resolver_did_not_clear_conflict
@@ -665,7 +665,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     # that predate the field; the resolver itself fills any remaining nil from
     # workspace config.
     args = %{
-      bead_id: item.bead_id,
+      task_id: item.task_id,
       workspace_id: state.workspace_id,
       target_branch: item.base || state.base,
       pr_ref: item.mr_ref
@@ -673,7 +673,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     case safe_resolve(state.conflict_resolver, args) do
       {:ok, _info} ->
-        Logger.info("MergeQueue: spawned conflict resolver for bead=#{item.bead_id}")
+        Logger.info("MergeQueue: spawned conflict resolver for task=#{item.task_id}")
 
         item = %{
           item
@@ -686,12 +686,12 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       {:error, reason} ->
         Logger.warning(
-          "MergeQueue: conflict resolver failed for bead=#{item.bead_id}: #{inspect(reason)}"
+          "MergeQueue: conflict resolver failed for task=#{item.task_id}: #{inspect(reason)}"
         )
 
         safe_escalate(
           state.conflict_resolver,
-          item.bead_id,
+          item.task_id,
           state.workspace_id,
           item_branch_label(item),
           reason
@@ -738,7 +738,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     _ = post_revise_ack(state, item)
 
     args = %{
-      bead_id: item.bead_id,
+      task_id: item.task_id,
       workspace_id: state.workspace_id,
       target_branch: item.base || state.base,
       pr_ref: item.mr_ref,
@@ -748,7 +748,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     case safe_dispatch_revise(state.revise_dispatcher, args) do
       {:ok, _info} ->
         Logger.info(
-          "MergeQueue: dispatched revise pass for bead=#{item.bead_id} " <>
+          "MergeQueue: dispatched revise pass for task=#{item.task_id} " <>
             "(review=#{inspect(review_id)})"
         )
 
@@ -763,7 +763,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       {:error, reason} ->
         Logger.warning(
-          "MergeQueue: revise dispatch failed for bead=#{item.bead_id}: #{inspect(reason)}"
+          "MergeQueue: revise dispatch failed for task=#{item.task_id}: #{inspect(reason)}"
         )
 
         {%{item | status: :failed, last_error: {:revise_dispatch_failed, reason}}, state}
@@ -792,8 +792,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   # acting on the feedback. Best-effort: never fails the revise dispatch.
   defp post_revise_ack(state, item) do
     body =
-      "🤖 Addressing review feedback on the existing branch for bead " <>
-        "#{item.bead_id} — a revision will be pushed to this PR shortly."
+      "🤖 Addressing review feedback on the existing branch for task " <>
+        "#{item.task_id} — a revision will be pushed to this PR shortly."
 
     state.adapter.add_comment(item.mr_ref, body)
   rescue
@@ -818,7 +818,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  defp safe_escalate(resolver_module, bead_id, workspace_id, branch, reason)
+  defp safe_escalate(resolver_module, task_id, workspace_id, branch, reason)
        when is_atom(resolver_module) do
     target =
       if function_exported?(resolver_module, :escalate_unresolved, 4) do
@@ -827,11 +827,11 @@ defmodule Arbiter.Workflows.MergeQueue do
         Arbiter.Workflows.MergeQueue.ConflictResolver
       end
 
-    target.escalate_unresolved(bead_id, workspace_id, branch, reason)
+    target.escalate_unresolved(task_id, workspace_id, branch, reason)
   rescue
     e ->
       Logger.warning(
-        "MergeQueue.safe_escalate: swallowed exception for bead=#{bead_id}: " <>
+        "MergeQueue.safe_escalate: swallowed exception for task=#{task_id}: " <>
           Exception.message(e)
       )
 
@@ -848,11 +848,11 @@ defmodule Arbiter.Workflows.MergeQueue do
         Arbiter.Workflows.MergeQueue.ConflictResolver
       end
 
-    target.notify_resolution(item.bead_id, state.workspace_id, item_branch_label(item))
+    target.notify_resolution(item.task_id, state.workspace_id, item_branch_label(item))
   rescue
     e ->
       Logger.warning(
-        "MergeQueue.safe_notify_resolution: swallowed exception for bead=#{item.bead_id}: " <>
+        "MergeQueue.safe_notify_resolution: swallowed exception for task=#{item.task_id}: " <>
           Exception.message(e)
       )
 
@@ -861,7 +861,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     :exit, _ -> :ok
   end
 
-  defp item_branch_label(%{bead_id: bead_id}), do: "bead=" <> bead_id
+  defp item_branch_label(%{task_id: task_id}), do: "task=" <> task_id
 
   defp try_merge(state, item) do
     case state.adapter.merge(item.mr_ref) do
@@ -870,7 +870,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         # Synchronously finalize. adapter.merge/1 returning :ok is the merge
         # confirmation, so it's safe to close now.
         item = %{item | status: :done}
-        state = close_bead_and_finalize(state, item)
+        state = close_task_and_finalize(state, item)
         {item, state}
 
       {:error, reason} ->
@@ -878,19 +878,19 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp close_bead_and_finalize(state, item) do
-    case Ash.get(Issue, item.bead_id) do
-      {:ok, bead} ->
-        case Ash.update(bead, %{close_upstream: true}, action: :close) do
+  defp close_task_and_finalize(state, item) do
+    case Ash.get(Issue, item.task_id) do
+      {:ok, task} ->
+        case Ash.update(task, %{close_upstream: true}, action: :close) do
           {:ok, _closed} ->
-            broadcast_merge_queue_event(state, {:bead_closed_by_merge_queue, item.bead_id})
+            broadcast_merge_queue_event(state, {:task_closed_by_merge_queue, item.task_id})
 
           {:error, reason} ->
-            Logger.warning("MergeQueue: failed to close bead #{item.bead_id}: #{inspect(reason)}")
+            Logger.warning("MergeQueue: failed to close task #{item.task_id}: #{inspect(reason)}")
         end
 
       {:error, reason} ->
-        Logger.warning("MergeQueue: bead #{item.bead_id} vanished before close: #{inspect(reason)}")
+        Logger.warning("MergeQueue: task #{item.task_id} vanished before close: #{inspect(reason)}")
     end
 
     state
@@ -898,9 +898,9 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # ---- helpers ------------------------------------------------------------
 
-  defp new_item(bead_id, strategy, overrides) do
+  defp new_item(task_id, strategy, overrides) do
     base = %{
-      bead_id: bead_id,
+      task_id: task_id,
       mr_ref: nil,
       status: :opening,
       strategy: strategy,
@@ -916,8 +916,8 @@ defmodule Arbiter.Workflows.MergeQueue do
     Map.merge(base, Map.new(overrides))
   end
 
-  defp already_queued?(%State{items: items}, bead_id) do
-    Enum.any?(items, fn i -> i.bead_id == bead_id and i.status not in [:done, :failed] end)
+  defp already_queued?(%State{items: items}, task_id) do
+    Enum.any?(items, fn i -> i.task_id == task_id and i.status not in [:done, :failed] end)
   end
 
   defp strategy_for(workspace, key1, key2, default) do
@@ -935,26 +935,26 @@ defmodule Arbiter.Workflows.MergeQueue do
     end
   end
 
-  defp maybe_record_mr_ref(%Issue{} = bead, mr_ref) do
-    case Ash.update(bead, %{pr_ref: mr_ref}, action: :update) do
+  defp maybe_record_mr_ref(%Issue{} = task, mr_ref) do
+    case Ash.update(task, %{pr_ref: mr_ref}, action: :update) do
       {:ok, _} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
-  # Attach the opened MR as a remote link on the bead's upstream tracker
-  # ticket. Dispatches on the bead's `tracker_type`, seeds the adapter's
-  # per-process config from the bead's workspace, and tolerates trackers that
+  # Attach the opened MR as a remote link on the task's upstream tracker
+  # ticket. Dispatches on the task's `tracker_type`, seeds the adapter's
+  # per-process config from the task's workspace, and tolerates trackers that
   # don't support remote links. Never fails the enqueue.
   defp maybe_link_mr_to_tracker(%Issue{tracker_type: :none}, _adapter, _mr_ref), do: :ok
 
-  defp maybe_link_mr_to_tracker(%Issue{} = bead, adapter, mr_ref) do
+  defp maybe_link_mr_to_tracker(%Issue{} = task, adapter, mr_ref) do
     url = adapter.link_for(mr_ref)
-    title = "MR #{mr_ref} (bead #{bead.id})"
+    title = "MR #{mr_ref} (task #{task.id})"
 
-    Trackers.prepare(bead, bead.workspace)
+    Trackers.prepare(task, task.workspace)
 
-    case Trackers.add_remote_link(bead, url, title) do
+    case Trackers.add_remote_link(task, url, title) do
       :ok ->
         :ok
 
@@ -964,7 +964,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:error, reason} ->
         Logger.warning(
           "MergeQueue: failed to link MR #{mr_ref} onto tracker " <>
-            "#{bead.tracker_type} ref=#{bead.tracker_ref} for bead=#{bead.id}: #{inspect(reason)}"
+            "#{task.tracker_type} ref=#{task.tracker_ref} for task=#{task.id}: #{inspect(reason)}"
         )
 
         :ok
@@ -972,14 +972,14 @@ defmodule Arbiter.Workflows.MergeQueue do
   rescue
     e ->
       Logger.warning(
-        "MergeQueue: error linking MR #{mr_ref} for bead=#{bead.id}: #{Exception.message(e)}"
+        "MergeQueue: error linking MR #{mr_ref} for task=#{task.id}: #{Exception.message(e)}"
       )
 
       :ok
   catch
     :exit, reason ->
       Logger.warning(
-        "MergeQueue: exit linking MR #{mr_ref} for bead=#{bead.id}: #{inspect(reason)}"
+        "MergeQueue: exit linking MR #{mr_ref} for task=#{task.id}: #{inspect(reason)}"
       )
 
       :ok

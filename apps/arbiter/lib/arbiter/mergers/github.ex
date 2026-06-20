@@ -306,7 +306,7 @@ defmodule Arbiter.Mergers.Github do
   `fun`, restoring the previous config when `fun` returns. Useful in tests and
   one-shot scripts. Mirrors `Arbiter.Trackers.Jira.with_workspace/2`.
   """
-  @spec with_workspace(map() | Arbiter.Beads.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(map() | Arbiter.Tasks.Workspace.t(), (-> result)) :: result
         when result: any()
   def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
     prev = Process.get({Config, :active_workspace_config})

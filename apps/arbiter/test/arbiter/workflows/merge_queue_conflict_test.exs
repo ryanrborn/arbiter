@@ -13,8 +13,8 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
   import Ash.Query, only: [filter: 2]
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Workflows.MergeQueue
 
@@ -35,16 +35,16 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
   # The MergeQueue resolves the stub by atom, so we can't pass closures through
   # opts. Instead the stub pulls a per-test target pid out of :persistent_term
-  # keyed on the bead id — the test seeds it before driving the MergeQueue.
+  # keyed on the task id — the test seeds it before driving the MergeQueue.
   defmodule StubResolverWithCallback do
     @moduledoc false
     @behaviour Arbiter.Workflows.MergeQueue.ConflictResolver
 
     @impl true
     def resolve(args) do
-      bead_id = Map.fetch!(args, :bead_id)
+      task_id = Map.fetch!(args, :task_id)
 
-      case lookup(bead_id) do
+      case lookup(task_id) do
         {pid, resolver_result} ->
           send(pid, {:resolver_called, args})
 
@@ -59,10 +59,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
     end
 
     @impl true
-    def escalate_unresolved(bead_id, workspace_id, branch, reason) do
-      case lookup(bead_id) do
+    def escalate_unresolved(task_id, workspace_id, branch, reason) do
+      case lookup(task_id) do
         {pid, _} ->
-          send(pid, {:escalate_called, bead_id, workspace_id, branch, reason})
+          send(pid, {:escalate_called, task_id, workspace_id, branch, reason})
           :ok
 
         nil ->
@@ -71,10 +71,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
     end
 
     @impl true
-    def notify_resolution(bead_id, workspace_id, branch) do
-      case lookup(bead_id) do
+    def notify_resolution(task_id, workspace_id, branch) do
+      case lookup(task_id) do
         {pid, _} ->
-          send(pid, {:notify_called, bead_id, workspace_id, branch})
+          send(pid, {:notify_called, task_id, workspace_id, branch})
           :ok
 
         nil ->
@@ -82,16 +82,16 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       end
     end
 
-    def register(bead_id, pid, resolver_result \\ :ok) do
-      :persistent_term.put({__MODULE__, bead_id}, {pid, resolver_result})
+    def register(task_id, pid, resolver_result \\ :ok) do
+      :persistent_term.put({__MODULE__, task_id}, {pid, resolver_result})
     end
 
-    def unregister(bead_id) do
-      :persistent_term.erase({__MODULE__, bead_id})
+    def unregister(task_id) do
+      :persistent_term.erase({__MODULE__, task_id})
     end
 
-    defp lookup(bead_id) do
-      :persistent_term.get({__MODULE__, bead_id}, nil)
+    defp lookup(task_id) do
+      :persistent_term.get({__MODULE__, task_id}, nil)
     end
   end
 
@@ -108,16 +108,16 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
         config: workspace_config
       })
 
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{
         title: "conflict me",
-        description: "bead under conflict test",
+        description: "task under conflict test",
         workspace_id: workspace.id
       })
 
-    on_exit(fn -> StubResolverWithCallback.unregister(bead.id) end)
+    on_exit(fn -> StubResolverWithCallback.unregister(task.id) end)
 
-    %{workspace: workspace, bead: bead}
+    %{workspace: workspace, task: task}
   end
 
   defp start_merge_queue(workspace, opts \\ []) do
@@ -218,17 +218,17 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   describe "CONFLICTING PR triggers auto-spawn" do
     test "first conflicting tick spawns the resolver and parks the item", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      StubResolverWithCallback.register(bead.id, self(), :ok)
+      StubResolverWithCallback.register(task.id, self(), :ok)
       conflicting_stub(901)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       assert_received {:resolver_called, args}
-      assert args.bead_id == bead.id
+      assert args.task_id == task.id
       assert args.workspace_id == ws.id
       assert args.target_branch == "main"
       assert args.pr_ref == "#901"
@@ -241,16 +241,16 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
     test "second conflicting tick does NOT re-spawn — escalates instead", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       # One mechanical rebase pass is all the resolver gets. If the next tick
       # still sees mergeable: false, the conflict is semantic — escalate
       # rather than spinning on more spawns.
-      StubResolverWithCallback.register(bead.id, self(), :ok)
+      StubResolverWithCallback.register(task.id, self(), :ok)
       conflicting_stub(902)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       assert_received {:resolver_called, _}
@@ -268,10 +268,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
     test "successful resolution (mergeable: true on next tick) restores prior status", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      bead_id = bead.id
-      StubResolverWithCallback.register(bead.id, self(), :ok)
+      task_id = task.id
+      StubResolverWithCallback.register(task.id, self(), :ok)
 
       # Toggle: first GET returns conflicting, second returns clean.
       tick_count = :counters.new(1, [:atomics])
@@ -317,7 +317,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
       assert_received {:resolver_called, _}
 
@@ -332,7 +332,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert item.resolver_spawned_at == nil
 
       # Acceptance criterion: Admiral / author is notified of the resolution.
-      assert_received {:notify_called, ^bead_id, _ws_id, _branch}
+      assert_received {:notify_called, ^task_id, _ws_id, _branch}
     end
   end
 
@@ -341,23 +341,23 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   describe "escalation via mailbox" do
     test "second conflicting tick → escalation + item marked :failed", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      StubResolverWithCallback.register(bead.id, self(), :ok)
+      StubResolverWithCallback.register(task.id, self(), :ok)
       conflicting_stub(904)
 
       # One mechanical rebase pass per conflict — the first spawn happens on
       # the first tick, and a second consecutive CONFLICTING observation
       # means the rebase didn't clear it → escalate.
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       :ok = MergeQueue.tick(name)
       assert_received {:resolver_called, _}
 
       :ok = MergeQueue.tick(name)
-      assert_received {:escalate_called, bead_id, ws_id, _branch, reason}
-      assert bead_id == bead.id
+      assert_received {:escalate_called, task_id, ws_id, _branch, reason}
+      assert task_id == task.id
       assert ws_id == ws.id
       assert reason == :resolver_did_not_clear_conflict
 
@@ -368,23 +368,23 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
     test "resolver returns {:error, _} → escalation via real module + item :failed", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       # The stub returns an error from resolve/1 — the MergeQueue escalates and
       # marks the item :failed. We assert the escalation lands in the message
       # queue (the real ConflictResolver.escalate_unresolved/4 path), since
       # the stub's escalate_unresolved is also wired and we want both layers
       # observed.
-      StubResolverWithCallback.register(bead.id, self(), {:error, :no_repo_path})
+      StubResolverWithCallback.register(task.id, self(), {:error, :no_repo_path})
       conflicting_stub(905)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       assert_received {:resolver_called, _}
-      assert_received {:escalate_called, bead_id, _ws_id, _branch, :no_repo_path}
-      assert bead_id == bead.id
+      assert_received {:escalate_called, task_id, _ws_id, _branch, :no_repo_path}
+      assert task_id == task.id
 
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
@@ -397,13 +397,13 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   describe "ConflictResolver.escalate_unresolved/4" do
     test "creates an :escalation Message addressed to admiral", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       :ok =
         Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved(
-          bead.id,
+          task.id,
           ws.id,
-          "feature/" <> bead.id,
+          "feature/" <> task.id,
           :attempts_exhausted
         )
 
@@ -413,16 +413,16 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
         |> Ash.read!()
 
       assert [msg] = messages
-      assert msg.from_ref == bead.id
-      assert msg.directive_ref == bead.id
+      assert msg.from_ref == task.id
+      assert msg.directive_ref == task.id
       assert msg.body =~ "CONFLICTING"
-      assert msg.body =~ bead.id
+      assert msg.body =~ task.id
     end
 
-    test "missing workspace_id is a no-op (does not raise)", %{bead: bead} do
+    test "missing workspace_id is a no-op (does not raise)", %{task: task} do
       assert :ok =
                Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved(
-                 bead.id,
+                 task.id,
                  nil,
                  "x",
                  :anything
@@ -433,31 +433,31 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   # ---- ConflictResolver.notify_resolution/3 ------------------------------
 
   describe "ConflictResolver.notify_resolution/3" do
-    test "creates a :notification Message attributed to the bead", %{
+    test "creates a :notification Message attributed to the task", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       :ok =
         Arbiter.Workflows.MergeQueue.ConflictResolver.notify_resolution(
-          bead.id,
+          task.id,
           ws.id,
-          "feature/" <> bead.id
+          "feature/" <> task.id
         )
 
       messages =
         Message
-        |> filter(workspace_id == ^ws.id and from_ref == ^bead.id and kind == :notification)
+        |> filter(workspace_id == ^ws.id and from_ref == ^task.id and kind == :notification)
         |> Ash.read!()
 
       assert [msg] = messages
       assert msg.body =~ "auto-resolved"
-      assert msg.body =~ bead.id
+      assert msg.body =~ task.id
     end
 
-    test "missing workspace_id is a no-op (does not raise)", %{bead: bead} do
+    test "missing workspace_id is a no-op (does not raise)", %{task: task} do
       assert :ok =
                Arbiter.Workflows.MergeQueue.ConflictResolver.notify_resolution(
-                 bead.id,
+                 task.id,
                  nil,
                  "x"
                )
@@ -516,22 +516,22 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       %{tmp: tmp, repo: repo}
     end
 
-    test "attaches an EXISTING branch (does NOT use -b) and spawns a worker under bead_id:conflict",
-         %{workspace: ws, bead: bead, repo: repo} do
+    test "attaches an EXISTING branch (does NOT use -b) and spawns a worker under task_id:conflict",
+         %{workspace: ws, task: task, repo: repo} do
       # Pre-create the conflicting branch in the fixture repo. This is the
-      # key precondition: the bead's branch already exists (the conflicting
+      # key precondition: the task's branch already exists (the conflicting
       # PR is open against it), so `Worktree.create` (which uses -b) would
       # fail. `Worktree.attach` is the right tool.
-      branch = Arbiter.Worker.BranchNamer.derive(bead)
+      branch = Arbiter.Worker.BranchNamer.derive(task)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
 
       # Pre-condition: no worker registered yet under either slot.
-      assert Arbiter.Worker.whereis(bead.id) == nil
-      assert Arbiter.Worker.whereis(bead.id <> ":conflict") == nil
+      assert Arbiter.Worker.whereis(task.id) == nil
+      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
 
       {:ok, info} =
         Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
-          bead_id: bead.id,
+          task_id: task.id,
           workspace_id: ws.id,
           repo_path: repo,
           repo: "test/repo",
@@ -545,10 +545,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert is_binary(info.worktree_path)
       assert File.dir?(info.worktree_path)
 
-      # Crucial: registry slot for the resolver is `bead_id:conflict`, NOT
-      # `bead_id`. The bead_id slot stays open for the original work worker.
-      assert Arbiter.Worker.whereis(bead.id <> ":conflict") == info.worker_pid
-      assert Arbiter.Worker.whereis(bead.id) == nil
+      # Crucial: registry slot for the resolver is `task_id:conflict`, NOT
+      # `task_id`. The task_id slot stays open for the original work worker.
+      assert Arbiter.Worker.whereis(task.id <> ":conflict") == info.worker_pid
+      assert Arbiter.Worker.whereis(task.id) == nil
 
       # The worker's meta carries the conflict-resolver role + the branch
       # being rebased — proves we built the worker for this job, not
@@ -563,26 +563,26 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       :ok = GenServer.stop(info.worker_pid, :normal, 1_000)
     end
 
-    test "a stale resolver worker (already running for this bead) is surfaced, not papered over",
-         %{workspace: ws, bead: bead, repo: repo} do
+    test "a stale resolver worker (already running for this task) is surfaced, not papered over",
+         %{workspace: ws, task: task, repo: repo} do
       # Simulate a previous resolver run that hasn't terminated by starting a
       # second worker under the resolver's registry key. The resolver must
       # NOT silently return that pid — the round-2 finding was that the
       # `:already_started` shortcut hid a real wrong-process bug.
-      branch = Arbiter.Worker.BranchNamer.derive(bead)
+      branch = Arbiter.Worker.BranchNamer.derive(task)
       {_, 0} = System.cmd("git", ["-C", repo, "branch", branch])
 
       {:ok, prior} =
         Arbiter.Worker.start(
-          bead_id: bead.id,
-          registry_key: bead.id <> ":conflict",
+          task_id: task.id,
+          registry_key: task.id <> ":conflict",
           repo: "test/repo",
           workspace_id: ws.id
         )
 
       result =
         Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
-          bead_id: bead.id,
+          task_id: task.id,
           workspace_id: ws.id,
           repo_path: repo,
           repo: "test/repo",
@@ -595,14 +595,14 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
     end
 
     test "no branch on the repo → {:error, {:worktree_failed, _}} (no silent -b creation)",
-         %{workspace: ws, bead: bead, repo: repo} do
-      # Deliberately do NOT pre-create the bead's branch. The resolver MUST
+         %{workspace: ws, task: task, repo: repo} do
+      # Deliberately do NOT pre-create the task's branch. The resolver MUST
       # NOT silently fall back to `-b` and create a new branch; the contract
       # is "attach to the existing branch" — anything else risks shadowing
       # the PR's head ref.
       result =
         Arbiter.Workflows.MergeQueue.ConflictResolver.resolve(%{
-          bead_id: bead.id,
+          task_id: task.id,
           workspace_id: ws.id,
           repo_path: repo,
           repo: "test/repo",
@@ -611,7 +611,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
       assert {:error, {:worktree_failed, {:git_failed, _}}} = result
       # And no worker got partially spawned.
-      assert Arbiter.Worker.whereis(bead.id <> ":conflict") == nil
+      assert Arbiter.Worker.whereis(task.id <> ":conflict") == nil
     end
   end
 end

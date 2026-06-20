@@ -12,11 +12,11 @@ defmodule Arbiter.Mergers do
   ## Resolution rule
 
   The strategy is an atom resolved from the workspace via
-  `Arbiter.Beads.Workspace.merger_strategy/1` (which reads
+  `Arbiter.Tasks.Workspace.merger_strategy/1` (which reads
   `config["merge"]["strategy"]`, falling back to `:direct`).
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.{Direct, Github, Gitlab}
 
   @type adapter :: module()

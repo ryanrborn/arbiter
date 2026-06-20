@@ -38,7 +38,7 @@ defmodule ArbiterCli.Cmd.ListTest do
                        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]},
                         200}}
 
-    test "merges local beads with unclaimed tracker issues, dedups by tracker_ref" do
+    test "merges local tasks with unclaimed tracker issues, dedups by tracker_ref" do
       stub_routes([
         {{"get", "/api/issues"},
          {%{
@@ -47,7 +47,7 @@ defmodule ArbiterCli.Cmd.ListTest do
                 "id" => "bd-claimed",
                 "status" => "in_progress",
                 "priority" => 2,
-                "title" => "Already a bead",
+                "title" => "Already a task",
                 "tracker_type" => "github",
                 "tracker_ref" => "42"
               }
@@ -58,7 +58,7 @@ defmodule ArbiterCli.Cmd.ListTest do
          {%{
             "supported" => true,
             "data" => [
-              %{"ref" => "42", "title" => "Already a bead", "status" => "open"},
+              %{"ref" => "42", "title" => "Already a task", "status" => "open"},
               %{
                 "ref" => "99",
                 "title" => "Unclaimed tracker issue",
@@ -70,25 +70,25 @@ defmodule ArbiterCli.Cmd.ListTest do
 
       {out, _err, code} = capture(fn -> List.run(["--tracker"]) end)
       assert code == 0
-      # Bead row shown.
+      # Task row shown.
       assert out =~ "bd-claimed"
-      assert out =~ "Already a bead"
+      assert out =~ "Already a task"
       # Unclaimed row shown with the marker.
       assert out =~ "(unclaimed)"
       assert out =~ "#99"
       assert out =~ "Unclaimed tracker issue"
-      # The tracker issue that shares ref=42 with a bead is NOT duplicated as
-      # an unclaimed row (it's already represented by the bead). The bead row
+      # The tracker issue that shares ref=42 with a task is NOT duplicated as
+      # an unclaimed row (it's already represented by the task). The task row
       # comes first, the unclaimed row comes after.
-      bead_index = :binary.match(out, "Already a bead") |> elem(0)
+      task_index = :binary.match(out, "Already a task") |> elem(0)
       unclaimed_index = :binary.match(out, "Unclaimed tracker issue") |> elem(0)
-      assert bead_index < unclaimed_index
+      assert task_index < unclaimed_index
       # No row with `#42` (that would mean the deduped ref leaked through as
       # an unclaimed row).
       refute out =~ "#42"
     end
 
-    test "degrades cleanly when tracker is :none — emits a stderr notice and shows local beads" do
+    test "degrades cleanly when tracker is :none — emits a stderr notice and shows local tasks" do
       stub_routes([
         {{"get", "/api/issues"},
          {%{
@@ -112,7 +112,7 @@ defmodule ArbiterCli.Cmd.ListTest do
       assert err =~ "doesn't support listing"
     end
 
-    test "--tracker --json includes both beads and tracker_issues" do
+    test "--tracker --json includes both tasks and tracker_issues" do
       stub_routes([
         {{"get", "/api/issues"},
          {%{

@@ -1,21 +1,21 @@
 defmodule ArbiterCli.Cmd.Resume do
   @moduledoc """
-  `arb resume <bead-id> [<repo>] [--model <name>]` — resume a stopped worker
+  `arb resume <task-id> [<repo>] [--model <name>]` — resume a stopped worker
   (bd-auma3z).
 
   When a worker is stopped mid-work (token exhaustion, crash, kill) its
-  worktree — the per-bead git worktree with its committed and uncommitted
+  worktree — the per-task git worktree with its committed and uncommitted
   progress — is preserved. `arb resume` re-attaches a **fresh** agent to that
   same worktree, briefed with a git-derived summary of the work so far, so it
   continues from where the stopped run left off instead of restarting from
   scratch.
 
-  POSTs to `/api/workers/:bead_id/resume`. The server validates the bead has a
+  POSTs to `/api/workers/:task_id/resume`. The server validates the task has a
   preserved worktree and isn't being actively worked, stops the lingering
   stopped worker, and dispatchs a fresh claude-driven worker onto the existing
   branch — reusing any already-open PR rather than opening a duplicate.
 
-  The repo is optional: if omitted, it's inherited from the bead's most recent
+  The repo is optional: if omitted, it's inherited from the task's most recent
   run. Pass it explicitly when no prior run is on record.
 
   Flags:
@@ -36,12 +36,12 @@ defmodule ArbiterCli.Cmd.Resume do
       mode = if opts[:json], do: :json, else: :text
       model = opts[:model]
 
-      {bead_id, repo} =
+      {task_id, repo} =
         case rest do
           [id] -> {id, nil}
           [id, repo] -> {id, repo}
-          [] -> Output.die("resume requires a bead id (e.g. `arb resume bd-auma3z`)")
-          _ -> Output.die("resume takes at most two positional arguments: <bead-id> [<repo>]")
+          [] -> Output.die("resume requires a task id (e.g. `arb resume bd-auma3z`)")
+          _ -> Output.die("resume takes at most two positional arguments: <task-id> [<repo>]")
         end
 
       body =
@@ -49,7 +49,7 @@ defmodule ArbiterCli.Cmd.Resume do
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
 
-      case Client.post("/api/workers/#{bead_id}/resume", body) do
+      case Client.post("/api/workers/#{task_id}/resume", body) do
         {:ok, payload} -> emit(payload, mode)
         {:error, err} -> Output.die(err)
       end
@@ -62,13 +62,13 @@ defmodule ArbiterCli.Cmd.Resume do
   defp emit(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit(payload, :text) do
-    bead = payload["bead"] || %{}
+    task = payload["task"] || %{}
     worker = payload["worker"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Resume:")
-    IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
-    IO.puts("  Status:   #{bead["status"]}")
+    IO.puts("  Issue:     #{task["id"]} — #{task["title"]}")
+    IO.puts("  Status:   #{task["status"]}")
     IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 

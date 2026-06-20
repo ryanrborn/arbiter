@@ -49,8 +49,8 @@ defmodule Arbiter.MCP.AgentConfigTest do
       tools = config["mcpServers"]["arbiter"]["includeTools"]
 
       assert is_list(tools)
-      assert "bead_show" in tools
-      assert "bead_update_progress" in tools
+      assert "task_show" in tools
+      assert "task_update_progress" in tools
       assert "inbox_check" in tools
       assert "message_send" in tools
       assert "workspace_show" in tools
@@ -63,9 +63,9 @@ defmodule Arbiter.MCP.AgentConfigTest do
 
     test "accepts a custom include_tools list" do
       config =
-        Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: ["bead_show"])
+        Gemini.config_map(mcp_url: "u", scope_token: "t", include_tools: ["task_show"])
 
-      assert config["mcpServers"]["arbiter"]["includeTools"] == ["bead_show"]
+      assert config["mcpServers"]["arbiter"]["includeTools"] == ["task_show"]
     end
 
     test "honours a custom server_name" do
@@ -117,7 +117,7 @@ defmodule Arbiter.MCP.AgentConfigTest do
 
       assert {:ok, scope} = Scope.from_token(embedded)
       assert scope.tier == :worker
-      assert scope.bead_id == "bd-77"
+      assert scope.task_id == "bd-77"
       assert scope.workspace_id == "ws-77"
     end
 
@@ -139,10 +139,10 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert server["httpUrl"] == "http://127.0.0.1:4848/mcp"
       "Bearer " <> embedded = server["headers"]["Authorization"]
       assert {:ok, scope} = Scope.from_token(embedded)
-      assert scope.bead_id == "bd-88"
+      assert scope.task_id == "bd-88"
 
       assert is_list(server["includeTools"])
-      assert "bead_show" in server["includeTools"]
+      assert "task_show" in server["includeTools"]
     end
 
     test "writes a .codex/config.toml for the :codex provider", %{dir: dir} do

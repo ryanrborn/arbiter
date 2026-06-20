@@ -5,15 +5,15 @@ defmodule ArbiterWeb.Api.UsageController do
   Routes:
 
     * `GET /api/usage`          — aggregated rollup. Required query: `by` (one of
-                                  `day | bead | campaign | workspace | repo |
+                                  `day | task | campaign | workspace | repo |
                                   model | step | provider`). Optional:
                                   `workspace_id`, `since` (ISO8601), `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
-                                  filters: `workspace_id`, `bead_id`, `since`,
+                                  filters: `workspace_id`, `task_id`, `since`,
                                   `step`, `limit` (default 50).
 
   Both back the `arb usage` CLI; the rollup is the primary surface (per-day
-  spend, top beads, rework cost). `events` is for debugging / drill-down.
+  spend, top tasks, rework cost). `events` is for debugging / drill-down.
   """
 
   use ArbiterWeb, :controller
@@ -53,7 +53,7 @@ defmodule ArbiterWeb.Api.UsageController do
       events =
         Event
         |> filter_eq(:workspace_id, params["workspace_id"])
-        |> filter_eq(:bead_id, params["bead_id"])
+        |> filter_eq(:task_id, params["task_id"])
         |> filter_eq(:step, step)
         |> filter_since(since)
         |> Ash.Query.sort(occurred_at: :desc)
@@ -86,7 +86,7 @@ defmodule ArbiterWeb.Api.UsageController do
   defp render_event(%Event{} = ev) do
     %{
       id: ev.id,
-      bead_id: ev.bead_id,
+      task_id: ev.task_id,
       workspace_id: ev.workspace_id,
       repo: ev.repo,
       step: Atom.to_string(ev.step),
@@ -120,9 +120,9 @@ defmodule ArbiterWeb.Api.UsageController do
   defp filter_eq(query, _field, value) when value in [nil, ""], do: query
   defp filter_eq(query, :workspace_id, v), do: Ash.Query.filter(query, workspace_id == ^v)
 
-  defp filter_eq(query, :bead_id, v) do
+  defp filter_eq(query, :task_id, v) do
     prefix = v <> "#%"
-    Ash.Query.filter(query, bead_id == ^v or like(bead_id, ^prefix))
+    Ash.Query.filter(query, task_id == ^v or like(task_id, ^prefix))
   end
 
   defp filter_eq(query, :step, v), do: Ash.Query.filter(query, step == ^v)

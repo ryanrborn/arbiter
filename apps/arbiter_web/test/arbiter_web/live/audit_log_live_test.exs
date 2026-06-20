@@ -3,7 +3,7 @@ defmodule ArbiterWeb.AuditLogLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
 
   setup do
     {:ok, ws} =
@@ -22,12 +22,12 @@ defmodule ArbiterWeb.AuditLogLiveTest do
       assert html =~ "Audit log"
       assert html =~ "Since"
       assert html =~ "Until"
-      assert html =~ "Bead id contains"
+      assert html =~ "Task id contains"
       assert html =~ "Export as JSON"
     end
 
     test "lists existing paper_trail versions", %{conn: conn, ws: ws} do
-      {:ok, _bead} =
+      {:ok, _task} =
         Ash.create(Issue, %{title: "audit me", workspace_id: ws.id})
 
       {:ok, _view, html} = live(conn, "/audit")
@@ -54,11 +54,11 @@ defmodule ArbiterWeb.AuditLogLiveTest do
       # close events show up
       assert html =~ "close"
       # 'create' for "remains open" should NOT be in the table body when filtered to :close
-      # (it may still appear in the select option list, so we check for the bead id)
+      # (it may still appear in the select option list, so we check for the task id)
       refute html =~ "remains open"
     end
 
-    test "filter by entity_id substring narrows to that bead", %{conn: conn, ws: ws} do
+    test "filter by entity_id substring narrows to that task", %{conn: conn, ws: ws} do
       {:ok, b1} = Ash.create(Issue, %{title: "first", workspace_id: ws.id})
       {:ok, b2} = Ash.create(Issue, %{title: "second", workspace_id: ws.id})
 

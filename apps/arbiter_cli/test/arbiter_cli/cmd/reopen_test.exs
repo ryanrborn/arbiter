@@ -34,7 +34,7 @@ defmodule ArbiterCli.Cmd.ReopenTest do
     assert err =~ "requires an issue id"
   end
 
-  test "reopen of a non-closed bead surfaces the friendly FSM reason" do
+  test "reopen of a non-closed task surfaces the friendly FSM reason" do
     stub_post(
       "/api/issues/bd-001/reopen",
       %{

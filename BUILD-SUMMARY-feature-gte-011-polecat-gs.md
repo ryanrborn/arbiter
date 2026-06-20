@@ -1,14 +1,14 @@
 # Build summary: feature/gte-011-polecat-gs
 
-**Bead:** gte-011
+**Task:** gte-011
 **Builder:** Mayor (interactive session, 2026-05-19)
 **Branch:** feature/gte-011-polecat-gs
 **Commit:** 48227ab (impl + tests)
 
 ## What I built
 
-`Arbiter.Polecat` — a per-bead supervised `GenServer` skeleton with a
-status FSM, registry lookup by bead_id, and a clean transition API. This is
+`Arbiter.Polecat` — a per-task supervised `GenServer` skeleton with a
+status FSM, registry lookup by task_id, and a clean transition API. This is
 the Phase 2 lifecycle plumbing; the workflow driver that actually walks
 steps ships separately (gte-014 / later phase).
 
@@ -34,7 +34,7 @@ apps/arbiter/lib/arbiter/application.ex
 ```elixir
 Arbiter.Polecat.start(opts)                       # spawn under DynamicSupervisor
 Arbiter.Polecat.start_link(opts)                  # raw entry point
-Arbiter.Polecat.whereis(bead_id)                  # pid | nil
+Arbiter.Polecat.whereis(task_id)                  # pid | nil
 Arbiter.Polecat.state(ref)                        # snapshot map | nil
 Arbiter.Polecat.advance(ref, step)                # change current workflow step
 Arbiter.Polecat.await(ref, reason \\ nil)         # park (waiting on external event)
@@ -45,7 +45,7 @@ Arbiter.Polecat.report(ref, key, value)           # write to :meta
 Arbiter.Polecat.stop(ref, reason \\ :normal)
 ```
 
-`ref` is either a pid or a bead_id string. String lookups go through the
+`ref` is either a pid or a task_id string. String lookups go through the
 registry; if no polecat is registered, the call returns `{:error, :not_found}`
 (or `nil` for `state/1`, which the spec called out explicitly).
 
@@ -68,9 +68,9 @@ than a `case` ladder.
 
 ## Design choices worth flagging
 
-### 1. Explicit verbs over sentinel atoms (the bead asked us to pick)
+### 1. Explicit verbs over sentinel atoms (the task asked us to pick)
 
-The bead offered two API shapes:
+The task offered two API shapes:
 
 - `advance(pid, :__awaiting__)` / `advance(pid, {:complete, result})` — one
   entry point, sentinel atoms or tagged tuples for lifecycle changes.
@@ -93,11 +93,11 @@ The bead offered two API shapes:
   can't accidentally collide with sentinel names, since sentinels don't
   exist.
 
-The bead's "recommend this" hint pointed in the same direction.
+The task's "recommend this" hint pointed in the same direction.
 
 ### 2. Supervisor restart strategy: `:temporary`
 
-Each polecat's child_spec uses `restart: :temporary`. The reasoning the bead
+Each polecat's child_spec uses `restart: :temporary`. The reasoning the task
 gave is correct: a polecat is a workflow runner, not a service. If it
 crashes, its in-memory workflow state is gone; restarting the GenServer
 would resurrect a process with no idea what step it was on, and the
@@ -107,14 +107,14 @@ crash as a definitive "this workflow died" signal and let the next layer
 re-spawn from scratch.
 
 A direct consequence is the "supervisor behavior" test: after
-`Process.exit(pid, :kill)`, `Polecat.whereis(bead_id)` returns `nil` rather
+`Process.exit(pid, :kill)`, `Polecat.whereis(task_id)` returns `nil` rather
 than a new pid.
 
 ### 3. `state/1` returns a snapshot map, not the internal `%State{}`
 
 The spec was explicit: "NOT the GenServer state struct verbatim; a stable
 shape." `Arbiter.Polecat.State` is `defmodule …, do: @moduledoc false`
-and not exported. Callers see a flat `%{bead_id, workspace_id, rig,
+and not exported. Callers see a flat `%{task_id, workspace_id, rig,
 current_step, status, started_at, step_started_at, meta}` map. We can
 evolve the internal struct without breaking consumers.
 
@@ -139,7 +139,7 @@ the orchestrator owns its own key conventions.
 `mix format --check-formatted` against the whole repo flags two migration
 files in `apps/arbiter/priv/repo/migrations/` that pre-date this branch.
 My added files all pass `mix format --check-formatted`. I deliberately did
-not reformat the migrations — not part of this bead, and migrations are
+not reformat the migrations — not part of this task, and migrations are
 sensitive (they're database history).
 
 ## Test coverage
@@ -148,16 +148,16 @@ sensitive (they're database history).
 
 | Block | Count | Covers |
 |---|---|---|
-| `start/1 + lifecycle` | 6 | start succeeds, registry lookup, defaults, `state/1` accepts bead_id, unknown bead_id returns nil, missing `:bead_id`, missing `:rig`, duplicate bead_id → `:already_started` |
-| `advance/2` | 4 | `:idle → :running`, sequential advances keep `:running`, bead_id ref, unknown bead_id |
+| `start/1 + lifecycle` | 6 | start succeeds, registry lookup, defaults, `state/1` accepts task_id, unknown task_id returns nil, missing `:task_id`, missing `:rig`, duplicate task_id → `:already_started` |
+| `advance/2` | 4 | `:idle → :running`, sequential advances keep `:running`, task_id ref, unknown task_id |
 | `await / resume` | 4 | `await` from `:running`, `resume` from `:awaiting`, illegal `await` from `:idle`, illegal `resume` from `:running` |
 | `complete / fail` | 5 | `complete` from `:running`, `advance` after `complete` rejected, `fail` from `:running`, `fail` from `:awaiting`, illegal `complete` from `:idle` |
 | `report/3` | 1 | multiple reports accumulate in `:meta` |
-| `stop/2` | 3 | stop by pid, stop by bead_id, stop unknown |
+| `stop/2` | 3 | stop by pid, stop by task_id, stop unknown |
 | `supervisor behavior` | 1 | crash does NOT restart (verifies `restart: :temporary`) |
 
 `async: false` because the registry and supervisor are singletons. Each
-test generates a unique bead_id via `System.unique_integer/1` so cases
+test generates a unique task_id via `System.unique_integer/1` so cases
 don't collide on the registry; `on_exit` cleans up any lingering
 processes.
 
@@ -170,7 +170,7 @@ mix test                            # umbrella: 259 tests, 0 failures
                                     # (arbiter 175, arbiter_cli 48, arbiter_web 36)
 ```
 
-## What's NOT in this bead
+## What's NOT in this task
 
 - No Workflow behaviour. That's gte-014 (parallel).
 - No driver that calls `advance / await / complete` based on a workflow
@@ -178,7 +178,7 @@ mix test                            # umbrella: 259 tests, 0 failures
 - No persistence. The polecat's state is purely in-process. If we crash,
   it's gone — that's the explicit design.
 - No integration with the worktree (gte-009) or branch namer (gte-010).
-  Future bead.
+  Future task.
 - No telemetry/logging. Will land when the driver lands.
 
 ## For the reviewer
@@ -189,7 +189,7 @@ The three things most worth scrutinizing:
    atoms on `advance`). The reasoning is above; the alternative is
    defensible too. If you want sentinels, this is the moment to push back.
 2. **`restart: :temporary`.** If the orchestrator is supposed to treat
-   GenServer crashes as recoverable, this is wrong. My read of the bead is
+   GenServer crashes as recoverable, this is wrong. My read of the task is
    it's not — crashes are workflow failure events. Confirm.
 3. **The snapshot shape returned by `state/1`.** This is what every
    downstream consumer will pattern-match against. Lock it in or push for

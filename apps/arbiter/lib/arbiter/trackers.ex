@@ -4,20 +4,20 @@ defmodule Arbiter.Trackers do
 
   Reads `issue.tracker_type`, resolves the adapter, and delegates. Callers
   should generally use this module rather than reaching into a specific
-  adapter — keeps adapter-resolution centralized so per-bead overrides and
+  adapter — keeps adapter-resolution centralized so per-task overrides and
   workspace defaults behave consistently.
 
   ## Resolution rule
 
   `issue.tracker_type` is an atom in `[:none, :jira, :shortcut, :linear, :github]`. It is
-  populated by `Arbiter.Beads.Issue.Changes.InheritTrackerType` from the
+  populated by `Arbiter.Tasks.Issue.Changes.InheritTrackerType` from the
   workspace's `config["tracker"]["type"]` at create-time, unless explicitly
   overridden by the caller.
 
   See `docs/decision-doc.md` section 8.
   """
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers.{GitHub, Jira, None, Shortcut, Tracker}
 
   @type adapter :: module()
@@ -31,15 +31,15 @@ defmodule Arbiter.Trackers do
   }
 
   @doc """
-  Returns the adapter module for the given bead.
+  Returns the adapter module for the given task.
 
-  Raises if the bead's `tracker_type` has no adapter registered (i.e. it's a
+  Raises if the task's `tracker_type` has no adapter registered (i.e. it's a
   type the codebase knows about but hasn't shipped yet — Jira/Linear/GitHub
   before their phases). Callers that want to handle that gracefully should
   pattern-match on `Issue.tracker_types/0` against `adapters/0`.
   """
-  @spec for_bead(Issue.t()) :: adapter
-  def for_bead(%Issue{tracker_type: type}), do: for_type(type)
+  @spec for_task(Issue.t()) :: adapter
+  def for_task(%Issue{tracker_type: type}), do: for_type(type)
 
   @spec for_type(atom()) :: adapter
   def for_type(type) when is_atom(type) do
@@ -75,7 +75,7 @@ defmodule Arbiter.Trackers do
   `Application.get_env/3` default. A no-op for `:none`. Mirrors
   `Arbiter.Mergers.prepare/1`.
   """
-  @spec prepare(Issue.t(), Arbiter.Beads.Workspace.t() | nil) :: :ok
+  @spec prepare(Issue.t(), Arbiter.Tasks.Workspace.t() | nil) :: :ok
   def prepare(%Issue{tracker_type: type}, workspace) do
     case type do
       :github -> GitHub.Config.put_active(workspace)
@@ -91,25 +91,25 @@ defmodule Arbiter.Trackers do
   # Thin pass-throughs so callers don't need to manually resolve+invoke.
 
   @spec fetch(Issue.t()) :: {:ok, map()} | {:error, term()}
-  def fetch(%Issue{tracker_ref: ref} = issue), do: for_bead(issue).fetch(ref)
+  def fetch(%Issue{tracker_ref: ref} = issue), do: for_task(issue).fetch(ref)
 
   @spec transition(Issue.t(), Tracker.status()) :: :ok | {:error, term()}
   def transition(%Issue{tracker_ref: ref} = issue, status),
-    do: for_bead(issue).transition(ref, status)
+    do: for_task(issue).transition(ref, status)
 
   @spec update_fields(Issue.t(), map()) :: :ok | {:error, term()}
   def update_fields(%Issue{tracker_ref: ref} = issue, fields),
-    do: for_bead(issue).update_fields(ref, fields)
+    do: for_task(issue).update_fields(ref, fields)
 
   @spec link_for(Issue.t()) :: String.t()
-  def link_for(%Issue{tracker_ref: ref} = issue), do: for_bead(issue).link_for(ref)
+  def link_for(%Issue{tracker_ref: ref} = issue), do: for_task(issue).link_for(ref)
 
   @doc """
-  Attach a remote link (typically the implementing PR/MR) to the bead's
+  Attach a remote link (typically the implementing PR/MR) to the task's
   tracked item so the ticket references the code.
 
-  Resolves the adapter from the bead's `tracker_type` and dispatches to its
-  optional `add_remote_link/3`. Adapters that don't implement it — or beads
+  Resolves the adapter from the task's `tracker_type` and dispatches to its
+  optional `add_remote_link/3`. Adapters that don't implement it — or tasks
   with no `tracker_ref` — return `{:error, :not_supported}`, which callers
   treat as "nothing to link" rather than a hard failure. Callers must have
   seeded the adapter's per-process config first (see `prepare/2`).
@@ -123,7 +123,7 @@ defmodule Arbiter.Trackers do
         {:error, :not_supported}
 
       true ->
-        adapter = for_bead(issue)
+        adapter = for_task(issue)
 
         if function_exported?(adapter, :add_remote_link, 3) do
           adapter.add_remote_link(ref, url, title)
@@ -134,10 +134,10 @@ defmodule Arbiter.Trackers do
   end
 
   @doc """
-  Post a comment on the bead's tracked item (typically the PR URL at PR-open).
+  Post a comment on the task's tracked item (typically the PR URL at PR-open).
 
-  Resolves the adapter from the bead's `tracker_type` and dispatches to its
-  optional `add_comment/2`. Adapters that don't implement it — or beads with no
+  Resolves the adapter from the task's `tracker_type` and dispatches to its
+  optional `add_comment/2`. Adapters that don't implement it — or tasks with no
   `tracker_ref` — return `{:error, :not_supported}`, which callers treat as
   "nothing to comment" rather than a hard failure. Callers must have seeded the
   adapter's per-process config first (see `prepare/2`).
@@ -150,7 +150,7 @@ defmodule Arbiter.Trackers do
         {:error, :not_supported}
 
       true ->
-        adapter = for_bead(issue)
+        adapter = for_task(issue)
 
         if function_exported?(adapter, :add_comment, 2) do
           adapter.add_comment(ref, body)
@@ -162,21 +162,21 @@ defmodule Arbiter.Trackers do
 
   @spec list_transitions(Issue.t()) :: {:ok, [Tracker.status()]} | {:error, term()}
   def list_transitions(%Issue{tracker_ref: ref} = issue),
-    do: for_bead(issue).list_transitions(ref)
+    do: for_task(issue).list_transitions(ref)
 
   @doc """
   Lists open items from the workspace's configured tracker — used by
-  `arb list --tracker` to surface upstream backlog alongside local beads.
+  `arb list --tracker` to surface upstream backlog alongside local tasks.
 
   Resolves the adapter from `workspace.config["tracker"]["type"]`, seeds the
   adapter's per-process config (same dance as `prepare/2`), and delegates.
   Adapters that don't have a notion of a backlog return
   `{:error, :not_supported}`, which callers should treat as "render local
-  beads only" rather than a hard failure.
+  tasks only" rather than a hard failure.
   """
-  @spec list_open(Arbiter.Beads.Workspace.t(), keyword()) ::
+  @spec list_open(Arbiter.Tasks.Workspace.t(), keyword()) ::
           {:ok, [Tracker.summary()]} | {:error, :not_supported} | {:error, term()}
-  def list_open(%Arbiter.Beads.Workspace{} = workspace, opts \\ []) do
+  def list_open(%Arbiter.Tasks.Workspace{} = workspace, opts \\ []) do
     type = workspace_tracker_type(workspace)
     adapter = adapter_for_workspace_type(type)
 
@@ -187,16 +187,16 @@ defmodule Arbiter.Trackers do
   Create a new upstream issue in the workspace's configured tracker.
 
   Used by the `Issue.create` after-transaction hook so `arb create` can mirror
-  a new bead into the workspace's tracker. Resolves the adapter from
+  a new task into the workspace's tracker. Resolves the adapter from
   `workspace.config["tracker"]["type"]`, seeds the adapter's per-process
   config (same dance as `prepare/2`), and dispatches to `create/1`. Workspaces
   without a tracker (`type == :none`) or whose tracker doesn't support
   outbound create return `{:error, :not_supported}` and callers should treat
-  that as "skip — local-only bead".
+  that as "skip — local-only task".
   """
-  @spec create_for_workspace(Arbiter.Beads.Workspace.t(), Tracker.create_attrs()) ::
+  @spec create_for_workspace(Arbiter.Tasks.Workspace.t(), Tracker.create_attrs()) ::
           {:ok, Tracker.ref()} | {:error, :not_supported} | {:error, term()}
-  def create_for_workspace(%Arbiter.Beads.Workspace{} = workspace, attrs) when is_map(attrs) do
+  def create_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, attrs) when is_map(attrs) do
     type = workspace_tracker_type(workspace)
     adapter = adapter_for_workspace_type(type)
 
@@ -208,10 +208,10 @@ defmodule Arbiter.Trackers do
 
   Resolves the adapter from `workspace.config["tracker"]["type"]`, seeds the
   adapter's per-process config, and delegates to `link_for/1`. Used by the
-  `--ticket-only` path so callers can print the URL without a local bead.
+  `--ticket-only` path so callers can print the URL without a local task.
   """
-  @spec link_for_workspace(Arbiter.Beads.Workspace.t(), Tracker.ref()) :: String.t()
-  def link_for_workspace(%Arbiter.Beads.Workspace{} = workspace, ref) when is_binary(ref) do
+  @spec link_for_workspace(Arbiter.Tasks.Workspace.t(), Tracker.ref()) :: String.t()
+  def link_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, ref) when is_binary(ref) do
     type = workspace_tracker_type(workspace)
     adapter = adapter_for_workspace_type(type)
 
@@ -224,8 +224,8 @@ defmodule Arbiter.Trackers do
   Exposed so callers (e.g. the ticket-only controller) can check whether a
   workspace has a real tracker before attempting an outbound create.
   """
-  @spec workspace_type(Arbiter.Beads.Workspace.t()) :: atom()
-  def workspace_type(%Arbiter.Beads.Workspace{} = workspace),
+  @spec workspace_type(Arbiter.Tasks.Workspace.t()) :: atom()
+  def workspace_type(%Arbiter.Tasks.Workspace{} = workspace),
     do: workspace_tracker_type(workspace)
 
   @doc """
@@ -233,13 +233,13 @@ defmodule Arbiter.Trackers do
   title matches `title` (case-insensitive exact match).
 
   Used by `arb create` to detect upstream duplicates before creating a new
-  bead. Adapters that do not implement `search_by_title/1` — or workspaces
+  task. Adapters that do not implement `search_by_title/1` — or workspaces
   without a tracker — return `{:error, :not_supported}`, which callers should
   treat as "skip check".
   """
-  @spec search_by_title_for_workspace(Arbiter.Beads.Workspace.t(), String.t()) ::
+  @spec search_by_title_for_workspace(Arbiter.Tasks.Workspace.t(), String.t()) ::
           {:ok, [map()]} | {:error, :not_supported} | {:error, term()}
-  def search_by_title_for_workspace(%Arbiter.Beads.Workspace{} = workspace, title)
+  def search_by_title_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, title)
       when is_binary(title) do
     type = workspace_tracker_type(workspace)
     adapter = adapter_for_workspace_type(type)
@@ -257,8 +257,8 @@ defmodule Arbiter.Trackers do
   Falls back to `None` for unknown types (e.g. `:linear` before its adapter
   lands), mirroring `adapter_for_workspace_type/1`.
   """
-  @spec for_workspace(Arbiter.Beads.Workspace.t()) :: adapter
-  def for_workspace(%Arbiter.Beads.Workspace{} = workspace),
+  @spec for_workspace(Arbiter.Tasks.Workspace.t()) :: adapter
+  def for_workspace(%Arbiter.Tasks.Workspace{} = workspace),
     do: adapter_for_workspace_type(workspace_tracker_type(workspace))
 
   @doc """
@@ -269,11 +269,11 @@ defmodule Arbiter.Trackers do
   Mirrors the adapter-specific `with_workspace/2` helpers — callers that want
   to stay tracker-agnostic use this instead of reaching into a specific adapter.
   """
-  @spec with_workspace(atom(), Arbiter.Beads.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(atom(), Arbiter.Tasks.Workspace.t(), (-> result)) :: result
         when result: any()
   def with_workspace(type, workspace, fun), do: do_with_workspace(type, workspace, fun)
 
-  defp workspace_tracker_type(%Arbiter.Beads.Workspace{config: config}) do
+  defp workspace_tracker_type(%Arbiter.Tasks.Workspace{config: config}) do
     case get_in(config || %{}, ["tracker", "type"]) do
       type when is_binary(type) ->
         try do
@@ -287,7 +287,7 @@ defmodule Arbiter.Trackers do
     end
   end
 
-  # Unlike for_bead/1, the workspace-tracker-type may name an adapter we don't
+  # Unlike for_task/1, the workspace-tracker-type may name an adapter we don't
   # have shipped (e.g. `:linear`). Fall back to None rather than raising —
   # the caller is asking us to list, and "no backend yet" is naturally
   # :not_supported (which is what None returns).

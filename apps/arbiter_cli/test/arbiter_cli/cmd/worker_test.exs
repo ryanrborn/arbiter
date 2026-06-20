@@ -6,7 +6,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
   describe "worker show" do
     test "prints the snapshot and output lines" do
       stub_get("/api/workers/bd-001", %{
-        "bead_id" => "bd-001",
+        "task_id" => "bd-001",
         "status" => "running",
         "current_step" => "implement",
         "repo" => "test/repo",
@@ -22,7 +22,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "arb done"
     end
 
-    test "missing bead_id returns a friendly error" do
+    test "missing task_id returns a friendly error" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["show"]) end)
       assert exit_code != 0
     end
@@ -30,7 +30,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "flags a historical fallback run and shows completion time" do
       stub_get("/api/workers/bd-003", %{
         "source" => "history",
-        "bead_id" => "bd-003",
+        "task_id" => "bd-003",
         "status" => "failed",
         "current_step" => nil,
         "repo" => "arbiter",
@@ -53,7 +53,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "uses the plain worker/issue/repo labels" do
       stub_get("/api/workers/bd-004", %{
         "source" => "history",
-        "bead_id" => "bd-004",
+        "task_id" => "bd-004",
         "status" => "failed",
         "repo" => "arbiter",
         "started_at" => "2026-05-20T19:00:00Z",
@@ -69,14 +69,14 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
     test "--json forwards the full snapshot" do
       stub_get("/api/workers/bd-002", %{
-        "bead_id" => "bd-002",
+        "task_id" => "bd-002",
         "status" => "completed",
         "output_lines" => ["ok"]
       })
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["show", "bd-002", "--json"]) end)
       assert exit_code == 0
-      assert {:ok, %{"bead_id" => "bd-002"}} = Jason.decode(String.trim(out))
+      assert {:ok, %{"task_id" => "bd-002"}} = Jason.decode(String.trim(out))
     end
   end
 
@@ -85,7 +85,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       stub_get("/api/workers", %{
         "data" => [
           %{
-            "bead_id" => "bd-001",
+            "task_id" => "bd-001",
             "status" => "running",
             "current_step" => "implement",
             "repo" => "test/repo",
@@ -120,7 +120,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
 
   describe "worker stop" do
     test "POSTs to the stop endpoint" do
-      stub_post("/api/workers/bd-003/stop", %{"bead_id" => "bd-003", "stopped" => true})
+      stub_post("/api/workers/bd-003/stop", %{"task_id" => "bd-003", "stopped" => true})
 
       {out, _err, exit_code} = capture(fn -> Worker.run(["stop", "bd-003"]) end)
       assert exit_code == 0
@@ -128,7 +128,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "bd-003"
     end
 
-    test "missing bead_id returns a friendly error" do
+    test "missing task_id returns a friendly error" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["stop"]) end)
       assert exit_code != 0
     end
@@ -138,7 +138,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "prints the run metadata and the full durable transcript, oldest first" do
       stub_get("/api/workers/bd-005/log", %{
         "data" => %{
-          "bead_id" => "bd-005",
+          "task_id" => "bd-005",
           "run_id" => "run-abc",
           "path" => "/var/arbiter/worker-logs/run-abc.log",
           "exists" => true,
@@ -160,7 +160,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     test "reports when no durable transcript exists on disk" do
       stub_get("/api/workers/bd-006/log", %{
         "data" => %{
-          "bead_id" => "bd-006",
+          "task_id" => "bd-006",
           "run_id" => "run-xyz",
           "path" => "/var/arbiter/worker-logs/run-xyz.log",
           "exists" => false,
@@ -174,7 +174,7 @@ defmodule ArbiterCli.Cmd.WorkerTest do
       assert out =~ "no durable transcript"
     end
 
-    test "missing bead_id returns a friendly error" do
+    test "missing task_id returns a friendly error" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["log"]) end)
       assert exit_code != 0
     end

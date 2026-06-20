@@ -3,7 +3,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
   use ExUnit.Case, async: false
 
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   describe "base/0 and default/0" do
     test "base is the safe baseline: bypass mode, non-empty safe_defaults, worktree fs" do

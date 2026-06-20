@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
-  @shortdoc "Bulk-close beads obsoleted by the GT → arbiter cutover"
+  @shortdoc "Bulk-close tasks obsoleted by the GT → arbiter cutover"
   @moduledoc """
-  Bulk-close beads orphaned by the cutover from the original Go GT system.
-  See `Arbiter.Beads.DecommissionSweep` for the pattern list and the
+  Bulk-close tasks orphaned by the cutover from the original Go GT system.
+  See `Arbiter.Tasks.DecommissionSweep` for the pattern list and the
   keep-list.
 
   ## Usage
@@ -10,13 +10,13 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
       mix arbiter.sweep_decommissioned                # dry-run
       mix arbiter.sweep_decommissioned --apply        # actually close
 
-  In dry-run the matched beads are grouped by category and printed. No
+  In dry-run the matched tasks are grouped by category and printed. No
   database writes happen until `--apply` is passed.
   """
 
   use Mix.Task
 
-  alias Arbiter.Beads.DecommissionSweep
+  alias Arbiter.Tasks.DecommissionSweep
 
   @switches [apply: :boolean]
 
@@ -29,19 +29,19 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
 
     cond do
       proposals == [] ->
-        Mix.shell().info("No matching beads — sweep is a no-op.")
+        Mix.shell().info("No matching tasks — sweep is a no-op.")
 
       opts[:apply] == true ->
         Mix.shell().info(
-          "Closing #{length(proposals)} bead(s) across #{count_categories(proposals)} categories:\n"
+          "Closing #{length(proposals)} task(s) across #{count_categories(proposals)} categories:\n"
         )
 
         print_table(proposals)
         {closed, errors} = DecommissionSweep.apply!(proposals)
-        Mix.shell().info("\nClosed #{length(closed)} bead(s).")
+        Mix.shell().info("\nClosed #{length(closed)} task(s).")
 
         unless errors == [] do
-          Mix.shell().error("Failed on #{length(errors)} bead(s):")
+          Mix.shell().error("Failed on #{length(errors)} task(s):")
 
           for {id, reason} <- errors do
             Mix.shell().error("  #{id}: #{inspect(reason)}")
@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
 
       true ->
         Mix.shell().info(
-          "Would close #{length(proposals)} bead(s) across #{count_categories(proposals)} categories:\n"
+          "Would close #{length(proposals)} task(s) across #{count_categories(proposals)} categories:\n"
         )
 
         print_table(proposals)
@@ -63,7 +63,7 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
   end
 
   defp print_table(proposals) do
-    width = proposals |> Enum.map(&String.length(&1.bead_id)) |> Enum.max(fn -> 0 end)
+    width = proposals |> Enum.map(&String.length(&1.task_id)) |> Enum.max(fn -> 0 end)
 
     proposals
     |> Enum.group_by(& &1.category)
@@ -72,7 +72,7 @@ defmodule Mix.Tasks.Arbiter.SweepDecommissioned do
       Mix.shell().info("#{category} (#{length(items)}):")
 
       for p <- items do
-        padded = String.pad_trailing(p.bead_id, width)
+        padded = String.pad_trailing(p.task_id, width)
         Mix.shell().info("  #{padded}  #{truncate(p.title, 100)}")
       end
 

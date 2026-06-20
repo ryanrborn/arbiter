@@ -22,8 +22,8 @@ defmodule Arbiter.Trackers.Jira do
 
     * **Extra `Workspace` argument**: breaks the behaviour signature and
       forces every caller to thread workspace through the stack.
-    * **Resolve workspace from the bead via Ash inside the adapter**: the
-      adapter takes only a `ref` (string), not the bead — and reaching back
+    * **Resolve workspace from the task via Ash inside the adapter**: the
+      adapter takes only a `ref` (string), not the task — and reaching back
       to Ash from inside a tracker callback couples the HTTP layer to the
       database. Worse for testability.
 
@@ -37,7 +37,7 @@ defmodule Arbiter.Trackers.Jira do
 
   ## Status mapping & path-finding
 
-  Bead lifecycle atoms (`:open | :in_progress | :closed`, plus the richer
+  Task lifecycle atoms (`:open | :in_progress | :closed`, plus the richer
   `:pr_opened | :approved_unmerged | :merged`) map to a Jira target **status
   name** (NOT a transition name) via `tracker.config.status_map`. Jira's REST
   API moves issues by invoking transitions, so `transition/2` resolves a *path*
@@ -253,7 +253,7 @@ defmodule Arbiter.Trackers.Jira do
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, jira_transitions} <- list_raw_transitions(cfg, ref) do
-      # status_map maps bead lifecycle atom -> target STATUS name. Reverse it
+      # status_map maps task lifecycle atom -> target STATUS name. Reverse it
       # and key each available transition by the status it lands on (`to`),
       # falling back to the transition name for payloads without a `to`.
       reverse = Enum.into(cfg.status_map, %{}, fn {k, v} -> {v, k} end)
@@ -324,7 +324,7 @@ defmodule Arbiter.Trackers.Jira do
   # Jira v3 returns `description` as an ADF document (a map); legacy/v2
   # payloads or plain-text fields come through as a string. We flatten ADF
   # to plain text (block boundaries become blank lines) — good enough for
-  # mirroring the body into a bead; we don't attempt a full round-trip.
+  # mirroring the body into a task; we don't attempt a full round-trip.
   defp description_to_text(nil), do: ""
   defp description_to_text(text) when is_binary(text), do: text
 
@@ -357,7 +357,7 @@ defmodule Arbiter.Trackers.Jira do
   `fun`, clearing the config when `fun` returns. Useful in tests and
   one-shot scripts.
   """
-  @spec with_workspace(map() | Arbiter.Beads.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(map() | Arbiter.Tasks.Workspace.t(), (-> result)) :: result
         when result: any()
   def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
     prev = Process.get({Config, :active_workspace_config})
@@ -458,7 +458,7 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
-  # status_map maps a bead lifecycle atom -> target STATUS name. A missing or
+  # status_map maps a task lifecycle atom -> target STATUS name. A missing or
   # blank entry is NOT an error here: it means "this tracker doesn't model that
   # lifecycle event". Callers (e.g. `Arbiter.Trackers.Sync`) treat
   # `:status_unmapped` as a benign skip, while a *mapped* status that can't be
@@ -473,7 +473,7 @@ defmodule Arbiter.Trackers.Jira do
          %Error{
            kind: :status_unmapped,
            status: nil,
-           message: "no Jira target status mapped for bead lifecycle event #{inspect(status)}",
+           message: "no Jira target status mapped for task lifecycle event #{inspect(status)}",
            raw: nil
          }}
     end

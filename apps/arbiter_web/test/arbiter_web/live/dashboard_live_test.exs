@@ -35,7 +35,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
   alias ArbiterWeb.DashboardLiveTest.QueueMerger
 
-  alias Arbiter.Beads.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Workers.Run
 
@@ -44,7 +44,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
     # may have left children running. Stop them so the dashboard's "active
     # workers" section starts in a known empty state.
     for snap <- Worker.list_children() do
-      Worker.stop(snap.bead_id)
+      Worker.stop(snap.task_id)
     end
 
     Process.sleep(50)
@@ -101,7 +101,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   describe "workspaces section" do
-    test "lists every workspace with its prefix and bead counts", %{conn: conn, ws: ws} do
+    test "lists every workspace with its prefix and task counts", %{conn: conn, ws: ws} do
       {:ok, _open} = Ash.create(Issue, %{title: "o1", workspace_id: ws.id})
       {:ok, _open2} = Ash.create(Issue, %{title: "o2", workspace_id: ws.id})
       {:ok, to_close} = Ash.create(Issue, %{title: "to-close", workspace_id: ws.id})
@@ -118,8 +118,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
 
     test "counts active workers per workspace", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "polly-ws", workspace_id: ws.id})
-      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "polly-ws", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
       # The workspace row should reflect the active worker. Hard to assert
@@ -154,11 +154,11 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
 
     test "counts active workers per repo", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "repo-pol", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "repo-pol", workspace_id: ws.id})
 
       {:ok, _pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "dashboard-test-repo",
           workspace_id: ws.id
         )
@@ -196,8 +196,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
     test "surfaces a worker using an unconfigured repo under (unconfigured)",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "weird-repo", workspace_id: ws.id})
-      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "no-such-repo", workspace_id: ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "weird-repo", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "no-such-repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "no-such-repo"
@@ -207,8 +207,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
   describe "active workers workspace column" do
     test "shows the workspace name on each worker row", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "ws-col", workspace_id: ws.id})
-      {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "ws-col", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
       {:ok, _view, html} = live(conn, "/")
 
@@ -217,27 +217,27 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "recent beads section" do
-    test "existing beads are rendered", %{conn: conn, ws: ws} do
+  describe "recent tasks section" do
+    test "existing tasks are rendered", %{conn: conn, ws: ws} do
       {:ok, _b} = Ash.create(Issue, %{title: "i-am-on-the-dashboard", workspace_id: ws.id})
 
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "i-am-on-the-dashboard"
     end
 
-    test "creating a new bead pushes a PubSub update", %{conn: conn, ws: ws} do
+    test "creating a new task pushes a PubSub update", %{conn: conn, ws: ws} do
       {:ok, view, _html} = live(conn, "/")
 
-      # Sanity: bead doesn't exist yet
-      refute render(view) =~ "newly-created-bead-title"
+      # Sanity: task doesn't exist yet
+      refute render(view) =~ "newly-created-task-title"
 
-      {:ok, _b} = Ash.create(Issue, %{title: "newly-created-bead-title", workspace_id: ws.id})
+      {:ok, _b} = Ash.create(Issue, %{title: "newly-created-task-title", workspace_id: ws.id})
 
-      # The LiveView receives `{:bead_lifecycle, :created, _}` and re-renders.
-      assert render(view) =~ "newly-created-bead-title"
+      # The LiveView receives `{:task_lifecycle, :created, _}` and re-renders.
+      assert render(view) =~ "newly-created-task-title"
     end
 
-    test "creating a new bead via the REST API also pushes a PubSub update",
+    test "creating a new task via the REST API also pushes a PubSub update",
          %{conn: conn, ws: ws} do
       # Regression for bd-97ijhk — the original report was that `bd create`
       # (which posts to POST /api/issues) did not update an open dashboard.
@@ -256,7 +256,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert render(view) =~ "via-rest-api-title"
     end
 
-    test "closing a bead drops it from the current directives list (PubSub)", %{
+    test "closing a task drops it from the current directives list (PubSub)", %{
       conn: conn,
       ws: ws
     } do
@@ -268,8 +268,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _closed} = Ash.update(b, %{}, action: :close)
 
       # The landing shows only CURRENT (non-closed) directives now; closing the
-      # bead removes it from the recent list. The full history (incl. closed)
-      # lives on the /beads index.
+      # task removes it from the recent list. The full history (incl. closed)
+      # lives on the /tasks index.
       refute render(view) =~ "to-close-on-dashboard"
     end
 
@@ -288,23 +288,23 @@ defmodule ArbiterWeb.DashboardLiveTest do
       refute html =~ "aaa-closed-directive"
     end
 
-    test "the recent directives section links to the /beads index", %{conn: conn} do
+    test "the recent directives section links to the /tasks index", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
-      assert html =~ ~s(href="/beads")
+      assert html =~ ~s(href="/tasks")
     end
   end
 
   describe "active workers section" do
     test "starting a worker shows it; stopping removes it", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "worker-bead", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "worker-task", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, "/")
       # Sanity: before starting, the Active Workers section shows the empty
-      # message (the bead may still appear in "Recent beads" — that's fine).
+      # message (the task may still appear in "Recent tasks" — that's fine).
       assert render(view) =~ "No active"
 
       {:ok, _pid} =
-        Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+        Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
       # PubSub fires :started — re-render now lists the worker in the
       # active table (count goes from 0 to 1, and the empty message is gone).
@@ -312,7 +312,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Active Workers (1)"
       refute html =~ "No active workers"
 
-      Worker.stop(bead.id)
+      Worker.stop(task.id)
       # Allow time for terminate's broadcast to propagate
       Process.sleep(150)
 
@@ -332,8 +332,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
     test "lists completed and failed runs with a link to the detail page", %{conn: conn} do
       {:ok, completed} =
         Ash.create(Run, %{
-          bead_id: "bd-done",
-          bead_title: "the-completed-title",
+          task_id: "bd-done",
+          task_title: "the-completed-title",
           repo: "arbiter",
           workspace_id: "ws-1",
           status: :completed,
@@ -343,8 +343,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       {:ok, _failed} =
         Ash.create(Run, %{
-          bead_id: "bd-bust",
-          bead_title: "the-failed-title",
+          task_id: "bd-bust",
+          task_title: "the-failed-title",
           repo: "arbiter",
           workspace_id: "ws-1",
           status: :failed,
@@ -370,8 +370,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
     test "an in-flight merge surfaces with MR link, merger type and Watchdog activity",
          %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "merging-bead", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "merging-task", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
       :ok = Worker.advance(pid, :integrate)
 
       {:ok, "!99"} =
@@ -380,7 +380,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ ~s(id="merge-queue")
-      assert html =~ bead.id
+      assert html =~ task.id
       # MR ref + clickable link from the stub adapter.
       assert html =~ "!99"
       assert html =~ "https://example.test/mr/99"
@@ -392,8 +392,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
 
     test "a recorded approval drives the status badge label", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "approved-bead", workspace_id: ws.id})
-      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "approved-task", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
       :ok = Worker.advance(pid, :integrate)
       {:ok, _} = Worker.open_mr(pid, "feature/y", "Integrate y", "", merge_opts())
 
@@ -414,8 +414,8 @@ defmodule ArbiterWeb.DashboardLiveTest do
           config: %{"merge" => %{"strategy" => "gitlab"}}
         })
 
-      {:ok, bead} = Ash.create(Issue, %{title: "gl-bead", workspace_id: gl_ws.id})
-      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: gl_ws.id)
+      {:ok, task} = Ash.create(Issue, %{title: "gl-task", workspace_id: gl_ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: gl_ws.id)
       :ok = Worker.advance(pid, :integrate)
       {:ok, _} = Worker.open_mr(pid, "feature/z", "Integrate z", "", merge_opts())
 
@@ -437,7 +437,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "No escalations"
     end
 
-    test "recent escalations render with verdict badge, bead link and findings",
+    test "recent escalations render with verdict badge, task link and findings",
          %{conn: conn, ws: ws} do
       {:ok, _changes} =
         Message.send_mail(%{
@@ -470,17 +470,17 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # Linked back to the directive under review + the reviewer's findings.
       assert html =~ "bd-rejected"
       assert html =~ "The migration is missing a down/0."
-      assert html =~ "/beads/bd-murky"
+      assert html =~ "/tasks/bd-murky"
     end
 
     test "a review in flight surfaces under 'in review'", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "under-review", workspace_id: ws.id})
+      {:ok, task} = Ash.create(Issue, %{title: "under-review", workspace_id: ws.id})
 
       # Drive an author worker to :awaiting_review_gate without spawning a live
       # reviewer (review_spawn: false) — the same seam the ReviewGate tests use.
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "test/repo",
           workspace_id: ws.id,
           meta: %{
@@ -498,7 +498,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ ~s(id="pending-reviews")
-      assert html =~ bead.id
+      assert html =~ task.id
       assert html =~ "in review"
     end
   end
@@ -547,7 +547,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   describe "directive queue priority + blocking" do
-    test "P1 beads get the error-tinted treatment, P2 stays neutral", %{conn: conn, ws: ws} do
+    test "P1 tasks get the error-tinted treatment, P2 stays neutral", %{conn: conn, ws: ws} do
       {:ok, _p1} = Ash.create(Issue, %{title: "urgent-p1", workspace_id: ws.id, priority: 1})
       {:ok, _p2} = Ash.create(Issue, %{title: "normal-p2", workspace_id: ws.id, priority: 2})
 

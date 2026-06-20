@@ -5,7 +5,7 @@
 **Last updated:** 2026-05-20
 
 This is the playbook for switching from the Go GT (in `~/dev/gt/`) to the
-Elixir arbiter port as the source of truth for bead tracking, polecat
+Elixir arbiter port as the source of truth for task tracking, polecat
 orchestration, and merge queuing.
 
 ## Pre-flight checklist
@@ -15,7 +15,7 @@ Run through this before starting the cutover window.
 - [ ] `mix test` is clean on `main` (latest commit).
 - [ ] `mix arbiter.import_from_dolt --hq-path ... --server-path ... --sync-status`
       has been run within the last hour and reports `0 errors`.
-- [ ] All gte-* beads in Postgres match Dolt status (cross-check via SQL):
+- [ ] All gte-* tasks in Postgres match Dolt status (cross-check via SQL):
       ```bash
       gt dolt sql -d hq "SELECT id, status FROM issues WHERE id LIKE 'gte-%' ORDER BY id"
       # vs
@@ -63,7 +63,7 @@ returns nothing.
 
 ### 2. Run the importer one last time
 
-This catches any beads created in GT after the most recent sync.
+This catches any tasks created in GT after the most recent sync.
 
 ```bash
 cd ~/dev/arbiter
@@ -73,7 +73,7 @@ mix arbiter.import_from_dolt \
     --sync-status
 ```
 
-**Verify:** "Import complete" with `0 errors`. Compare bead counts:
+**Verify:** "Import complete" with `0 errors`. Compare task counts:
 
 ```bash
 # Dolt
@@ -82,7 +82,7 @@ gt dolt sql -d server "SELECT COUNT(*) FROM issues"
 
 # Postgres
 cd ~/dev/arbiter/apps/arbiter
-mix run -e 'IO.inspect(Arbiter.Repo.aggregate({"issues", Arbiter.Beads.Issue}, :count, :id))'
+mix run -e 'IO.inspect(Arbiter.Repo.aggregate({"issues", Arbiter.Tasks.Issue}, :count, :id))'
 ```
 
 The Postgres count must equal `hq + server` Dolt counts (minus any cross-rig
@@ -152,7 +152,7 @@ equivalent:
 In `~/dev/arbiter/docs/postmortem-cutover.md`. Cover:
 
 - Total elapsed time from Phase 0 to cutover.
-- Beads completed vs Phase 0 estimate (28-42 days).
+- Tasks completed vs Phase 0 estimate (28-42 days).
 - Bugs surfaced during parallel run.
 - What was harder than expected.
 - What was easier than expected.
@@ -170,7 +170,7 @@ If something breaks within 7 days of cutover:
 3. **Revert `~/.zshrc`** (the `bd` alias).
 4. **Re-enable GT autostart** (`systemctl --user enable gt-mayor.service`).
 5. **Start GT**: `gt start`.
-6. **File a bead in the new (working) world** describing the cutover blocker,
+6. **File a task in the new (working) world** describing the cutover blocker,
    then re-attempt cutover once it's resolved.
 
 Postgres data is NOT discarded on rollback — it remains available for
@@ -184,7 +184,7 @@ The cutover is complete when:
 - [ ] `arb list` is the only working CLI; the old `bd` alias no longer exists.
 - [ ] At least one polecat has been slung via `arb sling` and reached `:done`.
 - [ ] At least one PR has been opened + merged via the Refinery merge queue.
-- [ ] No bead has been edited in the archived Dolt for 24 hours.
+- [ ] No task has been edited in the archived Dolt for 24 hours.
 - [ ] gte-028 (Decommission GT) is closed.
 
 ## What's NOT in this plan
