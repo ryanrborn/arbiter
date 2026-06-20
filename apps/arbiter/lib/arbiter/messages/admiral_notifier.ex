@@ -229,6 +229,87 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   def tracker_sync_failed(_snapshot, _event, _reason), do: :ok
 
+  @doc """
+  Escalate a blocked merge to the coordinator (#354, Phase 1).
+
+  Fired by `Arbiter.Worker.Watchdog` when an approved/parked PR can't merge and
+  the merger adapter has classified *why* (`:conflict`, `:behind_base`,
+  `:ci_failed`, `:needs_approval`, `:draft`, `:blocked_other`). Unlike the
+  broadcast lifecycle notifications, this is an addressed `:escalation` **mailbox**
+  message (`to_ref: "admiral"`) so it lands in `arb inbox` as an actionable item
+  — the whole point of Phase 1 is that a blocked merge never parks silently.
+
+  `snapshot` carries `:task_id` + `:workspace_id`; `mr_ref` is the PR/MR ref (may
+  be `nil`); `reason` is the block-reason atom. Best-effort, returns `:ok`.
+  """
+  @spec merge_blocked(map(), String.t() | nil, atom()) :: :ok
+  def merge_blocked(%{workspace_id: ws_id} = snapshot, mr_ref, reason)
+      when is_binary(ws_id) and is_atom(reason) do
+    task_id = Map.get(snapshot, :task_id, "system")
+
+    subject = "#{task_id} merge blocked — #{block_label(reason)}"
+
+    body =
+      [
+        "#{title_for(task_id)} cannot merge: #{block_label(reason)}.",
+        mr_ref && "PR/MR: #{mr_ref}",
+        "Reason: #{reason}",
+        "Remediation: #{block_remediation(reason)}",
+        "The Warden detected this on its merge poll and parked the PR rather " <>
+          "than failing it — resolve the block (or force-merge) and the next " <>
+          "poll will pick it up."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: task_id,
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.merge_blocked/3 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def merge_blocked(_snapshot, _mr_ref, _reason), do: :ok
+
+  defp block_label(:conflict), do: "merge conflict with the base branch"
+  defp block_label(:behind_base), do: "branch is behind the base branch"
+  defp block_label(:ci_failed), do: "required CI checks are failing"
+  defp block_label(:needs_approval), do: "required approval is missing"
+  defp block_label(:draft), do: "the PR is still a draft"
+  defp block_label(:blocked_other), do: "a forge merge rule is unsatisfied"
+  defp block_label(other), do: "merge is blocked (#{other})"
+
+  defp block_remediation(:conflict),
+    do: "rebase or resolve the conflicts with the base branch, then re-push."
+
+  defp block_remediation(:behind_base),
+    do: "update the branch from its base (merge or rebase) and re-push."
+
+  defp block_remediation(:ci_failed),
+    do: "fix the failing checks (or re-run flaky ones), then re-push."
+
+  defp block_remediation(:needs_approval),
+    do: "approve the PR, or re-request review if a prior approval was dismissed."
+
+  defp block_remediation(:draft), do: "mark the PR ready for review."
+
+  defp block_remediation(:blocked_other),
+    do: "inspect the PR's merge requirements on the forge and satisfy them."
+
+  defp block_remediation(_other), do: "inspect the PR on the forge."
+
   defp describe_reason(%{__struct__: _, message: msg, kind: kind}) when is_binary(msg),
     do: "#{msg} (#{kind})"
 
