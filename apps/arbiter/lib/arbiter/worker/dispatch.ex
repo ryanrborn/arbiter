@@ -1065,6 +1065,74 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  @doc """
+  Briefing for a **conflict-resolve** acolyte (#354, Phase 2b).
+
+  The Warden (`Arbiter.Worker.Watchdog`) dispatches a short-lived acolyte
+  against the task's existing worktree when an *approved* PR is blocked as
+  `:conflict` — mergeable in isolation but no longer applying cleanly on top of
+  the current base. The acolyte's job is narrow: rebase the branch onto the
+  current base, resolve the conflicts **honoring the task's original intent**,
+  fix anything the rebase broke, and force-push so the Warden's next poll can
+  re-attempt the merge.
+
+  The original intent (title / description / acceptance) is embedded so a
+  semantic conflict is resolved the way the task *meant*, not guessed. This
+  supersedes and hardens the narrower #122 auto-conflict-resolver prompt: it
+  adds the intent context and an explicit "run the tests, fix what the rebase
+  broke" step the old mechanical-only prompt lacked.
+  """
+  @spec conflict_resolve_briefing(Issue.t(), String.t(), String.t()) :: String.t()
+  def conflict_resolve_briefing(%Issue{} = task, branch, target_branch)
+      when is_binary(branch) and is_binary(target_branch) do
+    """
+    You are a conflict-resolution worker for task #{task.id}.
+
+    Your branch (#{branch}) is APPROVED but CONFLICTS with the current head of
+    #{target_branch}: it was mergeable in isolation, but the base has moved and
+    it no longer applies cleanly. Your ONLY job is to rebase it onto the current
+    base, resolve the conflicts, and force-push — NOT to re-implement the change
+    or open a new PR.
+
+    ## Original intent — resolve conflicts so the result still satisfies THIS
+
+    Title: #{task.title}
+
+    Description:
+    #{task.description || "(none)"}
+
+    Acceptance:
+    #{task.acceptance || "(none)"}
+
+    ## Steps
+
+      1. Fetch the latest base: `git fetch origin #{target_branch}`
+      2. Rebase your branch onto it: `git rebase origin/#{target_branch}`
+      3. Resolve every conflict so the result still honors the intent above.
+         Most collisions are parallel edits to non-overlapping sections — keep
+         both sides. Where two changes touch the same logic, keep the behaviour
+         the acceptance criteria describe, then `git rebase --continue`.
+      4. Run the test suite and fix anything the rebase broke — a clean rebase
+         that fails tests is NOT done. Re-run until green.
+      5. Force-push with lease to update the existing PR in place:
+         `git push --force-with-lease origin #{branch}`
+      6. Print `arb done` on a line by itself.
+
+    DO NOT:
+      * re-implement the change set or open a new PR,
+      * touch files unrelated to the conflict,
+      * abandon the rebase silently (`git rebase --abort` then exit).
+
+    If a conflict is SEMANTIC — two changes both rewrote the same predicate or
+    invariant such that no mechanical merge can honor both — STOP and escalate:
+
+        arb message admiral "Conflict on #{task.id} needs human review: <one-line why>"
+
+    then print `arb done`. A loud escalation beats a silent miscompile in
+    #{target_branch}.
+    """
+  end
+
   # When resuming (bd-auma3z) the work prompt is prefixed with a git-derived
   # briefing of the prior worker's committed + uncommitted work, so the fresh
   # agent continues from the preserved worktree instead of redoing finished
