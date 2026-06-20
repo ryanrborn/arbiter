@@ -54,6 +54,38 @@ defmodule Arbiter.MCP.ScopeTest do
     end
   end
 
+  describe "from_token/1 backward compatibility" do
+    test "legacy can_sling: true decodes as can_dispatch: true (pre-rename coordinator token)" do
+      # Simulate a coordinator token minted before the can_sling → can_dispatch rename.
+      # Such tokens have the old claim key and must still grant dispatch capability.
+      token =
+        Arbiter.MCP.mint(%{
+          tier: :coordinator,
+          workspace_id: nil,
+          task_id: nil,
+          repo: nil,
+          can_sling: true,
+          depth: 0
+        })
+
+      assert {:ok, %Scope{tier: :coordinator, can_dispatch: true}} = Scope.from_token(token)
+    end
+
+    test "legacy can_sling: false decodes as can_dispatch: false" do
+      token =
+        Arbiter.MCP.mint(%{
+          tier: :coordinator,
+          workspace_id: nil,
+          task_id: nil,
+          repo: nil,
+          can_sling: false,
+          depth: 0
+        })
+
+      assert {:ok, %Scope{tier: :coordinator, can_dispatch: false}} = Scope.from_token(token)
+    end
+  end
+
   describe "from_token/1 validation" do
     test "rejects a garbage token" do
       assert {:error, :invalid} = Scope.from_token("not-a-real-token")
