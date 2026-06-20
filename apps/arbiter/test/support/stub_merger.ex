@@ -27,7 +27,16 @@ defmodule Arbiter.Test.StubMerger do
     ensure_started()
 
     Agent.update(@name, fn _ ->
-      %{gets: %{}, merges: %{}, open_ref: "!stub", opens: [], review_feedbacks: %{}}
+      %{
+        gets: %{},
+        merges: %{},
+        open_ref: "!stub",
+        opens: [],
+        review_feedbacks: %{},
+        update_branches: %{},
+        update_branch_result: :ok,
+        failing_checks: %{}
+      }
     end)
 
     :ok
@@ -63,6 +72,26 @@ defmodule Arbiter.Test.StubMerger do
   def set_review_feedback(ref, feedback) when is_map(feedback) do
     ensure_started()
     Agent.update(@name, fn s -> put_in(s, [:review_feedbacks, ref], feedback) end)
+    :ok
+  end
+
+  @doc "How many times `update_branch/1` was called for `ref`."
+  def update_branch_count(ref) do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s.update_branches, ref, 0) end)
+  end
+
+  @doc "Set the result `update_branch/1` returns (`:ok` or `{:error, term}`)."
+  def set_update_branch_result(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> %{s | update_branch_result: result} end)
+    :ok
+  end
+
+  @doc "Set the `failing_check_logs/1` result list for `ref`."
+  def set_failing_checks(ref, checks) when is_list(checks) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:failing_checks, ref], checks) end)
     :ok
   end
 
@@ -117,6 +146,23 @@ defmodule Arbiter.Test.StubMerger do
   end
 
   @impl true
+  def update_branch(ref) do
+    ensure_started()
+
+    Agent.get_and_update(@name, fn s ->
+      s = update_in(s, [:update_branches, ref], &((&1 || 0) + 1))
+      {s.update_branch_result, s}
+    end)
+  end
+
+  @impl true
+  def failing_check_logs(ref) do
+    ensure_started()
+    checks = Agent.get(@name, fn s -> Map.get(s.failing_checks, ref, []) end)
+    {:ok, checks}
+  end
+
+  @impl true
   def close(_ref), do: :ok
 
   @impl true
@@ -152,7 +198,16 @@ defmodule Arbiter.Test.StubMerger do
       nil ->
         case Agent.start(
                fn ->
-                 %{gets: %{}, merges: %{}, open_ref: "!stub", opens: [], review_feedbacks: %{}}
+                 %{
+                   gets: %{},
+                   merges: %{},
+                   open_ref: "!stub",
+                   opens: [],
+                   review_feedbacks: %{},
+                   update_branches: %{},
+                   update_branch_result: :ok,
+                   failing_checks: %{}
+                 }
                end,
                name: @name
              ) do

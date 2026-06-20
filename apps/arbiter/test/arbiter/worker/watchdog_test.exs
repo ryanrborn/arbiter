@@ -6,9 +6,11 @@ defmodule Arbiter.Worker.WatchdogTest do
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Test.StubMerger
+  alias Arbiter.Test.StubFixPassDispatcher
 
   setup do
     StubMerger.reset()
+    StubFixPassDispatcher.reset()
     :ok
   end
 
@@ -156,7 +158,11 @@ defmodule Arbiter.Worker.WatchdogTest do
 
   describe "effective_block_reason/1 (gated on approval, #354)" do
     test "an approved PR with a block reason reports it" do
-      assert Watchdog.effective_block_reason(%{status: :open, approved: true, block_reason: :conflict}) ==
+      assert Watchdog.effective_block_reason(%{
+               status: :open,
+               approved: true,
+               block_reason: :conflict
+             }) ==
                :conflict
     end
 
@@ -212,6 +218,136 @@ defmodule Arbiter.Worker.WatchdogTest do
       start_watchdog(pid, task_id, "!b2", [])
 
       wait_until(fn -> Worker.state(pid).status == :completed end)
+    end
+  end
+
+  describe "auto-resolve :behind_base (#354 Phase 2a)" do
+    test "runs update-branch on an approved behind-base PR, then merges when caught up" do
+      {pid, task_id} = running_worker()
+      # Poll 1: approved but behind base -> the Warden runs update-branch.
+      # Poll 2: caught up (no block) -> auto-merge fires.
+      StubMerger.queue_get("!ar1", [
+        %{status: :open, approved: true, block_reason: :behind_base},
+        %{status: :open, approved: true}
+      ])
+
+      start_watchdog(pid, task_id, "!ar1", auto_merge: true)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert StubMerger.update_branch_count("!ar1") == 1
+      assert StubMerger.merge_count("!ar1") == 1
+    end
+
+    test "stops retrying update-branch after max_auto_resolve_attempts and parks" do
+      {pid, task_id} = running_worker()
+      # Perpetually behind base: the Warden retries update-branch up to the cap,
+      # then escalates + parks (no more update-branch calls).
+      StubMerger.queue_get("!ar2", [%{status: :open, approved: true, block_reason: :behind_base}])
+
+      start_watchdog(pid, task_id, "!ar2", auto_merge: true, max_auto_resolve_attempts: 2)
+
+      wait_until(fn -> StubMerger.update_branch_count("!ar2") >= 2 end)
+      # Let several more poll intervals elapse — the count must stay capped at 2.
+      Process.sleep(120)
+      assert StubMerger.update_branch_count("!ar2") == 2
+      refute Worker.state(pid).status == :failed
+    end
+
+    test "a failed update-branch (conflict introduced) does not merge or fail the worker" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_update_branch_result({:error, :merge_conflict})
+      StubMerger.queue_get("!ar3", [%{status: :open, approved: true, block_reason: :behind_base}])
+
+      start_watchdog(pid, task_id, "!ar3",
+        auto_merge: true,
+        max_auto_resolve_attempts: 2,
+        interval_ms: 10
+      )
+
+      wait_until(fn -> StubMerger.update_branch_count("!ar3") >= 1 end)
+      Process.sleep(80)
+      # It attempted update-branch but, on failure, never merged or failed the worker.
+      assert StubMerger.merge_count("!ar3") == 0
+      refute Worker.state(pid).status == :failed
+    end
+  end
+
+  describe "auto-resolve :ci_failed (#354 Phase 2a)" do
+    test "dispatches a fix-pass acolyte briefed with the failing check logs" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_failing_checks("!cf1", [%{name: "test", summary: "boom", url: nil}])
+      StubMerger.queue_get("!cf1", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!cf1",
+        auto_merge: true,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+
+      args = StubFixPassDispatcher.last_args()
+      assert args.task_id == task_id
+      assert args.pr_ref == "!cf1"
+      assert args.checks == [%{name: "test", summary: "boom", url: nil}]
+    end
+
+    test "stops re-dispatching the fix pass after max_auto_resolve_attempts" do
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!cf2", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!cf2",
+        auto_merge: true,
+        max_auto_resolve_attempts: 2,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 2 end)
+      Process.sleep(120)
+      assert StubFixPassDispatcher.call_count() == 2
+    end
+  end
+
+  describe "Phase 2a leaves :conflict / :needs_approval unaffected (#354)" do
+    test ":conflict never triggers update-branch or a fix pass" do
+      {pid, task_id} = running_worker()
+      # auto_merge: false keeps the worker parked so we can observe several polls.
+      StubMerger.queue_get("!na1", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!na1",
+        auto_merge: false,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      wait_until(fn ->
+        status = Map.get(Worker.state(pid).meta, :last_merger_status)
+        is_map(status) and Map.get(status, :block_reason) == :conflict
+      end)
+
+      Process.sleep(80)
+      assert StubMerger.update_branch_count("!na1") == 0
+      assert StubFixPassDispatcher.call_count() == 0
+    end
+
+    test ":needs_approval never triggers update-branch or a fix pass" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!na2", [
+        %{status: :open, approved: true, block_reason: :needs_approval}
+      ])
+
+      start_watchdog(pid, task_id, "!na2",
+        auto_merge: false,
+        fix_pass_dispatcher: StubFixPassDispatcher
+      )
+
+      wait_until(fn ->
+        status = Map.get(Worker.state(pid).meta, :last_merger_status)
+        is_map(status) and Map.get(status, :block_reason) == :needs_approval
+      end)
+
+      Process.sleep(80)
+      assert StubMerger.update_branch_count("!na2") == 0
+      assert StubFixPassDispatcher.call_count() == 0
     end
   end
 

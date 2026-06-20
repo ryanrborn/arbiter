@@ -24,6 +24,24 @@ defmodule Arbiter.Worker.Watchdog do
   :approved | :closed | :pending`. It is the *single* decision surface — the
   poll loop and any future push trigger both route through it.
 
+  ## Auto-resolving blocked merges (#354, Phase 2a)
+
+  An *approved* PR that still can't merge carries a `block_reason`
+  (`effective_block_reason/1`). On an `auto_merge` lane the Warden tries to
+  resolve the two mechanically-fixable reasons itself before escalating:
+
+      :behind_base -> `adapter.update_branch/1` (update-branch), then re-poll.
+                      A failed update (conflict introduced) falls through to
+                      `:conflict` handling.
+      :ci_failed   -> dispatch a fix-pass acolyte (briefed with the failing
+                      check logs via `adapter.failing_check_logs/1`) to fix the
+                      root cause and push, then re-poll.
+
+  Each attempt increments a per-episode counter; after `max_auto_resolve_attempts`
+  (default 2) the Warden stops retrying and escalates with the reason + attempt
+  count. The remaining reasons (`:conflict`, `:needs_approval`, `:draft`,
+  `:blocked_other`) keep the Phase 1 behaviour: escalate once and park.
+
   ### Webhook upgrade (design only — not implemented here)
 
   Polling is the shipped mechanism. A future push path would add
@@ -62,6 +80,20 @@ defmodule Arbiter.Worker.Watchdog do
   @default_max_polls_auto 30
   @default_max_polls_manual :infinity
 
+  # Consecutive auto-resolve attempts (#354, Phase 2a) before the Warden stops
+  # mechanically resolving a block and escalates to the coordinator with the
+  # reason + attempt count. Override via opt `:max_auto_resolve_attempts` or
+  # workspace config["merge"]["max_auto_resolve_attempts"].
+  @default_max_auto_resolve_attempts 2
+
+  # The default dispatcher the Warden uses to spawn a fix-pass acolyte for a
+  # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
+  @default_fix_pass_dispatcher Arbiter.Workflows.MergeQueue.FixPassDispatcher
+
+  # Registry suffix the fix-pass worker registers under — MUST match
+  # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
+  @fix_pass_registry_suffix ":fixpass"
+
   @type opt ::
           {:task_id, String.t()}
           | {:worker, pid() | String.t()}
@@ -74,6 +106,8 @@ defmodule Arbiter.Worker.Watchdog do
           | {:initial_delay_ms, non_neg_integer()}
           | {:max_polls, non_neg_integer()}
           | {:watch_pipeline, boolean()}
+          | {:max_auto_resolve_attempts, non_neg_integer()}
+          | {:fix_pass_dispatcher, module()}
 
   @type opts :: [opt()]
 
@@ -233,6 +267,14 @@ defmodule Arbiter.Worker.Watchdog do
             _ -> watch_pipeline_from_workspace(workspace)
           end
 
+        max_auto_resolve_attempts =
+          Keyword.get(opts, :max_auto_resolve_attempts) ||
+            max_auto_resolve_from_workspace(workspace) ||
+            @default_max_auto_resolve_attempts
+
+        fix_pass_dispatcher =
+          Keyword.get(opts, :fix_pass_dispatcher, @default_fix_pass_dispatcher)
+
         state = %{
           task_id: task_id,
           worker_pid: worker_pid,
@@ -249,6 +291,15 @@ defmodule Arbiter.Worker.Watchdog do
           # The last merge-block reason we escalated, so a blocked merge is
           # surfaced once per reason rather than on every poll (#354, Phase 1).
           last_block_reason: nil,
+          # Consecutive auto-resolve attempts for the current block episode
+          # (#354, Phase 2a). Reset to 0 when the block clears. After
+          # `max_auto_resolve_attempts` the Warden escalates instead of retrying.
+          auto_resolve_attempts: 0,
+          max_auto_resolve_attempts: max_auto_resolve_attempts,
+          fix_pass_dispatcher: fix_pass_dispatcher,
+          # Latches the exhausted-retry escalation so it fires once per block
+          # episode rather than on every subsequent poll (#354, Phase 2a).
+          unresolved_escalated: false,
           # Fired once when an approved MR is parked without auto-merge, so the
           # external tracker moves to its "approved, awaiting merge" status
           # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
@@ -267,8 +318,7 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
         state = maybe_escalate_pipeline(state, result)
-        state = maybe_escalate_merge_block(state, result)
-        apply_outcome(effective_outcome(state, result), result, state)
+        handle_merge_state(state, result)
 
       {:error, reason} ->
         Logger.debug(
@@ -410,49 +460,203 @@ defmodule Arbiter.Worker.Watchdog do
     %{state | last_pipeline: current_pipeline}
   end
 
-  # Detect, record, and escalate a blocked merge (#354, Phase 1). When the
-  # adapter classifies *why* the MR can't merge — conflict, behind base, CI
-  # failed, needs approval, draft — raise a coordinator escalation so an
-  # approved PR never parks silently at :awaiting_review. The reason itself is
-  # already recorded on the worker (via `record_status` → `:last_merger_status`)
-  # for the dashboard; this is the active escalation half.
+  # Route the poll result on its (approval-gated) merge-block reason (#354).
+  #
+  #   * no block        → reset the block latch + auto-resolve counter, run the
+  #                       normal merged/approved/closed/pending outcome.
+  #   * a block reason   → `handle_block/3` either auto-resolves it (Phase 2a),
+  #                       escalates it (Phase 1 reasons / exhausted retries), or
+  #                       both, then re-polls.
   #
   # Gated on approval (`effective_block_reason/1`): only an *approved* PR that
-  # cannot merge escalates, so the ordinary pre-approval review window never
-  # fires a spurious "merge blocked" alert.
-  #
-  # Debounced on `last_block_reason`: a given reason escalates once when it first
-  # appears (or changes), not on every poll. A cleared block (reason `nil`, e.g.
-  # the branch caught up, the MR merged, or approval has not landed yet) resets
-  # the latch so a later re-block re-escalates. Best-effort — a notifier failure
-  # must not disrupt the poll loop.
-  defp maybe_escalate_merge_block(state, result) do
+  # cannot merge is treated as blocked, so the ordinary pre-approval review
+  # window never fires a spurious alert or auto-resolution.
+  defp handle_merge_state(state, result) do
     case effective_block_reason(result) do
       nil ->
-        %{state | last_block_reason: nil}
+        state = %{
+          state
+          | last_block_reason: nil,
+            auto_resolve_attempts: 0,
+            unresolved_escalated: false
+        }
 
-      reason when reason == state.last_block_reason ->
-        state
+        apply_outcome(effective_outcome(state, result), result, state)
 
       reason ->
-        Logger.warning(
-          "Worker.Watchdog: merge blocked (#{reason}) for task=#{state.task_id} " <>
-            "mr=#{state.mr_ref}; escalating to coordinator"
-        )
-
-        safe(fn ->
-          snap =
-            case safe_snapshot(state.worker_pid) do
-              %{} = s -> s
-              _ -> %{task_id: state.task_id, workspace_id: nil}
-            end
-
-          Arbiter.Messages.AdmiralNotifier.merge_blocked(snap, state.mr_ref, reason)
-        end)
-
-        %{state | last_block_reason: reason}
+        handle_block(reason, result, state)
     end
   end
+
+  # Auto-resolution only runs on auto_merge lanes — the autonomous merge path
+  # (#354, Phase 2a). On a human-merge lane (auto_merge: false) a person is
+  # driving the merge, so we keep the Phase 1 behaviour: escalate the block once
+  # and let the normal parked-but-approved flow continue.
+  defp handle_block(reason, result, %{auto_merge: false} = state) do
+    state = debounce_escalate_block(state, reason)
+    apply_outcome(effective_outcome(state, result), result, state)
+  end
+
+  defp handle_block(reason, result, state) do
+    cond do
+      # Not mechanically resolvable here (:conflict → Phase 2b, :needs_approval /
+      # :draft / :blocked_other → human), or the adapter can't perform the
+      # resolution: fall back to the Phase 1 debounced escalation + normal outcome.
+      not (auto_resolvable?(reason) and adapter_supports?(state, reason)) ->
+        state = debounce_escalate_block(state, reason)
+        apply_outcome(effective_outcome(state, result), result, state)
+
+      # Bounded retries exhausted: escalate (once) with the reason + attempt
+      # count and park — stop auto-resolving so a human / Phase 2b takes over.
+      state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
+        state = maybe_escalate_unresolved(state, reason)
+        reschedule(%{state | last_block_reason: reason})
+
+      true ->
+        auto_resolve(reason, result, state)
+    end
+  end
+
+  # The Phase 1 debounced escalation: a given block reason escalates once when it
+  # first appears (or changes), not on every poll. Best-effort.
+  defp debounce_escalate_block(%{last_block_reason: reason} = state, reason), do: state
+
+  defp debounce_escalate_block(state, reason) do
+    Logger.warning(
+      "Worker.Watchdog: merge blocked (#{reason}) for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref}; escalating to coordinator"
+    )
+
+    safe(fn ->
+      Arbiter.Messages.AdmiralNotifier.merge_blocked(snapshot(state), state.mr_ref, reason)
+    end)
+
+    %{state | last_block_reason: reason}
+  end
+
+  # The two mechanically auto-resolvable block reasons (#354, Phase 2a).
+  defp auto_resolvable?(:behind_base), do: true
+  defp auto_resolvable?(:ci_failed), do: true
+  defp auto_resolvable?(_), do: false
+
+  # :behind_base needs the adapter to support `update_branch/1`; :ci_failed is
+  # resolved by dispatching a fix-pass acolyte (adapter-agnostic — the failing
+  # check logs are best-effort).
+  defp adapter_supports?(%{adapter: adapter}, :behind_base),
+    do: function_exported?(adapter, :update_branch, 1)
+
+  defp adapter_supports?(_state, :ci_failed), do: true
+  defp adapter_supports?(_state, _reason), do: false
+
+  defp auto_resolve(:behind_base, _result, state), do: resolve_behind_base(state)
+  defp auto_resolve(:ci_failed, result, state), do: resolve_ci_failed(result, state)
+
+  # :behind_base — run update-branch (mechanical, no agent) and re-poll. On
+  # failure (update-branch would conflict) fall through to :conflict handling.
+  defp resolve_behind_base(state) do
+    attempts = state.auto_resolve_attempts + 1
+
+    Logger.info(
+      "Worker.Watchdog: auto-resolving :behind_base via update-branch for " <>
+        "task=#{state.task_id} mr=#{state.mr_ref} (attempt #{attempts})"
+    )
+
+    case safe_update_branch(state) do
+      :ok ->
+        reschedule(%{state | last_block_reason: :behind_base, auto_resolve_attempts: attempts})
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker.Watchdog: update-branch failed for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}: #{inspect(reason)}; falling through to :conflict"
+        )
+
+        # update-branch introduced (or hit) a conflict — escalate as :conflict so
+        # a human / the Phase 2b rebase agent takes over, and park.
+        safe(fn ->
+          Arbiter.Messages.AdmiralNotifier.merge_blocked(snapshot(state), state.mr_ref, :conflict)
+        end)
+
+        reschedule(%{state | last_block_reason: :conflict, auto_resolve_attempts: attempts})
+    end
+  end
+
+  # :ci_failed — dispatch a fix-pass acolyte (briefed with the failing check
+  # logs) to fix the root cause and push, then re-poll. Only one fix pass runs at
+  # a time: while a prior one is still working we wait rather than spawning a
+  # second, so the attempt counter tracks *completed* fix passes.
+  defp resolve_ci_failed(result, state) do
+    if fix_pass_active?(state) do
+      reschedule(%{state | last_block_reason: :ci_failed})
+    else
+      attempts = state.auto_resolve_attempts + 1
+      checks = safe_failing_checks(state)
+
+      Logger.info(
+        "Worker.Watchdog: auto-resolving :ci_failed via fix-pass acolyte for " <>
+          "task=#{state.task_id} mr=#{state.mr_ref} (attempt #{attempts}, " <>
+          "#{length(checks)} failing check(s))"
+      )
+
+      _ = dispatch_fix_pass(state, checks)
+      _ = result
+
+      reschedule(%{state | last_block_reason: :ci_failed, auto_resolve_attempts: attempts})
+    end
+  end
+
+  # True when a fix-pass acolyte for this task is still working (registered under
+  # the `:fixpass` suffix and not yet terminal).
+  defp fix_pass_active?(state) do
+    case Worker.whereis(state.task_id <> @fix_pass_registry_suffix) do
+      nil -> false
+      pid -> safe_worker_status(pid) not in [:failed, :completed, nil]
+    end
+  end
+
+  defp dispatch_fix_pass(state, checks) do
+    args = %{
+      task_id: state.task_id,
+      workspace_id: workspace_id(state),
+      pr_ref: state.mr_ref,
+      checks: checks
+    }
+
+    safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
+  end
+
+  defp maybe_escalate_unresolved(%{unresolved_escalated: true} = state, _reason), do: state
+
+  defp maybe_escalate_unresolved(state, reason) do
+    escalate_unresolved_block(state, reason)
+    %{state | unresolved_escalated: true}
+  end
+
+  defp escalate_unresolved_block(state, reason) do
+    Logger.warning(
+      "Worker.Watchdog: auto-resolve exhausted (#{reason}, " <>
+        "#{state.auto_resolve_attempts} attempt(s)) for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref}; escalating to coordinator"
+    )
+
+    safe(fn ->
+      Arbiter.Messages.AdmiralNotifier.merge_block_unresolved(
+        snapshot(state),
+        state.mr_ref,
+        reason,
+        state.auto_resolve_attempts
+      )
+    end)
+  end
+
+  defp max_auto_resolve_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    case get_in(config, ["merge", "max_auto_resolve_attempts"]) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> nil
+    end
+  end
+
+  defp max_auto_resolve_from_workspace(_), do: nil
 
   defp watch_pipeline_from_workspace(nil), do: false
 
@@ -517,6 +721,60 @@ defmodule Arbiter.Worker.Watchdog do
     _ -> nil
   catch
     :exit, _ -> nil
+  end
+
+  # The worker snapshot the notifiers read, with a workspace-derived fallback so
+  # an escalation can still be addressed (Message.workspace_id is required) when
+  # the worker process can't be reached.
+  defp snapshot(state) do
+    case safe_snapshot(state.worker_pid) do
+      %{} = s -> s
+      _ -> %{task_id: state.task_id, workspace_id: workspace_id(state)}
+    end
+  end
+
+  defp workspace_id(%{workspace: %Arbiter.Tasks.Workspace{id: id}}), do: id
+  defp workspace_id(_), do: nil
+
+  defp safe_worker_status(pid) do
+    case Worker.state(pid) do
+      %{status: status} -> status
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp safe_update_branch(%{adapter: adapter, mr_ref: mr_ref}) do
+    case adapter.update_branch(mr_ref) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:bad_return, other}}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # Best-effort fetch of the failing-check briefing for the fix-pass acolyte. An
+  # adapter that doesn't expose check logs, or any error, yields an empty list —
+  # the fix pass still dispatches, just without log context.
+  defp safe_failing_checks(%{adapter: adapter, mr_ref: mr_ref}) do
+    if function_exported?(adapter, :failing_check_logs, 1) do
+      case adapter.failing_check_logs(mr_ref) do
+        {:ok, checks} when is_list(checks) -> checks
+        _ -> []
+      end
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp schedule(pid, ms) when is_integer(ms) and ms >= 0 do

@@ -99,6 +99,21 @@ defmodule Arbiter.Mergers.Merger do
         }
 
   @typedoc """
+  A single failing CI check surfaced by `failing_check_logs/1` so the Warden
+  can brief a fix-pass acolyte with the failure (#354, Phase 2a).
+
+    * `:name` — the check/job name (e.g. `"build"`, `"test (1.16)"`).
+    * `:summary` — a tail of the failure output (title/summary/log excerpt),
+      truncated to a briefing-sized snippet.
+    * `:url` — a human link to the full check run, when the adapter has one.
+  """
+  @type failing_check :: %{
+          required(:name) => String.t(),
+          required(:summary) => String.t(),
+          optional(:url) => String.t() | nil
+        }
+
+  @typedoc """
   Aggregated human PR-side review feedback (bd-95lsjb). Returned by
   `list_review_feedback/1` and consumed by the MergeQueue to drive an
   auto-revise pass on the existing worktree.
@@ -147,4 +162,39 @@ defmodule Arbiter.Mergers.Merger do
   `{:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}`.
   """
   @callback list_review_feedback(mr_ref) :: {:ok, review_feedback()} | {:error, term()}
+
+  @doc """
+  Update the MR's head branch from its base — the mechanical `:behind_base`
+  auto-resolution the Warden runs before re-attempting the merge (#354, Phase
+  2a). For GitHub this is `PUT /pulls/:n/update-branch` (equivalently `gh pr
+  update-branch`); for a local adapter it is a rebase/merge of the base onto the
+  branch + push.
+
+  Returns `:ok` once the update is accepted (it may complete asynchronously on
+  the forge — the Warden re-polls). Returns `{:error, term()}` when the update
+  can't be performed (e.g. the merge would conflict), at which point the Warden
+  falls through to `:conflict` handling.
+
+  Optional — adapters that can't update a branch (e.g. `Direct`, `GitLab` until
+  wired) simply don't implement it; the Warden guards with `function_exported?/3`
+  and falls back to escalation.
+  """
+  @callback update_branch(mr_ref) :: :ok | {:error, term()}
+
+  @doc """
+  Fetch the failing CI checks for `mr_ref` — their names and a tail of each
+  one's output — so the Warden can brief a fix-pass acolyte on a `:ci_failed`
+  block (#354, Phase 2a). For GitHub this reads the Checks API for the PR's head
+  commit.
+
+  Returns `{:ok, [failing_check()]}` (an empty list when nothing is failing or
+  no CI is configured) or `{:error, term()}`.
+
+  Optional — adapters that don't expose check logs simply don't implement it;
+  the Warden guards with `function_exported?/3` and dispatches the fix pass with
+  whatever context it has.
+  """
+  @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
+
+  @optional_callbacks update_branch: 1, failing_check_logs: 1
 end
