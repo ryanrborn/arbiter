@@ -358,8 +358,30 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert block_get(%{"detailed_merge_status" => "need_rebase"}).block_reason == :behind_base
     end
 
-    test "ci_must_pass classifies as :ci_failed" do
-      assert block_get(%{"detailed_merge_status" => "ci_must_pass"}).block_reason == :ci_failed
+    test "ci_must_pass is non-blocking (CI required but not yet failed)" do
+      # ci_must_pass means CI hasn't gone green yet — it may still be running.
+      # Only a resolved :failed pipeline is a CI block, so this is nil.
+      assert block_get(%{"detailed_merge_status" => "ci_must_pass"}).block_reason == nil
+    end
+
+    test "ci_still_running is non-blocking (pipeline in progress, not failed)" do
+      assert block_get(%{"detailed_merge_status" => "ci_still_running"}).block_reason == nil
+    end
+
+    test "ci_must_pass with a failed pipeline still classifies as :ci_failed" do
+      # When CI has actually failed, the resolved pipeline value wins regardless
+      # of the detailed-status string.
+      result =
+        block_get(%{"detailed_merge_status" => "ci_must_pass"}, [%{"id" => 9, "status" => "failed"}])
+
+      assert result.block_reason == :ci_failed
+    end
+
+    test "transient detailed statuses (preparing/checking/unchecked) are non-blocking" do
+      for status <- ["preparing", "checking", "unchecked"] do
+        assert block_get(%{"detailed_merge_status" => status}).block_reason == nil,
+               "expected #{status} to be non-blocking"
+      end
     end
 
     test "a failed pipeline classifies as :ci_failed" do
