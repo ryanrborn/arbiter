@@ -82,9 +82,9 @@ defmodule Arbiter.MCP.Catalog do
         "installation default. A worker may only ever name its own workspace."
   }
 
-  # Tools that do NOT take a `workspace` arg: `workspace_list` already enumerates
-  # every workspace.
-  @no_workspace_field ~w(workspace_list)
+  # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
+  # All other tools do not accept a workspace override.
+  @workspace_tools ~w(task_ready coordinator_inbox workspace_show task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync)
 
   @raw_tools [
     %{
@@ -602,16 +602,15 @@ defmodule Arbiter.MCP.Catalog do
     }
   ]
 
-  # Inject the optional `workspace` field into every workspace-resolving tool's
-  # input schema (all but `@no_workspace_field`), so callers can target a
-  # workspace explicitly without each tool restating the property by hand.
+  # Inject the optional `workspace` field into every tool that calls resolve_workspace_id,
+  # so callers can target a workspace explicitly without each tool restating the property by hand.
   @tools Enum.map(@raw_tools, fn tool ->
-           if tool.name in @no_workspace_field do
-             tool
-           else
+           if tool.name in @workspace_tools do
              update_in(tool, [:input_schema, "properties"], fn props ->
                Map.put(props, "workspace", @workspace_field)
              end)
+           else
+             tool
            end
          end)
 
