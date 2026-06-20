@@ -180,6 +180,82 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     end
   end
 
+  describe "worker review" do
+    test "POSTs to the review endpoint with task_id" do
+      stub_post("/api/workers/review", %{
+        "task_id" => "bd-099",
+        "task" => %{"id" => "bd-099"},
+        "worker" => %{"pid" => "worker-xyz"}
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["review", "bd-099"]) end)
+      assert exit_code == 0
+      assert out =~ "Review worker spawned"
+      assert out =~ "bd-099"
+      assert out =~ "worker-xyz"
+    end
+
+    test "forwards --repo flag" do
+      stub_post("/api/workers/review", %{
+        "task_id" => "bd-100",
+        "task" => %{"id" => "bd-100"},
+        "worker" => %{"pid" => "worker-abc"}
+      })
+
+      {out, _err, exit_code} =
+        capture(fn -> Worker.run(["review", "bd-100", "--repo", "my-repo"]) end)
+
+      assert exit_code == 0
+      assert out =~ "Review worker spawned"
+    end
+
+    test "forwards --model flag" do
+      stub_post("/api/workers/review", %{
+        "task_id" => "bd-101",
+        "task" => %{"id" => "bd-101"},
+        "worker" => %{"pid" => "worker-def"}
+      })
+
+      {out, _err, exit_code} =
+        capture(fn -> Worker.run(["review", "bd-101", "--model", "opus"]) end)
+
+      assert exit_code == 0
+      assert out =~ "Review worker spawned"
+    end
+
+    test "--json forwards the full payload" do
+      stub_post("/api/workers/review", %{
+        "task_id" => "bd-102",
+        "task" => %{"id" => "bd-102"},
+        "worker" => %{"pid" => "worker-ghi"}
+      })
+
+      {out, _err, exit_code} =
+        capture(fn -> Worker.run(["review", "bd-102", "--json"]) end)
+
+      assert exit_code == 0
+      assert {:ok, %{"task_id" => "bd-102"}} = Jason.decode(String.trim(out))
+    end
+
+    test "missing task_id returns a friendly error" do
+      {_out, _err, exit_code} = capture(fn -> Worker.run(["review"]) end)
+      assert exit_code != 0
+    end
+
+    test "includes worktree_path if present" do
+      stub_post("/api/workers/review", %{
+        "task_id" => "bd-103",
+        "task" => %{"id" => "bd-103"},
+        "worker" => %{"pid" => "worker-jkl"},
+        "worktree_path" => "/tmp/worktree-123"
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["review", "bd-103"]) end)
+      assert exit_code == 0
+      assert out =~ "/tmp/worktree-123"
+    end
+  end
+
   describe "unknown subcommand" do
     test "halts with a useful message" do
       {_out, _err, exit_code} = capture(fn -> Worker.run(["wat"]) end)
