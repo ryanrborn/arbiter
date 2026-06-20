@@ -329,4 +329,94 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert String.contains?(updated_task.notes || "", "REQUEST_CHANGES")
     end
   end
+
+  # ---- bd-btcyn6 fallback: adapter-derived verdict when VERDICT sentinel missing ----
+
+  describe "adapter-derived verdict fallback (bd-btcyn6)" do
+    test "APPROVE derived from adapter review when stdout has no VERDICT sentinel" do
+      # Belt-and-suspenders for bd-btcyn6: if the reviewer posts `gh pr review
+      # --approve` but (contrary to the updated prompt) omits the VERDICT sentinel,
+      # the completion path falls back to querying the adapter's PR review state and
+      # derives APPROVE from the submitted APPROVED review — not INCONCLUSIVE.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-300"}, action: :update)
+
+      StubMerger.set_review_feedback("pr-300", %{
+        changes_requested: false,
+        latest_review_id: 42,
+        feedback: [%{kind: :review, state: "APPROVED", body: "LGTM", author: "bot"}]
+      })
+
+      # Stdout has no VERDICT sentinel — only the gh pr review output.
+      pid =
+        start_reviewer(task, [
+          "Reviewed PR #300.",
+          "Posted review via: gh pr review 300 --approve --body 'LGTM'"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
+
+      snap = Worker.state(pid)
+      assert snap.status == :awaiting_review
+      assert snap.mr_ref == "pr-300"
+    end
+
+    test "REQUEST_CHANGES derived from adapter review when stdout has no VERDICT sentinel" do
+      # Belt-and-suspenders for bd-btcyn6: if the reviewer posts
+      # `gh pr review --request-changes` but omits the VERDICT sentinel,
+      # the fallback derives REQUEST_CHANGES from the adapter and fails the
+      # worker correctly — not INCONCLUSIVE.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-301"}, action: :update)
+
+      StubMerger.set_review_feedback("pr-301", %{
+        changes_requested: true,
+        latest_review_id: 43,
+        feedback: [
+          %{kind: :review, state: "CHANGES_REQUESTED", body: "nil guard missing", author: "bot"}
+        ]
+      })
+
+      pid =
+        start_reviewer(task, [
+          "Found issues in PR #301.",
+          "Posted review via: gh pr review 301 --request-changes --body 'see comments'"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.status == :failed
+      assert StubMerger.merge_count("pr-301") == 0
+
+      assert {:ok, updated_task} = Ash.get(Arbiter.Tasks.Issue, task.id)
+      refute String.contains?(updated_task.notes || "", "INCONCLUSIVE")
+      assert String.contains?(updated_task.notes || "", "REQUEST_CHANGES")
+    end
+
+    test "still lands INCONCLUSIVE when stdout has no VERDICT and adapter has no review" do
+      # When the reviewer never posted a review at all (no VERDICT sentinel,
+      # no adapter review), INCONCLUSIVE is the correct outcome.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-302"}, action: :update)
+
+      # StubMerger returns empty feedback by default — no reviews submitted.
+      pid = start_reviewer(task, ["Starting review of PR #302..."])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.status == :failed
+      assert StubMerger.merge_count("pr-302") == 0
+    end
+  end
 end
