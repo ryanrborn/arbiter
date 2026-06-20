@@ -1291,6 +1291,15 @@ defmodule Arbiter.Worker.ReviewGate do
     by reading it — you do not run the application. (Reading files and running
     `git` is fine.)
 
+    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+    tool — including in parallel or with background execution modes. However,
+    you MUST wait for every background task to complete and read its full
+    output before producing your VERDICT. A VERDICT issued while any
+    background task is still running is invalid: you would be judging on
+    incomplete evidence. Do not exit, do not print your VERDICT, and do not
+    print `arb done` until every tool you launched has finished and you have
+    read its result.
+
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
         VERDICT: APPROVE
