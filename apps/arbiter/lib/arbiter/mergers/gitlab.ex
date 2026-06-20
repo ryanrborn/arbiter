@@ -455,10 +455,17 @@ defmodule Arbiter.Mergers.Gitlab do
   #
   #   :conflict       — merge conflict with the target branch
   #   :behind_base    — fast-forward-only target needs a rebase
-  #   :ci_failed      — required pipeline failed or still running
+  #   :ci_failed      — required pipeline actually failed
   #   :needs_approval — required approvals not yet satisfied
   #   :draft          — MR is a draft / work in progress
-  #   :blocked_other  — blocked by some other rule (unresolved threads, …)
+  #   :blocked_other  — blocked by some other settled rule (unresolved threads, …)
+  #
+  # In-progress / transient statuses map to `nil` (not a block): "ci_still_running"
+  # / "ci_must_pass" mean CI is required but not yet green — it may still be
+  # running — so a CI block is keyed off the *resolved* `pipeline == :failed`,
+  # never the detailed-status string; and "preparing" / "checking" / "unchecked"
+  # mean GitLab is still computing the merge status. Escalating any of these
+  # would fire while the MR is merely being prepared, not genuinely blocked.
   defp block_reason(_body, status, _pipeline) when status in [:merged, :closed], do: nil
 
   defp block_reason(body, _status, pipeline) do
@@ -477,13 +484,21 @@ defmodule Arbiter.Mergers.Gitlab do
       detailed == "need_rebase" ->
         :behind_base
 
-      pipeline == :failed or detailed in ["ci_must_pass", "ci_still_running"] ->
+      # Only a settled, failed pipeline is a CI block. "ci_must_pass" /
+      # "ci_still_running" are handled in the in-progress bucket below.
+      pipeline == :failed ->
         :ci_failed
 
       detailed in ["not_approved", "approvals_syncing", "requested_changes"] ->
         :needs_approval
 
       detailed == "mergeable" ->
+        nil
+
+      # In-progress / transient — CI not yet green, or merge status still being
+      # computed. Non-blocking until it settles (findings: ci_still_running is
+      # not a failure; preparing/checking/unchecked are not a block).
+      detailed in ["ci_must_pass", "ci_still_running", "preparing", "checking", "unchecked"] ->
         nil
 
       is_nil(detailed) and merge_status == "cannot_be_merged" ->
