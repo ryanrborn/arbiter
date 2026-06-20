@@ -1,6 +1,6 @@
 defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   @moduledoc """
-  Regression tests for bd-4ji58d.
+  Regression tests for bd-4ji58d and bd-btcyn6.
 
   When a coordinator dispatches a reviewer via `worker_review` / `arb worker
   review`, the resulting worker is tagged `review_only: true` and has no
@@ -8,7 +8,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   caused the reviewer worker to complete normally, which prompted the Driver
   to close the task — without ever merging the PR.
 
-  After the fix:
+  After the fix (bd-4ji58d):
 
     * APPROVE → reviewer worker parks at :awaiting_review and the Watchdog
       merges the task's pr_ref automatically (via_review_gate: true path).
@@ -17,6 +17,12 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     * No verdict → same as REQUEST_CHANGES (fail, task stays :in_progress).
     * No pr_ref on the task → APPROVE falls through to complete normally
       (nothing to merge).
+
+  bd-btcyn6 regression: a reviewer that submits the review verdict via the
+  tracker CLI (`gh pr review`) and also emits the required `VERDICT:` sentinel
+  before `arb done` must land in a clean terminal state — not failed/INCONCLUSIVE.
+  The review prompt was updated to require the sentinel; these tests cover the
+  adapter-submitted-verdict completion path.
   """
 
   # async: false — shares the singleton Worker registry/supervisor + the
@@ -253,6 +259,74 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       wait_until(fn -> Worker.state(pid).status == :completed end)
 
       assert Worker.state(pid).status == :completed
+    end
+  end
+
+  # ---- bd-btcyn6 regression: adapter-submitted verdict completion path ------
+
+  describe "adapter-submitted verdict (bd-btcyn6)" do
+    test "APPROVE after posting gh pr review parks at :awaiting_review (not failed/INCONCLUSIVE)" do
+      # Regression for bd-btcyn6: a reviewer that posts the GitHub review via
+      # `gh pr review --approve` AND emits the required `VERDICT: APPROVE`
+      # sentinel (as the updated review prompt demands) must land in
+      # :awaiting_review, NOT :failed. Previously the completion path only
+      # parsed stdout for the sentinel and returned INCONCLUSIVE when it was
+      # absent; with the updated prompt the sentinel is always present.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-200"}, action: :update)
+
+      # Simulate the reviewer's stdout: it posts via `gh pr review --approve`,
+      # then emits the VERDICT: sentinel the updated prompt requires, then arb done.
+      pid =
+        start_reviewer(task, [
+          "Reviewed PR #200 — all changes look good.",
+          "Posted review via: gh pr review 200 --approve --body 'LGTM'",
+          "VERDICT: APPROVE",
+          "arb done"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
+
+      snap = Worker.state(pid)
+      assert snap.status == :awaiting_review
+      assert snap.mr_ref == "pr-200"
+    end
+
+    test "REQUEST_CHANGES after posting gh pr review fails the worker (not INCONCLUSIVE)" do
+      # Regression for bd-btcyn6: a reviewer that posts CHANGES_REQUESTED via
+      # `gh pr review --request-changes` AND emits `VERDICT: REQUEST_CHANGES`
+      # must fail the worker (leaving the task :in_progress for a fix-pass),
+      # NOT land as INCONCLUSIVE. Previously it landed INCONCLUSIVE because no
+      # VERDICT: sentinel was present in stdout.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-201"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "Found issues in PR #201:",
+          "- [error] lib/foo.ex:10 nil guard missing",
+          "Posted review via: gh pr review 201 --request-changes --body 'see comments'",
+          "VERDICT: REQUEST_CHANGES",
+          "- [error] lib/foo.ex:10 nil guard missing"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      snap = Worker.state(pid)
+      assert snap.status == :failed
+      assert StubMerger.merge_count("pr-201") == 0
+
+      # The task should NOT have landed as INCONCLUSIVE — it should have
+      # recorded the actual REQUEST_CHANGES verdict.
+      assert {:ok, updated_task} = Ash.get(Arbiter.Tasks.Issue, task.id)
+      refute String.contains?(updated_task.notes || "", "INCONCLUSIVE")
+      assert String.contains?(updated_task.notes || "", "REQUEST_CHANGES")
     end
   end
 end
