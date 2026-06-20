@@ -6,13 +6,13 @@ defmodule Arbiter.Trackers.GitHub do
   fetch/create/update/transition flows, so directives can sync to GitHub
   Issues. `create/1` POSTs `/repos/:owner/:repo/issues` and returns the new
   issue number as the canonical ref; used by `arb create` to mirror a new
-  bead into the workspace's GitHub repo.
+  task into the workspace's GitHub repo.
 
   ## Active-workspace contract
 
   The `Tracker` behaviour callbacks take a `ref` (the issue number as a
   string, e.g. `"42"`) with no workspace context. But GitHub needs an owner,
-  repo, token, and a bead-status → state/label mapping — all workspace-scoped.
+  repo, token, and a task-status → state/label mapping — all workspace-scoped.
   We resolve those through `Arbiter.Trackers.GitHub.Config`, exactly as the
   Jira and Shortcut adapters do for their backends:
 
@@ -40,7 +40,7 @@ defmodule Arbiter.Trackers.GitHub do
   ## Status mapping
 
   GitHub Issues have only two native states — `open` and `closed` — so the
-  bead-vocabulary `:in_progress` is expressed as an open issue carrying a
+  task-vocabulary `:in_progress` is expressed as an open issue carrying a
   label (default `"in progress"`). `transition/2`:
 
     1. Resolves the target status to a `%{state, label}` pair via the
@@ -167,7 +167,7 @@ defmodule Arbiter.Trackers.GitHub do
   def list_transitions(ref) when is_binary(ref) do
     # GitHub imposes no transition state machine — an issue can move to any of
     # the mapped statuses at any time — so we validate the ref exists, then
-    # return every bead status the workspace knows how to map.
+    # return every task status the workspace knows how to map.
     with {:ok, cfg} <- Config.resolve(),
          {:ok, _issue} <- request(cfg, :get, issue_path(cfg, ref), []) |> handle_json() do
       statuses =
@@ -219,7 +219,7 @@ defmodule Arbiter.Trackers.GitHub do
          raw: nil
        }}
 
-  # Map bead-domain attrs onto GitHub's POST /repos/:o/:r/issues body. `title`
+  # Map task-domain attrs onto GitHub's POST /repos/:o/:r/issues body. `title`
   # is required; `body`, `assignees`, and labels are optional — we skip them
   # when the caller didn't supply them. Labels are a merged set of: the
   # initial-status label from the workspace status_map, a `"priority: N"` label
@@ -262,7 +262,7 @@ defmodule Arbiter.Trackers.GitHub do
   defp maybe_put_assignees(payload, _), do: payload
 
   # Merge labels from three sources: the workspace status_map for the initial
-  # bead status, a "priority: N" label when priority is given, and a "type: T"
+  # task status, a "priority: N" label when priority is given, and a "type: T"
   # label when issue_type is given. Only sets "labels" if there is at least one.
   defp maybe_put_labels(payload, cfg, status, priority, issue_type) do
     status_label =
@@ -328,14 +328,14 @@ defmodule Arbiter.Trackers.GitHub do
   end
 
   @impl true
-  def signal_claim(ref, bead_id, %{
+  def signal_claim(ref, task_id, %{
         workspace_name: name,
         workspace_prefix: prefix,
         current_user: login,
         host: host
       }) do
     body =
-      "Claimed as #{bead_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+      "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
 
     post_comment(ref, body)
     assign_user(ref, login)
@@ -349,7 +349,7 @@ defmodule Arbiter.Trackers.GitHub do
   restoring the previous config when `fun` returns. Useful in tests and
   one-shot scripts. Mirrors `Arbiter.Trackers.Jira.with_workspace/2`.
   """
-  @spec with_workspace(map() | Arbiter.Beads.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(map() | Arbiter.Tasks.Workspace.t(), (-> result)) :: result
         when result: any()
   def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
     prev = Process.get({Config, :active_workspace_config})
@@ -365,7 +365,7 @@ defmodule Arbiter.Trackers.GitHub do
   @doc """
   Returns the authenticated user's login (the "viewer") associated with the
   active workspace's token. Used by `arb claim` and `arb sync` to enforce
-  assignment-as-claim: a bead is only created for an issue assigned to *this*
+  assignment-as-claim: a task is only created for an issue assigned to *this*
   workspace's GitHub user.
   """
   @spec viewer_login() :: {:ok, String.t()} | {:error, Error.t()}
@@ -681,7 +681,7 @@ defmodule Arbiter.Trackers.GitHub do
          %Error{
            kind: :transition_not_found,
            status: nil,
-           message: "no GitHub state mapped for bead status #{inspect(status)}",
+           message: "no GitHub state mapped for task status #{inspect(status)}",
            raw: nil
          }}
     end
@@ -722,7 +722,7 @@ defmodule Arbiter.Trackers.GitHub do
 
   # ---- Internals: field translation ---------------------------------------
 
-  # Bead-domain field keys -> GitHub issue attributes.
+  # Task-domain field keys -> GitHub issue attributes.
   @field_map %{
     title: "title",
     description: "body"

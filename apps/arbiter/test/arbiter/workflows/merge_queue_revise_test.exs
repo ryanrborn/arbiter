@@ -10,8 +10,8 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
   # async: false — same rationale as the parent merge_queue_test.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.MergeQueue
 
   @token "test-token-abc123"
@@ -32,7 +32,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
   # ---- stub dispatcher ----------------------------------------------------
 
   # The MergeQueue resolves the stub by atom, so we route through :persistent_term
-  # keyed on bead id (same trick the conflict-test stub uses): the test seeds a
+  # keyed on task id (same trick the conflict-test stub uses): the test seeds a
   # target pid + canned result before driving the MergeQueue.
   defmodule StubDispatcher do
     @moduledoc false
@@ -40,9 +40,9 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
 
     @impl true
     def dispatch(args) do
-      bead_id = Map.fetch!(args, :bead_id)
+      task_id = Map.fetch!(args, :task_id)
 
-      case lookup(bead_id) do
+      case lookup(task_id) do
         {pid, result} ->
           send(pid, {:revise_called, args})
 
@@ -56,15 +56,15 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       end
     end
 
-    def register(bead_id, pid, result \\ :ok) do
-      :persistent_term.put({__MODULE__, bead_id}, {pid, result})
+    def register(task_id, pid, result \\ :ok) do
+      :persistent_term.put({__MODULE__, task_id}, {pid, result})
     end
 
-    def unregister(bead_id) do
-      :persistent_term.erase({__MODULE__, bead_id})
+    def unregister(task_id) do
+      :persistent_term.erase({__MODULE__, task_id})
     end
 
-    defp lookup(bead_id), do: :persistent_term.get({__MODULE__, bead_id}, nil)
+    defp lookup(task_id), do: :persistent_term.get({__MODULE__, task_id}, nil)
   end
 
   # ---- setup --------------------------------------------------------------
@@ -80,16 +80,16 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
         config: workspace_config
       })
 
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{
         title: "revise me",
-        description: "bead under revise test",
+        description: "task under revise test",
         workspace_id: workspace.id
       })
 
-    on_exit(fn -> StubDispatcher.unregister(bead.id) end)
+    on_exit(fn -> StubDispatcher.unregister(task.id) end)
 
-    %{workspace: workspace, bead: bead}
+    %{workspace: workspace, task: task}
   end
 
   defp start_merge_queue(workspace, opts \\ []) do
@@ -115,9 +115,9 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
 
   # Adopt path: pre-seed pr_ref so enqueue slots the item straight into
   # :awaiting_approval without an open call.
-  defp with_pr_ref(bead, ref) do
-    {:ok, bead} = Ash.update(bead, %{pr_ref: ref}, action: :update)
-    bead
+  defp with_pr_ref(task, ref) do
+    {:ok, task} = Ash.update(task, %{pr_ref: ref}, action: :update)
+    task
   end
 
   # A stub serving PR get + reviews + (review) comments + issue-comment POST +
@@ -173,13 +173,13 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
 
   describe "CHANGES_REQUESTED triggers a single revise pass" do
     test "dispatches the revise, parks :changes_requested, then returns to :awaiting_approval",
-         %{workspace: ws, bead: bead} do
-      bead = with_pr_ref(bead, "#901")
-      StubDispatcher.register(bead.id, self(), :ok)
+         %{workspace: ws, task: task} do
+      task = with_pr_ref(task, "#901")
+      StubDispatcher.register(task.id, self(), :ok)
       pr_stub(901, reviews: fn -> [changes_requested_review(100)] end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       # Adopted straight into :awaiting_approval.
       %{items: [item]} = MergeQueue.state(name)
@@ -189,7 +189,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       :ok = MergeQueue.tick(name)
 
       assert_received {:revise_called, args}
-      assert args.bead_id == bead.id
+      assert args.task_id == task.id
       assert args.workspace_id == ws.id
       assert args.pr_ref == "#901"
       assert args.target_branch == "main"
@@ -215,14 +215,14 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
 
     test "the same review is never actioned twice across many ticks (debounce)", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      bead = with_pr_ref(bead, "#902")
-      StubDispatcher.register(bead.id, self(), :ok)
+      task = with_pr_ref(task, "#902")
+      StubDispatcher.register(task.id, self(), :ok)
       pr_stub(902, reviews: fn -> [changes_requested_review(100)] end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       for _ <- 1..5, do: :ok = MergeQueue.tick(name)
 
@@ -233,10 +233,10 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
 
     test "a NEW CHANGES_REQUESTED review (different id) triggers a second revise", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      bead = with_pr_ref(bead, "#903")
-      StubDispatcher.register(bead.id, self(), :ok)
+      task = with_pr_ref(task, "#903")
+      StubDispatcher.register(task.id, self(), :ok)
 
       # First two reads return review 100; after that, a fresh review 300.
       counter = :counters.new(1, [:atomics])
@@ -250,7 +250,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       )
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       :ok = MergeQueue.tick(name)
       assert_received {:revise_called, %{}}
@@ -271,10 +271,10 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
   describe "a later APPROVE advances to merge" do
     test "after the revise, an APPROVE (latest verdict) merges as today", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      bead = with_pr_ref(bead, "#904")
-      StubDispatcher.register(bead.id, self(), :ok)
+      task = with_pr_ref(task, "#904")
+      StubDispatcher.register(task.id, self(), :ok)
 
       # Tick 1 read: CHANGES_REQUESTED. After that: the same reviewer APPROVED
       # (the CHANGES_REQUESTED stays in history, but the latest verdict wins).
@@ -297,7 +297,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       )
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       :ok = MergeQueue.tick(name)
       assert_received {:revise_called, _}
@@ -307,7 +307,7 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
       :ok = MergeQueue.tick(name)
       assert_received :merge_called
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
     end
   end
@@ -317,14 +317,14 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
   describe "dispatch failure" do
     test "a failed dispatch parks the item :failed (no retry loop)", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      bead = with_pr_ref(bead, "#905")
-      StubDispatcher.register(bead.id, self(), {:error, :no_outpost})
+      task = with_pr_ref(task, "#905")
+      StubDispatcher.register(task.id, self(), {:error, :no_outpost})
       pr_stub(905, reviews: fn -> [changes_requested_review(100)] end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       assert_received {:revise_called, _}
@@ -343,19 +343,19 @@ defmodule Arbiter.Workflows.MergeQueueReviseTest do
 
   describe "Direct (no-forge) merger" do
     @tag workspace_config: @ws_direct
-    test "never dispatches a revise — the bead closes immediately", %{
+    test "never dispatches a revise — the task closes immediately", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      StubDispatcher.register(bead.id, self(), :ok)
+      StubDispatcher.register(task.id, self(), :ok)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       refute_received {:revise_called, _}
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
     end
   end

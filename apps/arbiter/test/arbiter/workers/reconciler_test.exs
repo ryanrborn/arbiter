@@ -4,16 +4,16 @@ defmodule Arbiter.Workers.ReconcilerTest do
   # WorkerRunPersistenceTest.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Workers.Reconciler
   alias Arbiter.Workers.Run
   require Ash.Query
 
-  defp create_run(bead_id, status) do
+  defp create_run(task_id, status) do
     Ash.create!(Run, %{
-      bead_id: bead_id,
+      task_id: task_id,
       repo: "arbiter",
       workspace_id: "ws-reconcile",
       status: status,
@@ -22,35 +22,35 @@ defmodule Arbiter.Workers.ReconcilerTest do
     })
   end
 
-  defp reload(bead_id) do
+  defp reload(task_id) do
     Run
-    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.read_one!()
   end
 
   test "marks an orphaned :running run :failed with a server-restarted reason" do
-    bead_id = "bd-orphan-#{System.unique_integer([:positive])}"
-    create_run(bead_id, :running)
+    task_id = "bd-orphan-#{System.unique_integer([:positive])}"
+    create_run(task_id, :running)
 
     assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
 
-    run = reload(bead_id)
+    run = reload(task_id)
     assert run.status == :failed
     assert run.failure_reason == "server restarted"
     assert %DateTime{} = run.completed_at
   end
 
   test "leaves a :running run with a live worker untouched" do
-    bead_id = "bd-live-#{System.unique_integer([:positive])}"
+    task_id = "bd-live-#{System.unique_integer([:positive])}"
 
     # A live worker both registers under Worker.Registry and writes its own
     # :running Run row on init — exactly the case the sweep must skip.
-    {:ok, pid} = Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-reconcile")
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-reconcile")
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
     assert {:ok, 0} = Reconciler.reconcile_orphaned_runs()
 
-    run = reload(bead_id)
+    run = reload(task_id)
     assert run.status == :running
   end
 
@@ -74,21 +74,21 @@ defmodule Arbiter.Workers.ReconcilerTest do
   test "the primary instance still performs the crash-recovery sweep" do
     # The legitimate single-server-restart path: primary?: true reconciles as
     # before, so genuine orphans are still swept.
-    bead_id = "bd-orphan-primary-#{System.unique_integer([:positive])}"
-    create_run(bead_id, :running)
+    task_id = "bd-orphan-primary-#{System.unique_integer([:positive])}"
+    create_run(task_id, :running)
 
     assert {:ok, 1} = Reconciler.reconcile_orphaned_runs(primary?: true)
 
-    assert reload(bead_id).status == :failed
+    assert reload(task_id).status == :failed
   end
 
   test "leaves already-terminal runs untouched" do
-    bead_id = "bd-done-#{System.unique_integer([:positive])}"
-    create_run(bead_id, :completed)
+    task_id = "bd-done-#{System.unique_integer([:positive])}"
+    create_run(task_id, :completed)
 
     assert {:ok, 0} = Reconciler.reconcile_orphaned_runs()
 
-    run = reload(bead_id)
+    run = reload(task_id)
     assert run.status == :completed
     assert run.failure_reason == nil
   end
@@ -96,15 +96,15 @@ defmodule Arbiter.Workers.ReconcilerTest do
   test "after the sweep no orphaned :running row remains" do
     orphans =
       for _ <- 1..4 do
-        bead_id = "bd-stale-#{System.unique_integer([:positive])}"
-        create_run(bead_id, :running)
-        bead_id
+        task_id = "bd-stale-#{System.unique_integer([:positive])}"
+        create_run(task_id, :running)
+        task_id
       end
 
     assert {:ok, 4} = Reconciler.reconcile_orphaned_runs()
 
-    for bead_id <- orphans do
-      assert reload(bead_id).status == :failed
+    for task_id <- orphans do
+      assert reload(task_id).status == :failed
     end
 
     # No :running row survives without a live worker backing it.
@@ -112,12 +112,12 @@ defmodule Arbiter.Workers.ReconcilerTest do
       Run
       |> Ash.Query.filter(status == :running)
       |> Ash.read!()
-      |> Enum.reject(fn run -> Worker.whereis(run.bead_id) end)
+      |> Enum.reject(fn run -> Worker.whereis(run.task_id) end)
 
     assert surviving == []
   end
 
-  # ---- reconcile_open_pr_beads (bd-crqku8 regression) -------------------
+  # ---- reconcile_open_pr_tasks (bd-crqku8 regression) -------------------
 
   defp create_workspace do
     {:ok, ws} =
@@ -147,7 +147,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     end
   end
 
-  test "escalates an :in_progress bead with a pr_ref and no live worker to Admiral" do
+  test "escalates an :in_progress task with a pr_ref and no live worker to Admiral" do
     ws = create_workspace()
 
     issue =
@@ -156,7 +156,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
-    assert {:ok, 1} = Reconciler.reconcile_open_pr_beads()
+    assert {:ok, 1} = Reconciler.reconcile_open_pr_tasks()
 
     mail = Message.inbox("admiral", workspace_id: ws.id)
     assert length(mail) >= 1
@@ -168,7 +168,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert escalation.subject =~ "stuck"
   end
 
-  test "does not escalate an :in_progress bead with a pr_ref when a live worker is running" do
+  test "does not escalate an :in_progress task with a pr_ref when a live worker is running" do
     ws = create_workspace()
 
     issue =
@@ -177,29 +177,29 @@ defmodule Arbiter.Workers.ReconcilerTest do
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
-    # The Issue's id IS the bead_id used to register workers.
-    {:ok, pid} = Worker.start(bead_id: issue.id, repo: "arbiter", workspace_id: ws.id)
+    # The Issue's id IS the task_id used to register workers.
+    {:ok, pid} = Worker.start(task_id: issue.id, repo: "arbiter", workspace_id: ws.id)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
-    assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()
+    assert {:ok, 0} = Reconciler.reconcile_open_pr_tasks()
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  test "does not escalate an :in_progress bead with no pr_ref" do
+  test "does not escalate an :in_progress task with no pr_ref" do
     ws = create_workspace()
     _issue = create_issue(ws.id, %{status: :in_progress})
 
-    assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()
+    assert {:ok, 0} = Reconciler.reconcile_open_pr_tasks()
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  test "does not escalate a :closed or :open bead even if it somehow has a pr_ref" do
+  test "does not escalate a :closed or :open task even if it somehow has a pr_ref" do
     ws = create_workspace()
     _issue = create_issue(ws.id, %{pr_ref: "99"})
 
-    assert {:ok, 0} = Reconciler.reconcile_open_pr_beads()
+    assert {:ok, 0} = Reconciler.reconcile_open_pr_tasks()
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
@@ -213,7 +213,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
-    assert {:ok, :skipped} = Reconciler.reconcile_open_pr_beads(primary?: false)
+    assert {:ok, :skipped} = Reconciler.reconcile_open_pr_tasks(primary?: false)
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end

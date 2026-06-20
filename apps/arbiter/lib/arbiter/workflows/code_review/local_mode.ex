@@ -4,7 +4,7 @@ defmodule Arbiter.Workflows.CodeReview.LocalMode do
 
   Local mode writes a structured Markdown file at
   `<worktree_path>/reviews/<sanitized-branch>.md`. The format mirrors the
-  Go GT worker-reviewer convention: a header naming the branch + bead, a
+  Go GT worker-reviewer convention: a header naming the branch + task, a
   pending verdict line that is rewritten in the `:verdict` step, and one
   section per finding ordered by severity.
 
@@ -28,11 +28,11 @@ defmodule Arbiter.Workflows.CodeReview.LocalMode do
   overwritten if it already exists.
   """
   @spec write_findings(String.t(), String.t(), map() | nil, [finding()]) :: :ok
-  def write_findings(worktree_path, branch, bead, findings)
+  def write_findings(worktree_path, branch, task, findings)
       when is_binary(worktree_path) and is_binary(branch) and is_list(findings) do
     path = review_path(worktree_path, branch)
     File.mkdir_p!(Path.dirname(path))
-    File.write!(path, render_initial(branch, bead, findings))
+    File.write!(path, render_initial(branch, task, findings))
     :ok
   end
 
@@ -58,20 +58,20 @@ defmodule Arbiter.Workflows.CodeReview.LocalMode do
 
   # ---- formatting ---------------------------------------------------------
 
-  defp render_initial(branch, bead, findings) do
+  defp render_initial(branch, task, findings) do
     sorted = sort_findings(findings)
 
-    bead_line =
-      case bead do
-        %{id: id, title: title} -> "**Bead:** #{id} — #{title}"
-        %{"id" => id, "title" => title} -> "**Bead:** #{id} — #{title}"
-        _ -> "**Bead:** (none)"
+    task_line =
+      case task do
+        %{id: id, title: title} -> "**Task:** #{id} — #{title}"
+        %{"id" => id, "title" => title} -> "**Task:** #{id} — #{title}"
+        _ -> "**Task:** (none)"
       end
 
     [
       "# Code review: #{branch}\n",
       "\n",
-      bead_line,
+      task_line,
       "\n",
       "**Mode:** local\n",
       "**Verdict (pending):** _to be set in :verdict step_\n",

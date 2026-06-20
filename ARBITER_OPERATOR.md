@@ -23,7 +23,7 @@ External comms (GitHub, Slack) stay in normal professional voice.
 ## 2. Directive Intake — Claim & Create
 
 When taking in new directives locally via `arb claim` or `arb create`, **always
-set difficulty immediately after intake**. Both commands create beads without
+set difficulty immediately after intake**. Both commands create tasks without
 prompting for difficulty, and the field defaults to unset. Difficulty drives the
 model tier and thinking budget — set it before slinging to avoid under-scoped work.
 
@@ -32,11 +32,11 @@ Workflow:
 ```bash
 # Option A: Claim an existing upstream issue
 arb claim 42
-arb update <bead-id> --difficulty <n>
+arb update <task-id> --difficulty <n>
 
 # Option B: Create a new local directive
 arb create "Fix widget crash on startup" --description "..."
-arb update <bead-id> --difficulty <n>
+arb update <task-id> --difficulty <n>
 ```
 
 Difficulty scale (D0–D4):
@@ -185,7 +185,7 @@ Check the Admiral inbox with:
 
 ```bash
 arb inbox              # check all unread messages
-arb inbox <bead-id>   # check messages for a specific bead
+arb inbox <task-id>   # check messages for a specific task
 ```
 
 Or use the continuous monitor (recommended while acolytes are flying):
@@ -212,7 +212,7 @@ The Admiral inbox surfaces three classes of escalations:
 3. **Acolyte Crashes** — An acolyte encountered an unrecoverable error and
    terminated. **Check the logs and retry or escalate.**
 
-Use `arb show <bead-id>` to see the full transcript and context for any message.
+Use `arb show <task-id>` to see the full transcript and context for any message.
 
 ### Responding to a Tribunal Escalation
 
@@ -220,17 +220,17 @@ When the inbox surfaces a tribunal escalation:
 
 1. **Read the full transcript:**
    ```bash
-   arb show <bead-id>   # see the complete exchange
+   arb show <task-id>   # see the complete exchange
    ```
 
 2. **Send your ruling to the acolyte:**
    ```bash
-   arb message <bead-id> "Your ruling here: approve / reject / clarify and retry"
+   arb message <task-id> "Your ruling here: approve / reject / clarify and retry"
    ```
 
 3. **Resume the acolyte to continue work:**
    ```bash
-   arb resume <bead-id> <ship>   # acolyte picks up from where it left off
+   arb resume <task-id> <ship>   # acolyte picks up from where it left off
    ```
 
 The acolyte will see your message, incorporate your judgment, and continue the
@@ -246,7 +246,7 @@ arb worker list        # list all active and recently-completed acolytes
 ```
 
 Look for:
-- **status=failed** — An acolyte stopped with an error. Check `arb show <bead-id>`
+- **status=failed** — An acolyte stopped with an error. Check `arb show <task-id>`
   for the reason and decide whether to retry or escalate.
 - **status=running** — Expected; the acolyte is working.
 - **status=success** — Work completed; ready for the next phase (review, merge).

@@ -225,7 +225,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"bead_id" => "bd-xyz", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-xyz", "status" => "running"}]}, 200}}
       ])
 
       stub_deploy([])
@@ -243,7 +243,7 @@ defmodule ArbiterCli.Cmd.UpdateDeployTest do
       stub_routes([
         {{"get", "/api/workspaces"}, {@green, 200}},
         {{"get", "/api/workers"},
-         {%{"data" => [%{"bead_id" => "bd-xyz", "status" => "running"}]}, 200}}
+         {%{"data" => [%{"task_id" => "bd-xyz", "status" => "running"}]}, 200}}
       ])
 
       stub_deploy(changed: true)

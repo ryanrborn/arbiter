@@ -17,7 +17,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert out =~ "Hello"
   end
 
-  test "--parent attaches the new issue to the parent bead via a parent_of edge" do
+  test "--parent attaches the new issue to the parent task via a parent_of edge" do
     parent = self()
 
     stub_routes([
@@ -222,7 +222,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
     assert err =~ "difficulty"
   end
 
-  test "upstream-create failure (502 with bead body + error) surfaces non-zero" do
+  test "upstream-create failure (502 with task body + error) surfaces non-zero" do
     stub_routes([
       {{"get", "/api/workspaces"},
        {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
@@ -231,8 +231,8 @@ defmodule ArbiterCli.Cmd.CreateTest do
           "issue" => %{"id" => "bd-004", "title" => "Half"},
           "error" => %{
             "type" => "upstream_create_failed",
-            "message" => "bead bd-004 created locally but upstream github create failed: boom",
-            "details" => %{"bead_id" => "bd-004", "tracker_type" => "github"}
+            "message" => "task bd-004 created locally but upstream github create failed: boom",
+            "details" => %{"task_id" => "bd-004", "tracker_type" => "github"}
           }
         }, 502}}
     ])
@@ -277,7 +277,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
       refute Map.has_key?(body, "workspace_id")
     end
 
-    test "--no-bead alias works the same as --ticket-only" do
+    test "--no-task alias works the same as --ticket-only" do
       stub_routes([
         {{"get", "/api/workspaces"},
          {%{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}, 200}},
@@ -289,7 +289,7 @@ defmodule ArbiterCli.Cmd.CreateTest do
           }, 201}}
       ])
 
-      {out, _err, exit_code} = capture(fn -> Create.run(["No-bead title", "--no-bead"]) end)
+      {out, _err, exit_code} = capture(fn -> Create.run(["No-task title", "--no-task"]) end)
       assert exit_code == 0
       assert out =~ "77"
     end

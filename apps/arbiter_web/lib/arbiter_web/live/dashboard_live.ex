@@ -2,8 +2,8 @@ defmodule ArbiterWeb.DashboardLive do
   @moduledoc """
   Dashboard LiveView at `/` — real-time view of:
 
-    * Active workers (name, current step, bead, runtime)
-    * Recent beads (last 20 by `updated_at` desc)
+    * Active workers (name, current step, task, runtime)
+    * Recent tasks (last 20 by `updated_at` desc)
     * Merge queue — branches integrating via `Arbiter.Mergers`
       (Direct/GitLab/GitHub): the workers parked at `:awaiting_review`, each
       with its open MR, approval status, and Watchdog poll activity. Live.
@@ -21,8 +21,8 @@ defmodule ArbiterWeb.DashboardLive do
   ## PubSub topics
 
   Subscribed at mount:
-    * `"beads"`     — `{:bead_lifecycle, event, issue}` from
-                      `Arbiter.Beads.Issue.broadcast_lifecycle/2`.
+    * `"tasks"`     — `{:task_lifecycle, event, issue}` from
+                      `Arbiter.Tasks.Issue.broadcast_lifecycle/2`.
     * `"workers"`  — `{:worker_lifecycle, event, snapshot}` from
                       `Arbiter.Worker.broadcast_lifecycle/2`.
     * `"messages:<workspace_id>"` — `{:new_message, message}` from
@@ -41,9 +41,9 @@ defmodule ArbiterWeb.DashboardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.RepoConfig
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Watchdog
@@ -51,7 +51,7 @@ defmodule ArbiterWeb.DashboardLive do
   alias Arbiter.Workers.Run
   require Ash.Query
 
-  @beads_topic "beads"
+  @tasks_topic "tasks"
   @workers_topic "workers"
 
   # The coordinator's mailbox recipient — the `to_ref` workers address reports
@@ -61,11 +61,11 @@ defmodule ArbiterWeb.DashboardLive do
 
   # Number of CURRENT (non-closed) directives shown in the dashboard's
   # recent-directives list. The landing shows only this current slice, capped;
-  # the full, filterable history lives on the `/beads` index ("See all").
-  @recent_beads_limit 8
+  # the full, filterable history lives on the `/tasks` index ("See all").
+  @recent_tasks_limit 8
 
-  # Number of open epics (parent beads) shown in the dashboard's current
-  # campaigns section, capped. Each is a bead with `:parent_of` children.
+  # Number of open epics (parent tasks) shown in the dashboard's current
+  # campaigns section, capped. Each is a task with `:parent_of` children.
   @current_epics_limit 6
 
   # Number of escalations (ReviewGate verdicts) shown in the ReviewGate view.
@@ -76,7 +76,7 @@ defmodule ArbiterWeb.DashboardLive do
     live? = connected?(socket)
 
     if live? do
-      Phoenix.PubSub.subscribe(Arbiter.PubSub, @beads_topic)
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, @tasks_topic)
       Phoenix.PubSub.subscribe(Arbiter.PubSub, @workers_topic)
       # Drives live elapsed counters (active workers) and relative timestamps
       # (notifications). Only reassigns :now — no DB reads in the tick handler.
@@ -106,15 +106,15 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_completed_runs()
      |> refresh_pending_reviews()
      |> refresh_escalations()
-     |> refresh_recent_beads()
+     |> refresh_recent_tasks()
      |> refresh_epics()}
   end
 
   @impl true
-  def handle_info({:bead_lifecycle, _event, _issue}, socket) do
+  def handle_info({:task_lifecycle, _event, _issue}, socket) do
     {:noreply,
      socket
-     |> refresh_recent_beads()
+     |> refresh_recent_tasks()
      |> refresh_epics()
      |> refresh_workspaces()}
   end
@@ -225,7 +225,7 @@ defmodule ArbiterWeb.DashboardLive do
         meta = p.meta || %{}
 
         %{
-          bead_id: p.bead_id,
+          task_id: p.task_id,
           workspace_name: workspace_label(workspaces_by_id, p.workspace_id),
           merger_type: merger_type(workspaces_by_id, p.workspace_id),
           mr_ref: p.mr_ref,
@@ -258,7 +258,7 @@ defmodule ArbiterWeb.DashboardLive do
 
   # Reviews in flight right now: author workers parked at :awaiting_review_gate
   # while a distinct reviewer mind code-reviews their diff. Each is enriched
-  # with the live activity of its reviewer (a sibling `<bead>#review` worker,
+  # with the live activity of its reviewer (a sibling `<task>#review` worker,
   # matched via meta.reviews) so the operator can see what the review is doing,
   # not just that one is pending. Ordered longest-waiting first.
   defp refresh_pending_reviews(socket) do
@@ -272,7 +272,7 @@ defmodule ArbiterWeb.DashboardLive do
     workspaces_by_id =
       socket.assigns[:workspaces_by_id] || index_workspaces(load_workspaces())
 
-    reviewers_by_bead =
+    reviewers_by_task =
       children
       |> Enum.filter(fn p -> Map.get(p.meta || %{}, :role) == :reviewer end)
       |> Map.new(fn p -> {Map.get(p.meta || %{}, :reviews), p} end)
@@ -282,10 +282,10 @@ defmodule ArbiterWeb.DashboardLive do
       |> Enum.filter(&(&1.status == :awaiting_review_gate))
       |> Enum.map(fn p ->
         %{
-          bead_id: p.bead_id,
+          task_id: p.task_id,
           workspace_name: workspace_label(workspaces_by_id, p.workspace_id),
           since: p.step_started_at || p.started_at,
-          reviewer_activity: reviewer_activity(Map.get(reviewers_by_bead, p.bead_id))
+          reviewer_activity: reviewer_activity(Map.get(reviewers_by_task, p.task_id))
         }
       end)
       |> Enum.sort_by(& &1.since, {:asc, DateTime})
@@ -324,30 +324,30 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   # CURRENT directives only: the landing shows the open + in-progress slice,
-  # newest-updated first, capped at @recent_beads_limit. Closed directives are
-  # never shown here — they live on the `/beads` index ("See all"). This keeps
+  # newest-updated first, capped at . Closed directives are
+  # never shown here — they live on the `/tasks` index ("See all"). This keeps
   # the landing bounded as the directive history grows unbounded.
-  defp refresh_recent_beads(socket) do
-    beads =
+  defp refresh_recent_tasks(socket) do
+    tasks =
       Issue
       |> Ash.Query.filter(status != :closed)
       |> Ash.Query.sort(updated_at: :desc)
-      |> Ash.Query.limit(@recent_beads_limit)
+      |> Ash.Query.limit(@recent_tasks_limit)
       |> Ash.read!()
 
-    blocked_counts = blocked_counts_for(Enum.map(beads, & &1.id))
+    blocked_counts = blocked_counts_for(Enum.map(tasks, & &1.id))
 
-    beads =
-      Enum.map(beads, fn b ->
+    tasks =
+      Enum.map(tasks, fn b ->
         Map.put(b, :blocked_count, Map.get(blocked_counts, b.id, 0))
       end)
 
-    assign(socket, :recent_beads, beads)
+    assign(socket, :recent_tasks, tasks)
   end
 
-  # CURRENT campaigns only: open epic beads (issue_type == :epic), newest-updated
+  # CURRENT campaigns only: open epic tasks (issue_type == :epic), newest-updated
   # first, capped. Each is loaded with its `:parent_of` child-progress rollup for
-  # the inline bar. The full, filterable bead list lives on the `/beads` index.
+  # the inline bar. The full, filterable task list lives on the `/tasks` index.
   defp refresh_epics(socket) do
     epic = :epic
 
@@ -366,21 +366,21 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :epics, epics)
   end
 
-  # For the given bead ids, count how many of each bead's `:depends_on` edges
+  # For the given task ids, count how many of each task's `:depends_on` edges
   # point at a target issue that is NOT yet closed — i.e. how many open
-  # blockers gate the bead. One extra Dependency read + one Issue status read
+  # blockers gate the task. One extra Dependency read + one Issue status read
   # scoped to the targets, keyed by the dependent (`from_issue_id`).
   #
   # NOTE (data hook): this only counts `:depends_on` edges. If you later want to
   # also surface inbound `:blocks` edges, add a second pass keyed on
   # `to_issue_id` here — the template already renders whatever count lands in
-  # each bead's `:blocked_count`.
+  # each task's `:blocked_count`.
   defp blocked_counts_for([]), do: %{}
 
-  defp blocked_counts_for(bead_ids) do
+  defp blocked_counts_for(task_ids) do
     deps =
-      Arbiter.Beads.Dependency
-      |> Ash.Query.filter(type == :depends_on and from_issue_id in ^bead_ids)
+      Arbiter.Tasks.Dependency
+      |> Ash.Query.filter(type == :depends_on and from_issue_id in ^task_ids)
       |> Ash.Query.select([:from_issue_id, :to_issue_id])
       |> Ash.read!()
 
@@ -824,8 +824,8 @@ defmodule ArbiterWeb.DashboardLive do
 
   # Derive the verdict an escalation represents from its subject. The ReviewGate
   # raises escalations with subjects of the form
-  # "ReviewGate: changes requested for <bead>" or
-  # "ReviewGate: review inconclusive for <bead>"; anything else falls back to a
+  # "ReviewGate: changes requested for <task>" or
+  # "ReviewGate: review inconclusive for <task>"; anything else falls back to a
   # neutral label so a non-ReviewGate escalation still renders sensibly.
   defp escalation_verdict_label(subject) when is_binary(subject) do
     cond do
@@ -967,7 +967,7 @@ defmodule ArbiterWeb.DashboardLive do
                 >
                   <div class="flex items-center justify-between gap-2">
                     <.link
-                      navigate={~p"/workers/#{p.bead_id}"}
+                      navigate={~p"/workers/#{p.task_id}"}
                       class="flex items-center gap-2 min-w-0 group"
                     >
                       <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -983,7 +983,7 @@ defmodule ArbiterWeb.DashboardLive do
                         </span>
                       </span>
                       <code class="text-xs font-semibold group-hover:text-info transition-colors truncate">
-                        {p.bead_id}
+                        {p.task_id}
                       </code>
                     </.link>
                     <span class="text-xs font-mono text-base-content/70 tabular-nums shrink-0">
@@ -1051,13 +1051,13 @@ defmodule ArbiterWeb.DashboardLive do
               <div class="flex items-center justify-between">
                 <h2 class="text-lg font-semibold flex items-center gap-2">
                   <.icon name="hero-queue-list" class="size-5 text-base-content/70" />
-                  Current {cap_plural(@issue_label)} ({length(@recent_beads)})
+                  Current {cap_plural(@issue_label)} ({length(@recent_tasks)})
                 </h2>
-                <.see_all_link navigate={~p"/beads"} />
+                <.see_all_link navigate={~p"/tasks"} />
               </div>
 
               <div
-                :if={@recent_beads == []}
+                :if={@recent_tasks == []}
                 class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
               >
                 <.icon
@@ -1068,15 +1068,15 @@ defmodule ArbiterWeb.DashboardLive do
                   No active {plural(@issue_label)} right now. Open and in-progress {plural(
                     @issue_label
                   )} surface here; closed ones live on the <.link
-                    navigate={~p"/beads"}
+                    navigate={~p"/tasks"}
                     class="link link-hover text-primary"
                   >{@issue_label} index</.link>.
                 </p>
               </div>
 
-              <ul :if={@recent_beads != []} id="recent-beads" class="flex flex-col gap-1.5">
+              <ul :if={@recent_tasks != []} id="recent-tasks" class="flex flex-col gap-1.5">
                 <li
-                  :for={b <- @recent_beads}
+                  :for={b <- @recent_tasks}
                   class={[
                     "rounded-box border bg-base-100 px-3 py-2 transition-colors duration-150 hover:bg-base-300/40",
                     if(b.priority == 1,
@@ -1098,7 +1098,7 @@ defmodule ArbiterWeb.DashboardLive do
                     ]}>
                       {difficulty_label(b.difficulty)}
                     </span>
-                    <.link navigate={~p"/beads/#{b.id}"} class="min-w-0 flex-1 group">
+                    <.link navigate={~p"/tasks/#{b.id}"} class="min-w-0 flex-1 group">
                       <div class="flex items-center gap-2">
                         <code class="text-xs text-base-content/60 shrink-0 group-hover:text-primary transition-colors">
                           {b.id}
@@ -1130,8 +1130,8 @@ defmodule ArbiterWeb.DashboardLive do
         </div>
 
         <%!-- ── C2. Campaigns (open epics) ───────────────────────────── --%>
-        <%!-- Only OPEN epic beads surface on the landing, capped. The full,
-             filterable bead list lives on the /beads index. Each epic shows
+        <%!-- Only OPEN epic tasks surface on the landing, capped. The full,
+             filterable task list lives on the /tasks index. Each epic shows
              its `:parent_of` child-progress rollup. --%>
         <section id="epics-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
@@ -1140,7 +1140,7 @@ defmodule ArbiterWeb.DashboardLive do
                 <.icon name="hero-rectangle-stack" class="size-5 text-base-content/70" />
                 Open {cap_plural(@epic_label)} ({length(@epics)})
               </h2>
-              <.see_all_link navigate={~p"/beads"} />
+              <.see_all_link navigate={~p"/tasks"} />
             </div>
 
             <div
@@ -1159,7 +1159,7 @@ defmodule ArbiterWeb.DashboardLive do
                 :for={e <- @epics}
                 class="rounded-box bg-base-100 border border-base-300 p-3 transition-colors duration-150 hover:border-primary/40"
               >
-                <.link navigate={~p"/beads/#{e.id}"} class="group block">
+                <.link navigate={~p"/tasks/#{e.id}"} class="group block">
                   <div class="flex items-center gap-2">
                     <span
                       class="truncate text-sm font-medium group-hover:text-primary transition-colors"
@@ -1245,7 +1245,7 @@ defmodule ArbiterWeb.DashboardLive do
                     </span>
                     <.link
                       :if={m.directive_ref}
-                      navigate={~p"/beads/#{m.directive_ref}"}
+                      navigate={~p"/tasks/#{m.directive_ref}"}
                       class="text-xs link link-hover text-base-content/50"
                     >
                       [<code class="font-mono">{m.directive_ref}</code>]
@@ -1454,11 +1454,11 @@ defmodule ArbiterWeb.DashboardLive do
                   <tr :for={r <- @completed_runs} class="hover:bg-base-300/40 transition-colors">
                     <td>
                       <.link navigate={~p"/workers/history/#{r.id}"} class="link link-hover">
-                        <code class="text-xs">{r.bead_id}</code>
+                        <code class="text-xs">{r.task_id}</code>
                       </.link>
                     </td>
-                    <td class="text-xs max-w-xs truncate" title={r.bead_title || ""}>
-                      {r.bead_title || "—"}
+                    <td class="text-xs max-w-xs truncate" title={r.task_title || ""}>
+                      {r.task_title || "—"}
                     </td>
                     <td>
                       <span class={["badge badge-sm", run_status_class(r.status)]}>{r.status}</span>
@@ -1510,7 +1510,7 @@ defmodule ArbiterWeb.DashboardLive do
               >
                 <div class="flex items-center justify-between gap-2">
                   <.link
-                    navigate={~p"/workers/#{m.bead_id}"}
+                    navigate={~p"/workers/#{m.task_id}"}
                     class="flex items-center gap-2 min-w-0 group"
                   >
                     <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -1519,7 +1519,7 @@ defmodule ArbiterWeb.DashboardLive do
                       <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>
                     </span>
                     <code class="text-xs font-semibold group-hover:text-primary transition-colors truncate">
-                      {m.bead_id}
+                      {m.task_id}
                     </code>
                   </.link>
                   <div class="flex items-center gap-1.5 shrink-0">
@@ -1609,7 +1609,7 @@ defmodule ArbiterWeb.DashboardLive do
                 >
                   <div class="flex items-center justify-between gap-2">
                     <.link
-                      navigate={~p"/workers/#{r.bead_id}"}
+                      navigate={~p"/workers/#{r.task_id}"}
                       class="flex items-center gap-2 min-w-0 group"
                     >
                       <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -1618,7 +1618,7 @@ defmodule ArbiterWeb.DashboardLive do
                         <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-warning"></span>
                       </span>
                       <code class="text-xs font-semibold group-hover:text-warning transition-colors truncate">
-                        {r.bead_id}
+                        {r.task_id}
                       </code>
                     </.link>
                     <span
@@ -1675,7 +1675,7 @@ defmodule ArbiterWeb.DashboardLive do
                       </span>
                       <.link
                         :if={e.directive_ref}
-                        navigate={~p"/beads/#{e.directive_ref}"}
+                        navigate={~p"/tasks/#{e.directive_ref}"}
                         class="text-xs link link-hover font-mono text-base-content/60"
                       >
                         {e.directive_ref}

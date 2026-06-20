@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Labels do
   @moduledoc """
   Pluralization for labels, so headers read naturally regardless of the word
-  ("repo" → "repos", "watch" → "watches", "bead" → "beads"). A naive
+  ("repo" → "repos", "watch" → "watches", "task" → "tasks"). A naive
   `label <> "s"` breaks on trailing -y and sibilant endings, which a polished
   surface shouldn't show.
 

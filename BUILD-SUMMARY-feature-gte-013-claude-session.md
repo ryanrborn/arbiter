@@ -1,6 +1,6 @@
 # Build summary: feature/gte-013-claude-session
 
-**Bead:** gte-013
+**Task:** gte-013
 **Builder:** Mayor (interactive session, 2026-05-20)
 **Branch:** feature/gte-013-claude-session
 **Commits:**
@@ -54,7 +54,7 @@ Arbiter.Polecat.ClaudeSession.start(opts) :: {:ok, port()} | {:error, term()}
 #   command:       [String.t()] | nil OVERRIDE — full argv; tests always set this
 #   prompt:        String.t()         REQUIRED iff command is nil; becomes
 #                                     ["claude", "--print", prompt]
-#   topic:         String.t() | nil   defaults to "polecat:<bead_id>"
+#   topic:         String.t() | nil   defaults to "polecat:<task_id>"
 ```
 
 ## Architecture (one diagram, then prose)
@@ -104,13 +104,13 @@ hyphen breaks the word boundary on the right), and would not match
 `giga-tonne done` (no `gt` token).
 
 **Risk**: real Claude transcripts may casually mention "gt done" in
-prose ("…and then you'd run `gt done` to close it…"). The bead asked
+prose ("…and then you'd run `gt done` to close it…"). The task asked
 the reviewer to weigh this. Two cheap tightenings if it bites us:
 - Anchor to start-of-line: `~r/^\s*gt done\s*$/`
 - Anchor to a sentinel prefix: `~r/^>>>\s*gt done\s*<<<$/` and have
   the prompt instruct Claude to emit that sentinel literally.
 
-I picked the looser regex because the bead said *either* form, the
+I picked the looser regex because the task said *either* form, the
 spike doesn't yet have real Claude output to calibrate against, and
 the stricter forms are an easy follow-up.
 
@@ -133,15 +133,15 @@ this from a CI runner with megabyte-per-second output we'll want a
 streaming sink (file? batched writes?) rather than holding everything
 in memory.
 
-### 3. PubSub topic default: `"polecat:<bead_id>"`
+### 3. PubSub topic default: `"polecat:<task_id>"`
 
 `Phoenix.PubSub` instance is `Arbiter.PubSub` (verified in
-`apps/arbiter/lib/arbiter/application.ex`; the bead's hint of
+`apps/arbiter/lib/arbiter/application.ex`; the task's hint of
 `ArbiterWeb.PubSub` was wrong — the actual PubSub lives in the core
 app, not the web app).
 
 Subscribers discover the topic the same way they discover the polecat:
-**by bead_id**. LiveView for bead `gte-013` subscribes to
+**by task_id**. LiveView for task `gte-013` subscribes to
 `"polecat:gte-013"`. The override (`:topic` opt) exists for tests and
 for any future case where two surfaces want different namespaces.
 
@@ -153,23 +153,23 @@ returns `:ok` without doing real work.
 I added a `claude_sessions: %{}` field to `Polecat.State` rather than
 stashing per-port state inside `meta`. Two reasons:
 
-- The bead's existing `meta == %{}` assertion in `polecat_test.exs`
+- The task's existing `meta == %{}` assertion in `polecat_test.exs`
   would break if we always populated meta with a sessions map.
 - Per-port internals (regex, line cap) are not snapshot-worthy; they're
   implementation detail of this module, not workflow state.
 
 The *useful* fields (output_lines, exit_status, exited_at) ARE mirrored
 into `meta` via `sync_session_meta/2`, so callers reading
-`Polecat.state(pid).meta` see exactly what the bead spec promised:
+`Polecat.state(pid).meta` see exactly what the task spec promised:
 `output_lines`, `exit_status`, `exited_at`.
 
 ### 5. Additive handle_info clauses
 
-Before this bead, `Polecat` had **zero** `handle_info` clauses. All my
+Before this task, `Polecat` had **zero** `handle_info` clauses. All my
 new clauses pattern-match on either `{port, ...}` (where `port` is
 guarded `is_port/1`) or `{:__claude_session_done__, _}`. Nothing
 shadows future additions; nothing catches arbitrary messages with a
-catch-all. If a future bead adds `handle_info({:tick, _}, state)`, it
+catch-all. If a future task adds `handle_info({:tick, _}, state)`, it
 slots in alongside cleanly.
 
 ### 6. Error handling on port open
@@ -196,7 +196,7 @@ edge cases like a binary that disappears between `find_executable` and
 | `concurrent polecats` | 1 | two polecats with two ports — each only sees its own output, each PubSub topic isolated |
 
 `async: false` (Port + PubSub + Polecat registry are all globals). Each
-test uses a unique bead_id and a per-test tmp dir for cwd; `on_exit`
+test uses a unique task_id and a per-test tmp dir for cwd; `on_exit`
 cleans them up.
 
 ## Verification
@@ -212,9 +212,9 @@ mix test                                                            # umbrella: 
 `mix format --check-formatted` on the umbrella flags four files that
 pre-date this branch (migrations, mapper_test, trackers_test,
 import_from_dolt). I confirmed by stashing and re-running — same diff
-on `HEAD~`. Not part of this bead.
+on `HEAD~`. Not part of this task.
 
-## What's NOT in this bead
+## What's NOT in this task
 
 - **No real Claude invocation.** Default argv is
   `["claude", "--print", prompt]` but every test passes `:command`
@@ -243,9 +243,9 @@ The three things worth your time:
 2. **The 1000-line cap and the lack of back-pressure.** Will this hold
    for real Claude sessions (typical output volume)? Section "Design
    choices > 2" sketches the failure mode.
-3. **The PubSub topic convention.** `"polecat:<bead_id>"` is the
+3. **The PubSub topic convention.** `"polecat:<task_id>"` is the
    discovery contract. Subscribers find topics the same way they find
-   polecats — by bead_id. If LiveView or the CLI follower wants a
+   polecats — by task_id. If LiveView or the CLI follower wants a
    different namespace, this is the moment to push back.
 
 Also worth a glance: the additive `handle_info` clauses in

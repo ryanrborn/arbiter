@@ -1,6 +1,6 @@
 # Build summary: feature/gte-018-github
 
-**Bead:** gte-018
+**Task:** gte-018
 **Builder:** Mayor (interactive session, 2026-05-19)
 **Branch:** feature/gte-018-github
 **Commit:** 53e3f47 (impl + tests)
@@ -36,14 +36,14 @@ apps/arbiter/test/test_helper.exs                (M) ensure :req started
 config/test.exs                                    (M) :github_http_stub flag
 ```
 
-## Acceptance check (from bead gte-018)
+## Acceptance check (from task gte-018)
 
 | Criterion | Status |
 |---|---|
 | Module GitHub using Req with seven listed functions | covered |
 | Token from env | `System.get_env("GITHUB_TOKEN")` lazy, opts[:token] override |
 | Rate-limit aware (uses GH headers) | every response (success + error) updates `:persistent_term` cache; `rate_limit/0` reads it |
-| Tested against a real repo (could be a fixture personal repo) | **deferred** — bead Phase 2 is module surface only. Tests use `Req.Test` stubs; a real-repo smoke test belongs with gte-020/021/022 when there's actual orchestration to exercise. Flagging for reviewer to confirm. |
+| Tested against a real repo (could be a fixture personal repo) | **deferred** — task Phase 2 is module surface only. Tests use `Req.Test` stubs; a real-repo smoke test belongs with gte-020/021/022 when there's actual orchestration to exercise. Flagging for reviewer to confirm. |
 | Errors are structured tagged tuples | `{:error, %Arbiter.GitHub.Error{kind, status, message, raw}}` |
 
 ## Design choices worth flagging
@@ -103,21 +103,21 @@ config/test.exs                                    (M) :github_http_stub flag
 
 ## What I punted on (with reasons)
 
-1. **Real-repo smoke test.** Bead acceptance says "tested against a
+1. **Real-repo smoke test.** Task acceptance says "tested against a
    real repo (could be a fixture personal repo for safety)" — I read
    that as a follow-up acceptance criterion for the orchestrator
-   beads (gte-020+), not Phase 2. Adding a smoke test now means a CI
+   tasks (gte-020+), not Phase 2. Adding a smoke test now means a CI
    secret + a real PR being opened-and-closed in a fixture repo every
    build, which is the kind of thing that's better attached to the
    first feature that actually opens PRs end-to-end. File a follow-up
-   bead under gte-020 if reviewer wants this sooner.
+   task under gte-020 if reviewer wants this sooner.
 
 2. **`reviewDecision` parsing.** `pr_get` returns the REST payload
    verbatim, which does **not** include `reviewDecision` (that field
    is GraphQL-only). The spec lists `reviewDecision` under `pr_get`,
    but exposing it requires a second GraphQL round-trip per call.
    Callers needing it should combine `pr_get` with `pr_list_reviews`
-   and infer state, or open a follow-up bead to add a GraphQL variant.
+   and infer state, or open a follow-up task to add a GraphQL variant.
 
 3. **Retry / backoff on 5xx and `:network`.** `retry: false` on every
    call. The orchestrator (gte-020+) is the right layer to decide retry

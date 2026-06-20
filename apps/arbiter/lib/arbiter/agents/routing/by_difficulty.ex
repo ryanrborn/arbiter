@@ -1,10 +1,10 @@
 defmodule Arbiter.Agents.Routing.ByDifficulty do
   @moduledoc """
-  Routing policy: pick an agent config based on the bead's `difficulty`
+  Routing policy: pick an agent config based on the task's `difficulty`
   (0..4 / D0..D4). Sibling to `:by_priority`; difficulty answers "how
   hard?" (drives model + thinking) while priority answers "how urgent?"
   (drives scheduling order). The two are orthogonal — both can be set on
-  a bead, and a workspace can opt into one or the other.
+  a task, and a workspace can opt into one or the other.
 
   ## Provider-agnostic abstractions
 
@@ -31,12 +31,12 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
       D3 → premium  / high
       D4 → premium  / high
 
-  A bead with `difficulty: nil` is treated as D2 (the common-feature
+  A task with `difficulty: nil` is treated as D2 (the common-feature
   default).
 
   ## Workspace overrides
 
-  `workspace.config["routing"]["rules"]` is consulted with the bead's
+  `workspace.config["routing"]["rules"]` is consulted with the task's
   difficulty key (`"D0".."D4"`). A matching rule is merged on top of the
   default mapping for that tier; any key the rule omits keeps the default.
   Unknown keys (e.g. a workspace that pins `"model"` directly) are
@@ -58,16 +58,16 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
         }
       }
 
-  A bead with `difficulty: 2` (no rule) gets the D2 default
-  (standard / medium); a bead with `difficulty: 0` gets the rule above
+  A task with `difficulty: 2` (no rule) gets the D2 default
+  (standard / medium); a task with `difficulty: 0` gets the rule above
   (economy / none).
   """
 
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Routing
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   # Default mapping: D0..D4 → {model_tier, thinking}. The Admiral signed
   # off on this exact table; do not adjust without re-litigation.
@@ -83,9 +83,9 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   @default_difficulty 2
 
   @impl true
-  def choose(%Issue{} = bead, workspace, _ledger_snapshot) do
+  def choose(%Issue{} = task, workspace, _ledger_snapshot) do
     default = Routing.default_choice(workspace)
-    difficulty = effective_difficulty(bead.difficulty)
+    difficulty = effective_difficulty(task.difficulty)
     rule = merged_rule(workspace, difficulty)
 
     %{default | config: Map.merge(default.config, rule)}

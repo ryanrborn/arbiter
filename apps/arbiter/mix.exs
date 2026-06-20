@@ -56,7 +56,7 @@ defmodule Arbiter.MixProject do
       # Periodic / cron-style scheduling (replaces gt's daemon convoy patrol etc.)
       {:quantum, "~> 3.5"},
 
-      # HTTP client (used by Tracker.Jira, Tracker.GitHub adapters in later beads)
+      # HTTP client (used by Tracker.Jira, Tracker.GitHub adapters in later tasks)
       {:req, "~> 0.5"},
 
       # GenStateMachine — workflow driver FSM (gte-015 WorkflowMachine)

@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.WorkspaceControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   setup %{conn: conn} do
     {:ok, conn: put_req_header(conn, "accept", "application/json")}

@@ -265,7 +265,7 @@ defmodule ArbiterCli.Cmd.Config do
 
   @doc """
   Returns `:ok` if the new config is "safe", or `{:unsafe, [reasons]}` if it
-  drops a key the system relies on. Reasons mirror the bead description.
+  drops a key the system relies on. Reasons mirror the task description.
   """
   def safety_check(new_config) when is_map(new_config) do
     reasons =

@@ -180,10 +180,10 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
     If an `arbiter` MCP server is connected this session, prefer its typed tools
     over shelling out to `arb` for these structured operations:
 
-    - read your bead → `bead_show`
+    - read your task → `task_show`
     - check your mailbox → `inbox_check` (this marks the mail read, like `arb inbox`)
-    - record progress / completion notes → `bead_update_progress`
-      (`notes` / `qa_notes` / `deployment_notes` — your own bead only)
+    - record progress / completion notes → `task_update_progress`
+      (`notes` / `qa_notes` / `deployment_notes` — your own task only)
     - inspect your workspace config → `workspace_show`
 
     Use `arb` and the shell for everything else — git, tests, and printing the

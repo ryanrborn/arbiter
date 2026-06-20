@@ -2,13 +2,13 @@ defmodule Arbiter.WorkerPrRefTest do
   @moduledoc """
   bd-7b46wd: when the worker opens its own PR/MR (the worker finished and the
   branch is integrated through the configured merger), the opened ref must be
-  persisted onto the bead's `pr_ref`.
+  persisted onto the task's `pr_ref`.
 
   This is the single signal the workspace MergeQueue reads to ADOPT an already-open
   PR (`MergeQueue.existing_mr_ref/1`) instead of opening a duplicate. Without it
   the Watchdog-merged PR is invisible to the MergeQueue: it falls through to
   `open_mr_for/3`, fails opening a second PR on the already-merged branch, and
-  the bead is never auto-closed — exactly the recurring silent-stall the bead
+  the task is never auto-closed — exactly the recurring silent-stall the task
   describes.
   """
 
@@ -17,12 +17,12 @@ defmodule Arbiter.WorkerPrRefTest do
   # singleton named Agent.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Test.StubMerger
 
   # Park the auto-started Watchdog far in the future so it doesn't merge/complete
-  # (and tear the worker + bead down) while we assert on the recorded pr_ref.
+  # (and tear the worker + task down) while we assert on the recorded pr_ref.
   @parked %{
     adapter: StubMerger,
     workspace: nil,
@@ -34,15 +34,15 @@ defmodule Arbiter.WorkerPrRefTest do
   setup do
     StubMerger.reset()
     {:ok, ws} = Ash.create(Workspace, %{name: "pr-ref-ws", prefix: "pr"})
-    {:ok, bead} = Ash.create(Issue, %{title: "record my pr_ref", workspace_id: ws.id})
-    {:ok, _} = Ash.update(bead, %{status: :in_progress})
-    {:ok, ws: ws, bead: bead}
+    {:ok, task} = Ash.create(Issue, %{title: "record my pr_ref", workspace_id: ws.id})
+    {:ok, _} = Ash.update(task, %{status: :in_progress})
+    {:ok, ws: ws, task: task}
   end
 
-  test "open_mr records the opened ref onto the bead's pr_ref", %{ws: ws, bead: bead} do
+  test "open_mr records the opened ref onto the task's pr_ref", %{ws: ws, task: task} do
     StubMerger.next_open_ref("#1234")
 
-    {:ok, worker_pid} = Worker.start(bead_id: bead.id, repo: "arbiter", workspace_id: ws.id)
+    {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
     on_exit(fn -> if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal) end)
 
     :ok = Worker.advance(worker_pid, :running)
@@ -50,11 +50,11 @@ defmodule Arbiter.WorkerPrRefTest do
     assert {:ok, "#1234"} =
              Worker.open_mr(worker_pid, "bd-branch", "title", "body", @parked)
 
-    # The bead now carries the PR ref so the MergeQueue adopts it instead of
+    # The task now carries the PR ref so the MergeQueue adopts it instead of
     # opening a duplicate.
-    {:ok, reloaded} = Ash.get(Issue, bead.id)
+    {:ok, reloaded} = Ash.get(Issue, task.id)
     assert reloaded.pr_ref == "#1234"
-    # The worker is parked for review; the bead is not closed yet.
+    # The worker is parked for review; the task is not closed yet.
     assert reloaded.status == :in_progress
     assert Worker.state(worker_pid).status == :awaiting_review
   end

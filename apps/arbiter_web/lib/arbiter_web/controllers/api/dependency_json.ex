@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.DependencyJSON do
   @moduledoc "Render functions for Dependency resources."
 
-  alias Arbiter.Beads.Dependency
+  alias Arbiter.Tasks.Dependency
 
   def show(%{dependency: dep}), do: data(dep)
 

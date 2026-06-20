@@ -30,11 +30,11 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
   import Phoenix.LiveViewTest
 
   alias ArbiterWeb.MergeQueueIndexLiveTest.QueueMerger
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
 
   setup do
-    for snap <- Worker.list_children(), do: Worker.stop(snap.bead_id)
+    for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
     Process.sleep(50)
 
     {:ok, ws} =
@@ -60,17 +60,17 @@ defmodule ArbiterWeb.MergeQueueIndexLiveTest do
 
   test "an in-flight merge surfaces with its MR link and links to the worker detail",
        %{conn: conn, ws: ws} do
-    {:ok, bead} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
-    {:ok, pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+    {:ok, task} = Ash.create(Issue, %{title: "merging-now", workspace_id: ws.id})
+    {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
     :ok = Worker.advance(pid, :integrate)
     {:ok, "!77"} = Worker.open_mr(pid, "feature/x", "Integrate x", "", merge_opts())
 
     {:ok, _view, html} = live(conn, ~p"/merge_queue")
 
     assert html =~ ~s(id="merge_queue")
-    assert html =~ bead.id
+    assert html =~ task.id
     assert html =~ "!77"
     assert html =~ "https://example.test/mr/77"
-    assert html =~ ~s(href="/workers/#{bead.id}")
+    assert html =~ ~s(href="/workers/#{task.id}")
   end
 end

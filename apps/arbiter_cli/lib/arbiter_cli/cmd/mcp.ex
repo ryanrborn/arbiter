@@ -128,8 +128,8 @@ defmodule ArbiterCli.Cmd.Mcp do
     IO.puts("tier:         #{resp["tier"]}")
     IO.puts("workspace:    #{workspace_label(resp["workspace_id"])}")
 
-    if resp["bead_id"] do
-      IO.puts("bead_id:      #{resp["bead_id"]}")
+    if resp["task_id"] do
+      IO.puts("task_id:      #{resp["task_id"]}")
     end
 
     if resp["repo"] do

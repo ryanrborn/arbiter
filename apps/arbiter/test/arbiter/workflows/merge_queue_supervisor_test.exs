@@ -2,7 +2,7 @@ defmodule Arbiter.Workflows.MergeQueueSupervisorTest do
   # async: false — the MergeQueueSupervisor and its Registry are singletons.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.MergeQueueSupervisor
 
   # Make every merge_queue this test starts use a no-op tick schedule, since the

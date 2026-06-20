@@ -12,7 +12,7 @@ defmodule Arbiter.UsageTest do
 
   defp create_event!(attrs) do
     base = %{
-      bead_id: "bd-usage-#{System.unique_integer([:positive])}",
+      task_id: "bd-usage-#{System.unique_integer([:positive])}",
       repo: "arbiter",
       workspace_id: "ws-usage",
       step: :work,
@@ -55,14 +55,14 @@ defmodule Arbiter.UsageTest do
     end
 
     test "review step is valid" do
-      ev = create_event!(%{step: :review, bead_id: "bd-xyz#review"})
+      ev = create_event!(%{step: :review, task_id: "bd-xyz#review"})
       assert ev.step == :review
     end
 
     test "rejects an unknown step" do
       assert {:error, _} =
                Ash.create(Event, %{
-                 bead_id: "bd-bad",
+                 task_id: "bd-bad",
                  repo: "arbiter",
                  step: :sideways,
                  occurred_at: DateTime.utc_now()
@@ -75,12 +75,12 @@ defmodule Arbiter.UsageTest do
       day1 = ~U[2026-06-01 12:00:00.000000Z]
       day2 = ~U[2026-06-02 09:00:00.000000Z]
 
-      bead_a = "bd-#{System.unique_integer([:positive])}"
-      bead_b = "bd-#{System.unique_integer([:positive])}"
+      task_a = "bd-#{System.unique_integer([:positive])}"
+      task_b = "bd-#{System.unique_integer([:positive])}"
 
-      # Two work sessions on bead_a (rework!) + one review.
+      # Two work sessions on task_a (rework!) + one review.
       create_event!(%{
-        bead_id: bead_a,
+        task_id: task_a,
         step: :work,
         model: "claude-opus-4-7",
         provider: "claude",
@@ -92,7 +92,7 @@ defmodule Arbiter.UsageTest do
       })
 
       create_event!(%{
-        bead_id: bead_a,
+        task_id: task_a,
         step: :work,
         model: "claude-opus-4-7",
         provider: "claude",
@@ -104,7 +104,7 @@ defmodule Arbiter.UsageTest do
       })
 
       create_event!(%{
-        bead_id: bead_a <> "#review",
+        task_id: task_a <> "#review",
         step: :review,
         model: "claude-sonnet-4-6",
         provider: "claude",
@@ -115,9 +115,9 @@ defmodule Arbiter.UsageTest do
         occurred_at: day2
       })
 
-      # One unrelated bead in a different workspace.
+      # One unrelated task in a different workspace.
       create_event!(%{
-        bead_id: bead_b,
+        task_id: task_b,
         workspace_id: "ws-other",
         step: :work,
         model: "claude-opus-4-7",
@@ -129,7 +129,7 @@ defmodule Arbiter.UsageTest do
         occurred_at: day2
       })
 
-      {:ok, %{bead_a: bead_a, bead_b: bead_b, day1: day1, day2: day2}}
+      {:ok, %{task_a: task_a, task_b: task_b, day1: day1, day2: day2}}
     end
 
     test "by day buckets by occurred_at date in chronological order" do
@@ -141,11 +141,11 @@ defmodule Arbiter.UsageTest do
       assert groups == Enum.sort(groups), "by :day should be chronologically sorted"
     end
 
-    test "by bead groups review under the #review id and surfaces rework", %{bead_a: a} do
-      {:ok, rollups} = Usage.summarize(by: :bead, workspace_id: "ws-usage")
+    test "by task groups review under the #review id and surfaces rework", %{task_a: a} do
+      {:ok, rollups} = Usage.summarize(by: :task, workspace_id: "ws-usage")
 
       a_rollup = Enum.find(rollups, &(&1.group == a))
-      assert a_rollup.rows == 2, "two :work rows on the same bead = rework visibility"
+      assert a_rollup.rows == 2, "two :work rows on the same task = rework visibility"
       # 1.50 + 1.80 = 3.30
       assert_in_delta a_rollup.total_cost_usd, 3.30, 0.001
 
@@ -164,18 +164,18 @@ defmodule Arbiter.UsageTest do
       assert_in_delta by_step["review"].total_cost_usd, 0.40, 0.001
     end
 
-    test "by model rolls cross-bead cost up per model" do
+    test "by model rolls cross-task cost up per model" do
       {:ok, rollups} = Usage.summarize(by: :model, workspace_id: "ws-usage")
       by_model = Map.new(rollups, &{&1.group, &1})
 
-      # opus rows: bead_a's two :work rows = 1.50 + 1.80 = 3.30
+      # opus rows: task_a's two :work rows = 1.50 + 1.80 = 3.30
       assert_in_delta by_model["claude-opus-4-7"].total_cost_usd, 3.30, 0.001
       assert_in_delta by_model["claude-sonnet-4-6"].total_cost_usd, 0.40, 0.001
     end
 
     test "since filter drops earlier rows", %{day2: day2} do
-      {:ok, rollups} = Usage.summarize(by: :bead, workspace_id: "ws-usage", since: day2)
-      # Only the day2 rows survive: bead_a's second :work + the review.
+      {:ok, rollups} = Usage.summarize(by: :task, workspace_id: "ws-usage", since: day2)
+      # Only the day2 rows survive: task_a's second :work + the review.
       total = Enum.reduce(rollups, 0.0, &(&1.total_cost_usd + &2))
       assert_in_delta total, 1.80 + 0.40, 0.001
     end
@@ -187,9 +187,9 @@ defmodule Arbiter.UsageTest do
       assert MapSet.member?(groups, "ws-other")
     end
 
-    test "limit caps results", %{bead_a: _a} do
+    test "limit caps results", %{task_a: _a} do
       {:ok, [_only_one]} =
-        Usage.summarize(by: :bead, workspace_id: "ws-usage", limit: 1)
+        Usage.summarize(by: :task, workspace_id: "ws-usage", limit: 1)
     end
 
     test "missing by errors" do
@@ -256,10 +256,10 @@ defmodule Arbiter.UsageTest do
     end
 
     test "captures tokens + cost + model from stream-json result event" do
-      bead_id = "bd-cs-usage-#{System.unique_integer([:positive])}"
+      task_id = "bd-cs-usage-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -303,7 +303,7 @@ defmodule Arbiter.UsageTest do
       ev =
         wait_until(fn ->
           case Event
-               |> Ash.Query.filter(bead_id == ^bead_id)
+               |> Ash.Query.filter(task_id == ^task_id)
                |> Ash.read!() do
             [row] -> row
             _ -> nil
@@ -325,10 +325,10 @@ defmodule Arbiter.UsageTest do
     end
 
     test "session without a result event still writes a row with nil cost (graceful)" do
-      bead_id = "bd-cs-nores-#{System.unique_integer([:positive])}"
+      task_id = "bd-cs-nores-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -347,7 +347,7 @@ defmodule Arbiter.UsageTest do
       ev =
         wait_until(fn ->
           case Event
-               |> Ash.Query.filter(bead_id == ^bead_id)
+               |> Ash.Query.filter(task_id == ^task_id)
                |> Ash.read!() do
             [row] -> row
             _ -> nil
@@ -365,7 +365,7 @@ defmodule Arbiter.UsageTest do
 
       {:ok, pid} =
         Worker.start(
-          bead_id: reviewer_id,
+          task_id: reviewer_id,
           repo: "arbiter",
           workspace_id: nil,
           meta: %{role: :reviewer, reviews: "bd-author"}
@@ -403,7 +403,7 @@ defmodule Arbiter.UsageTest do
       ev =
         wait_until(fn ->
           case Event
-               |> Ash.Query.filter(bead_id == ^reviewer_id)
+               |> Ash.Query.filter(task_id == ^reviewer_id)
                |> Ash.read!() do
             [row] -> row
             _ -> nil
@@ -416,10 +416,10 @@ defmodule Arbiter.UsageTest do
     end
 
     test "gemini/agy session writes provider=gemini even without stream-json events" do
-      bead_id = "bd-gemini-#{System.unique_integer([:positive])}"
+      task_id = "bd-gemini-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -441,7 +441,7 @@ defmodule Arbiter.UsageTest do
       ev =
         wait_until(fn ->
           case Event
-               |> Ash.Query.filter(bead_id == ^bead_id)
+               |> Ash.Query.filter(task_id == ^task_id)
                |> Ash.read!() do
             [row] -> row
             _ -> nil
@@ -458,10 +458,10 @@ defmodule Arbiter.UsageTest do
     end
 
     test "captures tokens + derived cost + model from gemini stream-json result event" do
-      bead_id = "bd-gemini-sj-#{System.unique_integer([:positive])}"
+      task_id = "bd-gemini-sj-#{System.unique_integer([:positive])}"
 
       {:ok, pid} =
-        Worker.start(bead_id: bead_id, repo: "arbiter", workspace_id: "ws-usage")
+        Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
@@ -507,7 +507,7 @@ defmodule Arbiter.UsageTest do
       ev =
         wait_until(fn ->
           case Event
-               |> Ash.Query.filter(bead_id == ^bead_id)
+               |> Ash.Query.filter(task_id == ^task_id)
                |> Ash.read!() do
             [row] -> row
             _ -> nil
@@ -534,7 +534,7 @@ defmodule Arbiter.UsageTest do
 
       {:ok, pid} =
         Worker.start(
-          bead_id: reviewer_id,
+          task_id: reviewer_id,
           repo: "arbiter",
           workspace_id: nil,
           meta: %{role: :reviewer, reviews: "bd-author"}
@@ -557,7 +557,7 @@ defmodule Arbiter.UsageTest do
       ev =
         wait_until(fn ->
           case Event
-               |> Ash.Query.filter(bead_id == ^reviewer_id)
+               |> Ash.Query.filter(task_id == ^reviewer_id)
                |> Ash.read!() do
             [row] -> row
             _ -> nil

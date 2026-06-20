@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.Api.DependencyController do
   @moduledoc """
-  REST endpoints for `Arbiter.Beads.Dependency`.
+  REST endpoints for `Arbiter.Tasks.Dependency`.
 
   Routes:
 
@@ -10,7 +10,7 @@ defmodule ArbiterWeb.Api.DependencyController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Beads.Dependency
+  alias Arbiter.Tasks.Dependency
 
   action_fallback ArbiterWeb.Api.FallbackController
 

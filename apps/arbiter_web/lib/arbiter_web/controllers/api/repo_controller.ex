@@ -20,8 +20,8 @@ defmodule ArbiterWeb.Api.RepoController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Beads.RepoConfig
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.Worktree
 

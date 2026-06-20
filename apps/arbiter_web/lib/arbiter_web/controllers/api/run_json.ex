@@ -17,8 +17,8 @@ defmodule ArbiterWeb.Api.RunJSON do
   defp summary(%Run{} = r) do
     %{
       id: r.id,
-      bead_id: r.bead_id,
-      bead_title: r.bead_title,
+      task_id: r.task_id,
+      task_title: r.task_title,
       repo: r.repo,
       workspace_id: r.workspace_id,
       status: to_string_atom(r.status),

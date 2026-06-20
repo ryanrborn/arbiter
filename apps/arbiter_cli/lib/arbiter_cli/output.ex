@@ -198,7 +198,7 @@ defmodule ArbiterCli.Output do
   defp difficulty_label(n) when is_integer(n) and n in 0..4, do: "D#{n}"
   defp difficulty_label(other), do: to_string(other)
 
-  # Child-progress rollup line for a parent bead. Only shown when the bead has
+  # Child-progress rollup line for a parent task. Only shown when the task has
   # at least one `:parent_of` child (child_total > 0).
   defp child_progress_label(%{"child_total" => total, "child_closed" => closed})
        when is_integer(total) and total > 0 and is_integer(closed) do
@@ -207,7 +207,7 @@ defmodule ArbiterCli.Output do
 
   defp child_progress_label(_), do: nil
 
-  # Only surface the auto-close flag when it is actually on; a plain bead with
+  # Only surface the auto-close flag when it is actually on; a plain task with
   # auto_close=false shouldn't clutter the detail view.
   defp auto_close_label(%{"auto_close" => true}), do: "yes (closes when all children done)"
   defp auto_close_label(_), do: nil

@@ -31,7 +31,7 @@ defmodule Arbiter.Trackers.Shortcut.Config do
   avoided outside of tests.
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.Shortcut.Error
 
   @pdict_key {__MODULE__, :active_workspace_config}

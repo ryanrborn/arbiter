@@ -1,7 +1,7 @@
 defmodule Arbiter.Worker do
   @moduledoc """
   A `Worker` is the unit of agent work in Gas Town: a supervised GenServer
-  driving a single bead through a workflow (load → design → implement → verify
+  driving a single task through a workflow (load → design → implement → verify
   → submit).
 
   This module is the Phase 2 skeleton — it provides the lifecycle, registry,
@@ -42,7 +42,7 @@ defmodule Arbiter.Worker do
   spawns an `Arbiter.Worker.ReviewGate` — which runs a **distinct** reviewer
   worker over the diff — *instead of* calling the merger. The ReviewGate reports a
   verdict back via `review_gate_verdict/2`: APPROVE proceeds to `do_open_mr` (the
-  same merge path), REQUEST_CHANGES (or an inconclusive review) parks the bead
+  same merge path), REQUEST_CHANGES (or an inconclusive review) parks the task
   with the findings and escalates to the Admiral without merging. When review is
   not required (the default) completion routes straight to the merger as before.
 
@@ -59,9 +59,9 @@ defmodule Arbiter.Worker do
 
   This is also the path the `arb done` marker takes in claude-driven mode: when
   the worker knows its branch (a worktree was provisioned at dispatch time) the
-  marker triggers the same `open_mr` flow rather than closing the bead
+  marker triggers the same `open_mr` flow rather than closing the task
   directly. For the default `Direct` strategy the merge (`git merge --no-ff`)
-  runs immediately, so the branch reaches the target line before the bead
+  runs immediately, so the branch reaches the target line before the task
   closes. A merge failure fails the worker instead of silently completing it.
   Only an ad-hoc run with no branch completes straight from `arb done`.
 
@@ -76,9 +76,9 @@ defmodule Arbiter.Worker do
 
   ## Registry
 
-  Each worker registers under `Arbiter.Worker.Registry` keyed by `bead_id`.
-  Use `whereis/1` to look up by bead_id; most API functions accept either a
-  pid or a bead_id string.
+  Each worker registers under `Arbiter.Worker.Registry` keyed by `task_id`.
+  Use `whereis/1` to look up by task_id; most API functions accept either a
+  pid or a task_id string.
 
   ## Supervision
 
@@ -114,7 +114,7 @@ defmodule Arbiter.Worker do
 
   @typedoc "Snapshot returned by `state/1`."
   @type snapshot :: %{
-          bead_id: String.t(),
+          task_id: String.t(),
           workspace_id: String.t() | nil,
           repo: String.t(),
           current_step: step(),
@@ -129,13 +129,13 @@ defmodule Arbiter.Worker do
   defmodule State do
     @moduledoc false
     defstruct [
-      :bead_id,
-      # Registry name this worker is registered under. Defaults to bead_id
+      :task_id,
+      # Registry name this worker is registered under. Defaults to task_id
       # but can be overridden via the `:registry_key` start opt so multiple
-      # workers can coexist for the same bead (e.g. the merge queue's short-lived
+      # workers can coexist for the same task (e.g. the merge queue's short-lived
       # conflict-resolver runs alongside the original work worker under a
-      # `bead_id <> ":conflict"` key). `terminate/2` uses this when
-      # unregistering so we don't accidentally wipe the bead's primary slot.
+      # `task_id <> ":conflict"` key). `terminate/2` uses this when
+      # unregistering so we don't accidentally wipe the task's primary slot.
       :registry_key,
       :workspace_id,
       :repo,
@@ -196,17 +196,17 @@ defmodule Arbiter.Worker do
   Start a worker under the dynamic supervisor.
 
   Required opts:
-    * `:bead_id` — string, used as the default registry key.
+    * `:task_id` — string, used as the default registry key.
     * `:repo`   — string, the repo/project key the worker operates on.
 
   Optional opts:
     * `:workspace_id`   — string.
     * `:meta`           — initial map of workflow-specific state.
     * `:registry_key`   — string. Overrides the registry key (defaults to
-      `:bead_id`). Lets multiple workers coexist for the same bead — the
-      merge queue's conflict-resolver worker uses `bead_id <> ":conflict"` so
+      `:task_id`). Lets multiple workers coexist for the same task — the
+      merge queue's conflict-resolver worker uses `task_id <> ":conflict"` so
       it doesn't collide with the completed-but-still-resident original
-      work worker (whose lifecycle is tied to bead `:close`).
+      work worker (whose lifecycle is tied to task `:close`).
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts) when is_list(opts) do
@@ -218,11 +218,11 @@ defmodule Arbiter.Worker do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
-    case Keyword.fetch(opts, :bead_id) do
-      {:ok, bead_id} when is_binary(bead_id) and bead_id != "" ->
+    case Keyword.fetch(opts, :task_id) do
+      {:ok, task_id} when is_binary(task_id) and task_id != "" ->
         case Keyword.fetch(opts, :repo) do
           {:ok, repo} when is_binary(repo) and repo != "" ->
-            registry_key = resolve_registry_key(opts, bead_id)
+            registry_key = resolve_registry_key(opts, task_id)
             GenServer.start_link(__MODULE__, opts, name: PRegistry.via_tuple(registry_key))
 
           _ ->
@@ -230,28 +230,28 @@ defmodule Arbiter.Worker do
         end
 
       _ ->
-        {:error, :missing_bead_id}
+        {:error, :missing_task_id}
     end
   end
 
-  defp resolve_registry_key(opts, bead_id) do
+  defp resolve_registry_key(opts, task_id) do
     case Keyword.get(opts, :registry_key) do
       key when is_binary(key) and key != "" -> key
-      _ -> bead_id
+      _ -> task_id
     end
   end
 
   @doc """
-  Return the pid of the worker registered for `bead_id`, or `nil`.
+  Return the pid of the worker registered for `task_id`, or `nil`.
   """
   @spec whereis(String.t()) :: pid() | nil
-  def whereis(bead_id) when is_binary(bead_id), do: PRegistry.whereis(bead_id)
+  def whereis(task_id) when is_binary(task_id), do: PRegistry.whereis(task_id)
 
   @doc """
   Return a list of active worker snapshots — one entry per child under
   `Arbiter.Worker.Supervisor`. Crashed / stopped workers are omitted.
 
-  Each entry is the same snapshot map `state/1` returns (bead_id,
+  Each entry is the same snapshot map `state/1` returns (task_id,
   workspace_id, repo, current_step, status, started_at, step_started_at,
   meta), plus `:pid`.
   """
@@ -285,13 +285,13 @@ defmodule Arbiter.Worker do
 
   @doc """
   Return a snapshot of the worker's state, or `nil` if no worker is
-  registered for the given bead_id.
+  registered for the given task_id.
   """
   @spec state(ref()) :: snapshot() | nil
   def state(pid) when is_pid(pid), do: GenServer.call(pid, :snapshot)
 
-  def state(bead_id) when is_binary(bead_id) do
-    case whereis(bead_id) do
+  def state(task_id) when is_binary(task_id) do
+    case whereis(task_id) do
       nil -> nil
       pid -> state(pid)
     end
@@ -381,8 +381,8 @@ defmodule Arbiter.Worker do
     * `{:approve, findings}` → records the approval and proceeds to the merger
       (`do_open_mr`); the worker transitions to `:awaiting_review`.
     * `{:request_changes, findings}` → records the findings, escalates to the
-      Admiral, and parks the worker at `:failed` **without** merging. The bead
-      stays `:in_progress` (the Driver leaves a `:failed` worker's bead open for
+      Admiral, and parks the worker at `:failed` **without** merging. The task
+      stays `:in_progress` (the Driver leaves a `:failed` worker's task open for
       inspection / re-dispatch).
     * `{:no_verdict, reason}` → an inconclusive review; treated like a rejection
       (escalate, do not merge) since the safe default is never to merge unreviewed
@@ -405,8 +405,8 @@ defmodule Arbiter.Worker do
   def stop(ref, reason \\ :normal)
   def stop(pid, reason) when is_pid(pid), do: GenServer.stop(pid, reason)
 
-  def stop(bead_id, reason) when is_binary(bead_id) do
-    case whereis(bead_id) do
+  def stop(task_id, reason) when is_binary(task_id) do
+    case whereis(task_id) do
       nil -> {:error, :not_found}
       pid -> GenServer.stop(pid, reason)
     end
@@ -417,12 +417,12 @@ defmodule Arbiter.Worker do
   @impl true
   def init(opts) do
     now = DateTime.utc_now()
-    bead_id = Keyword.fetch!(opts, :bead_id)
+    task_id = Keyword.fetch!(opts, :task_id)
     meta = Keyword.get(opts, :meta, %{})
 
     state = %State{
-      bead_id: bead_id,
-      registry_key: resolve_registry_key(opts, bead_id),
+      task_id: task_id,
+      registry_key: resolve_registry_key(opts, task_id),
       workspace_id: Keyword.get(opts, :workspace_id),
       repo: Keyword.fetch!(opts, :repo),
       current_step: :idle,
@@ -477,27 +477,27 @@ defmodule Arbiter.Worker do
       :ok
   end
 
-  # Broadcast {:worker_done, bead_id} to "worker:done:<workspace_id>" so the
-  # workspace's MergeQueue (the merge queue) can pick the bead up and drive it through
+  # Broadcast {:worker_done, task_id} to "worker:done:<workspace_id>" so the
+  # workspace's MergeQueue (the merge queue) can pick the task up and drive it through
   # the merge queue. A worker without a workspace_id (e.g. ad-hoc local runs)
   # has no MergeQueue listening and so the broadcast is skipped.
   #
   # Review-only workers (`meta[:review_only] == true`) skip the merge queue
   # broadcast — they don't author code, so there's nothing for the merge queue
-  # to do, and the bead they're reviewing may not even belong to the fleet.
+  # to do, and the task they're reviewing may not even belong to the fleet.
   # The Admiral notification still fires so the dashboard / inbox feed picks
   # up the completion.
   defp broadcast_done(%State{workspace_id: nil}), do: :ok
 
-  defp broadcast_done(%State{workspace_id: ws_id, bead_id: bead_id, meta: meta} = state) do
+  defp broadcast_done(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
     unless review_only?(meta) do
       Phoenix.PubSub.broadcast(
         Arbiter.PubSub,
         "worker:done:" <> ws_id,
-        {:worker_done, bead_id}
+        {:worker_done, task_id}
       )
 
-      Arbiter.Events.broadcast(ws_id, "worker_done", %{bead_id: bead_id})
+      Arbiter.Events.broadcast(ws_id, "worker_done", %{task_id: task_id})
     end
 
     # The message queue is the single source of truth for the notification
@@ -517,9 +517,9 @@ defmodule Arbiter.Worker do
 
   defp broadcast_worker_failed(%State{workspace_id: nil}), do: :ok
 
-  defp broadcast_worker_failed(%State{workspace_id: ws_id, bead_id: bead_id, meta: meta}) do
+  defp broadcast_worker_failed(%State{workspace_id: ws_id, task_id: task_id, meta: meta}) do
     unless review_only?(meta) do
-      Arbiter.Events.broadcast(ws_id, "worker_failed", %{bead_id: bead_id})
+      Arbiter.Events.broadcast(ws_id, "worker_failed", %{task_id: task_id})
     end
 
     :ok
@@ -537,8 +537,8 @@ defmodule Arbiter.Worker do
   # nil — subsequent terminal updates will no-op cleanly.
   defp record_run_started(%State{} = state) do
     attrs = %{
-      bead_id: state.bead_id,
-      bead_title: lookup_bead_title(state.bead_id),
+      task_id: state.task_id,
+      task_title: lookup_task_title(state.task_id),
       repo: state.repo,
       workspace_id: state.workspace_id,
       status: :running,
@@ -555,12 +555,12 @@ defmodule Arbiter.Worker do
         %State{state | run_id: run.id}
 
       {:error, reason} ->
-        log_run_warning("create", state.bead_id, reason)
+        log_run_warning("create", state.task_id, reason)
         state
     end
   rescue
     e ->
-      log_run_warning("create", state.bead_id, e)
+      log_run_warning("create", state.task_id, e)
       state
   end
 
@@ -574,7 +574,7 @@ defmodule Arbiter.Worker do
   # nil — the original create failed, so there's nothing to update and the
   # warning was already logged at that time.
   defp record_run_finished(%State{run_id: nil} = state) do
-    Logger.debug("Worker.record_run_finished/1 skipped (no run_id) for bead=#{state.bead_id}")
+    Logger.debug("Worker.record_run_finished/1 skipped (no run_id) for task=#{state.task_id}")
 
     :ok
   end
@@ -592,10 +592,10 @@ defmodule Arbiter.Worker do
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
       :ok
     else
-      {:error, reason} -> log_run_warning("update", state.bead_id, reason)
+      {:error, reason} -> log_run_warning("update", state.task_id, reason)
     end
   rescue
-    e -> log_run_warning("update", state.bead_id, e)
+    e -> log_run_warning("update", state.task_id, e)
   end
 
   defp capture_output_lines(%State{} = state) do
@@ -618,7 +618,7 @@ defmodule Arbiter.Worker do
         handle
 
       {:error, reason} ->
-        log_run_warning("output_log_open", state.bead_id, reason)
+        log_run_warning("output_log_open", state.task_id, reason)
         nil
     end
   end
@@ -627,8 +627,8 @@ defmodule Arbiter.Worker do
   defp stringify_failure(s) when is_binary(s), do: s
   defp stringify_failure(other), do: inspect(other)
 
-  defp lookup_bead_title(bead_id) do
-    case Ash.get(Arbiter.Beads.Issue, bead_id) do
+  defp lookup_task_title(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
       {:ok, %{title: title}} -> title
       _ -> nil
     end
@@ -636,8 +636,8 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
-  defp log_run_warning(op, bead_id, reason) do
-    Logger.warning("Worker.record_run_#{op}/1 swallowed for bead=#{bead_id}: #{inspect(reason)}")
+  defp log_run_warning(op, task_id, reason) do
+    Logger.warning("Worker.record_run_#{op}/1 swallowed for task=#{task_id}: #{inspect(reason)}")
 
     :error
   end
@@ -681,7 +681,7 @@ defmodule Arbiter.Worker do
         wall_clock_duration_ms(Map.get(session, :started_at), Map.get(session, :exited_at))
 
     attrs = %{
-      bead_id: state.bead_id,
+      task_id: state.task_id,
       workspace_id: state.workspace_id,
       repo: state.repo,
       step: step,
@@ -706,7 +706,7 @@ defmodule Arbiter.Worker do
 
       {:error, reason} ->
         Logger.warning(
-          "Worker.record_usage_event/3 swallowed for bead=#{state.bead_id}: #{inspect(reason)}"
+          "Worker.record_usage_event/3 swallowed for task=#{state.task_id}: #{inspect(reason)}"
         )
 
         :error
@@ -714,7 +714,7 @@ defmodule Arbiter.Worker do
   rescue
     e ->
       Logger.warning(
-        "Worker.record_usage_event/3 raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+        "Worker.record_usage_event/3 raised for task=#{state.task_id}: #{Exception.message(e)}"
       )
 
       :error
@@ -929,7 +929,7 @@ defmodule Arbiter.Worker do
 
         # bd-awi4nw: the port closing is the PRIMARY stop signal. If the worker
         # is still in a live state, the worker died/stopped without completing
-        # (token exhaustion, crash, kill, flag-rejection). Don't strand the bead
+        # (token exhaustion, crash, kill, flag-rejection). Don't strand the task
         # at a silent in_progress — schedule a classify+escalate after a short
         # grace so an in-flight `arb done` (which the exit_status message can
         # race ahead of) still wins and the check no-ops on a normal completion.
@@ -947,12 +947,12 @@ defmodule Arbiter.Worker do
   # Deferred stop check (scheduled by the exit_status handler). By now an
   # in-flight `arb done` has been processed: if the worker moved to a
   # terminal/review state, the exit was the expected end of a normal completion
-  # — nothing to do. Otherwise the subprocess is genuinely gone with the bead
+  # — nothing to do. Otherwise the subprocess is genuinely gone with the task
   # unfinished: classify the cause from exit status + captured output and fail +
   # escalate to the Admiral (bd-awi4nw).
   #
   # bd-1pdyov: a stop check must consider the WHOLE run, not just the one port
-  # that closed. A single bead run can span multiple ClaudeSession ports — the
+  # that closed. A single task run can span multiple ClaudeSession ports — the
   # commit-gate nudge (respawn_with_commit_nudge/2) opens a continuation session
   # in the same worktree, and `arb resume` re-attaches a fresh one. When the
   # primary session's port exits while a continuation is still mid-run, this
@@ -1023,7 +1023,7 @@ defmodule Arbiter.Worker do
         %State{status: :awaiting_review_gate, meta: %{review_gate_ref: ref}} = state
       ) do
     Logger.warning(
-      "Worker: ReviewGate for bead=#{state.bead_id} exited before a verdict " <>
+      "Worker: ReviewGate for task=#{state.task_id} exited before a verdict " <>
         "(#{inspect(reason)}); escalating as no_verdict"
     )
 
@@ -1116,7 +1116,7 @@ defmodule Arbiter.Worker do
   # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the
   # stop from the exit status + captured output, fail the worker into an
   # obviously-stalled state (not silent in_progress), and raise an addressed
-  # Admiral escalation naming the bead + cause + remediation. Distinct from
+  # Admiral escalation naming the task + cause + remediation. Distinct from
   # fail_now/2's generic "exit code N" notification: the StopReason carries the
   # actionable classification (auth expiry, credit exhaustion, kill, …).
   #
@@ -1129,7 +1129,7 @@ defmodule Arbiter.Worker do
     reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
 
     Logger.warning(
-      "Worker: worker for bead=#{state.bead_id} stopped — #{Arbiter.Worker.StopReason.label(reason)}"
+      "Worker: worker for task=#{state.task_id} stopped — #{Arbiter.Worker.StopReason.label(reason)}"
     )
 
     if reason.category == :auth_expired do
@@ -1177,7 +1177,7 @@ defmodule Arbiter.Worker do
   # running? Its port has not yet reported an exit_status. A continuation /
   # resume session opened by the commit-gate nudge (respawn_with_commit_nudge/2)
   # is exactly this — the primary port exits while the continuation is mid-run.
-  # While one is live the bead run is not over, so a per-port stop check must
+  # While one is live the task run is not over, so a per-port stop check must
   # not fail it.
   defp other_session_live?(%State{claude_sessions: sessions}, exited_port) do
     Enum.any?(sessions, fn {port, session} ->
@@ -1198,7 +1198,7 @@ defmodule Arbiter.Worker do
   defp mark_done_seen(%State{meta: meta} = state),
     do: %State{state | meta: Map.put(meta || %{}, :done_seen, true)}
 
-  # Handle the worker's "arb done" marker. Before bd-7qq81g this closed the bead
+  # Handle the worker's "arb done" marker. Before bd-7qq81g this closed the task
   # directly, bypassing the merger entirely — branches never reached the target
   # line. Completion now routes through the configured merger:
   #
@@ -1207,13 +1207,13 @@ defmodule Arbiter.Worker do
   #     Direct strategy this merges --no-ff into the target branch synchronously,
   #     parks at :awaiting_review, and the Watchdog completes the worker on its
   #     first poll. A merge failure surfaces as a :failure_reason rather than
-  #     silently closing the bead as done.
+  #     silently closing the task as done.
   #   * With no branch (ad-hoc runs / unconfigured repo / no worktree) there is
   #     nothing to integrate. For review_only workers this is the expected path
   #     (coordinator-dispatched reviewers have no worktree). When the reviewer
-  #     produced an APPROVE verdict, trigger the Watchdog on the bead's pr_ref so
+  #     produced an APPROVE verdict, trigger the Watchdog on the task's pr_ref so
   #     the PR is merged automatically (bd-4ji58d). For REQUEST_CHANGES or no
-  #     parseable verdict, fail the worker so the bead stays :in_progress for a
+  #     parseable verdict, fail the worker so the task stays :in_progress for a
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
   defp on_claude_done(%State{meta: meta} = state) do
@@ -1232,7 +1232,7 @@ defmodule Arbiter.Worker do
         if review_only?(meta) do
           route_completion(state, branch)
         else
-          # bd-ofql8k: before routing to the ReviewGate (which diffs the per-bead
+          # bd-ofql8k: before routing to the ReviewGate (which diffs the per-task
           # branch's COMMITTED history) or the merger, check that the worktree is
           # actually in a reviewable state — clean tree AND ≥1 commit ahead of the
           # target. The repeated failure mode this guards against: the worker
@@ -1269,11 +1269,11 @@ defmodule Arbiter.Worker do
   # verdict from the reviewer's captured output and act on it.
   #
   # APPROVE → park at :awaiting_review and start the Watchdog with via_review_gate:
-  # true so it merges the bead's pr_ref on its first poll. Mirrors the full
+  # true so it merges the task's pr_ref on its first poll. Mirrors the full
   # ReviewGate approve path without going through the ReviewGate machinery.
   #
   # REQUEST_CHANGES / :no_verdict → fail the worker (not complete it) so the
-  # Driver does NOT close the bead. The bead stays :in_progress for the
+  # Driver does NOT close the task. The task stays :in_progress for the
   # coordinator to dispatch a fix-pass. Mirrors park_rejected/3 from the full
   # review_gate path.
   defp route_reviewer_completion(%State{} = state) do
@@ -1292,12 +1292,12 @@ defmodule Arbiter.Worker do
   end
 
   # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
-  # has no branch of its own — the PR lives on the bead's pr_ref. If a pr_ref
+  # has no branch of its own — the PR lives on the task's pr_ref. If a pr_ref
   # is present: park at :awaiting_review and start the Watchdog with
   # via_review_gate: true so it merges on the first poll. If no pr_ref is recorded
-  # (reviewer was dispatched against a bead with no open PR), complete normally.
-  defp trigger_watchdog_on_approval(%State{bead_id: bead_id} = state) do
-    case fetch_bead_pr_ref(bead_id) do
+  # (reviewer was dispatched against a task with no open PR), complete normally.
+  defp trigger_watchdog_on_approval(%State{task_id: task_id} = state) do
+    case fetch_task_pr_ref(task_id) do
       {:ok, pr_ref} ->
         opts = merge_opts_from_meta(state.meta, %{via_review_gate: true})
 
@@ -1325,14 +1325,14 @@ defmodule Arbiter.Worker do
               rescue
                 e ->
                   Logger.warning(
-                    "Worker: review_only APPROVE: Watchdog startup raised for bead=#{bead_id}: #{Exception.message(e)}"
+                    "Worker: review_only APPROVE: Watchdog startup raised for task=#{task_id}: #{Exception.message(e)}"
                   )
 
                   false
               catch
                 :exit, reason ->
                   Logger.warning(
-                    "Worker: review_only APPROVE: Watchdog startup exit for bead=#{bead_id}: #{inspect(reason)}"
+                    "Worker: review_only APPROVE: Watchdog startup exit for task=#{task_id}: #{inspect(reason)}"
                   )
 
                   false
@@ -1346,7 +1346,7 @@ defmodule Arbiter.Worker do
 
           {:error, reason} ->
             Logger.warning(
-              "Worker: review_only APPROVE: could not resolve merger for bead=#{bead_id}: " <>
+              "Worker: review_only APPROVE: could not resolve merger for task=#{task_id}: " <>
                 "#{inspect(reason)}; completing without merge"
             )
 
@@ -1354,12 +1354,12 @@ defmodule Arbiter.Worker do
         end
 
       {:error, :no_pr_ref} ->
-        # No open PR on the bead — complete normally, nothing to merge.
+        # No open PR on the task — complete normally, nothing to merge.
         complete_now(state, :claude_done)
 
       {:error, reason} ->
         Logger.warning(
-          "Worker: review_only APPROVE: could not load bead pr_ref for bead=#{bead_id}: " <>
+          "Worker: review_only APPROVE: could not load task pr_ref for task=#{task_id}: " <>
             "#{inspect(reason)}; completing without merge"
         )
 
@@ -1367,11 +1367,11 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # Load the pr_ref from the bead's current DB record. Returns {:ok, pr_ref}
+  # Load the pr_ref from the task's current DB record. Returns {:ok, pr_ref}
   # when present, {:error, :no_pr_ref} when nil/blank, and {:error, reason}
   # on any other failure. Best-effort: callers fall back to a plain complete.
-  defp fetch_bead_pr_ref(bead_id) do
-    case Ash.get(Arbiter.Beads.Issue, bead_id) do
+  defp fetch_task_pr_ref(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
       {:ok, %{pr_ref: pr_ref}} when is_binary(pr_ref) and pr_ref != "" ->
         {:ok, pr_ref}
 
@@ -1389,7 +1389,7 @@ defmodule Arbiter.Worker do
   # :no_commits}` to divert. We only gate when:
   #
   #   * a worktree is configured and exists on disk, AND
-  #   * the worktree is actually checked out on the per-bead branch.
+  #   * the worktree is actually checked out on the per-task branch.
   #
   # The branch check exists because some test setups (notably ReviewGateTest)
   # reuse the repo itself as the "worktree" with `worktree_path: repo` and a
@@ -1397,7 +1397,7 @@ defmodule Arbiter.Worker do
   # In that case the worktree's HEAD is some other branch (usually `main`) and
   # `git rev-list main..HEAD` is meaningless — gating on it would manufacture
   # false `:no_commits` trips. Production worktrees provisioned via
-  # `Worktree.create/3` are always checked out on the per-bead branch, so the
+  # `Worktree.create/3` are always checked out on the per-task branch, so the
   # gate fires there as intended.
   #
   # ad-hoc runs without a provisioned worktree (no `:worktree_path` in meta)
@@ -1485,13 +1485,13 @@ defmodule Arbiter.Worker do
       next_attempts = ((meta && Map.get(meta, :commit_nudge_attempts)) || 0) + 1
 
       Logger.info(
-        "Worker: bd-ofql8k commit gate tripped (#{reason}) for bead=#{state.bead_id}; " <>
+        "Worker: bd-ofql8k commit gate tripped (#{reason}) for task=#{state.task_id}; " <>
           "relaunching worker with nudge (attempt #{next_attempts}/#{commit_nudge_cap(meta)})"
       )
 
       session_config = %{
-        bead_id: state.bead_id,
-        topic: "worker:" <> state.bead_id,
+        task_id: state.task_id,
+        topic: "worker:" <> state.task_id,
         line_cap: Arbiter.Worker.ClaudeSession.line_cap(),
         done_regex: Arbiter.Worker.ClaudeSession.done_regex()
       }
@@ -1567,11 +1567,11 @@ defmodule Arbiter.Worker do
 
   defp inject_nudge_argv(_port_args, _nudge), do: {:error, :missing_argv}
 
-  defp commit_nudge_prompt(%State{bead_id: bead_id, meta: meta}, :uncommitted) do
+  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
 
     """
-    bd-ofql8k commit gate: you printed `arb done` for bead #{bead_id}, but the
+    bd-ofql8k commit gate: you printed `arb done` for task #{task_id}, but the
     worktree on branch `#{branch}` has uncommitted changes (staged, unstaged,
     or untracked). The review gate diffs `base..HEAD` — committed history
     only — so without commits your work is invisible and the reviewer would
@@ -1590,12 +1590,12 @@ defmodule Arbiter.Worker do
     """
   end
 
-  defp commit_nudge_prompt(%State{bead_id: bead_id, meta: meta}, :no_commits) do
+  defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :no_commits) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
 
     """
-    bd-ofql8k commit gate: you printed `arb done` for bead #{bead_id}, but
+    bd-ofql8k commit gate: you printed `arb done` for task #{task_id}, but
     branch `#{branch}` has no commits ahead of `#{target}`. Either no work
     was done, or your edits landed on a different branch. The review gate
     cannot proceed with a zero-commit branch.
@@ -1616,7 +1616,7 @@ defmodule Arbiter.Worker do
     """
   end
 
-  # Final park: record on the bead, escalate to the Admiral, fail the worker.
+  # Final park: record on the task, escalate to the Admiral, fail the worker.
   # We deliberately do NOT auto-commit (per bd-ofql8k: "Prefer send-back/retry
   # over a blind auto-commit (so half-work/junk is not committed)") — an
   # uncommitted worktree at gate-cap is escalated for human / dispatcher
@@ -1642,7 +1642,7 @@ defmodule Arbiter.Worker do
   defp commit_gate_failure_metadata(:no_commits),
     do: {:no_commits_at_completion, "Worker signalled done with no commits on branch"}
 
-  defp commit_gate_summary(%State{bead_id: bead_id, meta: meta}, reason, why) do
+  defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
     worktree = (meta && Map.get(meta, :worktree_path)) || "(unknown)"
@@ -1676,7 +1676,7 @@ defmodule Arbiter.Worker do
       end
 
     """
-    bd-ofql8k commit gate tripped for bead #{bead_id}: #{reason_blurb}
+    bd-ofql8k commit gate tripped for task #{task_id}: #{reason_blurb}
 
     #{detail_blurb}
 
@@ -1709,51 +1709,51 @@ defmodule Arbiter.Worker do
     |> Enum.join("\n")
   end
 
-  defp record_commit_gate_note(%State{bead_id: bead_id}, _reason, _why, summary) do
+  defp record_commit_gate_note(%State{task_id: task_id}, _reason, _why, summary) do
     stamp = DateTime.utc_now() |> DateTime.to_iso8601()
     block = "## Commit gate tripped (#{stamp})\n\n#{summary}"
 
-    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
       notes =
-        [bead.notes, block]
+        [task.notes, block]
         |> Enum.reject(&(&1 in [nil, ""]))
         |> Enum.join("\n\n")
 
-      case Ash.update(bead, %{notes: notes}, action: :update) do
+      case Ash.update(task, %{notes: notes}, action: :update) do
         {:ok, _} -> :ok
-        {:error, reason} -> log_commit_gate_warning(bead_id, reason)
+        {:error, reason} -> log_commit_gate_warning(task_id, reason)
       end
     end
 
     :ok
   rescue
-    e -> log_commit_gate_warning(bead_id, e)
+    e -> log_commit_gate_warning(task_id, e)
   end
 
-  defp escalate_commit_gate(%State{workspace_id: ws_id, bead_id: bead_id}, subject, summary)
+  defp escalate_commit_gate(%State{workspace_id: ws_id, task_id: task_id}, subject, summary)
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: bead_id,
-      subject: "Commit gate: #{subject} (#{bead_id})",
+      directive_ref: task_id,
+      subject: "Commit gate: #{subject} (#{task_id})",
       body: summary
     })
 
     :ok
   rescue
-    e -> log_commit_gate_warning(bead_id, e)
+    e -> log_commit_gate_warning(task_id, e)
   catch
     :exit, _ -> :ok
   end
 
   defp escalate_commit_gate(_state, _subject, _summary), do: :ok
 
-  defp log_commit_gate_warning(bead_id, reason) do
+  defp log_commit_gate_warning(task_id, reason) do
     Logger.warning(
-      "Worker: commit-gate escalation swallowed for bead=#{bead_id}: #{inspect(reason)}"
+      "Worker: commit-gate escalation swallowed for task=#{task_id}: #{inspect(reason)}"
     )
 
     :error
@@ -1768,8 +1768,8 @@ defmodule Arbiter.Worker do
   # (bd-66ey1o: the ReviewGate approves in-process, it does NOT post a GitHub
   # review).
   defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
-    title = Map.get(meta, :merge_title) || "Merge #{state.bead_id}"
-    description = build_pr_body(state.bead_id, Map.get(meta, :worktree_path))
+    title = Map.get(meta, :merge_title) || "Merge #{state.task_id}"
+    description = build_pr_body(state.task_id, Map.get(meta, :worktree_path))
 
     case do_open_mr(state, branch, title, description, opts) do
       {:ok, _mr_ref, new_state} -> new_state
@@ -1778,12 +1778,12 @@ defmodule Arbiter.Worker do
   end
 
   # Build the PR/MR body from the repo's pull_request_template.md, falling back
-  # to a minimal default when the template is absent or the bead can't be loaded.
-  defp build_pr_body(bead_id, worktree_path) do
-    case Ash.get(Arbiter.Beads.Issue, bead_id) do
-      {:ok, bead} ->
+  # to a minimal default when the template is absent or the task can't be loaded.
+  defp build_pr_body(task_id, worktree_path) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, task} ->
         template = is_binary(worktree_path) && PRTemplate.read(worktree_path)
-        if template, do: PRTemplate.fill(template, bead), else: PRTemplate.default_body(bead)
+        if template, do: PRTemplate.fill(template, task), else: PRTemplate.default_body(task)
 
       _ ->
         ""
@@ -1796,11 +1796,11 @@ defmodule Arbiter.Worker do
   # Direct merger runs `git merge --abort` on conflict — see bd-1rhyla: a
   # half-merged tree took the live server down), so main stays clean and
   # compilable. Here we own the lifecycle side: fail the worker WITHOUT closing
-  # the bead, and — for a genuine conflict — escalate to the Admiral inbox with
-  # the conflicting files so the bead can be rebased / re-resolved.
+  # the task, and — for a genuine conflict — escalate to the Admiral inbox with
+  # the conflicting files so the task can be rebased / re-resolved.
   #
   # failure_reason stays a short term (it shares the Run.failure_reason column);
-  # the full conflict detail lives in the escalation message + bead notes.
+  # the full conflict detail lives in the escalation message + task notes.
   defp park_merge_failure(%State{} = state, branch, {:merge_conflict, detail}) do
     record_merge_conflict_note(state, branch, detail)
     escalate_merge_conflict(state, branch, detail)
@@ -1811,27 +1811,27 @@ defmodule Arbiter.Worker do
     fail_now(state, {:merge_failed, reason})
   end
 
-  # Append the conflict + conflicting files to the bead's notes so `arb show`
+  # Append the conflict + conflicting files to the task's notes so `arb show`
   # and the UI carry the rebase context. Best-effort: a DB hiccup is logged,
   # never fatal (mirrors record_review_gate_outcome/3).
-  defp record_merge_conflict_note(%State{bead_id: bead_id}, branch, detail) do
+  defp record_merge_conflict_note(%State{task_id: task_id}, branch, detail) do
     block = format_merge_conflict_note(branch, detail)
 
-    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
       notes =
-        [bead.notes, block]
+        [task.notes, block]
         |> Enum.reject(&(&1 in [nil, ""]))
         |> Enum.join("\n\n")
 
-      case Ash.update(bead, %{notes: notes}, action: :update) do
+      case Ash.update(task, %{notes: notes}, action: :update) do
         {:ok, _} -> :ok
-        {:error, reason} -> log_merge_conflict_warning(bead_id, reason)
+        {:error, reason} -> log_merge_conflict_warning(task_id, reason)
       end
     end
 
     :ok
   rescue
-    e -> log_merge_conflict_warning(bead_id, e)
+    e -> log_merge_conflict_warning(task_id, e)
   end
 
   defp format_merge_conflict_note(branch, detail) do
@@ -1843,30 +1843,30 @@ defmodule Arbiter.Worker do
   # Raise an escalation to the Admiral's mailbox naming the conflicting files.
   # Requires a workspace (messages are workspace-scoped); mirrors
   # escalate_review_gate/3.
-  defp escalate_merge_conflict(%State{workspace_id: ws_id, bead_id: bead_id}, branch, detail)
+  defp escalate_merge_conflict(%State{workspace_id: ws_id, task_id: task_id}, branch, detail)
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: bead_id,
-      subject: "Merge conflict: #{bead_id} aborted, needs rebase",
+      directive_ref: task_id,
+      subject: "Merge conflict: #{task_id} aborted, needs rebase",
       body: merge_conflict_body(branch, detail)
     })
 
     :ok
   rescue
-    e -> log_merge_conflict_warning(bead_id, e)
+    e -> log_merge_conflict_warning(task_id, e)
   catch
     :exit, _ -> :ok
   end
 
   defp escalate_merge_conflict(_state, _branch, _detail), do: :ok
 
-  defp log_merge_conflict_warning(bead_id, reason) do
+  defp log_merge_conflict_warning(task_id, reason) do
     Logger.warning(
-      "Worker merge-conflict escalation swallowed for bead=#{bead_id}: #{inspect(reason)}"
+      "Worker merge-conflict escalation swallowed for task=#{task_id}: #{inspect(reason)}"
     )
 
     :error
@@ -1884,7 +1884,7 @@ defmodule Arbiter.Worker do
     """
     Auto-merge of branch #{branch} into the target conflicted and was aborted.
     The canonical working tree was restored (git merge --abort) — main is \
-    unchanged and compilable; the bead was NOT merged or closed. It is parked \
+    unchanged and compilable; the task was NOT merged or closed. It is parked \
     for rebase / re-resolution.
 
     Conflicting files:
@@ -1929,8 +1929,8 @@ defmodule Arbiter.Worker do
         flag
 
       _ ->
-        case state.workspace_id && Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
-          {:ok, ws} -> Arbiter.Beads.Workspace.review_required?(ws)
+        case state.workspace_id && Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
+          {:ok, ws} -> Arbiter.Tasks.Workspace.review_required?(ws)
           _ -> false
         end
     end
@@ -1946,7 +1946,7 @@ defmodule Arbiter.Worker do
   #      (bd-a5k6wb) optionally tightened by `config["review_gate"]["max_rounds"]`.
   #   3. Falls back to `nil` to let the ReviewGate apply its built-in D2 default.
   #
-  # The bead's difficulty drives the default; the workspace cap can only tighten
+  # The task's difficulty drives the default; the workspace cap can only tighten
   # it (min), never loosen it beyond the difficulty-appropriate ceiling.
   defp resolve_review_rounds(%State{meta: meta} = state) do
     case meta && Map.get(meta, :review_rounds) do
@@ -1954,12 +1954,12 @@ defmodule Arbiter.Worker do
         n
 
       _ ->
-        difficulty = bead_difficulty(state.bead_id)
+        difficulty = task_difficulty(state.task_id)
         difficulty_default = Arbiter.Worker.ReviewGate.rounds_for_difficulty(difficulty)
 
-        case state.workspace_id && Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
+        case state.workspace_id && Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
           {:ok, ws} ->
-            case Arbiter.Beads.Workspace.review_gate_max_rounds(ws) do
+            case Arbiter.Tasks.Workspace.review_gate_max_rounds(ws) do
               nil -> difficulty_default
               cap -> min(difficulty_default, cap)
             end
@@ -1972,18 +1972,18 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
-  # Load the bead's difficulty integer (0..4) from the DB. Returns nil on any
+  # Load the task's difficulty integer (0..4) from the DB. Returns nil on any
   # error so the ReviewGate falls back to its D2 default rather than crashing.
-  defp bead_difficulty(bead_id) when is_binary(bead_id) do
-    case Ash.get(Arbiter.Beads.Issue, bead_id) do
-      {:ok, %Arbiter.Beads.Issue{difficulty: d}} -> d
+  defp task_difficulty(task_id) when is_binary(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, %Arbiter.Tasks.Issue{difficulty: d}} -> d
       _ -> nil
     end
   rescue
     _ -> nil
   end
 
-  defp bead_difficulty(_), do: nil
+  defp task_difficulty(_), do: nil
 
   # Park at :awaiting_review_gate and spawn the reviewer. The branch + merge title
   # are stashed in meta so review_gate_verdict/2 can fire the same merge path on
@@ -2032,7 +2032,7 @@ defmodule Arbiter.Worker do
       opts =
         [
           author: self(),
-          bead_id: state.bead_id,
+          task_id: state.task_id,
           workspace_id: state.workspace_id,
           repo: state.repo,
           worktree_path: Map.get(meta, :worktree_path),
@@ -2051,7 +2051,7 @@ defmodule Arbiter.Worker do
 
         {:error, reason} ->
           Logger.warning(
-            "Worker: failed to start ReviewGate for bead=#{state.bead_id}: #{inspect(reason)}"
+            "Worker: failed to start ReviewGate for task=#{state.task_id}: #{inspect(reason)}"
           )
 
           :error
@@ -2085,7 +2085,7 @@ defmodule Arbiter.Worker do
 
   # Reject path: record findings, escalate to the Admiral, and park the worker
   # at :failed WITHOUT merging. failure_reason stays a short atom; the full
-  # findings live in meta + bead notes + the escalation message (well under the
+  # findings live in meta + task notes + the escalation message (well under the
   # Run.failure_reason length cap).
   defp park_rejected(%State{} = state, verdict, findings) do
     record_review_gate_outcome(state, verdict, findings)
@@ -2102,27 +2102,27 @@ defmodule Arbiter.Worker do
   defp fail_reason_for(:no_verdict), do: :review_gate_inconclusive
   defp fail_reason_for(_), do: :review_gate_rejected
 
-  # Append the verdict + findings to the bead's notes so it surfaces in
+  # Append the verdict + findings to the task's notes so it surfaces in
   # `arb show` / the UI. Best-effort: a DB hiccup is logged, never fatal.
-  defp record_review_gate_outcome(%State{bead_id: bead_id, meta: meta}, verdict, findings) do
+  defp record_review_gate_outcome(%State{task_id: task_id, meta: meta}, verdict, findings) do
     rounds = Map.get(meta || %{}, :review_gate_rounds)
     block = format_review_gate_note(verdict, findings, rounds)
 
-    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
       notes =
-        [bead.notes, block]
+        [task.notes, block]
         |> Enum.reject(&(&1 in [nil, ""]))
         |> Enum.join("\n\n")
 
-      case Ash.update(bead, %{notes: notes}, action: :update) do
+      case Ash.update(task, %{notes: notes}, action: :update) do
         {:ok, _} -> :ok
-        {:error, reason} -> log_review_gate_warning(bead_id, reason)
+        {:error, reason} -> log_review_gate_warning(task_id, reason)
       end
     end
 
     :ok
   rescue
-    e -> log_review_gate_warning(bead_id, e)
+    e -> log_review_gate_warning(task_id, e)
   end
 
   defp format_review_gate_note(verdict, findings, rounds) do
@@ -2140,38 +2140,38 @@ defmodule Arbiter.Worker do
 
   # On a non-approve verdict, raise an escalation to the Admiral's mailbox with
   # the reviewer's findings. Requires a workspace (messages are workspace-scoped).
-  defp escalate_review_gate(%State{workspace_id: ws_id, bead_id: bead_id}, verdict, findings)
+  defp escalate_review_gate(%State{workspace_id: ws_id, task_id: task_id}, verdict, findings)
        when is_binary(ws_id) do
     subject =
       case verdict do
-        :no_verdict -> "ReviewGate: review inconclusive for #{bead_id}"
-        _ -> "ReviewGate: changes requested for #{bead_id}"
+        :no_verdict -> "ReviewGate: review inconclusive for #{task_id}"
+        _ -> "ReviewGate: changes requested for #{task_id}"
       end
 
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: bead_id,
+      directive_ref: task_id,
       subject: subject,
       body: findings
     })
 
-    Arbiter.Events.broadcast(ws_id, "review_gate", %{bead_id: bead_id, message: subject})
+    Arbiter.Events.broadcast(ws_id, "review_gate", %{task_id: task_id, message: subject})
 
     :ok
   rescue
-    e -> log_review_gate_warning(bead_id, e)
+    e -> log_review_gate_warning(task_id, e)
   catch
     :exit, _ -> :ok
   end
 
   defp escalate_review_gate(_state, _verdict, _findings), do: :ok
 
-  defp log_review_gate_warning(bead_id, reason) do
+  defp log_review_gate_warning(task_id, reason) do
     Logger.warning(
-      "Worker.record_review_gate_outcome swallowed for bead=#{bead_id}: #{inspect(reason)}"
+      "Worker.record_review_gate_outcome swallowed for task=#{task_id}: #{inspect(reason)}"
     )
 
     :error
@@ -2181,7 +2181,7 @@ defmodule Arbiter.Worker do
   def terminate(_reason, %State{} = state) do
     # Finalize the run row before we tear down. This is the normal-path
     # bookkeeping the boot reconciler (bd-6k8519) was silently masking: the
-    # real worker-completion path is `arb done` -> bead closes -> the bead
+    # real worker-completion path is `arb done` -> task closes -> the task
     # `:close` after-action StopWorker calls `Worker.stop` -> terminate/2
     # from a NON-terminal state (:running/:idle/:awaiting/:awaiting_review).
     # Nothing on that path ever marks the row terminal, so it stayed :running
@@ -2193,9 +2193,9 @@ defmodule Arbiter.Worker do
     # monitor-based cleanup runs asynchronously and was the source of a flaky
     # test where `whereis/1` returned the dead pid briefly after stop.
     # Use the registry_key the worker actually registered under — defaults
-    # to bead_id but the merge queue's conflict-resolver overrides it so its
+    # to task_id but the merge queue's conflict-resolver overrides it so its
     # teardown doesn't accidentally unregister the original work worker.
-    PRegistry.unregister(state.registry_key || state.bead_id)
+    PRegistry.unregister(state.registry_key || state.task_id)
     broadcast_lifecycle(:stopped, state)
     :ok
   end
@@ -2206,7 +2206,7 @@ defmodule Arbiter.Worker do
   #     fail_now/2 (the explicit complete/fail paths). Don't double-write.
   #   * any non-terminal status (:idle/:running/:awaiting/:awaiting_review) —
   #     the worker is being torn down without an explicit terminal transition
-  #     (the normal `arb done` -> bead :close -> StopWorker teardown). Treat
+  #     (the normal `arb done` -> task :close -> StopWorker teardown). Treat
   #     the termination as completion and stamp the row :completed + completed_at
   #     so `arb worker show` reflects the finished run immediately, with no
   #     manual reconcile.
@@ -2234,8 +2234,8 @@ defmodule Arbiter.Worker do
 
   defp call(pid, msg) when is_pid(pid), do: GenServer.call(pid, msg)
 
-  defp call(bead_id, msg) when is_binary(bead_id) do
-    case whereis(bead_id) do
+  defp call(task_id, msg) when is_binary(task_id) do
+    case whereis(task_id) do
       nil -> {:error, :not_found}
       pid -> GenServer.call(pid, msg)
     end
@@ -2243,7 +2243,7 @@ defmodule Arbiter.Worker do
 
   defp snapshot(%State{} = s) do
     %{
-      bead_id: s.bead_id,
+      task_id: s.task_id,
       workspace_id: s.workspace_id,
       repo: s.repo,
       current_step: s.current_step,
@@ -2277,13 +2277,13 @@ defmodule Arbiter.Worker do
           {:ok, mr_ref} ->
             merger_url = safe_link_for(adapter, mr_ref)
 
-            # bd-7b46wd: persist the PR/MR ref onto the bead so the workspace
+            # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
             # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
-            # later receives the {:worker_done, bead_id} broadcast. Without
+            # later receives the {:worker_done, task_id} broadcast. Without
             # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
             # through to open_mr_for/3, fails opening a second PR on the
-            # already-merged branch, and the bead is never auto-closed.
-            record_pr_ref_on_bead(state, mr_ref)
+            # already-merged branch, and the task is never auto-closed.
+            record_pr_ref_on_task(state, mr_ref)
             sync_tracker_pr_opened(state, mr_ref, merger_url)
 
             new_state = %State{
@@ -2310,14 +2310,14 @@ defmodule Arbiter.Worker do
               rescue
                 e ->
                   Logger.warning(
-                    "Worker.open_mr: Watchdog startup raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+                    "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
                   )
 
                   false
               catch
                 :exit, reason ->
                   Logger.warning(
-                    "Worker.open_mr: Watchdog startup exit for bead=#{state.bead_id}: #{inspect(reason)}"
+                    "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
                   )
 
                   false
@@ -2331,7 +2331,7 @@ defmodule Arbiter.Worker do
 
           {:error, reason} ->
             Logger.warning(
-              "Worker.open_mr: adapter open failed for bead=#{state.bead_id}: #{inspect(reason)}"
+              "Worker.open_mr: adapter open failed for task=#{state.task_id}: #{inspect(reason)}"
             )
 
             {:error, reason, state}
@@ -2351,7 +2351,7 @@ defmodule Arbiter.Worker do
         {:ok, adapter, Map.get(opts, :workspace)}
 
       is_binary(state.workspace_id) ->
-        case Ash.get(Arbiter.Beads.Workspace, state.workspace_id) do
+        case Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
           {:ok, ws} -> {:ok, Arbiter.Mergers.for_workspace(ws), ws}
           _ -> {:error, :workspace_not_found}
         end
@@ -2363,7 +2363,7 @@ defmodule Arbiter.Worker do
     e -> {:error, {:exception, Exception.message(e)}}
   end
 
-  # Build the opts map handed to the adapter's open/4. Carries the bead-domain
+  # Build the opts map handed to the adapter's open/4. Carries the task-domain
   # keys and, when the caller didn't supply them, defaults from the worker's
   # meta:
   #
@@ -2405,21 +2405,21 @@ defmodule Arbiter.Worker do
     :exit, _ -> nil
   end
 
-  # Persist the opened MR/PR ref onto the bead's `pr_ref` (bd-7b46wd). This is
+  # Persist the opened MR/PR ref onto the task's `pr_ref` (bd-7b46wd). This is
   # the single signal the workspace MergeQueue reads (`existing_mr_ref/1`) to
   # ADOPT an already-open PR rather than open a duplicate — without it the
-  # Watchdog-merged PR is invisible to the MergeQueue and the bead never closes.
+  # Watchdog-merged PR is invisible to the MergeQueue and the task never closes.
   # Mirrors `Arbiter.Workflows.MergeQueue.maybe_record_mr_ref/2`. Best-effort: a
   # DB hiccup logs at debug and never fails the open.
-  defp record_pr_ref_on_bead(%State{bead_id: bead_id}, mr_ref)
+  defp record_pr_ref_on_task(%State{task_id: task_id}, mr_ref)
        when is_binary(mr_ref) and mr_ref != "" do
-    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id),
-         {:ok, _updated} <- Ash.update(bead, %{pr_ref: mr_ref}, action: :update) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id),
+         {:ok, _updated} <- Ash.update(task, %{pr_ref: mr_ref}, action: :update) do
       :ok
     else
       {:error, reason} ->
         Logger.debug(
-          "Worker.open_mr: failed to record pr_ref=#{mr_ref} for bead=#{bead_id}: #{inspect(reason)}"
+          "Worker.open_mr: failed to record pr_ref=#{mr_ref} for task=#{task_id}: #{inspect(reason)}"
         )
 
         :ok
@@ -2427,25 +2427,25 @@ defmodule Arbiter.Worker do
   rescue
     e ->
       Logger.debug(
-        "Worker.open_mr: pr_ref record raised for bead=#{bead_id}: #{Exception.message(e)}"
+        "Worker.open_mr: pr_ref record raised for task=#{task_id}: #{Exception.message(e)}"
       )
 
       :ok
   end
 
-  defp record_pr_ref_on_bead(_state, _mr_ref), do: :ok
+  defp record_pr_ref_on_task(_state, _mr_ref), do: :ok
 
-  # PR-open: drive the bead's external tracker forward (e.g. Jira VR ->
+  # PR-open: drive the task's external tracker forward (e.g. Jira VR ->
   # In Code Review) and attach the PR as a comment + remote link. The original
   # incident (VR-17911) opened a PR but never transitioned the ticket and left
   # 0 comments / no remote-link; this fires that hook. Best-effort and
-  # loud-on-failure inside `Arbiter.Trackers.Sync` — a missing/unreadable bead
+  # loud-on-failure inside `Arbiter.Trackers.Sync` — a missing/unreadable task
   # here just skips. (bd-c4cfuv)
-  defp sync_tracker_pr_opened(%State{bead_id: bead_id}, mr_ref, merger_url) do
-    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, bead_id) do
-      Arbiter.Trackers.Sync.lifecycle(bead, :pr_opened,
+  defp sync_tracker_pr_opened(%State{task_id: task_id}, mr_ref, merger_url) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, task_id) do
+      Arbiter.Trackers.Sync.lifecycle(task, :pr_opened,
         pr_url: merger_url,
-        pr_title: "PR #{mr_ref} (#{bead_id})"
+        pr_title: "PR #{mr_ref} (#{task_id})"
       )
     end
 
@@ -2453,7 +2453,7 @@ defmodule Arbiter.Worker do
   rescue
     e ->
       Logger.debug(
-        "Worker.open_mr: PR-open tracker sync raised for bead=#{bead_id}: #{Exception.message(e)}"
+        "Worker.open_mr: PR-open tracker sync raised for task=#{task_id}: #{Exception.message(e)}"
       )
 
       :ok
@@ -2490,7 +2490,7 @@ defmodule Arbiter.Worker do
 
     watchdog_opts =
       [
-        bead_id: state.bead_id,
+        task_id: state.task_id,
         worker: self(),
         mr_ref: state.mr_ref,
         adapter: state.merger_adapter,
@@ -2515,7 +2515,7 @@ defmodule Arbiter.Worker do
 
       {:error, reason} ->
         Logger.warning(
-          "Worker.open_mr: failed to start Watchdog for bead=#{state.bead_id}: #{inspect(reason)}"
+          "Worker.open_mr: failed to start Watchdog for task=#{state.task_id}: #{inspect(reason)}"
         )
 
         :error
@@ -2528,7 +2528,7 @@ defmodule Arbiter.Worker do
   # indefinitely with no watcher.
   defp escalate_watchdog_failure(%State{
          workspace_id: ws_id,
-         bead_id: bead_id,
+         task_id: task_id,
          mr_ref: mr_ref,
          merger_url: merger_url
        })
@@ -2540,29 +2540,29 @@ defmodule Arbiter.Worker do
       end
 
     Logger.warning(
-      "Worker.open_mr: Watchdog failed to start for bead=#{bead_id} — MR #{mr_ref} orphaned; escalating"
+      "Worker.open_mr: Watchdog failed to start for task=#{task_id} — MR #{mr_ref} orphaned; escalating"
     )
 
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: ws_id,
-      directive_ref: bead_id,
-      subject: "Watchdog startup failed: #{bead_id} MR orphaned",
+      directive_ref: task_id,
+      subject: "Watchdog startup failed: #{task_id} MR orphaned",
       body:
-        "The Watchdog process failed to start after MR #{mr_info} was opened for bead #{bead_id}. " <>
+        "The Watchdog process failed to start after MR #{mr_info} was opened for task #{task_id}. " <>
           "The MR exists on the forge but has no Watchdog watching it — " <>
           "manual completion or failure is required once the MR resolves.\n\n" <>
-          "To complete: Worker.complete(#{inspect(bead_id)}, :merged)\n" <>
-          "To fail:     Worker.fail(#{inspect(bead_id)}, :watchdog_lost)"
+          "To complete: Worker.complete(#{inspect(task_id)}, :merged)\n" <>
+          "To fail:     Worker.fail(#{inspect(task_id)}, :watchdog_lost)"
     })
 
     :ok
   rescue
     e ->
       Logger.warning(
-        "Worker: Watchdog-failure escalation swallowed for bead=#{bead_id}: #{Exception.message(e)}"
+        "Worker: Watchdog-failure escalation swallowed for task=#{task_id}: #{Exception.message(e)}"
       )
 
       :ok
@@ -2572,13 +2572,13 @@ defmodule Arbiter.Worker do
 
   defp escalate_watchdog_failure(_state), do: :ok
 
-  defp workspace_auto_merge?(%Arbiter.Beads.Workspace{} = ws),
-    do: Arbiter.Beads.Workspace.auto_merge?(ws)
+  defp workspace_auto_merge?(%Arbiter.Tasks.Workspace{} = ws),
+    do: Arbiter.Tasks.Workspace.auto_merge?(ws)
 
   defp workspace_auto_merge?(_), do: false
 
-  defp workspace_watchdog_max_polls(%Arbiter.Beads.Workspace{} = ws),
-    do: Arbiter.Beads.Workspace.watchdog_max_polls(ws)
+  defp workspace_watchdog_max_polls(%Arbiter.Tasks.Workspace{} = ws),
+    do: Arbiter.Tasks.Workspace.watchdog_max_polls(ws)
 
   defp workspace_watchdog_max_polls(_), do: nil
 

@@ -7,7 +7,7 @@ defmodule Arbiter.Messages.Message do
     * `:notification` — broadcast event, no specific recipient (`to_ref` nil).
       Worker completion, progress milestones, system events. Feeds the
       Admiral's live dashboard. Never "consumed" — `read_at` stays nil.
-    * `:mailbox` — targeted at a specific bead (`to_ref`). Requires read
+    * `:mailbox` — targeted at a specific task (`to_ref`). Requires read
       acknowledgement (`mark_read`).
     * `:direction` — user-authored instruction sent from the LiveView to a
       running worker. A subtype of mailbox; distinguished for display.
@@ -26,7 +26,7 @@ defmodule Arbiter.Messages.Message do
   `:mailbox`, `:direction`, `:flag`, `:completion`, `:failure`,
   `:escalation`, and `:info` together are the "mailbox family": addressed
   messages that show up in an inbox and are read-acknowledged. The
-  `:directive_ref` they may carry links the message to the bead it concerns
+  `:directive_ref` they may carry links the message to the task it concerns
   (shown in brackets in `arb inbox`). See `mailbox_kinds/0`.
 
   ## PubSub
@@ -51,7 +51,7 @@ defmodule Arbiter.Messages.Message do
     repo Arbiter.Repo
 
     custom_indexes do
-      # Mailbox queries: "unread messages addressed to bead X in workspace W".
+      # Mailbox queries: "unread messages addressed to task X in workspace W".
       index [:workspace_id, :to_ref, :read_at]
     end
   end
@@ -95,20 +95,20 @@ defmodule Arbiter.Messages.Message do
     attribute :from_ref, :string do
       public? true
       constraints max_length: 255, trim?: true
-      description ~s(bead_id, "admiral", or "system". nil for anonymous events.)
+      description ~s(task_id, "admiral", or "system". nil for anonymous events.)
     end
 
     attribute :to_ref, :string do
       public? true
       constraints max_length: 255, trim?: true
-      description "Recipient bead_id. nil = broadcast (notifications)."
+      description "Recipient task_id. nil = broadcast (notifications)."
     end
 
     attribute :workspace_id, :string do
       allow_nil? false
       public? true
       constraints max_length: 255, trim?: true
-      description "Workspace scope. Not a foreign key — messages outlive bead churn."
+      description "Workspace scope. Not a foreign key — messages outlive task churn."
     end
 
     attribute :subject, :string do
@@ -121,7 +121,7 @@ defmodule Arbiter.Messages.Message do
       public? true
       constraints max_length: 255, trim?: true
 
-      description "The directive bead_id this message concerns. Shown in brackets by arb inbox. nil = not about a specific directive."
+      description "The directive task_id this message concerns. Shown in brackets by arb inbox. nil = not about a specific directive."
     end
 
     attribute :body, :string do
@@ -165,7 +165,7 @@ defmodule Arbiter.Messages.Message do
 
     if Map.get(message, :to_ref) == "admiral" do
       Arbiter.Events.broadcast(ws_id, "inbox", %{
-        bead_id: Map.get(message, :directive_ref),
+        task_id: Map.get(message, :directive_ref),
         from_ref: Map.get(message, :from_ref),
         subject: Map.get(message, :subject),
         kind: to_string(Map.get(message, :kind) || "")
@@ -284,7 +284,7 @@ defmodule Arbiter.Messages.Message do
   end
 
   @doc """
-  The full inter-agent thread about a directive (bead), oldest first: every
+  The full inter-agent thread about a directive (task), oldest first: every
   mailbox-family message whose `directive_ref` is `ref`, regardless of direction
   or read state.
 

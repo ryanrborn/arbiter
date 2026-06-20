@@ -1,6 +1,6 @@
 defmodule Arbiter.Worker.BranchNamer do
   @moduledoc """
-  Derive a git branch name from a `Arbiter.Beads.Issue` following the Verus
+  Derive a git branch name from a `Arbiter.Tasks.Issue` following the Verus
   naming convention:
 
       feature/VR-17585-add-monitor-controller-tests
@@ -36,7 +36,7 @@ defmodule Arbiter.Worker.BranchNamer do
   hook. For now the mapping is hard-coded.
   """
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
 
   @stopwords ~w(a an the of to for and or in on with)
 
@@ -58,7 +58,7 @@ defmodule Arbiter.Worker.BranchNamer do
 
   def derive(other) do
     raise ArgumentError,
-          "BranchNamer.derive/1 expected %Arbiter.Beads.Issue{}, got: #{inspect(other)}"
+          "BranchNamer.derive/1 expected %Arbiter.Tasks.Issue{}, got: #{inspect(other)}"
   end
 
   # ---- prefix ----

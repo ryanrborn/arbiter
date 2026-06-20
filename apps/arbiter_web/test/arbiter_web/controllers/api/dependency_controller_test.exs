@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.DependencyControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
 
   setup %{conn: conn} do
     {:ok, ws} = Ash.create(Workspace, %{name: "dep-test-ws", prefix: "dpt"})

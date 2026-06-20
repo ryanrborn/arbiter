@@ -3,14 +3,14 @@ defmodule Arbiter.Worker.CompletionMergeTest do
   End-to-end proof for bd-7qq81g: a `--with-claude` dispatch on the default
   (Direct) domain must integrate the branch into the target line when the
   worker finishes — a real `git merge --no-ff` commit on `main` — rather than
-  closing the bead without merging.
+  closing the task without merging.
   """
 
   # DataCase (async: false → shared sandbox) so the worker/driver/watchdog
   # processes under the DynamicSupervisor reach the same DB connection.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
@@ -82,11 +82,11 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
   test "a --with-claude completion merges the branch into main with a --no-ff commit",
        %{repo: repo, ws: ws} do
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{title: "integrate me", workspace_id: ws.id, issue_type: :feature})
 
     {:ok, result} =
-      Dispatch.dispatch(bead.id,
+      Dispatch.dispatch(task.id,
         repo: "merge/repo",
         start_claude: true,
         claude_command: [@fixture],
@@ -98,12 +98,12 @@ defmodule Arbiter.Worker.CompletionMergeTest do
       if Process.alive?(result.worker_pid), do: GenServer.stop(result.worker_pid, :normal)
     end)
 
-    # Wait for the whole path: worker done → Direct merge → bead closes.
-    # We use the bead's DB status (not worker in-memory state) because the
-    # StopWorker after-action kills the worker process right after close_bead
+    # Wait for the whole path: worker done → Direct merge → task closes.
+    # We use the task's DB status (not worker in-memory state) because the
+    # StopWorker after-action kills the worker process right after close_task
     # returns — checking Worker.state/1 would raise if we arrive slightly late.
     wait_until(fn ->
-      match?({:ok, %Issue{status: :closed}}, Ash.get(Issue, bead.id))
+      match?({:ok, %Issue{status: :closed}}, Ash.get(Issue, task.id))
     end)
 
     # main now carries a real merge commit (two parents) — not a fast-forward.
@@ -117,7 +117,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
   test "a merge failure surfaces as a failure_reason and does NOT complete the worker",
        %{repo: repo, ws: ws} do
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{title: "conflict me", workspace_id: ws.id, issue_type: :feature})
 
     # Create the source branch so it exists, but point target_branch at a branch
@@ -130,11 +130,11 @@ defmodule Arbiter.Worker.CompletionMergeTest do
       branch: "feature/x",
       repo_path: repo,
       target_branch: "no-such-target",
-      merge_title: "Merge #{bead.id}"
+      merge_title: "Merge #{task.id}"
     }
 
     {:ok, pid} =
-      Worker.start(bead_id: bead.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
+      Worker.start(task_id: task.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
@@ -149,11 +149,11 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     refute snap.status == :completed
   end
 
-  test "a conflicting auto-merge aborts, keeps main clean, escalates, and does NOT close the bead",
+  test "a conflicting auto-merge aborts, keeps main clean, escalates, and does NOT close the task",
        %{repo: repo, ws: ws} do
     # bd-1rhyla: a conflicted auto-merge once left main half-merged + uncompilable
     # and took the live server down. Prove the full recovery contract end-to-end.
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{
         title: "conflict me for real",
         workspace_id: ws.id,
@@ -174,11 +174,11 @@ defmodule Arbiter.Worker.CompletionMergeTest do
       branch: "feature/conflict",
       repo_path: repo,
       target_branch: "main",
-      merge_title: "Merge #{bead.id}"
+      merge_title: "Merge #{task.id}"
     }
 
     {:ok, pid} =
-      Worker.start(bead_id: bead.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
+      Worker.start(task_id: task.id, repo: "merge/repo", workspace_id: ws.id, meta: meta)
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
     :ok = Worker.advance(pid, :claude)
@@ -194,18 +194,18 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert {"", 0} = git(["status", "--porcelain"], repo)
     refute File.read!(Path.join(repo, "README.md")) =~ "<<<<<<<"
 
-    # 2. the bead is NOT closed (parked for rebase) — and the worker failed, not completed.
+    # 2. the task is NOT closed (parked for rebase) — and the worker failed, not completed.
     snap = Worker.state(pid)
     assert snap.status == :failed
     assert snap.meta.failure_reason == :merge_conflict
-    {:ok, reloaded} = Ash.get(Issue, bead.id)
+    {:ok, reloaded} = Ash.get(Issue, task.id)
     refute reloaded.status == :closed
     assert reloaded.notes =~ "Merge conflict"
     assert reloaded.notes =~ "README.md"
 
     # 3. the Admiral inbox got an escalation naming the conflicting files.
     escalations = Message.inbox("admiral", workspace_id: ws.id)
-    escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
+    escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     assert escalation
     assert escalation.body =~ "README.md"
     assert escalation.body =~ "feature/conflict"

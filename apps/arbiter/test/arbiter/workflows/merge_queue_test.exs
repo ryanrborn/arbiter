@@ -3,8 +3,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   # in async mode.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Workers.Run
   alias Arbiter.Workflows.MergeQueue
@@ -84,14 +84,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
         config: workspace_config
       })
 
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{
         title: "merge me",
         description: "body",
         workspace_id: workspace.id
       })
 
-    %{workspace: workspace, bead: bead}
+    %{workspace: workspace, task: task}
   end
 
   defp start_merge_queue(workspace, opts \\ []) do
@@ -197,7 +197,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     @tag workspace_config: @ws_github
     test "opens a PR via adapter.open and queues with status :awaiting_approval", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       test_pid = self()
 
@@ -214,69 +214,69 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      assert :ok = MergeQueue.enqueue(name, bead.id)
+      assert :ok = MergeQueue.enqueue(name, task.id)
       assert_received :pr_open_called
 
       %{items: [item]} = MergeQueue.state(name)
-      assert item.bead_id == bead.id
+      assert item.task_id == task.id
       assert item.mr_ref == "#101"
       assert item.status == :awaiting_approval
       assert item.strategy == "github"
     end
 
     @tag workspace_config: @ws_github
-    test "records mr_ref on the bead's pr_ref", %{workspace: ws, bead: bead} do
+    test "records mr_ref on the task's pr_ref", %{workspace: ws, task: task} do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 77})
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.pr_ref == "#77"
     end
 
     @tag workspace_config: @ws_github
     test "writes pr_ref even when tracker_ref is already set (issue ref preserved)", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      {:ok, bead} = Ash.update(bead, %{tracker_ref: "PRE-123"}, action: :update)
+      {:ok, task} = Ash.update(task, %{tracker_ref: "PRE-123"}, action: :update)
 
       stub(fn conn ->
         conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 77})
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.tracker_ref == "PRE-123"
       assert reloaded.pr_ref == "#77"
     end
 
     @tag workspace_config: @ws_github
-    test "adapter.open failure → status :failed; bead is not modified", %{
+    test "adapter.open failure → status :failed; task is not modified", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       stub(fn conn ->
         conn |> Plug.Conn.put_status(422) |> Req.Test.json(%{"message" => "Validation Failed"})
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      {:error, _} = MergeQueue.enqueue(name, bead.id)
+      {:error, _} = MergeQueue.enqueue(name, task.id)
 
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :open
     end
 
     @tag workspace_config: @ws_github
     test "push failure → status :failed with {:push_failed, reason}; adapter.open never called",
-         %{workspace: ws, bead: bead} do
+         %{workspace: ws, task: task} do
       test_pid = self()
 
       stub(fn conn ->
@@ -288,7 +288,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws, worktree_module: FailingWorktree)
-      {:error, {:push_failed, _reason}} = MergeQueue.enqueue(name, bead.id)
+      {:error, {:push_failed, _reason}} = MergeQueue.enqueue(name, task.id)
 
       refute_received :pr_open_called
 
@@ -296,7 +296,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert item.status == :failed
       assert match?({:push_failed, _}, item.last_error)
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :open
     end
   end
@@ -333,12 +333,12 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
     end
 
-    defp record_run(bead, repo) do
+    defp record_run(task, repo) do
       {:ok, _run} =
         Ash.create(Run, %{
-          bead_id: bead.id,
+          task_id: task.id,
           repo: repo,
-          workspace_id: bead.workspace_id,
+          workspace_id: task.workspace_id,
           status: :completed,
           started_at: DateTime.utc_now()
         })
@@ -347,16 +347,16 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
 
     @tag workspace_config: @ws_github
-    test "per-bead target_branch wins even when the queue's state.base differs", %{
+    test "per-task target_branch wins even when the queue's state.base differs", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      {:ok, bead} = Ash.update(bead, %{target_branch: "dolphin"}, action: :update)
+      {:ok, task} = Ash.update(task, %{target_branch: "dolphin"}, action: :update)
       capture_base_stub(self())
 
-      # Queue base is "main" (start_merge_queue default) — the bead must still win.
+      # Queue base is "main" (start_merge_queue default) — the task must still win.
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_base, "dolphin"}
     end
@@ -364,33 +364,33 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     @tag workspace_config: @ws_github_repo
     test "repo-level target_branch sets the PR base AND matches the worktree base", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      # The bead was worked in dolphin/repo — recorded on its worker run, exactly
+      # The task was worked in dolphin/repo — recorded on its worker run, exactly
       # the repo Dispatch cut the worktree with.
-      :ok = record_run(bead, "dolphin/repo")
+      :ok = record_run(task, "dolphin/repo")
       capture_base_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_base, pr_base}
       assert pr_base == "integration/dolphin"
 
-      # Invariant: the worktree base Dispatch would compute for this bead (same
+      # Invariant: the worktree base Dispatch would compute for this task (same
       # shared resolver, same repo) is identical to the PR base.
-      {:ok, bead} = Ash.load(bead, [:workspace])
-      worktree_base = TargetBranch.resolve(bead, repo: "dolphin/repo")
+      {:ok, task} = Ash.load(task, [:workspace])
+      worktree_base = TargetBranch.resolve(task, repo: "dolphin/repo")
       assert worktree_base == pr_base
     end
 
     @tag workspace_config: @ws_github
-    test "default-workspace bead with no overrides targets main", %{workspace: ws, bead: bead} do
+    test "default-workspace task with no overrides targets main", %{workspace: ws, task: task} do
       capture_base_stub(self())
 
-      # No explicit queue base, no bead target, no repo default, no merge.base.
+      # No explicit queue base, no task target, no repo default, no merge.base.
       {_pid, name} = start_merge_queue(ws, base: nil)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_base, "main"}
     end
@@ -414,37 +414,37 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
 
     @tag workspace_config: @ws_github
-    test "opens with the worker-authored pr_body when present", %{workspace: ws, bead: bead} do
+    test "opens with the worker-authored pr_body when present", %{workspace: ws, task: task} do
       worker_body = "## Summary\nDid the thing.\n\n## Test plan\n- [x] mix test"
-      {:ok, bead} = Ash.update(bead, %{pr_body: worker_body}, action: :update)
+      {:ok, task} = Ash.update(task, %{pr_body: worker_body}, action: :update)
       capture_body_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_body, ^worker_body}
     end
 
     @tag workspace_config: @ws_github
-    test "pr_body wins over the bead description", %{workspace: ws, bead: bead} do
-      {:ok, bead} =
-        Ash.update(bead, %{description: "ticket spec", pr_body: "real writeup"}, action: :update)
+    test "pr_body wins over the task description", %{workspace: ws, task: task} do
+      {:ok, task} =
+        Ash.update(task, %{description: "ticket spec", pr_body: "real writeup"}, action: :update)
 
       capture_body_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_body, "real writeup"}
     end
 
     @tag workspace_config: @ws_github
-    test "falls back to the bead description when no pr_body", %{workspace: ws, bead: bead} do
-      # setup creates the bead with description: "body" and no pr_body.
+    test "falls back to the task description when no pr_body", %{workspace: ws, task: task} do
+      # setup creates the task with description: "body" and no pr_body.
       capture_body_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_body, "body"}
     end
@@ -456,13 +456,13 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     @tag workspace_config: @ws_github
     test "blank description + no pr_body → non-empty default body (not empty)", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      {:ok, bead} = Ash.update(bead, %{description: "", pr_body: ""}, action: :update)
+      {:ok, task} = Ash.update(task, %{description: "", pr_body: ""}, action: :update)
       capture_body_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_body, sent_body}
       assert sent_body != ""
@@ -473,15 +473,15 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     @tag workspace_config: @ws_github
     test "whitespace-only pr_body is treated as absent (falls through)", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      {:ok, bead} =
-        Ash.update(bead, %{description: "the spec", pr_body: "   \n  "}, action: :update)
+      {:ok, task} =
+        Ash.update(task, %{description: "the spec", pr_body: "   \n  "}, action: :update)
 
       capture_body_stub(self())
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:pr_body, "the spec"}
     end
@@ -491,10 +491,10 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     @tag workspace_config: @ws_github
     test "adopts an existing open MR ref instead of opening a duplicate", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
-      # Simulate a resumed bead whose prior worker already opened PR #55.
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "#55"}, action: :update)
+      # Simulate a resumed task whose prior worker already opened PR #55.
+      {:ok, task} = Ash.update(task, %{pr_ref: "#55"}, action: :update)
 
       test_pid = self()
 
@@ -507,7 +507,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      assert :ok = MergeQueue.enqueue(name, bead.id)
+      assert :ok = MergeQueue.enqueue(name, task.id)
 
       # No open call — the existing MR was adopted, not duplicated.
       refute_received :pr_open_called
@@ -516,8 +516,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       assert item.mr_ref == "#55"
       assert item.status == :awaiting_approval
 
-      # The bead's pr_ref is unchanged.
-      assert Ash.get!(Issue, bead.id).pr_ref == "#55"
+      # The task's pr_ref is unchanged.
+      assert Ash.get!(Issue, task.id).pr_ref == "#55"
     end
   end
 
@@ -551,7 +551,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
     @tag workspace_config: @ws_github_jira
     test "posts a Jira remote link pointing at the opened MR", %{workspace: ws} do
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
           title: "jira-backed",
           tracker_type: :jira,
@@ -580,7 +580,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       {pid, name} = start_merge_queue(ws)
       Req.Test.allow(Arbiter.Trackers.Jira.HTTP, self(), pid)
 
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       assert_receive {:jira_remotelink, "/rest/api/3/issue/VR-17585/remotelink", payload}
       assert payload["object"]["url"] == "https://github.com/octo/widget/pull/88"
@@ -589,9 +589,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   describe "enqueue/2 with strategy=direct" do
     @tag workspace_config: @ws_direct
-    test "never calls adapter APIs and closes the bead immediately", %{
+    test "never calls adapter APIs and closes the task immediately", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       test_pid = self()
 
@@ -601,25 +601,25 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       refute_received {:unexpected_api_call, _, _}
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
     end
   end
 
   describe ":tick polling" do
     @tag workspace_config: @ws_github_squash
-    test "approved + ci_clean → merges with squash and closes the bead", %{
+    test "approved + ci_clean → merges with squash and closes the task", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       full_cycle_stub(50)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
 
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :awaiting_approval
@@ -632,14 +632,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       %{items: items} = MergeQueue.state(name)
       assert items == []
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
     end
 
     @tag workspace_config: @ws_github
     test "not approved → stays in :awaiting_approval and does not merge", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       test_pid = self()
       pr_number = 60
@@ -672,7 +672,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       refute_received :unexpected_merge
@@ -680,14 +680,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :awaiting_approval
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :open
     end
 
     @tag workspace_config: @ws_github
     test "conflicting MR → spawns conflict resolver (not a plain merge)", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       test_pid = self()
       pr_number = 70
@@ -721,7 +721,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       # The item must NOT have been merged.
@@ -730,14 +730,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       # The conflict resolver path parks the item; the exact status depends on
       # whether the resolver successfully spawns (it won't in test without a repo,
       # so it'll be :failed or :conflict_resolving). Either way, it's not :closed.
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :open
     end
 
     @tag workspace_config: @ws_github
-    test "adapter.merge failure → status :failed; bead is NOT closed", %{
+    test "adapter.merge failure → status :failed; task is NOT closed", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       pr_number = 80
 
@@ -765,34 +765,34 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :failed
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :open
     end
   end
 
   # bd-d1jp4r: when the Watchdog merges a PR before the MergeQueue processes the
-  # {:worker_done, bead_id} event, advance_status must close the bead on the
+  # {:worker_done, task_id} event, advance_status must close the task on the
   # first tick rather than stalling at :awaiting_approval forever. This happens
   # because a merged GitHub PR returns status: :merged but no GitHub review
   # (the ReviewGate approved in-process), so approved: false and ci_clean: false.
   describe "already-merged MR (bd-d1jp4r)" do
     @tag workspace_config: @ws_github
-    test "tick closes the bead when the polled PR is already merged", %{
+    test "tick closes the task when the polled PR is already merged", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       pr_number = 91
       test_pid = self()
 
-      # Simulate a bead whose Watchdog already merged the PR: the pr_ref is set
-      # on the bead and the GitHub API returns merged: true with no reviews.
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "##{pr_number}"}, action: :update)
+      # Simulate a task whose Watchdog already merged the PR: the pr_ref is set
+      # on the task and the GitHub API returns merged: true with no reviews.
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
 
       stub(fn conn ->
         cond do
@@ -824,14 +824,14 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       {_pid, name} = start_merge_queue(ws)
 
-      # adopt_existing_mr enqueues without opening (bead already has pr_ref).
-      :ok = MergeQueue.enqueue(name, bead.id)
+      # adopt_existing_mr enqueues without opening (task already has pr_ref).
+      :ok = MergeQueue.enqueue(name, task.id)
 
       %{items: [item]} = MergeQueue.state(name)
       assert item.status == :awaiting_approval
       assert item.mr_ref == "##{pr_number}"
 
-      # On tick: adapter.get returns status: :merged → close bead, no merge API call.
+      # On tick: adapter.get returns status: :merged → close task, no merge API call.
       :ok = MergeQueue.tick(name)
 
       refute_received :unexpected_merge_call,
@@ -841,28 +841,28 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       %{items: items} = MergeQueue.state(name)
       assert items == []
 
-      reloaded = Ash.get!(Issue, bead.id)
+      reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
     end
   end
 
   describe "merge_method mapping" do
     @tag workspace_config: @ws_github_squash
-    test "merge_method=squash → adapter sends squash", %{workspace: ws, bead: bead} do
-      assert_merge_method_called("squash", ws, bead)
+    test "merge_method=squash → adapter sends squash", %{workspace: ws, task: task} do
+      assert_merge_method_called("squash", ws, task)
     end
 
     @tag workspace_config: @ws_github_merge
-    test "merge_method=merge → adapter sends merge", %{workspace: ws, bead: bead} do
-      assert_merge_method_called("merge", ws, bead)
+    test "merge_method=merge → adapter sends merge", %{workspace: ws, task: task} do
+      assert_merge_method_called("merge", ws, task)
     end
 
     @tag workspace_config: @ws_github_rebase
-    test "merge_method=rebase → adapter sends rebase", %{workspace: ws, bead: bead} do
-      assert_merge_method_called("rebase", ws, bead)
+    test "merge_method=rebase → adapter sends rebase", %{workspace: ws, task: task} do
+      assert_merge_method_called("rebase", ws, task)
     end
 
-    defp assert_merge_method_called(expected_method, ws, bead) do
+    defp assert_merge_method_called(expected_method, ws, task) do
       test_pid = self()
       pr_number = 90
 
@@ -891,7 +891,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
       assert_received {:merge_method, ^expected_method}
@@ -900,7 +900,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   describe "PubSub" do
     @tag workspace_config: @ws_github
-    test "{:worker_done, bead_id} message triggers enqueue", %{workspace: ws, bead: bead} do
+    test "{:worker_done, task_id} message triggers enqueue", %{workspace: ws, task: task} do
       test_pid = self()
 
       stub(fn conn ->
@@ -913,20 +913,20 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       end)
 
       {pid, _name} = start_merge_queue(ws)
-      send(pid, {:worker_done, bead.id})
+      send(pid, {:worker_done, task.id})
 
       assert_receive :pr_open_called, 500
 
       :sys.get_state(pid)
       %{items: [item]} = MergeQueue.state(pid)
-      assert item.bead_id == bead.id
+      assert item.task_id == task.id
       assert item.mr_ref == "#111"
     end
 
     @tag workspace_config: @ws_github
-    test "broadcasts {:bead_closed_by_merge_queue, bead_id} when merge lands", %{
+    test "broadcasts {:task_closed_by_merge_queue, task_id} when merge lands", %{
       workspace: ws,
-      bead: bead
+      task: task
     } do
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "merge_queue:" <> ws.id)
 
@@ -934,11 +934,11 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       full_cycle_stub(pr_number)
 
       {_pid, name} = start_merge_queue(ws)
-      :ok = MergeQueue.enqueue(name, bead.id)
+      :ok = MergeQueue.enqueue(name, task.id)
       :ok = MergeQueue.tick(name)
 
-      bead_id = bead.id
-      assert_receive {:bead_closed_by_merge_queue, ^bead_id}, 500
+      task_id = task.id
+      assert_receive {:task_closed_by_merge_queue, ^task_id}, 500
     end
   end
 end

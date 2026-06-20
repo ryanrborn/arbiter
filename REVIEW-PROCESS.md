@@ -50,7 +50,7 @@ This repo is local-only (no GitHub). Peer review happens via markdown files in `
 
 ## Acceptance criteria check
 - [ ] <criterion 1 from the Directive>
-- [x] <criterion 2 from the bead>
+- [x] <criterion 2 from the task>
 ...
 
 ## Findings
@@ -69,7 +69,7 @@ This repo is local-only (no GitHub). Peer review happens via markdown files in `
 - [ ] mix format --check-formatted
 - [ ] mix credo --strict clean
 - [ ] mix dialyzer clean (if applicable)
-- [ ] No new TODO comments without bead references
+- [ ] No new TODO comments without task references
 - [ ] Acceptance criteria covered by tests
 
 ## Verdict

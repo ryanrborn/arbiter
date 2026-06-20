@@ -1,23 +1,23 @@
 defmodule ArbiterCli.Cmd.Claim do
   @moduledoc """
-  `arb claim <issue#> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a bead
+  `arb claim <issue#> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a task
   linked to a GitHub issue assigned to the workspace user.
 
   POSTs to `/api/workspaces/:workspace_id/claim`. The server fetches the
   issue via the workspace's GitHub tracker, verifies it's assigned to the
   workspace's authenticated user (the claim signal), and either creates a
-  new bead or returns the existing one if a bead already references that
+  new task or returns the existing one if a task already references that
   issue.
 
   Flags:
     --force        Skip the assignment-as-claim check. Use only when you
-                   *know* you want a bead for an issue you don't own (e.g.
+                   *know* you want a task for an issue you don't own (e.g.
                    to track someone else's work).
     --difficulty N Task difficulty (0..4): D0 trivial · D1 easy · D2 medium ·
                    D3 hard · D4 very hard. Drives model tier and thinking
                    budget routed to workers. (default: D2 on the server)
     --repo <repo>  Hint for a later `arb dispatch`. Recorded as a tip in the
-                   command's text output — not persisted on the bead.
+                   command's text output — not persisted on the task.
     --json         Emit JSON instead of human-readable text.
   """
 
@@ -74,23 +74,23 @@ defmodule ArbiterCli.Cmd.Claim do
   defp emit(payload, _repo, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit(payload, repo, :text) do
-    bead = payload["bead"] || %{}
+    task = payload["task"] || %{}
 
     headline =
       case payload["status"] do
-        "created" -> "Claimed #{bead["id"]} (new bead created)"
-        "existing" -> "Already claimed: #{bead["id"]}"
-        other -> "Claim result: #{other} — #{bead["id"]}"
+        "created" -> "Claimed #{task["id"]} (new task created)"
+        "existing" -> "Already claimed: #{task["id"]}"
+        other -> "Claim result: #{other} — #{task["id"]}"
       end
 
     IO.puts(headline)
-    IO.puts("  title:        #{bead["title"]}")
-    IO.puts("  status:       #{bead["status"]}")
-    IO.puts("  tracker:      #{bead["tracker_type"]}:#{bead["tracker_ref"]}")
+    IO.puts("  title:        #{task["title"]}")
+    IO.puts("  status:       #{task["status"]}")
+    IO.puts("  tracker:      #{task["tracker_type"]}:#{task["tracker_ref"]}")
 
     if repo do
       IO.puts("")
-      IO.puts("Tip: `arb dispatch #{bead["id"]} #{repo}` to start work on this bead.")
+      IO.puts("Tip: `arb dispatch #{task["id"]} #{repo}` to start work on this task.")
     end
   end
 end

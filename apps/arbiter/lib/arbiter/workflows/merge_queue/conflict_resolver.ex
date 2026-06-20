@@ -1,12 +1,12 @@
 defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @moduledoc """
-  Spawn a short-lived worker to rebase a CONFLICTING bead branch onto the
+  Spawn a short-lived worker to rebase a CONFLICTING task branch onto the
   current head of its target branch, resolve conflicts, and force-push.
 
   Invoked by `Arbiter.Workflows.MergeQueue` when a merge queue item enters the
   CONFLICTING state (the merger reports `mergeable: false` on the PR).
   Before this, the queue froze the item and waited for a human to rebase —
-  twice this morning that meant an Admiral page on a dispatcher-bead
+  twice this morning that meant an Admiral page on a dispatcher-task
   collision (#117, #121). The resolver worker exists so that case unblocks
   itself.
 
@@ -42,9 +42,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   git.
   """
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.RepoConfig
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
@@ -59,7 +59,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @behaviour __MODULE__
 
   @type resolve_args :: %{
-          required(:bead_id) => String.t(),
+          required(:task_id) => String.t(),
           required(:workspace_id) => String.t() | nil,
           optional(:branch) => String.t(),
           optional(:target_branch) => String.t(),
@@ -75,16 +75,16 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
           | {:error, term()}
 
   @doc """
-  Spawn a worker to rebase + resolve + push the bead's branch.
+  Spawn a worker to rebase + resolve + push the task's branch.
 
-  Resolves `branch`, `target_branch`, and `repo_path` from the bead +
+  Resolves `branch`, `target_branch`, and `repo_path` from the task +
   workspace when not supplied in `args`. Returns `{:ok, info}` once the
   worker is spawned (the rebase runs asynchronously); the MergeQueue picks
   up the resolution on its next poll when the PR turns mergeable again.
 
   When the worker cannot be spawned (no local checkout, no branch,
   workspace missing) returns `{:error, reason}`. The MergeQueue's escalation
-  path handles that by mailing the Admiral so the bead does not sit in
+  path handles that by mailing the Admiral so the task does not sit in
   CONFLICTING limbo.
   """
   @callback resolve(args :: resolve_args()) :: resolve_result()
@@ -97,7 +97,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   may implement it to intercept escalations for assertion.
   """
   @callback escalate_unresolved(
-              bead_id :: String.t(),
+              task_id :: String.t(),
               workspace_id :: String.t() | nil,
               branch :: String.t(),
               reason :: term()
@@ -110,7 +110,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   it; test stubs may implement it to intercept notifications for assertion.
   """
   @callback notify_resolution(
-              bead_id :: String.t(),
+              task_id :: String.t(),
               workspace_id :: String.t() | nil,
               branch :: String.t()
             ) :: :ok
@@ -126,11 +126,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
   @impl true
   @spec resolve(resolve_args()) :: resolve_result()
-  def resolve(%{bead_id: bead_id} = args) when is_binary(bead_id) do
-    with {:ok, bead} <- load_bead(bead_id),
-         {:ok, context} <- resolve_context(bead, args),
+  def resolve(%{task_id: task_id} = args) when is_binary(task_id) do
+    with {:ok, task} <- load_task(task_id),
+         {:ok, context} <- resolve_context(task, args),
          {:ok, worktree_path} <- create_worktree(context),
-         {:ok, worker_pid} <- start_worker(bead, context, worktree_path),
+         {:ok, worker_pid} <- start_worker(task, context, worktree_path),
          {:ok, _port} <- maybe_start_claude(worker_pid, worktree_path, context, args) do
       {:ok,
        %{
@@ -141,26 +141,26 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  def resolve(_), do: {:error, :missing_bead_id}
+  def resolve(_), do: {:error, :missing_task_id}
 
   # ---- context resolution --------------------------------------------------
 
-  defp load_bead(bead_id) do
-    case Ash.get(Issue, bead_id) do
-      {:ok, bead} -> {:ok, bead}
-      {:error, _} -> {:error, {:bead_not_found, bead_id}}
+  defp load_task(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, task} -> {:ok, task}
+      {:error, _} -> {:error, {:task_not_found, task_id}}
     end
   rescue
-    e -> {:error, {:bead_load_failed, Exception.message(e)}}
+    e -> {:error, {:task_load_failed, Exception.message(e)}}
   end
 
   # Resolve everything the worker needs: a local checkout to cut the worktree
-  # from, the bead's branch name, and the target branch to rebase onto. Caller-
+  # from, the task's branch name, and the target branch to rebase onto. Caller-
   # supplied args win over derived values so the MergeQueue and tests can override.
-  defp resolve_context(%Issue{} = bead, args) do
-    workspace = maybe_load_workspace(bead.workspace_id)
+  defp resolve_context(%Issue{} = task, args) do
+    workspace = maybe_load_workspace(task.workspace_id)
 
-    branch = Map.get(args, :branch) || derive_branch(bead)
+    branch = Map.get(args, :branch) || derive_branch(task)
     target_branch = Map.get(args, :target_branch) || workspace_base_branch(workspace) || "main"
     repo_path = Map.get(args, :repo_path) || resolve_repo_path(workspace, Map.get(args, :repo))
 
@@ -177,7 +177,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       true ->
         {:ok,
          %{
-           bead: bead,
+           task: task,
            workspace: workspace,
            branch: branch,
            target_branch: target_branch,
@@ -187,8 +187,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  defp derive_branch(%Issue{} = bead) do
-    BranchNamer.derive(bead)
+  defp derive_branch(%Issue{} = task) do
+    BranchNamer.derive(task)
   rescue
     _ -> nil
   end
@@ -285,8 +285,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   # Registry suffix the conflict-resolver worker registers under. The original
   # work worker is still registered (and sitting `:completed`) when the
   # merge queue picks up the CONFLICTING signal — the registry key is keyed on
-  # bead_id and the original is only torn down on bead `:close`. Spawning under
-  # `<bead_id>:conflict` gives the resolver its own slot so `Worker.start`
+  # task_id and the original is only torn down on task `:close`. Spawning under
+  # `<task_id>:conflict` gives the resolver its own slot so `Worker.start`
   # doesn't return `:already_started` and we don't accidentally open a Claude
   # session against the finished worker.
   @resolver_registry_suffix ":conflict"
@@ -305,7 +305,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     end
   end
 
-  defp start_worker(%Issue{} = bead, context, worktree_path) do
+  defp start_worker(%Issue{} = task, context, worktree_path) do
     meta = %{
       role: :conflict_resolver,
       worktree_path: worktree_path,
@@ -316,9 +316,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     }
 
     opts = [
-      bead_id: bead.id,
-      registry_key: bead.id <> @resolver_registry_suffix,
-      workspace_id: bead.workspace_id,
+      task_id: task.id,
+      registry_key: task.id <> @resolver_registry_suffix,
+      workspace_id: task.workspace_id,
       repo: context.repo || "unknown",
       meta: meta
     ]
@@ -327,7 +327,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
       {:ok, pid} ->
         {:ok, pid}
 
-      # A resolver is already in flight for this bead (a previous tick's
+      # A resolver is already in flight for this task (a previous tick's
       # spawn that hasn't terminated yet). Don't open a second Claude session
       # against it — surface the collision so the MergeQueue's escalation path
       # mails the Admiral instead of pretending we restarted the rebase.
@@ -383,9 +383,9 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   ambiguity rather than failing silently.
   """
   @spec prompt_for(map()) :: String.t()
-  def prompt_for(%{bead: %Issue{id: bead_id}, branch: branch, target_branch: target}) do
+  def prompt_for(%{task: %Issue{id: task_id}, branch: branch, target_branch: target}) do
     """
-    You are a conflict-resolution worker for bead #{bead_id}.
+    You are a conflict-resolution worker for task #{task_id}.
 
     Your branch (#{branch}) is CONFLICTING with the current head of
     #{target}. Your ONLY job is:
@@ -410,7 +410,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     or both changed a shared invariant where a mechanical merge would
     silently break either side — STOP and escalate by running:
 
-        arb message admiral "Conflict on #{bead_id} requires human review: <one-line explanation>"
+        arb message admiral "Conflict on #{task_id} requires human review: <one-line explanation>"
 
     then print `arb done`. Better a loud escalation than a silent
     miscompile in #{target}.
@@ -434,11 +434,11 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
   @impl true
   @spec escalate_unresolved(String.t(), String.t() | nil, String.t(), term()) :: :ok
-  def escalate_unresolved(bead_id, workspace_id, branch, reason)
-      when is_binary(bead_id) and is_binary(workspace_id) do
+  def escalate_unresolved(task_id, workspace_id, branch, reason)
+      when is_binary(task_id) and is_binary(workspace_id) do
     body =
       """
-      The merge queue detected a CONFLICTING PR for bead #{bead_id} (branch
+      The merge queue detected a CONFLICTING PR for task #{task_id} (branch
       #{branch}) and could not auto-resolve it (#{inspect_short(reason)}).
       Manual rebase + push required before the merge queue can proceed.
       """
@@ -446,10 +446,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     Message.send_mail(%{
       kind: :escalation,
       to_ref: "admiral",
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: workspace_id,
-      directive_ref: bead_id,
-      subject: "Merge queue: unresolved conflict on #{bead_id}",
+      directive_ref: task_id,
+      subject: "Merge queue: unresolved conflict on #{task_id}",
       body: body
     })
 
@@ -457,7 +457,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   rescue
     e ->
       Logger.warning(
-        "ConflictResolver.escalate_unresolved swallowed for bead=#{bead_id}: " <>
+        "ConflictResolver.escalate_unresolved swallowed for task=#{task_id}: " <>
           Exception.message(e)
       )
 
@@ -466,7 +466,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     :exit, _ -> :ok
   end
 
-  def escalate_unresolved(_bead_id, _workspace_id, _branch, _reason), do: :ok
+  def escalate_unresolved(_task_id, _workspace_id, _branch, _reason), do: :ok
 
   @doc """
   Post a `:notification` announcing a successful auto-resolution. Used by
@@ -479,20 +479,20 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   """
   @impl true
   @spec notify_resolution(String.t(), String.t() | nil, String.t()) :: :ok
-  def notify_resolution(bead_id, workspace_id, branch)
-      when is_binary(bead_id) and is_binary(workspace_id) do
+  def notify_resolution(task_id, workspace_id, branch)
+      when is_binary(task_id) and is_binary(workspace_id) do
     body =
       """
-      The merge queue auto-resolved a CONFLICTING PR for bead #{bead_id}
+      The merge queue auto-resolved a CONFLICTING PR for task #{task_id}
       (branch #{branch}) — the conflict-resolver worker rebased onto the
       current target branch, resolved the conflict, and force-pushed. The
       merge queue is resuming.
       """
 
     Message.notify(%{
-      from_ref: bead_id,
+      from_ref: task_id,
       workspace_id: workspace_id,
-      subject: "Merge queue: auto-resolved conflict on #{bead_id}",
+      subject: "Merge queue: auto-resolved conflict on #{task_id}",
       body: body
     })
 
@@ -500,7 +500,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   rescue
     e ->
       Logger.warning(
-        "ConflictResolver.notify_resolution swallowed for bead=#{bead_id}: " <>
+        "ConflictResolver.notify_resolution swallowed for task=#{task_id}: " <>
           Exception.message(e)
       )
 
@@ -509,7 +509,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     :exit, _ -> :ok
   end
 
-  def notify_resolution(_bead_id, _workspace_id, _branch), do: :ok
+  def notify_resolution(_task_id, _workspace_id, _branch), do: :ok
 
   defp inspect_short(reason) when is_binary(reason), do: reason
   defp inspect_short(reason), do: reason |> inspect() |> String.slice(0, 200)

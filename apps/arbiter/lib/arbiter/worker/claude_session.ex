@@ -21,7 +21,7 @@ defmodule Arbiter.Worker.ClaudeSession do
         ▼
       worker handle_info({port, ...})
         │   • append line to meta[:output_lines]   (cap @line_cap)
-        │   • Phoenix.PubSub.broadcast {:worker_output, bead_id, line}
+        │   • Phoenix.PubSub.broadcast {:worker_output, task_id, line}
         │   • on "arb done" → Worker.complete(self())
         │   • on {:exit_status, n} → meta[:exit_status], broadcast :worker_exited
         ▼
@@ -81,8 +81,8 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   ## PubSub topic
 
-  Default topic is `"worker:" <> bead_id`. Subscribers (LiveView, CLI
-  followers, tests) must know the bead_id to subscribe. The `:topic` opt
+  Default topic is `"worker:" <> task_id`. Subscribers (LiveView, CLI
+  followers, tests) must know the task_id to subscribe. The `:topic` opt
   overrides this.
   """
 
@@ -131,7 +131,7 @@ defmodule Arbiter.Worker.ClaudeSession do
       verbatim (no `sh`/stdin wrapping). Tests **must** pass this so we don't
       shell out to real Claude.
     * `:topic` — PubSub topic to broadcast output on. Defaults to
-      `"worker:" <> bead_id`.
+      `"worker:" <> task_id`.
 
   ## Returns
 
@@ -145,11 +145,11 @@ defmodule Arbiter.Worker.ClaudeSession do
          {:ok, worktree_path} <- fetch_worktree(opts),
          {:ok, argv} <- resolve_argv(opts),
          {:ok, exec} <- resolve_executable(argv) do
-      bead_id = bead_id_for(owner)
-      topic = Keyword.get(opts, :topic) || default_topic(bead_id)
+      task_id = task_id_for(owner)
+      topic = Keyword.get(opts, :topic) || default_topic(task_id)
 
       session_config = %{
-        bead_id: bead_id,
+        task_id: task_id,
         topic: topic,
         line_cap: @line_cap,
         done_regex: @done_regex,
@@ -163,7 +163,7 @@ defmodule Arbiter.Worker.ClaudeSession do
         exec: exec,
         argv: argv,
         cd: worktree_path,
-        env: env_pairs(opts, bead_id)
+        env: env_pairs(opts, task_id)
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -265,15 +265,15 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
-  defp bead_id_for(owner) do
+  defp task_id_for(owner) do
     case Worker.state(owner) do
-      %{bead_id: id} -> id
+      %{task_id: id} -> id
       _ -> nil
     end
   end
 
   defp default_topic(nil), do: "worker:unknown"
-  defp default_topic(bead_id), do: "worker:" <> bead_id
+  defp default_topic(task_id), do: "worker:" <> task_id
 
   # ---- helpers called from Worker's handle_info -------------------------
   #
@@ -473,7 +473,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # the PubSub hop — live followers only care about lines with content.
   defp emit_line(%{} = session, line, detect_done?) do
     unless blank?(line) do
-      broadcast(session, {:worker_output, session.bead_id, line})
+      broadcast(session, {:worker_output, session.task_id, line})
     end
 
     if detect_done? and Regex.match?(session.done_regex, line) do
@@ -732,7 +732,7 @@ defmodule Arbiter.Worker.ClaudeSession do
         buf -> process_line(%{session | line_buf: ""}, buf)
       end
 
-    broadcast(session, {:worker_exited, session.bead_id, status})
+    broadcast(session, {:worker_exited, session.task_id, status})
     close_durable(session)
     %{session | exit_status: status, exited_at: DateTime.utc_now()}
   end
@@ -808,14 +808,14 @@ defmodule Arbiter.Worker.ClaudeSession do
   # bd-crqku8: always inject ARB_ACOLYTE_BEAD_ID so any `arb restart/update/
   # start` invoked from inside the worker session can detect it and refuse,
   # preventing an worker from bouncing the live orchestrating server.
-  defp env_pairs(opts, bead_id) do
+  defp env_pairs(opts, task_id) do
     base =
       case Keyword.fetch(opts, :env) do
         {:ok, list} when is_list(list) -> list
         _ -> Arbiter.Agents.Claude.ConfigDir.env()
       end
 
-    case bead_id do
+    case task_id do
       id when is_binary(id) and id != "" ->
         base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
 

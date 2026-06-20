@@ -4,17 +4,17 @@ defmodule Arbiter.MCP.CatalogTest do
   alias Arbiter.MCP.Catalog
   alias Arbiter.MCP.Scope
 
-  @worker %Scope{tier: :worker, workspace_id: "w", bead_id: "bd-1"}
+  @worker %Scope{tier: :worker, workspace_id: "w", task_id: "bd-1"}
   @coordinator %Scope{tier: :coordinator, workspace_id: "w"}
 
   # The both-tier tools a worker may also reach.
-  @both_tier ~w(bead_show inbox_check bead_update_progress workspace_show
+  @both_tier ~w(task_show inbox_check task_update_progress workspace_show
                 message_send notify_list)
 
   # Coordinator-only tools; never visible to a worker.
-  @coordinator_only ~w(bead_ready bead_create bead_update bead_close bead_reopen dep_add dep_remove
+  @coordinator_only ~w(task_ready task_create task_update task_close task_reopen dep_add dep_remove
                        worker_dispatch
-                       worker_resume worker_review worker_stop worker_list bead_list
+                       worker_resume worker_review worker_stop worker_list task_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox)
 
   describe "visible/1" do
@@ -73,7 +73,7 @@ defmodule Arbiter.MCP.CatalogTest do
     end
 
     test "a worker calling a coordinator-only tool is a JSON-RPC not-permitted error" do
-      assert {:rpc_error, -32_003, message} = Catalog.call(@worker, "bead_ready", %{})
+      assert {:rpc_error, -32_003, message} = Catalog.call(@worker, "task_ready", %{})
       assert message =~ "not permitted"
     end
   end

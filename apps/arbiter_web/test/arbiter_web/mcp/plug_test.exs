@@ -1,21 +1,21 @@
 defmodule ArbiterWeb.MCP.PlugTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.MCP.Scope
 
   setup %{conn: conn} do
     {:ok, ws} = Ash.create(Workspace, %{name: "mcp-plug-ws", prefix: "mcpw"})
-    {:ok, bead} = Ash.create(Issue, %{title: "plug bead", workspace_id: ws.id})
+    {:ok, task} = Ash.create(Issue, %{title: "plug task", workspace_id: ws.id})
 
-    worker_token = Scope.mint_worker(bead, "shipyard")
+    worker_token = Scope.mint_worker(task, "shipyard")
     coordinator_token = Scope.mint_coordinator(ws.id)
 
     {:ok,
      conn: conn,
      ws: ws,
-     bead: bead,
+     task: task,
      worker_token: worker_token,
      coordinator_token: coordinator_token}
   end
@@ -108,15 +108,15 @@ defmodule ArbiterWeb.MCP.PlugTest do
       conn = rpc(ctx.conn, ctx.worker_token, req("tools/list"))
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
 
-      assert "bead_show" in names
-      refute "bead_ready" in names
+      assert "task_show" in names
+      refute "task_ready" in names
     end
 
     test "a coordinator sees coordinator-only tools", ctx do
       conn = rpc(ctx.conn, ctx.coordinator_token, req("tools/list"))
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
 
-      assert "bead_ready" in names
+      assert "task_ready" in names
     end
 
     test "tools advertise an inputSchema (camelCase wire field)", ctx do
@@ -127,17 +127,17 @@ defmodule ArbiterWeb.MCP.PlugTest do
   end
 
   describe "tools/call" do
-    test "a worker reads its own bead, returning structuredContent", ctx do
+    test "a worker reads its own task, returning structuredContent", ctx do
       conn =
         rpc(
           ctx.conn,
           ctx.worker_token,
-          req("tools/call", %{"name" => "bead_show", "arguments" => %{}})
+          req("tools/call", %{"name" => "task_show", "arguments" => %{}})
         )
 
       result = json_response(conn, 200)["result"]
       assert result["isError"] == false
-      assert result["structuredContent"]["id"] == ctx.bead.id
+      assert result["structuredContent"]["id"] == ctx.task.id
       assert [%{"type" => "text"} | _] = result["content"]
     end
 
@@ -146,7 +146,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
         rpc(
           ctx.conn,
           ctx.worker_token,
-          req("tools/call", %{"name" => "bead_ready", "arguments" => %{}})
+          req("tools/call", %{"name" => "task_ready", "arguments" => %{}})
         )
 
       body = json_response(conn, 200)
@@ -159,7 +159,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
         rpc(
           ctx.conn,
           ctx.coordinator_token,
-          req("tools/call", %{"name" => "bead_show", "arguments" => %{"id" => "bd-nope"}})
+          req("tools/call", %{"name" => "task_show", "arguments" => %{"id" => "bd-nope"}})
         )
 
       result = json_response(conn, 200)["result"]
@@ -173,13 +173,13 @@ defmodule ArbiterWeb.MCP.PlugTest do
   end
 
   describe "Phase 2 coordinator mutations" do
-    test "a coordinator creates a bead end-to-end via tools/call", ctx do
+    test "a coordinator creates a task end-to-end via tools/call", ctx do
       conn =
         rpc(
           ctx.conn,
           ctx.coordinator_token,
           req("tools/call", %{
-            "name" => "bead_create",
+            "name" => "task_create",
             "arguments" => %{"title" => "via mcp", "priority" => 1}
           })
         )
@@ -196,7 +196,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           ctx.conn,
           ctx.worker_token,
           req("tools/call", %{
-            "name" => "bead_create",
+            "name" => "task_create",
             "arguments" => %{"title" => "nope"}
           })
         )
@@ -213,7 +213,7 @@ defmodule ArbiterWeb.MCP.PlugTest do
           no_dispatch,
           req("tools/call", %{
             "name" => "worker_dispatch",
-            "arguments" => %{"bead_id" => ctx.bead.id}
+            "arguments" => %{"task_id" => ctx.task.id}
           })
         )
 
@@ -364,8 +364,8 @@ defmodule ArbiterWeb.MCP.PlugTest do
         |> post("/mcp", Jason.encode!(req("tools/list", %{}, 2)))
 
       names = json_response(conn, 200)["result"]["tools"] |> Enum.map(& &1["name"])
-      assert "bead_ready" in names
-      assert "bead_show" in names
+      assert "task_ready" in names
+      assert "task_show" in names
     end
   end
 end

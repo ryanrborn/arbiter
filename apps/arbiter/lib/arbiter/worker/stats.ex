@@ -15,15 +15,15 @@ defmodule Arbiter.Worker.Stats do
 
   def short_model_name(_), do: nil
 
-  def bead_costs_usd([]), do: %{}
+  def task_costs_usd([]), do: %{}
 
-  def bead_costs_usd(bead_ids) when is_list(bead_ids) do
+  def task_costs_usd(task_ids) when is_list(task_ids) do
     require Ash.Query
 
     Arbiter.Usage.Event
-    |> Ash.Query.filter(bead_id in ^bead_ids)
+    |> Ash.Query.filter(task_id in ^task_ids)
     |> Ash.read!()
-    |> Enum.group_by(& &1.bead_id)
+    |> Enum.group_by(& &1.task_id)
     |> Map.new(fn {id, events} ->
       total = Enum.reduce(events, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
       {id, total}

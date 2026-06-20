@@ -11,7 +11,7 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
           "arbiter": {
             "httpUrl": "http://127.0.0.1:4848/mcp",
             "headers": { "Authorization": "Bearer <scope-token>" },
-            "includeTools": ["bead_show", "bead_update_progress", ...]
+            "includeTools": ["task_show", "task_update_progress", ...]
           }
         }
       }
@@ -36,8 +36,8 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   # token is permitted to call (see Arbiter.MCP.Scope and the tool catalog in
   # docs/mcp-server-design.md §3).
   @worker_tools ~w(
-    bead_show
-    bead_update_progress
+    task_show
+    task_update_progress
     inbox_check
     message_send
     notify_list

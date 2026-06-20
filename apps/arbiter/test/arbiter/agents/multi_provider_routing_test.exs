@@ -3,8 +3,8 @@ defmodule Arbiter.Agents.MultiProviderRoutingTest do
 
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.Routing
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   setup do
     on_exit(fn -> :ets.delete_all_objects(:arbiter_provider_circuit_breakers) end)

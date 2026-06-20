@@ -1,6 +1,6 @@
 # gte-019 — Tracker behaviour + None adapter
 
-Bead: gte-019
+Task: gte-019
 Branch: `feature/gte-019-tracker-behaviour`
 
 ## What
@@ -24,11 +24,11 @@ adapters in Phase 5.
 - `apps/arbiter/lib/arbiter/trackers/none.ex` — `Tracker.None` adapter.
   All callbacks succeed as no-ops. `fetch/1` returns `{:ok, %{}}`,
   `link_for/1` returns `""`, `parse_ref/1` always returns `:error` (None
-  never owns a ref), `list_transitions/1` returns the full bead-status set.
+  never owns a ref), `list_transitions/1` returns the full task-status set.
 - `apps/arbiter/lib/arbiter/trackers.ex` — registry + delegating
-  wrappers: `for_bead/1`, `for_type/1`, `adapters/0`, plus `fetch/1`,
+  wrappers: `for_task/1`, `for_type/1`, `adapters/0`, plus `fetch/1`,
   `transition/2`, `update_fields/2`, `link_for/1`, `list_transitions/1` that
-  take an `Issue` and dispatch through `for_bead/1`.
+  take an `Issue` and dispatch through `for_task/1`.
 - `apps/arbiter/test/arbiter/trackers_test.exs` — 9 tests for resolution
   + delegation.
 - `apps/arbiter/test/arbiter/trackers/none_test.exs` — 7 tests for the
@@ -48,9 +48,9 @@ adapters in Phase 5.
 
 Asking for `for_type(:jira)` today raises `ArgumentError` with a useful
 message ("no tracker adapter registered for :jira (registered: [:none])").
-That's deliberate — bead create-time already validates `tracker_type` is in
+That's deliberate — task create-time already validates `tracker_type` is in
 the enum, so this code path is only hit when someone tries to *use* the
-tracker on a bead whose adapter doesn't exist yet. Loud failure is better
+tracker on a task whose adapter doesn't exist yet. Loud failure is better
 than silently no-op'ing on arb close or PR-link generation.
 
 The Phase 3 work that wires up Jira just needs to add `jira: Arbiter.Trackers.Jira`
@@ -62,17 +62,17 @@ to the map (plus the adapter module).
 def list_transitions(_ref), do: {:ok, [:open, :in_progress, :closed]}
 ```
 
-For tracker-backed beads this is restricted (Jira workflows have edges). For
-`Tracker.None` the bead ledger imposes the only restrictions, which are
+For tracker-backed tasks this is restricted (Jira workflows have edges). For
+`Tracker.None` the task ledger imposes the only restrictions, which are
 already enforced by `GuardStatus` in the Issue resource — so the adapter
-reports "anything goes." Callers that want the *bead*'s allowed transitions
+reports "anything goes." Callers that want the *task*'s allowed transitions
 should ask the Issue, not the tracker.
 
 ### 3. Delegating wrappers use `Issue.t()`, not `(adapter, ref)` pairs
 
 The public surface is `Trackers.fetch(issue)`, not `Trackers.fetch(adapter, ref)`.
 This is intentional — keeps `tracker_type` resolution centralized so
-per-bead overrides (the `Workspace.config.tracker.type` → bead.tracker_type
+per-task overrides (the `Workspace.config.tracker.type` → task.tracker_type
 inheritance from gte-002) actually take effect at call time. Callers that
 need to bypass resolution can use `for_type/1` directly.
 
@@ -102,10 +102,10 @@ total                  206 tests, 0 failures
 - gte-020 / gte-029 (Jira adapter): the Markdown → ADF helper already exists
   from prior GT work; the Jira adapter wires it up to `update_fields/2`.
 - The `Tracker.None` `list_transitions` returning all-statuses is technically
-  inaccurate — `:open → :closed` is illegal per the bead FSM (you go through
+  inaccurate — `:open → :closed` is illegal per the task FSM (you go through
   `:in_progress` or use the dedicated `:close` action). But the *tracker*
-  doesn't know that; the bead-ledger does. If we want a unified API later we
-  can have callers AND the bead FSM both consulted.
+  doesn't know that; the task-ledger does. If we want a unified API later we
+  can have callers AND the task FSM both consulted.
 - No integration test wiring Trackers through an actual Issue create/close —
   Phase 1 already covers Issue lifecycle, and the unit tests cover the
   delegation. Will add a real round-trip test when Jira lands.

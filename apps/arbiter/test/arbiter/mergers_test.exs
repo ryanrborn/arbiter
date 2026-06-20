@@ -1,7 +1,7 @@
 defmodule Arbiter.MergersTest do
   use ExUnit.Case, async: false
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers
 
   @github_env "GTE_MERGERS_PREPARE_GITHUB_TOKEN"

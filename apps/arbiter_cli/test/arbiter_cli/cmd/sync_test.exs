@@ -14,7 +14,7 @@ defmodule ArbiterCli.Cmd.SyncTest do
        {%{
           "data" => [
             %{"action" => "create", "ref" => "43", "title" => "Wire it up"},
-            %{"action" => "close", "bead_id" => "bd-old", "reason" => "tracker closed"}
+            %{"action" => "close", "task_id" => "bd-old", "reason" => "tracker closed"}
           ]
         }, 200}}
     ])
@@ -22,7 +22,7 @@ defmodule ArbiterCli.Cmd.SyncTest do
     {out, _err, code} = capture(fn -> Sync.run(["--dry"]) end)
     assert code == 0
     assert out =~ "Sync plan"
-    assert out =~ "create bead for #43"
+    assert out =~ "create task for #43"
     assert out =~ "close bd-old"
   end
 
@@ -35,7 +35,7 @@ defmodule ArbiterCli.Cmd.SyncTest do
           "results" => [
             %{
               "outcome" => "created",
-              "bead" => %{"id" => "bd-new", "tracker_type" => "github", "tracker_ref" => "43"}
+              "task" => %{"id" => "bd-new", "tracker_type" => "github", "tracker_ref" => "43"}
             }
           ],
           "applied" => true

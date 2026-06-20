@@ -159,7 +159,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
       assert :ok = Shortcut.transition(@ref, :open)
     end
 
-    test "returns {:error, :transition_not_found} when the bead status has no mapping" do
+    test "returns {:error, :transition_not_found} when the task status has no mapping" do
       Config.put_active(%{
         "credentials_ref" => "env:#{@env_var}",
         "status_map" => %{
@@ -254,7 +254,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
         decoded = Jason.decode!(body)
 
         assert decoded["url"] == "https://github.com/example/pr/42"
-        assert decoded["description"] == "PR 42 (bead bd-12345)"
+        assert decoded["description"] == "PR 42 (task bd-12345)"
 
         conn
         |> Plug.Conn.put_status(201)
@@ -265,7 +265,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
                Shortcut.add_remote_link(
                  @ref,
                  "https://github.com/example/pr/42",
-                 "PR 42 (bead bd-12345)"
+                 "PR 42 (task bd-12345)"
                )
     end
 
@@ -460,7 +460,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
   end
 
   describe "list_transitions/1" do
-    test "reverse-maps workflow state names to bead-status atoms" do
+    test "reverse-maps workflow state names to task-status atoms" do
       stub(fn conn ->
         assert conn.method == "GET"
         assert conn.request_path == "/api/v3/workflows"
@@ -588,7 +588,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
       end)
 
       context = %{
-        bead_id: "bd-abc123",
+        task_id: "bd-abc123",
         workspace_name: "my-ws",
         workspace_prefix: "mw",
         current_user: "member-uuid-999",
@@ -624,7 +624,7 @@ defmodule Arbiter.Trackers.ShortcutTest do
       end)
 
       context = %{
-        bead_id: "bd-abc123",
+        task_id: "bd-abc123",
         workspace_name: "ws",
         workspace_prefix: "w",
         current_user: "member-uuid-999",

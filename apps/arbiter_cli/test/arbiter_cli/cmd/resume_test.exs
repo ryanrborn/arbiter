@@ -2,9 +2,9 @@ defmodule ArbiterCli.Cmd.ResumeTest do
   use ArbiterCli.CliCase, async: false
 
   describe "arb resume" do
-    test "missing bead-id fails with usage hint" do
+    test "missing task-id fails with usage hint" do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run([]) end)
-      assert err =~ "resume requires a bead id"
+      assert err =~ "resume requires a task id"
       assert code != 0
     end
 
@@ -14,12 +14,12 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       assert code != 0
     end
 
-    test "happy path posts to /api/workers/:bead_id/resume and renders text" do
+    test "happy path posts to /api/workers/:task_id/resume and renders text" do
       stub_post(
         "/api/workers/bd-auma3z/resume",
         %{
-          "bead" => %{"id" => "bd-auma3z", "title" => "resume cmd", "status" => "in_progress"},
-          "worker" => %{"bead_id" => "bd-auma3z", "pid" => "#PID<0.123.0>"},
+          "task" => %{"id" => "bd-auma3z", "title" => "resume cmd", "status" => "in_progress"},
+          "worker" => %{"task_id" => "bd-auma3z", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
           "worktree_path" => "/wt/feature-bd-auma3z",
           "claude_started" => true
@@ -36,15 +36,15 @@ defmodule ArbiterCli.Cmd.ResumeTest do
 
     test "--json mode emits JSON" do
       stub_post("/api/workers/bd-1/resume", %{
-        "bead" => %{"id" => "bd-1", "title" => "t", "status" => "in_progress"},
-        "worker" => %{"bead_id" => "bd-1", "pid" => "x"},
+        "task" => %{"id" => "bd-1", "title" => "t", "status" => "in_progress"},
+        "worker" => %{"task_id" => "bd-1", "pid" => "x"},
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
       {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-1", "--json"]) end)
       assert code == 0
       assert {:ok, decoded} = Jason.decode(out)
-      assert decoded["bead"]["id"] == "bd-1"
+      assert decoded["task"]["id"] == "bd-1"
     end
 
     test "error response propagates as die" do
@@ -53,7 +53,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
         %{
           "error" => %{
             "type" => "invalid_request",
-            "message" => "no preserved worktree for this bead"
+            "message" => "no preserved worktree for this task"
           }
         },
         422
@@ -77,8 +77,8 @@ defmodule ArbiterCli.Cmd.ResumeTest do
             conn
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{
-              "bead" => %{"id" => "bd-9", "title" => "t", "status" => "in_progress"},
-              "worker" => %{"bead_id" => "bd-9", "pid" => "x"},
+              "task" => %{"id" => "bd-9", "title" => "t", "status" => "in_progress"},
+              "worker" => %{"task_id" => "bd-9", "pid" => "x"},
               "machine" => %{"id" => "m", "pid" => "y"}
             })
 

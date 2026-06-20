@@ -24,8 +24,8 @@ defmodule ArbiterWeb.RunIndexLiveTest do
   end
 
   test "lists completed and failed runs, linking to the run detail page", %{conn: conn} do
-    completed = run(%{bead_id: "bd-ok", bead_title: "the-good-run", status: :completed})
-    _failed = run(%{bead_id: "bd-bad", bead_title: "the-bad-run", status: :failed})
+    completed = run(%{task_id: "bd-ok", task_title: "the-good-run", status: :completed})
+    _failed = run(%{task_id: "bd-bad", task_title: "the-bad-run", status: :failed})
 
     {:ok, _view, html} = live(conn, ~p"/workers/history")
 
@@ -36,8 +36,8 @@ defmodule ArbiterWeb.RunIndexLiveTest do
   end
 
   test "the failed filter excludes completed runs", %{conn: conn} do
-    _completed = run(%{bead_id: "bd-ok2", bead_title: "completed-only", status: :completed})
-    _failed = run(%{bead_id: "bd-bad2", bead_title: "failed-only", status: :failed})
+    _completed = run(%{task_id: "bd-ok2", task_title: "completed-only", status: :completed})
+    _failed = run(%{task_id: "bd-bad2", task_title: "failed-only", status: :failed})
 
     {:ok, _view, html} = live(conn, ~p"/workers/history?#{%{status: :failed}}")
 

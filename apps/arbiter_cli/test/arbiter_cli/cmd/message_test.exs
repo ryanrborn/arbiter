@@ -3,8 +3,8 @@ defmodule ArbiterCli.Cmd.MessageTest do
 
   @workspaces %{"data" => [%{"id" => "ws-1", "name" => "default", "prefix" => "bd"}]}
 
-  describe "arb message <bead-id> <text>" do
-    test "sends a direction to the bead" do
+  describe "arb message <task-id> <text>" do
+    test "sends a direction to the task" do
       stub_routes([
         {{"get", "/api/workspaces"}, {@workspaces, 200}},
         {{"post", "/api/messages"},
@@ -22,13 +22,13 @@ defmodule ArbiterCli.Cmd.MessageTest do
       assert out =~ "Direction sent to bd-xyz."
     end
 
-    test "requires text after the bead id" do
+    test "requires text after the task id" do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Message.run(["bd-xyz"]) end)
       assert code != 0
       assert err =~ "message requires text"
     end
 
-    test "requires a bead id" do
+    test "requires a task id" do
       {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Message.run([]) end)
       assert code != 0
       assert err =~ "message requires"

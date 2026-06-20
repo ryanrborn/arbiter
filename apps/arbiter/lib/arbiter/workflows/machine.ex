@@ -1,7 +1,7 @@
 defmodule Arbiter.Workflows.Machine do
   @moduledoc """
   Workflow driver. A `GenStateMachine` per workflow instance that walks a
-  `Arbiter.Workflow` module's declared steps for a specific bead,
+  `Arbiter.Workflow` module's declared steps for a specific task,
   persisting progress to the DB on every transition so a crash + restart
   resumes at the same step.
 
@@ -12,7 +12,7 @@ defmodule Arbiter.Workflows.Machine do
 
   ## Lifecycle
 
-      attach(workflow_module, bead_id, vars)  →  {:ok, id}    # row created, idle
+      attach(workflow_module, task_id, vars)  →  {:ok, id}    # row created, idle
       start(id)                               →  {:ok, pid}   # GenStateMachine alive
       advance(id_or_pid)                      →  {:ok, next_step | :completed}
       pause(id_or_pid)  / resume(id_or_pid)   →  :ok
@@ -64,7 +64,7 @@ defmodule Arbiter.Workflows.Machine do
     defstruct [
       :id,
       :workflow_module,
-      :bead_id,
+      :task_id,
       :vars,
       :current_step,
       :completed_steps,
@@ -75,15 +75,15 @@ defmodule Arbiter.Workflows.Machine do
   # ---- public API ---------------------------------------------------------
 
   @doc """
-  Attach a workflow to a bead. Creates a `MachineState` row in `:idle`
+  Attach a workflow to a task. Creates a `MachineState` row in `:idle`
   status with `current_step` set to the workflow's first step. Does *not*
   start a GenStateMachine — call `start/1` to begin executing.
 
   `vars` should be a map of the workflow's declared `vars/0` keys.
   """
   @spec attach(module(), String.t(), map()) :: {:ok, id()} | {:error, term()}
-  def attach(workflow_module, bead_id, vars \\ %{})
-      when is_atom(workflow_module) and is_binary(bead_id) and is_map(vars) do
+  def attach(workflow_module, task_id, vars \\ %{})
+      when is_atom(workflow_module) and is_binary(task_id) and is_map(vars) do
     with :ok <- validate_workflow_module(workflow_module) do
       first_step =
         case workflow_module.steps() do
@@ -95,7 +95,7 @@ defmodule Arbiter.Workflows.Machine do
 
       attrs = %{
         workflow_module: inspect(workflow_module),
-        bead_id: bead_id,
+        task_id: task_id,
         vars: stringified_vars,
         current_step: Atom.to_string(first_step),
         status: :idle,
@@ -143,7 +143,7 @@ defmodule Arbiter.Workflows.Machine do
       data = %Data{
         id: row.id,
         workflow_module: mod,
-        bead_id: row.bead_id,
+        task_id: row.task_id,
         vars: row.vars || %{},
         current_step: string_to_step(row.current_step),
         completed_steps: Enum.map(row.completed_steps || [], &String.to_existing_atom/1),

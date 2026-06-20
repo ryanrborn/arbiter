@@ -3,7 +3,7 @@
 **Status:** design proposal (this is the spike deliverable for #254; not yet
 approved)
 **Date:** 2026-06-15
-**Bead:** bd-b2eqn5 · **Tracker:** github:254
+**Task:** bd-b2eqn5 · **Tracker:** github:254
 **Author:** acolyte
 **Builds on:** the pluggable agent harness (`docs/agent-harness-design.md`,
 bd-c6xf18) and acolyte security (`docs/acolyte-security.md`, bd-9u10op) — the
@@ -12,7 +12,7 @@ MCP work reuses both seams.
 ## TL;DR
 
 Stand up **`Arbiter.MCP`**, a single in-process Model Context Protocol server
-that exposes Arbiter's domain operations (beads, convoys, dependencies,
+that exposes Arbiter's domain operations (tasks, convoys, dependencies,
 messages, polecats, workspace) as schema-backed MCP tools, and connect agent
 sessions to it. Capability is a **scope token** presented at connection time,
 not a code fork. This replaces the model's current route back into Arbiter —
@@ -51,8 +51,8 @@ The issue's framing is GT-era. Two corrections matter for the design:
   structured path back into Arbiter today is shelling out to the **`arb`
   escript**, which talks to the Phoenix REST API at `http://127.0.0.1:4848`
   (`apps/arbiter_cli/lib/arbiter_cli/client.ex`, base URL + `ARB_HOST`). The
-  work prompt literally instructs the agent to run `arb inbox <bead>`,
-  `arb message <bead> <text>`, and `arb issue update <bead> --qa-notes …`
+  work prompt literally instructs the agent to run `arb inbox <task>`,
+  `arb message <task> <text>`, and `arb issue update <task> --qa-notes …`
   (`apps/arbiter/lib/arbiter/polecat/sling.ex`, `base_work_prompt/1`). The model
   constructs those argv strings and parses `--json`; the tool surface is
   discoverable only via `--help`. (`bd2` in this repo is just a test-seam prefix
@@ -65,11 +65,11 @@ The issue's framing is GT-era. Two corrections matter for the design:
 
 An MCP server fixes the agent-facing half at both tiers:
 
-- **Polecats** get a scoped, agent-native way to read their own bead, check
+- **Polecats** get a scoped, agent-native way to read their own task, check
   their mailbox, report progress, and write completion notes — from inside the
   agent loop, as typed tool calls instead of stringly-typed CLI guessing.
 - **Coordinator-scope clients** (operator tooling now; a Mayor agent later) get
-  validated `bead_create` / `polecat_sling` / convoy mutations with structured
+  validated `task_create` / `polecat_sling` / convoy mutations with structured
   returns instead of CLI argv.
 
 Because MCP is the write-once/use-across-agents abstraction, the tool
@@ -101,7 +101,7 @@ is no internal HTTP hop and no second source of truth.
    └───────────────┬────────────────────────────┘
                    │ Ash.read/create/update (in-process)
                    ▼
-   Arbiter.Beads / Messages / Polecats / Usage   (Ash domains)
+   Arbiter.Tasks / Messages / Polecats / Usage   (Ash domains)
 ```
 
 ### 2.1 Transport: Streamable HTTP
@@ -141,18 +141,18 @@ JSON. `R` = readable, `W` = writable.
 
 | Tool | Tier | R/W | Backs onto (Ash action / domain fn) |
 |---|---|---|---|
-| `bead_show` | polecat, coordinator | R | `Ash.get(Issue, id)` |
-| `bead_list` | coordinator | R | `Ash.read(Issue)` + filters |
-| `bead_ready` | coordinator | R | `Issue.ready/1` |
-| `bead_update_progress` | polecat (own bead) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes only |
-| `bead_create` | coordinator | W | `Ash.create(Issue, …)` |
-| `bead_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
-| `bead_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
-| `bead_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
+| `task_show` | polecat, coordinator | R | `Ash.get(Issue, id)` |
+| `task_list` | coordinator | R | `Ash.read(Issue)` + filters |
+| `task_ready` | coordinator | R | `Issue.ready/1` |
+| `task_update_progress` | polecat (own task) | W | `Ash.update(issue, …, action: :update)` — notes / qa_notes / deployment_notes only |
+| `task_create` | coordinator | W | `Ash.create(Issue, …)` |
+| `task_update` | coordinator | W | `Ash.update(issue, …, action: :update)` (status/priority/…) |
+| `task_close` | coordinator | W | `Ash.update(issue, %{reason}, action: :close)` |
+| `task_reopen` | coordinator | W | `Ash.update(issue, …, action: :reopen)` |
 | `dep_add` / `dep_remove` | coordinator | W | `Ash.create/destroy(Dependency)` |
 | `convoy_status` | polecat (own), coordinator | R | `Ash.get(Convoy, id)` + calcs |
 | `convoy_list` / `convoy_create` / `convoy_add_member` / `convoy_close` | coordinator | R/W | `Convoy` actions / `ConvoyMembership.:add` |
-| `inbox_check` | polecat (own bead), coordinator | R | `Messages.inbox/2` + `mark_read` |
+| `inbox_check` | polecat (own task), coordinator | R | `Messages.inbox/2` + `mark_read` |
 | `notify_list` | polecat (own ws), coordinator | R | `Messages.recent_notifications/2` |
 | `message_send` | polecat, coordinator | W | `Messages.send_mail/1` — coordinator→direction, polecat→flag-to-sibling |
 | `polecat_list` | coordinator | R | `Ash.read(Polecats.Run)` / live snapshot |
@@ -160,8 +160,8 @@ JSON. `R` = readable, `W` = writable.
 | `polecat_resume` | **coordinator only** (`can_sling`) | W | `Arbiter.Polecat.Sling.resume/2` |
 | `polecat_review` | **coordinator only** (`can_sling`) | W | `Arbiter.Polecat.Sling.sling/2` (`review: true`) |
 | `polecat_stop` | coordinator | W | `Arbiter.Polecat.stop/2` |
-| `tracker_claim` | coordinator | W | `Arbiter.Beads.Claim.claim/3` |
-| `tracker_sync` | coordinator | W | `Arbiter.Beads.Claim.plan/1` + `apply_plan/2` |
+| `tracker_claim` | coordinator | W | `Arbiter.Tasks.Claim.claim/3` |
+| `tracker_sync` | coordinator | W | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
 | `workspace_show` | polecat, coordinator | R | `Ash.get(Workspace, id)` (config/vernacular/security posture) |
 | `workspace_list` | coordinator | R | `Ash.read(Workspace)` — id/name/prefix/tracker only |
 | `usage_summarize` | coordinator | R | `Arbiter.Usage.summarize/1` |
@@ -173,7 +173,7 @@ Notes:
   `polecat_message`; the live build shipped only `polecat_message`. These are
   reconciled to one tool, `message_send`, available to both tiers: a coordinator
   sends a `:direction` from `"coordinator"`; a polecat raises a `:flag` from its
-  own bound bead to a sibling (the documented "flags to siblings" capability).
+  own bound task to a sibling (the documented "flags to siblings" capability).
   The sender identity is set from the scope, never the client, and pinned to the
   scope's workspace.
 - **The acolyte-dispatch tools (`polecat_sling` / `polecat_resume` /
@@ -187,12 +187,12 @@ Notes:
   posture stay behind `workspace_show`, which only ever returns the bound
   workspace.
 
-- **`bead_update_progress` is the polecat's only write.** It is a narrowed
+- **`task_update_progress` is the polecat's only write.** It is a narrowed
   alias over `Issue.:update` that accepts *only* `notes`, `qa_notes`,
-  `deployment_notes` for the polecat's **own** bound bead — the structured
+  `deployment_notes` for the polecat's **own** bound task — the structured
   replacement for today's `arb issue update <id> --qa-notes …` step the work
   prompt requires before `arb done`. A polecat cannot flip status, reprioritize,
-  or touch another bead through it.
+  or touch another task through it.
 - **`arb done` stays a stdout sentinel, not a tool.** Completion detection is a
   regex on the agent's stdout (`ClaudeSession`, `~r/\barb done\b/` against
   assistant text only). It is not an Arbiter API call and does not become an MCP
@@ -234,7 +234,7 @@ is a design decision, not an oversight:
   tiers.
 - **Aggregate UX — `prime`.** A convenience command that bundles several reads
   into one human-oriented briefing. Reconstructable from the granular read tools
-  (`bead_show`, `inbox_check`, `convoy_status`, `notify_list`, …), so it adds a
+  (`task_show`, `inbox_check`, `convoy_status`, `notify_list`, …), so it adds a
   second, divergent code path for no new capability. Agents compose the granular
   tools instead.
 
@@ -258,7 +258,7 @@ the agent.
 %Arbiter.MCP.Scope{
   tier:         :polecat | :coordinator,
   workspace_id: "uuid",          # every call is filtered to this workspace
-  bead_id:      "bd-…" | nil,    # polecat tier: the one bead it may read/progress
+  task_id:      "bd-…" | nil,    # polecat tier: the one task it may read/progress
   rig:          "shipyard" | nil,# polecat tier: its rig
   can_sling:    false | true     # coordinator-only; the recursion guardrail
 }
@@ -266,10 +266,10 @@ the agent.
 
 | Tier | Reads | Writes | Sling |
 |---|---|---|---|
-| `polecat` | its own bead, its own convoy, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | **never** |
-| `coordinator` | across the workspace | create/update/close beads, deps, convoys; sling | yes |
+| `polecat` | its own task, its own convoy, its mailbox, its workspace config | progress/qa/deployment notes on **its own task**; flags to siblings | **never** |
+| `coordinator` | across the workspace | create/update/close tasks, deps, convoys; sling | yes |
 
-The `polecat` tier is deliberately narrow — it should not list arbitrary beads,
+The `polecat` tier is deliberately narrow — it should not list arbitrary tasks,
 sling, or touch another convoy's state. The MCP layer enforces this; we do not
 rely on prompt discipline. (There is no Ash policy/actor framework in the domain
 today — workspace isolation is done by filtering `workspace_id` at query time —
@@ -280,7 +280,7 @@ so the scope plug is where capability lives.)
 A signed, expiring token (recommend `Phoenix.Token` — already available, no new
 dep — or a JWT if we later need cross-service verification) carrying the claims
 above. It is minted **per spawn** by the sling path (see §5) with the polecat's
-bead/rig/workspace baked in, and validated on every MCP request by the scope
+task/rig/workspace baked in, and validated on every MCP request by the scope
 plug. Header transport: `Authorization: Bearer <token>` (what Claude Code,
 Gemini, and Codex all send for HTTP MCP servers). Reject invalid/expired tokens
 with HTTP 401; reject in-scope-but-not-permitted calls with an MCP error
@@ -332,7 +332,7 @@ The injection point already exists. For Claude, the seam is one of:
   (`apps/arbiter/lib/arbiter/agents/claude.ex`, `default_argv/2`);
 - the token is minted in `Arbiter.Polecat.Sling`
   (`apps/arbiter/lib/arbiter/polecat/sling.ex`, where `build_agent_session_opts/4`
-  already assembles per-spawn opts) with the bead/rig/workspace claims, and
+  already assembles per-spawn opts) with the task/rig/workspace claims, and
   threaded to the adapter.
 
 This mirrors how the security policy is already resolved per dispatch and mapped
@@ -351,8 +351,8 @@ for the first cut:
 
 - **MCP supplements `arb` for polecats; it does not yet replace it.** A polecat
   still needs Bash for git, tests, and `arb done` (the stdout sentinel). We add
-  MCP tools for the structured ops (`bead_show`, `inbox_check`,
-  `bead_update_progress`, `message_send`) and **steer the generated `CLAUDE.md`
+  MCP tools for the structured ops (`task_show`, `inbox_check`,
+  `task_update_progress`, `message_send`) and **steer the generated `CLAUDE.md`
   / work prompt toward the tools** for those ops, while leaving `arb` available.
   We do not exclude Bash (it's load-bearing for the actual work).
 - **Re-evaluate replacing `arb` for coordinator-scope clients** once a Mayor
@@ -390,16 +390,16 @@ Each phase is independently shippable.
 ### Phase 1 — read tools, Claude Code, two tiers
 - `Arbiter.MCP` mounted on :4848 via Streamable HTTP (`anubis_mcp` or Plug).
 - `Arbiter.MCP.Scope` token mint (in `Sling`) + validate (plug); two tiers.
-- Read tools: `bead_show`, `bead_ready`, `convoy_status`, `inbox_check`,
-  `workspace_show`; plus the one narrowed write `bead_update_progress`.
+- Read tools: `task_show`, `task_ready`, `convoy_status`, `inbox_check`,
+  `workspace_show`; plus the one narrowed write `task_update_progress`.
 - `Arbiter.MCP.AgentConfig` + Claude `.mcp.json` adapter, wired into the spawn.
 - Steer the generated `CLAUDE.md` toward the tools for those ops.
-- Exit criteria: a slung Claude polecat reads its bead and writes its completion
+- Exit criteria: a slung Claude polecat reads its task and writes its completion
   notes via MCP tools; existing suite green; an out-of-scope call (e.g. a
-  polecat token calling `bead_list`) is rejected with a JSON-RPC error.
+  polecat token calling `task_list`) is rejected with a JSON-RPC error.
 
 ### Phase 2 — mutating tools behind coordinator scope
-- `bead_create` / `bead_update` / `bead_close` / `bead_reopen`, `dep_*`,
+- `task_create` / `task_update` / `task_close` / `task_reopen`, `dep_*`,
   `convoy_*`, the `polecat_*` lifecycle family (`polecat_sling` /
   `polecat_resume` / `polecat_review` / `polecat_stop` / `polecat_list`),
   `message_send`, `notify_list`, the `tracker_*` bridge (`tracker_claim` /
