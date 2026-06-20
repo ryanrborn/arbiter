@@ -903,7 +903,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
               <label class="text-sm font-medium flex items-center gap-1.5">
                 <.icon name="hero-paper-airplane" class="size-4 text-base-content/60" />
                 Send direction to <code class="font-mono">{@task_id}</code>
-                (from admiral)
+                (from coordinator)
               </label>
               <textarea
                 name="body"
