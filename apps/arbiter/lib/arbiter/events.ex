@@ -35,7 +35,13 @@ defmodule Arbiter.Events do
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics
 
-  @doc "The PubSub topic for a workspace's event stream."
+  @global_topic "events"
+
+  @doc """
+  The PubSub topic for a workspace's event stream.
+  `nil` returns the global topic, which receives a copy of every broadcast.
+  """
+  def pubsub_topic(nil), do: @global_topic
   def pubsub_topic(workspace_id) when is_binary(workspace_id), do: "events:" <> workspace_id
 
   @doc """
@@ -43,7 +49,8 @@ defmodule Arbiter.Events do
 
   `event_topic` is one of the valid topic strings (e.g. `"worker_failed"`).
   `payload` is merged with `topic` and `at` (ISO-8601 timestamp) before broadcasting.
-  Best-effort: PubSub failures are swallowed.
+  Also fans out to the global topic so workspace-agnostic coordinator connections
+  receive all events. Best-effort: PubSub failures are swallowed.
   """
   def broadcast(workspace_id, event_topic, payload)
       when is_binary(workspace_id) and is_binary(event_topic) and is_map(payload) do
@@ -53,6 +60,7 @@ defmodule Arbiter.Events do
       |> Map.put(:at, DateTime.utc_now() |> DateTime.to_iso8601())
 
     Phoenix.PubSub.broadcast(Arbiter.PubSub, pubsub_topic(workspace_id), {:event, event})
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, @global_topic, {:event, event})
     :ok
   rescue
     e ->
