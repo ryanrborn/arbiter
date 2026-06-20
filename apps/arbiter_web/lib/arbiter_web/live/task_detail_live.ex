@@ -17,6 +17,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Run
   require Ash.Query
+  require Logger
 
   @tasks_topic "tasks"
   @workers_topic "workers"
@@ -182,7 +183,9 @@ defmodule ArbiterWeb.TaskDetailLive do
         |> Ash.Query.sort(started_at: :desc)
         |> Ash.read!()
       rescue
-        _ -> []
+        e ->
+          Logger.warning("Failed to load worker runs: #{inspect(e)}")
+          []
       end
 
     usage_by_run =
@@ -194,15 +197,19 @@ defmodule ArbiterWeb.TaskDetailLive do
         try do
           UsageEvent
           |> Ash.Query.filter(worker_run_id in ^run_ids)
+          |> Ash.Query.sort(inserted_at: :asc)
           |> Ash.read!()
           |> Enum.group_by(& &1.worker_run_id)
           |> Map.new(fn {run_id, events} ->
-            total_cost = events |> Enum.map(& &1.cost_usd || 0.0) |> Enum.sum()
+            costs = events |> Enum.map(& &1.cost_usd) |> Enum.reject(&is_nil/1)
+            total_cost = if costs == [], do: nil, else: Enum.sum(costs)
             representative = List.first(events)
             {run_id, %{representative | cost_usd: total_cost}}
           end)
         rescue
-          _ -> %{}
+          e ->
+            Logger.warning("Failed to load usage events for worker runs: #{inspect(e)}")
+            %{}
         end
       end
 
