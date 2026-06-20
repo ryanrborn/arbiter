@@ -4,6 +4,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
       arb worker list             — list active workers with status + step
       arb worker show <task-id>   — full snapshot incl. recent Claude output
+      arb worker runs <task-id>   — list every historical run for the task
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
       arb worker review <task-id> [--repo <repo>] [--model <name>] — spawn a review worker
@@ -13,10 +14,13 @@ defmodule ArbiterCli.Cmd.Worker do
   `show` reports a live worker's full snapshot when one is running. When no
   live worker exists for the task it falls back to the most recent historical
   run (status, started/completed times, failure reason, and any retained
-  output), so finished or exited runs stay inspectable. `show`'s output is the
-  bounded UI tail (capped); `log` returns the **full, uncapped** transcript of
-  the task's most recent run from the durable on-disk store — the audit source
-  of record, retaining every line however long the run.
+  output), so finished or exited runs stay inspectable. `runs` lists *every*
+  recorded run for the task (main, review, and impl workers) newest-first —
+  use it to see how many times a task was worked, by whom, and the outcome of
+  each. `show`'s output is the bounded UI tail (capped); `log` returns the
+  **full, uncapped** transcript of the task's most recent run from the durable
+  on-disk store — the audit source of record, retaining every line however
+  long the run.
 
   `review` spawns a worker specialized for review tasks, optionally overriding
   the repo and model.
@@ -34,18 +38,49 @@ defmodule ArbiterCli.Cmd.Worker do
       rest = Output.drop_json(argv)
 
       case rest do
-        ["list" | _] -> list(mode)
-        ["ls" | _] -> list(mode)
-        ["show", task_id | _] -> show(task_id, mode)
-        ["show" | _] -> Output.die("worker show requires: <task-id>")
-        ["log", task_id | _] -> log(task_id, mode)
-        ["log" | _] -> Output.die("worker log requires: <task-id>")
-        ["stop", task_id | _] -> stop(task_id, mode)
-        ["stop" | _] -> Output.die("worker stop requires: <task-id>")
-        ["review", task_id | opts] -> review(task_id, opts, mode)
-        ["review" | _] -> Output.die("worker review requires: <task-id>")
-        [] -> Output.die("worker requires a subcommand: `list`, `show`, `log`, `stop`, or `review`")
-        [unknown | _] -> Output.die("unknown worker subcommand: #{unknown}")
+        ["list" | _] ->
+          list(mode)
+
+        ["ls" | _] ->
+          list(mode)
+
+        ["show", task_id | _] ->
+          show(task_id, mode)
+
+        ["show" | _] ->
+          Output.die("worker show requires: <task-id>")
+
+        ["runs", task_id | _] ->
+          runs(task_id, mode)
+
+        ["runs" | _] ->
+          Output.die("worker runs requires: <task-id>")
+
+        ["log", task_id | _] ->
+          log(task_id, mode)
+
+        ["log" | _] ->
+          Output.die("worker log requires: <task-id>")
+
+        ["stop", task_id | _] ->
+          stop(task_id, mode)
+
+        ["stop" | _] ->
+          Output.die("worker stop requires: <task-id>")
+
+        ["review", task_id | opts] ->
+          review(task_id, opts, mode)
+
+        ["review" | _] ->
+          Output.die("worker review requires: <task-id>")
+
+        [] ->
+          Output.die(
+            "worker requires a subcommand: `list`, `show`, `runs`, `log`, `stop`, or `review`"
+          )
+
+        [unknown | _] ->
+          Output.die("unknown worker subcommand: #{unknown}")
       end
     end
   end
@@ -61,6 +96,14 @@ defmodule ArbiterCli.Cmd.Worker do
   defp show(task_id, mode) do
     case Client.get("/api/workers/#{task_id}") do
       {:ok, snap} -> emit_show(snap, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp runs(task_id, mode) do
+    case Client.get("/api/workers/history?task_id=#{URI.encode_www_form(task_id)}") do
+      {:ok, %{"data" => list}} -> emit_runs(task_id, list, mode)
+      {:ok, _} -> emit_runs(task_id, [], mode)
       {:error, err} -> Output.die(err)
     end
   end
@@ -107,6 +150,7 @@ defmodule ArbiterCli.Cmd.Worker do
     end
 
     IO.puts("Issue:       #{snap["task_id"]}")
+    if snap["worker_type"], do: IO.puts("Type:       #{snap["worker_type"]}")
     IO.puts("Status:     #{snap["status"]}")
     # A claude-driven worker has no ticking workflow step; show the live
     # activity derived from its stream instead of a frozen step. See bd-c919xj.
@@ -131,6 +175,28 @@ defmodule ArbiterCli.Cmd.Worker do
         IO.puts("\nOutput (#{length(lines)} lines, oldest first):")
         Enum.each(lines, fn line -> IO.puts("  | #{line}") end)
     end
+  end
+
+  defp emit_runs(_task_id, list, :json), do: IO.puts(Jason.encode!(%{"data" => list}))
+
+  defp emit_runs(_task_id, [], :text) do
+    IO.puts("(no historical runs recorded for this task)")
+  end
+
+  defp emit_runs(task_id, list, :text) do
+    IO.puts("Historical runs for #{task_id} (#{length(list)}, newest first):")
+
+    Enum.each(list, fn r ->
+      model_part = if r["model"], do: "  model=#{r["model"]}", else: ""
+      completed = r["completed_at"] || "—"
+
+      IO.puts(
+        "  #{r["id"]}  type=#{r["worker_type"]}  status=#{r["status"]}  " <>
+          "started=#{r["started_at"]}  completed=#{completed}#{model_part}"
+      )
+
+      if r["failure_reason"], do: IO.puts("      failure: #{r["failure_reason"]}")
+    end)
   end
 
   defp emit_log(data, :json), do: IO.puts(Jason.encode!(data))

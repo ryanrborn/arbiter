@@ -109,6 +109,7 @@ defmodule ArbiterWeb.RunIndexLive do
                   <tr class="text-base-content/60">
                     <th>{String.capitalize(@issue_label)}</th>
                     <th>Title</th>
+                    <th>Type</th>
                     <th>Status</th>
                     <th>Started</th>
                     <th class="text-right">Duration</th>
@@ -123,6 +124,9 @@ defmodule ArbiterWeb.RunIndexLive do
                     </td>
                     <td class="text-xs max-w-xs truncate" title={r.task_title || ""}>
                       {r.task_title || "—"}
+                    </td>
+                    <td>
+                      <span class="badge badge-sm badge-ghost">{r.worker_type}</span>
                     </td>
                     <td>
                       <span class={["badge badge-sm", run_status_class(r.status)]}>{r.status}</span>
