@@ -80,6 +80,66 @@ defmodule ArbiterCli.Cmd.WorkerTest do
     end
   end
 
+  describe "worker runs" do
+    test "lists historical runs newest-first with type, status, and model" do
+      stub_get("/api/workers/history", %{
+        "data" => [
+          %{
+            "id" => "run-2",
+            "task_id" => "bd-010",
+            "worker_type" => "review",
+            "status" => "completed",
+            "model" => "claude-opus-4-8",
+            "started_at" => "2026-05-20T19:10:00Z",
+            "completed_at" => "2026-05-20T19:12:00Z"
+          },
+          %{
+            "id" => "run-1",
+            "task_id" => "bd-010",
+            "worker_type" => "main",
+            "status" => "failed",
+            "started_at" => "2026-05-20T19:00:00Z",
+            "completed_at" => "2026-05-20T19:05:00Z",
+            "failure_reason" => "exit code 2"
+          }
+        ]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-010"]) end)
+      assert exit_code == 0
+      assert out =~ "Historical runs for bd-010 (2"
+      assert out =~ "type=review"
+      assert out =~ "type=main"
+      assert out =~ "model=claude-opus-4-8"
+      assert out =~ "failure: exit code 2"
+      # Newest-first ordering is preserved from the API: review run before main.
+      assert :binary.match(out, "run-2") < :binary.match(out, "run-1")
+    end
+
+    test "reports when no historical runs exist" do
+      stub_get("/api/workers/history", %{"data" => []})
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-011"]) end)
+      assert exit_code == 0
+      assert out =~ "no historical runs"
+    end
+
+    test "--json forwards the full list" do
+      stub_get("/api/workers/history", %{
+        "data" => [%{"id" => "run-9", "task_id" => "bd-012", "worker_type" => "main"}]
+      })
+
+      {out, _err, exit_code} = capture(fn -> Worker.run(["runs", "bd-012", "--json"]) end)
+      assert exit_code == 0
+      assert {:ok, %{"data" => [%{"id" => "run-9"}]}} = Jason.decode(String.trim(out))
+    end
+
+    test "missing task_id returns a friendly error" do
+      {_out, _err, exit_code} = capture(fn -> Worker.run(["runs"]) end)
+      assert exit_code != 0
+    end
+  end
+
   describe "worker list" do
     test "renders a table of active workers" do
       stub_get("/api/workers", %{
