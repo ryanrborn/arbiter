@@ -6,7 +6,7 @@ defmodule Arbiter.Agents do
   `Arbiter.Agents.Agent` adapter, and hands back the module. Callers should
   resolve through this dispatcher rather than referencing
   `Arbiter.Agents.Claude` directly — keeps adapter resolution centralized
-  so workspace defaults and per-bead overrides behave consistently.
+  so workspace defaults and per-task overrides behave consistently.
 
   Mirrors `Arbiter.Trackers` and `Arbiter.Mergers`. Phase B of the harness
   design (`docs/agent-harness-design.md`) intentionally ships only the
@@ -33,8 +33,8 @@ defmodule Arbiter.Agents do
   alias Arbiter.Agents.Claude
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.ProviderPool
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   @type adapter :: module()
 
@@ -70,15 +70,15 @@ defmodule Arbiter.Agents do
   end
 
   @doc """
-  Returns the adapter module for a bead.
+  Returns the adapter module for a task.
 
-  Today there's no per-bead override (no `Issue.agent_type` column yet —
-  see `docs/agent-harness-design.md` §4.2 Stage 2). For now the bead
-  inherits the workspace's adapter. The signature accepts the bead +
-  workspace so callers don't change when the per-bead override lands.
+  Today there's no per-task override (no `Issue.agent_type` column yet —
+  see `docs/agent-harness-design.md` §4.2 Stage 2). For now the task
+  inherits the workspace's adapter. The signature accepts the task +
+  workspace so callers don't change when the per-task override lands.
   """
-  @spec for_bead(Issue.t(), Workspace.t() | nil) :: adapter
-  def for_bead(%Issue{}, workspace), do: for_workspace(workspace)
+  @spec for_task(Issue.t(), Workspace.t() | nil) :: adapter
+  def for_task(%Issue{}, workspace), do: for_workspace(workspace)
 
   @doc """
   Returns the adapter module for an agent type atom.

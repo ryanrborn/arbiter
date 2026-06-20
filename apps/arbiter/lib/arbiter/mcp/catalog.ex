@@ -7,28 +7,28 @@ defmodule Arbiter.MCP.Catalog do
 
   Tier-level visibility is the **only** capability decision made here: a tool is
   visible to — and callable by — a scope iff the scope's tier is in the tool's
-  `:tiers`. Data-level rules (own-bead, workspace isolation) live in the handlers
+  `:tiers`. Data-level rules (own-task, workspace isolation) live in the handlers
   (`Arbiter.MCP.Tools`) via `Arbiter.MCP.Scope`.
 
   ## Phase 1 catalog
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `bead_show` | worker, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
-  | `bead_ready` | coordinator | `Issue.ready/1` |
+  | `task_show` | worker, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
+  | `task_ready` | coordinator | `Issue.ready/1` |
   | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (Admiral mailbox) |
   | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
-  | `bead_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
+  | `task_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
   ## Phase 2 catalog (coordinator tools + the both-tier `message_send`)
 
   | Tool | Tiers | Backs onto |
   |---|---|---|
-  | `bead_create` | coordinator | `Ash.create(Issue, …)` |
-  | `bead_update` | coordinator | `Ash.update(issue, …, action: :update)` |
-  | `bead_close` | coordinator | `Ash.update(issue, …, action: :close)` |
-  | `bead_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
+  | `task_create` | coordinator | `Ash.create(Issue, …)` |
+  | `task_update` | coordinator | `Ash.update(issue, …, action: :update)` |
+  | `task_close` | coordinator | `Ash.update(issue, …, action: :close)` |
+  | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
   | `dep_add` | coordinator | `Ash.create(Dependency, …)` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
@@ -38,9 +38,9 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
-  | `bead_list` | coordinator | `Ash.read(Issue, …)` with filters |
-  | `tracker_claim` | coordinator | `Arbiter.Beads.Claim.claim/3` |
-  | `tracker_sync` | coordinator | `Arbiter.Beads.Claim.plan/1` + `apply_plan/2` |
+  | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
+  | `tracker_claim` | coordinator | `Arbiter.Tasks.Claim.claim/3` |
+  | `tracker_sync` | coordinator | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
   | `workspace_list` | coordinator | `Ash.read(Workspace)` (summary fields) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   """
@@ -72,13 +72,13 @@ defmodule Arbiter.MCP.Catalog do
   # The optional `workspace` field every workspace-resolving tool advertises.
   # Coordinator tokens are workspace-agnostic (one token, any workspace); naming
   # a workspace here targets it explicitly. Omitting it resolves the workspace
-  # from the referenced entity (e.g. a bead's own workspace) or the installation
+  # from the referenced entity (e.g. a task's own workspace) or the installation
   # default. A workspace-bound scope (a worker) may only ever name its own.
   @workspace_field %{
     "type" => "string",
     "description" =>
       "Workspace name or id to operate in (optional). Coordinator tokens are " <>
-        "workspace-agnostic; omit to resolve from the referenced bead or the " <>
+        "workspace-agnostic; omit to resolve from the referenced task or the " <>
         "installation default. A worker may only ever name its own workspace."
   }
 
@@ -88,45 +88,45 @@ defmodule Arbiter.MCP.Catalog do
 
   @raw_tools [
     %{
-      name: "bead_show",
+      name: "task_show",
       tiers: @both,
       description:
-        "Read one bead (id, title, status, notes, tracker, `auto_close`, and child-progress " <>
+        "Read one task (id, title, status, notes, tracker, `auto_close`, and child-progress " <>
           "`child_closed`/`child_total` over its `parent_of` children, …). A worker reads its " <>
-          "own bead (the `id` argument may be omitted); a coordinator must pass the `id`.",
+          "own task (the `id` argument may be omitted); a coordinator must pass the `id`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "id" => %{
             "type" => "string",
             "description" =>
-              "Bead id (e.g. \"bd-dem49g\"). Optional for a worker (defaults to its own bead)."
+              "Task id (e.g. \"bd-dem49g\"). Optional for a worker (defaults to its own task)."
           }
         },
         "additionalProperties" => false
       },
-      handler: &Tools.bead_show/2
+      handler: &Tools.task_show/2
     },
     %{
-      name: "bead_ready",
+      name: "task_ready",
       tiers: [:coordinator],
-      description: "List ready (open, unblocked) beads in the workspace.",
+      description: "List ready (open, unblocked) tasks in the workspace.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
-      handler: &Tools.bead_ready/2
+      handler: &Tools.task_ready/2
     },
     %{
       name: "inbox_check",
       tiers: @both,
       description:
-        "Read (and mark read) the unread mailbox for a bead — the structured replacement for " <>
-          "`arb inbox`. A worker checks its own bead; a coordinator passes `bead_id`.",
+        "Read (and mark read) the unread mailbox for a task — the structured replacement for " <>
+          "`arb inbox`. A worker checks its own task; a coordinator passes `task_id`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{
+          "task_id" => %{
             "type" => "string",
             "description" =>
-              "Recipient bead id. Optional for a worker (defaults to its own bead)."
+              "Recipient task id. Optional for a worker (defaults to its own task)."
           }
         },
         "additionalProperties" => false
@@ -164,18 +164,18 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.workspace_show/2
     },
     %{
-      name: "bead_update_progress",
+      name: "task_update_progress",
       tiers: @both,
       description:
-        "Record progress / completion notes on a bead — `notes`, `qa_notes`, `deployment_notes`, " <>
+        "Record progress / completion notes on a task — `notes`, `qa_notes`, `deployment_notes`, " <>
           "`pr_body` only (the structured replacement for `arb issue update --qa-notes …`). A " <>
-          "worker may only update its own bead and cannot change status or priority.",
+          "worker may only update its own task and cannot change status or priority.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "id" => %{
             "type" => "string",
-            "description" => "Bead id. Optional for a worker (defaults to its own bead)."
+            "description" => "Task id. Optional for a worker (defaults to its own task)."
           },
           "notes" => %{"type" => "string", "description" => "Free-form progress / working notes."},
           "qa_notes" => %{"type" => "string", "description" => "What QA should verify."},
@@ -187,26 +187,26 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "The worker-authored PR/MR description (Summary / Test plan / References) the " <>
-                "MergeQueue opens the bead's single canonical PR with."
+                "MergeQueue opens the task's single canonical PR with."
           }
         },
         "additionalProperties" => false
       },
-      handler: &Tools.bead_update_progress/2
+      handler: &Tools.task_update_progress/2
     },
 
     # ---- Phase 2: coordinator-only mutating tools ----
     %{
-      name: "bead_create",
+      name: "task_create",
       tiers: @coordinator,
       description:
-        "Create a bead in the workspace. `title` is required; optional `description`, " <>
+        "Create a task in the workspace. `title` is required; optional `description`, " <>
           "`acceptance`, `priority`, `difficulty`, `issue_type`, `auto_close`, `assignee`, " <>
-          "`tracker_type`, …. The bead is always created in the coordinator's own workspace.",
+          "`tracker_type`, …. The task is always created in the coordinator's own workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "title" => %{"type" => "string", "description" => "Bead title (required)."},
+          "title" => %{"type" => "string", "description" => "Task title (required)."},
           "description" => %{"type" => "string", "description" => "Markdown body."},
           "acceptance" => %{"type" => "string", "description" => "Markdown acceptance criteria."},
           "notes" => %{"type" => "string"},
@@ -224,7 +224,7 @@ defmodule Arbiter.MCP.Catalog do
           "auto_close" => %{
             "type" => "boolean",
             "description" =>
-              "When true, this bead auto-closes once all its `parent_of` children are closed " <>
+              "When true, this task auto-closes once all its `parent_of` children are closed " <>
                 "(≥1 child). Default false."
           },
           "assignee" => %{"type" => "string"},
@@ -238,18 +238,18 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["title"],
         "additionalProperties" => false
       },
-      handler: &Tools.bead_create/2
+      handler: &Tools.task_create/2
     },
     %{
-      name: "bead_update",
+      name: "task_update",
       tiers: @coordinator,
       description:
-        "Update a bead in the workspace (status / priority / title / …). To close a bead use " <>
-          "`bead_close`; the `closed` status is rejected here.",
+        "Update a task in the workspace (status / priority / title / …). To close a task use " <>
+          "`task_close`; the `closed` status is rejected here.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Bead id (required)."},
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
           "title" => %{"type" => "string"},
           "description" => %{"type" => "string"},
           "acceptance" => %{"type" => "string"},
@@ -262,7 +262,7 @@ defmodule Arbiter.MCP.Catalog do
           "issue_type" => %{"type" => "string"},
           "auto_close" => %{
             "type" => "boolean",
-            "description" => "Auto-close this bead when all its `parent_of` children are closed."
+            "description" => "Auto-close this task when all its `parent_of` children are closed."
           },
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{"type" => "string"},
@@ -273,18 +273,18 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["id"],
         "additionalProperties" => false
       },
-      handler: &Tools.bead_update/2
+      handler: &Tools.task_update/2
     },
     %{
-      name: "bead_close",
+      name: "task_close",
       tiers: @coordinator,
       description:
-        "Close a bead in the workspace. Optional `reason`; `close_upstream: true` also closes the " <>
+        "Close a task in the workspace. Optional `reason`; `close_upstream: true` also closes the " <>
           "linked external tracker issue.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Bead id (required)."},
+          "id" => %{"type" => "string", "description" => "Task id (required)."},
           "reason" => %{"type" => "string"},
           "close_upstream" => %{
             "type" => "boolean",
@@ -294,37 +294,37 @@ defmodule Arbiter.MCP.Catalog do
         "required" => ["id"],
         "additionalProperties" => false
       },
-      handler: &Tools.bead_close/2
+      handler: &Tools.task_close/2
     },
     %{
-      name: "bead_reopen",
+      name: "task_reopen",
       tiers: @coordinator,
       description:
-        "Reopen a closed bead (clears closed_at, returns it to the ready queue, and best-effort " <>
-          "reopens the linked tracker issue). The only supported path out of `closed` — `bead_update` " <>
+        "Reopen a closed task (clears closed_at, returns it to the ready queue, and best-effort " <>
+          "reopens the linked tracker issue). The only supported path out of `closed` — `task_update` " <>
           "rejects that transition.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "id" => %{"type" => "string", "description" => "Bead id (required)."}
+          "id" => %{"type" => "string", "description" => "Task id (required)."}
         },
         "required" => ["id"],
         "additionalProperties" => false
       },
-      handler: &Tools.bead_reopen/2
+      handler: &Tools.task_reopen/2
     },
     %{
       name: "dep_add",
       tiers: @coordinator,
       description:
-        "Add a dependency edge between two beads in the workspace. `type` is one of blocks, " <>
+        "Add a dependency edge between two tasks in the workspace. `type` is one of blocks, " <>
           "depends_on, relates_to, discovered_from, parent_of. Use `parent_of` (from = parent, " <>
-          "to = child) to attach a child to a parent bead — that is how grouping/epics work; the " <>
+          "to = child) to attach a child to a parent task — that is how grouping/epics work; the " <>
           "parent then rolls up child progress and can auto-close.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "from_issue_id" => %{"type" => "string", "description" => "The dependent bead."},
+          "from_issue_id" => %{"type" => "string", "description" => "The dependent task."},
           "to_issue_id" => %{"type" => "string", "description" => "The dependency target."},
           "type" => %{"type" => "string", "description" => "Edge type (required)."},
           "notes" => %{"type" => "string"},
@@ -339,7 +339,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "dep_remove",
       tiers: @coordinator,
       description:
-        "Remove dependency edges between two beads in the workspace. Omit `type` to remove every " <>
+        "Remove dependency edges between two tasks in the workspace. Omit `type` to remove every " <>
           "edge between the pair. Idempotent.",
       input_schema: %{
         "type" => "object",
@@ -360,20 +360,20 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_dispatch",
       tiers: @coordinator,
       description:
-        "Dispatch a worker to work a bead in the workspace. Requires a `can_dispatch` coordinator " <>
+        "Dispatch a worker to work a task in the workspace. Requires a `can_dispatch` coordinator " <>
           "token and is depth-limited (the dispatch-recursion guardrail). Pass `provider` to start a " <>
-          "worker session (`claude` or `gemini`); omit it to park the bead in_progress.",
+          "worker session (`claude` or `gemini`); omit it to park the task in_progress.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{"type" => "string", "description" => "Bead to dispatch (required)."},
+          "task_id" => %{"type" => "string", "description" => "Task to dispatch (required)."},
           "repo" => %{"type" => "string", "description" => "Repo to run in (optional)."},
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "provider" => %{
             "type" => "string",
             "enum" => ["claude", "gemini"],
             "description" =>
-              "Worker provider to dispatch. Omit to park the bead in_progress (no worker)."
+              "Worker provider to dispatch. Omit to park the task in_progress (no worker)."
           },
           "with_claude" => %{
             "type" => "boolean",
@@ -381,7 +381,7 @@ defmodule Arbiter.MCP.Catalog do
               "DEPRECATED alias for `provider: \"claude\"`. `true` → start a Claude worker."
           }
         },
-        "required" => ["bead_id"],
+        "required" => ["task_id"],
         "additionalProperties" => false
       },
       handler: &Tools.worker_dispatch/2
@@ -390,20 +390,20 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_resume",
       tiers: @coordinator,
       description:
-        "Re-attach a fresh worker to a bead's preserved worktree (`arb resume`), continuing " <>
+        "Re-attach a fresh worker to a task's preserved worktree (`arb resume`), continuing " <>
           "the stopped run rather than restarting. Requires a `can_dispatch` coordinator token and is " <>
           "depth-limited (the dispatch-recursion guardrail).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{"type" => "string", "description" => "Bead to resume (required)."},
+          "task_id" => %{"type" => "string", "description" => "Task to resume (required)."},
           "repo" => %{
             "type" => "string",
-            "description" => "Repo to run in (optional; inherited from the bead's last run)."
+            "description" => "Repo to run in (optional; inherited from the task's last run)."
           },
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."}
         },
-        "required" => ["bead_id"],
+        "required" => ["task_id"],
         "additionalProperties" => false
       },
       handler: &Tools.worker_resume/2
@@ -412,13 +412,13 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_review",
       tiers: @coordinator,
       description:
-        "Dispatch a review-only worker against the PR/MR linked to a bead (`arb review`): no worktree, " <>
+        "Dispatch a review-only worker against the PR/MR linked to a task (`arb review`): no worktree, " <>
           "no branch, no merge. Requires a `can_dispatch` coordinator token and is depth-limited. " <>
           "Claude-driven by default; pass `with_claude: false` to dispatch without spawning an agent.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{"type" => "string", "description" => "Bead to review (required)."},
+          "task_id" => %{"type" => "string", "description" => "Task to review (required)."},
           "repo" => %{
             "type" => "string",
             "description" => "Local checkout the reviewer runs in (needs `gh`/`git`)."
@@ -429,7 +429,7 @@ defmodule Arbiter.MCP.Catalog do
             "description" => "Spawn the reviewer agent (default true)."
           }
         },
-        "required" => ["bead_id"],
+        "required" => ["task_id"],
         "additionalProperties" => false
       },
       handler: &Tools.worker_review/2
@@ -438,17 +438,17 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_stop",
       tiers: @coordinator,
       description:
-        "Stop the worker currently working a bead (`arb worker stop`). Scoped to the coordinator's " <>
-          "workspace; a bead with no live worker is reported not-found. Teardown only — does not dispatch.",
+        "Stop the worker currently working a task (`arb worker stop`). Scoped to the coordinator's " <>
+          "workspace; a task with no live worker is reported not-found. Teardown only — does not dispatch.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{
+          "task_id" => %{
             "type" => "string",
-            "description" => "Bead whose worker to stop (required)."
+            "description" => "Task whose worker to stop (required)."
           }
         },
-        "required" => ["bead_id"],
+        "required" => ["task_id"],
         "additionalProperties" => false
       },
       handler: &Tools.worker_stop/2
@@ -457,17 +457,17 @@ defmodule Arbiter.MCP.Catalog do
       name: "message_send",
       tiers: @both,
       description:
-        "Send a message to a bead's mailbox (the structured replacement for `arb message <bead> <text>`). " <>
-          "A coordinator sends a direction from `coordinator`; a worker raises a flag from its own bead " <>
+        "Send a message to a task's mailbox (the structured replacement for `arb message <task> <text>`). " <>
+          "A coordinator sends a direction from `coordinator`; a worker raises a flag from its own task " <>
           "to a sibling. The sender identity is set from the scope and pinned to its workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "bead_id" => %{"type" => "string", "description" => "Recipient bead id (required)."},
+          "task_id" => %{"type" => "string", "description" => "Recipient task id (required)."},
           "body" => %{"type" => "string", "description" => "Message body (required)."},
           "subject" => %{"type" => "string"}
         },
-        "required" => ["bead_id", "body"],
+        "required" => ["task_id", "body"],
         "additionalProperties" => false
       },
       handler: &Tools.message_send/2
@@ -494,18 +494,18 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_list",
       tiers: @coordinator,
       description:
-        "List active workers in the workspace: bead_id, status, repo, started_at, activity, " <>
-          "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the bead).",
+        "List active workers in the workspace: task_id, status, repo, started_at, activity, " <>
+          "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the task).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
     },
     %{
-      name: "bead_list",
+      name: "task_list",
       tiers: @coordinator,
       description:
-        "List beads in the workspace with optional filters. `status` (open | in_progress | closed), " <>
+        "List tasks in the workspace with optional filters. `status` (open | in_progress | closed), " <>
           "`priority` (integer 0–4), and `issue_type` (task | bug | feature | epic | chore | decision) " <>
-          "are all optional. Returns matching beads in the coordinator's workspace.",
+          "are all optional. Returns matching tasks in the coordinator's workspace.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -524,15 +524,15 @@ defmodule Arbiter.MCP.Catalog do
         },
         "additionalProperties" => false
       },
-      handler: &Tools.bead_list/2
+      handler: &Tools.task_list/2
     },
     %{
       name: "tracker_claim",
       tiers: @coordinator,
       description:
-        "Claim an external tracker issue into a bead (`arb claim <issue#>`). Verifies the issue is " <>
-          "assigned to the workspace user (skip with `force: true`) and creates a linked bead. " <>
-          "Idempotent — returns the existing bead if one already references the issue.",
+        "Claim an external tracker issue into a task (`arb claim <issue#>`). Verifies the issue is " <>
+          "assigned to the workspace user (skip with `force: true`) and creates a linked task. " <>
+          "Idempotent — returns the existing task if one already references the issue.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -554,8 +554,8 @@ defmodule Arbiter.MCP.Catalog do
       name: "tracker_sync",
       tiers: @coordinator,
       description:
-        "Reconcile the workspace's beads against its external tracker (`arb sync`): bead assigned issues " <>
-          "with no bead, close beads whose issue is gone. `dry: true` returns the plan without acting. " <>
+        "Reconcile the workspace's tasks against its external tracker (`arb sync`): task assigned issues " <>
+          "with no task, close tasks whose issue is gone. `dry: true` returns the plan without acting. " <>
           "No-ops cleanly when the tracker does not support reconciliation.",
       input_schema: %{
         "type" => "object",
@@ -583,7 +583,7 @@ defmodule Arbiter.MCP.Catalog do
       name: "usage_summarize",
       tiers: @coordinator,
       description:
-        "Roll up the token/cost usage ledger for the workspace. `by` is required (day, bead, " <>
+        "Roll up the token/cost usage ledger for the workspace. `by` is required (day, task, " <>
           "campaign, workspace, repo, model, step, provider); optional `since` (ISO-8601) and `limit`.",
       input_schema: %{
         "type" => "object",

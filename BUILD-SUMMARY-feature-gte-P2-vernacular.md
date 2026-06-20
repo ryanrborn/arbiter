@@ -1,6 +1,6 @@
 # gte-P2 — Vernacular module + default fallback
 
-Bead: gte-P2
+Task: gte-P2
 Branch: `feature/gte-P2-vernacular`
 
 ## What
@@ -29,7 +29,7 @@ Falls back to the canonical gas-town defaults when a key is unset.
   merge_queue: "refinery",
   monitor: "witness",
   watchdog: "deacon",
-  issue: "bead",
+  issue: "task",
   batch: "convoy",
   rig: "rig",
   epic: "mountain"
@@ -115,7 +115,7 @@ total             254 tests, 0 failures across umbrella
   whoever wires up the multi-workspace web UI.
 - Same for the arb CLI bootstrap — `apps/arbiter_cli` already resolves
   the active workspace; it should call `Vernacular.put_active/1` right
-  after. Filing as a quick gte-P2.5 follow-up bead if desired.
+  after. Filing as a quick gte-P2.5 follow-up task if desired.
 - Aliases currently affect only one direction (verb → alias). If we want
   the reverse (alias → verb) for parsing user input, add an
   `alias_canonical/1` companion. Defer until the CLI actually needs it.

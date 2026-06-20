@@ -1,6 +1,6 @@
 # Build summary: feature/gte-006-cli-escript
 
-**Bead:** gte-006
+**Task:** gte-006
 **Builder:** Agent (worktree session, 2026-05-19)
 **Branch:** feature/gte-006-cli-escript
 **Base commit:** 68cee00 (feat(gte-005): REST API endpoints for arb CLI)
@@ -10,7 +10,7 @@
 The `arb` escript — an Elixir port of the Go `bd` CLI, packaged in the
 `arbiter_cli` umbrella app. It speaks to the arbiter_web Phoenix REST API
 over local HTTP (default `http://127.0.0.1:4000`, overridable via
-`ARB_HOST`). Subcommand coverage matches the bead spec: `show`, `create`,
+`ARB_HOST`). Subcommand coverage matches the task spec: `show`, `create`,
 `close`, `list`, `update`, `dep add`, `dep rm`, `ready`, `doctor`, `where`.
 Output defaults to human-readable text mimicking bd's shape; `--json`
 switches every subcommand to machine-readable JSON.
@@ -79,7 +79,7 @@ apps/arbiter_cli/test/arbiter_cli/cmd/where_test.exs      (+) 2 tests
   error. This matches the spec section 4. Resolution issues `GET /api/workspaces`
   and filters client-side; cheap given workspace counts are tiny.
 
-- **Bead IDs pass through verbatim.** No client-side parsing of the
+- **Task IDs pass through verbatim.** No client-side parsing of the
   `<prefix>-<short>` shape — the server is the source of truth and 404s
   unknown IDs.
 
@@ -92,7 +92,7 @@ apps/arbiter_cli/test/arbiter_cli/cmd/where_test.exs      (+) 2 tests
 - **`arb ready` uses the existing `/api/issues/ready` endpoint.** Spec
   asked for client-side fallback if no endpoint existed; one does (from
   gte-005), so I use it. **Caveat: the server-side endpoint currently
-  500s** because `Arbiter.Beads.Issue.ready/0` raises
+  500s** because `Arbiter.Tasks.Issue.ready/0` raises
   `Ash.Error.Unknown` reading dependencies. That's a pre-existing
   upstream bug, not introduced by gte-006 — but `arb ready` will return
   `arb: error: HTTP 500` against the current main until that's fixed. The
@@ -151,7 +151,7 @@ workspace: default
 ===== arb create =====
 {
   "id": "bd-6ddr4z",
-  "title": "Test bead from arb",
+  "title": "Test task from arb",
   "description": "End-to-end smoke test from gte-006",
   "status": "open",
   "priority": 2,
@@ -161,7 +161,7 @@ workspace: default
 
 ===== arb show bd-6ddr4z =====
 ID:         bd-6ddr4z
-Title:      Test bead from arb
+Title:      Test task from arb
 Status:     open
 Priority:   2
 Type:       task
@@ -173,7 +173,7 @@ Description:
 
 ===== arb close bd-6ddr4z =====
 ID:         bd-6ddr4z
-Title:      Test bead from arb
+Title:      Test task from arb
 Status:     closed
 Priority:   2
 ...
@@ -181,7 +181,7 @@ Closed:     2026-05-19T20:32:16.946562Z
 
 ===== arb show bd-6ddr4z (after close) =====
 ID:         bd-6ddr4z
-Title:      Test bead from arb
+Title:      Test task from arb
 Status:     closed
 ...
 Closed:     2026-05-19T20:32:16.946562Z
@@ -220,7 +220,7 @@ arb doctor — checks against http://127.0.0.1:4000
 exit=1
 ```
 
-All three acceptance criteria from the bead are met:
+All three acceptance criteria from the task are met:
 
 1. `arb create + arb show + arb close` round-trip works → see transcript.
 2. `arb doctor` reports green when Phoenix is up, red with actionable
@@ -267,23 +267,23 @@ test hits a live Phoenix; that's gte-008's job.
 ## Spec deviations
 
 1. **`arb ready` hits a broken upstream endpoint.** The route exists at
-   `GET /api/issues/ready` (gte-005), so per the bead spec's guidance
+   `GET /api/issues/ready` (gte-005), so per the task spec's guidance
    ("if not, you can either query `/api/issues?status=open` and filter
    client-side, or call out the gap"), I called it. But the server-side
    action currently raises `Ash.Error.Unknown` from
-   `Arbiter.Beads.Issue.ready/0` (which itself reads
-   `Arbiter.Beads.Dependency`). The CLI's behavior is correct — it
+   `Arbiter.Tasks.Issue.ready/0` (which itself reads
+   `Arbiter.Tasks.Dependency`). The CLI's behavior is correct — it
    surfaces "HTTP 500" — but the user experience is bad until either
    gte-003 or gte-005 fixes that read action. I considered adding a
    client-side fallback that hits `/api/issues?status=open` and filters,
    but it would mask a real server bug. I'd rather file the bug.
-   Recommended follow-up bead: investigate and fix
-   `Arbiter.Beads.Issue.ready/0` server-side.
+   Recommended follow-up task: investigate and fix
+   `Arbiter.Tasks.Issue.ready/0` server-side.
 
 2. **`--labels` flag.** Accepted on `arb create` and `arb list` for
    interface parity with Go `bd`, but ignored with a stderr warning. The
    Issue resource has no `labels` attribute (gte-002). Cleanest path
-   forward is a separate bead to add labels to the Issue resource (which
+   forward is a separate task to add labels to the Issue resource (which
    probably wants its own attribute or join table); shouldn't block
    gte-006.
 
@@ -385,7 +385,7 @@ ID=$(./arb create "Smoke" --priority 2 --json | jq -r .id)
 ## Verdict requested
 
 Ready for review. After merge, unblocks:
-- **gte-006a** (recommended): file a bead for `Arbiter.Beads.Issue.ready/0`
+- **gte-006a** (recommended): file a task for `Arbiter.Tasks.Issue.ready/0`
   fix so `arb ready` becomes useful.
 - **gte-008** (if I'm reading the roadmap right): live integration tests
   that boot the actual web stack and exercise arb end-to-end.

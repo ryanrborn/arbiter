@@ -12,7 +12,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   use ArbiterWeb, :live_view
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias ArbiterWeb.Paging
 
@@ -145,7 +145,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
               >
                 <div class="flex items-center justify-between gap-2">
                   <.link
-                    navigate={~p"/workers/#{p.bead_id}"}
+                    navigate={~p"/workers/#{p.task_id}"}
                     class="flex items-center gap-2 min-w-0 group"
                   >
                     <span class="relative flex h-2.5 w-2.5 shrink-0">
@@ -161,7 +161,7 @@ defmodule ArbiterWeb.WorkerIndexLive do
                       </span>
                     </span>
                     <code class="text-xs font-semibold group-hover:text-info transition-colors truncate">
-                      {p.bead_id}
+                      {p.task_id}
                     </code>
                   </.link>
                   <span class={["badge badge-sm shrink-0", worker_status_class(p.status)]}>

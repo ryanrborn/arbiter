@@ -1,11 +1,11 @@
 defmodule ArbiterWeb.Api.ClaimController do
   @moduledoc """
-  REST endpoints for the GitHub-issue ↔ bead bridge.
+  REST endpoints for the GitHub-issue ↔ task bridge.
 
   Routes:
 
     * `POST /api/workspaces/:workspace_id/claim` — claim one issue by ref.
-      Body: `{"ref": "42", "force": false}`. Returns the bead JSON.
+      Body: `{"ref": "42", "force": false}`. Returns the task JSON.
     * `GET  /api/workspaces/:workspace_id/sync/plan` — dry-run reconcile.
       Returns the list of planned actions without acting.
     * `POST /api/workspaces/:workspace_id/sync` — apply reconcile.
@@ -14,7 +14,7 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Beads.{Claim, Workspace}
+  alias Arbiter.Tasks.{Claim, Workspace}
   alias ArbiterWeb.Api.IssueJSON
 
   action_fallback ArbiterWeb.Api.FallbackController
@@ -25,12 +25,12 @@ defmodule ArbiterWeb.Api.ClaimController do
 
     with :ok <- require_string(ref, "ref"),
          {:ok, workspace} <- get_workspace(workspace_id),
-         {:ok, status, bead} <- Claim.claim(workspace, ref, force: force?) do
+         {:ok, status, task} <- Claim.claim(workspace, ref, force: force?) do
       conn
       |> put_status(status_code_for(status))
       |> json(%{
         status: Atom.to_string(status),
-        bead: IssueJSON.data(bead)
+        task: IssueJSON.data(task)
       })
     else
       {:error, :tracker_not_supported} ->
@@ -119,19 +119,19 @@ defmodule ArbiterWeb.Api.ClaimController do
     }
   end
 
-  defp serialize_action({:close, bead_id, reason}) do
+  defp serialize_action({:close, task_id, reason}) do
     %{
       action: "close",
-      bead_id: bead_id,
+      task_id: task_id,
       reason: reason
     }
   end
 
-  defp serialize_result({:created, bead}),
-    do: %{outcome: "created", bead: IssueJSON.data(bead)}
+  defp serialize_result({:created, task}),
+    do: %{outcome: "created", task: IssueJSON.data(task)}
 
-  defp serialize_result({:closed, bead}),
-    do: %{outcome: "closed", bead: IssueJSON.data(bead)}
+  defp serialize_result({:closed, task}),
+    do: %{outcome: "closed", task: IssueJSON.data(task)}
 
   defp serialize_result({:error, action, reason}) do
     %{

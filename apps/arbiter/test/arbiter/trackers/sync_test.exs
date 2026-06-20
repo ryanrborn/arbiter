@@ -12,8 +12,8 @@ defmodule Arbiter.Trackers.SyncTest do
   """
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Trackers.Sync
 
@@ -210,7 +210,7 @@ defmodule Arbiter.Trackers.SyncTest do
       assert escalations_for(ws.id) == []
     end
 
-    test "an untracked bead is a no-op" do
+    test "an untracked task is a no-op" do
       ws = jira_workspace(%{"in_progress" => "In Progress"})
 
       {:ok, issue} =

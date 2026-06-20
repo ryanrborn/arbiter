@@ -1,26 +1,26 @@
 defmodule ArbiterWeb.Api.WorkerController do
   @moduledoc """
   REST endpoints for worker lifecycle. The arb CLI calls `dispatch/2` to
-  start work on a bead; future LiveView dashboards will use the same
+  start work on a task; future LiveView dashboards will use the same
   endpoints + `list/2` to introspect running workers.
 
   Routes:
 
-    * `POST /api/workers/dispatch`           — :dispatch (body: `bead_id`, optional `repo`, `provider`).
+    * `POST /api/workers/dispatch`           — :dispatch (body: `task_id`, optional `repo`, `provider`).
       `provider` is `"claude"` | `"gemini"` (deprecated aliases: `with_claude` /
-      `with_gemini` booleans). With a provider a worker subprocess works the bead
-      and the Driver closes it on `arb done`; with `no_agent` the bead parks in
+      `with_gemini` booleans). With a provider a worker subprocess works the task
+      and the Driver closes it on `arb done`; with `no_agent` the task parks in
       `:in_progress` (no Driver).
-    * `POST /api/workers/review`          — :review (body: `bead_id`, optional `repo`).
-      Dispatches a review-only worker: no worktree, no per-bead branch, no
+    * `POST /api/workers/review`          — :review (body: `task_id`, optional `repo`).
+      Dispatches a review-only worker: no worktree, no per-task branch, no
       route through the merge queue/merger. Always claude-driven.
     * `GET  /api/workers`                 — :index (list active workers)
-    * `GET  /api/workers/:bead_id`        — :show (full snapshot inc. recent output).
-      When no live worker exists for the bead, falls back to the most recent
+    * `GET  /api/workers/:task_id`        — :show (full snapshot inc. recent output).
+      When no live worker exists for the task, falls back to the most recent
       `Arbiter.Workers.Run` row so finished/exited runs stay inspectable.
-    * `POST /api/workers/:bead_id/stop`   — :stop (terminate worker cleanly)
-    * `GET  /api/workers/:bead_id/log`    — :log (full, uncapped durable
-      transcript of the bead's most recent run; the audit source of record).
+    * `POST /api/workers/:task_id/stop`   — :stop (terminate worker cleanly)
+    * `GET  /api/workers/:task_id/log`    — :log (full, uncapped durable
+      transcript of the task's most recent run; the audit source of record).
   """
 
   use ArbiterWeb, :controller
@@ -35,60 +35,60 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   def dispatch(conn, params) do
     case params do
-      %{"bead_id" => bead_id} when is_binary(bead_id) and bead_id != "" ->
+      %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
         opts = dispatch_opts(params)
 
-        case Dispatch.dispatch(bead_id, opts) do
+        case Dispatch.dispatch(task_id, opts) do
           {:ok, result} ->
             conn
             |> put_status(:created)
             |> render(:dispatch, result: result)
 
-          {:error, {:bead_not_found, _}} ->
+          {:error, {:task_not_found, _}} ->
             {:error, :not_found}
 
-          {:error, {:bead_closed, _}} ->
+          {:error, {:task_closed, _}} ->
             {:error,
-             {:invalid_request, "bead is closed; reopen it before dispatching", %{bead_id: bead_id}}}
+             {:invalid_request, "task is closed; reopen it before dispatching", %{task_id: task_id}}}
 
-          {:error, {:bead_awaiting_review, _}} ->
+          {:error, {:task_awaiting_review, _}} ->
             {:error,
              {:invalid_request,
-              "bead is already awaiting review; the Watchdog will close it on MR merge",
-              %{bead_id: bead_id}}}
+              "task is already awaiting review; the Watchdog will close it on MR merge",
+              %{task_id: task_id}}}
 
           {:error, :no_repo_configured} ->
             {:error,
              {:invalid_request,
               "no repos configured — add at least one repo to your workspace config " <>
                 "(repo_paths) or application env (:arbiter, :repo_paths), " <>
-                "or pass a repo explicitly: `arb issue dispatch #{bead_id} <repo>`",
-              %{bead_id: bead_id}}}
+                "or pass a repo explicitly: `arb issue dispatch #{task_id} <repo>`",
+              %{task_id: task_id}}}
 
           {:error, {:repo_not_found, repo}} ->
             {:error,
              {:invalid_request,
               "repo #{inspect(repo)} is not in :repo_paths — check your workspace config or " <>
-                "application env (:arbiter, :repo_paths)", %{bead_id: bead_id, repo: repo}}}
+                "application env (:arbiter, :repo_paths)", %{task_id: task_id, repo: repo}}}
 
           {:error, {:ambiguous_repo, repos}} ->
             {:error,
              {:invalid_request,
               "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
-                "`arb issue dispatch #{bead_id} <repo>`",
-              %{bead_id: bead_id, available_repos: repos}}}
+                "`arb issue dispatch #{task_id} <repo>`",
+              %{task_id: task_id, available_repos: repos}}}
 
           {:error, reason} ->
             {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
         end
 
       _ ->
-        {:error, {:invalid_request, "bead_id is required", %{}}}
+        {:error, {:invalid_request, "task_id is required", %{}}}
     end
   end
 
   @doc """
-  Dispatch a review-only issue. The bead is slung with `review: true`,
+  Dispatch a review-only issue. The task is slung with `review: true`,
   which forces the `CodeReview` workflow, skips worktree provisioning, swaps
   the work prompt for the review prompt, and tags the worker as
   `review_only` so completion does not fan out to the merge queue/merger.
@@ -98,96 +98,96 @@ defmodule ArbiterWeb.Api.WorkerController do
   """
   def review(conn, params) do
     case params do
-      %{"bead_id" => bead_id} when is_binary(bead_id) and bead_id != "" ->
+      %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
         opts = review_opts(params)
 
-        case Dispatch.dispatch(bead_id, opts) do
+        case Dispatch.dispatch(task_id, opts) do
           {:ok, result} ->
             conn
             |> put_status(:created)
             |> render(:dispatch, result: result)
 
-          {:error, {:bead_not_found, _}} ->
+          {:error, {:task_not_found, _}} ->
             {:error, :not_found}
 
-          {:error, {:bead_closed, _}} ->
+          {:error, {:task_closed, _}} ->
             {:error,
-             {:invalid_request, "bead is closed; reopen it before reviewing", %{bead_id: bead_id}}}
+             {:invalid_request, "task is closed; reopen it before reviewing", %{task_id: task_id}}}
 
-          {:error, {:bead_awaiting_review, _}} ->
+          {:error, {:task_awaiting_review, _}} ->
             {:error,
              {:invalid_request,
-              "bead is already awaiting review; a Watchdog is active and will close it on MR merge",
-              %{bead_id: bead_id}}}
+              "task is already awaiting review; a Watchdog is active and will close it on MR merge",
+              %{task_id: task_id}}}
 
           {:error, reason} ->
             {:error, {:server_error, "review dispatch failed", %{reason: inspect(reason)}}}
         end
 
       _ ->
-        {:error, {:invalid_request, "bead_id is required", %{}}}
+        {:error, {:invalid_request, "task_id is required", %{}}}
     end
   end
 
   @doc """
-  Resume a stopped worker (bd-auma3z). Re-attaches a fresh agent to the bead's
+  Resume a stopped worker (bd-auma3z). Re-attaches a fresh agent to the task's
   preserved worktree with a git-derived briefing of the prior run's
   work, so it continues rather than restarting from scratch. Always
   claude-driven. Renders the same payload as `dispatch/2`.
   """
-  def resume(conn, %{"bead_id" => bead_id} = params)
-      when is_binary(bead_id) and bead_id != "" do
+  def resume(conn, %{"task_id" => task_id} = params)
+      when is_binary(task_id) and task_id != "" do
     opts = resume_opts(params)
 
-    case Dispatch.resume(bead_id, opts) do
+    case Dispatch.resume(task_id, opts) do
       {:ok, result} ->
         conn
         |> put_status(:created)
         |> render(:dispatch, result: result)
 
-      {:error, {:bead_not_found, _}} ->
+      {:error, {:task_not_found, _}} ->
         {:error, :not_found}
 
-      {:error, {:bead_closed, _}} ->
+      {:error, {:task_closed, _}} ->
         {:error,
-         {:invalid_request, "bead is closed; reopen it before resuming", %{bead_id: bead_id}}}
+         {:invalid_request, "task is closed; reopen it before resuming", %{task_id: task_id}}}
 
       {:error, :no_outpost} ->
         {:error,
          {:invalid_request,
-          "no preserved worktree for this bead — nothing to resume; dispatch it fresh instead",
-          %{bead_id: bead_id}}}
+          "no preserved worktree for this task — nothing to resume; dispatch it fresh instead",
+          %{task_id: task_id}}}
 
       {:error, :repo_unknown} ->
         {:error,
          {:invalid_request,
-          "could not resolve the repo for this bead; pass it explicitly: `arb worker resume <bead> <repo>`",
-          %{bead_id: bead_id}}}
+          "could not resolve the repo for this task; pass it explicitly: `arb worker resume <task> <repo>`",
+          %{task_id: task_id}}}
 
       {:error, {:acolyte_active, status}} ->
         {:error,
          {:invalid_request,
-          "a worker is still active for this bead (#{status}); stop it before resuming",
-          %{bead_id: bead_id}}}
+          "a worker is still active for this task (#{status}); stop it before resuming",
+          %{task_id: task_id}}}
 
       {:error, reason} ->
         {:error, {:server_error, "resume failed", %{reason: inspect(reason)}}}
     end
   end
 
-  def resume(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+  def resume(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
   def index(conn, _params) do
     children = Worker.list_children()
-    bead_ids = Enum.map(children, & &1.bead_id)
-    costs = Arbiter.Worker.Stats.bead_costs_usd(bead_ids)
+    task_ids = Enum.map(children, & &1.task_id)
+    costs = Arbiter.Worker.Stats.task_costs_usd(task_ids)
     render(conn, :index, children: children, costs: costs)
   end
 
-  def show(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
-    case Worker.whereis(bead_id) do
+  def show(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+    case Worker.whereis(task_id) do
       nil ->
-        show_historical(conn, bead_id)
+        show_historical(conn, task_id)
 
       pid ->
         case Worker.state(pid) do
@@ -195,26 +195,26 @@ defmodule ArbiterWeb.Api.WorkerController do
             render(conn, :show, snapshot: Map.put(snap, :pid, pid))
 
           _ ->
-            show_historical(conn, bead_id)
+            show_historical(conn, task_id)
         end
     end
   end
 
-  def show(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+  def show(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  # No live worker for this bead — fall back to the most recent durable
+  # No live worker for this task — fall back to the most recent durable
   # `Run` row so a finished/exited run is still inspectable. 404 only when no
   # run was ever recorded.
-  defp show_historical(conn, bead_id) do
-    case latest_run(bead_id) do
+  defp show_historical(conn, task_id) do
+    case latest_run(task_id) do
       %Run{} = run -> render(conn, :show, run: run)
       nil -> {:error, :not_found}
     end
   end
 
-  defp latest_run(bead_id) do
+  defp latest_run(task_id) do
     Run
-    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
@@ -223,26 +223,26 @@ defmodule ArbiterWeb.Api.WorkerController do
     _ -> nil
   end
 
-  def stop(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
-    case Worker.stop(bead_id, :normal) do
+  def stop(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+    case Worker.stop(task_id, :normal) do
       :ok ->
         conn
         |> put_status(:ok)
-        |> json(%{bead_id: bead_id, stopped: true})
+        |> json(%{task_id: task_id, stopped: true})
 
       {:error, :not_found} ->
         {:error, :not_found}
     end
   end
 
-  def stop(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+  def stop(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  # Full, uncapped durable transcript for the bead's most recent run. Resolves
+  # Full, uncapped durable transcript for the task's most recent run. Resolves
   # the latest `Run` row, then reads its on-disk transcript via `OutputLog`.
   # `exists` distinguishes "no file yet / never captured" (false, lines [])
   # from "captured but empty" (true, lines []). 404 only when no run exists.
-  def log(conn, %{"bead_id" => bead_id}) when is_binary(bead_id) and bead_id != "" do
-    case latest_run(bead_id) do
+  def log(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+    case latest_run(task_id) do
       %Run{} = run ->
         {exists, lines} =
           case OutputLog.read_lines(run.id) do
@@ -252,7 +252,7 @@ defmodule ArbiterWeb.Api.WorkerController do
 
         json(conn, %{
           data: %{
-            bead_id: run.bead_id,
+            task_id: run.task_id,
             run_id: run.id,
             path: OutputLog.path_for(run.id),
             exists: exists,
@@ -266,12 +266,12 @@ defmodule ArbiterWeb.Api.WorkerController do
     end
   end
 
-  def log(_conn, _params), do: {:error, {:invalid_request, "bead_id is required", %{}}}
+  def log(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
   # Map request params onto `Dispatch.dispatch/2` opts.
   #
   # Worker resolution:
-  #   * `no_agent`    → dry dispatch: park the bead in `:in_progress` for a hand
+  #   * `no_agent`    → dry dispatch: park the task in `:in_progress` for a hand
   #     to attach. The Driver is suppressed (`start_driver: false`) so the
   #     no-op Work workflow doesn't race to a bogus `:closed`.
   #   * `provider`    → force the named provider (`"claude"` | `"gemini"`),
@@ -318,7 +318,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   defp normalize_provider(_), do: nil
 
   # Map request params onto `Dispatch.resume/2` opts. Repo is optional — resume
-  # falls back to the bead's most recent run's repo when omitted. `--model` is an
+  # falls back to the task's most recent run's repo when omitted. `--model` is an
   # optional per-dispatch override, same as dispatch.
   defp resume_opts(params) do
     [repo: params["repo"]]

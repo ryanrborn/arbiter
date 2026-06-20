@@ -1,15 +1,15 @@
 # gte-023 — MergeQueue / Refinery GenServer
 
-Bead: gte-023
+Task: gte-023
 Branch: `feature/gte-023-refinery`
 
 ## What
 
 `Arbiter.Workflows.Refinery` — per-workspace GenServer acting as a merge
-queue. Picks up `{:polecat_done, bead_id}` PubSub events (and accepts
+queue. Picks up `{:polecat_done, task_id}` PubSub events (and accepts
 synchronous `enqueue/2` for tests), opens PRs via `GitHub.pr_open/6`,
 monitors review + CI state via periodic `:tick`, and merges with the
-workspace's configured strategy. Bead transitions to `:closed` on
+workspace's configured strategy. Task transitions to `:closed` on
 successful merge.
 
 ## Files
@@ -28,7 +28,7 @@ successful merge.
                                                                  ↘ :failed
 ```
 
-`:done` triggers `Ash.update(bead, :close)` and the item is removed from
+`:done` triggers `Ash.update(task, :close)` and the item is removed from
 the queue.
 
 ## Reviewer items
@@ -55,7 +55,7 @@ exercises this.
 ### 2. `merge_strategy="direct"` does NOT call any PR APIs
 
 Direct strategy is the personal-project escape hatch: no PR is opened, the
-bead is moved straight to `:done`. Verified by a test that fails the
+task is moved straight to `:done`. Verified by a test that fails the
 `Req.Test` stub on any HTTP — the test passes, proving no HTTP was
 attempted.
 
@@ -66,7 +66,7 @@ before signaling done.
 ### 3. PubSub topic: `"polecat:done"` (global)
 
 The Refinery subscribes to a workspace-agnostic `"polecat:done"` topic. The
-event payload is `{:polecat_done, bead_id}`; the Refinery loads the bead
+event payload is `{:polecat_done, task_id}`; the Refinery loads the task
 to find its workspace, then ignores events whose workspace doesn't match
 its own. Per-workspace topics (`"polecat:#{ws_id}:done"`) were considered
 but rejected — keeping the topic flat means polecats don't need to know

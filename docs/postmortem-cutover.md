@@ -14,12 +14,12 @@
 Phase 0 estimate was **28-42 days of focused work**, or **6-8 calendar
 weeks** at the assumed cadence (3-4 hours/day Ryan direction, 2-3 polecat
 PRs/day). Actual was roughly an order of magnitude faster — the assumed
-cadence was wildly low for an AI-driven port where most beads were one or
+cadence was wildly low for an AI-driven port where most tasks were one or
 two Claude sessions of focused work, not human-day units.
 
-## Beads completed vs Phase 0 estimate
+## Tasks completed vs Phase 0 estimate
 
-**Scoped:** 33 beads (gte-001..028, gte-P1..P4, gte-029).
+**Scoped:** 33 tasks (gte-001..028, gte-P1..P4, gte-029).
 
 **Status snapshot at cutover (from Postgres after final `--sync-status` import):**
 
@@ -27,10 +27,10 @@ two Claude sessions of focused work, not human-day units.
 - Open: everything else.
 
 **Caveat — the status snapshot lies.** Git history shows feature commits
-landed for many beads that still read `open` in Dolt/Postgres
-(gte-016, gte-017, gte-021..025, gte-P4, etc.). Bead status in Dolt
+landed for many tasks that still read `open` in Dolt/Postgres
+(gte-016, gte-017, gte-021..025, gte-P4, etc.). Task status in Dolt
 drifted out of sync with reality during the late-Phase implementation
-push because the Mayor stopped closing beads in Dolt once dogfood
+push because the Mayor stopped closing tasks in Dolt once dogfood
 switchover happened at gte-008 (per decision-doc § "Dogfood switchover").
 **TODO (Ryan):** decide whether to backfill status via bd2 now or treat
 this as historic noise.
@@ -59,7 +59,7 @@ Things to recall and write up:
 
 **TODO (Ryan).** Candidates:
 - The 6 ported formulas (Phase 3) seem to have landed in a handful of
-  beads (gte-016, gte-017, gte-021, gte-022, gte-023) within ~hours of
+  tasks (gte-016, gte-017, gte-021, gte-022, gte-023) within ~hours of
   each other on 2026-05-20 — Workflows abstraction paid off?
 - Postgres + Ash vs the Phase 0 SQLite assumption — was the switch as
   cheap as decision #1 predicted?
@@ -72,9 +72,9 @@ Things to recall and write up:
 1. **Time estimate.** 28-42 focused days / 6-8 calendar weeks was off by
    roughly an order of magnitude. Root cause: assumed cadence figures
    (3-4 hours/day of Ryan direction, 2-3 polecat PRs/day) modeled a
-   human-paced workflow, not an AI-driven port where most beads close in
+   human-paced workflow, not an AI-driven port where most tasks close in
    a single Claude session. Future estimates for AI-driven ports should
-   start from "beads × ~1-2 sessions/bead" rather than human-day units.
+   start from "tasks × ~1-2 sessions/task" rather than human-day units.
 
 2. **Parallel-run duration.** Phase 0 risk-table promised "Dual-run for
    3-5 days before decommissioning" as the migration data-loss
@@ -83,8 +83,8 @@ Things to recall and write up:
    single-user, but the risk-table should reflect that the archive
    *was* the mitigation, not the dual-run.
 
-3. **Bead status discipline.** Phase 0 didn't predict that the
-   dogfood-switchover (decision-doc § 2026-05-19) would cause bead
+3. **Task status discipline.** Phase 0 didn't predict that the
+   dogfood-switchover (decision-doc § 2026-05-19) would cause task
    statuses in Dolt to stop being updated. Anyone re-reading the
    `import_from_dolt --sync-status` output will see a misleading
    open/closed picture. **TODO (Ryan):** consider whether a future
@@ -95,7 +95,7 @@ Things to recall and write up:
 
 ## Open follow-ups
 
-- Decide whether to backfill bead statuses (see "Beads completed" caveat).
+- Decide whether to backfill task statuses (see "Tasks completed" caveat).
 - gte-028 (Decommission GT) closure — should fire once the 7-day rollback
   window expires (≈ 2026-05-27).
 - The old `gt` Go binary at `~/.local/bin/gt` is still on PATH; cutover

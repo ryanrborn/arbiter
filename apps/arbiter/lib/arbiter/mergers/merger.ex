@@ -22,7 +22,7 @@ defmodule Arbiter.Mergers.Merger do
 
   ## `opts` map (passed to `open/4`)
 
-  Bead-domain keys, all optional unless an adapter says otherwise:
+  Task-domain keys, all optional unless an adapter says otherwise:
 
     * `:target_branch` — branch to integrate into (e.g. `"main"`).
     * `:reviewer_ids` — reviewers to request on open.

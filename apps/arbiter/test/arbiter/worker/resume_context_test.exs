@@ -1,7 +1,7 @@
 defmodule Arbiter.Worker.ResumeContextTest do
   use ExUnit.Case, async: true
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker.ResumeContext
 
   setup do
@@ -17,12 +17,12 @@ defmodule Arbiter.Worker.ResumeContextTest do
     git!(repo, ["add", "README.md"])
     git!(repo, ["commit", "-q", "-m", "base commit on main"])
 
-    # Cut the per-bead branch from main, so `main..HEAD` is meaningful.
+    # Cut the per-task branch from main, so `main..HEAD` is meaningful.
     git!(repo, ["checkout", "-q", "-b", "feature/bd-test"])
 
     on_exit(fn -> File.rm_rf!(tmp) end)
 
-    %{repo: repo, bead: %Issue{id: "bd-test", title: "resume me"}}
+    %{repo: repo, task: %Issue{id: "bd-test", title: "resume me"}}
   end
 
   defp git!(repo, args) do
@@ -30,48 +30,48 @@ defmodule Arbiter.Worker.ResumeContextTest do
     :ok
   end
 
-  test "returns {:error, :no_outpost} when the worktree dir is missing", %{bead: bead} do
+  test "returns {:error, :no_outpost} when the worktree dir is missing", %{task: task} do
     assert {:error, :no_outpost} =
-             ResumeContext.build(bead, "/nonexistent/path/abc123", "main")
+             ResumeContext.build(task, "/nonexistent/path/abc123", "main")
   end
 
-  test "summarizes committed work since the branch was cut", %{repo: repo, bead: bead} do
+  test "summarizes committed work since the branch was cut", %{repo: repo, task: task} do
     File.write!(Path.join(repo, "feature.ex"), "defmodule F, do: nil\n")
     git!(repo, ["add", "feature.ex"])
     git!(repo, ["commit", "-q", "-m", "add the feature scaffold"])
 
-    assert {:ok, prefix} = ResumeContext.build(bead, repo, "main")
+    assert {:ok, prefix} = ResumeContext.build(task, repo, "main")
 
-    assert prefix =~ "RESUMING work on bead bd-test"
+    assert prefix =~ "RESUMING work on task bd-test"
     assert prefix =~ "add the feature scaffold"
     assert prefix =~ "working tree clean"
     # The base-branch commit must NOT appear — only commits ahead of main.
     refute prefix =~ "base commit on main"
   end
 
-  test "surfaces uncommitted work-in-progress (tracked edits)", %{repo: repo, bead: bead} do
+  test "surfaces uncommitted work-in-progress (tracked edits)", %{repo: repo, task: task} do
     # Modify a tracked file but do not commit it.
     File.write!(Path.join(repo, "README.md"), "base\nWORK IN PROGRESS LINE\n")
 
-    assert {:ok, prefix} = ResumeContext.build(bead, repo, "main")
+    assert {:ok, prefix} = ResumeContext.build(task, repo, "main")
 
     assert prefix =~ "Uncommitted work-in-progress"
     assert prefix =~ "README.md"
     assert prefix =~ "WORK IN PROGRESS LINE"
   end
 
-  test "reports a clean tree with no commits when nothing was done", %{repo: repo, bead: bead} do
-    assert {:ok, prefix} = ResumeContext.build(bead, repo, "main")
+  test "reports a clean tree with no commits when nothing was done", %{repo: repo, task: task} do
+    assert {:ok, prefix} = ResumeContext.build(task, repo, "main")
 
     assert prefix =~ "no commits yet"
     assert prefix =~ "working tree clean"
   end
 
-  test "caps an enormous diff so the prompt stays bounded", %{repo: repo, bead: bead} do
+  test "caps an enormous diff so the prompt stays bounded", %{repo: repo, task: task} do
     big = Enum.map_join(1..2000, "\n", &"line #{&1}")
     File.write!(Path.join(repo, "README.md"), big)
 
-    assert {:ok, prefix} = ResumeContext.build(bead, repo, "main")
+    assert {:ok, prefix} = ResumeContext.build(task, repo, "main")
     assert prefix =~ "diff truncated"
   end
 
@@ -92,6 +92,6 @@ defmodule Arbiter.Worker.ResumeContextTest do
     assert briefing =~ "Uncommitted work-in-progress"
     assert briefing =~ "WIP"
     # The resume-specific framing belongs to build/3, not the shared body.
-    refute briefing =~ "RESUMING work on bead"
+    refute briefing =~ "RESUMING work on task"
   end
 end

@@ -1,7 +1,7 @@
 defmodule Arbiter.Workflows.WorkTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflow
   alias Arbiter.Workflows.Work
 
@@ -15,14 +15,14 @@ defmodule Arbiter.Workflows.WorkTest do
       assert Work.steps() == [:load_context, :design, :implement, :pre_verify, :submit]
     end
 
-    test "vars/0 includes :bead_id, :worktree_path, :repo" do
+    test "vars/0 includes :task_id, :worktree_path, :repo" do
       vars = Work.vars()
-      for v <- [:bead_id, :worktree_path, :repo], do: assert(v in vars)
+      for v <- [:task_id, :worktree_path, :repo], do: assert(v in vars)
     end
 
     test "step_definition/1 returns the expected shape" do
       assert %{description: _, needs: [], vars: vars} = Work.step_definition(:load_context)
-      assert :bead_id in vars
+      assert :task_id in vars
 
       assert %{needs: [:load_context]} = Work.step_definition(:design)
       assert %{needs: [:design]} = Work.step_definition(:implement)
@@ -32,12 +32,12 @@ defmodule Arbiter.Workflows.WorkTest do
   end
 
   describe "run_step/2 — :load_context" do
-    test "succeeds and marks load_context_done when the bead exists", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "T", workspace_id: ws.id})
+    test "succeeds and marks load_context_done when the task exists", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "T", workspace_id: ws.id})
 
       assert {:ok, state} =
                Work.run_step(:load_context, %{
-                 bead_id: bead.id,
+                 task_id: task.id,
                  worktree_path: "/tmp/x",
                  repo: "test/repo"
                })
@@ -45,14 +45,14 @@ defmodule Arbiter.Workflows.WorkTest do
       assert state[:load_context_done] == true
       # The Issue struct is intentionally NOT stored — state must be
       # JSON-serializable for `Workflows.Machine` persistence. `:submit`
-      # re-fetches by bead_id.
-      refute Map.has_key?(state, :bead)
+      # re-fetches by task_id.
+      refute Map.has_key?(state, :task)
     end
 
-    test "missing bead returns {:error, _}" do
+    test "missing task returns {:error, _}" do
       assert {:error, _} =
                Work.run_step(:load_context, %{
-                 bead_id: "wt-doesnotexist",
+                 task_id: "wt-doesnotexist",
                  worktree_path: "/tmp/x",
                  repo: "test/repo"
                })
@@ -68,34 +68,34 @@ defmodule Arbiter.Workflows.WorkTest do
   end
 
   describe "run_step/2 — :submit polymorphism" do
-    test ":none-tracked beads no-op", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "T", workspace_id: ws.id, tracker_type: :none})
+    test ":none-tracked tasks no-op", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "T", workspace_id: ws.id, tracker_type: :none})
 
-      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{bead_id: bead.id})
+      assert {:ok, %{submit_result: :ok}} = Work.run_step(:submit, %{task_id: task.id})
     end
 
-    test "missing :bead_id in state returns an error" do
-      assert {:error, {:missing_var, :bead_id}} = Work.run_step(:submit, %{})
+    test "missing :task_id in state returns an error" do
+      assert {:error, {:missing_var, :task_id}} = Work.run_step(:submit, %{})
     end
 
-    test "bead_id pointing at a deleted bead returns {:error, {:bead_not_found, _}}" do
-      assert {:error, {:bead_not_found, "wt-no-such-bead"}} =
-               Work.run_step(:submit, %{bead_id: "wt-no-such-bead"})
+    test "task_id pointing at a deleted task returns {:error, {:task_not_found, _}}" do
+      assert {:error, {:task_not_found, "wt-no-such-task"}} =
+               Work.run_step(:submit, %{task_id: "wt-no-such-task"})
     end
 
-    test ":jira-tracked beads dispatch through the Jira adapter (config_missing path)" do
+    test ":jira-tracked tasks dispatch through the Jira adapter (config_missing path)" do
       # Without active Jira config, Tracker.Jira returns
       # {:error, %Error{kind: :config_missing}}. That propagates up as the
       # step's error.
-      {:ok, bead} =
+      {:ok, task} =
         Ash.create(Issue, %{
-          title: "Jira bead",
+          title: "Jira task",
           workspace_id: ws_for_this_test(:ws).id,
           tracker_type: :jira,
           tracker_ref: "VR-1"
         })
 
-      result = Work.run_step(:submit, %{bead_id: bead.id})
+      result = Work.run_step(:submit, %{task_id: task.id})
       assert match?({:error, _}, result)
     end
 
@@ -114,11 +114,11 @@ defmodule Arbiter.Workflows.WorkTest do
   end
 
   describe "end-to-end Workflow.run/2" do
-    test ":none-tracked bead runs all 5 steps", %{ws: ws} do
-      {:ok, bead} = Ash.create(Issue, %{title: "E2E", workspace_id: ws.id, tracker_type: :none})
+    test ":none-tracked task runs all 5 steps", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "E2E", workspace_id: ws.id, tracker_type: :none})
 
       initial = %{
-        bead_id: bead.id,
+        task_id: task.id,
         worktree_path: "/tmp/work-e2e",
         repo: "test/repo"
       }

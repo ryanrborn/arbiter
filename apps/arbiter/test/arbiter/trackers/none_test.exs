@@ -28,7 +28,7 @@ defmodule Arbiter.Trackers.NoneTest do
       assert None.parse_ref("") == :error
     end
 
-    test "list_transitions/1 returns all bead-vocabulary statuses" do
+    test "list_transitions/1 returns all task-vocabulary statuses" do
       assert {:ok, statuses} = None.list_transitions("ref")
       assert Enum.sort(statuses) == [:closed, :in_progress, :open]
     end

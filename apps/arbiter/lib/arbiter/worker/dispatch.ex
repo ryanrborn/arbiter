@@ -1,40 +1,40 @@
 defmodule Arbiter.Worker.Dispatch do
   @moduledoc """
-  Spawn a worker for a bead and attach it to the `Arbiter.Workflows.Work`
+  Spawn a worker for a task and attach it to the `Arbiter.Workflows.Work`
   workflow via `Arbiter.Workflows.Machine`.
 
-  This is the "go work this bead" entry point — called by:
+  This is the "go work this task" entry point — called by:
 
-    * the `arb dispatch <bead-id>` CLI command (via the REST API),
+    * the `arb dispatch <task-id>` CLI command (via the REST API),
     * the `MergeQueue` GenServer (when re-dispatching follow-ups),
     * Phoenix LiveView dashboards that have a "send worker" button.
 
   Single responsibility: orchestrate the three steps needed to start a
-  worker working on a bead, in the right order, with the right cleanup if
+  worker working on a task, in the right order, with the right cleanup if
   anything fails.
 
   ## Steps
 
-  1. Load + validate the bead. Bead must not be `:closed`.
-  2. Transition bead to `:in_progress` (via the bead's `:update` action,
+  1. Load + validate the task. Task must not be `:closed`.
+  2. Transition task to `:in_progress` (via the task's `:update` action,
      skipping the `:close` FSM path).
-  3. Provision a git worktree on a per-bead branch — skipped when the
+  3. Provision a git worktree on a per-task branch — skipped when the
      repo isn't in `:arbiter, :repo_paths` or `provision_worktree: false`.
-  4. Start a worker under `Arbiter.Worker.Supervisor` for the bead.
+  4. Start a worker under `Arbiter.Worker.Supervisor` for the task.
   5. **Optionally** spawn a Claude subprocess in the worktree via
      `ClaudeSession.start/1`. Opt-in via `start_claude: true` — defaults
      to `false` to avoid silent paid-API invocations. Requires a worktree.
   6. Attach `Arbiter.Workflows.Work` via `Workflows.Machine.attach/3`
      and start the machine.
   7. Start a `Arbiter.Worker.Driver` under the same supervisor — it
-     ticks the machine forward and closes the bead when the workflow
+     ticks the machine forward and closes the task when the workflow
      completes. Skipped when `start_driver: false`.
 
   ## Returns
 
   ```
   {:ok, %{
-    bead: %Issue{},              # updated, status: :in_progress
+    task: %Issue{},              # updated, status: :in_progress
     worker_pid: pid(),
     machine_id: String.t(),
     machine_pid: pid(),
@@ -45,7 +45,7 @@ defmodule Arbiter.Worker.Dispatch do
   ```
 
   Or `{:error, reason}` for any step that fails. On error, partial work is
-  best-effort-rolled-back (started worker is stopped; bead status revert is
+  best-effort-rolled-back (started worker is stopped; task status revert is
   NOT attempted because the user may want to inspect what happened).
   """
 
@@ -54,9 +54,9 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Messages.AdmiralNotifier
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.RepoConfig
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.RepoConfig
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
@@ -92,7 +92,7 @@ defmodule Arbiter.Worker.Dispatch do
         ]
 
   @type dispatch_result :: %{
-          bead: Issue.t(),
+          task: Issue.t(),
           worker_pid: pid(),
           machine_id: String.t(),
           machine_pid: pid(),
@@ -102,26 +102,26 @@ defmodule Arbiter.Worker.Dispatch do
         }
 
   @spec dispatch(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
-  def dispatch(bead_id, opts \\ []) when is_binary(bead_id) do
+  def dispatch(task_id, opts \\ []) when is_binary(task_id) do
     opts = normalize_opts(opts)
 
-    with {:ok, bead} <- load_bead(bead_id),
-         :ok <- ensure_not_closed(bead),
-         :ok <- ensure_not_awaiting_review(bead_id),
-         {:ok, opts} <- maybe_resolve_repo_for_real_work(bead, opts),
-         :ok <- maybe_preflight(bead, opts),
-         {:ok, bead} <- transition_to_in_progress(bead),
-         {:ok, worktree_path} <- maybe_provision_worktree(bead, opts),
-         {:ok, worker_pid} <- start_worker(bead, worktree_path, opts),
+    with {:ok, task} <- load_task(task_id),
+         :ok <- ensure_not_closed(task),
+         :ok <- ensure_not_awaiting_review(task_id),
+         {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
+         :ok <- maybe_preflight(task, opts),
+         {:ok, task} <- transition_to_in_progress(task),
+         {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
+         {:ok, worker_pid} <- start_worker(task, worktree_path, opts),
          {:ok, claude_port} <-
-           maybe_start_claude(bead, worker_pid, worktree_path, opts),
+           maybe_start_claude(task, worker_pid, worktree_path, opts),
          {:ok, machine_id, machine_pid} <-
-           attach_and_start_machine(bead, worktree_path, opts),
+           attach_and_start_machine(task, worktree_path, opts),
          {:ok, driver_pid} <-
-           maybe_start_driver(bead, worker_pid, machine_id, machine_pid, worktree_path, opts) do
+           maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts) do
       {:ok,
        %{
-         bead: bead,
+         task: task,
          worker_pid: worker_pid,
          machine_id: machine_id,
          machine_pid: machine_pid,
@@ -136,11 +136,11 @@ defmodule Arbiter.Worker.Dispatch do
 
   @doc """
   Resume a stopped worker (bd-auma3z): re-attach a **fresh** agent to the
-  bead's **preserved** worktree, briefed with a git-derived summary of
+  task's **preserved** worktree, briefed with a git-derived summary of
   the prior worker's committed + uncommitted work, so it continues from where
   the stopped run left off instead of restarting from scratch.
 
-  This is the explicit `arb resume <bead>` path. It is provider-agnostic — no
+  This is the explicit `arb resume <task>` path. It is provider-agnostic — no
   Claude/Gemini session-resume id; the continuity comes entirely from the
   preserved worktree state plus a `Arbiter.Worker.ResumeContext` briefing
   prepended to the standard work prompt (Admiral sign-off 2026-06-05, approach
@@ -148,20 +148,20 @@ defmodule Arbiter.Worker.Dispatch do
 
   ## Steps
 
-  1. Load + validate the bead (must not be `:closed`).
-  2. Refuse if a worker is still **actively** working the bead — resume only
+  1. Load + validate the task (must not be `:closed`).
+  2. Refuse if a worker is still **actively** working the task — resume only
      applies to a stopped/failed/dead worker. Stop the active one first.
-  3. Resolve the repo (explicit opt, else the bead's most recent run's repo).
+  3. Resolve the repo (explicit opt, else the task's most recent run's repo).
   4. Require the worktree to still exist on disk — `{:error,
      :no_outpost}` if it was cleaned up (nothing to resume; re-`dispatch` instead).
   5. Build the resume briefing from the worktree's git state.
-  6. Stop any prior (failed) worker still resident for the bead so a fresh
+  6. Stop any prior (failed) worker still resident for the task so a fresh
      `worker_run` starts cleanly rather than the new dispatch attaching to the
      dead one (which would skip the run row and collide on the registry key —
      the same class of bug fixed in the conflict-resolver).
   7. Delegate to `dispatch/2` with the resume markers set: it reuses the existing
      worktree (idempotent `Worktree.create`), prepends the briefing, links the
-     new run to the prior via `resumed_from_run_id`, and passes the bead's
+     new run to the prior via `resumed_from_run_id`, and passes the task's
      existing `pr_ref` so completion reuses any open PR rather than duplicating.
 
   Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
@@ -169,15 +169,15 @@ defmodule Arbiter.Worker.Dispatch do
   `{:error, {:acolyte_active, status}}`, `{:error, :repo_unknown}`.
   """
   @spec resume(String.t(), dispatch_opts()) :: {:ok, dispatch_result()} | {:error, term()}
-  def resume(bead_id, opts \\ []) when is_binary(bead_id) do
-    with {:ok, bead} <- load_bead(bead_id),
-         :ok <- ensure_not_closed(bead),
-         :ok <- ensure_not_active(bead_id),
-         {:ok, repo} <- resolve_resume_repo(bead, opts),
-         {:ok, worktree_path} <- resume_worktree(bead, repo),
-         target_branch <- resolve_target_branch(bead, Keyword.put(opts, :repo, repo)),
-         {:ok, context} <- ResumeContext.build(bead, worktree_path, target_branch) do
-      prior_run_id = latest_run_id(bead_id)
+  def resume(task_id, opts \\ []) when is_binary(task_id) do
+    with {:ok, task} <- load_task(task_id),
+         :ok <- ensure_not_closed(task),
+         :ok <- ensure_not_active(task_id),
+         {:ok, repo} <- resolve_resume_repo(task, opts),
+         {:ok, worktree_path} <- resume_worktree(task, repo),
+         target_branch <- resolve_target_branch(task, Keyword.put(opts, :repo, repo)),
+         {:ok, context} <- ResumeContext.build(task, worktree_path, target_branch) do
+      prior_run_id = latest_run_id(task_id)
 
       # bd-95lsjb: an auto-revise dispatch passes `:revise_feedback` — the
       # reviewer's PR-side feedback. Prepend it to the git-derived resume
@@ -186,11 +186,11 @@ defmodule Arbiter.Worker.Dispatch do
       context = prepend_revise_feedback(context, opts)
 
       # Free the registry slot: a stopped worker's worker lingers in :failed,
-      # still registered under bead_id. Without stopping it, dispatch/2's
+      # still registered under task_id. Without stopping it, dispatch/2's
       # start_worker would hit {:already_started, pid} and attach to the dead
       # one — no fresh run, no resumed_from_run_id. Stopping it does NOT touch
       # the worktree (terminate/2 never cleans up), so the worktree is preserved.
-      _ = stop_prior_worker(bead_id)
+      _ = stop_prior_worker(task_id)
 
       resume_opts =
         opts
@@ -199,9 +199,9 @@ defmodule Arbiter.Worker.Dispatch do
         |> Keyword.put(:resume, true)
         |> Keyword.put(:resume_context, context)
         |> Keyword.put(:resumed_from_run_id, prior_run_id)
-        |> Keyword.put(:existing_pr_ref, bead.pr_ref)
+        |> Keyword.put(:existing_pr_ref, task.pr_ref)
 
-      dispatch(bead_id, resume_opts)
+      dispatch(task_id, resume_opts)
     end
   end
 
@@ -216,8 +216,8 @@ defmodule Arbiter.Worker.Dispatch do
   # live in a working state, refuse rather than stomp in-flight work — the
   # operator should `arb worker stop` it first. A :failed (the stopped state)
   # or :completed worker, or no worker at all, is resumable.
-  defp ensure_not_active(bead_id) do
-    case Worker.whereis(bead_id) do
+  defp ensure_not_active(task_id) do
+    case Worker.whereis(task_id) do
       nil ->
         :ok
 
@@ -240,28 +240,28 @@ defmodule Arbiter.Worker.Dispatch do
     :exit, _ -> nil
   end
 
-  # The repo: an explicit opt wins; otherwise inherit the bead's most recent run's
-  # repo so `arb resume <bead>` works without re-specifying it. No run + no opt is
+  # The repo: an explicit opt wins; otherwise inherit the task's most recent run's
+  # repo so `arb resume <task>` works without re-specifying it. No run + no opt is
   # an error — we can't resolve the worktree without knowing the repo.
-  defp resolve_resume_repo(%Issue{id: bead_id}, opts) do
+  defp resolve_resume_repo(%Issue{id: task_id}, opts) do
     case Keyword.get(opts, :repo) do
       repo when is_binary(repo) and repo != "" ->
         {:ok, repo}
 
       _ ->
-        case latest_run(bead_id) do
+        case latest_run(task_id) do
           %Run{repo: repo} when is_binary(repo) and repo != "" -> {:ok, repo}
           _ -> {:error, :repo_unknown}
         end
     end
   end
 
-  # Resolve the preserved worktree path for the bead's per-bead branch and require
+  # Resolve the preserved worktree path for the task's per-task branch and require
   # it to exist on disk. A missing worktree means there's nothing to resume.
-  defp resume_worktree(%Issue{} = bead, repo) do
-    case resolve_repo_path(bead, repo) do
+  defp resume_worktree(%Issue{} = task, repo) do
+    case resolve_repo_path(task, repo) do
       repo_path when is_binary(repo_path) ->
-        path = Worktree.worktree_path(BranchNamer.derive(bead))
+        path = Worktree.worktree_path(BranchNamer.derive(task))
         if File.dir?(path), do: {:ok, path}, else: {:error, :no_outpost}
 
       _ ->
@@ -269,10 +269,10 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp stop_prior_worker(bead_id) do
-    case Worker.whereis(bead_id) do
+  defp stop_prior_worker(task_id) do
+    case Worker.whereis(task_id) do
       nil -> :ok
-      _pid -> Worker.stop(bead_id, :normal)
+      _pid -> Worker.stop(task_id, :normal)
     end
   rescue
     _ -> :ok
@@ -280,8 +280,8 @@ defmodule Arbiter.Worker.Dispatch do
     :exit, _ -> :ok
   end
 
-  defp latest_run_id(bead_id) do
-    case latest_run(bead_id) do
+  defp latest_run_id(task_id) do
+    case latest_run(task_id) do
       %Run{id: id} -> id
       _ -> nil
     end
@@ -289,9 +289,9 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp latest_run(nil), do: nil
 
-  defp latest_run(bead_id) when is_binary(bead_id) do
+  defp latest_run(task_id) when is_binary(task_id) do
     Run
-    |> Ash.Query.filter(bead_id == ^bead_id)
+    |> Ash.Query.filter(task_id == ^task_id)
     |> Ash.Query.sort(started_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read!()
@@ -317,52 +317,52 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp load_bead(bead_id) do
-    case Ash.get(Issue, bead_id) do
-      {:ok, bead} -> {:ok, bead}
-      {:error, _} -> {:error, {:bead_not_found, bead_id}}
+  defp load_task(task_id) do
+    case Ash.get(Issue, task_id) do
+      {:ok, task} -> {:ok, task}
+      {:error, _} -> {:error, {:task_not_found, task_id}}
     end
   end
 
-  defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:bead_closed, id}}
-  defp ensure_not_closed(_bead), do: :ok
+  defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:task_closed, id}}
+  defp ensure_not_closed(_task), do: :ok
 
-  # Guard against re-dispatching a bead whose worker is already parked at
+  # Guard against re-dispatching a task whose worker is already parked at
   # :awaiting_review with an active Watchdog. A second dispatch in this state
   # would attach a new machine/driver to the live worker, disrupting the
   # Watchdog's PID watch and preventing the auto-close on MR merge.
-  defp ensure_not_awaiting_review(bead_id) do
-    case Worker.whereis(bead_id) do
+  defp ensure_not_awaiting_review(task_id) do
+    case Worker.whereis(task_id) do
       nil ->
         :ok
 
       pid ->
         case safe_worker_status(pid) do
-          :awaiting_review -> {:error, {:bead_awaiting_review, bead_id}}
+          :awaiting_review -> {:error, {:task_awaiting_review, task_id}}
           _ -> :ok
         end
     end
   end
 
-  defp transition_to_in_progress(%Issue{status: :in_progress} = bead), do: {:ok, bead}
+  defp transition_to_in_progress(%Issue{status: :in_progress} = task), do: {:ok, task}
 
-  defp transition_to_in_progress(%Issue{} = bead) do
-    case Ash.update(bead, %{status: :in_progress}) do
+  defp transition_to_in_progress(%Issue{} = task) do
+    case Ash.update(task, %{status: :in_progress}) do
       {:ok, updated} -> {:ok, updated}
       {:error, e} -> {:error, {:transition_failed, e}}
     end
   end
 
-  defp start_worker(%Issue{id: id, workspace_id: ws_id} = bead, worktree_path, opts) do
+  defp start_worker(%Issue{id: id, workspace_id: ws_id} = task, worktree_path, opts) do
     repo = Keyword.get(opts, :repo) || "unknown"
-    meta = build_worker_meta(bead, worktree_path, opts)
+    meta = build_worker_meta(task, worktree_path, opts)
 
-    case Worker.start(bead_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
+    case Worker.start(task_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
       {:ok, pid} ->
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->
-        # A worker for this bead is already registered. If it ended in a
+        # A worker for this task is already registered. If it ended in a
         # terminal state (:failed / :completed) — the re-dispatch-a-failed-run
         # scenario (bd-d70whv) — stop the stale process so the registry slot
         # is freed, then start a fresh one. Without this, the new Claude
@@ -373,7 +373,7 @@ defmodule Arbiter.Worker.Dispatch do
           status when status in [:failed, :completed] ->
             _ = Worker.stop(pid, :normal)
 
-            case Worker.start(bead_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
+            case Worker.start(task_id: id, repo: repo, workspace_id: ws_id, meta: meta) do
               {:ok, new_pid} -> {:ok, new_pid}
               {:error, reason} -> {:error, {:worker_start_failed, reason}}
             end
@@ -391,12 +391,12 @@ defmodule Arbiter.Worker.Dispatch do
   # integrate the branch when the worker finishes (see the arb-done handler in
   # `Arbiter.Worker`).
   #
-  # When a worktree was provisioned we know the per-bead branch and the repo
+  # When a worktree was provisioned we know the per-task branch and the repo
   # path (the local checkout where the target branch lives — the `repo_path`
   # the `Direct` merger runs `git merge --no-ff` inside). With no worktree
   # (repo unconfigured, or `provision_worktree: false`) there is nothing to
-  # merge, so `:branch` stays absent and completion is a plain bead close.
-  defp build_worker_meta(%Issue{} = bead, worktree_path, opts) do
+  # merge, so `:branch` stays absent and completion is a plain task close.
+  defp build_worker_meta(%Issue{} = task, worktree_path, opts) do
     base =
       case Keyword.get(opts, :review, false) do
         true -> %{worktree_path: worktree_path, review_only: true}
@@ -405,13 +405,13 @@ defmodule Arbiter.Worker.Dispatch do
 
     base = maybe_put_resume_meta(base, opts)
 
-    case worktree_path && resolve_repo_path(bead, Keyword.get(opts, :repo)) do
+    case worktree_path && resolve_repo_path(task, Keyword.get(opts, :repo)) do
       repo_path when is_binary(repo_path) ->
         Map.merge(base, %{
-          branch: BranchNamer.derive(bead),
+          branch: BranchNamer.derive(task),
           repo_path: repo_path,
-          target_branch: resolve_target_branch(bead, opts),
-          merge_title: merge_title(bead)
+          target_branch: resolve_target_branch(task, opts),
+          merge_title: merge_title(task)
         })
 
       _ ->
@@ -448,7 +448,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp attach_and_start_machine(%Issue{id: id}, worktree_path, opts) do
     workflow = Keyword.get(opts, :workflow_module, Work)
-    vars = %{bead_id: id, worktree_path: worktree_path, repo: Keyword.get(opts, :repo)}
+    vars = %{task_id: id, worktree_path: worktree_path, repo: Keyword.get(opts, :repo)}
 
     with {:ok, machine_id} <- Machine.attach(workflow, id, vars),
          {:ok, pid} <- Machine.start(machine_id) do
@@ -458,7 +458,7 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Provision a fresh git worktree on a per-bead branch, cut from the upstream
+  # Provision a fresh git worktree on a per-task branch, cut from the upstream
   # tip of the resolved target branch (`origin/<target>`).
   #
   # The arbiter — not the worker — fetches from origin before creating the
@@ -476,14 +476,14 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # ## Repo path lookup order
   #
-  #   1. Bead's workspace config (`workspace.config["repo_paths"][repo]`)
+  #   1. Task's workspace config (`workspace.config["repo_paths"][repo]`)
   #      — per-workspace, runtime-settable, owns the source of truth.
   #   2. Application env (`:arbiter, :repo_paths`) — global fallback,
   #      configured in `config/dev.exs` for dev convenience.
   #
   # First hit wins. This lets workspaces override the global default
   # without changing application config.
-  defp maybe_provision_worktree(%Issue{} = bead, opts) do
+  defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
         {:ok, nil}
@@ -491,13 +491,13 @@ defmodule Arbiter.Worker.Dispatch do
       true ->
         repo = Keyword.get(opts, :repo)
 
-        case resolve_repo_path(bead, repo) do
+        case resolve_repo_path(task, repo) do
           nil ->
             {:ok, nil}
 
           repo_path when is_binary(repo_path) ->
-            branch = BranchNamer.derive(bead)
-            target_branch = resolve_target_branch(bead, opts)
+            branch = BranchNamer.derive(task)
+            target_branch = resolve_target_branch(task, opts)
 
             case Worktree.create(repo_path, branch, target_branch) do
               {:ok, path} ->
@@ -520,7 +520,7 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp resolve_repo_path(_bead, nil), do: nil
+  defp resolve_repo_path(_task, nil), do: nil
 
   defp resolve_repo_path(%Issue{workspace_id: ws_id}, repo) when is_binary(repo) do
     workspace_repo_path(ws_id, repo) || application_repo_path(repo)
@@ -530,8 +530,8 @@ defmodule Arbiter.Worker.Dispatch do
   # the one the completed branch merges back into. Delegates to the shared
   # `Arbiter.Worker.TargetBranch` resolver so the worktree base computed here
   # and the PR base computed by the `MergeQueue` can never diverge (bd-b6rzoc).
-  defp resolve_target_branch(%Issue{} = bead, opts) do
-    TargetBranch.resolve(bead,
+  defp resolve_target_branch(%Issue{} = task, opts) do
+    TargetBranch.resolve(task,
       base_branch: Keyword.get(opts, :base_branch),
       repo: Keyword.get(opts, :repo)
     )
@@ -579,23 +579,23 @@ defmodule Arbiter.Worker.Dispatch do
   #
   # The check fires only for `start_claude: true` dispatches; a dry/manual dispatch
   # (no agent) is allowed to park without a repo.
-  defp maybe_resolve_repo_for_real_work(%Issue{} = bead, opts) do
+  defp maybe_resolve_repo_for_real_work(%Issue{} = task, opts) do
     case Keyword.get(opts, :start_claude, false) do
       false -> {:ok, opts}
-      true -> resolve_repo_for_dispatch(bead, opts)
+      true -> resolve_repo_for_dispatch(task, opts)
     end
   end
 
-  defp resolve_repo_for_dispatch(%Issue{} = bead, opts) do
+  defp resolve_repo_for_dispatch(%Issue{} = task, opts) do
     case Keyword.get(opts, :repo) do
       repo when is_binary(repo) and repo != "" ->
-        case resolve_repo_path(bead, repo) do
+        case resolve_repo_path(task, repo) do
           nil -> {:error, {:repo_not_found, repo}}
           _path -> {:ok, opts}
         end
 
       _ ->
-        case all_available_repos(bead) do
+        case all_available_repos(task) do
           [] -> {:error, :no_repo_configured}
           [sole] -> {:ok, Keyword.put(opts, :repo, sole)}
           repos -> {:error, {:ambiguous_repo, repos}}
@@ -604,7 +604,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # Enumerate all repo names that have a resolvable path, drawn from:
-  #   1. The bead's workspace config `repo_paths` map (or legacy `rig_paths`).
+  #   1. The task's workspace config `repo_paths` map (or legacy `rig_paths`).
   #   2. The global Application env `:repo_paths` map.
   # Both sources are combined, de-duplicated, and sorted.
   defp all_available_repos(%Issue{workspace_id: ws_id}) do
@@ -634,18 +634,18 @@ defmodule Arbiter.Worker.Dispatch do
     (ws_repos ++ app_repos) |> Enum.uniq() |> Enum.sort()
   end
 
-  # Pre-flight auth check (bd-awi4nw): before transitioning the bead and
+  # Pre-flight auth check (bd-awi4nw): before transitioning the task and
   # dispatching a (paid, autonomous) worker, verify the agent CLI can
   # authenticate with a single cheap probe. If it can't — the confirmed
   # OAuth-expiry case where every spawn 401s — REFUSE to dispatch, escalate to the
-  # Admiral with a re-auth remediation, and abort before any bead/worktree state
+  # Admiral with a re-auth remediation, and abort before any task/worktree state
   # is mutated.
   #
   # Only runs on the real-agent path: skipped unless `start_claude: true`, and
   # skipped when a `:claude_command` test override is in play (no real CLI to
   # probe) unless the caller injects a `:probe_command`. Opt out entirely with
   # `preflight: false`.
-  defp maybe_preflight(%Issue{} = bead, opts) do
+  defp maybe_preflight(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :preflight, true) == false ->
         :ok
@@ -657,21 +657,21 @@ defmodule Arbiter.Worker.Dispatch do
         :ok
 
       true ->
-        run_preflight(bead, opts)
+        run_preflight(task, opts)
     end
   end
 
-  defp run_preflight(%Issue{} = bead, opts) do
-    workspace = load_workspace(bead)
+  defp run_preflight(%Issue{} = task, opts) do
+    workspace = load_workspace(task)
     :ok = Agents.prepare(workspace, :agent)
-    adapter = preflight_adapter(bead, workspace, opts)
+    adapter = preflight_adapter(task, workspace, opts)
 
     # bd-5wchp1: if the CredentialWatchdog already knows this adapter's creds are
     # expired, refuse immediately without re-running the expensive probe. The
     # guard is skipped when the watchdog isn't running (returns false by default).
     if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
       reason = known_expired_stop_reason()
-      AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
+      AdmiralNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
       probe_opts = preflight_opts(opts)
@@ -684,7 +684,7 @@ defmodule Arbiter.Worker.Dispatch do
           :ok
 
         {:error, reason} ->
-          AdmiralNotifier.preflight_failed(preflight_snapshot(bead, opts), reason)
+          AdmiralNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
           {:error, {:auth_check_failed, reason}}
       end
     end
@@ -707,7 +707,7 @@ defmodule Arbiter.Worker.Dispatch do
   #   1. `:agent_adapter` test override — lets tests stub the adapter.
   #   2. `:agent_type` explicit override — probe the forced provider.
   #   3. Workspace default — `Agents.for_workspace` reads `agent.type`.
-  defp preflight_adapter(_bead, workspace, opts) do
+  defp preflight_adapter(_task, workspace, opts) do
     case Keyword.get(opts, :agent_adapter) do
       mod when is_atom(mod) and not is_nil(mod) ->
         mod
@@ -727,7 +727,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp preflight_snapshot(%Issue{id: id, workspace_id: ws_id}, opts) do
     %{
-      bead_id: id,
+      task_id: id,
       workspace_id: ws_id,
       repo: Keyword.get(opts, :repo),
       meta: %{}
@@ -747,12 +747,12 @@ defmodule Arbiter.Worker.Dispatch do
   # The `:claude_command` opt is the test escape hatch: when set, it
   # overrides the default streaming `claude` argv so tests can spawn `echo`
   # or a script instead of the real Claude CLI.
-  defp maybe_start_claude(_bead, _worker_pid, _worktree_path, opts)
+  defp maybe_start_claude(_task, _worker_pid, _worktree_path, opts)
        when not is_list(opts) do
     {:ok, nil}
   end
 
-  defp maybe_start_claude(%Issue{} = bead, worker_pid, worktree_path, opts) do
+  defp maybe_start_claude(%Issue{} = task, worker_pid, worktree_path, opts) do
     case Keyword.get(opts, :start_claude, false) do
       false ->
         {:ok, nil}
@@ -762,7 +762,7 @@ defmodule Arbiter.Worker.Dispatch do
         # cwd for the Claude port. Fall back to the repo's local checkout so
         # the reviewer has `git`/`gh`/etc. in scope; an unmapped repo with no
         # worktree is still rejected — there's nowhere to `cd` to.
-        cwd = worktree_path || review_cwd(bead, opts)
+        cwd = worktree_path || review_cwd(task, opts)
 
         case cwd do
           nil ->
@@ -770,7 +770,7 @@ defmodule Arbiter.Worker.Dispatch do
 
           path when is_binary(path) ->
             # Inject the per-spawn MCP config (.mcp.json) into the *isolated*
-            # worktree so the agent can read its bead / mailbox and write
+            # worktree so the agent can read its task / mailbox and write
             # completion notes as typed tool calls. Best-effort: never blocks
             # the spawn.
             #
@@ -781,10 +781,10 @@ defmodule Arbiter.Worker.Dispatch do
             # the exact "worker leaks into the main worktree" class this fixes.
             # With a nil worktree the helper is a no-op, so reviews never touch
             # the repo's working tree.
-            _ = maybe_write_mcp_config(bead, worktree_path, opts)
+            _ = maybe_write_mcp_config(task, worktree_path, opts)
 
             with {:ok, session_opts} <-
-                   build_agent_session_opts(bead, worker_pid, path, opts),
+                   build_agent_session_opts(task, worker_pid, path, opts),
                  {:ok, port} <- ClaudeSession.start(session_opts) do
               # Move the worker out of :idle so UI/CLI report a meaningful
               # status while Claude works. In claude_driven mode the Driver
@@ -799,18 +799,18 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Resolve a sensible cwd for a review session that has no per-bead worktree.
+  # Resolve a sensible cwd for a review session that has no per-task worktree.
   # Only fires when `review: true` is set so a regular dispatch without
   # provision_worktree still surfaces `:missing_worktree` instead of silently
   # running Claude in the repo's main checkout.
-  defp review_cwd(%Issue{} = bead, opts) do
+  defp review_cwd(%Issue{} = task, opts) do
     case Keyword.get(opts, :review, false) do
-      true -> resolve_repo_path(bead, Keyword.get(opts, :repo))
+      true -> resolve_repo_path(task, Keyword.get(opts, :repo))
       _ -> nil
     end
   end
 
-  # Resolve the agent for this bead through the `Arbiter.Agents` dispatcher
+  # Resolve the agent for this task through the `Arbiter.Agents` dispatcher
   # and the configured `Arbiter.Agents.Routing` policy, then assemble the
   # `ClaudeSession.start/1` options. This is the seam where model-tiering
   # and key-rotation enter the spawn — both default off, so a workspace
@@ -819,7 +819,7 @@ defmodule Arbiter.Worker.Dispatch do
   # The `:claude_command` opt (used by tests to spawn an echo script
   # instead of the real Claude CLI) bypasses the adapter entirely — it's a
   # raw argv override and the routing policy has nothing to add.
-  defp build_agent_session_opts(%Issue{} = bead, worker_pid, worktree_path, opts) do
+  defp build_agent_session_opts(%Issue{} = task, worker_pid, worktree_path, opts) do
     base = [owner: worker_pid, worktree_path: worktree_path]
 
     case Keyword.get(opts, :claude_command) do
@@ -827,14 +827,14 @@ defmodule Arbiter.Worker.Dispatch do
         {:ok, base ++ [command: cmd]}
 
       _ ->
-        workspace = load_workspace(bead)
+        workspace = load_workspace(task)
         :ok = Agents.prepare(workspace, :agent)
 
         # Order matters: apply the provider (agent_type) override *first* so it
         # can strip the routed, provider-specific model, then let an explicit
         # `--model` override win on top of the resolved provider.
         choice =
-          bead
+          task
           |> Routing.choose(workspace, %{})
           |> apply_agent_type_override(Keyword.get(opts, :agent_type))
           |> apply_model_override(Keyword.get(opts, :model))
@@ -848,7 +848,7 @@ defmodule Arbiter.Worker.Dispatch do
         policy = SecurityPolicy.resolve(workspace, security_override(opts))
 
         agent_opts = agent_opts_from_choice(choice) ++ [security: policy]
-        prompt = prompt_for_bead(bead, opts)
+        prompt = prompt_for_task(task, opts)
 
         provider = Atom.to_string(choice.type)
 
@@ -906,7 +906,7 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # A `:model` opt on `Dispatch.dispatch/2` is a one-shot, per-dispatch override —
-  # the bead might be P2 (routing → sonnet) but the caller wants to try it
+  # the task might be P2 (routing → sonnet) but the caller wants to try it
   # on Opus once. We splat the override on top of the routed config so it
   # wins over both the workspace default and any routing rule. A `nil` /
   # empty override is a no-op (the routed choice stands).
@@ -936,7 +936,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp apply_agent_type_override(choice, _), do: choice
 
-  # Optional per-dispatch (per-bead) security override. Accepts a raw map under
+  # Optional per-dispatch (per-task) security override. Accepts a raw map under
   # the `:security` dispatch opt (same shape as `workspace.config["agent"]["security"]`)
   # or the `:security_mode` shorthand for the common "just change the mode" case.
   # Returns `%{}` (no override) when neither is set.
@@ -977,9 +977,9 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # Write the per-spawn Arbiter.MCP config into the worktree (bd-dem49g). Mints a
-  # narrow `:worker`-tier scope token bound to this bead/repo/workspace and hands
+  # narrow `:worker`-tier scope token bound to this task/repo/workspace and hands
   # it to the agent-specific config adapter (Phase 1: Claude `.mcp.json`). The
-  # token *is* the worker's capability — it can only read/progress its own bead.
+  # token *is* the worker's capability — it can only read/progress its own task.
   #
   # Gated by `Arbiter.MCP.inject_config?/0` (off in test by default) and fully
   # best-effort: a missing signing secret or write failure is logged and swallowed
@@ -988,20 +988,20 @@ defmodule Arbiter.Worker.Dispatch do
   # checkout) → never write the token-bearing `.mcp.json`. Injecting it into the
   # canonical checkout would leak the scope token into the working tree the live
   # server and operator share (bd-dlv3no).
-  defp maybe_write_mcp_config(_bead, nil, _opts), do: :ok
+  defp maybe_write_mcp_config(_task, nil, _opts), do: :ok
 
-  defp maybe_write_mcp_config(%Issue{} = bead, worktree_path, opts)
+  defp maybe_write_mcp_config(%Issue{} = task, worktree_path, opts)
        when is_binary(worktree_path) do
     if Arbiter.MCP.inject_config?() do
       # `:depth` carries the dispatch-recursion depth (Phase 2 guardrail): a worker
       # slung *by a coordinator* via `worker_dispatch` is minted one level deeper, so
       # a chain of dispatches is tracked. Defaults to 0 for a plain operator dispatch.
       token =
-        Arbiter.MCP.Scope.mint_worker(bead, Keyword.get(opts, :repo),
+        Arbiter.MCP.Scope.mint_worker(task, Keyword.get(opts, :repo),
           depth: Keyword.get(opts, :depth, 0)
         )
 
-      Arbiter.MCP.AgentConfig.write(resolve_mcp_provider(bead, opts), worktree_path,
+      Arbiter.MCP.AgentConfig.write(resolve_mcp_provider(task, opts), worktree_path,
         mcp_url: Arbiter.MCP.server_url(),
         scope_token: token,
         server_name: Arbiter.MCP.server_name()
@@ -1025,7 +1025,7 @@ defmodule Arbiter.Worker.Dispatch do
   #   3. Workspace default via `Agents.for_workspace`.
   # Falls back to :claude on any error so a misconfigured workspace never blocks a
   # dispatch.
-  defp resolve_mcp_provider(%Issue{} = bead, opts) do
+  defp resolve_mcp_provider(%Issue{} = task, opts) do
     adapter =
       case Keyword.get(opts, :agent_adapter) do
         mod when is_atom(mod) and not is_nil(mod) ->
@@ -1034,7 +1034,7 @@ defmodule Arbiter.Worker.Dispatch do
         _ ->
           case Keyword.get(opts, :agent_type) do
             type when is_atom(type) and not is_nil(type) -> Agents.for_type(type)
-            _ -> Agents.for_workspace(load_workspace(bead))
+            _ -> Agents.for_workspace(load_workspace(task))
           end
       end
 
@@ -1055,13 +1055,13 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   @doc false
-  def prompt_for(%Issue{} = bead), do: prompt_for_bead(bead, [])
+  def prompt_for(%Issue{} = task), do: prompt_for_task(task, [])
 
   @doc false
-  def prompt_for_bead(%Issue{} = bead, opts) do
+  def prompt_for_task(%Issue{} = task, opts) do
     case Keyword.get(opts, :review, false) do
-      true -> review_prompt(bead)
-      _ -> work_prompt(bead, opts)
+      true -> review_prompt(task)
+      _ -> work_prompt(task, opts)
     end
   end
 
@@ -1070,74 +1070,74 @@ defmodule Arbiter.Worker.Dispatch do
   # agent continues from the preserved worktree instead of redoing finished
   # steps. `:resume_context` is built by `Arbiter.Worker.ResumeContext`; it's
   # absent (empty prefix) on a normal fresh dispatch.
-  defp work_prompt(%Issue{} = bead, opts) do
+  defp work_prompt(%Issue{} = task, opts) do
     resume_prefix = Keyword.get(opts, :resume_context) || ""
-    resume_prefix <> base_work_prompt(bead)
+    resume_prefix <> base_work_prompt(task)
   end
 
-  defp base_work_prompt(%Issue{} = bead) do
+  defp base_work_prompt(%Issue{} = task) do
     """
-    You are a worker working autonomously on bead #{bead.id}.
+    You are a worker working autonomously on task #{task.id}.
 
-    Title: #{bead.title}
+    Title: #{task.title}
 
     Description:
-    #{bead.description || "(none)"}
+    #{task.description || "(none)"}
 
     Acceptance:
-    #{bead.acceptance || "(none)"}
-    #{prior_review_findings_section(bead)}
-    Your current directory is a fresh git worktree on a per-bead branch.
-    Work the bead to completion: load context, design, implement, test,
+    #{task.acceptance || "(none)"}
+    #{prior_review_findings_section(task)}
+    Your current directory is a fresh git worktree on a per-task branch.
+    Work the task to completion: load context, design, implement, test,
     commit on this branch, and push it.
 
     Do NOT open a pull request yourself (no `gh pr create` / `glab mr
-    create`). The MergeQueue opens the single canonical PR for this bead, on
+    create`). The MergeQueue opens the single canonical PR for this task, on
     the correct base branch, using the body you author in the next step.
     Opening your own PR creates a duplicate on the wrong base.
-    #{pr_review_instruction(bead)}#{pr_body_step(bead)}#{completion_notes_step(bead)}
+    #{pr_review_instruction(task)}#{pr_body_step(task)}#{completion_notes_step(task)}
     Coordination: at the start of each step, check your mailbox by running
 
-        arb inbox #{bead.id}
+        arb inbox #{task.id}
 
     This shows any direction from the Admiral or flags from sibling workers
     (e.g. an upstream API shape changed) and marks them read. To leave a flag
-    for another worker, use `arb message <their-bead-id> <text>`.
+    for another worker, use `arb message <their-task-id> <text>`.
 
     When you are completely done, print the line:
 
         arb done
 
     on a line by itself, exactly. The worker watches your stdout and
-    will mark the bead complete when it sees that marker.
+    will mark the task complete when it sees that marker.
     """
   end
 
-  # The worker authors the PR/MR body and persists it on the bead; the
+  # The worker authors the PR/MR body and persists it on the task; the
   # MergeQueue (not the worker) opens the one canonical PR with it (bd-53xrmi).
   # Authoring it *after* implementing is what makes it worker-quality — the
   # Test plan reflects what actually passed, not what the spec hoped for. If
   # the repo ships a PR template we fill it rather than discard it (GitHub
   # injects the bare template only when the body is empty — the empty-body
-  # incident #3606). Persisted via the `bead_update_progress` MCP tool
+  # incident #3606). Persisted via the `task_update_progress` MCP tool
   # (`pr_body` field), which the MergeQueue reads back as `pr_body`. We use the
   # MCP tool rather than the `arb` escript so completion never depends on
   # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
   defp pr_body_step(%Issue{id: id}) do
     """
 
-    Author the PR description and persist it on the bead — the MergeQueue opens
+    Author the PR description and persist it on the task — the MergeQueue opens
     the PR with this exact body, so write it as the PR writeup, not a restatement
     of the ticket. Do this AFTER the work is implemented and tested, so it
     reflects what actually changed:
 
       * **Summary** — what changed and why, in a few sentences.
       * **Test plan** — the checks you ran, with checked boxes for what passed.
-      * **References** — the bead id (#{id}) and any linked ticket/PRs.
+      * **References** — the task id (#{id}) and any linked ticket/PRs.
 
     If the repo has a PR template (`.github/pull_request_template.md`), FILL it
     rather than discard it. Persist the finished body verbatim by calling the
-    `bead_update_progress` MCP tool with its `pr_body` argument set to the full
+    `task_update_progress` MCP tool with its `pr_body` argument set to the full
     PR body (Markdown). Use the MCP tool, which is available in this session —
     do NOT shell out to the `arb` CLI for this.
 
@@ -1146,9 +1146,9 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # When a prior review_gate pass escalated with REQUEST_CHANGES, the reviewer's
-  # findings are stored in bead.notes by record_review_gate_outcome/3 in Worker.
+  # findings are stored in task.notes by record_review_gate_outcome/3 in Worker.
   # Surface them here so the re-slunged worker sees them immediately in its
-  # prompt without having to call bead_show or gh pr view first.
+  # prompt without having to call task_show or gh pr view first.
   defp prior_review_findings_section(%Issue{notes: notes})
        when is_binary(notes) and notes != "" do
     """
@@ -1158,17 +1158,17 @@ defmodule Arbiter.Worker.Dispatch do
     """
   end
 
-  defp prior_review_findings_section(_bead), do: ""
+  defp prior_review_findings_section(_task), do: ""
 
-  # When a PR is already open for this bead, the re-slunged worker must read
-  # the PR review comments to find what changed. The findings in bead.notes
+  # When a PR is already open for this task, the re-slunged worker must read
+  # the PR review comments to find what changed. The findings in task.notes
   # (above) are the primary source, but the PR reviews are the canonical record
   # — fetching them explicitly guards against notes being stale or missing.
   defp pr_review_instruction(%Issue{pr_ref: pr_ref})
        when is_binary(pr_ref) and pr_ref != "" do
     """
 
-    This bead has an existing PR (##{pr_ref}). Read the PR review comments
+    This task has an existing PR (##{pr_ref}). Read the PR review comments
     before starting work — the review findings are there:
 
         gh pr view #{pr_ref} --json reviews,reviewComments
@@ -1178,17 +1178,17 @@ defmodule Arbiter.Worker.Dispatch do
     """
   end
 
-  defp pr_review_instruction(_bead), do: ""
+  defp pr_review_instruction(_task), do: ""
 
-  # For tracker-backed beads (an upstream Jira/etc. ticket), completing the
+  # For tracker-backed tasks (an upstream Jira/etc. ticket), completing the
   # work includes producing the gated completion notes the tracker requires
   # before it will transition the ticket forward. We make this an explicit,
   # non-optional step in the worker's prompt and tell it exactly how to
-  # persist the notes on the bead (the `bead_update_progress` MCP tool), so the
+  # persist the notes on the task (the `task_update_progress` MCP tool), so the
   # downstream tracker-sync has the fields to push. We use the MCP tool rather
   # than the `arb` escript so completion never depends on `~/.local/bin/arb`
   # being present (it is transiently deleted by test runs — bd-53xrmi). Untracked
-  # beads get nothing extra.
+  # tasks get nothing extra.
   defp completion_notes_step(%Issue{tracker_type: :none}), do: ""
 
   defp completion_notes_step(%Issue{tracker_ref: ref}) when ref in [nil, ""], do: ""
@@ -1196,10 +1196,10 @@ defmodule Arbiter.Worker.Dispatch do
   defp completion_notes_step(%Issue{}) do
     """
 
-    This bead is backed by an external tracker ticket. Before you finish, you
-    MUST produce its completion notes and persist them on the bead — the
+    This task is backed by an external tracker ticket. Before you finish, you
+    MUST produce its completion notes and persist them on the task — the
     tracker gates the ticket's forward transition until both are filled. Call
-    the `bead_update_progress` MCP tool (available in this session) with these
+    the `task_update_progress` MCP tool (available in this session) with these
     arguments:
 
       * `qa_notes` — What QA should verify: the user-facing behaviour to
@@ -1214,16 +1214,16 @@ defmodule Arbiter.Worker.Dispatch do
     """
   end
 
-  defp review_prompt(%Issue{} = bead) do
+  defp review_prompt(%Issue{} = task) do
     tracker_line =
-      case bead.pr_ref do
+      case task.pr_ref do
         pr when is_binary(pr) and pr != "" ->
-          "Tracker ref (PR/MR to review): #{bead.tracker_type}:#{pr}\n\n"
+          "Tracker ref (PR/MR to review): #{task.tracker_type}:#{pr}\n\n"
 
         _ ->
-          case bead.tracker_ref do
+          case task.tracker_ref do
             ref when is_binary(ref) and ref != "" ->
-              "Tracker ref (PR/MR to review): #{bead.tracker_type}:#{ref}\n\n"
+              "Tracker ref (PR/MR to review): #{task.tracker_type}:#{ref}\n\n"
 
             _ ->
               ""
@@ -1231,20 +1231,20 @@ defmodule Arbiter.Worker.Dispatch do
       end
 
     """
-    You are a reviewer worker. Review the pull/merge request linked to bead
-    #{bead.id} and post a verdict. You are not the author; do not modify the
+    You are a reviewer worker. Review the pull/merge request linked to task
+    #{task.id} and post a verdict. You are not the author; do not modify the
     branch.
 
-    Title: #{bead.title}
+    Title: #{task.title}
 
     Description:
-    #{bead.description || "(none)"}
+    #{task.description || "(none)"}
 
     Acceptance:
-    #{bead.acceptance || "(none)"}
+    #{task.acceptance || "(none)"}
 
     #{tracker_line}Your current directory is the repo's local checkout. There is
-    no per-bead branch and no worktree was provisioned — this is a review-only
+    no per-task branch and no worktree was provisioned — this is a review-only
     directive.
 
     Steps:
@@ -1252,7 +1252,7 @@ defmodule Arbiter.Worker.Dispatch do
          <ref>` for GitHub, `glab mr diff <ref>` for GitLab, `git diff` for
          the Direct local strategy). Do not check out the branch.
       2. Identify real correctness, security, or contract issues against the
-         bead's intent. Skip style nits.
+         task's intent. Skip style nits.
       3. Post inline comments for each finding through the same tracker CLI.
       4. Post a single review-level verdict — `approve` or `request_changes`
          — with a one-paragraph summary.
@@ -1286,14 +1286,14 @@ defmodule Arbiter.Worker.Dispatch do
         # When Claude is in charge of doing the real work, the Driver
         # waits on the worker's completion instead of ticking the
         # bookkeeping Machine to closure. This avoids the race where the
-        # no-op workflow's 5 steps finish in ~500ms and close the bead
+        # no-op workflow's 5 steps finish in ~500ms and close the task
         # before Claude has time to respond.
         claude_driven =
           Keyword.get(opts, :claude_driven, Keyword.get(opts, :start_claude, false))
 
         driver_opts =
           [
-            bead_id: id,
+            task_id: id,
             worker_pid: worker_pid,
             machine_id: machine_id,
             machine_pid: machine_pid,

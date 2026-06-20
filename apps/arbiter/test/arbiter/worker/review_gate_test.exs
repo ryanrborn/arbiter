@@ -9,7 +9,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     * gate parks at `:awaiting_review_gate` (and does NOT merge) when review is
       required,
     * APPROVE → the branch merges (a real `git merge --no-ff` on main),
-    * REQUEST_CHANGES → the branch is NOT merged, the bead is parked with the
+    * REQUEST_CHANGES → the branch is NOT merged, the task is parked with the
       findings, and the Admiral is escalated,
     * review-off (default) → completion routes straight to the merger, no gate.
 
@@ -25,7 +25,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
@@ -186,7 +186,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   # Start a worker already seeded with branch/merge meta and parked-ready to
   # accept a verdict, WITHOUT spawning a live reviewer (`review_spawn: false`),
   # so the verdict transitions can be driven directly.
-  defp start_author(bead, repo, extra_meta) do
+  defp start_author(task, repo, extra_meta) do
     branch = "feature/rev"
     :ok = seed_feature_branch(repo, branch)
 
@@ -196,7 +196,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
           branch: branch,
           repo_path: repo,
           target_branch: "main",
-          merge_title: "Merge #{bead.id}",
+          merge_title: "Merge #{task.id}",
           review_required: true,
           review_spawn: false
         },
@@ -205,9 +205,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
     {:ok, pid} =
       Worker.start(
-        bead_id: bead.id,
+        task_id: task.id,
         repo: "trib/repo",
-        workspace_id: bead.workspace_id,
+        workspace_id: task.workspace_id,
         meta: meta
       )
 
@@ -216,15 +216,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
     {pid, branch}
   end
 
-  defp new_bead(ws, attrs \\ %{}) do
-    {:ok, bead} =
+  defp new_task(ws, attrs \\ %{}) do
+    {:ok, task} =
       Ash.create(
         Issue,
-        Map.merge(%{title: "review_gate bead", workspace_id: ws.id, issue_type: :feature}, attrs)
+        Map.merge(%{title: "review_gate task", workspace_id: ws.id, issue_type: :feature}, attrs)
       )
 
-    {:ok, bead} = Ash.update(bead, %{status: :in_progress})
-    bead
+    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task
   end
 
   # ---- gate behaviour ------------------------------------------------------
@@ -232,8 +232,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
   describe "the gate" do
     test "parks at :awaiting_review_gate and does NOT merge when review is required",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
-      {pid, _branch} = start_author(bead, repo, %{})
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -245,8 +245,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
     test "APPROVE proceeds to the merger — a real --no-ff merge lands on main",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
-      {pid, _branch} = start_author(bead, repo, %{})
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
       wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
@@ -257,8 +257,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
       assert merge_commit_count(repo) == 1
 
-      # The approval is recorded on the bead notes (visible via arb show).
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      # The approval is recorded on the task notes (visible via arb show).
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.notes =~ "ReviewGate verdict: APPROVE"
     end
 
@@ -274,10 +274,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       Arbiter.Test.StubMerger.next_open_ref("!76")
       # Don't queue any get results → default :open/approved=false forever.
 
-      bead = new_bead(ws)
+      task = new_task(ws)
 
       {pid, _branch} =
-        start_author(bead, repo, %{
+        start_author(task, repo, %{
           merger_adapter_override: Arbiter.Test.StubMerger,
           watchdog_interval_ms: 20,
           watchdog_initial_delay_ms: 0,
@@ -297,10 +297,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
     end
 
-    test "REQUEST_CHANGES parks the bead with findings and does NOT merge",
+    test "REQUEST_CHANGES parks the task with findings and does NOT merge",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
-      {pid, _branch} = start_author(bead, repo, %{})
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
       wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
@@ -318,21 +318,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert snap.meta.review_gate_verdict == :request_changes
       assert snap.meta.review_gate_findings =~ "needs a guard"
 
-      # Bead parked (still in_progress, not closed) with findings in its notes.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      # Task parked (still in_progress, not closed) with findings in its notes.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
       assert reloaded.notes =~ "ReviewGate verdict: REQUEST_CHANGES"
       assert reloaded.notes =~ "needs a guard"
 
       # The Admiral was escalated.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
-      assert Enum.any?(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
+      assert Enum.any?(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     end
 
     test "an inconclusive review (no verdict) escalates and does NOT merge",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
-      {pid, _branch} = start_author(bead, repo, %{})
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
 
       send(pid, {:__claude_session_done__, "arb done"})
       wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
@@ -354,11 +354,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
         })
 
       _ = tmp
-      bead = new_bead(ws)
+      task = new_task(ws)
       # No meta review override; review_spawn left default — the gate must never
       # engage because the workspace doesn't require review.
       {pid, _branch} =
-        start_author(bead, repo, %{review_required: false, review_spawn: true})
+        start_author(task, repo, %{review_required: false, review_spawn: true})
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -369,8 +369,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
 
     test "review_gate_verdict/2 is rejected outside :awaiting_review_gate", %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
-      {pid, _branch} = start_author(bead, repo, %{})
+      task = new_task(ws)
+      {pid, _branch} = start_author(task, repo, %{})
 
       # Still :running — no verdict expected yet.
       assert {:error, {:invalid_transition, :running, :review_gate_verdict}} =
@@ -383,7 +383,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   describe "full path with a live (fixture) reviewer" do
     test "a reviewer approves → the branch merges, by a process distinct from the author",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -391,7 +391,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         # Real reviewer spawn, but the "claude" subprocess is our fixture script.
         worktree_path: repo,
@@ -401,7 +401,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: meta
@@ -420,15 +420,15 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # process): it recorded its OWN run row under the #review-suffixed id,
       # separate from the author's run. (Asserting on the persisted run avoids
       # racing the short-lived reviewer process in the registry.)
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
-      assert Enum.any?(runs, &(&1.bead_id == review_id)), "expected a distinct reviewer run row"
-      assert Enum.any?(runs, &(&1.bead_id == bead.id)), "expected the author's own run row"
+      assert Enum.any?(runs, &(&1.task_id == review_id)), "expected a distinct reviewer run row"
+      assert Enum.any?(runs, &(&1.task_id == task.id)), "expected the author's own run row"
     end
 
-    test "a reviewer requests changes → no merge, bead parked + escalated",
+    test "a reviewer requests changes → no merge, task parked + escalated",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -436,7 +436,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         # rounds: 1 — a single review pass, so a reject escalates immediately with
         # no revise loop (the Stage 2 loop is exercised separately below).
@@ -447,7 +447,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -459,7 +459,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
-      assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
+      assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
     test "review_agent.config.model is passed as `--model` when no command override is given",
@@ -497,7 +497,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
           }
         })
 
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -505,7 +505,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         review_rounds: 1,
         worktree_path: repo,
@@ -516,7 +516,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -540,7 +540,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # ran and its APPROVE was honored.
     test "a reviewer that omits the verdict is re-prompted; APPROVE on re-prompt merges",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -548,7 +548,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         worktree_path: repo,
         review_command: [@reprompt, "APPROVE"],
@@ -556,7 +556,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -567,16 +567,16 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       # The re-prompt ran as a distinct follow-up reviewer (its own run row under
       # the versioned id), separate from the first (verdict-less) pass.
-      reprompt_id = ReviewGate.reviewer_bead_id(bead.id) <> "#v2"
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a distinct re-prompt reviewer run row"
     end
 
-    test "REQUEST_CHANGES on re-prompt is honored — no merge, bead parked + escalated",
+    test "REQUEST_CHANGES on re-prompt is honored — no merge, task parked + escalated",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -584,7 +584,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         # rounds: 1 — the re-prompt yields a verdict in the same (only) round; a
         # REQUEST_CHANGES there escalates immediately, no revise loop.
@@ -595,7 +595,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -606,14 +606,14 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
       escalations = Message.inbox("admiral", workspace_id: ws.id)
-      assert Enum.any?(escalations, &(&1.directive_ref == bead.id))
+      assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
     # Only a SECOND empty result escalates as inconclusive: the fixture withholds
     # the verdict on both the first pass and the re-prompt ("NONE").
     test "a reviewer that omits the verdict twice escalates as inconclusive",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -621,7 +621,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         worktree_path: repo,
         review_command: [@reprompt, "NONE"],
@@ -629,7 +629,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -640,10 +640,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
 
       # The re-prompt WAS attempted before escalating — its run row exists.
-      reprompt_id = ReviewGate.reviewer_bead_id(bead.id) <> "#v2"
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted before escalating"
     end
 
@@ -653,7 +653,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # revise loop empty-handed.
     test "REQUEST_CHANGES with no findings is re-prompted; a valid re-prompt is honored",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -661,7 +661,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         worktree_path: repo,
         # First pass: REQUEST_CHANGES with no findings → re-prompt → APPROVE.
@@ -670,7 +670,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -681,10 +681,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # APPROVE merged. A merge at all proves the empty verdict was re-prompted.
       assert merge_commit_count(repo) == 1
 
-      reprompt_id = ReviewGate.reviewer_bead_id(bead.id) <> "#v2"
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      assert Enum.any?(runs, &(&1.bead_id == reprompt_id)),
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a distinct re-prompt reviewer run row"
     end
 
@@ -693,7 +693,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # never silently accepted, never merged.
     test "REQUEST_CHANGES with no findings twice escalates as inconclusive — no merge",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
@@ -701,7 +701,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         review_rounds: 1,
         worktree_path: repo,
@@ -710,7 +710,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       }
 
       {:ok, pid} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
       :ok = Worker.advance(pid, :claude)
@@ -730,20 +730,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # addresses the findings, and the round-3 reviewer can approve → merge.
     test "empty-findings verdict does not consume the round cap — implementer gets to revise",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             # 2-round cap: round 1 real reject → revise → round 2 empty verdict
             # (malformed) → re-prompt real findings → (fix) round 3 reviewer.
@@ -766,10 +766,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 1
 
       # A round-2 implementer ran, proving the findings DID reach it.
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl2")),
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl2")),
              "expected a round-2 implementer run (findings reached the implementer)"
     end
 
@@ -781,20 +781,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # start of each new round, so round 2 still gets its reprompt → APPROVE → merge.
     test "per-round retry budget resets so round 2 can reprompt even after round 1 used its budget",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             review_rounds: 2,
             worktree_path: repo,
@@ -816,10 +816,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # Merge proves round 2 got its reprompt (exhausted budget would have escalated).
       assert merge_commit_count(repo) == 1
 
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
              "expected a round-1 implementer run"
     end
   end
@@ -833,20 +833,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # implementer between the two reviews.
     test "reject → revise → approve converges and merges within the round cap",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             review_rounds: 2,
             worktree_path: repo,
@@ -866,26 +866,26 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       # A distinct implementer worker ran between the rounds (its own run row
       # under the round-1 #impl id), proving a fresh mind addressed the findings.
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
              "expected a distinct implementer run row for round 1"
 
       # A distinct round-2 reviewer ran too.
-      assert Enum.any?(runs, &(&1.bead_id == review_id <> "#r2")),
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#r2")),
              "expected a distinct round-2 reviewer run row"
 
       # The implementer↔reviewer back-and-forth was persisted to the mailbox as a
       # durable thread (reviewer findings + implementer response), oldest first.
-      thread = Message.thread(bead.id, workspace_id: ws.id)
+      thread = Message.thread(task.id, workspace_id: ws.id)
       flags = Enum.filter(thread, &(&1.kind == :flag))
       assert length(flags) >= 2
 
-      assert Enum.any?(flags, &(&1.from_ref == review_id and &1.to_ref == bead.id)),
+      assert Enum.any?(flags, &(&1.from_ref == review_id and &1.to_ref == task.id)),
              "expected a reviewer→implementer findings message"
 
-      assert Enum.any?(flags, &(&1.from_ref == bead.id and &1.to_ref == review_id)),
+      assert Enum.any?(flags, &(&1.from_ref == task.id and &1.to_ref == review_id)),
              "expected an implementer→reviewer response message"
     end
 
@@ -894,20 +894,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # escalates to Darth Gnosis with the FULL transcript + diff — no merge.
     test "not converged after the cap → escalate with the full transcript, no merge",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             review_rounds: 2,
             worktree_path: repo,
@@ -929,7 +929,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # rounds of findings + the implementer's response) and the current diff —
       # Darth Gnosis judges with the whole argument, not a summary.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
-      escalation = Enum.find(escalations, &(&1.directive_ref == bead.id))
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
       assert escalation, "expected an escalation to the Admiral"
       assert escalation.body =~ "transcript"
       assert escalation.body =~ "Round 1"
@@ -937,22 +937,22 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert escalation.body =~ "Implementer → Reviewer"
       assert escalation.body =~ "Current diff"
 
-      # The same transcript is on the bead notes (visible via arb show), including
+      # The same transcript is on the task notes (visible via arb show), including
       # the round count so operators can see it ran the full 2-round cap.
-      {:ok, reloaded} = Ash.get(Issue, bead.id)
+      {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.notes =~ "REQUEST_CHANGES"
       assert reloaded.notes =~ "rounds: 2"
 
       # The full thread persisted as durable mailbox rows: r1 findings, r1
       # response, r2 findings — three :flag entries, oldest first.
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
-      flags = bead.id |> Message.thread(workspace_id: ws.id) |> Enum.filter(&(&1.kind == :flag))
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      flags = task.id |> Message.thread(workspace_id: ws.id) |> Enum.filter(&(&1.kind == :flag))
       assert length(flags) == 3
 
       assert Enum.count(flags, &(&1.from_ref == review_id)) == 2,
              "expected two reviewer→implementer findings rows (round 1 and round 2)"
 
-      assert Enum.count(flags, &(&1.from_ref == bead.id)) == 1,
+      assert Enum.count(flags, &(&1.from_ref == task.id)) == 1,
              "expected one implementer→reviewer response row"
     end
 
@@ -960,20 +960,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # escalates immediately — no implementer is ever spawned, no revise loop.
     test "rounds: 1 escalates on the first reject with no revise loop",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             review_rounds: 1,
             worktree_path: repo,
@@ -992,10 +992,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
       # No implementer was ever spawned — the round cap was 1.
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_task_id(task.id)
       runs = Ash.read!(Arbiter.Workers.Run)
 
-      refute Enum.any?(runs, &(&1.bead_id == review_id <> "#impl1")),
+      refute Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
              "rounds: 1 must not spawn an implementer"
     end
   end
@@ -1007,7 +1007,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # git-derived "work so far" briefing so it continues the prior round's
     # thread instead of re-deriving it from a raw diff.
     test "prepends the prior round's committed + uncommitted work", %{repo: repo, ws: ws} do
-      bead = new_bead(ws, %{description: "the directive", acceptance: "it works"})
+      task = new_task(ws, %{description: "the directive", acceptance: "it works"})
       branch = "feature/rev"
 
       # Put HEAD on the feature branch with a commit ahead of main, plus an
@@ -1019,7 +1019,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       File.write!(Path.join(repo, "README.md"), "seed\nstraggler edit\n")
 
       state = %{
-        bead_id: bead.id,
+        task_id: task.id,
         branch: branch,
         target_branch: "main",
         worktree_path: repo,
@@ -1041,10 +1041,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # A worktree-less ReviewGate (ad-hoc / test run) must degrade to the
     # directive-only prompt rather than crash trying to read git state.
     test "degrades gracefully with no worktree", %{ws: ws} do
-      bead = new_bead(ws, %{description: "the directive"})
+      task = new_task(ws, %{description: "the directive"})
 
       state = %{
-        bead_id: bead.id,
+        task_id: task.id,
         branch: "feature/rev",
         target_branch: "main",
         worktree_path: nil,
@@ -1059,10 +1059,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
 
     test "clean_findings/1 strips sentinel lines and arb done markers from findings", %{ws: ws} do
-      bead = new_bead(ws, %{description: "the directive"})
+      task = new_task(ws, %{description: "the directive"})
 
       state = %{
-        bead_id: bead.id,
+        task_id: task.id,
         branch: "feature/rev",
         target_branch: "main",
         worktree_path: nil,
@@ -1097,7 +1097,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # commit gate does not fire).
     test "ReviewGate escalates as request_changes when branch has no commits",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
       branch = "feature/no-commits"
 
       # Create the branch at the same commit as main — no commits ahead.
@@ -1114,13 +1114,13 @@ defmodule Arbiter.Worker.ReviewGateTest do
         branch: branch,
         repo_path: repo,
         target_branch: "main",
-        merge_title: "Merge #{bead.id}",
+        merge_title: "Merge #{task.id}",
         review_required: true,
         review_spawn: false
       }
 
       {:ok, author} =
-        Worker.start(bead_id: bead.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
 
       on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
       :ok = Worker.advance(author, :claude)
@@ -1149,7 +1149,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {:ok, _review_gate} =
         ReviewGate.start(
           author: author,
-          bead_id: bead.id,
+          task_id: task.id,
           workspace_id: ws.id,
           repo: "trib/repo",
           worktree_path: sub_wt,
@@ -1174,7 +1174,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # reviewer can confirm it is on the correct commit before diffing.
     test "includes the HEAD SHA when the worktree is on the expected branch",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws, %{description: "impl desc", acceptance: "it works"})
+      task = new_task(ws, %{description: "impl desc", acceptance: "it works"})
       branch = "feature/rev"
 
       # Put the repo HEAD on the feature branch with a commit ahead of main.
@@ -1187,7 +1187,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       expected_sha = String.trim(sha_out)
 
       state = %{
-        bead_id: bead.id,
+        task_id: task.id,
         branch: branch,
         target_branch: "main",
         worktree_path: repo,
@@ -1206,10 +1206,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
     test "omits the HEAD SHA anchor when head_sha is nil (no worktree / ad-hoc)",
          %{ws: ws} do
-      bead = new_bead(ws)
+      task = new_task(ws)
 
       state = %{
-        bead_id: bead.id,
+        task_id: task.id,
         branch: "feature/rev",
         target_branch: "main",
         worktree_path: nil,
@@ -1267,21 +1267,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
   # stays alive while a test probes or kills it). Cleanup cascades: stopping the
   # author trips the ReviewGate's author-monitor, which stops the reviewer.
   defp start_live_gate(repo, ws) do
-    bead = new_bead(ws)
+    task = new_task(ws)
     branch = "feature/rev"
     :ok = seed_feature_branch(repo, branch)
     sleep = System.find_executable("sleep") || "/bin/sleep"
 
     {:ok, pid} =
       Worker.start(
-        bead_id: bead.id,
+        task_id: task.id,
         repo: "trib/repo",
         workspace_id: ws.id,
         meta: %{
           branch: branch,
           repo_path: repo,
           target_branch: "main",
-          merge_title: "Merge #{bead.id}",
+          merge_title: "Merge #{task.id}",
           review_required: true,
           worktree_path: repo,
           review_command: [sleep, "10"],
@@ -1290,7 +1290,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       )
 
     on_exit(fn ->
-      review_id = ReviewGate.reviewer_bead_id(bead.id)
+      review_id = ReviewGate.reviewer_task_id(task.id)
       if rp = Worker.whereis(review_id), do: safe_stop(rp)
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)
     end)
@@ -1304,7 +1304,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   # ---- difficulty-derived round cap (bd-a5k6wb) ----------------------------
 
   describe "rounds_for_difficulty/1" do
-    test "D0 and D1 beads get a 2-round cap" do
+    test "D0 and D1 tasks get a 2-round cap" do
       assert ReviewGate.rounds_for_difficulty(0) == 2
       assert ReviewGate.rounds_for_difficulty(1) == 2
     end
@@ -1314,32 +1314,32 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert ReviewGate.rounds_for_difficulty(nil) == 3
     end
 
-    test "D3 and D4 beads get a 4-round cap" do
+    test "D3 and D4 tasks get a 4-round cap" do
       assert ReviewGate.rounds_for_difficulty(3) == 4
       assert ReviewGate.rounds_for_difficulty(4) == 4
     end
   end
 
   describe "difficulty-derived and workspace-cap round resolution" do
-    # A D0 bead has a 2-round default. With the @rounds fixture (reject first,
+    # A D0 task has a 2-round default. With the @rounds fixture (reject first,
     # approve second), a 2-round cap means one reject + one revise → approval.
-    # Because only 2 rounds are allowed and the second approves, the bead merges.
-    test "D0 bead escalates after 2 rounds (difficulty default applies)",
+    # Because only 2 rounds are allowed and the second approves, the task merges.
+    test "D0 task escalates after 2 rounds (difficulty default applies)",
          %{repo: repo, ws: ws} do
-      bead = new_bead(ws, %{difficulty: 0})
+      task = new_task(ws, %{difficulty: 0})
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             worktree_path: repo,
             # @rounds rejects round 1, approves round 2 — within a D0 cap of 2.
@@ -1358,7 +1358,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 1
     end
 
-    # A D3 bead has a 4-round default. A workspace with max_rounds: 2 caps it at
+    # A D3 task has a 4-round default. A workspace with max_rounds: 2 caps it at
     # min(4, 2) = 2. The @rounds fixture rejects first then emits REQUEST_CHANGES
     # on all later passes, so after 2 rounds it escalates — proving the workspace
     # cap was applied rather than the difficulty default of 4.
@@ -1374,20 +1374,20 @@ defmodule Arbiter.Worker.ReviewGateTest do
           }
         })
 
-      bead = new_bead(ws_capped, %{difficulty: 3})
+      task = new_task(ws_capped, %{difficulty: 3})
       branch = "feature/rev"
       :ok = seed_feature_branch(repo, branch)
 
       {:ok, pid} =
         Worker.start(
-          bead_id: bead.id,
+          task_id: task.id,
           repo: "trib/repo",
           workspace_id: ws_capped.id,
           meta: %{
             branch: branch,
             repo_path: repo,
             target_branch: "main",
-            merge_title: "Merge #{bead.id}",
+            merge_title: "Merge #{task.id}",
             review_required: true,
             worktree_path: repo,
             # @rounds always REQUEST_CHANGES — the cap determines when to escalate.

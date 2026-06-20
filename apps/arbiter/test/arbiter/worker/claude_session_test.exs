@@ -1,6 +1,6 @@
 defmodule Arbiter.Worker.ClaudeSessionTest do
   # async: false — Port + Phoenix.PubSub + shared Worker registry are all
-  # global resources. Per-test unique bead_ids keep cases independent.
+  # global resources. Per-test unique task_ids keep cases independent.
   use ExUnit.Case, async: false
 
   alias Arbiter.Worker
@@ -8,19 +8,19 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   @fixture Path.expand("../../fixtures/echo_with_done.sh", __DIR__)
 
-  defp new_bead_id, do: "gte-013-#{System.unique_integer([:positive])}"
+  defp new_task_id, do: "gte-013-#{System.unique_integer([:positive])}"
 
   defp start_worker(extra_opts \\ []) do
-    bead_id = new_bead_id()
+    task_id = new_task_id()
 
     {:ok, pid} =
-      Worker.start(Keyword.merge([bead_id: bead_id, repo: "arbiter"], extra_opts))
+      Worker.start(Keyword.merge([task_id: task_id, repo: "arbiter"], extra_opts))
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)
     end)
 
-    {pid, bead_id}
+    {pid, task_id}
   end
 
   defp tmp_dir!(tag) do
@@ -95,7 +95,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "start/1" do
     test "returns {:ok, port} with a valid command override" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-ok")
 
       assert {:ok, port} =
@@ -139,7 +139,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "output streaming" do
     test "fixture lines land in meta[:output_lines] in order" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-lines")
 
       {:ok, _port} =
@@ -147,7 +147,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           owner: pid,
           worktree_path: cwd,
           command: [@fixture],
-          topic: "worker:#{bead_id}"
+          topic: "worker:#{task_id}"
         )
 
       # Wait until the exit_status is recorded — by then all output has
@@ -170,9 +170,9 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "broadcasts :worker_output on the configured topic" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-bcast")
-      topic = "worker:#{bead_id}"
+      topic = "worker:#{task_id}"
 
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
 
@@ -184,16 +184,16 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           topic: topic
         )
 
-      assert_receive {:worker_output, ^bead_id, "starting fake claude session"}, 2_000
-      assert_receive {:worker_output, ^bead_id, "doing important work"}, 2_000
-      assert_receive {:worker_output, ^bead_id, "arb done"}, 2_000
+      assert_receive {:worker_output, ^task_id, "starting fake claude session"}, 2_000
+      assert_receive {:worker_output, ^task_id, "doing important work"}, 2_000
+      assert_receive {:worker_output, ^task_id, "arb done"}, 2_000
     end
 
-    test "default topic is worker:<bead_id> when :topic not provided" do
-      {pid, bead_id} = start_worker()
+    test "default topic is worker:<task_id> when :topic not provided" do
+      {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-default-topic")
 
-      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:#{bead_id}")
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:#{task_id}")
 
       {:ok, _port} =
         ClaudeSession.start(
@@ -202,13 +202,13 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
           command: [@fixture]
         )
 
-      assert_receive {:worker_output, ^bead_id, "starting fake claude session"}, 2_000
+      assert_receive {:worker_output, ^task_id, "starting fake claude session"}, 2_000
     end
   end
 
   describe "completion detection" do
     test "a line matching ~r/\\barb done\\b/ triggers Worker.complete/2" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-done")
 
       # Must be :running for :completed to be a legal transition.
@@ -230,7 +230,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "completion signal completes the worker even when status is :idle" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-idle-done")
 
       {:ok, _port} =
@@ -252,7 +252,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "a prose line that only mentions the marker as a substring does not trip" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-no-trip")
 
       :ok = Worker.advance(pid, :implement)
@@ -284,7 +284,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "exit handling" do
     test "exit status is captured in meta[:exit_status]" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-exit")
 
       {:ok, _port} =
@@ -302,20 +302,20 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test ":worker_exited is broadcast on child exit" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-exit-bcast")
-      topic = "worker:#{bead_id}"
+      topic = "worker:#{task_id}"
 
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
 
       {:ok, _port} =
         ClaudeSession.start(owner: pid, worktree_path: cwd, command: [@fixture], topic: topic)
 
-      assert_receive {:worker_exited, ^bead_id, 0}, 2_000
+      assert_receive {:worker_exited, ^task_id, 0}, 2_000
     end
 
     test "non-zero exit status propagates" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-nonzero")
 
       {:ok, _port} =
@@ -339,7 +339,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "buffering" do
     test "output_lines is capped at the configured line cap" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-cap")
       cap = ClaudeSession.line_cap()
       to_emit = cap + 50
@@ -371,9 +371,9 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "stream-json parsing" do
     test "assistant text is split into display lines (system/result events summarized)" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-text")
-      topic = "worker:#{bead_id}"
+      topic = "worker:#{task_id}"
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
 
       events = [
@@ -416,11 +416,11 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       # assistant turn carries it), so "line one" appears exactly once.
       assert Enum.count(lines, &(&1 == "line one")) == 1
 
-      assert_receive {:worker_output, ^bead_id, "line one"}, 2_000
+      assert_receive {:worker_output, ^task_id, "line one"}, 2_000
     end
 
     test "tool_use renders as a compact call line" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-tool")
 
       events = [
@@ -447,7 +447,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "decoded events refresh the session's live activity (mirrored into meta)" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-activity")
 
       events = [
@@ -480,7 +480,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "arb done in assistant text completes the worker" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-done")
 
       events = [
@@ -512,7 +512,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "arb done inside a tool result is displayed but does NOT complete" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-toolresult")
 
       # Must be :running so :completed would be a legal transition — proving the
@@ -546,7 +546,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "a stream-json line larger than the port line limit is reassembled and parsed" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("cs-sj-big")
 
       # Force the port's {:line, 65_536} framing to split this event across
@@ -580,9 +580,9 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "gemini stream-json parsing" do
     test "gemini events render display lines and summarize init/result" do
-      {pid, bead_id} = start_worker()
+      {pid, task_id} = start_worker()
       cwd = tmp_dir!("gem-sj-text")
-      topic = "worker:#{bead_id}"
+      topic = "worker:#{task_id}"
       :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
 
       events = [
@@ -618,7 +618,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "arb done in gemini assistant text completes the worker" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("gem-sj-done")
 
       events = [
@@ -646,7 +646,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "arb done split across two assistant deltas still completes (rolling buffer)" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("gem-sj-split")
 
       # The sentinel straddles a `delta: true` chunk boundary — per-line
@@ -682,7 +682,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "arb done in a gemini tool result is displayed but does NOT complete" do
-      {pid, _bead_id} = start_worker()
+      {pid, _task_id} = start_worker()
       cwd = tmp_dir!("gem-sj-toolresult")
       :ok = Worker.advance(pid, :implement)
 
@@ -719,13 +719,13 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
   describe "concurrent workers" do
     test "each worker sees only its own output" do
-      {pid_a, bead_a} = start_worker()
-      {pid_b, bead_b} = start_worker()
+      {pid_a, task_a} = start_worker()
+      {pid_b, task_b} = start_worker()
 
       cwd = tmp_dir!("cs-concurrent")
 
-      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:#{bead_a}")
-      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:#{bead_b}")
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:#{task_a}")
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:#{task_b}")
 
       {:ok, _} =
         ClaudeSession.start(
@@ -762,11 +762,11 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       refute "from-a-1" in b_lines
       refute "from-a-2" in b_lines
 
-      # Each PubSub topic only saw its own bead's output.
-      assert_receive {:worker_output, ^bead_a, "from-a-1"}, 2_000
-      assert_receive {:worker_output, ^bead_b, "from-b-1"}, 2_000
-      refute_receive {:worker_output, ^bead_a, "from-b-1"}, 100
-      refute_receive {:worker_output, ^bead_b, "from-a-1"}, 100
+      # Each PubSub topic only saw its own task's output.
+      assert_receive {:worker_output, ^task_a, "from-a-1"}, 2_000
+      assert_receive {:worker_output, ^task_b, "from-b-1"}, 2_000
+      refute_receive {:worker_output, ^task_a, "from-b-1"}, 100
+      refute_receive {:worker_output, ^task_b, "from-a-1"}, 100
     end
   end
 
@@ -795,7 +795,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       total = cap + 500
 
       session = %{
-        bead_id: "bd-durable",
+        task_id: "bd-durable",
         topic: "worker:durable-#{System.unique_integer([:positive])}",
         line_cap: cap,
         done_regex: ClaudeSession.done_regex(),
@@ -825,7 +825,7 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
 
     test "a session without an :output_log handle behaves as before (no durable write)" do
       session = %{
-        bead_id: "bd-nolog",
+        task_id: "bd-nolog",
         topic: "worker:nolog-#{System.unique_integer([:positive])}",
         line_cap: ClaudeSession.line_cap(),
         done_regex: ClaudeSession.done_regex(),

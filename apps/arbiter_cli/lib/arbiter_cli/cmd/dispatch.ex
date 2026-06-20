@@ -1,16 +1,16 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb dispatch <bead-id> [<repo>] [--provider claude|gemini | --no-agent] [--model <name>]`
-  — spawn a worker to work on a bead.
+  `arb dispatch <task-id> [<repo>] [--provider claude|gemini | --no-agent] [--model <name>]`
+  — spawn a worker to work on a task.
 
-  POSTs to `/api/workers/dispatch`. The server transitions the bead to
+  POSTs to `/api/workers/dispatch`. The server transitions the task to
   `:in_progress`, starts a worker GenServer under
   `Arbiter.Worker.Supervisor`, attaches `Arbiter.Workflows.Work` via
   the WorkflowMachine, and spawns an agent subprocess in the worktree.
 
   By default (no worker flag) the server reads the workspace's `agent.type`
   config and spawns that agent. Use `--provider` to force a specific provider,
-  or `--no-agent` to park the bead for a manual attach instead.
+  or `--no-agent` to park the task for a manual attach instead.
 
   Flags:
     --provider <p>   force the worker provider regardless of the workspace's
@@ -20,13 +20,13 @@ defmodule ArbiterCli.Cmd.Dispatch do
                      (consumes Google credits).
     --with-claude    DEPRECATED alias for `--provider claude`.
     --with-gemini    DEPRECATED alias for `--provider gemini`.
-    --no-agent       dry dispatch — park the bead in `:in_progress` for a hand
+    --no-agent       dry dispatch — park the task in `:in_progress` for a hand
                      to attach, with no agent spawned. Preserves the old
                      manual-attach path.
     --model <name>   one-shot override of the model the worker session runs
                      on (`haiku|sonnet|opus`). Takes precedence over the
                      workspace's `agent.config.model` and any routing rule
-                     for the bead.
+                     for the task.
     --json           emit JSON instead of human-readable text
   """
 
@@ -51,12 +51,12 @@ defmodule ArbiterCli.Cmd.Dispatch do
       mode = if opts[:json], do: :json, else: :text
       model = opts[:model]
 
-      {bead_id, repo} =
+      {task_id, repo} =
         case rest do
           [id] -> {id, nil}
           [id, repo] -> {id, repo}
           [] -> Output.die("dispatch requires an issue id (e.g. `arb dispatch gte-006`)")
-          _ -> Output.die("dispatch takes at most two positional arguments: <bead-id> [<repo>]")
+          _ -> Output.die("dispatch takes at most two positional arguments: <task-id> [<repo>]")
         end
 
       worker =
@@ -71,7 +71,7 @@ defmodule ArbiterCli.Cmd.Dispatch do
         end
 
       body =
-        %{"bead_id" => bead_id}
+        %{"task_id" => task_id}
         |> Map.merge(worker)
         |> maybe_put("repo", repo)
         |> maybe_put("model", model)
@@ -95,13 +95,13 @@ defmodule ArbiterCli.Cmd.Dispatch do
   defp emit(payload, :json), do: IO.puts(Jason.encode!(payload))
 
   defp emit(payload, :text) do
-    bead = payload["bead"] || %{}
+    task = payload["task"] || %{}
     worker = payload["worker"] || %{}
     machine = payload["machine"] || %{}
 
     IO.puts("Dispatch:")
-    IO.puts("  Issue:     #{bead["id"]} — #{bead["title"]}")
-    IO.puts("  Status:   #{bead["status"]}")
+    IO.puts("  Issue:     #{task["id"]} — #{task["title"]}")
+    IO.puts("  Status:   #{task["status"]}")
     IO.puts("  Worker:  #{worker["pid"]}")
     IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
 

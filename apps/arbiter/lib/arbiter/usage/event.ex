@@ -8,16 +8,16 @@ defmodule Arbiter.Usage.Event do
   `Arbiter.Worker.ClaudeSession`'s session state — see `usage_summary/1`
   there.
 
-  Multiple rows per bead are the point of this table: a re-slung bead writes
+  Multiple rows per task are the point of this table: a re-slung task writes
   a second `:work` row, a ReviewGate review adds a `:review` row, and so the
   spend-on-rework story falls out of `Arbiter.Usage.summarize/1` for free.
 
   ## Step
 
   `:work` — the worker's own session that produced the diff.
-  `:review` — a ReviewGate-spawned reviewer session. `bead_id` carries the
+  `:review` — a ReviewGate-spawned reviewer session. `task_id` carries the
               `#review` suffix used by `Arbiter.Worker.ReviewGate` so the row
-              is still attributable to the bead being reviewed (drop the
+              is still attributable to the task being reviewed (drop the
               suffix at read time).
   `:other` — escape hatch for future non-Claude agents that don't fit the
               author/reviewer split.
@@ -41,11 +41,11 @@ defmodule Arbiter.Usage.Event do
     repo Arbiter.Repo
 
     custom_indexes do
-      # Powers the per-workspace / per-day / per-bead dashboards. Keep narrow
+      # Powers the per-workspace / per-day / per-task dashboards. Keep narrow
       # — the table is small for now and we read it eagerly into memory in
       # Arbiter.Usage.summarize/1.
       index [:workspace_id, :occurred_at]
-      index [:bead_id, :occurred_at]
+      index [:task_id, :occurred_at]
     end
   end
 
@@ -56,7 +56,7 @@ defmodule Arbiter.Usage.Event do
       primary? true
 
       accept [
-        :bead_id,
+        :task_id,
         :workspace_id,
         :repo,
         :step,
@@ -80,11 +80,11 @@ defmodule Arbiter.Usage.Event do
   attributes do
     uuid_primary_key :id
 
-    attribute :bead_id, :string do
+    attribute :task_id, :string do
       allow_nil? false
       public? true
       constraints max_length: 255, trim?: true
-      description "Bead this session worked. For ReviewGate reviewers carries a `#review` suffix."
+      description "Task this session worked. For ReviewGate reviewers carries a `#review` suffix."
     end
 
     attribute :workspace_id, :string do

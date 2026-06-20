@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.TrackerControllerTest do
   use ArbiterWeb.ConnCase, async: false
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.GitHub.Config
 
   @viewer "tracker-acolyte"

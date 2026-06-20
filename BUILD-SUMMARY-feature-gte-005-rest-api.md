@@ -1,13 +1,13 @@
 # Build summary: feature/gte-005-rest-api
 
-**Bead:** gte-005
+**Task:** gte-005
 **Builder:** Agent (worktree session, 2026-05-19)
 **Branch:** feature/gte-005-rest-api
 **Commit:** 5deb1dc
 
 ## What I built
 
-A JSON-only Phoenix REST API in the `arbiter_web` app that exposes the bead-ledger resources (Workspace, Issue, Dependency, Convoy) over the existing `:api` pipeline. The arb CLI (gte-006) will speak to this over a localhost HTTP socket. No auth — that's a later bead.
+A JSON-only Phoenix REST API in the `arbiter_web` app that exposes the task-ledger resources (Workspace, Issue, Dependency, Convoy) over the existing `:api` pipeline. The arb CLI (gte-006) will speak to this over a localhost HTTP socket. No auth — that's a later task.
 
 ### Files added/changed
 
@@ -100,7 +100,7 @@ $ mix test
 Total: 110 tests (gte-001..004 baseline + 31 new), 0 failures
 ```
 
-Test breakdown for this bead:
+Test breakdown for this task:
 - `issue_controller_test.exs` — 15 tests: create happy/422, show happy/404, index list, 3 filter variants (status, workspace_id, invalid status → 400), patch happy/immutable workspace_id/404, close happy/already-closed 422, reopen happy/already-open 422, ready filtering with a real dep
 - `dependency_controller_test.exs` — 5 tests: create happy, create self-ref 422, delete-all-by-pair, delete-by-type filter, delete with no matches 404
 - `convoy_controller_test.exs` — 4 tests: create happy/422, show with members and aggregates, show 404, close with reason
@@ -112,7 +112,7 @@ Test breakdown for this bead:
 2. **Bulk endpoints** (`POST /api/issues:bulk_create`, `POST /api/convoy/:id/issues` for batch membership) — not in spec, easy to add later.
 3. **GET /api/dependencies** (list/filter edges) — not in spec; the CLI doesn't need it for gte-006.
 4. **GET /api/convoys** (list convoys) — not in spec; only show was required.
-5. **Per-page Ash policy auth** — explicitly out of scope for this bead.
+5. **Per-page Ash policy auth** — explicitly out of scope for this task.
 6. **Strict JSON content-type enforcement on POST/PATCH bodies** — Plug parses any media type given the `:api` pipeline `accepts: ["json"]`; if someone POSTs `text/plain` Phoenix will reject with a 415 before the controller. Not adding extra plug here.
 
 ## What I noticed worth improving separately

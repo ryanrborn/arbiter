@@ -11,7 +11,7 @@ defmodule ArbiterWeb.Api.EventController do
     * review_gate       — a review_gate escalation requires Admiral ruling
     * worker_failed — a worker stopped unexpectedly (status → failed)
     * worker_done   — a worker completed (status → completed)
-    * bead_state     — any bead FSM transition (noisier — opt-in only)
+    * task_state     — any task FSM transition (noisier — opt-in only)
 
   Wire format: one newline-terminated JSON object per event. A bare newline
   is sent every 30 seconds on idle connections as a keepalive.

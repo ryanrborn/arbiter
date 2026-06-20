@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   4. Bulk-inserts all `dependencies` rows. Skips conflicts on
      `(from_issue_id, to_issue_id, type)`.
 
-  Field mappings live in `Arbiter.Beads.DoltImport.Mapper` (with unit tests).
+  Field mappings live in `Arbiter.Tasks.DoltImport.Mapper` (with unit tests).
   """
 
   use Mix.Task
@@ -38,9 +38,9 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   require Ash.Query
   require Logger
 
-  alias Arbiter.Beads.DoltImport.Mapper
+  alias Arbiter.Tasks.DoltImport.Mapper
 
-  # Map well-known Dolt DB names to the prefix their dominant beads use.
+  # Map well-known Dolt DB names to the prefix their dominant tasks use.
   # For unknown source names we fall back to deriving from the first row.
   @known_prefixes %{
     "hq" => "hq",
@@ -163,7 +163,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
     prefix = Map.get(@known_prefixes, name) || Mapper.derive_prefix(issues)
 
     existing =
-      Arbiter.Beads.Workspace
+      Arbiter.Tasks.Workspace
       |> Ash.Query.filter(name == ^name)
       |> Ash.read_one!()
 
@@ -171,7 +171,7 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
       case existing do
         nil ->
           {:ok, ws} =
-            Ash.create(Arbiter.Beads.Workspace, %{
+            Ash.create(Arbiter.Tasks.Workspace, %{
               name: name,
               prefix: prefix,
               description: "Imported from Dolt by mix arbiter.import_from_dolt"
@@ -260,9 +260,9 @@ defmodule Mix.Tasks.Arbiter.ImportFromDolt do
   defp bulk_insert_dependencies(rows) do
     now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
-    # Filter out edges that reference beads not in our Postgres store.
-    # Cross-repo deps in Dolt may point to beads from repos we didn't import
-    # (e.g. server has deps pointing to ac-*, ad-* beads from other Dolt DBs).
+    # Filter out edges that reference tasks not in our Postgres store.
+    # Cross-repo deps in Dolt may point to tasks from repos we didn't import
+    # (e.g. server has deps pointing to ac-*, ad-* tasks from other Dolt DBs).
     # Postgres FK would block these; skip them rather than failing the whole batch.
     known_ids =
       Arbiter.Repo.query!("SELECT id FROM issues", [])

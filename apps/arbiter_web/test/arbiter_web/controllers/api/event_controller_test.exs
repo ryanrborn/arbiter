@@ -1,7 +1,7 @@
 defmodule ArbiterWeb.Api.EventControllerTest do
   use ArbiterWeb.ConnCase, async: true
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.MCP.Scope
 
   setup do
@@ -28,8 +28,8 @@ defmodule ArbiterWeb.Api.EventControllerTest do
     end
 
     test "returns 401 for a worker-tier token (only coordinator allowed)", %{conn: conn, ws: ws} do
-      {:ok, bead} = Ash.create(Arbiter.Beads.Issue, %{title: "t", workspace_id: ws.id})
-      token = Scope.mint_worker(bead, "test-repo")
+      {:ok, task} = Ash.create(Arbiter.Tasks.Issue, %{title: "t", workspace_id: ws.id})
+      token = Scope.mint_worker(task, "test-repo")
       conn = get(conn, "/events?token=#{token}")
       assert json_response(conn, 401)["error"] == "unauthorized"
     end
@@ -119,22 +119,22 @@ defmodule ArbiterWeb.Api.EventControllerTest do
       assert "review_gate" in topics
       assert "worker_failed" in topics
       assert "worker_done" in topics
-      assert "bead_state" in topics
+      assert "task_state" in topics
     end
 
     test "broadcast/3 returns :ok and fires on the PubSub topic", %{ws: ws} do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
 
-      assert :ok = Arbiter.Events.broadcast(ws.id, "worker_done", %{bead_id: "bd-test"})
+      assert :ok = Arbiter.Events.broadcast(ws.id, "worker_done", %{task_id: "bd-test"})
 
       assert_receive {:event, event}, 500
       assert event.topic == "worker_done"
-      assert event.bead_id == "bd-test"
+      assert event.task_id == "bd-test"
       assert is_binary(event.at)
     end
 
     test "broadcast/3 returns :ok silently when workspace_id is nil" do
-      assert :ok = Arbiter.Events.broadcast(nil, "worker_done", %{bead_id: "bd-x"})
+      assert :ok = Arbiter.Events.broadcast(nil, "worker_done", %{task_id: "bd-x"})
     end
 
     test "broadcast/3 scopes events to the workspace — other workspaces don't receive them",
@@ -144,10 +144,10 @@ defmodule ArbiterWeb.Api.EventControllerTest do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
 
       # Broadcast on the OTHER workspace
-      Arbiter.Events.broadcast(other_ws.id, "worker_done", %{bead_id: "bd-other"})
+      Arbiter.Events.broadcast(other_ws.id, "worker_done", %{task_id: "bd-other"})
 
       # Should NOT receive this event on ws's topic
-      refute_receive {:event, %{bead_id: "bd-other"}}, 100
+      refute_receive {:event, %{task_id: "bd-other"}}, 100
     end
   end
 end

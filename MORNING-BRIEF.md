@@ -1,6 +1,6 @@
 # Morning brief — 2026-05-18 overnight session
 
-**TL;DR:** Phase 0 deliverables complete + 32 beads filed + `gte-001` built on a feature branch awaiting your review. Nothing merged to `main` per the agreed process. No surprises, no scope changes, no destructive ops.
+**TL;DR:** Phase 0 deliverables complete + 32 tasks filed + `gte-001` built on a feature branch awaiting your review. Nothing merged to `main` per the agreed process. No surprises, no scope changes, no destructive ops.
 
 ---
 
@@ -32,15 +32,15 @@ If happy: `git checkout main && git merge --squash --ff-only feature/gte-001-umb
 
 If you want a reviewer polecat to look first per the formal process, dispatch one against this branch. Today's autonomous-night exception was that I'm both builder and reviewer; you can be the second pair of eyes or hand it to a polecat.
 
-## Beads filed for the port (32 total)
+## Tasks filed for the port (32 total)
 
 All persisted to canonical Dolt and verified. View them: `bd list --labels arbiter-port`. The full graph with dependencies is in `docs/decision-doc.md`.
 
 Phase split:
 
-| Phase | Beads | Description |
+| Phase | Tasks | Description |
 |---|---|---|
-| 1 | gte-001 → gte-008 | Bead ledger + CLI shim (`arb`). gte-001 done. |
+| 1 | gte-001 → gte-008 | Task ledger + CLI shim (`arb`). gte-001 done. |
 | 2 | gte-009 → gte-017 | Polecat lifecycle + workflow engine + 6 ported formulas |
 | 3 | gte-018 → gte-023 | PR + Jira watchers + peer review |
 | 3.5 | gte-P1 → gte-P4 | DB-stored vernacular system (user-defined, no hardcoded personas) |
@@ -49,19 +49,19 @@ Phase split:
 ## Hygiene
 
 - Closed `hq-spq` as duplicate of `mol-pr-feedback-patrol` (which already exists in GT).
-- Verified all 32 new beads persisted to canonical Dolt (bd silent-write bug from yesterday is gone after the Dolt restart, but I verified anyway).
+- Verified all 32 new tasks persisted to canonical Dolt (bd silent-write bug from yesterday is gone after the Dolt restart, but I verified anyway).
 - No GT bugs encountered overnight. Daemon running clean.
 
 ## Open questions for you
 
-1. **Reviewer model for the first few beads.** Today I was solo, so I both built and self-reviewed gte-001. For gte-002 onward, do you want:
+1. **Reviewer model for the first few tasks.** Today I was solo, so I both built and self-reviewed gte-001. For gte-002 onward, do you want:
    - (a) Reviewer polecat dispatched after every builder PR (formal process, slower)
-   - (b) You as reviewer for the first N beads to calibrate style, then switch to polecat reviewers
+   - (b) You as reviewer for the first N tasks to calibrate style, then switch to polecat reviewers
    - (c) Me as reviewer when builder is a polecat, polecat as reviewer when builder is me
 
    My lean: (b) — your eyes calibrate the style bar, then we automate.
 
-2. **gte-002 readiness.** Ash Issue resource. Reasonably scoped, but the bead asks for "ID generation uses external prefix configurable via opts (default 'bd', can override per workspace)" — workspaces aren't built until gte-P1. Two options:
+2. **gte-002 readiness.** Ash Issue resource. Reasonably scoped, but the task asks for "ID generation uses external prefix configurable via opts (default 'bd', can override per workspace)" — workspaces aren't built until gte-P1. Two options:
    - Defer the workspace-overridable prefix; ship gte-002 with a hardcoded `gte` prefix for now and a TODO
    - Bundle gte-P1 (Workspace resource) into gte-002 since the prefix really should be per-workspace from day one
 

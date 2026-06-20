@@ -58,7 +58,7 @@ defmodule Arbiter.Agents.Claude.Config do
   workspace to declare an `ANTHROPIC_API_KEY` env var.
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @rotation_key {__MODULE__, :api_key_rotation_index}
@@ -182,7 +182,7 @@ defmodule Arbiter.Agents.Claude.Config do
   @doc """
   Return the active model name as a string, or `nil` if unset.
 
-  Per-bead / per-dispatch overrides should be threaded through `:model` in
+  Per-task / per-dispatch overrides should be threaded through `:model` in
   the adapter's `opts` rather than reading this — that's the routing-policy
   seam. This helper is for the "no routing policy applied" path
   (`Routing.Static` default).

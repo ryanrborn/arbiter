@@ -33,7 +33,7 @@ defmodule Arbiter.Mergers.Gitlab do
 
   ## `get/1` response
 
-  Returns the bead-domain view of the MR:
+  Returns the task-domain view of the MR:
 
       %{ref: mr_ref, status: :open | :merged | :closed, approved: boolean(), url: String.t()}
 
@@ -312,7 +312,7 @@ defmodule Arbiter.Mergers.Gitlab do
   `fun`, restoring the previous config when `fun` returns. Useful in tests
   and one-shot scripts. Mirrors `Arbiter.Trackers.Jira.with_workspace/2`.
   """
-  @spec with_workspace(map() | Arbiter.Beads.Workspace.t(), (-> result)) :: result
+  @spec with_workspace(map() | Arbiter.Tasks.Workspace.t(), (-> result)) :: result
         when result: any()
   def with_workspace(workspace_or_config, fun) when is_function(fun, 0) do
     prev = Process.get({Config, :active_workspace_config})

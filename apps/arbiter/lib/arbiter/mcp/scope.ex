@@ -8,14 +8,14 @@ defmodule Arbiter.MCP.Scope do
   (`Arbiter.MCP.mint/2` / `verify/2`) carrying the claims below; this module
   mints those tokens per spawn, decodes a presented token back into a `%Scope{}`,
   and answers the capability questions the transport and tool handlers ask
-  (`from_token/1`, `own_bead/2`, `same_workspace?/2`).
+  (`from_token/1`, `own_task/2`, `same_workspace?/2`).
 
   ## Tiers
 
       %Arbiter.MCP.Scope{
         tier:         :worker | :coordinator,
         workspace_id: "uuid" | nil,    # worker: the bound workspace; coordinator: nil (workspace-agnostic)
-        bead_id:      "bd-…" | nil,    # worker tier: the one bead it may read/progress
+        task_id:      "bd-…" | nil,    # worker tier: the one task it may read/progress
         repo:         "shipyard" | nil,# worker tier: its repo
         can_dispatch:    false | true,    # coordinator-only; the recursion guardrail
         depth:        0                # dispatch-recursion depth (Phase 2 guardrail)
@@ -23,14 +23,14 @@ defmodule Arbiter.MCP.Scope do
 
   | Tier | Reads | Writes | Dispatch |
   |---|---|---|---|
-  | `:worker` | its own bead, its mailbox, its workspace config | progress/qa/deployment notes on **its own bead**; flags to siblings | never |
-  | `:coordinator` | across any workspace on the installation | create/update/close beads, deps (incl. `parent_of` grouping); dispatch | yes |
+  | `:worker` | its own task, its mailbox, its workspace config | progress/qa/deployment notes on **its own task**; flags to siblings | never |
+  | `:coordinator` | across any workspace on the installation | create/update/close tasks, deps (incl. `parent_of` grouping); dispatch | yes |
 
-  The `:worker` tier is deliberately narrow — it must not list arbitrary beads,
-  dispatch, or touch another bead's state, and it is **workspace-scoped**: a worker
+  The `:worker` tier is deliberately narrow — it must not list arbitrary tasks,
+  dispatch, or touch another task's state, and it is **workspace-scoped**: a worker
   token carries the workspace it was dispatched into and can never reach another.
   Tier-level tool visibility is declared in `Arbiter.MCP.Catalog`; the data-level
-  checks (own-bead, workspace isolation) live here so handlers cannot accidentally
+  checks (own-task, workspace isolation) live here so handlers cannot accidentally
   skip them.
 
   ## Workspace-agnostic coordinators
@@ -49,7 +49,7 @@ defmodule Arbiter.MCP.Scope do
   @enforce_keys [:tier]
   defstruct tier: nil,
             workspace_id: nil,
-            bead_id: nil,
+            task_id: nil,
             repo: nil,
             can_dispatch: false,
             depth: 0
@@ -59,7 +59,7 @@ defmodule Arbiter.MCP.Scope do
   @type t :: %__MODULE__{
           tier: tier(),
           workspace_id: String.t() | nil,
-          bead_id: String.t() | nil,
+          task_id: String.t() | nil,
           repo: String.t() | nil,
           can_dispatch: boolean(),
           depth: non_neg_integer()
@@ -72,20 +72,20 @@ defmodule Arbiter.MCP.Scope do
   # ---- minting ------------------------------------------------------------
 
   @doc """
-  Mint a `:worker`-tier scope token for a slung bead. The bead's id, workspace,
+  Mint a `:worker`-tier scope token for a slung task. The task's id, workspace,
   and repo are baked into the claims, so the token *is* the worker's identity —
-  it can only ever read/progress that one bead. Never carries `can_dispatch`.
+  it can only ever read/progress that one task. Never carries `can_dispatch`.
 
-  `bead` is anything exposing `:id` and `:workspace_id` (an `Arbiter.Beads.Issue`).
+  `task` is anything exposing `:id` and `:workspace_id` (an `Arbiter.Tasks.Issue`).
   """
   @spec mint_worker(%{id: String.t(), workspace_id: String.t()}, String.t() | nil, keyword()) ::
           String.t()
-  def mint_worker(%{id: bead_id, workspace_id: ws_id}, repo \\ nil, opts \\ [])
-      when is_binary(bead_id) and is_binary(ws_id) do
+  def mint_worker(%{id: task_id, workspace_id: ws_id}, repo \\ nil, opts \\ [])
+      when is_binary(task_id) and is_binary(ws_id) do
     %{
       tier: :worker,
       workspace_id: ws_id,
-      bead_id: bead_id,
+      task_id: task_id,
       repo: repo,
       can_dispatch: false,
       depth: Keyword.get(opts, :depth, 0)
@@ -111,7 +111,7 @@ defmodule Arbiter.MCP.Scope do
     %{
       tier: :coordinator,
       workspace_id: workspace_id,
-      bead_id: nil,
+      task_id: nil,
       repo: nil,
       can_dispatch: Keyword.get(opts, :can_dispatch, true),
       depth: Keyword.get(opts, :depth, 0)
@@ -136,13 +136,13 @@ defmodule Arbiter.MCP.Scope do
 
   def from_token(_), do: {:error, :invalid}
 
-  defp from_claims(%{tier: :worker, workspace_id: ws, bead_id: bead} = c)
-       when is_binary(ws) and is_binary(bead) do
+  defp from_claims(%{tier: :worker, workspace_id: ws, task_id: task} = c)
+       when is_binary(ws) and is_binary(task) do
     {:ok,
      %__MODULE__{
        tier: :worker,
        workspace_id: ws,
-       bead_id: bead,
+       task_id: task,
        repo: nilable_string(c[:repo]),
        can_dispatch: false,
        depth: depth(c[:depth])
@@ -157,7 +157,7 @@ defmodule Arbiter.MCP.Scope do
      %__MODULE__{
        tier: :coordinator,
        workspace_id: nilable_string(c[:workspace_id]),
-       bead_id: nil,
+       task_id: nil,
        repo: nil,
        can_dispatch: c[:can_dispatch] == true,
        depth: depth(c[:depth])
@@ -175,22 +175,22 @@ defmodule Arbiter.MCP.Scope do
   # ---- data-level enforcement --------------------------------------------
 
   @doc """
-  Resolve and authorize the bead id a tool may act on for this scope.
+  Resolve and authorize the task id a tool may act on for this scope.
 
-    * `:worker` — the requested id must be `nil` (defaults to the bound bead) or
-      exactly the bound bead. Any other id is `{:error, :unauthorized}` — a
-      worker cannot read or progress another bead through its token.
+    * `:worker` — the requested id must be `nil` (defaults to the bound task) or
+      exactly the bound task. Any other id is `{:error, :unauthorized}` — a
+      worker cannot read or progress another task through its token.
     * `:coordinator` — the requested id is required (a non-empty binary) and used
       verbatim; a missing id is `{:error, :missing}` so the handler can surface a
       usable "id is required" rather than guessing.
   """
-  @spec own_bead(t(), String.t() | nil) ::
+  @spec own_task(t(), String.t() | nil) ::
           {:ok, String.t()} | {:error, :unauthorized | :missing}
-  def own_bead(%__MODULE__{tier: :worker, bead_id: bound}, nil), do: {:ok, bound}
-  def own_bead(%__MODULE__{tier: :worker, bead_id: bound}, bound), do: {:ok, bound}
-  def own_bead(%__MODULE__{tier: :worker}, _other), do: {:error, :unauthorized}
-  def own_bead(%__MODULE__{tier: :coordinator}, id) when is_binary(id) and id != "", do: {:ok, id}
-  def own_bead(%__MODULE__{tier: :coordinator}, _), do: {:error, :missing}
+  def own_task(%__MODULE__{tier: :worker, task_id: bound}, nil), do: {:ok, bound}
+  def own_task(%__MODULE__{tier: :worker, task_id: bound}, bound), do: {:ok, bound}
+  def own_task(%__MODULE__{tier: :worker}, _other), do: {:error, :unauthorized}
+  def own_task(%__MODULE__{tier: :coordinator}, id) when is_binary(id) and id != "", do: {:ok, id}
+  def own_task(%__MODULE__{tier: :coordinator}, _), do: {:error, :missing}
 
   @doc """
   Whether this scope may act on a resource in `workspace_id`.

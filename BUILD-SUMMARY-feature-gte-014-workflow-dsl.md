@@ -1,6 +1,6 @@
 # gte-014 — Workflow behaviour + macro DSL
 
-Bead: gte-014
+Task: gte-014
 Branch: `feature/gte-014-workflow-dsl`
 
 ## What

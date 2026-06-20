@@ -1,14 +1,14 @@
 defmodule Arbiter.TrackersTest do
   use ExUnit.Case, async: true
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Trackers
   alias Arbiter.Trackers.{GitHub, Jira, None, Shortcut}
 
-  describe "for_bead/1 and for_type/1" do
+  describe "for_task/1 and for_type/1" do
     test "returns Tracker.None for :none-typed issues" do
       issue = %Issue{tracker_type: :none, tracker_ref: nil}
-      assert Trackers.for_bead(issue) == None
+      assert Trackers.for_task(issue) == None
     end
 
     test "for_type/1 returns Tracker.None for :none" do

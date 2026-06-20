@@ -27,7 +27,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
         ],
         [
           %{
-            "bead_id" => "bd-001",
+            "task_id" => "bd-001",
             "status" => "running",
             "current_step" => "implement",
             "repo" => "test/repo"
@@ -85,7 +85,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "2 safe-default + 1 custom"
     end
 
-    test "empty workers and ready beads render '(none)'" do
+    test "empty workers and ready tasks render '(none)'" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -177,7 +177,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "[ ] Never boot a second Arbiter instance — it sweeps live runs"
       assert out =~ "[ ] No merge to main without the ReviewGate review gate"
 
-      # Surfaced high: before the work list (workers / ready beads).
+      # Surfaced high: before the work list (workers / ready tasks).
       orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
       ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
       assert orders_at < ready_at

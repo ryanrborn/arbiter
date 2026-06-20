@@ -7,9 +7,9 @@ defmodule Arbiter.Agents.Routing do
   policies:
 
     * `:static` (default) — always return the workspace's `agent` config.
-    * `:by_priority` — map `bead.priority` to a rule under
+    * `:by_priority` — map `task.priority` to a rule under
       `routing.rules["P0".."P4"]`, falling back to the workspace default.
-    * `:by_difficulty` — map `bead.difficulty` to abstract
+    * `:by_difficulty` — map `task.difficulty` to abstract
       `{model_tier, thinking}` under `routing.rules["D0".."D4"]`, falling
       back to a default mapping. Provider-agnostic: each adapter resolves
       the tier + thinking abstractions to its own knobs.
@@ -28,8 +28,8 @@ defmodule Arbiter.Agents.Routing do
 
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Agents.Routing.{ByBudget, ByDifficulty, ByPriority, Policy, RoundRobin, Static}
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
 
   @policies %{
     static: Static,
@@ -42,15 +42,15 @@ defmodule Arbiter.Agents.Routing do
   @valid_policies ~w(static by_priority by_difficulty by_budget round_robin)
 
   @doc """
-  Choose an agent for `bead`. `:ledger_snapshot` is reserved for
+  Choose an agent for `task`. `:ledger_snapshot` is reserved for
   policies that read usage data (`:by_budget`); the default policies
   ignore it.
   """
   @spec choose(Issue.t(), Workspace.t() | nil, Policy.ledger_snapshot()) :: Policy.choice()
-  def choose(%Issue{} = bead, workspace, ledger_snapshot \\ %{}) do
+  def choose(%Issue{} = task, workspace, ledger_snapshot \\ %{}) do
     workspace
     |> policy_for_workspace()
-    |> apply(:choose, [bead, workspace, ledger_snapshot])
+    |> apply(:choose, [task, workspace, ledger_snapshot])
   end
 
   @doc """
@@ -77,9 +77,9 @@ defmodule Arbiter.Agents.Routing do
   def valid_policies, do: @valid_policies
 
   @doc """
-  Default choice — the workspace's worker-agent config, with no per-bead
+  Default choice — the workspace's worker-agent config, with no per-task
   override applied. Policies fall back to this when they have no rule
-  for a bead.
+  for a task.
   """
   @spec default_choice(Workspace.t() | nil) :: Policy.choice()
   def default_choice(nil), do: %{type: :claude, config: %{}}

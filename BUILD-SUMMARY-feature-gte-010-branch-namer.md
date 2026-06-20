@@ -1,6 +1,6 @@
 # Build summary: feature/gte-010-branch-namer
 
-**Bead:** gte-010
+**Task:** gte-010
 **Builder:** Mayor (interactive session, 2026-05-19)
 **Branch:** feature/gte-010-branch-namer
 **Commit:** 1c5a1b7 (impl + tests)
@@ -8,13 +8,13 @@
 ## What I built
 
 A pure-logic module `Arbiter.Polecat.BranchNamer` that derives a git branch
-name from a `Arbiter.Beads.Issue`, following the Verus repo naming
+name from a `Arbiter.Tasks.Issue`, following the Verus repo naming
 convention.
 
 ### Public API
 
 ```elixir
-Arbiter.Polecat.BranchNamer.derive(%Arbiter.Beads.Issue{}) :: String.t()
+Arbiter.Polecat.BranchNamer.derive(%Arbiter.Tasks.Issue{}) :: String.t()
 ```
 
 Returns strings like:
@@ -33,10 +33,10 @@ apps/arbiter/lib/arbiter/polecat/branch_namer.ex            (+) 99 LOC
 apps/arbiter/test/arbiter/polecat/branch_namer_test.exs     (+) 18 tests
 ```
 
-The `polecat/` namespace did not exist before this bead; it now hosts this
+The `polecat/` namespace did not exist before this task; it now hosts this
 module. gte-009 (parallel) will add `Polecat.Worktree` alongside.
 
-## Acceptance check (from bead gte-010)
+## Acceptance check (from task gte-010)
 
 | Criterion | Status |
 |---|---|
@@ -58,7 +58,7 @@ module. gte-009 (parallel) will add `Polecat.Worktree` alongside.
    list is a module attribute (`@stopwords`), easy to lift into Vernacular
    config later.
 
-2. **`:chore` and `:decision` map to `chore/`.** The bead spec only covered
+2. **`:chore` and `:decision` map to `chore/`.** The task spec only covered
    `:bug`, `:feature`, `:task`, `:epic`. The Issue resource defines six
    `issue_types`, and leaving two unmapped would make `derive/1` partial.
    `chore/` is the natural bucket — Verus's convention has `chore/` for
@@ -87,7 +87,7 @@ module. gte-009 (parallel) will add `Polecat.Worktree` alongside.
 1. **Vernacular-driven prefix/stopword overrides.** Hooks are in place
    (`prefix_for/1`, `@stopwords`), but reading from `Workspace.config`
    requires the Vernacular module (gte-P2) which hasn't landed. File a
-   follow-up bead once gte-P2 ships to swap the hard-coded values for
+   follow-up task once gte-P2 ships to swap the hard-coded values for
    `Vernacular.fetch/2` calls.
 
 2. **Collision detection.** Two issues with identical titles + identical
