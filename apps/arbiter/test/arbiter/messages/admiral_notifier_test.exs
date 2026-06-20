@@ -246,6 +246,62 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
     end
   end
 
+  describe "merge_blocked/3 (#354)" do
+    defp only_merge_escalation(ws) do
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      escalation
+    end
+
+    test "raises an addressed escalation naming the task, reason, and remediation" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.merge_blocked(
+                 %{task_id: task_id, workspace_id: ws},
+                 "!42",
+                 :conflict
+               )
+
+      escalation = only_merge_escalation(ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "admiral"
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ task_id
+      assert escalation.subject =~ "merge blocked"
+      assert escalation.body =~ "PR/MR: !42"
+      assert escalation.body =~ "Reason: conflict"
+      assert escalation.body =~ "rebase"
+    end
+
+    test "each reason gets its own label + remediation" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.merge_blocked(
+                 %{task_id: task_id, workspace_id: ws},
+                 "#7",
+                 :ci_failed
+               )
+
+      body = only_merge_escalation(ws).body
+      assert body =~ "CI checks are failing"
+      assert body =~ "fix the failing checks"
+    end
+
+    test "a block with no workspace posts nothing" do
+      assert :ok =
+               AdmiralNotifier.merge_blocked(
+                 %{task_id: "bd-noworkspace", workspace_id: nil},
+                 "!1",
+                 :behind_base
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
   describe "preflight_failed/2 (bd-awi4nw)" do
     alias Arbiter.Worker.StopReason
 

@@ -144,18 +144,22 @@ defmodule Arbiter.Mergers.Github do
            |> handle_json() do
       head_sha = get_in(pr, ["head", "sha"])
       pipeline = fetch_pipeline_status(cfg, owner, repo, head_sha)
+      status = pr_status(pr)
+      approved = approved?(reviews)
+      changes_requested = changes_requested?(reviews)
 
       {:ok,
        %{
          ref: mr_ref,
-         status: pr_status(pr),
-         approved: approved?(reviews),
-         changes_requested: changes_requested?(reviews),
+         status: status,
+         approved: approved,
+         changes_requested: changes_requested,
          latest_review_id: latest_changes_requested_id(reviews),
          pipeline: pipeline,
          ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
          conflicting:
            Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
+         block_reason: block_reason(pr, status, pipeline, approved, changes_requested),
          url: Map.get(pr, "html_url") || ""
        }}
     end
@@ -392,6 +396,47 @@ defmodule Arbiter.Mergers.Github do
   defp pr_status(%{"merged_at" => at}) when is_binary(at), do: :merged
   defp pr_status(%{"state" => "closed"}), do: :closed
   defp pr_status(_), do: :open
+
+  # Classify *why* an open PR can't merge, or nil when it is mergeable (or
+  # already terminal). This is the block-reason surface Phase 1 (#354) escalates
+  # on so an approved-but-unmergeable PR never parks silently. Derived from
+  # GitHub's merge-state signal plus the resolved CI pipeline and review state:
+  #
+  #   :conflict       — mergeable=false / mergeable_state "dirty"
+  #   :behind_base    — "behind" (no conflict, just stale relative to base)
+  #   :ci_failed      — a required check failed (pipeline :failed)
+  #   :needs_approval — "blocked" by required review, or a dismissed approval
+  #   :draft          — PR is a draft
+  #   :blocked_other  — blocked by some other forge rule
+  defp block_reason(_pr, status, _pipeline, _approved, _changes_requested)
+       when status in [:merged, :closed],
+       do: nil
+
+  defp block_reason(pr, _status, pipeline, _approved, changes_requested) do
+    state = merge_state(pr)
+    draft? = Map.get(pr, "draft") == true or state == "draft"
+
+    cond do
+      draft? -> :draft
+      state == "dirty" or Map.get(pr, "mergeable") == false -> :conflict
+      state == "behind" -> :behind_base
+      pipeline == :failed -> :ci_failed
+      changes_requested -> :needs_approval
+      state == "blocked" -> :needs_approval
+      state in ["clean", "has_hooks", "unstable", "unknown", nil] -> nil
+      true -> :blocked_other
+    end
+  end
+
+  # Normalize GitHub's merge-state signal to a lowercase string. Prefers the REST
+  # `mergeable_state`; falls back to the GraphQL `mergeStateStatus` enum
+  # (uppercase) some payloads carry. nil when neither is present.
+  defp merge_state(pr) do
+    case Map.get(pr, "mergeable_state") || Map.get(pr, "mergeStateStatus") do
+      s when is_binary(s) and s != "" -> String.downcase(s)
+      _ -> nil
+    end
+  end
 
   # Approved when the *latest* verdict per reviewer settles on APPROVED with no
   # outstanding CHANGES_REQUESTED. Using the latest-per-reviewer state (rather

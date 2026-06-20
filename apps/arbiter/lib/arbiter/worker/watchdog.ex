@@ -150,6 +150,24 @@ defmodule Arbiter.Worker.Watchdog do
   def classify(%{approved: true}), do: :approved
   def classify(_), do: :pending
 
+  @typedoc """
+  Why an open MR can't merge, as classified by the merger adapter
+  (`Arbiter.Mergers.get/1`). `nil` when the MR is mergeable or already terminal.
+  """
+  @type block_reason ::
+          :conflict | :behind_base | :ci_failed | :needs_approval | :draft | :blocked_other
+
+  @doc """
+  Read the merge-block reason a `Arbiter.Mergers.get/1` result carries, or `nil`
+  when the MR is mergeable (or the adapter reports no reason). The adapters
+  (`Arbiter.Mergers.Github` / `Arbiter.Mergers.Gitlab`) classify the reason from
+  PR/MR state; this is the single extraction surface the poll loop and the
+  dashboard both read (#354, Phase 1).
+  """
+  @spec block_reason(map()) :: block_reason() | nil
+  def block_reason(result) when is_map(result), do: Map.get(result, :block_reason)
+  def block_reason(_), do: nil
+
   # ---- GenServer ----------------------------------------------------------
 
   @impl true
@@ -201,6 +219,9 @@ defmodule Arbiter.Worker.Watchdog do
           poll_count: 0,
           watch_pipeline: watch_pipeline,
           last_pipeline: nil,
+          # The last merge-block reason we escalated, so a blocked merge is
+          # surfaced once per reason rather than on every poll (#354, Phase 1).
+          last_block_reason: nil,
           # Fired once when an approved MR is parked without auto-merge, so the
           # external tracker moves to its "approved, awaiting merge" status
           # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
@@ -219,6 +240,7 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
         state = maybe_escalate_pipeline(state, result)
+        state = maybe_escalate_merge_block(state, result)
         apply_outcome(effective_outcome(state, result), result, state)
 
       {:error, reason} ->
@@ -359,6 +381,45 @@ defmodule Arbiter.Worker.Watchdog do
     end
 
     %{state | last_pipeline: current_pipeline}
+  end
+
+  # Detect, record, and escalate a blocked merge (#354, Phase 1). When the
+  # adapter classifies *why* the MR can't merge — conflict, behind base, CI
+  # failed, needs approval, draft — raise a coordinator escalation so an
+  # approved PR never parks silently at :awaiting_review. The reason itself is
+  # already recorded on the worker (via `record_status` → `:last_merger_status`)
+  # for the dashboard; this is the active escalation half.
+  #
+  # Debounced on `last_block_reason`: a given reason escalates once when it first
+  # appears (or changes), not on every poll. A cleared block (reason `nil`, e.g.
+  # the branch caught up or the MR merged) resets the latch so a later re-block
+  # re-escalates. Best-effort — a notifier failure must not disrupt the poll loop.
+  defp maybe_escalate_merge_block(state, result) do
+    case block_reason(result) do
+      nil ->
+        %{state | last_block_reason: nil}
+
+      reason when reason == state.last_block_reason ->
+        state
+
+      reason ->
+        Logger.warning(
+          "Worker.Watchdog: merge blocked (#{reason}) for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref}; escalating to coordinator"
+        )
+
+        safe(fn ->
+          snap =
+            case safe_snapshot(state.worker_pid) do
+              %{} = s -> s
+              _ -> %{task_id: state.task_id, workspace_id: nil}
+            end
+
+          Arbiter.Messages.AdmiralNotifier.merge_blocked(snap, state.mr_ref, reason)
+        end)
+
+        %{state | last_block_reason: reason}
+    end
   end
 
   defp watch_pipeline_from_workspace(nil), do: false
