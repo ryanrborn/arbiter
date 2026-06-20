@@ -12,8 +12,10 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
   ## Job scope
 
-  The worker is given a *narrowly* constrained prompt: rebase onto the
-  current target branch, resolve mechanical conflicts, push back with
+  The worker is given a *narrowly* constrained prompt (built by
+  `Arbiter.Worker.Dispatch.conflict_resolve_briefing/3`): rebase onto the
+  current target branch, resolve conflicts honoring the task's original intent,
+  run the tests and fix what the rebase broke, push back with
   `--force-with-lease`, and exit. It must NOT re-implement the change set
   or open a new PR. The original PR's history is preserved (force-push to
   the same branch updates the existing PR in place).
@@ -376,49 +378,21 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   @doc """
   Resolver prompt. Public for tests + introspection.
 
-  The prompt is intentionally narrow: rebase + resolve + force-push + exit.
-  It does NOT instruct the worker to re-implement the change set or open a
-  new PR — the original PR's history is preserved by force-pushing to the
-  same branch. The worker is told to escalate via the mailbox on semantic
-  ambiguity rather than failing silently.
+  Delegates to `Arbiter.Worker.Dispatch.conflict_resolve_briefing/3` — the
+  single, hardened conflict-resolve briefing (#354, Phase 2b). It is narrow
+  (rebase + resolve + run tests + force-push + exit; no re-implementation, no
+  new PR) but now carries the task's original intent and an explicit
+  run-the-tests step so the rebase honors what the task *meant*. The worker is
+  told to escalate via the mailbox on semantic ambiguity rather than failing
+  silently.
   """
   @spec prompt_for(map()) :: String.t()
-  def prompt_for(%{task: %Issue{id: task_id}, branch: branch, target_branch: target}) do
-    """
-    You are a conflict-resolution worker for task #{task_id}.
-
-    Your branch (#{branch}) is CONFLICTING with the current head of
-    #{target}. Your ONLY job is:
-
-      1. Fetch the latest #{target}: `git fetch origin #{target}`
-      2. Rebase your branch onto it: `git rebase origin/#{target}`
-      3. Resolve conflicts mechanically. Most collisions on this codebase
-         are parallel edits to non-overlapping sections of structured
-         tables (the dispatcher `@known_verbs` and the command-alias
-         resolver). For those, accept BOTH sides of the conflict and
-         continue: `git rebase --continue`.
-      4. Push back with lease: `git push --force-with-lease origin #{branch}`
-      5. Exit by printing `arb done` on a line by itself.
-
-    DO NOT:
-      * re-implement the change set,
-      * open a new PR,
-      * touch files unrelated to the conflict,
-      * abandon the rebase silently.
-
-    If a conflict is SEMANTIC — two waves both rewrote the same predicate
-    or both changed a shared invariant where a mechanical merge would
-    silently break either side — STOP and escalate by running:
-
-        arb message admiral "Conflict on #{task_id} requires human review: <one-line explanation>"
-
-    then print `arb done`. Better a loud escalation than a silent
-    miscompile in #{target}.
-    """
+  def prompt_for(%{task: %Issue{} = task, branch: branch, target_branch: target}) do
+    Arbiter.Worker.Dispatch.conflict_resolve_briefing(task, branch, target)
   end
 
   def prompt_for(_) do
-    "You are a conflict-resolution worker. Rebase, resolve, force-push, exit."
+    "You are a conflict-resolution worker. Rebase, resolve, run tests, force-push, exit."
   end
 
   # ---- escalation helper ---------------------------------------------------
