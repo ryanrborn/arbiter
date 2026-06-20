@@ -12,8 +12,12 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Worker.ReviewGate
+  alias Arbiter.Workers.Run
   require Ash.Query
+  require Logger
 
   @tasks_topic "tasks"
   @workers_topic "workers"
@@ -51,7 +55,7 @@ defmodule ArbiterWeb.TaskDetailLive do
         {:worker_lifecycle, _event, %{task_id: id}},
         %{assigns: %{task_id: id}} = socket
       ) do
-    {:noreply, refresh_worker(socket)}
+    {:noreply, socket |> refresh_worker() |> refresh_runs()}
   end
 
   def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
@@ -64,6 +68,7 @@ defmodule ArbiterWeb.TaskDetailLive do
     |> refresh_task()
     |> refresh_workspace()
     |> refresh_worker()
+    |> refresh_runs()
     |> refresh_deps()
     |> refresh_versions()
   end
@@ -164,6 +169,53 @@ defmodule ArbiterWeb.TaskDetailLive do
       end
 
     assign(socket, :versions, versions)
+  end
+
+  defp refresh_runs(socket) do
+    id = socket.assigns.task_id
+    review_id = ReviewGate.reviewer_task_id(id)
+    task_ids = [id, review_id]
+
+    runs =
+      try do
+        Run
+        |> Ash.Query.filter(task_id in ^task_ids)
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.read!()
+      rescue
+        e ->
+          Logger.warning("Failed to load worker runs: #{inspect(e)}")
+          []
+      end
+
+    usage_by_run =
+      if runs == [] do
+        %{}
+      else
+        run_ids = Enum.map(runs, & &1.id)
+
+        try do
+          UsageEvent
+          |> Ash.Query.filter(worker_run_id in ^run_ids)
+          |> Ash.Query.sort(inserted_at: :asc)
+          |> Ash.read!()
+          |> Enum.group_by(& &1.worker_run_id)
+          |> Map.new(fn {run_id, events} ->
+            costs = events |> Enum.map(& &1.cost_usd) |> Enum.reject(&is_nil/1)
+            total_cost = if costs == [], do: nil, else: Enum.sum(costs)
+            representative = List.first(events)
+            {run_id, %{representative | cost_usd: total_cost}}
+          end)
+        rescue
+          e ->
+            Logger.warning("Failed to load usage events for worker runs: #{inspect(e)}")
+            %{}
+        end
+      end
+
+    socket
+    |> assign(:runs, runs)
+    |> assign(:usage_by_run, usage_by_run)
   end
 
   # ---- render ----
@@ -449,7 +501,91 @@ defmodule ArbiterWeb.TaskDetailLive do
             </section>
           </div>
 
-          <%!-- ── C. Audit trail timeline ─────────────────────────────── --%>
+          <%!-- ── C. Worker run history ───────────────────────────────── --%>
+          <section class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-4 gap-4">
+              <div class="flex items-center justify-between gap-2">
+                <h2 class="text-lg font-semibold flex items-center gap-2">
+                  <.icon name="hero-cpu-chip" class="size-5 text-base-content/70" />
+                  {String.capitalize(@worker_label)} history ({length(@runs)})
+                </h2>
+                <.link
+                  :if={@runs != []}
+                  navigate={~p"/workers/history"}
+                  class="link link-hover text-sm text-base-content/50 flex items-center gap-1"
+                >
+                  see all runs <.icon name="hero-arrow-right" class="size-3" />
+                </.link>
+              </div>
+
+              <p
+                :if={@runs == []}
+                class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-sm text-center text-base-content/50"
+              >
+                No recorded runs for this {@issue_label} yet.
+              </p>
+
+              <div :if={@runs != []} class="overflow-x-auto">
+                <table class="table table-sm" id="task-run-history">
+                  <thead>
+                    <tr class="text-base-content/60">
+                      <th>Type</th>
+                      <th>Status</th>
+                      <th>Model</th>
+                      <th>Cost</th>
+                      <th>Started</th>
+                      <th class="text-right">Duration</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      :for={r <- @runs}
+                      class={[
+                        "hover:bg-base-300/40 transition-colors",
+                        if(r.status == :failed, do: "text-error/80", else: "")
+                      ]}
+                    >
+                      <td>
+                        <span class={["badge badge-xs", run_step_class(Map.get(@usage_by_run, r.id), r)]}>
+                          {run_step_label(Map.get(@usage_by_run, r.id), r)}
+                        </span>
+                      </td>
+                      <td>
+                        <span class={["badge badge-sm", run_status_class(r.status)]}>
+                          {r.status}
+                        </span>
+                      </td>
+                      <td class="text-xs font-mono text-base-content/60">
+                        {run_model_label(Map.get(@usage_by_run, r.id))}
+                      </td>
+                      <td class="text-xs font-mono tabular-nums">
+                        {run_cost_label(Map.get(@usage_by_run, r.id))}
+                      </td>
+                      <td class="text-xs whitespace-nowrap">
+                        {format_started(r.started_at)}
+                      </td>
+                      <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
+                        {humanize_run_duration(r.started_at, r.completed_at)}
+                      </td>
+                      <td class="text-right">
+                        <.link
+                          navigate={~p"/workers/history/#{r.id}"}
+                          class="btn btn-ghost btn-xs gap-1"
+                          title="View full output"
+                        >
+                          <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                          output
+                        </.link>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <%!-- ── D. Audit trail timeline ─────────────────────────────── --%>
           <section class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
               <h2 class="text-lg font-semibold flex items-center gap-2">
@@ -632,4 +768,47 @@ defmodule ArbiterWeb.TaskDetailLive do
       _ -> "working"
     end
   end
+
+  defp run_status_class(:completed), do: "badge-success"
+  defp run_status_class(:failed), do: "badge-error"
+  defp run_status_class(:running), do: "badge-info"
+  defp run_status_class(_), do: "badge-ghost"
+
+  defp run_step_label(%UsageEvent{step: :review}, _), do: "review"
+  defp run_step_label(%UsageEvent{step: :other}, _), do: "other"
+  defp run_step_label(%UsageEvent{step: :work}, _), do: "work"
+  defp run_step_label(_, %Run{task_id: task_id}) when is_binary(task_id) do
+    if String.ends_with?(task_id, "#review"), do: "review", else: "work"
+  end
+  defp run_step_label(_, _), do: "work"
+
+  defp run_step_class(%UsageEvent{step: :review}, _), do: "badge-secondary"
+  defp run_step_class(%UsageEvent{step: :other}, _), do: "badge-ghost"
+  defp run_step_class(%UsageEvent{}, _), do: "badge-primary"
+  defp run_step_class(_, %Run{task_id: task_id}) when is_binary(task_id) do
+    if String.ends_with?(task_id, "#review"), do: "badge-secondary", else: "badge-primary"
+  end
+  defp run_step_class(_, _), do: "badge-primary"
+
+  defp run_model_label(%UsageEvent{model: m}) when is_binary(m) do
+    m |> String.split("-") |> Enum.take(4) |> Enum.join("-")
+  end
+
+  defp run_model_label(_), do: "—"
+
+  defp run_cost_label(%UsageEvent{cost_usd: c}) when is_float(c) do
+    "$#{:erlang.float_to_binary(c, decimals: 4)}"
+  end
+
+  defp run_cost_label(_), do: "—"
+
+  defp humanize_run_duration(%DateTime{} = started_at, %DateTime{} = completed_at) do
+    started_at |> DateTime.diff(completed_at, :second) |> abs() |> humanize_run_seconds()
+  end
+
+  defp humanize_run_duration(_, _), do: "—"
+
+  defp humanize_run_seconds(s) when s < 60, do: "#{s}s"
+  defp humanize_run_seconds(s) when s < 3600, do: "#{div(s, 60)}m #{rem(s, 60)}s"
+  defp humanize_run_seconds(s), do: "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
 end
