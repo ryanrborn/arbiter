@@ -25,7 +25,11 @@ defmodule Arbiter.Test.StubMerger do
 
   def reset do
     ensure_started()
-    Agent.update(@name, fn _ -> %{gets: %{}, merges: %{}, open_ref: "!stub", opens: []} end)
+
+    Agent.update(@name, fn _ ->
+      %{gets: %{}, merges: %{}, open_ref: "!stub", opens: [], review_feedbacks: %{}}
+    end)
+
     :ok
   end
 
@@ -53,6 +57,13 @@ defmodule Arbiter.Test.StubMerger do
   def last_open do
     ensure_started()
     Agent.get(@name, fn s -> List.first(s.opens) end)
+  end
+
+  @doc "Set the `list_review_feedback/1` result for `ref`."
+  def set_review_feedback(ref, feedback) when is_map(feedback) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:review_feedbacks, ref], feedback) end)
+    :ok
   end
 
   # ---- Merger behaviour ---------------------------------------------------
@@ -127,15 +138,22 @@ defmodule Arbiter.Test.StubMerger do
   def submit_review(_ref, _verdict, _body, _opts), do: {:ok, %{}}
 
   @impl true
-  def list_review_feedback(_ref),
-    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+  def list_review_feedback(ref) do
+    ensure_started()
+    default = %{changes_requested: false, latest_review_id: nil, feedback: []}
+    result = Agent.get(@name, fn s -> Map.get(s.review_feedbacks, ref, default) end)
+    {:ok, result}
+  end
 
   # ---- internals ----------------------------------------------------------
 
   defp ensure_started do
     case Process.whereis(@name) do
       nil ->
-        case Agent.start(fn -> %{gets: %{}, merges: %{}, open_ref: "!stub", opens: []} end,
+        case Agent.start(
+               fn ->
+                 %{gets: %{}, merges: %{}, open_ref: "!stub", opens: [], review_feedbacks: %{}}
+               end,
                name: @name
              ) do
           {:ok, _} -> :ok

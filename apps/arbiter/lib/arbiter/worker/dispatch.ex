@@ -1269,20 +1269,21 @@ defmodule Arbiter.Worker.Dispatch do
       * Do NOT merge or close the PR/MR.
       * Do NOT modify any branch, including the PR's head.
 
-    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
-    tool — including in parallel or with background execution modes. However,
-    you MUST wait for every background task to complete and read its full
-    output before producing your VERDICT. A VERDICT issued while any
-    background task is still running is invalid: you would be judging on
-    incomplete evidence. Do not exit, do not print your VERDICT, and do not
-    print `arb done` until every tool you launched has finished and you have
-    read its result.
+    *** ASYNC TOOLS: You may run tests, linters, or any diagnostic tool —
+    including in parallel or with background execution modes. However, you
+    MUST wait for every background task to complete and read its full output
+    before printing `arb done`. Do not signal done while any background task
+    is still running.
 
-    When you are completely done, print the line:
+    After you post the review to the tracker, print your conclusion on its
+    own line, EXACTLY one of:
+
+        VERDICT: APPROVE
+        VERDICT: REQUEST_CHANGES
+
+    Then print, on a line by itself:
 
         arb done
-
-    on a line by itself, exactly.
     """
   end
 
