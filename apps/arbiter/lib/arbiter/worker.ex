@@ -1276,6 +1276,12 @@ defmodule Arbiter.Worker do
   # Driver does NOT close the task. The task stays :in_progress for the
   # coordinator to dispatch a fix-pass. Mirrors park_rejected/3 from the full
   # review_gate path.
+  #
+  # bd-btcyn6: when no VERDICT sentinel is found in stdout (e.g. the reviewer
+  # submitted via the adapter/CLI without printing the required sentinel), fall
+  # back to querying the merger adapter for the PR's submitted review state. This
+  # treats the adapter submission as the source of truth and avoids landing
+  # INCONCLUSIVE when the review genuinely went out.
   defp route_reviewer_completion(%State{} = state) do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 
@@ -1287,8 +1293,66 @@ defmodule Arbiter.Worker do
         park_rejected(state, :request_changes, findings)
 
       :no_verdict ->
-        park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
+        case derive_verdict_from_adapter(state) do
+          {:approve, _} ->
+            Logger.info(
+              "Worker: review_only task=#{state.task_id}: no VERDICT sentinel in stdout; " <>
+                "derived APPROVE from adapter-submitted review"
+            )
+
+            trigger_watchdog_on_approval(state)
+
+          {:request_changes, findings} ->
+            Logger.info(
+              "Worker: review_only task=#{state.task_id}: no VERDICT sentinel in stdout; " <>
+                "derived REQUEST_CHANGES from adapter-submitted review"
+            )
+
+            park_rejected(state, :request_changes, findings)
+
+          :no_verdict ->
+            park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
+        end
     end
+  end
+
+  # bd-btcyn6: attempt to derive the review verdict from the adapter's PR review
+  # state when the reviewer's stdout lacks the VERDICT sentinel. Queries the
+  # merger adapter for the task's pr_ref reviews; maps the forge state to the
+  # internal verdict type. Returns :no_verdict on any error or when no review
+  # is found so the caller can fall through to INCONCLUSIVE.
+  defp derive_verdict_from_adapter(%State{task_id: task_id} = state) do
+    with {:ok, pr_ref} <- fetch_task_pr_ref(task_id),
+         {:ok, adapter, _workspace} <- resolve_merger(state, merge_opts_from_meta(state.meta, %{})),
+         {:ok, feedback} <- safe_list_review_feedback(adapter, pr_ref) do
+      reviews = Enum.filter(Map.get(feedback, :feedback, []), &(&1[:kind] == :review))
+
+      cond do
+        Enum.any?(reviews, &(&1[:state] == "APPROVED")) ->
+          {:approve, ""}
+
+        Map.get(feedback, :changes_requested) ->
+          body =
+            reviews
+            |> Enum.filter(&(&1[:state] == "CHANGES_REQUESTED"))
+            |> Enum.map_join("\n", &Map.get(&1, :body, ""))
+
+          {:request_changes, body}
+
+        true ->
+          :no_verdict
+      end
+    else
+      _ -> :no_verdict
+    end
+  end
+
+  defp safe_list_review_feedback(adapter, pr_ref) do
+    adapter.list_review_feedback(pr_ref)
+  rescue
+    _ -> {:error, :exception}
+  catch
+    :exit, _ -> {:error, :exit}
   end
 
   # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
