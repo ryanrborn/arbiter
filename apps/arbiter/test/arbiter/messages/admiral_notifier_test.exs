@@ -302,6 +302,43 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
     end
   end
 
+  describe "merge_block_unresolved/4 (#354 Phase 2a)" do
+    test "names the reason, attempt count, and remediation after auto-resolve fails" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.merge_block_unresolved(
+                 %{task_id: task_id, workspace_id: ws},
+                 "!88",
+                 :ci_failed,
+                 2
+               )
+
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "admiral"
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ "auto-resolve exhausted (2×)"
+      assert escalation.body =~ "after 2 auto-resolve attempt"
+      assert escalation.body =~ "Reason: ci_failed"
+      assert escalation.body =~ "Auto-resolve attempts: 2"
+      assert escalation.body =~ "fix the failing checks"
+    end
+
+    test "an unresolved block with no workspace posts nothing" do
+      assert :ok =
+               AdmiralNotifier.merge_block_unresolved(
+                 %{task_id: "bd-noworkspace", workspace_id: nil},
+                 "!1",
+                 :behind_base,
+                 2
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
   describe "preflight_failed/2 (bd-awi4nw)" do
     alias Arbiter.Worker.StopReason
 
