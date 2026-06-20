@@ -152,6 +152,10 @@ defmodule Arbiter.MCP.Scope do
   # A coordinator claim decodes whether or not it carries a workspace: a
   # workspace-agnostic token (`workspace_id: nil`, the current mint shape) and a
   # legacy workspace-bound token both land here.
+  #
+  # Backward compat: `can_sling` was the claim key before it was renamed to
+  # `can_dispatch` in the Tier-B vernacular rename. Tokens minted before that
+  # rename carry `can_sling: true` and must still decode as can_dispatch: true.
   defp from_claims(%{tier: :coordinator} = c) do
     {:ok,
      %__MODULE__{
@@ -159,7 +163,7 @@ defmodule Arbiter.MCP.Scope do
        workspace_id: nilable_string(c[:workspace_id]),
        task_id: nil,
        repo: nil,
-       can_dispatch: c[:can_dispatch] == true,
+       can_dispatch: c[:can_dispatch] == true or c[:can_sling] == true,
        depth: depth(c[:depth])
      }}
   end
