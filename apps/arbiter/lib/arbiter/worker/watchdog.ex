@@ -63,11 +63,11 @@ defmodule Arbiter.Worker.Watchdog do
   @default_max_polls_manual :infinity
 
   @type opt ::
-          {:bead_id, String.t()}
+          {:task_id, String.t()}
           | {:worker, pid() | String.t()}
           | {:mr_ref, String.t()}
           | {:adapter, module()}
-          | {:workspace, Arbiter.Beads.Workspace.t() | nil}
+          | {:workspace, Arbiter.Tasks.Workspace.t() | nil}
           | {:auto_merge, boolean()}
           | {:via_review_gate, boolean()}
           | {:interval_ms, non_neg_integer()}
@@ -82,7 +82,7 @@ defmodule Arbiter.Worker.Watchdog do
   @doc """
   Start a Watchdog under `Arbiter.Worker.WatchdogSupervisor`.
 
-  Required opts: `:bead_id`, `:worker` (pid or bead_id), `:mr_ref`,
+  Required opts: `:task_id`, `:worker` (pid or task_id), `:mr_ref`,
   `:adapter`. Optional:
 
     * `:workspace`
@@ -154,7 +154,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   @impl true
   def init(opts) do
-    bead_id = Keyword.fetch!(opts, :bead_id)
+    task_id = Keyword.fetch!(opts, :task_id)
     adapter = Keyword.fetch!(opts, :adapter)
     mr_ref = Keyword.fetch!(opts, :mr_ref)
 
@@ -189,7 +189,7 @@ defmodule Arbiter.Worker.Watchdog do
           end
 
         state = %{
-          bead_id: bead_id,
+          task_id: task_id,
           worker_pid: worker_pid,
           mr_ref: mr_ref,
           adapter: adapter,
@@ -223,7 +223,7 @@ defmodule Arbiter.Worker.Watchdog do
 
       {:error, reason} ->
         Logger.debug(
-          "Worker.Watchdog: get/1 error for bead=#{state.bead_id} mr=#{state.mr_ref}: #{inspect(reason)}"
+          "Worker.Watchdog: get/1 error for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}"
         )
 
         reschedule(state)
@@ -258,13 +258,13 @@ defmodule Arbiter.Worker.Watchdog do
   # apply_outcome/3, so the approval semantics stay in one place.
 
   defp apply_outcome(:merged, _result, state) do
-    Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for bead=#{state.bead_id}")
+    Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
     safe(fn -> Worker.complete(state.worker_pid, :merged) end)
     {:stop, :normal, state}
   end
 
   defp apply_outcome(:closed, _result, state) do
-    Logger.info("Worker.Watchdog: MR #{state.mr_ref} closed for bead=#{state.bead_id}")
+    Logger.info("Worker.Watchdog: MR #{state.mr_ref} closed for task=#{state.task_id}")
     safe(fn -> Worker.fail(state.worker_pid, {:mr_closed, state.mr_ref}) end)
     {:stop, :normal, state}
   end
@@ -273,7 +273,7 @@ defmodule Arbiter.Worker.Watchdog do
     case safe_merge(state) do
       :ok ->
         Logger.info(
-          "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for bead=#{state.bead_id}"
+          "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for task=#{state.task_id}"
         )
 
         safe(fn -> Worker.complete(state.worker_pid, :merged) end)
@@ -281,9 +281,9 @@ defmodule Arbiter.Worker.Watchdog do
 
       {:error, reason} ->
         # Merge failed (race, branch conflict, transient). Stay parked and let
-        # the next poll re-attempt rather than failing the bead outright.
+        # the next poll re-attempt rather than failing the task outright.
         Logger.warning(
-          "Worker.Watchdog: auto-merge failed for bead=#{state.bead_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry"
+          "Worker.Watchdog: auto-merge failed for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry"
         )
 
         reschedule(state)
@@ -308,17 +308,17 @@ defmodule Arbiter.Worker.Watchdog do
   defp apply_outcome(:pending, _result, state), do: reschedule(state)
 
   # Fire the approved-but-parked tracker hook. Best-effort + loud-on-failure
-  # inside `Arbiter.Trackers.Sync`; an unreadable bead just skips.
+  # inside `Arbiter.Trackers.Sync`; an unreadable task just skips.
   defp sync_tracker_pending_merge(state) do
-    with {:ok, bead} <- Ash.get(Arbiter.Beads.Issue, state.bead_id) do
-      Arbiter.Trackers.Sync.lifecycle(bead, :approved_unmerged)
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, state.task_id) do
+      Arbiter.Trackers.Sync.lifecycle(task, :approved_unmerged)
     end
 
     :ok
   rescue
     e ->
       Logger.debug(
-        "Worker.Watchdog: pending-merge tracker sync raised for bead=#{state.bead_id}: #{Exception.message(e)}"
+        "Worker.Watchdog: pending-merge tracker sync raised for task=#{state.task_id}: #{Exception.message(e)}"
       )
 
       :ok
@@ -343,7 +343,7 @@ defmodule Arbiter.Worker.Watchdog do
 
     if current_pipeline == :failed and state.last_pipeline != :failed do
       Logger.warning(
-        "Worker.Watchdog: CI pipeline failed for bead=#{state.bead_id} mr=#{state.mr_ref}; " <>
+        "Worker.Watchdog: CI pipeline failed for task=#{state.task_id} mr=#{state.mr_ref}; " <>
           "escalating to Admiral, staying parked"
       )
 
@@ -351,7 +351,7 @@ defmodule Arbiter.Worker.Watchdog do
         snap =
           case safe_snapshot(state.worker_pid) do
             %{} = s -> s
-            _ -> %{bead_id: state.bead_id, workspace_id: nil}
+            _ -> %{task_id: state.task_id, workspace_id: nil}
           end
 
         Arbiter.Messages.AdmiralNotifier.pipeline_failed(snap, state.mr_ref)
@@ -363,8 +363,8 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp watch_pipeline_from_workspace(nil), do: false
 
-  defp watch_pipeline_from_workspace(%Arbiter.Beads.Workspace{} = ws),
-    do: Arbiter.Beads.Workspace.watch_pipeline?(ws)
+  defp watch_pipeline_from_workspace(%Arbiter.Tasks.Workspace{} = ws),
+    do: Arbiter.Tasks.Workspace.watch_pipeline?(ws)
 
   defp watch_pipeline_from_workspace(_), do: false
 
@@ -381,7 +381,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: true} = state)
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
-      "Worker.Watchdog: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
         "#{cap} polls without a terminal outcome; escalating + failing"
     )
 
@@ -393,7 +393,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp reschedule(%{max_polls: cap, poll_count: count, auto_merge: false} = state)
        when is_integer(cap) and cap > 0 and count + 1 >= cap do
     Logger.warning(
-      "Worker.Watchdog: bead=#{state.bead_id} mr=#{state.mr_ref} exceeded " <>
+      "Worker.Watchdog: task=#{state.task_id} mr=#{state.mr_ref} exceeded " <>
         "#{cap} polls on a manual-merge lane; parking (worker stays :awaiting_review)"
     )
 
@@ -410,7 +410,7 @@ defmodule Arbiter.Worker.Watchdog do
     snap =
       case safe_snapshot(state.worker_pid) do
         %{} = s -> s
-        _ -> %{bead_id: state.bead_id, workspace_id: nil}
+        _ -> %{task_id: state.task_id, workspace_id: nil}
       end
 
     safe(fn ->

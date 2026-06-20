@@ -4,7 +4,7 @@ defmodule Arbiter.Trackers.Tracker do
 
   An adapter implements this for one tracker backend (`Jira`, `Linear`,
   `GitHub`, or the trivial `None` stand-in). The `Arbiter.Trackers` helper
-  resolves which adapter to use for a given bead by reading
+  resolves which adapter to use for a given task by reading
   `issue.tracker_type`.
 
   See `docs/decision-doc.md` section 8 for the design rationale and the full
@@ -16,10 +16,10 @@ defmodule Arbiter.Trackers.Tracker do
       tracker-specific (a Jira issue map, a Linear node, etc.); callers should
       treat the result as opaque and use other callbacks to act on it.
     * `transition/2` — move the external item to a target status. The status
-      atom uses the bead vocabulary (`:open | :in_progress | :closed`); each
+      atom uses the task vocabulary (`:open | :in_progress | :closed`); each
       adapter maps it to its own state machine.
     * `update_fields/2` — patch fields on the external item. The fields map
-      uses bead-domain keys (`:title`, `:description`, `:assignee`, ...); the
+      uses task-domain keys (`:title`, `:description`, `:assignee`, ...); the
       adapter renames + format-converts (e.g. Markdown → ADF for Jira).
     * `link_for/1` — return a human-clickable URL for the ref. Used in CLI
       output and notifications.
@@ -27,15 +27,15 @@ defmodule Arbiter.Trackers.Tracker do
       adapter's canonical ref form (e.g. `"VR-17585"` for Jira). Returns
       `:error` if the string is clearly not for this tracker.
     * `list_transitions/1` — return the set of legal next-states from the
-      current state, as bead-vocabulary atoms.
+      current state, as task-vocabulary atoms.
     * `list_open/1` — return open items in the tracker that look "claimable"
       by the active workspace's user (assignment is the claim signal). Used
       by `arb list --tracker` to surface upstream backlog alongside local
-      beads. Adapters that don't have a notion of a backlog return
+      tasks. Adapters that don't have a notion of a backlog return
       `{:error, :not_supported}`.
     * `create/1` — create a new issue in the tracker from the given attrs
       and return the canonical `ref`. Used by `arb create` to mirror a new
-      bead into the configured tracker. Attrs use bead-domain keys
+      task into the configured tracker. Attrs use task-domain keys
       (`:title`, `:description`, `:assignee`, `:status`); each adapter
       translates to its own field names. Adapters that don't support
       outbound creation return `{:error, :not_supported}`.
@@ -53,7 +53,7 @@ defmodule Arbiter.Trackers.Tracker do
         description: "...",        # optional, Markdown
         assignee: "alice",         # optional, tracker-specific login
         status: :open,             # optional, default :open
-        priority: 2,               # optional, integer 0..4 (bead priority scale)
+        priority: 2,               # optional, integer 0..4 (task priority scale)
         issue_type: "bug"          # optional, free-form type string
       }
 
@@ -82,10 +82,10 @@ defmodule Arbiter.Trackers.Tracker do
   @type ref :: String.t()
 
   @typedoc """
-  Bead-domain status / lifecycle-event atoms passed to `transition/2`.
+  Task-domain status / lifecycle-event atoms passed to `transition/2`.
 
-  `:open | :in_progress | :closed` are the bead's own statuses. The remaining
-  atoms are richer lifecycle moments that don't map to a bead status but still
+  `:open | :in_progress | :closed` are the task's own statuses. The remaining
+  atoms are richer lifecycle moments that don't map to a task status but still
   drive an external workflow (e.g. Jira's VR board): `:pr_opened` (PR opened
   for review), `:approved_unmerged` (review approved but parked, not merged),
   and `:merged` (PR merged). Adapters that don't model an event simply leave it
@@ -104,7 +104,7 @@ defmodule Arbiter.Trackers.Tracker do
           required(:raw) => map()
         }
 
-  @typedoc "Bead-domain attrs accepted by `create/1`."
+  @typedoc "Task-domain attrs accepted by `create/1`."
   @type create_attrs :: %{
           required(:title) => String.t(),
           optional(:description) => String.t(),
@@ -145,7 +145,7 @@ defmodule Arbiter.Trackers.Tracker do
   @callback assignees(map()) :: [String.t()]
 
   @doc """
-  Derives the bead-vocabulary status (`:open | :in_progress | :closed`) from
+  Derives the task-vocabulary status (`:open | :in_progress | :closed`) from
   a raw issue map returned by `fetch/1`.
   """
   @callback issue_status(map()) :: status()
@@ -194,16 +194,16 @@ defmodule Arbiter.Trackers.Tracker do
   @doc """
   Post-claim side-effects: mark ownership on the upstream item (e.g. post an
   ownership comment and assign the user). Non-fatal — failures do not roll
-  back the bead. Optional — adapters that have no ownership-signal mechanism
+  back the task. Optional — adapters that have no ownership-signal mechanism
   simply don't implement it.
 
   `context` carries claim metadata:
-  - `:bead_id` — the newly-created bead's id
+  - `:task_id` — the newly-created task's id
   - `:workspace_name` / `:workspace_prefix` — the workspace identifiers
   - `:current_user` — the viewer's tracker identity
   - `:host` — the Arbiter host string
   """
-  @callback signal_claim(ref, bead_id :: String.t(), context :: map()) :: :ok
+  @callback signal_claim(ref, task_id :: String.t(), context :: map()) :: :ok
 
   @optional_callbacks add_remote_link: 3, add_comment: 2, check_prior_claim: 1, signal_claim: 3
 end

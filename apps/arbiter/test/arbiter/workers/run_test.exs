@@ -11,15 +11,15 @@ defmodule Arbiter.Workers.RunTest do
 
       {:ok, run} =
         Ash.create(Run, %{
-          bead_id: "bd-aaa",
-          bead_title: "do a thing",
+          task_id: "bd-aaa",
+          task_title: "do a thing",
           repo: "arbiter",
           workspace_id: @ws,
           status: :running,
           started_at: now
         })
 
-      assert run.bead_id == "bd-aaa"
+      assert run.task_id == "bd-aaa"
       assert run.status == :running
       assert run.output_lines == []
       assert %DateTime{} = run.inserted_at
@@ -28,14 +28,14 @@ defmodule Arbiter.Workers.RunTest do
     test "rejects an unknown status" do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Run, %{
-                 bead_id: "bd-x",
+                 task_id: "bd-x",
                  repo: "arbiter",
                  status: :bogus,
                  started_at: DateTime.utc_now()
                })
     end
 
-    test "rejects a missing bead_id" do
+    test "rejects a missing task_id" do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Run, %{
                  repo: "arbiter",
@@ -49,7 +49,7 @@ defmodule Arbiter.Workers.RunTest do
     test "stamps completed_at, exit_code, output_lines, failure_reason" do
       {:ok, run} =
         Ash.create(Run, %{
-          bead_id: "bd-bbb",
+          task_id: "bd-bbb",
           repo: "arbiter",
           workspace_id: @ws,
           status: :running,

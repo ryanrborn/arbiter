@@ -25,14 +25,14 @@ defmodule Arbiter.Agents.Routing.ByBudget do
   Stage-D-ready (`docs/agent-harness-design.md` §4.4): the policy ships
   here so the seam is present, but it's only *useful* once the ledger
   is queried into a snapshot on every dispatch — that integration is
-  intentionally out of scope for this bead.
+  intentionally out of scope for this task.
   """
 
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.Routing.ByPriority
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   @model_degrade %{
     "opus" => "sonnet",
@@ -47,8 +47,8 @@ defmodule Arbiter.Agents.Routing.ByBudget do
   }
 
   @impl true
-  def choose(bead, workspace, ledger_snapshot) do
-    base = base_policy(workspace).choose(bead, workspace, ledger_snapshot)
+  def choose(task, workspace, ledger_snapshot) do
+    base = base_policy(workspace).choose(task, workspace, ledger_snapshot)
 
     case over_budget?(workspace, ledger_snapshot) do
       false -> base

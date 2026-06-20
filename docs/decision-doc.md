@@ -3,11 +3,11 @@
 **Status:** draft for review
 **Date:** 2026-05-18
 **Author:** Mayor (acting under autonomy grant from Ryan)
-**Scope:** Define what to port from Gas Town, what to drop, what to defer. Produce a bead graph for Phases 1-4 implementation.
+**Scope:** Define what to port from Gas Town, what to drop, what to defer. Produce a task graph for Phases 1-4 implementation.
 
 ## Dogfood switchover — 2026-05-19
 
-**Phase 1 complete.** As of gte-008 (this bead), arbiter port progress is tracked in **arb** (the Phoenix/Postgres-backed CLI in this repo), not in the legacy bd/Dolt tooling. All 33 gte- beads (gte-001..028, gte-P1..P4, gte-029) were imported into `apps/arbiter`'s Postgres via `mix arbiter.import_from_dolt --hq-path ... --sync-status`; statuses match the Dolt source at switchover time.
+**Phase 1 complete.** As of gte-008 (this task), arbiter port progress is tracked in **arb** (the Phoenix/Postgres-backed CLI in this repo), not in the legacy bd/Dolt tooling. All 33 gte- tasks (gte-001..028, gte-P1..P4, gte-029) were imported into `apps/arbiter`'s Postgres via `mix arbiter.import_from_dolt --hq-path ... --sync-status`; statuses match the Dolt source at switchover time.
 
 The mayor's runtime (GT, in `~/dev/gt`) still uses bd for ALL non-gte work (cross-rig coordination, polecat work, etc.); the switchover is scoped strictly to the arbiter port itself. Once Phase 4 ships, the broader bd-to-arb migration will be considered.
 
@@ -35,7 +35,7 @@ My original estimate of 15-22 days assumed I understood GT's surface. Phase 0 re
 - External tracker abstraction with pluggable adapters (`Tracker.None` MVP, `Tracker.Jira` MVP, `Tracker.Linear` / `Tracker.GitHub` deferred)
 - Postgres + Quantum (switched from SQLite 2026-05-19 — see decision 1)
 
-**Bead count: 33** (gte-001 through gte-028 + gte-P1 through gte-P4 + gte-029).
+**Task count: 33** (gte-001 through gte-028 + gte-P1 through gte-P4 + gte-029).
 
 This is honest. I would rather over-estimate now than discover scope mid-flight.
 
@@ -61,7 +61,7 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
        "merge_queue": "Reclamation",  // internal: refinery
        "monitor": "Inquisitor",       // internal: witness
        "watchdog": "Grand Moff",      // internal: deacon
-       "issue": "Directive",          // internal: bead
+       "issue": "Directive",          // internal: task
        "batch": "Strike Force",       // internal: convoy
        "rig": "Ship",                 // internal: rig
        "epic": "Campaign",            // internal: mountain
@@ -90,17 +90,17 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
    - `list_transitions(ref) :: {:ok, [atom]} | {:error, term}`
 
    **Adapters:**
-   - `Tracker.None` — no external tracker (MVP, Phase 2). Bead system is the only source of truth.
+   - `Tracker.None` — no external tracker (MVP, Phase 2). Task system is the only source of truth.
    - `Tracker.Jira` — Atlassian REST + ADF (MVP, Phase 3). Replaces original gte-019 scope.
    - `Tracker.Linear` — Markdown + GraphQL (Phase 5, deferred).
    - `Tracker.GitHub` — Markdown + REST (Phase 5, deferred).
 
    **Issue resource columns (updated):**
-   - `tracker_type :: enum(:none, :jira, :linear, :github)` (default `:none`; inherited from workspace if not set per-bead)
+   - `tracker_type :: enum(:none, :jira, :linear, :github)` (default `:none`; inherited from workspace if not set per-task)
    - `tracker_ref :: String.t() | nil` (the external ID, e.g. `"VR-17585"`)
    - Removed: free-form `external_ref` string.
 
-   **Rich content (qa_notes, deployment_notes, description, acceptance):** stored in bead as **Markdown**. Adapters convert at write time. Jira: Markdown → ADF (helper from 2026-05-18). Linear/GitHub: Markdown is native. None: no-op.
+   **Rich content (qa_notes, deployment_notes, description, acceptance):** stored in task as **Markdown**. Adapters convert at write time. Jira: Markdown → ADF (helper from 2026-05-18). Linear/GitHub: Markdown is native. None: no-op.
 
    **Per-workspace tracker config (extends the vernacular JSON):**
    ```json
@@ -116,9 +116,9 @@ This is honest. I would rather over-estimate now than discover scope mid-flight.
      }
    }
    ```
-   For personal projects: `"tracker": {"type": "none"}` and the bead system stands alone.
+   For personal projects: `"tracker": {"type": "none"}` and the task system stands alone.
 
-   **Per-bead override:** if a workspace has Jira default but you want one bead untracked (e.g., infra work), set `bead.tracker_type = :none`.
+   **Per-task override:** if a workspace has Jira default but you want one task untracked (e.g., infra work), set `task.tracker_type = :none`.
 
 ## Tier 1 — Definitely port (MVP core)
 
@@ -126,15 +126,15 @@ These are the features Ryan used today and that the system would be useless with
 
 | GT feature | Elixir target | Notes |
 |---|---|---|
-| **Bead ledger** | `Beads` context, Ash resource `Issue` with audit + deps + status FSM | Ash gives policies, audit, derived state. Postgres-backed. |
+| **Task ledger** | `Tasks` context, Ash resource `Issue` with audit + deps + status FSM | Ash gives policies, audit, derived state. Postgres-backed. |
 | **CLI shim** | Escript `arb` that calls Phoenix REST/socket | Replaces bd entirely. Reuse familiar surface (show/create/close/list/update). |
 | **Polecat lifecycle** | `Polecat.Supervisor` (DynamicSupervisor), `Polecat.GenServer`, `Worktree` module | Spawn Claude in worktree, monitor, emit events. |
-| **Mayor coordinator** | LiveView dashboard | Realtime view of active polecats, beads in flight, PRs. |
+| **Mayor coordinator** | LiveView dashboard | Realtime view of active polecats, tasks in flight, PRs. |
 | **GitHub PR integration** | `GitHub` module using Req + GH REST/GraphQL | Open PR, poll, merge, comment, resolve threads. |
 | **Jira integration** | `Jira` module using Req | Fetch, transition, custom field writes (ADF for QA Testing Notes / Deployment Notes). |
 | **Refinery (merge queue)** | `MergeQueue` GenServer per rig | Subscribes to "polecat done" events, opens PRs, monitors, drives merge. |
 | **Integration-branch routing** | Config (`config/runtime.exs`) per team | Dolphin → integration/dolphin, etc. Default = development. |
-| **Branch naming convention** | `BranchNamer` module driven by bead type + Jira key | feature/VR-#####-slug or bugfix/VR-#####-slug. |
+| **Branch naming convention** | `BranchNamer` module driven by task type + Jira key | feature/VR-#####-slug or bugfix/VR-#####-slug. |
 | **PR template population** | `PRTemplate` module reads `.github/pull_request_template.md` | Polecats emit compliant PR bodies automatically. |
 
 ## Tier 2 — Port for v1 (important workflows)
@@ -145,9 +145,9 @@ These are workflows that exist in GT and that Ryan's flow benefits from:
 |---|---|---|
 | **Workflow engine** | Behaviour `Workflow` + `WorkflowMachine` (GenStateMachine) + macro DSL | Steps with deps, vars, composition. Replaces the TOML formula engine with Elixir-native. |
 | **`mol-polecat-work`** | `Workflows.Work` module implementing `Workflow` | Standard 5-step lifecycle: load-context, design, implement, verify, submit. |
-| **`mol-polecat-code-review`** | `Workflows.CodeReview` | Peer-review pattern. Output: review beads or `reviews/<branch>.md` (local-only repo flow). |
+| **`mol-polecat-code-review`** | `Workflows.CodeReview` | Peer-review pattern. Output: review tasks or `reviews/<branch>.md` (local-only repo flow). |
 | **`mol-pr-feedback-patrol`** | `Workflows.PRPatrol` GenServer | Closes `hq-spq` (duplicate; this already exists in GT as a formula). |
-| **Convoy concept** | `Convoy` Ash resource + LiveView card | Batch of related beads with synthesis step. |
+| **Convoy concept** | `Convoy` Ash resource + LiveView card | Batch of related tasks with synthesis step. |
 | **Composition (extends/expansions/aspects)** | Macro `use Workflow, extends: SomeOther, expansions: [...], aspects: [...]` | TDD as expansion, security-audit as aspect. Faithful to GT semantics. |
 
 ## Tier 3 — Defer to v2
@@ -157,7 +157,7 @@ These are real features but high-cost-low-frequency. Build later if needed:
 | GT feature | Why deferred |
 |---|---|
 | **`mol-idea-to-plan`** (6-polecat PRD review pipeline + plan-align rounds) | Sophisticated and useful but expensive to build. Can use existing GT formula via mol-prd-review until v2. |
-| **Mountain-Eater** (epic orchestration with stall detection, skip-after-N-failures) | Useful when running many beads. Build when first big epic warrants it. |
+| **Mountain-Eater** (epic orchestration with stall detection, skip-after-N-failures) | Useful when running many tasks. Build when first big epic warrants it. |
 | **Synthesis** (cross-leg aggregation step) | Specific to multi-leg convoys. Build when a convoy needs it. |
 | **TDD expansion / security audit aspect as first-class** | Build composition system in Tier 2; these specific compositions can be data, not engine work. |
 | **Scheduler with capacity controls** | Needed when running >=5 concurrent polecats. Trivial to add later via Task.Supervisor with max_children. |
@@ -178,8 +178,8 @@ These don't justify their cost in the Elixir version:
 | **Most dog formulas** (mol-dog-checkpoint, -compactor, -reaper, -doctor, -stale-db, etc.) | Postgres doesn't need most of this maintenance | Standard Postgres ops + `Quantum` for periodic tasks |
 | **Towers of Hanoi formulas** | Test artifacts | Real test suite |
 | **Boot's "when to wake" reasoning** | OTP supervision strategies | `:permanent` / `:transient` / `:temporary` |
-| **The `.beads/dolt/` local clone pattern** | Source of today's silent write-loss | Single SQL connection to Postgres, autocommit on |
-| **`.beads/issues.jsonl` as passive export** | Source of import-on-read fallback bug | Native Postgres backups + audit table |
+| **The `.tasks/dolt/` local clone pattern** | Source of today's silent write-loss | Single SQL connection to Postgres, autocommit on |
+| **`.tasks/issues.jsonl` as passive export** | Source of import-on-read fallback bug | Native Postgres backups + audit table |
 
 ## Architecture sketch
 
@@ -188,7 +188,7 @@ arbiter/                       # repo root
 ├── apps/
 │   ├── arbiter/                # Ash domain + workflow engine (business logic)
 │   │   ├── lib/arbiter/
-│   │   │   ├── beads/            # Ash resources: Issue, Convoy, Dependency, AuditEvent, Workspace
+│   │   │   ├── tasks/            # Ash resources: Issue, Convoy, Dependency, AuditEvent, Workspace
 │   │   │   ├── trackers/         # Tracker behaviour + None / Jira adapters
 │   │   │   ├── workflows/        # Workflow behaviour + WorkflowMachine
 │   │   │   ├── polecats/         # Polecat lifecycle (added Phase 2)
@@ -214,46 +214,46 @@ arbiter/                       # repo root
 
 Single umbrella app. Postgres for everything. No Dolt. No daemon. Supervisors all the way down.
 
-## Bead graph (Phase 1 dispatch plan)
+## Task graph (Phase 1 dispatch plan)
 
-I'll file these as `hq-` beads in the existing GT system once you approve this doc. Each is ~2-4hrs scope, peer-reviewed by a second polecat in a markdown review file under `~/dev/arbiter/reviews/`, then merged by Mayor.
+I'll file these as `hq-` tasks in the existing GT system once you approve this doc. Each is ~2-4hrs scope, peer-reviewed by a second polecat in a markdown review file under `~/dev/arbiter/reviews/`, then merged by Mayor.
 
-Format: `[bead-id] [title] [needs: dep1, dep2]`
+Format: `[task-id] [title] [needs: dep1, dep2]`
 
-### Phase 1: bead ledger + CLI shim (4-6 days)
+### Phase 1: task ledger + CLI shim (4-6 days)
 
 1. **gte-001 Phoenix umbrella scaffold via Igniter** — `mix igniter.new arbiter --with=phx.new --with-args="--umbrella --no-mailer" --install ash,ash_postgres,ash_paper_trail,ash_phoenix`. Adds `arbiter_cli` as a fourth umbrella app via `cd apps && mix new arbiter_cli`. Postgres started via `docker compose up -d`. Acceptance: `mix test` passes empty suite, `mix phx.server` starts and serves a DaisyUI-styled landing page, Repo connects to Postgres, Ash domain registered in supervision tree.
 2. **gte-002 Ash Issue resource** — fields, actions (create/read/update/close), `status` FSM (open/in_progress/closed), `priority` (P0-P4), `issue_type` enum, audit via `ash_paper_trail`. **External tracker:** `tracker_type` (enum :none/:jira/:linear/:github, default :none) + `tracker_ref` (string nullable). Rich-content fields (description, acceptance, notes, qa_notes, deployment_notes) stored as **Markdown** (adapters convert on write). Acceptance: unit tests cover create/close/status-transition, tracker_type defaults to :none and can be overridden. [needs: gte-001]
-3. **gte-003 Ash Dependency resource** — bead-to-bead edges (blocks/depends-on/relates-to). Acceptance: query `Issue.ready/0` returns beads with no open deps. [needs: gte-002]
-4. **gte-004 Ash Convoy resource** — batch of beads with status, progress derived from members. Acceptance: convoy closes when all member beads close. [needs: gte-002]
+3. **gte-003 Ash Dependency resource** — task-to-task edges (blocks/depends-on/relates-to). Acceptance: query `Issue.ready/0` returns tasks with no open deps. [needs: gte-002]
+4. **gte-004 Ash Convoy resource** — batch of tasks with status, progress derived from members. Acceptance: convoy closes when all member tasks close. [needs: gte-002]
 5. **gte-005 REST API for CLI** — `POST /api/issues`, `GET /api/issues/:id`, `PATCH /api/issues/:id/status`, etc. JSON over local socket. Acceptance: curl-able. [needs: gte-002, gte-003, gte-004]
 6. **gte-006 CLI escript (arb)** — `arb show/create/close/list/update/deps`. Acceptance: parity with `bd` subcommand surface used in today's session. [needs: gte-005]
-7. **gte-007 Dolt-to-Postgres migration script** — import existing hq + server Dolt DBs into the new system. Acceptance: bead count matches, no data loss. [needs: gte-002, gte-003]
-8. **gte-008 Phase 1 integration tests** — end-to-end: create bead, add dep, close dep, query ready, close bead. Acceptance: green. [needs: gte-006]
+7. **gte-007 Dolt-to-Postgres migration script** — import existing hq + server Dolt DBs into the new system. Acceptance: task count matches, no data loss. [needs: gte-002, gte-003]
+8. **gte-008 Phase 1 integration tests** — end-to-end: create task, add dep, close dep, query ready, close task. Acceptance: green. [needs: gte-006]
 
 **Phase 1 milestone:** switch from `bd` to `arb` for the rest of the port. Eat our own dogfood.
 
 ### Phase 2: polecat lifecycle (6-9 days)
 
 9. **gte-009 Worktree module** — `Worktree.create/3`, `Worktree.cleanup/1`, `Worktree.branch/2`. Tested against real git. [needs: gte-008]
-10. **gte-010 BranchNamer module** — derive branch name from bead (feature/VR-#####-slug). [needs: gte-002]
-11. **gte-011 Polecat GenServer** — per-polecat state machine. States: spawning, working, idle, done. Stores worktree path, branch, bead ref. [needs: gte-009, gte-010]
+10. **gte-010 BranchNamer module** — derive branch name from task (feature/VR-#####-slug). [needs: gte-002]
+11. **gte-011 Polecat GenServer** — per-polecat state machine. States: spawning, working, idle, done. Stores worktree path, branch, task ref. [needs: gte-009, gte-010]
 12. **gte-012 Polecat DynamicSupervisor** — spawn/terminate polecats on demand. [needs: gte-011]
 13. **gte-013 Claude session Port wrapper** — spawn Claude Code in the worktree, capture stdout, detect completion signal. [needs: gte-011]
 14. **gte-014 Workflow behaviour + macro DSL** — `use Workflow, steps: [:load, :design, :implement, :verify, :submit]`, step deps, vars. [needs: gte-001]
-15. **gte-015 WorkflowMachine GenStateMachine** — execute a workflow instance. Persist state to bead. [needs: gte-014, gte-002]
-16. **gte-016 Workflows.Work module** — implement `mol-polecat-work` semantics as `use Workflow`. **Submit step is tracker-polymorphic:** calls `Tracker.transition(bead, :done)` via the bead's adapter. Works for `:none`-tracked beads (no-op) and Jira-tracked beads (transitions to Code Complete). [needs: gte-015, gte-019]
-17. **gte-017 sling command** — `arb sling <bead> <rig>` → spawn polecat, attach workflow. Acceptance: end-to-end works on a no-op task. [needs: gte-012, gte-016]
+15. **gte-015 WorkflowMachine GenStateMachine** — execute a workflow instance. Persist state to task. [needs: gte-014, gte-002]
+16. **gte-016 Workflows.Work module** — implement `mol-polecat-work` semantics as `use Workflow`. **Submit step is tracker-polymorphic:** calls `Tracker.transition(task, :done)` via the task's adapter. Works for `:none`-tracked tasks (no-op) and Jira-tracked tasks (transitions to Code Complete). [needs: gte-015, gte-019]
+17. **gte-017 sling command** — `arb sling <task> <rig>` → spawn polecat, attach workflow. Acceptance: end-to-end works on a no-op task. [needs: gte-012, gte-016]
 
 **Phase 2 milestone:** use Elixir-side polecats to build Phase 3 + 4. Two-stage dogfooding.
 
 ### Phase 3: PR + Jira watchers + peer review (4-6 days)
 
 18. **gte-018 GitHub module** — open PR, get state, list reviews, comment, resolve thread, merge. [needs: gte-001]
-19. **gte-019 Tracker behaviour + Tracker.None adapter + ref types** — define the `Tracker` behaviour and ship the no-op `Tracker.None` adapter. Define the `tracker_type` enum + `tracker_ref` types. Helper functions: `Tracker.for_bead/1` (resolve adapter from bead's `tracker_type`), `Tracker.parse_ref/2` (delegate to adapter). Acceptance: behaviour defined with @callback specs, None adapter passes all callbacks as no-ops, ref parsing round-trips. [needs: gte-001, gte-002]
+19. **gte-019 Tracker behaviour + Tracker.None adapter + ref types** — define the `Tracker` behaviour and ship the no-op `Tracker.None` adapter. Define the `tracker_type` enum + `tracker_ref` types. Helper functions: `Tracker.for_task/1` (resolve adapter from task's `tracker_type`), `Tracker.parse_ref/2` (delegate to adapter). Acceptance: behaviour defined with @callback specs, None adapter passes all callbacks as no-ops, ref parsing round-trips. [needs: gte-001, gte-002]
 
   *(Note: original gte-019 was Jira-specific; that scope moved to gte-029 after the 2026-05-19 tracker abstraction decision.)*
-20. **gte-020 PRTemplate module** — read `.github/pull_request_template.md`, fill sections from bead context. **Tracker-agnostic:** the section-fill logic doesn't assume Jira; pulls the Jira link from `Tracker.link_for(bead)` (returns empty string for `:none`-tracked beads). [needs: gte-018, gte-019]
+20. **gte-020 PRTemplate module** — read `.github/pull_request_template.md`, fill sections from task context. **Tracker-agnostic:** the section-fill logic doesn't assume Jira; pulls the Jira link from `Tracker.link_for(task)` (returns empty string for `:none`-tracked tasks). [needs: gte-018, gte-019]
 21. **gte-021 Workflows.CodeReview module** — peer-review formula. Output: `reviews/<branch>.md` (local repo) OR GH inline comments (remote). Configurable. [needs: gte-015, gte-018]
 22. **gte-022 Workflows.PRPatrol GenServer** — replaces `mol-pr-feedback-patrol`. Subscribes to GH webhooks or polls. Dispatches polecats on actionable PRs. [needs: gte-018, gte-017]
 23. **gte-023 Merge queue (Refinery) GenServer** — subscribes to `polecat:done` events, opens PRs, monitors approval+CI, merges. [needs: gte-018, gte-022]
@@ -271,7 +271,7 @@ P-4. **gte-P4 LiveView vernacular integration + setup wizard** — dashboard rea
 
 ### Phase 4: LiveView + migration cutover (3-5 days)
 
-24. **gte-024 Dashboard LiveView** — active polecats, recent beads, PRs in flight, escalations. Uses Vernacular module. [needs: gte-022, gte-023, gte-P1]
+24. **gte-024 Dashboard LiveView** — active polecats, recent tasks, PRs in flight, escalations. Uses Vernacular module. [needs: gte-022, gte-023, gte-P1]
 25. **gte-025 Audit log LiveView** — searchable history of every action. [needs: gte-002]
 26. **gte-026 Final data migration** — re-run gte-007 against latest GT state. Cutover plan. [needs: all above]
 27. **gte-027 Run both systems in parallel for 3-5 days** — verify Elixir handles real work. [needs: gte-026]
@@ -302,14 +302,14 @@ All resolved 2026-05-18. See "Decisions locked" section above.
 | Port + tmux + Claude Code interaction may have surprises | Spike in Phase 2 (gte-013) before committing to full implementation |
 | GT bugs block its own replacement | Per the operating model: fall back to direct Claude session if GT loses >2h |
 | Migration cutover data loss | Dual-run for 3-5 days before decommissioning |
-| LiveView dashboard scope creep | MVP is non-negotiable: active polecats + recent beads + PRs. Nothing else. |
+| LiveView dashboard scope creep | MVP is non-negotiable: active polecats + recent tasks + PRs. Nothing else. |
 
 ## What this doc is asking for
 
 Sign-off on:
 1. The tier-1 / tier-2 / drop classification
-2. The 5-phase bead graph (28 beads)
+2. The 5-phase task graph (28 tasks)
 3. The 24-37 day / 5-7 calendar week timeline
 4. The 6 open questions (recommend defaults are flagged)
 
-Once approved, I file the beads in GT (with `gte-` prefix or as `hq-` if creating a new prefix isn't worth it), set up the peer-review markdown convention, and dispatch gte-001.
+Once approved, I file the tasks in GT (with `gte-` prefix or as `hq-` if creating a new prefix isn't worth it), set up the peer-review markdown convention, and dispatch gte-001.

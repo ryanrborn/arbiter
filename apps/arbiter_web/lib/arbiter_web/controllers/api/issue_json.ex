@@ -5,7 +5,7 @@ defmodule ArbiterWeb.Api.IssueJSON do
   Atoms are emitted as strings; timestamps as ISO8601.
   """
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
 
   @doc "Renders a single issue."
   def show(%{issue: issue}), do: data(issue)

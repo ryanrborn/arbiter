@@ -2,7 +2,7 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
   @moduledoc """
   End-to-end Phase 1 smoke test (gte-008 acceptance).
 
-  Exercises the bead-ledger surface that the arb CLI relies on, end to end,
+  Exercises the task-ledger surface that the arb CLI relies on, end to end,
   using the Ash domain directly (the arb → REST → controllers → Ash chain is
   covered by the arbiter_web controller tests). Specifically:
 
@@ -16,13 +16,13 @@ defmodule Arbiter.Integration.Phase1SmokeTest do
     8. `Issue.ready/0` must include neither A nor B.
 
   Plus a smaller parent-with-progress auto-close sanity check — create a parent
-  bead with `auto_close: true` and one `:parent_of` child, close the child,
+  task with `auto_close: true` and one `:parent_of` child, close the child,
   expect the parent to auto-close.
   """
 
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Dependency, Issue, Workspace}
+  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
 
   describe "ready/0 transitions across a blocking dependency" do
     setup do

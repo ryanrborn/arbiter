@@ -1,38 +1,38 @@
 defmodule Arbiter.Worker.Driver do
   @moduledoc """
-  Drives a bead to completion. Has two modes:
+  Drives a task to completion. Has two modes:
 
   ### Workflow mode (default)
 
   Ticks `Arbiter.Workflows.Machine` forward and mirrors its progress onto
-  the paired `Arbiter.Worker`. Closes the bead when the workflow
+  the paired `Arbiter.Worker`. Closes the task when the workflow
   completes. Used for bookkeeping-only workers.
 
   ### Claude-driven mode (`claude_driven: true`)
 
   A Claude subprocess is doing the real work; the Driver does NOT tick the
-  Machine. Instead it polls the worker's status and closes the bead when
+  Machine. Instead it polls the worker's status and closes the task when
   the worker reaches `:completed` (typically triggered by Claude printing
   `arb done` on stdout — see `Worker.ClaudeSession`).
 
   This mode resolves the Driver/Claude race that `arb dispatch --with-claude`
   exposed: the bookkeeping workflow used to finish in ~500ms and close the
-  bead before Claude had time to respond.
+  task before Claude had time to respond.
 
   ## Lifecycle (workflow mode)
 
   - On start: schedules the first tick immediately.
   - On each tick: calls `Machine.advance/1` and reacts:
-    - `{:ok, :completed}` → `Worker.complete/2`, close the bead, stop.
+    - `{:ok, :completed}` → `Worker.complete/2`, close the task, stop.
     - `{:ok, next_step}` → `Worker.advance/2`, schedule next tick.
-    - `{:error, reason}` → `Worker.fail/2`, stop (bead remains `:in_progress`).
+    - `{:error, reason}` → `Worker.fail/2`, stop (task remains `:in_progress`).
 
   ## Lifecycle (claude-driven mode)
 
   - On start: schedules the first worker check.
   - On each check: reads worker status:
-    - `:completed` → close the bead, optionally cleanup worktree, stop.
-    - `:failed` → log, stop (bead remains `:in_progress` for inspection).
+    - `:completed` → close the task, optionally cleanup worktree, stop.
+    - `:failed` → log, stop (task remains `:in_progress` for inspection).
     - `:idle | :running | :awaiting | :awaiting_review` → schedule next check
       (`:awaiting_review` is the brief window after the worker's `arb done`
       opens an MR; the Watchdog, not the Driver, drives it to terminal).
@@ -53,7 +53,7 @@ defmodule Arbiter.Worker.Driver do
   use GenServer
   require Logger
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.Worker
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workflows.Machine
@@ -65,7 +65,7 @@ defmodule Arbiter.Worker.Driver do
   @claude_default_max_ticks 1_800
 
   @type opts :: [
-          bead_id: String.t(),
+          task_id: String.t(),
           worker_pid: pid(),
           machine_id: String.t(),
           machine_pid: pid(),
@@ -103,7 +103,7 @@ defmodule Arbiter.Worker.Driver do
     claude_driven = Keyword.get(opts, :claude_driven, false)
 
     state = %{
-      bead_id: Keyword.fetch!(opts, :bead_id),
+      task_id: Keyword.fetch!(opts, :task_id),
       worker_pid: Keyword.fetch!(opts, :worker_pid),
       machine_id: Keyword.fetch!(opts, :machine_id),
       machine_pid: Keyword.fetch!(opts, :machine_pid),
@@ -133,19 +133,19 @@ defmodule Arbiter.Worker.Driver do
 
   @impl true
   def handle_info(:tick, %{ticks: t, max_ticks: m} = state) when t >= m do
-    Logger.warning("Worker.Driver hit max_ticks=#{m} for bead=#{state.bead_id}; stopping")
+    Logger.warning("Worker.Driver hit max_ticks=#{m} for task=#{state.task_id}; stopping")
 
     safe(fn -> Worker.fail(state.worker_pid, {:driver_timeout, m}) end)
     {:stop, :normal, state}
   end
 
   def handle_info(:check_worker, %{ticks: t, max_ticks: m} = state) when t >= m do
-    # Even at max_ticks, close a completed worker rather than leaving the bead
+    # Even at max_ticks, close a completed worker rather than leaving the task
     # stranded. This handles the race where the Watchdog calls Worker.complete
     # in the same window the Driver's tick budget expires (bd-d1jp4r).
     case safe_worker_state(state.worker_pid) do
       %{status: :completed} = worker_state ->
-        close_bead(state.bead_id, should_close_upstream(worker_state))
+        close_task(state.task_id, should_close_upstream(worker_state))
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
@@ -153,7 +153,7 @@ defmodule Arbiter.Worker.Driver do
         # bd-7b46wd: the tick budget was spent on active worker work, but the
         # worker has since handed off to the ReviewGate (review gate) or the
         # Watchdog (merge poller). Both own the terminal transition and have
-        # their own watchdogs, so giving up here would strand a bead that is
+        # their own watchdogs, so giving up here would strand a task that is
         # legitimately mid-merge. Keep waiting for :completed rather than
         # stopping — same reasoning as the pre-max_ticks handler below.
         Process.send_after(self(), :check_worker, state.interval_ms)
@@ -161,7 +161,7 @@ defmodule Arbiter.Worker.Driver do
 
       _ ->
         Logger.warning(
-          "Worker.Driver (claude_driven) hit max_ticks=#{m} for bead=#{state.bead_id}; stopping"
+          "Worker.Driver (claude_driven) hit max_ticks=#{m} for task=#{state.task_id}; stopping"
         )
 
         {:stop, :normal, state}
@@ -172,13 +172,13 @@ defmodule Arbiter.Worker.Driver do
     case safe_worker_state(state.worker_pid) do
       %{status: :completed} = worker_state ->
         close_upstream = should_close_upstream(worker_state)
-        close_bead(state.bead_id, close_upstream)
+        close_task(state.task_id, close_upstream)
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
       %{status: :failed} ->
         Logger.warning(
-          "Worker.Driver (claude_driven): worker failed for bead=#{state.bead_id}; leaving bead :in_progress"
+          "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :in_progress"
         )
 
         {:stop, :normal, state}
@@ -212,7 +212,7 @@ defmodule Arbiter.Worker.Driver do
     case safe_advance(state.machine_pid) do
       {:ok, :completed} ->
         safe(fn -> Worker.complete(state.worker_pid, :workflow_completed) end)
-        close_bead(state.bead_id)
+        close_task(state.task_id)
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
@@ -223,7 +223,7 @@ defmodule Arbiter.Worker.Driver do
 
       {:error, reason} ->
         Logger.warning(
-          "Worker.Driver: machine.advance error for bead=#{state.bead_id}: #{inspect(reason)}"
+          "Worker.Driver: machine.advance error for task=#{state.task_id}: #{inspect(reason)}"
         )
 
         safe(fn -> Worker.fail(state.worker_pid, reason) end)
@@ -232,12 +232,12 @@ defmodule Arbiter.Worker.Driver do
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{worker_pid: pid} = state) do
-    Logger.warning("Worker.Driver: worker died for bead=#{state.bead_id}")
+    Logger.warning("Worker.Driver: worker died for task=#{state.task_id}")
     {:stop, :normal, state}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{machine_pid: pid} = state) do
-    Logger.warning("Worker.Driver: machine died for bead=#{state.bead_id}")
+    Logger.warning("Worker.Driver: machine died for task=#{state.task_id}")
     safe(fn -> Worker.fail(state.worker_pid, :machine_died) end)
     {:stop, :normal, state}
   end
@@ -277,23 +277,23 @@ defmodule Arbiter.Worker.Driver do
     :exit, _ -> :ok
   end
 
-  defp close_bead(bead_id, close_upstream \\ false) do
-    with {:ok, bead} <- Ash.get(Issue, bead_id) do
+  defp close_task(task_id, close_upstream \\ false) do
+    with {:ok, task} <- Ash.get(Issue, task_id) do
       attrs =
         %{}
         |> then(fn a -> if close_upstream, do: Map.put(a, :close_upstream, true), else: a end)
 
-      case Ash.update(bead, attrs, action: :close) do
+      case Ash.update(task, attrs, action: :close) do
         {:ok, _} ->
           :ok
 
         {:error, err} ->
-          Logger.warning("Worker.Driver: failed to close bead #{bead_id}: #{inspect(err)}")
+          Logger.warning("Worker.Driver: failed to close task #{task_id}: #{inspect(err)}")
           :error
       end
     else
       err ->
-        Logger.warning("Worker.Driver: failed to close bead #{bead_id}: #{inspect(err)}")
+        Logger.warning("Worker.Driver: failed to close task #{task_id}: #{inspect(err)}")
         :error
     end
   end
@@ -305,29 +305,29 @@ defmodule Arbiter.Worker.Driver do
   #   - `worktree_path` is nil (no worktree was provisioned)
   #   - the worktree has uncommitted changes (operator should inspect)
   #
-  # Failures are logged but never propagated — the bead is already closed
+  # Failures are logged but never propagated — the task is already closed
   # and the workflow is done, so we don't want to crash the Driver over a
   # cleanup hiccup.
   defp maybe_cleanup_worktree(%{cleanup_worktree: false}), do: :ok
   defp maybe_cleanup_worktree(%{worktree_path: nil}), do: :ok
 
-  defp maybe_cleanup_worktree(%{worktree_path: path, bead_id: bead_id}) do
+  defp maybe_cleanup_worktree(%{worktree_path: path, task_id: task_id}) do
     cond do
-      # The bead's :close after_action already removed the worktree (see
-      # Arbiter.Beads.Issue.Changes.CleanupWorktree) — nothing left to do.
+      # The task's :close after_action already removed the worktree (see
+      # Arbiter.Tasks.Issue.Changes.CleanupWorktree) — nothing left to do.
       # Returning :ok silently keeps the legacy Driver-side path from
       # logging a warning about a path that is already gone.
       not File.dir?(path) ->
         :ok
 
-      worktree_dirty?(path, bead_id) ->
+      worktree_dirty?(path, task_id) ->
         Logger.info(
-          "Worker.Driver: worktree has uncommitted changes for bead=#{bead_id}; skipping cleanup"
+          "Worker.Driver: worktree has uncommitted changes for task=#{task_id}; skipping cleanup"
         )
 
-      worktree_ahead_of_base?(path, bead_id) ->
+      worktree_ahead_of_base?(path, task_id) ->
         Logger.info(
-          "Worker.Driver: worktree has commits ahead of base for bead=#{bead_id}; skipping cleanup"
+          "Worker.Driver: worktree has commits ahead of base for task=#{task_id}; skipping cleanup"
         )
 
       true ->
@@ -337,7 +337,7 @@ defmodule Arbiter.Worker.Driver do
 
           {:error, reason} ->
             Logger.warning(
-              "Worker.Driver: cleanup_worktree failed for bead=#{bead_id}: #{inspect(reason)}"
+              "Worker.Driver: cleanup_worktree failed for task=#{task_id}: #{inspect(reason)}"
             )
         end
     end
@@ -345,14 +345,14 @@ defmodule Arbiter.Worker.Driver do
     :ok
   end
 
-  defp worktree_dirty?(path, bead_id) do
+  defp worktree_dirty?(path, task_id) do
     case Worktree.has_uncommitted?(path) do
       {:ok, dirty} ->
         dirty
 
       {:error, reason} ->
         Logger.warning(
-          "Worker.Driver: cleanup-dirty-probe failed for bead=#{bead_id}: #{inspect(reason)}"
+          "Worker.Driver: cleanup-dirty-probe failed for task=#{task_id}: #{inspect(reason)}"
         )
 
         # Conservative: treat probe failure as "might be dirty" — skip cleanup.
@@ -360,7 +360,7 @@ defmodule Arbiter.Worker.Driver do
     end
   end
 
-  defp worktree_ahead_of_base?(path, _bead_id) do
+  defp worktree_ahead_of_base?(path, _task_id) do
     # `Worktree.has_commits_ahead?/2` already swallows git errors and
     # returns {:ok, true} as the conservative default, so we only need
     # to handle the OK shape here.

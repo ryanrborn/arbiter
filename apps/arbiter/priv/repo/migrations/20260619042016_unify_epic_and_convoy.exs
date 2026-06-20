@@ -1,19 +1,19 @@
 defmodule Arbiter.Repo.Migrations.UnifyEpicAndConvoy do
   @moduledoc """
   Unify the epic (`issue_type`) and convoy/batch grouping concepts into one
-  parent-with-progress bead.
+  parent-with-progress task.
 
-  * Adds `issues.auto_close` — when set, a parent bead closes automatically once
+  * Adds `issues.auto_close` — when set, a parent task closes automatically once
     all its `:parent_of` children are closed (mirrors the old convoy
     `system_managed` vs `owned` lifecycle).
   * Drops the `Convoy` + `ConvoyMembership` tables. No data migration is needed:
     there are no convoys in any live workspace (`convoy_list` == 0). Progress
     rollup is now computed over `:parent_of` dependency edges (see
-    `Arbiter.Beads.Issue.Calcs`).
+    `Arbiter.Tasks.Issue.Calcs`).
 
   The `auto_close` column is added with `DEFAULT false` to support SQLite
   (which cannot add NOT NULL columns without a DB default on populated tables).
-  The default matches the Ash application layer (see `Arbiter.Beads.Issue`).
+  The default matches the Ash application layer (see `Arbiter.Tasks.Issue`).
   """
 
   use Ecto.Migration

@@ -1,7 +1,7 @@
 defmodule Arbiter.MCP do
   @moduledoc """
   Arbiter's single in-process Model Context Protocol server — the agent-native
-  route back into the domain (read your bead, check your mailbox, write your
+  route back into the domain (read your task, check your mailbox, write your
   completion notes) as schema-backed tool calls instead of `arb …` argv guessing.
 
   This module is the **domain-side seam**: config, the signed scope-token mint /

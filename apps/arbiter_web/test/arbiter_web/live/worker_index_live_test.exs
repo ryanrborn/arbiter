@@ -3,11 +3,11 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
 
   setup do
-    for snap <- Worker.list_children(), do: Worker.stop(snap.bead_id)
+    for snap <- Worker.list_children(), do: Worker.stop(snap.task_id)
     Process.sleep(50)
 
     {:ok, ws} =
@@ -22,27 +22,27 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
   end
 
   test "lists an active acolyte with its workspace, linking to detail", %{conn: conn, ws: ws} do
-    {:ok, bead} = Ash.create(Issue, %{title: "active-worker", workspace_id: ws.id})
-    {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+    {:ok, task} = Ash.create(Issue, %{title: "active-worker", workspace_id: ws.id})
+    {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
     {:ok, _view, html} = live(conn, ~p"/workers")
 
     assert html =~ ~s(id="workers")
-    assert html =~ bead.id
+    assert html =~ task.id
     assert html =~ ws.name
-    assert html =~ ~s(href="/workers/#{bead.id}")
+    assert html =~ ~s(href="/workers/#{task.id}")
   end
 
   test "live: stopping an acolyte removes it via PubSub", %{conn: conn, ws: ws} do
-    {:ok, bead} = Ash.create(Issue, %{title: "soon-stopped", workspace_id: ws.id})
-    {:ok, _pid} = Worker.start(bead_id: bead.id, repo: "test/repo", workspace_id: ws.id)
+    {:ok, task} = Ash.create(Issue, %{title: "soon-stopped", workspace_id: ws.id})
+    {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
     {:ok, view, _html} = live(conn, ~p"/workers")
-    assert render(view) =~ bead.id
+    assert render(view) =~ task.id
 
-    Worker.stop(bead.id)
+    Worker.stop(task.id)
     Process.sleep(150)
 
-    refute render(view) =~ bead.id
+    refute render(view) =~ task.id
   end
 end

@@ -11,7 +11,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     * Any review on the PR has `state == "CHANGES_REQUESTED"`
       (highest-priority signal).
 
-  Future triggers (deferred to a follow-up bead — see BUILD-SUMMARY):
+  Future triggers (deferred to a follow-up task — see BUILD-SUMMARY):
 
     * `statusCheckRollup` contains FAILURE — needs the GraphQL API or a
       separate `check-runs` fetch keyed off the PR head SHA.
@@ -25,9 +25,9 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   ## Dedup
 
-  Each follow-up bead is tagged with `tracker_type: :github, tracker_ref:
+  Each follow-up task is tagged with `tracker_type: :github, tracker_ref:
   to_string(pr_number)`. Before dispatching, PRPatrol queries `Issue` for
-  open beads with that combination — if one exists, the PR has already been
+  open tasks with that combination — if one exists, the PR has already been
   handled this cycle.
 
   ## Lifecycle
@@ -46,7 +46,7 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   use GenServer
 
-  alias Arbiter.Beads.Issue
+  alias Arbiter.Tasks.Issue
   alias Arbiter.GitHub
   alias Arbiter.Worker
   require Ash.Query
@@ -134,8 +134,8 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   defp maybe_dispatch(%{"number" => pr_number} = pr, state) do
     if actionable?(state.repo, pr_number) and not deduped?(pr_number) do
-      bead = create_follow_up(pr, state)
-      _ = Worker.start(bead_id: bead.id, repo: state.repo, workspace_id: state.workspace_id)
+      task = create_follow_up(pr, state)
+      _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
     end
   end
@@ -171,7 +171,7 @@ defmodule Arbiter.Workflows.PRPatrol do
       Original PR: #{pr["html_url"] || ""}
       """
 
-    {:ok, bead} =
+    {:ok, task} =
       Ash.create(Issue, %{
         title: title,
         description: description,
@@ -182,7 +182,7 @@ defmodule Arbiter.Workflows.PRPatrol do
         workspace_id: state.workspace_id
       })
 
-    bead
+    task
   end
 
   defp schedule_next(state) do

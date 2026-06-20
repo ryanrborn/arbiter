@@ -3,9 +3,9 @@ defmodule ArbiterCli.Cmd.Message do
   `arb message <verb>` — the inter-agent message queue: mailboxes + the
   Admiral's notification feed.
 
-      arb message inbox  [--all | read <id> | clear | <bead-id>]
+      arb message inbox  [--all | read <id> | clear | <task-id>]
                          the Admiral's mailbox (messages sent *up* the chain);
-                         a `<bead-id>` drains that bead's unread direction.
+                         a `<task-id>` drains that task's unread direction.
       arb message send   <recipient> <body> [--subject ...] [--directive bd-x]
                          [--kind notification|completion|failure|escalation|info]
                          send a message up (or across) the chain. The `from`
@@ -13,9 +13,9 @@ defmodule ArbiterCli.Cmd.Message do
       arb message notify [--limit N]
                          the recent notification feed.
 
-  As a shorthand, `arb message <bead-id> <text>` (no verb) sends a
+  As a shorthand, `arb message <task-id> <text>` (no verb) sends a
   `:direction` from the Admiral down to a running worker — the worker picks
-  it up next time it runs `arb message inbox <bead-id>`.
+  it up next time it runs `arb message inbox <task-id>`.
   """
 
   alias ArbiterCli.{Client, Cmd, Output, Workspace}
@@ -30,9 +30,9 @@ defmodule ArbiterCli.Cmd.Message do
       ["send" | rest] -> send(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
       ["-h" | _] -> IO.puts(@moduledoc)
-      # Shorthand: `arb message <bead-id> <text>` → an Admiral direction.
-      [bead_id | [_ | _] = rest] -> direction(bead_id, rest)
-      [_bead_id] -> Output.die("message requires text: `arb message <bead-id> <text>`")
+      # Shorthand: `arb message <task-id> <text>` → an Admiral direction.
+      [task_id | [_ | _] = rest] -> direction(task_id, rest)
+      [_task_id] -> Output.die("message requires text: `arb message <task-id> <text>`")
       [] -> Output.die("message requires a subcommand", usage_hint())
     end
   end
@@ -96,9 +96,9 @@ defmodule ArbiterCli.Cmd.Message do
   defp emit_send(message, _recipient, _kind, :json), do: IO.puts(Jason.encode!(message))
   defp emit_send(_message, recipient, kind, :text), do: IO.puts("Sent #{kind} to #{recipient}.")
 
-  # ---- direction shorthand (was `arb message <bead> <text>`) -------------
+  # ---- direction shorthand (was `arb message <task> <text>`) -------------
 
-  defp direction(bead_id, words) do
+  defp direction(task_id, words) do
     mode = Output.mode(words)
     text = words |> Output.drop_json() |> Enum.join(" ")
     workspace_id = Workspace.id_or_halt()
@@ -106,19 +106,19 @@ defmodule ArbiterCli.Cmd.Message do
     body = %{
       kind: "direction",
       from_ref: "admiral",
-      to_ref: bead_id,
+      to_ref: task_id,
       body: text,
       workspace_id: workspace_id
     }
 
     case Client.post("/api/messages", body) do
-      {:ok, message} -> emit_direction(message, bead_id, mode)
+      {:ok, message} -> emit_direction(message, task_id, mode)
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp emit_direction(message, _bead_id, :json), do: IO.puts(Jason.encode!(message))
-  defp emit_direction(_message, bead_id, :text), do: IO.puts("Direction sent to #{bead_id}.")
+  defp emit_direction(message, _task_id, :json), do: IO.puts(Jason.encode!(message))
+  defp emit_direction(_message, task_id, :text), do: IO.puts("Direction sent to #{task_id}.")
 
   defp usage_hint do
     "verbs: inbox, send, notify"

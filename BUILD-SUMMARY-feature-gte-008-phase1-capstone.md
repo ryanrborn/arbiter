@@ -1,6 +1,6 @@
 # gte-008 — Phase 1 integration tests + dogfood switchover
 
-Bead: gte-008
+Task: gte-008
 Branch: `feature/gte-008-phase1-capstone`
 
 ## What
@@ -58,7 +58,7 @@ $ apps/arbiter_cli/arb ready --json | jq '.data | length'
 
 The `arb ready` path is the regression surface for the UUIDv7 fix
 (commit b193ea9). Previously this returned a 500. Now it returns 68 ready
-beads, sourced from the live import.
+tasks, sourced from the live import.
 
 The arb create + show + close round-trip was already verified in the gte-006
 BUILD-SUMMARY; re-verified here against the post-import data.
@@ -70,7 +70,7 @@ BUILD-SUMMARY; re-verified here against the post-import data.
 A surgical UPDATE rather than `ON CONFLICT DO UPDATE`. Reason: an ON-CONFLICT
 upsert would clobber title/notes/etc. with the Dolt values, even if those
 fields have been edited locally via arb. The flag only touches `status`,
-`closed_at`, and `updated_at` — the fields that change when a bead transitions
+`closed_at`, and `updated_at` — the fields that change when a task transitions
 state and that we WANT to track from the source of truth. If we later want a
 "full sync" mode that overwrites everything, it's a separate flag.
 
@@ -80,8 +80,8 @@ push more rigs through, switch to a single CTE-based bulk update.
 
 ### 2. Acceptance amended: workspace + id LIKE filter, not labels
 
-The bead's original acceptance criterion was:
-> `arb list --labels arbiter-port` returns all 32 gte- beads
+The task's original acceptance criterion was:
+> `arb list --labels arbiter-port` returns all 32 gte- tasks
 
 The Issue resource has no `labels` field (the arb CLI currently warns and
 ignores `--labels`, per gte-006 design). For switchover verification I used:
@@ -91,10 +91,10 @@ arb list --json | jq '[.data[] | select(.id|startswith("gte-"))] | length'
 ```
 
 This returns **33**, not 32 — gte-P1 was created during Phase 1 build
-(workspace+config bead) and bumped the count by one. The original 33 in the
-decision-doc accounts for this; the bead's "32" was a stale typo.
+(workspace+config task) and bumped the count by one. The original 33 in the
+decision-doc accounts for this; the task's "32" was a stale typo.
 
-If we want a tag/label surface later, it's a follow-up bead (filed as a
+If we want a tag/label surface later, it's a follow-up task (filed as a
 to-be-named "labels on Issue" follow-up — not in this PR).
 
 ### 3. Switchover scope

@@ -1,15 +1,15 @@
 defmodule Arbiter.Trackers.None do
   @moduledoc """
-  The null tracker. Used when a workspace (or a specific bead) has no external
-  tracker — the bead ledger is the only source of truth.
+  The null tracker. Used when a workspace (or a specific task) has no external
+  tracker — the task ledger is the only source of truth.
 
   All callbacks succeed as no-ops. `fetch/1` returns an empty map (there is
   nothing to fetch). `link_for/1` returns an empty string (no URL).
   `parse_ref/1` always returns `:error` (we never own a ref).
-  `list_transitions/1` returns the full bead status set, since the bead ledger
+  `list_transitions/1` returns the full task status set, since the task ledger
   has no externally-imposed restrictions. `list_open/1` returns
   `{:error, :not_supported}` because there is no upstream backlog to list —
-  callers (e.g. `arb list --tracker`) treat that as "render local beads only".
+  callers (e.g. `arb list --tracker`) treat that as "render local tasks only".
   `create/1` returns `{:error, :not_supported}` so the `arb create` upstream
   hook short-circuits for untracked workspaces (callers should never reach
   this — they skip outbound create when `tracker_type == :none`).

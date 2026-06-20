@@ -28,14 +28,14 @@ defmodule ArbiterCli.Cmd.UsageTest do
     end
 
     test "--json mode emits the raw payload" do
-      stub_get("/api/usage", %{"by" => "bead", "data" => [%{"group" => "bd-1", "rows" => 1}]})
+      stub_get("/api/usage", %{"by" => "task", "data" => [%{"group" => "bd-1", "rows" => 1}]})
 
       {out, _err, code} =
-        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "bead", "--json"]) end)
+        capture(fn -> ArbiterCli.Cmd.Usage.run(["--by", "task", "--json"]) end)
 
       assert code == 0
       decoded = Jason.decode!(out)
-      assert decoded["by"] == "bead"
+      assert decoded["by"] == "task"
     end
 
     test "empty results say so" do
@@ -52,7 +52,7 @@ defmodule ArbiterCli.Cmd.UsageTest do
         "data" => [
           %{
             "id" => "x",
-            "bead_id" => "bd-1",
+            "task_id" => "bd-1",
             "step" => "work",
             "model" => "claude-opus-4-7",
             "cost_usd" => 0.4321,

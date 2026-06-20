@@ -6,7 +6,7 @@ defmodule Arbiter.Agents.Gemini.Config do
   seeded by `Arbiter.Agents.prepare/1` and stored in the process dictionary.
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @rotation_key {__MODULE__, :api_key_rotation_index}

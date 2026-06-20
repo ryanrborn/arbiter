@@ -1,11 +1,11 @@
 defmodule ArbiterCli.Cmd.Sync do
   @moduledoc """
   `arb sync [--dry] [--json]` — reconcile GitHub issues assigned to the
-  workspace user against beads linked by `tracker_ref`. Two directions:
+  workspace user against tasks linked by `tracker_ref`. Two directions:
 
-    * issue assigned + open + no bead → create a linked bead (as `claim`).
-    * open bead with a github ref whose issue is unassigned/closed → close
-      the bead.
+    * issue assigned + open + no task → create a linked task (as `claim`).
+    * open task with a github ref whose issue is unassigned/closed → close
+      the task.
 
   Flags:
     --dry    Print the plan without applying it.
@@ -65,21 +65,21 @@ defmodule ArbiterCli.Cmd.Sync do
   end
 
   defp print_action(%{"action" => "create", "ref" => ref, "title" => title}) do
-    IO.puts("  + create bead for ##{ref}: #{title}")
+    IO.puts("  + create task for ##{ref}: #{title}")
   end
 
-  defp print_action(%{"action" => "close", "bead_id" => id, "reason" => reason}) do
+  defp print_action(%{"action" => "close", "task_id" => id, "reason" => reason}) do
     IO.puts("  - close #{id}: #{reason}")
   end
 
   defp print_action(other), do: IO.puts("  ? #{inspect(other)}")
 
-  defp print_result(%{"outcome" => "created", "bead" => bead}) do
-    IO.puts("  + created #{bead["id"]} (#{bead["tracker_type"]}:#{bead["tracker_ref"]})")
+  defp print_result(%{"outcome" => "created", "task" => task}) do
+    IO.puts("  + created #{task["id"]} (#{task["tracker_type"]}:#{task["tracker_ref"]})")
   end
 
-  defp print_result(%{"outcome" => "closed", "bead" => bead}) do
-    IO.puts("  - closed #{bead["id"]}")
+  defp print_result(%{"outcome" => "closed", "task" => task}) do
+    IO.puts("  - closed #{task["id"]}")
   end
 
   defp print_result(%{"outcome" => "error", "action" => action, "reason" => reason}) do

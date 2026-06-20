@@ -29,17 +29,17 @@ defmodule ArbiterWeb.Router do
 
       # Entity index pages (list everything, filterable + paged) and their
       # detail pages. Literal segments are declared before the dynamic
-      # `:bead_id`/`:id` catch-alls so e.g. `/workers/history` isn't claimed
+      # `:task_id`/`:id` catch-alls so e.g. `/workers/history` isn't claimed
       # as a worker detail.
-      live("/beads", BeadIndexLive)
-      live("/beads/:id", BeadDetailLive)
+      live("/tasks", TaskIndexLive)
+      live("/tasks/:id", TaskDetailLive)
 
       live("/merge_queue", MergeQueueIndexLive)
 
       live("/workers", WorkerIndexLive)
       live("/workers/history", RunIndexLive)
       live("/workers/history/:id", RunDetailLive)
-      live("/workers/:bead_id", WorkerDetailLive)
+      live("/workers/:task_id", WorkerDetailLive)
     end
   end
 
@@ -98,13 +98,13 @@ defmodule ArbiterWeb.Router do
     # Workers (workflow runner)
     post("/workers/dispatch", WorkerController, :dispatch)
     post("/workers/review", WorkerController, :review)
-    post("/workers/:bead_id/resume", WorkerController, :resume)
+    post("/workers/:task_id/resume", WorkerController, :resume)
     get("/workers/history", RunController, :index)
     get("/workers/history/:id", RunController, :show)
     get("/workers", WorkerController, :index)
-    get("/workers/:bead_id", WorkerController, :show)
-    get("/workers/:bead_id/log", WorkerController, :log)
-    post("/workers/:bead_id/stop", WorkerController, :stop)
+    get("/workers/:task_id", WorkerController, :show)
+    get("/workers/:task_id/log", WorkerController, :log)
+    post("/workers/:task_id/stop", WorkerController, :stop)
   end
 
   # Server-push event stream — long-lived chunked HTTP connection for coordinator

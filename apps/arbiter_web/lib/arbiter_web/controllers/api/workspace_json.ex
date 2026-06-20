@@ -3,7 +3,7 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   def show(%{workspace: ws}), do: data(ws)
 

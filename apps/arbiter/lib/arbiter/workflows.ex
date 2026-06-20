@@ -3,11 +3,11 @@ defmodule Arbiter.Workflows do
   Ash domain for workflow execution state.
 
   Holds the persistent state machine rows that drive
-  `Arbiter.Workflow` modules step-by-step against beads (gte-015).
+  `Arbiter.Workflow` modules step-by-step against tasks (gte-015).
 
-  This is a sibling of `Arbiter.Beads` rather than a member because
-  workflows are not beads — they are *driven by* beads. Keeping the domains
-  separate avoids polluting the bead ledger with execution scaffolding.
+  This is a sibling of `Arbiter.Tasks` rather than a member because
+  workflows are not tasks — they are *driven by* tasks. Keeping the domains
+  separate avoids polluting the task ledger with execution scaffolding.
 
   Resources:
 

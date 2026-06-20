@@ -19,13 +19,13 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert err =~ "single positional"
   end
 
-  test "happy path POSTs ref, prints created bead" do
+  test "happy path POSTs ref, prints created task" do
     stub_routes([
       @workspace_lookup,
       {{"post", "/api/workspaces/ws-1/claim"},
        {%{
           "status" => "created",
-          "bead" => %{
+          "task" => %{
             "id" => "bd-abc",
             "title" => "Wire it up",
             "status" => "open",
@@ -42,13 +42,13 @@ defmodule ArbiterCli.Cmd.ClaimTest do
     assert out =~ "github:43"
   end
 
-  test "existing bead → 'Already claimed'" do
+  test "existing task → 'Already claimed'" do
     stub_routes([
       @workspace_lookup,
       {{"post", "/api/workspaces/ws-1/claim"},
        {%{
           "status" => "existing",
-          "bead" => %{
+          "task" => %{
             "id" => "bd-abc",
             "title" => "Wire it up",
             "status" => "in_progress",
@@ -69,7 +69,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
       {{"post", "/api/workspaces/ws-1/claim"},
        {%{
           "status" => "created",
-          "bead" => %{
+          "task" => %{
             "id" => "bd-abc",
             "title" => "T",
             "status" => "open",
@@ -90,7 +90,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
       {{"post", "/api/workspaces/ws-1/claim"},
        {%{
           "status" => "created",
-          "bead" => %{
+          "task" => %{
             "id" => "bd-abc",
             "tracker_ref" => "43"
           }
@@ -135,7 +135,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
          |> Plug.Conn.put_status(201)
          |> Req.Test.json(%{
            "status" => "created",
-           "bead" => %{
+           "task" => %{
              "id" => "bd-abc",
              "title" => "Hard task",
              "status" => "open",

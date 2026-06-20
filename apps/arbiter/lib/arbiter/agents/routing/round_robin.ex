@@ -24,10 +24,10 @@ defmodule Arbiter.Agents.Routing.RoundRobin do
   @behaviour Arbiter.Agents.Routing.Policy
 
   alias Arbiter.Agents.Routing
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   @impl true
-  def choose(_bead, workspace, _ledger_snapshot) do
+  def choose(_task, workspace, _ledger_snapshot) do
     default = Routing.default_choice(workspace)
 
     case adapters_for(workspace) do

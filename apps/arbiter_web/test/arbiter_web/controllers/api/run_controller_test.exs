@@ -11,7 +11,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
   defp insert_run!(attrs) do
     base = %{
-      bead_id: "bd-#{System.unique_integer([:positive])}",
+      task_id: "bd-#{System.unique_integer([:positive])}",
       repo: "arbiter",
       workspace_id: @ws,
       status: :running,
@@ -28,14 +28,14 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       older = DateTime.add(now, -10, :second)
       newer = DateTime.add(now, 0, :second)
 
-      _ = insert_run!(%{bead_id: "bd-h1", started_at: older, status: :completed})
-      _ = insert_run!(%{bead_id: "bd-h2", started_at: newer, status: :completed})
-      _ = insert_run!(%{bead_id: "bd-h3", started_at: newer, status: :failed})
-      _ = insert_run!(%{bead_id: "bd-h4", started_at: newer, workspace_id: "other"})
+      _ = insert_run!(%{task_id: "bd-h1", started_at: older, status: :completed})
+      _ = insert_run!(%{task_id: "bd-h2", started_at: newer, status: :completed})
+      _ = insert_run!(%{task_id: "bd-h3", started_at: newer, status: :failed})
+      _ = insert_run!(%{task_id: "bd-h4", started_at: newer, workspace_id: "other"})
 
       conn = get(conn, ~p"/api/workers/history", %{workspace_id: @ws, status: "completed"})
       data = json_response(conn, 200)["data"]
-      ids = Enum.map(data, & &1["bead_id"])
+      ids = Enum.map(data, & &1["task_id"])
       assert ids == ["bd-h2", "bd-h1"]
       # Summary view omits output_lines (only :show returns them).
       refute Map.has_key?(List.first(data), "output_lines")
@@ -44,7 +44,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
     test "limit caps results", %{conn: conn} do
       for i <- 1..5 do
         insert_run!(%{
-          bead_id: "bd-lim#{i}",
+          task_id: "bd-lim#{i}",
           status: :completed,
           started_at: DateTime.add(DateTime.utc_now(), -i, :second)
         })
@@ -55,8 +55,8 @@ defmodule ArbiterWeb.Api.RunControllerTest do
     end
 
     test "before cursor filters to earlier started_at", %{conn: conn} do
-      a = insert_run!(%{bead_id: "bd-c1", started_at: ~U[2026-05-27 10:00:00.000000Z]})
-      _ = insert_run!(%{bead_id: "bd-c2", started_at: ~U[2026-05-27 12:00:00.000000Z]})
+      a = insert_run!(%{task_id: "bd-c1", started_at: ~U[2026-05-27 10:00:00.000000Z]})
+      _ = insert_run!(%{task_id: "bd-c2", started_at: ~U[2026-05-27 12:00:00.000000Z]})
 
       conn =
         get(conn, ~p"/api/workers/history", %{
@@ -65,7 +65,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
         })
 
       data = json_response(conn, 200)["data"]
-      assert Enum.map(data, & &1["bead_id"]) == [a.bead_id]
+      assert Enum.map(data, & &1["task_id"]) == [a.task_id]
     end
 
     test "invalid status returns 400", %{conn: conn} do
@@ -78,7 +78,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
     test "returns the run with full output_lines", %{conn: conn} do
       run =
         insert_run!(%{
-          bead_id: "bd-show",
+          task_id: "bd-show",
           status: :completed,
           completed_at: DateTime.utc_now(),
           output_lines: ["one", "two", "three"]
@@ -86,7 +86,7 @@ defmodule ArbiterWeb.Api.RunControllerTest do
 
       conn = get(conn, ~p"/api/workers/history/#{run.id}")
       data = json_response(conn, 200)["data"]
-      assert data["bead_id"] == "bd-show"
+      assert data["task_id"] == "bd-show"
       assert data["output_lines"] == ["one", "two", "three"]
     end
 

@@ -5,17 +5,17 @@ defmodule ArbiterCli.Cmd.Usage do
   Every Claude session (work worker or ReviewGate reviewer) writes a usage row
   with tokens (in/out/cache), cost in USD, duration, model, and provider. This
   command rolls those rows up so you can answer "spend per campaign / per day
-  / per workspace" — and, by counting `:work` rows per bead, see what got
+  / per workspace" — and, by counting `:work` rows per task, see what got
   re-slung (rework spend).
 
   Usage:
 
-      arb usage [--by day|bead|campaign|workspace|repo|model|step|provider]
+      arb usage [--by day|task|campaign|workspace|repo|model|step|provider]
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
                 [--limit N]
                 [--json]
-      arb usage events [--bead <bead-id>] [--workspace <id>] [--step work|review]
+      arb usage events [--task <task-id>] [--workspace <id>] [--step work|review]
                        [--since ...] [--limit N] [--json]
 
   Defaults to `--by day`. `--since 7d` and `--since 24h` are accepted as
@@ -77,7 +77,7 @@ defmodule ArbiterCli.Cmd.Usage do
     {opts, _rest, _bad} =
       OptionParser.parse(argv,
         switches: [
-          bead: :string,
+          task: :string,
           workspace: :string,
           step: :string,
           since: :string,
@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
     params =
       []
-      |> maybe_put(:bead_id, Keyword.get(opts, :bead))
+      |> maybe_put(:task_id, Keyword.get(opts, :task))
       |> maybe_put(:workspace_id, Keyword.get(opts, :workspace))
       |> maybe_put(:step, Keyword.get(opts, :step))
       |> maybe_put(:since, normalize_since(Keyword.get(opts, :since)))
@@ -148,7 +148,7 @@ defmodule ArbiterCli.Cmd.Usage do
 
     Enum.each(rows, fn ev ->
       IO.puts(
-        "  #{ev["occurred_at"]}  bead=#{ev["bead_id"]}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
+        "  #{ev["occurred_at"]}  task=#{ev["task_id"]}  step=#{ev["step"]}  model=#{ev["model"]}  cost=$#{format_cost(ev["cost_usd"])}  in=#{format_int(ev["tokens_in"])}  out=#{format_int(ev["tokens_out"])}  dur=#{format_seconds(ev["duration_ms"])}"
       )
     end)
   end

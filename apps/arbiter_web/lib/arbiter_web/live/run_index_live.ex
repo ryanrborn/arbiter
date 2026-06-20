@@ -118,11 +118,11 @@ defmodule ArbiterWeb.RunIndexLive do
                   <tr :for={r <- @runs} class="hover:bg-base-300/40 transition-colors">
                     <td>
                       <.link navigate={~p"/workers/history/#{r.id}"} class="link link-hover">
-                        <code class="text-xs">{r.bead_id}</code>
+                        <code class="text-xs">{r.task_id}</code>
                       </.link>
                     </td>
-                    <td class="text-xs max-w-xs truncate" title={r.bead_title || ""}>
-                      {r.bead_title || "—"}
+                    <td class="text-xs max-w-xs truncate" title={r.task_title || ""}>
+                      {r.task_title || "—"}
                     </td>
                     <td>
                       <span class={["badge badge-sm", run_status_class(r.status)]}>{r.status}</span>

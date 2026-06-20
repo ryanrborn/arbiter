@@ -1,6 +1,6 @@
 defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   @moduledoc """
-  Dispatch an auto-revise pass on a bead's **existing** worktree when a human
+  Dispatch an auto-revise pass on a task's **existing** worktree when a human
   reviewer requests changes (or leaves actionable review comments) on its PR
   (bd-95lsjb).
 
@@ -14,18 +14,18 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   ## Job scope
 
   This reuses the `arb resume` path (`Arbiter.Worker.Dispatch.resume/2`): it
-  re-attaches a fresh worker to the bead's **preserved worktree** —
+  re-attaches a fresh worker to the task's **preserved worktree** —
   the same branch the PR already tracks — briefed with the reviewer's feedback
   prepended to the standard work prompt. The worker addresses the feedback,
   commits, and pushes to the **same branch**; the existing PR updates in place.
 
   It must NOT open a new PR (pairs with bd-53xrmi: single canonical PR, the
-  worker only pushes). `Dispatch.resume` threads the bead's existing `pr_ref`
+  worker only pushes). `Dispatch.resume` threads the task's existing `pr_ref`
   through so completion reuses the open PR rather than duplicating it.
 
   ## Merger/tracker-agnostic
 
-  Like the `ConflictResolver`, this module operates on the bead + its preserved
+  Like the `ConflictResolver`, this module operates on the task + its preserved
   worktree. It is unaware of GitHub/GitLab — the MergeQueue one layer up reads
   the CHANGES_REQUESTED signal from whichever forge adapter it's wired to and
   passes the rendered feedback down.
@@ -47,7 +47,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   @behaviour __MODULE__
 
   @type dispatch_args :: %{
-          required(:bead_id) => String.t(),
+          required(:task_id) => String.t(),
           optional(:workspace_id) => String.t() | nil,
           optional(:target_branch) => String.t() | nil,
           optional(:pr_ref) => term(),
@@ -60,14 +60,14 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   @type dispatch_result :: {:ok, map()} | {:error, term()}
 
   @doc """
-  Spawn a worker on the bead's existing worktree to address the review
+  Spawn a worker on the task's existing worktree to address the review
   feedback and push to the same branch.
 
   Returns `{:ok, info}` once the worker is spawned (the revise runs
   asynchronously; the MergeQueue returns the item to `:awaiting_approval` to
   await re-review). Returns `{:error, reason}` when the worktree can't be
   resumed (e.g. it was cleaned up, or a worker is still actively working the
-  bead) — the MergeQueue parks the item `:failed` so it doesn't spin.
+  task) — the MergeQueue parks the item `:failed` so it doesn't spin.
   """
   @callback dispatch(args :: dispatch_args()) :: dispatch_result()
 
@@ -83,7 +83,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   """
   @impl true
   @spec dispatch(dispatch_args()) :: dispatch_result()
-  def dispatch(%{bead_id: bead_id} = args) when is_binary(bead_id) do
+  def dispatch(%{task_id: task_id} = args) when is_binary(task_id) do
     briefing = render_feedback(args)
 
     resume_opts =
@@ -92,13 +92,13 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
       |> maybe_put(:claude_command, Map.get(args, :claude_command))
       |> Keyword.put(:start_claude, Map.get(args, :start_claude, true))
 
-    case Dispatch.resume(bead_id, resume_opts) do
+    case Dispatch.resume(task_id, resume_opts) do
       {:ok, info} -> {:ok, info}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  def dispatch(_), do: {:error, :missing_bead_id}
+  def dispatch(_), do: {:error, :missing_task_id}
 
   @doc """
   Render the reviewer's feedback into the briefing block prepended to the
@@ -111,13 +111,13 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   """
   @spec render_feedback(dispatch_args()) :: String.t()
   def render_feedback(%{} = args) do
-    bead_id = Map.get(args, :bead_id, "(unknown)")
+    task_id = Map.get(args, :task_id, "(unknown)")
     feedback = Map.get(args, :feedback) || []
 
     """
     ## Human PR review feedback to address (bd-95lsjb)
 
-    A reviewer requested changes on the open PR for bead #{bead_id}. Your job
+    A reviewer requested changes on the open PR for task #{task_id}. Your job
     this pass is to ADDRESS THE FEEDBACK BELOW on the existing branch:
 
     #{render_items(feedback)}

@@ -4,9 +4,9 @@ defmodule Arbiter.Trackers.Sync do
 
   Two entry points, both tracker-agnostic:
 
-    * `lifecycle/3` — drive a richer lifecycle moment that isn't a bead status
+    * `lifecycle/3` — drive a richer lifecycle moment that isn't a task status
       change (PR opened, review approved-but-parked). It seeds the adapter
-      config from the bead's workspace, transitions the external item toward
+      config from the task's workspace, transitions the external item toward
       the mapped target status (multi-hop path-finding lives in the adapter),
       and — for `:pr_opened` — attaches the PR as a comment + remote link.
 
@@ -26,13 +26,13 @@ defmodule Arbiter.Trackers.Sync do
 
   require Logger
 
-  alias Arbiter.Beads.Issue
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.AdmiralNotifier
   alias Arbiter.Trackers
 
   @doc """
-  Drive a lifecycle event for the bead's external tracker. Best-effort and
+  Drive a lifecycle event for the task's external tracker. Best-effort and
   always returns `:ok` — failures are logged + escalated, never raised, so the
   caller's own lifecycle is never disrupted.
 
@@ -50,13 +50,13 @@ defmodule Arbiter.Trackers.Sync do
   rescue
     e ->
       Logger.warning(
-        "Trackers.Sync: error on #{event} for bead=#{issue.id}: #{Exception.message(e)}"
+        "Trackers.Sync: error on #{event} for task=#{issue.id}: #{Exception.message(e)}"
       )
 
       :ok
   catch
     :exit, reason ->
-      Logger.warning("Trackers.Sync: exit on #{event} for bead=#{issue.id}: #{inspect(reason)}")
+      Logger.warning("Trackers.Sync: exit on #{event} for task=#{issue.id}: #{inspect(reason)}")
       :ok
   end
 
@@ -71,12 +71,12 @@ defmodule Arbiter.Trackers.Sync do
   end
 
   @doc """
-  Transition the bead's external item toward the status mapped from `event`,
+  Transition the task's external item toward the status mapped from `event`,
   surfacing any genuine failure loudly (log + escalation). Returns `:ok` on
   success or a benign skip, `{:error, reason}` only after escalating a loud
   failure (so callers that care can react; most ignore it).
 
-  Used by `lifecycle/3` and by `Arbiter.Beads.Issue.Changes.SyncTracker` for
+  Used by `lifecycle/3` and by `Arbiter.Tasks.Issue.Changes.SyncTracker` for
   the core status-change path so the swallow-on-error behaviour is gone from
   both.
   """
@@ -93,7 +93,7 @@ defmodule Arbiter.Trackers.Sync do
         else
           Logger.debug(
             "Trackers.Sync: #{event} not modelled by tracker=#{issue.tracker_type} " <>
-              "for bead=#{issue.id} (#{describe(reason)}) — skipping"
+              "for task=#{issue.id} (#{describe(reason)}) — skipping"
           )
 
           :ok
@@ -108,14 +108,14 @@ defmodule Arbiter.Trackers.Sync do
   @spec notify_failure(Issue.t(), atom(), term()) :: :ok
   def notify_failure(%Issue{} = issue, event, reason) do
     Logger.error(
-      "Trackers.Sync: FAILED to sync bead=#{issue.id} tracker=#{issue.tracker_type} " <>
+      "Trackers.Sync: FAILED to sync task=#{issue.id} tracker=#{issue.tracker_type} " <>
         "ref=#{issue.tracker_ref} on #{event}: #{describe(reason)} — raising escalation. " <>
         "Reconcile the workspace status_map / transition_graph with the tracker workflow."
     )
 
     AdmiralNotifier.tracker_sync_failed(
       %{
-        bead_id: issue.id,
+        task_id: issue.id,
         workspace_id: issue.workspace_id,
         tracker_type: issue.tracker_type,
         tracker_ref: issue.tracker_ref

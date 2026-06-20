@@ -2,7 +2,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Agents.CredentialWatchdog
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker.StopReason
 

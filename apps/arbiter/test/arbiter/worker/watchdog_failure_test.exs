@@ -6,7 +6,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
   (Watchdog startup failure), `start_watchdog/3` returns `:error`. The `try/rescue`
   block in `do_open_mr` only handled exceptions and exits — a plain `:error`
   return value was silently discarded. The MR was already open on the forge but
-  the worker had no Watchdog watching it, so the bead hung at `:awaiting_review`
+  the worker had no Watchdog watching it, so the task hung at `:awaiting_review`
   indefinitely with no path to completion.
 
   The fix captures the `start_watchdog` result and escalates to the Admiral when
@@ -18,7 +18,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
 
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Test.StubMerger
@@ -38,21 +38,21 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
     ws
   end
 
-  defp new_bead(ws) do
-    {:ok, bead} =
+  defp new_task(ws) do
+    {:ok, task} =
       Ash.create(Issue, %{
-        title: "watchdog failure bead",
+        title: "watchdog failure task",
         workspace_id: ws.id,
         issue_type: :feature
       })
 
-    bead
+    task
   end
 
-  defp running_worker(bead, ws) do
+  defp running_worker(task, ws) do
     {:ok, pid} =
       Worker.start(
-        bead_id: bead.id,
+        task_id: task.id,
         repo: "wf/repo",
         workspace_id: ws.id
       )
@@ -65,8 +65,8 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
   describe "Watchdog startup failure (bd-91rnwq)" do
     test "worker stays :awaiting_review when Watchdog fails to start" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      pid = running_worker(bead, ws)
+      task = new_task(ws)
+      pid = running_worker(task, ws)
 
       StubMerger.next_open_ref("!orphan")
 
@@ -92,8 +92,8 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
 
     test "Admiral is escalated with the MR ref when Watchdog fails to start" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      pid = running_worker(bead, ws)
+      task = new_task(ws)
+      pid = running_worker(task, ws)
 
       StubMerger.next_open_ref("!orphan2")
 
@@ -118,12 +118,12 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =
-        Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == bead.id))
+        Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
 
       assert escalation, "expected an Admiral escalation for the orphaned MR"
       assert escalation.subject =~ "Watchdog startup failed"
       assert escalation.body =~ "!orphan2"
-      assert escalation.body =~ bead.id
+      assert escalation.body =~ task.id
     end
   end
 end

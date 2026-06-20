@@ -316,7 +316,7 @@ defmodule Arbiter.Trackers.GitHubTest do
   end
 
   describe "list_transitions/1" do
-    test "validates the ref and returns the configured bead statuses" do
+    test "validates the ref and returns the configured task statuses" do
       stub(fn conn ->
         assert conn.method == "GET"
         assert conn.request_path == issue_path()
@@ -771,7 +771,7 @@ defmodule Arbiter.Trackers.GitHubTest do
   describe "add_remote_link/3" do
     test "POSTs a comment with the PR link when no prior comment exists" do
       url = "https://github.com/#{@owner}/#{@repo}/pull/123"
-      title = "PR 123 (bead bd-12345)"
+      title = "PR 123 (task bd-12345)"
 
       stub(fn conn ->
         case {conn.method, conn.request_path} do
@@ -797,13 +797,13 @@ defmodule Arbiter.Trackers.GitHubTest do
 
     test "skips posting when a comment with the same URL already exists (idempotent)" do
       url = "https://github.com/#{@owner}/#{@repo}/pull/123"
-      title = "PR 123 (bead bd-12345)"
+      title = "PR 123 (task bd-12345)"
 
       stub(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", _} ->
             Req.Test.json(conn, [
-              %{"id" => 1, "body" => "**Remote Link:** [PR 123 (bead bd-12345)](#{url})"}
+              %{"id" => 1, "body" => "**Remote Link:** [PR 123 (task bd-12345)](#{url})"}
             ])
 
           {"POST", _} ->

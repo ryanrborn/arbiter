@@ -6,16 +6,16 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   review`, the resulting worker is tagged `review_only: true` and has no
   branch/worktree. Before this fix, any verdict (APPROVE or REQUEST_CHANGES)
   caused the reviewer worker to complete normally, which prompted the Driver
-  to close the bead — without ever merging the PR.
+  to close the task — without ever merging the PR.
 
   After the fix:
 
     * APPROVE → reviewer worker parks at :awaiting_review and the Watchdog
-      merges the bead's pr_ref automatically (via_review_gate: true path).
+      merges the task's pr_ref automatically (via_review_gate: true path).
     * REQUEST_CHANGES → reviewer worker fails (not completes) so the Driver
-      does NOT close the bead; it stays :in_progress for a fix-pass.
-    * No verdict → same as REQUEST_CHANGES (fail, bead stays :in_progress).
-    * No pr_ref on the bead → APPROVE falls through to complete normally
+      does NOT close the task; it stays :in_progress for a fix-pass.
+    * No verdict → same as REQUEST_CHANGES (fail, task stays :in_progress).
+    * No pr_ref on the task → APPROVE falls through to complete normally
       (nothing to merge).
   """
 
@@ -23,7 +23,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # named StubMerger Agent.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Beads.{Issue, Workspace}
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Test.StubMerger
@@ -63,19 +63,19 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     ws
   end
 
-  defp new_bead(ws, opts \\ %{}) do
-    {:ok, bead} =
-      Ash.create(Issue, Map.merge(%{title: "review-only bead", workspace_id: ws.id}, opts))
+  defp new_task(ws, opts \\ %{}) do
+    {:ok, task} =
+      Ash.create(Issue, Map.merge(%{title: "review-only task", workspace_id: ws.id}, opts))
 
-    {:ok, bead} = Ash.update(bead, %{status: :in_progress})
-    bead
+    {:ok, task} = Ash.update(task, %{status: :in_progress})
+    task
   end
 
   # Start a review_only worker with no branch (coordinator-dispatch path).
   # `output_lines` is injected directly into meta to simulate what the reviewer
   # worker would have printed before "arb done" — avoids spawning a real
   # subprocess or going through ClaudeSession.
-  defp start_reviewer(bead, output_lines, extra_meta \\ %{}) do
+  defp start_reviewer(task, output_lines, extra_meta \\ %{}) do
     meta =
       Map.merge(
         %{
@@ -93,7 +93,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       )
 
     {:ok, pid} =
-      Worker.start(bead_id: bead.id, repo: "rv/repo", workspace_id: bead.workspace_id, meta: meta)
+      Worker.start(task_id: task.id, repo: "rv/repo", workspace_id: task.workspace_id, meta: meta)
 
     :ok = Worker.advance(pid, :claude)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
@@ -103,13 +103,13 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- APPROVE path ----------------------------------------------------------
 
   describe "APPROVE verdict" do
-    test "parks at :awaiting_review with the bead's pr_ref when APPROVE is detected" do
+    test "parks at :awaiting_review with the task's pr_ref when APPROVE is detected" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "pr-42"}, action: :update)
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-42"}, action: :update)
 
       pid =
-        start_reviewer(bead, [
+        start_reviewer(task, [
           "reviewing the diff...",
           "VERDICT: APPROVE",
           "looks good, ship it"
@@ -126,8 +126,8 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
     test "Watchdog auto-merges and completes the worker when the PR is approved" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "pr-99"}, action: :update)
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-99"}, action: :update)
 
       # Queue: first poll returns approved, second returns merged.
       StubMerger.queue_get("pr-99", [
@@ -136,7 +136,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       ])
 
       pid =
-        start_reviewer(bead, ["VERDICT: APPROVE", "great work"], %{
+        start_reviewer(task, ["VERDICT: APPROVE", "great work"], %{
           # Let the Watchdog poll immediately so the merge fires without sleeping.
           watchdog_initial_delay_ms: 0,
           watchdog_interval_ms: 50
@@ -153,11 +153,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert StubMerger.merge_count("pr-99") >= 1
     end
 
-    test "completes normally when the bead has no pr_ref (nothing to merge)" do
+    test "completes normally when the task has no pr_ref (nothing to merge)" do
       ws = new_workspace()
-      bead = new_bead(ws)
+      task = new_task(ws)
 
-      pid = start_reviewer(bead, ["VERDICT: APPROVE", "reviewed"])
+      pid = start_reviewer(task, ["VERDICT: APPROVE", "reviewed"])
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -170,13 +170,13 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- REQUEST_CHANGES path --------------------------------------------------
 
   describe "REQUEST_CHANGES verdict" do
-    test "fails the worker (not completes) so the bead stays :in_progress" do
+    test "fails the worker (not completes) so the task stays :in_progress" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "pr-77"}, action: :update)
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-77"}, action: :update)
 
       pid =
-        start_reviewer(bead, [
+        start_reviewer(task, [
           "VERDICT: REQUEST_CHANGES",
           "- [high] lib/foo.ex:12 missing guard"
         ])
@@ -193,11 +193,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
     test "escalates findings to the Admiral mailbox" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "pr-77"}, action: :update)
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-77"}, action: :update)
 
       pid =
-        start_reviewer(bead, [
+        start_reviewer(task, [
           "VERDICT: REQUEST_CHANGES",
           "- [high] lib/foo.ex:12 missing nil guard"
         ])
@@ -210,9 +210,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       messages = Message.inbox("admiral", workspace_id: ws.id)
 
       assert Enum.any?(messages, fn m ->
-               m.kind == :escalation and m.directive_ref == bead.id
+               m.kind == :escalation and m.directive_ref == task.id
              end),
-             "expected an Admiral escalation for bead #{bead.id}"
+             "expected an Admiral escalation for task #{task.id}"
     end
   end
 
@@ -221,10 +221,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   describe "no parseable verdict" do
     test "fails the worker when the reviewer emits no VERDICT line" do
       ws = new_workspace()
-      bead = new_bead(ws)
-      {:ok, bead} = Ash.update(bead, %{pr_ref: "pr-55"}, action: :update)
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-55"}, action: :update)
 
-      pid = start_reviewer(bead, ["some output but no verdict line"])
+      pid = start_reviewer(task, ["some output but no verdict line"])
 
       send(pid, {:__claude_session_done__, "arb done"})
 
@@ -240,11 +240,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   describe "non-review_only worker with no branch" do
     test "still completes normally (existing behaviour is unchanged)" do
       ws = new_workspace()
-      bead = new_bead(ws)
+      task = new_task(ws)
 
       # No review_only flag, no branch — should complete as before.
       meta = %{output_lines: ["VERDICT: APPROVE", "some work done"]}
-      {:ok, pid} = Worker.start(bead_id: bead.id, repo: "rv/repo", workspace_id: ws.id, meta: meta)
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "rv/repo", workspace_id: ws.id, meta: meta)
       :ok = Worker.advance(pid, :claude)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 

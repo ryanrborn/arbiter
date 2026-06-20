@@ -1,6 +1,6 @@
 # gte-029 — Tracker.Jira adapter
 
-Bead: gte-029
+Task: gte-029
 Branch: `feature/gte-029-jira-adapter`
 
 ## What
@@ -53,9 +53,9 @@ Three approaches were considered:
   signature forces every adapter (None, future Linear/GitHub) to either
   ignore the workspace or accept it too, and pushes workspace plumbing
   into every caller of `Trackers.fetch/1`.
-- **(c) Resolve workspace from the bead via Ash inside the adapter** —
-  *rejected*: the adapter only has the `ref` string, not the bead.
-  Looking up the bead inside the adapter would couple the HTTP layer to
+- **(c) Resolve workspace from the task via Ash inside the adapter** —
+  *rejected*: the adapter only has the `ref` string, not the task.
+  Looking up the task inside the adapter would couple the HTTP layer to
   Ash/Postgres and ruin testability.
 
 A hybrid fallback is also wired: if the process dict is unset,
@@ -115,12 +115,12 @@ in CI; the suite is hermetic.
 Defaults: `:open → "To Do"`, `:in_progress → "In Progress"`,
 `:closed → "Done"`. Verus needs `:closed → "Approved and merged"` — set in
 the workspace's `tracker.config.status_map`. The Phase 4 polecat that
-moves Verus beads through merge will set this once per workspace.
+moves Verus tasks through merge will set this once per workspace.
 
-`list_transitions/1` reverse-maps Jira transition names back to bead-status
+`list_transitions/1` reverse-maps Jira transition names back to task-status
 atoms via the same `status_map`. Names without a mapping (e.g. an
-in-progress sub-state Verus uses but bead doesn't model) are dropped — the
-caller sees only the bead-vocabulary atoms it can act on.
+in-progress sub-state Verus uses but task doesn't model) are dropped — the
+caller sees only the task-vocabulary atoms it can act on.
 
 ### 6. `parse_ref/1` is conservative
 
@@ -157,7 +157,7 @@ total                     356 tests, 0 failures
   (`X-RateLimit-NearLimit`, `Retry-After`); deferred until we see real
   rate-pressure.
 - Round-trip test wiring a real Issue resource → `Trackers.update_fields/2`
-  → ADF assertion. Punt to whichever bead first uses
+  → ADF assertion. Punt to whichever task first uses
   `Trackers.update_fields/2` for QA Notes — too synthetic to write here.
 - ADF subset is intentionally narrow; revisit if a non-QA-Notes caller
   appears that needs links or nested lists.

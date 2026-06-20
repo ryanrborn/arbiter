@@ -2,7 +2,7 @@ import Config
 config :ash, policies: [show_policy_breakdowns?: true]
 
 # Repo → git-repo path mapping consumed by `Arbiter.Worker.Dispatch` when it
-# provisions a worktree for a freshly-dispatched worker. Beads dispatched with
+# provisions a worktree for a freshly-dispatched worker. Tasks dispatched with
 # a repo string not in this map skip worktree provisioning entirely.
 # Repos can also be configured per-workspace via the dashboard
 # (Workspace → config["repo_paths"]) so you don't have to redeploy to add one.

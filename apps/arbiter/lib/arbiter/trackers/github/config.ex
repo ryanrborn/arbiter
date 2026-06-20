@@ -35,8 +35,8 @@ defmodule Arbiter.Trackers.GitHub.Config do
   ## `status_map`
 
   GitHub Issues have only two native states — `"open"` and `"closed"` — so the
-  bead-vocabulary `:in_progress` is expressed as an *open* issue carrying a
-  label. Each bead status maps to a `%{state: ..., label: ...}` pair:
+  task-vocabulary `:in_progress` is expressed as an *open* issue carrying a
+  label. Each task status maps to a `%{state: ..., label: ...}` pair:
 
     * `state` is `"open"` or `"closed"` (anything else falls back to the
       default for that status).
@@ -57,7 +57,7 @@ defmodule Arbiter.Trackers.GitHub.Config do
   avoided outside of tests.
   """
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.GitHub.Error
 
   @pdict_key {__MODULE__, :active_workspace_config}

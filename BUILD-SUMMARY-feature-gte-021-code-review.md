@@ -59,7 +59,7 @@ spec called out.
 
 ## Review file format (local mode)
 
-Mirrors the polecat-reviewer convention from the Go GT — header, bead
+Mirrors the polecat-reviewer convention from the Go GT — header, task
 reference, pending verdict line that is rewritten in place by `:verdict`,
 then findings ordered by severity (error > warning > info), then file,
 then line. Example:
@@ -67,7 +67,7 @@ then line. Example:
 ```
 # Code review: feature/x
 
-**Bead:** gte-021 — code review
+**Task:** gte-021 — code review
 **Mode:** local
 **Verdict:** APPROVE
 
@@ -95,7 +95,7 @@ line: pos_integer(), message: String.t()}`.
 
 I chose a state-borne hook over a module attribute because the
 workflow runs once per polecat-session and the runner needs to vary
-per workspace/bead anyway. Tests inject stubs via this hook without
+per workspace/task anyway. Tests inject stubs via this hook without
 mocking modules.
 
 ## Forbidden actions
@@ -133,7 +133,7 @@ Full umbrella: 67 + 335 + 36 = **438 tests, 0 failures**.
 ## Follow-ups (not in this PR)
 
   1. **Real check execution.** Implement a meaningful default runner that
-     reads the bead's acceptance criteria and runs lint / type checks
+     reads the task's acceptance criteria and runs lint / type checks
      against the diff. The hook is in place; the policy is not.
   2. **`pr_resolve_thread/3` integration.** A reviewer that approves
      should arguably mark prior request-changes threads resolved on

@@ -1,6 +1,6 @@
 defmodule ArbiterWeb.Api.WorkspaceController do
   @moduledoc """
-  REST endpoints for `Arbiter.Beads.Workspace`.
+  REST endpoints for `Arbiter.Tasks.Workspace`.
 
   Routes:
 
@@ -13,7 +13,7 @@ defmodule ArbiterWeb.Api.WorkspaceController do
 
   use ArbiterWeb, :controller
 
-  alias Arbiter.Beads.Workspace
+  alias Arbiter.Tasks.Workspace
 
   action_fallback ArbiterWeb.Api.FallbackController
 

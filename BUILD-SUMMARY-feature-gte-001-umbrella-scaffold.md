@@ -1,6 +1,6 @@
 # Build summary: feature/gte-001-umbrella-scaffold (v2)
 
-**Bead:** gte-001
+**Task:** gte-001
 **Builder:** Mayor (interactive session, 2026-05-19)
 **Branch:** feature/gte-001-umbrella-scaffold (reset from v1)
 **Commit:** eac3761
@@ -64,7 +64,7 @@ arbiter/
 └── .formatter.exs, .gitignore
 ```
 
-## Acceptance criteria (from bead gte-001)
+## Acceptance criteria (from task gte-001)
 
 - [x] `docker compose up -d` starts Postgres healthy. Verified: `pg_isready` returns "accepting connections", `SELECT version()` returns "PostgreSQL 17.10".
 - [x] `mix compile` clean. All 3 apps compile without errors.
@@ -84,7 +84,7 @@ arbiter/
 
 ## What I noticed worth improving separately
 
-- **AGENTS.md is 22K and Phoenix-flavored.** It's useful but generic. May want to fork it into a project-specific `AGENTS.md` that points at our `docs/decision-doc.md` + `REVIEW-PROCESS.md`. Tracking as a thought; not a bead yet.
+- **AGENTS.md is 22K and Phoenix-flavored.** It's useful but generic. May want to fork it into a project-specific `AGENTS.md` that points at our `docs/decision-doc.md` + `REVIEW-PROCESS.md`. Tracking as a thought; not a task yet.
 - **Phoenix 1.8.3 vs 1.8.7.** Phoenix installer recommends updating: `mix local.phx`. Doing this now would regenerate phx.new templates, but our scaffold is already committed. Defer; upgrade in a follow-up.
 - **`ash_phoenix` 2.0 is installed but we haven't used it.** It'll power LiveView form integration in gte-024 (dashboard).
 - **No `.iex.exs` aliases.** Helpful for iex sessions. Trivial follow-up.
@@ -112,7 +112,7 @@ Expected: clean compile, all tests pass, Phoenix endpoint serves the default lan
 
 ## Verdict requested
 
-This bead is complete per acceptance. Ready to merge to main:
+This task is complete per acceptance. Ready to merge to main:
 
 ```sh
 git checkout main

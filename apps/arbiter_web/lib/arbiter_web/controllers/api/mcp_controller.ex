@@ -61,7 +61,7 @@ defmodule ArbiterWeb.Api.McpController do
           "valid" => true,
           "tier" => to_string(scope.tier),
           "workspace_id" => scope.workspace_id,
-          "bead_id" => scope.bead_id,
+          "task_id" => scope.task_id,
           "repo" => scope.repo,
           "can_dispatch" => scope.can_dispatch,
           "depth" => scope.depth
