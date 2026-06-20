@@ -17,6 +17,10 @@ defmodule Arbiter.MCP.CatalogTest do
                        worker_resume worker_review worker_stop worker_list task_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox)
 
+  # Tools that call resolve_workspace_id and thus expose the optional `workspace` param.
+  @workspace_resolving_tools ~w(task_ready coordinator_inbox workspace_show task_create
+                                worker_list task_list usage_summarize notify_list tracker_claim tracker_sync)
+
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do
       names = @worker |> Catalog.visible() |> Enum.map(& &1.name)
@@ -42,18 +46,19 @@ defmodule Arbiter.MCP.CatalogTest do
     end
 
     test "workspace-resolving tools advertise an optional `workspace` param" do
-      for tool <- Catalog.all(), tool.name != "workspace_list" do
+      for tool <- Catalog.all() do
         props = tool.input_schema["properties"]
-        assert is_map(props["workspace"]), "#{tool.name} is missing the `workspace` param"
-        assert props["workspace"]["type"] == "string"
-        # `workspace` is never required — every workspace resolution has a default.
-        refute "workspace" in (tool.input_schema["required"] || [])
-      end
-    end
 
-    test "workspace_list does not take a `workspace` param (it enumerates all)" do
-      tool = Enum.find(Catalog.all(), &(&1.name == "workspace_list"))
-      refute Map.has_key?(tool.input_schema["properties"], "workspace")
+        if tool.name in @workspace_resolving_tools do
+          assert is_map(props["workspace"]), "#{tool.name} should have a `workspace` param"
+          assert props["workspace"]["type"] == "string"
+          # `workspace` is never required — every workspace resolution has a default.
+          refute "workspace" in (tool.input_schema["required"] || [])
+        else
+          refute Map.has_key?(props, "workspace"),
+                 "#{tool.name} should not have a `workspace` param"
+        end
+      end
     end
 
     test "worker_dispatch exposes a provider enum field and keeps the with_claude alias" do
