@@ -1104,6 +1104,13 @@ defmodule Arbiter.Worker.Dispatch do
     (e.g. an upstream API shape changed) and marks them read. To leave a flag
     for another worker, use `arb message <their-task-id> <text>`.
 
+    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+    tool — including in parallel or with background execution modes. However,
+    you MUST wait for every background task to complete and read its full
+    output before printing `arb done`. Do not signal done while any background
+    task is still running — the work is incomplete until every tool you launched
+    has finished and you have read its result.
+
     When you are completely done, print the line:
 
         arb done
@@ -1261,6 +1268,15 @@ defmodule Arbiter.Worker.Dispatch do
       * Do NOT push code.
       * Do NOT merge or close the PR/MR.
       * Do NOT modify any branch, including the PR's head.
+
+    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
+    tool — including in parallel or with background execution modes. However,
+    you MUST wait for every background task to complete and read its full
+    output before producing your VERDICT. A VERDICT issued while any
+    background task is still running is invalid: you would be judging on
+    incomplete evidence. Do not exit, do not print your VERDICT, and do not
+    print `arb done` until every tool you launched has finished and you have
+    read its result.
 
     When you are completely done, print the line:
 
