@@ -72,6 +72,40 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       conn = get(conn, ~p"/api/workers/history", %{status: "nope"})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
+
+    test "task_id filter lists every run for one task, newest first", %{conn: conn} do
+      task = "bd-hist-#{System.unique_integer([:positive])}"
+      now = DateTime.utc_now()
+
+      _ =
+        insert_run!(%{
+          task_id: task,
+          worker_type: :main,
+          model: "claude-opus-4-8",
+          status: :completed,
+          started_at: DateTime.add(now, -20, :second)
+        })
+
+      _ =
+        insert_run!(%{
+          task_id: task,
+          worker_type: :review,
+          status: :completed,
+          started_at: DateTime.add(now, -5, :second)
+        })
+
+      # A run for a different task must NOT leak into the per-task history.
+      _ = insert_run!(%{task_id: "bd-other-#{System.unique_integer([:positive])}"})
+
+      conn = get(conn, ~p"/api/workers/history", %{task_id: task})
+      data = json_response(conn, 200)["data"]
+
+      assert length(data) == 2
+      # Newest first: the review run precedes the main run.
+      assert Enum.map(data, & &1["worker_type"]) == ["review", "main"]
+      # Summary carries the worker_type + model surfaced in the history list.
+      assert List.last(data)["model"] == "claude-opus-4-8"
+    end
   end
 
   describe "GET /api/workers/history/:id" do

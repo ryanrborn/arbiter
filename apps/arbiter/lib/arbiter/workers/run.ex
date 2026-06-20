@@ -8,7 +8,10 @@ defmodule Arbiter.Workers.Run do
   crashes the workflow runner.
 
   `task_title` is denormalised so the dashboard's history list never needs to
-  join against `issues` on every render.
+  join against `issues` on every render. `worker_type` records which kind of
+  worker produced the run (`:main` / `:review` / `:impl`) so a task's history
+  shows *who* worked it at each step; `model` records the resolved agent model
+  id once the session stream reports it.
 
   `output_lines` stores the captured Claude / subprocess stdout, capped at
   `@max_output_lines` (see `Arbiter.Worker`) to keep the row size sane. This
@@ -26,6 +29,14 @@ defmodule Arbiter.Workers.Run do
 
   @statuses ~w(running completed failed)a
 
+  # The kind of worker that produced this run. A task can be worked by more
+  # than one worker over its life: the `:main` worker that authors the change,
+  # a `:review` worker (the review-gate reviewer or a coordinator-dispatched
+  # review-only worker) that judges the diff, and an `:impl` worker (the
+  # review-gate's revise-round implementer) that addresses findings. Recording
+  # the type lets the history list show *who* worked the task at each step.
+  @worker_types ~w(main review impl)a
+
   sqlite do
     table "worker_runs"
     repo Arbiter.Repo
@@ -34,6 +45,10 @@ defmodule Arbiter.Workers.Run do
       # Powers "completed workers for workspace W, optionally filtered by
       # status, newest first" — the dashboard's primary query shape.
       index [:workspace_id, :status, :started_at]
+
+      # Powers "all runs for task T, newest first" — the per-task history list
+      # surfaced by `GET /api/workers/history?task_id=…` and `arb worker runs`.
+      index [:task_id, :started_at]
     end
   end
 
@@ -48,7 +63,9 @@ defmodule Arbiter.Workers.Run do
         :task_title,
         :repo,
         :workspace_id,
+        :worker_type,
         :status,
+        :model,
         :started_at,
         :completed_at,
         :exit_code,
@@ -64,6 +81,7 @@ defmodule Arbiter.Workers.Run do
 
       accept [
         :status,
+        :model,
         :completed_at,
         :exit_code,
         :output_lines,
@@ -101,11 +119,30 @@ defmodule Arbiter.Workers.Run do
       description "Workspace scope. Nullable for ad-hoc runs with no workspace."
     end
 
+    attribute :worker_type, :atom do
+      allow_nil? false
+      public? true
+      default :main
+      constraints one_of: @worker_types
+
+      description "Which kind of worker produced this run: :main (authoring), " <>
+                    ":review (review-gate or review-only reviewer), or :impl " <>
+                    "(review-gate revise-round implementer)."
+    end
+
     attribute :status, :atom do
       allow_nil? false
       public? true
       default :running
       constraints one_of: @statuses
+    end
+
+    attribute :model, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "Resolved agent model id for the run (e.g. \"claude-opus-4-8\"); " <>
+                    "nil for a no-agent run or before the stream reports one."
     end
 
     attribute :started_at, :utc_datetime_usec do
@@ -150,4 +187,7 @@ defmodule Arbiter.Workers.Run do
 
   @doc "All valid status atoms."
   def statuses, do: @statuses
+
+  @doc "All valid worker_type atoms."
+  def worker_types, do: @worker_types
 end

@@ -153,6 +153,12 @@ defmodule ArbiterWeb.RunDetailLive do
                 </dd>
                 <dt class="font-medium text-base-content/60">{String.capitalize(@repo_label)}:</dt>
                 <dd><code class="font-mono text-xs">{@run.repo}</code></dd>
+                <dt class="font-medium text-base-content/60">Type:</dt>
+                <dd><span class="badge badge-sm badge-ghost">{@run.worker_type}</span></dd>
+                <%= if @run.model do %>
+                  <dt class="font-medium text-base-content/60">Model:</dt>
+                  <dd><code class="font-mono text-xs">{@run.model}</code></dd>
+                <% end %>
                 <dt class="font-medium text-base-content/60">
                   {String.capitalize(@workspace_label)}:
                 </dt>
