@@ -14,6 +14,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Run
   require Ash.Query
 
@@ -171,11 +172,13 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   defp refresh_runs(socket) do
     id = socket.assigns.task_id
+    review_id = ReviewGate.reviewer_task_id(id)
+    task_ids = [id, review_id]
 
     runs =
       try do
         Run
-        |> Ash.Query.filter(task_id == ^id)
+        |> Ash.Query.filter(task_id in ^task_ids)
         |> Ash.Query.sort(started_at: :desc)
         |> Ash.read!()
       rescue
@@ -192,7 +195,12 @@ defmodule ArbiterWeb.TaskDetailLive do
           UsageEvent
           |> Ash.Query.filter(worker_run_id in ^run_ids)
           |> Ash.read!()
-          |> Map.new(&{&1.worker_run_id, &1})
+          |> Enum.group_by(& &1.worker_run_id)
+          |> Map.new(fn {run_id, events} ->
+            total_cost = events |> Enum.map(& &1.cost_usd || 0.0) |> Enum.sum()
+            representative = List.first(events)
+            {run_id, %{representative | cost_usd: total_cost}}
+          end)
         rescue
           _ -> %{}
         end
@@ -769,7 +777,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_step_class(_, _), do: "badge-primary"
 
   defp run_model_label(%UsageEvent{model: m}) when is_binary(m) do
-    m |> String.split("-") |> Enum.take(3) |> Enum.join("-")
+    m |> String.split("-") |> Enum.take(4) |> Enum.join("-")
   end
 
   defp run_model_label(_), do: "—"
