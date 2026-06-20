@@ -154,6 +154,37 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "effective_block_reason/1 (gated on approval, #354)" do
+    test "an approved PR with a block reason reports it" do
+      assert Watchdog.effective_block_reason(%{status: :open, approved: true, block_reason: :conflict}) ==
+               :conflict
+    end
+
+    test "a not-yet-approved PR with a block reason reports nil (ordinary review window)" do
+      # A PR awaiting its required review routinely classifies as blocked
+      # (GitHub :needs_approval, GitLab not_approved). That is the normal
+      # pre-approval state, not a merge failure — so the gate suppresses it.
+      assert Watchdog.effective_block_reason(%{
+               status: :open,
+               approved: false,
+               block_reason: :needs_approval
+             }) == nil
+    end
+
+    test "an approved PR with no block reason reports nil" do
+      assert Watchdog.effective_block_reason(%{status: :open, approved: true}) == nil
+    end
+
+    test "merged/closed PRs report nil regardless of any stale block reason" do
+      assert Watchdog.effective_block_reason(%{status: :merged, block_reason: :conflict}) == nil
+      assert Watchdog.effective_block_reason(%{status: :closed, block_reason: :conflict}) == nil
+    end
+
+    test "non-map input is nil" do
+      assert Watchdog.effective_block_reason(nil) == nil
+    end
+  end
+
   describe "blocked-merge detection (#354)" do
     test "records the block reason on the worker and keeps the PR parked (no fail)" do
       {pid, task_id} = running_worker()

@@ -695,7 +695,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp merge_status_label(nil), do: "Awaiting first poll"
 
   defp merge_status_label(status) when is_map(status) do
-    case Watchdog.block_reason(status) do
+    case Watchdog.effective_block_reason(status) do
       nil ->
         case Watchdog.classify(status) do
           :merged -> "Merged"
@@ -712,7 +712,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp merge_status_class(nil), do: "badge-ghost"
 
   defp merge_status_class(status) when is_map(status) do
-    case Watchdog.block_reason(status) do
+    case Watchdog.effective_block_reason(status) do
       nil ->
         case Watchdog.classify(status) do
           :merged -> "badge-success"

@@ -168,6 +168,33 @@ defmodule Arbiter.Worker.Watchdog do
   def block_reason(result) when is_map(result), do: Map.get(result, :block_reason)
   def block_reason(_), do: nil
 
+  @doc """
+  The merge-block reason to *act on* — the adapter's `block_reason/1`, but only
+  once the MR is **approved** (`classify/1 == :approved`). `nil` otherwise.
+
+  The Watchdog polls throughout the ordinary pre-approval review window, and a
+  not-yet-approved PR routinely classifies as "blocked": GitHub reports
+  `mergeable_state == "blocked"` for an open PR merely awaiting its required
+  review, and GitLab reports `not_approved` / in-progress merge statuses. Those
+  are the *normal* review state, not a merge failure — the directive's silent-park
+  problem is specifically an **approved** PR that still cannot merge (#354).
+
+  So escalation and the dashboard both route through this gate, not raw
+  `block_reason/1`: only an approved-but-unmergeable PR is treated as blocked.
+  This also keeps the escalation debounce honest — a reason can never latch
+  during the pre-approval window and suppress a later, genuine post-approval
+  re-block, because the gate returns `nil` until approval lands.
+  """
+  @spec effective_block_reason(map()) :: block_reason() | nil
+  def effective_block_reason(result) when is_map(result) do
+    case classify(result) do
+      :approved -> block_reason(result)
+      _ -> nil
+    end
+  end
+
+  def effective_block_reason(_), do: nil
+
   # ---- GenServer ----------------------------------------------------------
 
   @impl true
@@ -390,12 +417,17 @@ defmodule Arbiter.Worker.Watchdog do
   # already recorded on the worker (via `record_status` → `:last_merger_status`)
   # for the dashboard; this is the active escalation half.
   #
+  # Gated on approval (`effective_block_reason/1`): only an *approved* PR that
+  # cannot merge escalates, so the ordinary pre-approval review window never
+  # fires a spurious "merge blocked" alert.
+  #
   # Debounced on `last_block_reason`: a given reason escalates once when it first
   # appears (or changes), not on every poll. A cleared block (reason `nil`, e.g.
-  # the branch caught up or the MR merged) resets the latch so a later re-block
-  # re-escalates. Best-effort — a notifier failure must not disrupt the poll loop.
+  # the branch caught up, the MR merged, or approval has not landed yet) resets
+  # the latch so a later re-block re-escalates. Best-effort — a notifier failure
+  # must not disrupt the poll loop.
   defp maybe_escalate_merge_block(state, result) do
-    case block_reason(result) do
+    case effective_block_reason(result) do
       nil ->
         %{state | last_block_reason: nil}
 
