@@ -657,10 +657,8 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
-  # #354 Phase 2a: the Warden mechanically resolves a :behind_base block by
-  # calling update_branch/1, and briefs a fix-pass acolyte from failing_check_logs/1.
-  describe "update_branch/1 (#354 Phase 2a)" do
-    test "PUTs to /pulls/:n/update-branch and returns :ok on 202" do
+  describe "update_branch/1 (#354, Phase 3)" do
+    test "PUTs /pulls/:n/update-branch and returns :ok on 202 Accepted" do
       stub(fn conn ->
         assert conn.method == "PUT"
         assert conn.request_path == "/repos/octo/widget/pulls/42/update-branch"
@@ -673,7 +671,7 @@ defmodule Arbiter.Mergers.GithubTest do
       assert :ok = Github.update_branch(@ref)
     end
 
-    test "422 (would conflict) maps to {:error, %Error{}} so the caller falls through to :conflict" do
+    test "422 (can't update cleanly) maps to {:error, %Error{}}" do
       stub(fn conn ->
         conn
         |> Plug.Conn.put_status(422)
@@ -683,15 +681,12 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:error, %Error{status: 422}} = Github.update_branch(@ref)
     end
 
-    test "routes to the embedded owner/repo for an embedded mr_ref" do
+    test "resolves an embedded owner/repo ref for the update-branch path" do
       stub(fn conn ->
-        assert conn.request_path ==
-                 "/repos/leo-technologies-llc/verus_server/pulls/7/update-branch"
-
+        assert conn.request_path == "/repos/leo-technologies-llc/verus_server/pulls/7/update-branch"
         conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{})
       end)
 
-      Config.put_active(%{"credentials_ref" => "env:#{@env_var}"})
       assert :ok = Github.update_branch("leo-technologies-llc/verus_server#7")
     end
   end
