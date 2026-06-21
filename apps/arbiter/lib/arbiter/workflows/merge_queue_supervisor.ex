@@ -67,6 +67,42 @@ defmodule Arbiter.Workflows.MergeQueueSupervisor do
     end
   end
 
+  @doc """
+  List every running merge queue as `[{workspace_id, pid}]`, read from the
+  Registry. Best-effort: returns `[]` if the Registry isn't available.
+  """
+  @spec list_queues() :: [{String.t(), pid()}]
+  def list_queues do
+    Registry.select(@registry, [{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  Gather the live Crucible view of every running merge queue (#354, Phase 3),
+  as `[{workspace_id, [queue_item]}]`. Each queue is queried with a short call
+  timeout and a busy/unreachable queue is simply skipped, so a slow poll can
+  never hang the dashboard. Used by the merge-queue LiveView to render the
+  serialized, base-aware queue.
+  """
+  @spec queue_views() :: [{String.t(), [map()]}]
+  def queue_views do
+    for {ws_id, pid} <- list_queues(),
+        {:ok, view} <- [safe_queue_view(pid)] do
+      {ws_id, view}
+    end
+  end
+
+  defp safe_queue_view(pid) do
+    {:ok, MergeQueue.queue_view(pid, 1_000)}
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
+  end
+
   @doc false
   def via(workspace_id), do: {:via, Registry, {@registry, workspace_id}}
 
