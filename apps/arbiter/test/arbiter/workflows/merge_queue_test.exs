@@ -20,6 +20,26 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     def push(_path, _opts), do: {:error, {:git_failed, "fatal: repository not found"}}
   end
 
+  # Conflict resolver that records each `resolve/1` to the pid stashed in
+  # application env, so the base-aware tests can assert the rebase step routed a
+  # surfaced conflict into Phase 2 resolution. Returns {:ok, _} so the item
+  # parks at :conflict_resolving (a real spawn would need a repo).
+  defmodule RecordingResolver do
+    @behaviour Arbiter.Workflows.MergeQueue.ConflictResolver
+
+    @impl true
+    def resolve(args) do
+      if pid = Application.get_env(:arbiter, :test_resolver_pid), do: send(pid, {:resolve_called, args})
+      {:ok, %{worker: :stub}}
+    end
+
+    @impl true
+    def escalate_unresolved(_task_id, _ws_id, _branch, _reason), do: :ok
+
+    @impl true
+    def notify_resolution(_task_id, _ws_id, _branch), do: :ok
+  end
+
   @token "test-token-abc123"
 
   @ws_github %{
@@ -895,6 +915,207 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       :ok = MergeQueue.tick(name)
 
       assert_received {:merge_method, ^expected_method}
+    end
+  end
+
+  # ---- base-aware serialized merge — the Crucible (#354, Phase 3) ----------
+
+  # A stateful GitHub stub driven by an Agent of `%{pr_number => state}` so a
+  # test can mutate a PR's mergeable state between ticks (simulating the base
+  # moving). Sends `{:update_branch, n}` / `{:merged, n}` to the test pid so the
+  # ordering of update-branch vs merge is assertable.
+  defp mutable_pr_stub(agent) do
+    test_pid = self()
+
+    stub(fn conn ->
+      number = pr_number_from_path(conn.request_path)
+      st = Agent.get(agent, fn s -> Map.get(s, number, %{}) end)
+      path = conn.request_path
+
+      cond do
+        conn.method == "GET" and String.ends_with?(path, "/reviews") ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(reviews_payload(Map.get(st, :reviews, "APPROVED")))
+
+        conn.method == "PUT" and String.ends_with?(path, "/update-branch") ->
+          send(test_pid, {:update_branch, number})
+          conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{})
+
+        conn.method == "PUT" and String.ends_with?(path, "/merge") ->
+          send(test_pid, {:merged, number})
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"merged" => true, "sha" => "ok"})
+
+        conn.method == "GET" and String.contains?(path, "/pulls/#{number}") ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(pr_payload(Map.merge(%{"number" => number}, Map.get(st, :pr, %{}))))
+
+        true ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+      end
+    end)
+  end
+
+  defp pr_number_from_path(path) do
+    case Regex.run(~r{/pulls/(\d+)}, path) do
+      [_, n] -> String.to_integer(n)
+      _ -> 0
+    end
+  end
+
+  # Create an extra task already carrying an open PR ref, so the queue adopts it
+  # (no open/4 call) and the mutable stub fully controls its merge state.
+  defp adopted_task(ws, pr_ref, priority) do
+    {:ok, t} = Ash.create(Issue, %{title: "t-#{pr_ref}", workspace_id: ws.id, priority: priority})
+    {:ok, t} = Ash.update(t, %{pr_ref: pr_ref}, action: :update)
+    t
+  end
+
+  describe "base-aware continuous auto-update (#354, Phase 3)" do
+    @tag workspace_config: @ws_github
+    test "approved PR behind base is rebased forward, then merges once caught up", %{
+      workspace: ws
+    } do
+      {:ok, agent} =
+        Agent.start_link(fn -> %{205 => %{reviews: "APPROVED", pr: %{"mergeStateStatus" => "behind"}}} end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#205", 2)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Cycle 1: behind base → update-branch issued, parked at :updating_base, no merge.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 205}
+      refute_received {:merged, 205}
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert item.status == :updating_base
+
+      # The base update landed — PR is now clean.
+      Agent.update(agent, fn s -> put_in(s, [205, :pr], %{"mergeStateStatus" => "clean"}) end)
+
+      # Cycle 2: caught up → ready → merged → task closed.
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 205}
+
+      assert %{items: []} = MergeQueue.state(name)
+      assert Ash.get!(Issue, task.id).status == :closed
+    end
+
+    @tag workspace_config: @ws_github
+    test "a base-introduced conflict surfaces during the rebase step → Phase 2 resolution", %{
+      workspace: ws
+    } do
+      Application.put_env(:arbiter, :test_resolver_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_resolver_pid) end)
+
+      {:ok, agent} =
+        Agent.start_link(fn -> %{213 => %{reviews: "APPROVED", pr: %{"mergeStateStatus" => "behind"}}} end)
+
+      mutable_pr_stub(agent)
+      task = adopted_task(ws, "#213", 2)
+
+      {_pid, name} = start_merge_queue(ws, conflict_resolver: RecordingResolver)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # Cycle 1: behind → update-branch.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 213}
+
+      # The rebase couldn't apply cleanly — the next poll sees the PR conflicting.
+      Agent.update(agent, fn s ->
+        put_in(s, [213, :pr], %{"mergeable" => false, "mergeStateStatus" => "dirty"})
+      end)
+
+      # Cycle 2: conflicting → conflict resolver dispatched (Phase 2), not merged.
+      :ok = MergeQueue.tick(name)
+      assert_received {:resolve_called, %{task_id: task_id}}
+      assert task_id == task.id
+      refute_received {:merged, 213}
+
+      %{items: [item]} = MergeQueue.state(name)
+      assert item.status == :conflict_resolving
+      assert Ash.get!(Issue, task.id).status == :open
+    end
+  end
+
+  describe "serialized merge admission (#354, Phase 3)" do
+    @tag workspace_config: @ws_github
+    test "two ready PRs → only the front of the queue merges per cycle; the follower rebases first",
+         %{workspace: ws} do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{211 => %{reviews: "APPROVED", pr: %{}}, 212 => %{reviews: "APPROVED", pr: %{}}}
+        end)
+
+      mutable_pr_stub(agent)
+
+      # P1 is higher priority (1) than P2 (3) → P1 is the front of the queue.
+      t1 = adopted_task(ws, "#211", 1)
+      t2 = adopted_task(ws, "#212", 3)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, t1.id)
+      :ok = MergeQueue.enqueue(name, t2.id)
+
+      # Cycle 1: both are mergeable, but only the front (P1/#211) merges.
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 211}
+      refute_received {:merged, 212}
+
+      assert Ash.get!(Issue, t1.id).status == :closed
+
+      %{items: items} = MergeQueue.state(name)
+      follower = Enum.find(items, &(&1.task_id == t2.id))
+      assert follower.status == :ready_to_merge
+
+      # The first merge advanced main; the follower now reports behind base.
+      Agent.update(agent, fn s -> put_in(s, [212, :pr], %{"mergeStateStatus" => "behind"}) end)
+
+      # Cycle 2: the follower rebases onto the post-merge head before its turn.
+      :ok = MergeQueue.tick(name)
+      assert_received {:update_branch, 212}
+      refute_received {:merged, 212}
+
+      # Rebase landed; follower is clean.
+      Agent.update(agent, fn s -> put_in(s, [212, :pr], %{"mergeStateStatus" => "clean"}) end)
+
+      # Cycle 3: follower merges.
+      :ok = MergeQueue.tick(name)
+      assert_received {:merged, 212}
+      assert Ash.get!(Issue, t2.id).status == :closed
+    end
+
+    @tag workspace_config: @ws_github
+    test "queue_view/1 exposes the serialized order and per-item status for the dashboard", %{
+      workspace: ws
+    } do
+      {:ok, agent} =
+        Agent.start_link(fn ->
+          %{
+            221 => %{reviews: "APPROVED", pr: %{}},
+            222 => %{reviews: "PENDING", pr: %{"mergeStateStatus" => "blocked"}}
+          }
+        end)
+
+      mutable_pr_stub(agent)
+      front = adopted_task(ws, "#221", 1)
+      back = adopted_task(ws, "#222", 4)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, front.id)
+      :ok = MergeQueue.enqueue(name, back.id)
+
+      view = MergeQueue.queue_view(name)
+      assert [first, second] = view
+      assert first.position == 1
+      assert first.task_id == front.id
+      assert second.position == 2
+      assert second.task_id == back.id
+      assert Enum.all?(view, &(&1.workspace_id == ws.id))
     end
   end
 
