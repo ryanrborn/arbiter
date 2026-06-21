@@ -419,8 +419,10 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert msg.body =~ task.id
     end
 
-    test "missing workspace_id is a no-op (does not raise)", %{task: task} do
-      assert :ok =
+    test "missing workspace_id returns an error tuple (the page can't be addressed)", %{
+      task: task
+    } do
+      assert {:error, :no_workspace_id} =
                Arbiter.Workflows.MergeQueue.ConflictResolver.escalate_unresolved(
                  task.id,
                  nil,
