@@ -52,9 +52,12 @@ defmodule Arbiter.MCP.Tools do
   @doc "Read a single task. Worker: its own task only. Coordinator: any in its workspace."
   @spec task_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_show(%Scope{} = scope, args) do
+    full = Map.get(args, "full") == true
+
     with {:ok, id} <- resolve_task_id(scope, args),
          {:ok, issue} <- fetch_task(scope, args, id) do
-      {:ok, serialize_task(load_progress(issue))}
+      loaded = load_progress(issue)
+      {:ok, if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))}
     end
   end
 
@@ -1186,6 +1189,22 @@ defmodule Arbiter.MCP.Tools do
       closed_at: iso(i.closed_at),
       created_at: iso(i.created_at),
       updated_at: iso(i.updated_at)
+    }
+    |> put_progress(i)
+  end
+
+  # Slim serializer for worker task_show (full: false). Omits review/human
+  # fields that bloat worker context without aiding task execution.
+  defp serialize_task_slim(%Issue{} = i) do
+    %{
+      id: i.id,
+      title: i.title,
+      description: i.description,
+      acceptance: i.acceptance,
+      status: to_str(i.status),
+      priority: i.priority,
+      difficulty: i.difficulty,
+      issue_type: to_str(i.issue_type)
     }
     |> put_progress(i)
   end
