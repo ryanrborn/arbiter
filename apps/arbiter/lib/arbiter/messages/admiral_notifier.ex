@@ -283,6 +283,61 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   def merge_blocked(_snapshot, _mr_ref, _reason), do: :ok
 
+  @doc """
+  Escalate a blocked merge the Warden tried — and failed — to auto-resolve
+  (#354, Phase 2a).
+
+  Fired by `Arbiter.Worker.Watchdog` after it has attempted to mechanically
+  resolve a `:behind_base` (update-branch) or `:ci_failed` (fix-pass acolyte)
+  block `attempts` times without the PR becoming mergeable. Unlike
+  `merge_blocked/3` — which fires immediately for a block the Warden does not
+  auto-resolve — this names the auto-resolve attempt count so the operator knows
+  the autonomous path was tried first. Same addressed `:escalation` **mailbox**
+  shape. Best-effort, returns `:ok`.
+  """
+  @spec merge_block_unresolved(map(), String.t() | nil, atom(), non_neg_integer()) :: :ok
+  def merge_block_unresolved(%{workspace_id: ws_id} = snapshot, mr_ref, reason, attempts)
+      when is_binary(ws_id) and is_atom(reason) and is_integer(attempts) do
+    task_id = Map.get(snapshot, :task_id, "system")
+
+    subject = "#{task_id} auto-resolve exhausted (#{attempts}×) — #{block_label(reason)}"
+
+    body =
+      [
+        "#{title_for(task_id)} still cannot merge after #{attempts} auto-resolve " <>
+          "attempt(s): #{block_label(reason)}.",
+        mr_ref && "PR/MR: #{mr_ref}",
+        "Reason: #{reason}",
+        "Auto-resolve attempts: #{attempts}",
+        "Remediation: #{block_remediation(reason)}",
+        "The Warden auto-resolved this block #{attempts} time(s) without success " <>
+          "and has stopped retrying. Resolve it manually (or force-merge) and the " <>
+          "next poll will pick it up."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: task_id,
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.merge_block_unresolved/4 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def merge_block_unresolved(_snapshot, _mr_ref, _reason, _attempts), do: :ok
+
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "required CI checks are failing"

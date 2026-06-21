@@ -74,6 +74,13 @@ defmodule Arbiter.Mergers.Github do
 
   @stub_name Arbiter.Mergers.Github.HTTP
 
+  # Check-run conclusions that count as a CI failure (shared by the pipeline
+  # classifier and the `:ci_failed` log fetch).
+  @failing_conclusions ["failure", "timed_out", "action_required", "cancelled"]
+
+  # How much of each failing check's output to keep in the fix-pass briefing.
+  @log_tail_limit 4_000
+
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
@@ -195,6 +202,29 @@ defmodule Arbiter.Mergers.Github do
 
       request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/merge", json: payload)
       |> expect_ok()
+    end
+  end
+
+  @impl true
+  def update_branch(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      # GitHub's update-branch merges the base into the PR head (202 Accepted,
+      # async). A 422 here means the update can't be performed cleanly (e.g. the
+      # base advanced in a way that conflicts) — the caller treats that as a
+      # fall-through to :conflict handling.
+      request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/update-branch", json: %{})
+      |> expect_ok()
+    end
+  end
+
+  @impl true
+  def failing_check_logs(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, pr} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
+      fetch_failing_checks(cfg, owner, repo, get_in(pr, ["head", "sha"]))
     end
   end
 
@@ -540,12 +570,55 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # Collect the failing check runs for the PR's head commit and render each one
+  # into a `name` + `summary` (output tail) + `url` map the Warden hands to a
+  # fix-pass acolyte. No head SHA (or no check runs) → an empty list, never an
+  # error — a `:ci_failed` block with nothing fetchable still dispatches the
+  # fix pass, just without log context.
+  defp fetch_failing_checks(_cfg, _owner, _repo, sha) when sha in [nil, ""], do: {:ok, []}
+
+  defp fetch_failing_checks(cfg, owner, repo, sha) do
+    case request(cfg, :get, "/repos/#{owner}/#{repo}/commits/#{sha}/check-runs", [])
+         |> handle_json() do
+      {:ok, %{"check_runs" => runs}} when is_list(runs) ->
+        {:ok, runs |> Enum.filter(&failing_check?/1) |> Enum.map(&summarize_check/1)}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp failing_check?(run), do: Map.get(run, "conclusion") in @failing_conclusions
+
+  defp summarize_check(run) do
+    output = Map.get(run, "output") || %{}
+
+    summary =
+      [Map.get(output, "title"), Map.get(output, "summary"), Map.get(output, "text")]
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join("\n")
+      |> truncate(@log_tail_limit)
+
+    %{
+      name: Map.get(run, "name") || "check",
+      summary: summary,
+      url: Map.get(run, "details_url") || Map.get(run, "html_url")
+    }
+  end
+
+  defp truncate(str, limit) when is_binary(str) do
+    if String.length(str) > limit, do: String.slice(str, 0, limit) <> "…", else: str
+  end
+
   defp map_check_run_status(runs) do
     conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
     statuses = Enum.map(runs, &Map.get(&1, "status"))
 
     cond do
-      Enum.any?(conclusions, &(&1 in ["failure", "timed_out", "action_required", "cancelled"])) ->
+      Enum.any?(conclusions, &(&1 in @failing_conclusions)) ->
         :failed
 
       Enum.all?(statuses, &(&1 == "completed")) and

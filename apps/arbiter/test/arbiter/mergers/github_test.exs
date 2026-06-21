@@ -657,6 +657,138 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  # #354 Phase 2a: the Warden mechanically resolves a :behind_base block by
+  # calling update_branch/1, and briefs a fix-pass acolyte from failing_check_logs/1.
+  describe "update_branch/1 (#354 Phase 2a)" do
+    test "PUTs to /pulls/:n/update-branch and returns :ok on 202" do
+      stub(fn conn ->
+        assert conn.method == "PUT"
+        assert conn.request_path == "/repos/octo/widget/pulls/42/update-branch"
+
+        conn
+        |> Plug.Conn.put_status(202)
+        |> Req.Test.json(%{"message" => "Updating pull request branch."})
+      end)
+
+      assert :ok = Github.update_branch(@ref)
+    end
+
+    test "422 (would conflict) maps to {:error, %Error{}} so the caller falls through to :conflict" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "merge conflict between base and head"})
+      end)
+
+      assert {:error, %Error{status: 422}} = Github.update_branch(@ref)
+    end
+
+    test "routes to the embedded owner/repo for an embedded mr_ref" do
+      stub(fn conn ->
+        assert conn.request_path ==
+                 "/repos/leo-technologies-llc/verus_server/pulls/7/update-branch"
+
+        conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{})
+      end)
+
+      Config.put_active(%{"credentials_ref" => "env:#{@env_var}"})
+      assert :ok = Github.update_branch("leo-technologies-llc/verus_server#7")
+    end
+  end
+
+  describe "failing_check_logs/1 (#354 Phase 2a)" do
+    test "returns the failing checks (name + output tail + url), skipping passing ones" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"state" => "open", "head" => %{"sha" => "sha1"}})
+
+          "/repos/octo/widget/commits/sha1/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"name" => "lint", "conclusion" => "success"},
+                %{
+                  "name" => "test",
+                  "conclusion" => "failure",
+                  "details_url" => "https://github.com/octo/widget/runs/9",
+                  "output" => %{
+                    "title" => "5 tests failed",
+                    "summary" => "lib/foo_test.exs:12 assertion failed"
+                  }
+                }
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, [check]} = Github.failing_check_logs(@ref)
+      assert check.name == "test"
+      assert check.url == "https://github.com/octo/widget/runs/9"
+      assert check.summary =~ "5 tests failed"
+      assert check.summary =~ "assertion failed"
+    end
+
+    test "returns an empty list when there is no head sha" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"state" => "open"})
+        end
+      end)
+
+      assert {:ok, []} = Github.failing_check_logs(@ref)
+    end
+
+    test "returns an empty list when no checks are failing" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"state" => "open", "head" => %{"sha" => "sha2"}})
+
+          "/repos/octo/widget/commits/sha2/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [%{"name" => "test", "conclusion" => "success"}]
+            })
+        end
+      end)
+
+      assert {:ok, []} = Github.failing_check_logs(@ref)
+    end
+
+    test "treats timed_out / cancelled / action_required as failing" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"state" => "open", "head" => %{"sha" => "sha3"}})
+
+          "/repos/octo/widget/commits/sha3/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"name" => "a", "conclusion" => "timed_out"},
+                %{"name" => "b", "conclusion" => "cancelled"},
+                %{"name" => "c", "conclusion" => "action_required"}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, checks} = Github.failing_check_logs(@ref)
+      assert Enum.map(checks, & &1.name) == ["a", "b", "c"]
+    end
+  end
+
   describe "close/1" do
     test "PATCHes the PR to state: closed" do
       stub(fn conn ->
