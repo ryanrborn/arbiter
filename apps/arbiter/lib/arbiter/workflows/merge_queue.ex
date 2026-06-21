@@ -740,7 +740,11 @@ defmodule Arbiter.Workflows.MergeQueue do
       # Caught up after a base update (no longer :behind_base): rejoin the normal
       # ladder and re-evaluate against the current MR state.
       item.status == :updating_base ->
-        advance_status(state, %{item | status: :awaiting_approval, base_updated_at: nil}, mr_state)
+        advance_status(
+          state,
+          %{item | status: :awaiting_approval, base_updated_at: nil},
+          mr_state
+        )
 
       # Merge-ready rungs PARK at :ready_to_merge; the actual merge is admitted
       # one-at-a-time by admit_one_merge/2 (Phase 3) so the queue serializes.
@@ -1075,7 +1079,9 @@ defmodule Arbiter.Workflows.MergeQueue do
         end
 
       {:error, reason} ->
-        Logger.warning("MergeQueue: task #{item.task_id} vanished before close: #{inspect(reason)}")
+        Logger.warning(
+          "MergeQueue: task #{item.task_id} vanished before close: #{inspect(reason)}"
+        )
     end
 
     state
