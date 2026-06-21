@@ -80,7 +80,7 @@ defmodule Arbiter.MCP.ToolsTest do
 
       {:ok, _} = Ash.update(c1, %{}, action: :close)
 
-      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id})
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => parent.id, "full" => true})
       assert data.child_total == 2
       assert data.child_closed == 1
       assert data.child_open == 1
@@ -91,6 +91,43 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
       assert data.child_total == 0
       assert data.child_closed == 0
+    end
+  end
+
+  describe "task_show/2 slim vs full payload" do
+    test "default (no full param) returns slim fields only", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id})
+      assert Map.has_key?(data, :id)
+      assert Map.has_key?(data, :title)
+      assert Map.has_key?(data, :description)
+      assert Map.has_key?(data, :acceptance)
+      assert Map.has_key?(data, :status)
+      assert Map.has_key?(data, :priority)
+      assert Map.has_key?(data, :difficulty)
+      assert Map.has_key?(data, :issue_type)
+      refute Map.has_key?(data, :notes)
+      refute Map.has_key?(data, :qa_notes)
+      refute Map.has_key?(data, :deployment_notes)
+      refute Map.has_key?(data, :pr_body)
+      refute Map.has_key?(data, :auto_close)
+      refute Map.has_key?(data, :created_at)
+    end
+
+    test "full: false returns slim fields only", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => false})
+      refute Map.has_key?(data, :notes)
+      refute Map.has_key?(data, :auto_close)
+    end
+
+    test "full: true returns complete record including review fields", ctx do
+      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+      assert Map.has_key?(data, :notes)
+      assert Map.has_key?(data, :qa_notes)
+      assert Map.has_key?(data, :deployment_notes)
+      assert Map.has_key?(data, :pr_body)
+      assert Map.has_key?(data, :auto_close)
+      assert Map.has_key?(data, :created_at)
+      assert Map.has_key?(data, :updated_at)
     end
   end
 
@@ -831,7 +868,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, here} = Tools.task_show(ctx.agnostic, %{"id" => ctx.task.id})
       assert here.id == ctx.task.id
 
-      assert {:ok, there} = Tools.task_show(ctx.agnostic, %{"id" => ctx.foreign.id})
+      assert {:ok, there} = Tools.task_show(ctx.agnostic, %{"id" => ctx.foreign.id, "full" => true})
       assert there.id == ctx.foreign.id
       assert there.workspace_id == ctx.other_ws.id
     end
