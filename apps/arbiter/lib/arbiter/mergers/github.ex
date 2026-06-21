@@ -211,8 +211,8 @@ defmodule Arbiter.Mergers.Github do
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
       # GitHub's update-branch merges the base into the PR head (202 Accepted,
       # async). A 422 here means the update can't be performed cleanly (e.g. the
-      # base advanced in a way that conflicts) — the caller treats that as a
-      # fall-through to :conflict handling.
+      # base advanced in a way that conflicts); the queue treats that as
+      # non-fatal and lets the next `get/1` poll surface the conflict.
       request(cfg, :put, "/repos/#{owner}/#{repo}/pulls/#{number}/update-branch", json: %{})
       |> expect_ok()
     end
