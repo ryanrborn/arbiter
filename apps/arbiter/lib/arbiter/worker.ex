@@ -601,14 +601,20 @@ defmodule Arbiter.Worker do
   end
 
   defp record_run_finished(%State{run_id: run_id} = state) do
+    # Extract the model from meta, checking both potential sources
+    meta = state.meta || %{}
+    model = Map.get(meta, :model)
+
     attrs = %{
       status: state.status,
-      model: Map.get(state.meta || %{}, :model),
       completed_at: DateTime.utc_now(),
-      exit_code: Map.get(state.meta || %{}, :exit_status),
+      exit_code: Map.get(meta, :exit_status),
       output_lines: capture_output_lines(state),
-      failure_reason: stringify_failure(Map.get(state.meta || %{}, :failure_reason))
+      failure_reason: stringify_failure(Map.get(meta, :failure_reason))
     }
+
+    # Only include model in the update if it's non-nil (to preserve NULL if not set)
+    attrs = if model, do: Map.put(attrs, :model, model), else: attrs
 
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
@@ -1091,6 +1097,15 @@ defmodule Arbiter.Worker do
         new_activity = Map.get(session, :activity)
         old_activity = Map.get(meta, :activity)
 
+        # Extract model from multiple possible sources, in order of preference
+        session_model =
+          case Map.get(session, :usage) do
+            %{} = usage -> Map.get(usage, :model)
+            _ -> nil
+          end
+
+        model = session_model || Map.get(session, :model)
+
         meta =
           meta
           |> Map.put(:output_lines, Enum.reverse(session.output_lines))
@@ -1098,7 +1113,7 @@ defmodule Arbiter.Worker do
           |> maybe_put(:activity, new_activity)
           |> maybe_put(:activity_at, Map.get(session, :activity_at))
           |> maybe_put(:exited_at, session.exited_at)
-          |> maybe_put(:model, get_in(session, [:usage, :model]) || Map.get(session, :model))
+          |> maybe_put(:model, model)
           |> maybe_put(:provider, Map.get(session, :provider))
 
         new_state = %State{state | meta: meta}

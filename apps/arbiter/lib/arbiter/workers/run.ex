@@ -65,7 +65,6 @@ defmodule Arbiter.Workers.Run do
         :workspace_id,
         :worker_type,
         :status,
-        :model,
         :started_at,
         :completed_at,
         :exit_code,
