@@ -103,7 +103,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
               workspace_id :: String.t() | nil,
               branch :: String.t(),
               reason :: term()
-            ) :: :ok
+            ) :: :ok | {:error, :no_workspace_id}
 
   @doc """
   Optional: post a `:notification` announcing a successful auto-resolution.
@@ -407,7 +407,8 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   state machine isn't disrupted.
   """
   @impl true
-  @spec escalate_unresolved(String.t(), String.t() | nil, String.t(), term()) :: :ok
+  @spec escalate_unresolved(String.t(), String.t() | nil, String.t(), term()) ::
+          :ok | {:error, :no_workspace_id}
   def escalate_unresolved(task_id, workspace_id, branch, reason)
       when is_binary(task_id) and is_binary(workspace_id) do
     body =
@@ -440,7 +441,18 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
     :exit, _ -> :ok
   end
 
-  def escalate_unresolved(_task_id, _workspace_id, _branch, _reason), do: :ok
+  # No (binary) workspace_id → the `:escalation` mailbox has no workspace to
+  # address, so the page can't be delivered. Don't swallow it silently (the
+  # original review's Low finding): log it and return an error tuple so the
+  # caller and operators can see the give-up never reached a coordinator.
+  def escalate_unresolved(task_id, _workspace_id, _branch, _reason) do
+    Logger.warning(
+      "ConflictResolver.escalate_unresolved: cannot page coordinator for task=#{inspect(task_id)} " <>
+        "— workspace_id is nil; the unresolved-conflict escalation was not sent"
+    )
+
+    {:error, :no_workspace_id}
+  end
 
   @doc """
   Post a `:notification` announcing a successful auto-resolution. Used by
