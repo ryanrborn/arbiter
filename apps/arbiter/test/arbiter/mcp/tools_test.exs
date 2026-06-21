@@ -678,11 +678,30 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.worker_dispatch(ctx.coordinator, %{"task_id" => foreign.id})
     end
 
-    test "parks the task in_progress and reports the child depth", ctx do
-      {:ok, task} = Ash.create(Issue, %{title: "to dispatch", workspace_id: ctx.ws.id})
+    # Without a provider, the workspace's `agent.type` config is used — the same
+    # real-work path as an explicit `provider`. Without a configured repo that
+    # path surfaces a repo error, proving the workspace default was honored (a
+    # park would return {:ok, ...} with claude_started: false).
+    test "omitting provider takes the workspace-default real-work path (not a park)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "default dispatch", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "repo" => "test/repo"})
+
+      assert msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
+
+    test "no_agent: true parks the task in_progress (explicit hand-off)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "parked dispatch", workspace_id: ctx.ws.id})
 
       assert {:ok, data} =
-               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "repo" => "test/repo"})
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo",
+                 "no_agent" => true
+               })
 
       assert data.task.status == "in_progress"
       assert data.claude_started == false
@@ -692,10 +711,9 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     # `provider` (and the deprecated `with_claude` alias) take the real-work
-    # dispatch path rather than parking. Without a configured repo that path
-    # surfaces a repo error — which is exactly the signal that the provider was
-    # honored as a worker dispatch (a park would have returned {:ok, ...} with
-    # claude_started: false).
+    # dispatch path. Without a configured repo that path surfaces a repo error —
+    # which is exactly the signal that the provider was honored as a worker
+    # dispatch (a park would have returned {:ok, ...} with claude_started: false).
     test "provider: \"gemini\" takes the real-work path (not a park)", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "gem dispatch", workspace_id: ctx.ws.id})
 
