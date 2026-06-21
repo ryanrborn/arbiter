@@ -93,6 +93,17 @@ defmodule Arbiter.Worker.Watchdog do
   # Registry suffix the fix-pass worker registers under — MUST match
   # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
   @fix_pass_registry_suffix ":fixpass"
+  # Bounded rebase attempts before the Warden gives up auto-resolving a
+  # `:conflict` block and escalates to the coordinator (#354, Phase 2b). Each
+  # attempt is one dispatched rebase-resolve acolyte; if two consecutive passes
+  # don't clear the conflict it is almost certainly semantic and needs a human.
+  @default_max_conflict_attempts 2
+
+  # The resolver that dispatches a rebase-resolve acolyte against the task's
+  # existing worktree. Injectable via the `:conflict_resolver` opt (tests pass a
+  # stub). The default is the same module the MergeQueue uses, so the Warden-
+  # driven Phase 2b flow and the legacy #122 MergeQueue path share one resolver.
+  @default_conflict_resolver Arbiter.Workflows.MergeQueue.ConflictResolver
 
   @type opt ::
           {:task_id, String.t()}
@@ -108,6 +119,9 @@ defmodule Arbiter.Worker.Watchdog do
           | {:watch_pipeline, boolean()}
           | {:max_auto_resolve_attempts, non_neg_integer()}
           | {:fix_pass_dispatcher, module()}
+          | {:auto_resolve_conflict, boolean()}
+          | {:max_conflict_attempts, pos_integer()}
+          | {:conflict_resolver, module()}
 
   @type opts :: [opt()]
 
@@ -170,6 +184,10 @@ defmodule Arbiter.Worker.Watchdog do
   @doc "Default watchdog cap for `auto_merge: false` (manual-merge) lanes."
   @spec default_max_polls_manual() :: :infinity
   def default_max_polls_manual, do: @default_max_polls_manual
+
+  @doc "Default bounded rebase attempts before a `:conflict` block escalates (Phase 2b)."
+  @spec default_max_conflict_attempts() :: pos_integer()
+  def default_max_conflict_attempts, do: @default_max_conflict_attempts
 
   @doc """
   Classify a `Arbiter.Mergers.get/1` result map into an approval outcome.
@@ -275,6 +293,9 @@ defmodule Arbiter.Worker.Watchdog do
         fix_pass_dispatcher =
           Keyword.get(opts, :fix_pass_dispatcher, @default_fix_pass_dispatcher)
 
+        auto_resolve_conflict = resolve_auto_resolve_conflict(opts, workspace)
+        max_conflict_attempts = resolve_max_conflict_attempts(opts, workspace)
+
         state = %{
           task_id: task_id,
           worker_pid: worker_pid,
@@ -303,7 +324,29 @@ defmodule Arbiter.Worker.Watchdog do
           # Fired once when an approved MR is parked without auto-merge, so the
           # external tracker moves to its "approved, awaiting merge" status
           # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
-          pending_merge_synced: false
+          pending_merge_synced: false,
+          # Auto-resolve of an approved `:conflict` block (#354, Phase 2b).
+          #   auto_resolve_conflict  — master switch (workspace-tunable).
+          #   conflict_resolver      — module that dispatches the rebase acolyte.
+          #   max_conflict_attempts  — bounded rebase passes before escalation.
+          #   conflict_attempts      — passes dispatched for the current conflict.
+          #   conflict_resolving     — a resolver acolyte is in flight right now.
+          #   conflict_resolver_pid  — that resolver worker's pid. We poll its
+          #                            terminal status to detect completion: the
+          #                            resolver worker does NOT exit when its
+          #                            acolyte finishes (it lingers :completed/
+          #                            :failed until task :close), so a `:DOWN`
+          #                            monitor never fires on a normal finish.
+          #   conflict_branch        — branch label (for the exhaustion escalation).
+          #   conflict_escalated     — exhaustion already paged; stay parked, don't spam.
+          auto_resolve_conflict: auto_resolve_conflict,
+          conflict_resolver: Keyword.get(opts, :conflict_resolver, @default_conflict_resolver),
+          max_conflict_attempts: max_conflict_attempts,
+          conflict_attempts: 0,
+          conflict_resolving: false,
+          conflict_resolver_pid: nil,
+          conflict_branch: nil,
+          conflict_escalated: false
         }
 
         Process.monitor(worker_pid)
@@ -318,7 +361,8 @@ defmodule Arbiter.Worker.Watchdog do
       {:ok, result} when is_map(result) ->
         record_status(state, result)
         state = maybe_escalate_pipeline(state, result)
-        handle_merge_state(state, result)
+        state = maybe_auto_resolve_conflict(state, result)
+        maybe_escalate_merge_block(state, result)
 
       {:error, reason} ->
         Logger.debug(
@@ -469,9 +513,28 @@ defmodule Arbiter.Worker.Watchdog do
   #                       both, then re-polls.
   #
   # Gated on approval (`effective_block_reason/1`): only an *approved* PR that
-  # cannot merge is treated as blocked, so the ordinary pre-approval review
-  # window never fires a spurious alert or auto-resolution.
-  defp handle_merge_state(state, result) do
+  # cannot merge escalates, so the ordinary pre-approval review window never
+  # fires a spurious "merge blocked" alert.
+  #
+  # Debounced on `last_block_reason`: a given reason escalates once when it first
+  # appears (or changes), not on every poll. A cleared block (reason `nil`, e.g.
+  # the branch caught up, the MR merged, or approval has not landed yet) resets
+  # the latch so a later re-block re-escalates. Best-effort — a notifier failure
+  # must not disrupt the poll loop.
+  # Phase 2b owns `:conflict`: when auto-resolve is enabled the Warden rebases
+  # rather than paging on a conflict, and only escalates after the bounded
+  # retries are exhausted (see `maybe_auto_resolve_conflict/2`). So skip the
+  # generic page here for `:conflict` — the other reasons still escalate.
+  defp maybe_escalate_merge_block(%{auto_resolve_conflict: true} = state, result) do
+    case effective_block_reason(result) do
+      :conflict -> reschedule(state)
+      _ -> do_maybe_escalate_merge_block(state, result)
+    end
+  end
+
+  defp maybe_escalate_merge_block(state, result), do: do_maybe_escalate_merge_block(state, result)
+
+  defp do_maybe_escalate_merge_block(state, result) do
     case effective_block_reason(result) do
       nil ->
         state = %{
@@ -657,6 +720,236 @@ defmodule Arbiter.Worker.Watchdog do
   end
 
   defp max_auto_resolve_from_workspace(_), do: nil
+  # Auto-resolve an approved-but-conflicting PR (#354, Phase 2b). When the
+  # merger reports a `:conflict` block on an *approved* PR — mergeable in
+  # isolation but no longer applying cleanly on the moved base — the Warden
+  # dispatches a short-lived rebase-resolve acolyte against the task's existing
+  # worktree instead of parking and paging a human. The acolyte rebases,
+  # resolves honoring the task intent, runs tests, and force-pushes; the next
+  # poll then re-attempts the merge.
+  #
+  # Bounded: a resolver runs asynchronously and the Warden monitors it, so it
+  # never spawns a second while one is in flight. After `max_conflict_attempts`
+  # passes that don't clear the conflict it escalates once (attempt count +
+  # context) and stays parked. A cleared conflict resets the counter so a future
+  # conflict starts fresh. This supersedes the manual stop → direction → resume
+  # → rebase flow and hardens the one-shot #122 resolver with bounded retries.
+  defp maybe_auto_resolve_conflict(%{auto_resolve_conflict: false} = state, _result), do: state
+
+  defp maybe_auto_resolve_conflict(state, result) do
+    case effective_block_reason(result) do
+      :conflict -> drive_conflict_resolution(state)
+      _ -> reset_conflict_state(state)
+    end
+  end
+
+  # A resolver acolyte is in flight. The resolver is an `Arbiter.Worker`
+  # GenServer that does NOT exit when its rebase acolyte finishes — it lingers
+  # in a terminal status (:completed/:failed) until task :close — so we drive
+  # completion off the worker's status on each poll rather than a process
+  # `:DOWN` that only fires on an abnormal crash (#354 review). While the
+  # resolver is still live we wait; once its pass has finished we tear it down
+  # (freeing its `:conflict` registry slot) and re-evaluate — dispatching the
+  # next bounded attempt or escalating.
+  defp drive_conflict_resolution(%{conflict_resolving: true} = state) do
+    if resolver_finished?(state) do
+      state |> teardown_resolver() |> drive_conflict_resolution()
+    else
+      state
+    end
+  end
+
+  # Retries already exhausted and escalated — stay parked, don't re-page.
+  defp drive_conflict_resolution(%{conflict_escalated: true} = state), do: state
+
+  # Bounded retries spent: escalate once with the attempt count, then stop.
+  defp drive_conflict_resolution(%{conflict_attempts: n, max_conflict_attempts: cap} = state)
+       when n >= cap do
+    escalate_conflict_exhausted(state, nil)
+    %{state | conflict_escalated: true}
+  end
+
+  defp drive_conflict_resolution(state), do: spawn_conflict_resolver(state)
+
+  defp spawn_conflict_resolver(state) do
+    args = %{
+      task_id: state.task_id,
+      workspace_id: workspace_id(state),
+      pr_ref: state.mr_ref
+    }
+
+    case safe_resolve(state.conflict_resolver, args) do
+      {:ok, info} ->
+        pid = Map.get(info, :worker_pid)
+        attempt = state.conflict_attempts + 1
+
+        Logger.info(
+          "Worker.Watchdog: dispatched conflict-resolve acolyte " <>
+            "(attempt #{attempt}/#{state.max_conflict_attempts}) for " <>
+            "task=#{state.task_id} mr=#{state.mr_ref}"
+        )
+
+        %{
+          state
+          | conflict_attempts: attempt,
+            conflict_resolving: is_pid(pid),
+            conflict_resolver_pid: if(is_pid(pid), do: pid, else: nil),
+            conflict_branch: Map.get(info, :branch) || state.conflict_branch
+        }
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker.Watchdog: could not dispatch conflict-resolve acolyte for " <>
+            "task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; escalating"
+        )
+
+        escalate_conflict_exhausted(
+          %{state | conflict_attempts: max(state.conflict_attempts, 1)},
+          reason
+        )
+
+        %{state | conflict_escalated: true}
+    end
+  end
+
+  # Conflict cleared (or never present): tear down any lingering resolver worker
+  # and reset the retry counter + escalation latch so a *future* conflict on this
+  # PR starts fresh.
+  defp reset_conflict_state(
+         %{
+           conflict_resolver_pid: nil,
+           conflict_resolving: false,
+           conflict_attempts: 0,
+           conflict_escalated: false
+         } = state
+       ),
+       do: state
+
+  defp reset_conflict_state(state),
+    do: %{teardown_resolver(state) | conflict_attempts: 0, conflict_escalated: false}
+
+  # Has the in-flight resolver acolyte finished its rebase pass? The resolver is
+  # an `Arbiter.Worker` that lingers in a terminal status (:completed/:failed)
+  # after its acolyte exits — it is only torn down on task :close — so "finished"
+  # means the worker reports a terminal status (or its process is already gone).
+  # This replaces the `:DOWN` monitor, which never fired on a normal completion
+  # and left `conflict_resolving` latched true forever (#354 review).
+  defp resolver_finished?(%{conflict_resolver_pid: pid}) when is_pid(pid) do
+    if Process.alive?(pid) do
+      case safe_snapshot(pid) do
+        %{status: status} -> status in [:completed, :failed]
+        _ -> true
+      end
+    else
+      true
+    end
+  end
+
+  defp resolver_finished?(_), do: true
+
+  # Tear down a finished resolver worker. It lingers in a terminal status holding
+  # its `task_id <> ":conflict"` registry slot until task :close; stopping it
+  # here frees that slot so the next bounded attempt's `Worker.start` doesn't
+  # collide (`:resolver_already_running`). `Worker.stop` unregisters
+  # synchronously in the worker's `terminate/2`. Best-effort — a dead/unstoppable
+  # pid just clears the in-flight flag.
+  defp teardown_resolver(%{conflict_resolver_pid: pid} = state) do
+    if is_pid(pid), do: safe(fn -> Worker.stop(pid) end)
+    %{state | conflict_resolving: false, conflict_resolver_pid: nil}
+  end
+
+  # Page the coordinator that auto-resolution gave up, with the attempt count and
+  # conflict context. Routes through the resolver's `escalate_unresolved/4` (the
+  # same channel #122 uses), falling back to the default resolver when an
+  # injected one doesn't implement the optional callback. Best-effort.
+  defp escalate_conflict_exhausted(state, extra) do
+    branch = state.conflict_branch || state.mr_ref || "(unknown branch)"
+
+    reason =
+      "auto-resolve exhausted after #{state.conflict_attempts} rebase attempt(s)" <>
+        if(extra, do: " (#{inspect_short(extra)})", else: "") <>
+        "; manual rebase + push required"
+
+    Logger.warning(
+      "Worker.Watchdog: conflict auto-resolve exhausted for task=#{state.task_id} " <>
+        "mr=#{state.mr_ref} after #{state.conflict_attempts} attempt(s); escalating to coordinator"
+    )
+
+    case workspace_id(state) do
+      ws_id when is_binary(ws_id) ->
+        resolver = state.conflict_resolver
+
+        target =
+          if function_exported?(resolver, :escalate_unresolved, 4),
+            do: resolver,
+            else: @default_conflict_resolver
+
+        safe(fn -> target.escalate_unresolved(state.task_id, ws_id, branch, reason) end)
+
+      _ ->
+        # No workspace_id → the escalation mailbox has no workspace to address, so
+        # `escalate_unresolved/4` would silently no-op (the original review's Low
+        # finding). Surface the give-up loudly instead of letting it vanish, so an
+        # operator still sees that auto-resolve gave up and a manual rebase is
+        # required.
+        Logger.error(
+          "Worker.Watchdog: conflict auto-resolve exhausted for task=#{state.task_id} " <>
+            "mr=#{state.mr_ref} but workspace_id is nil — cannot page the coordinator; " <>
+            "MANUAL rebase + push required (#{reason})"
+        )
+    end
+  end
+
+  defp safe_resolve(resolver, args) do
+    case resolver.resolve(args) do
+      {:ok, info} when is_map(info) -> {:ok, info}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:bad_return, other}}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp workspace_id(%{workspace: %{id: id}}) when is_binary(id), do: id
+  defp workspace_id(_), do: nil
+
+  defp inspect_short(reason) when is_binary(reason), do: reason
+  defp inspect_short(reason), do: reason |> inspect() |> String.slice(0, 200)
+
+  # Master switch for Phase 2b auto-resolve. Opt wins; else workspace config
+  # (`merge.auto_resolve_conflict`, default on); else on.
+  defp resolve_auto_resolve_conflict(opts, workspace) do
+    case Keyword.get(opts, :auto_resolve_conflict) do
+      flag when is_boolean(flag) -> flag
+      _ -> auto_resolve_from_workspace(workspace)
+    end
+  end
+
+  defp auto_resolve_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    get_in(config, ["merge", "auto_resolve_conflict"]) != false
+  end
+
+  defp auto_resolve_from_workspace(_), do: true
+
+  # Bounded rebase attempts. Opt wins; else workspace config
+  # (`merge.max_conflict_attempts`); else the module default.
+  defp resolve_max_conflict_attempts(opts, workspace) do
+    case Keyword.get(opts, :max_conflict_attempts) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> max_conflict_attempts_from_workspace(workspace)
+    end
+  end
+
+  defp max_conflict_attempts_from_workspace(%Arbiter.Tasks.Workspace{config: %{} = config}) do
+    case get_in(config, ["merge", "max_conflict_attempts"]) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> @default_max_conflict_attempts
+    end
+  end
+
+  defp max_conflict_attempts_from_workspace(_), do: @default_max_conflict_attempts
 
   defp watch_pipeline_from_workspace(nil), do: false
 
@@ -732,9 +1025,6 @@ defmodule Arbiter.Worker.Watchdog do
       _ -> %{task_id: state.task_id, workspace_id: workspace_id(state)}
     end
   end
-
-  defp workspace_id(%{workspace: %Arbiter.Tasks.Workspace{id: id}}), do: id
-  defp workspace_id(_), do: nil
 
   defp safe_worker_status(pid) do
     case Worker.state(pid) do
