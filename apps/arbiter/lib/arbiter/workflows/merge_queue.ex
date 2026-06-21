@@ -79,6 +79,42 @@ defmodule Arbiter.Workflows.MergeQueue do
   → `:arbiter, :merge_queue_conflict_resolver` (application env) → the default
   real implementation. Tests pass a stub so they don't spawn real workers.
 
+  ## Base-aware serialized merge — the Crucible (#354, Phase 3)
+
+  Phase 2's conflict resolver (above) is *reactive*: it rebases a PR after a
+  conflict has already appeared. The durable fix is to keep in-flight PRs
+  continuously rebased as the integration branch moves, and to merge them one
+  at a time against a frozen base so two individually-clean PRs can't break
+  together when merged in sequence. The merge queue is that Crucible:
+
+  ### Continuous auto-update-branch
+
+  Every poll, each **approved** item whose PR reports `block_reason:
+  :behind_base` (GitHub `mergeable_state == "behind"` — i.e. the base advanced
+  under it) is rebased forward via `adapter.update_branch/1` and parked at
+  `:updating_base` until the next poll observes it caught up. This surfaces a
+  base-introduced conflict *early* (a 1-commit rebase) rather than late (a
+  full-PR rebase at merge time): when the rebase can't apply, the very next
+  `get/1` reports `conflicting: true` and the existing conflict-resolver path
+  (Phase 2) takes over. Adapters without `update_branch/1` (Direct, GitLab)
+  simply skip this step — the queue degrades to its pre-Phase-3 behaviour.
+
+  ### Serialized merge admission
+
+  `poll_all/1` advances every item up to — but not through — the merge: an
+  approved, CI-clean, up-to-date item parks at `:ready_to_merge` instead of
+  merging inline. A second queue-level pass (`admit_one_merge/2`) then merges
+  **at most one** item per cycle: the front of the queue, ordered by task
+  priority then enqueue time. After it merges, `main` advances; on the next
+  poll the followers report `:behind_base`, are `update_branch`'d onto the new
+  head, and only then become eligible — so each PR rebases onto the post-merge
+  head before its own merge. A PR that was `:ready_to_merge` but is now behind
+  (because the base moved) drops back to `:updating_base` automatically.
+
+  This governs the **queue-driven** merge lane (auto-merge off, the Refinery is
+  the merger). The per-worker Watchdog's review-gate fast-merge is the explicit
+  non-queued bypass and is unaffected.
+
   ## Auto-revise on requested changes (bd-95lsjb)
 
   When `adapter.get` reports a CHANGES_REQUESTED review (the latest verdict
@@ -188,6 +224,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   @type status ::
           :opening
           | :awaiting_approval
+          | :updating_base
           | :ci_running
           | :ready_to_merge
           | :merging
@@ -203,11 +240,13 @@ defmodule Arbiter.Workflows.MergeQueue do
           status: status(),
           strategy: String.t(),
           base: String.t() | nil,
+          priority: non_neg_integer(),
           opened_at: DateTime.t() | nil,
           last_polled_at: DateTime.t() | nil,
           last_error: term() | nil,
           resolver_spawned_at: DateTime.t() | nil,
           prior_status: status() | nil,
+          base_updated_at: DateTime.t() | nil,
           last_handled_review_id: term() | nil
         }
 
@@ -256,6 +295,18 @@ defmodule Arbiter.Workflows.MergeQueue do
   @spec state(GenServer.server()) :: map()
   def state(server \\ __MODULE__) do
     GenServer.call(server, :state)
+  end
+
+  @doc """
+  Return the queue's items in merge-admission order (front of the queue first),
+  projected to the display fields the dashboard renders (#354, Phase 3). This is
+  the "Crucible" view: each entry carries its 1-based queue `position`, current
+  `status`, task `priority`, and MR ref. A pure state projection — answers
+  immediately even while a poll cycle is in flight (use a short call timeout).
+  """
+  @spec queue_view(GenServer.server(), timeout()) :: [map()]
+  def queue_view(server \\ __MODULE__, timeout \\ 5_000) do
+    GenServer.call(server, :queue_view, timeout)
   end
 
   @doc """
@@ -334,6 +385,10 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   def handle_call(:state, _from, %State{} = state) do
     {:reply, snapshot(state), state}
+  end
+
+  def handle_call(:queue_view, _from, %State{} = state) do
+    {:reply, build_queue_view(state), state}
   end
 
   def handle_call(:tick, _from, %State{} = state) do
@@ -423,11 +478,18 @@ defmodule Arbiter.Workflows.MergeQueue do
         mr_ref: mr_ref,
         status: :awaiting_approval,
         base: resolve_base(state, task),
+        priority: task_priority(task),
         opened_at: DateTime.utc_now()
       )
 
     {:ok, %{state | items: [item | state.items]}}
   end
+
+  # Task priority as captured on the item for serialized merge ordering. The
+  # Issue attribute defaults to 2 (P2) and is non-nullable, but stay defensive
+  # for partially-loaded structs.
+  defp task_priority(%Issue{priority: p}) when is_integer(p), do: p
+  defp task_priority(_), do: 2
 
   # Resolve the PR base for a task via the shared resolver, identical to the
   # chain `Arbiter.Worker.Dispatch` uses for the worktree base, so the two can
@@ -475,6 +537,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           mr_ref: mr_ref,
           status: :awaiting_approval,
           base: base,
+          priority: task_priority(task),
           opened_at: DateTime.utc_now()
         )
 
@@ -540,12 +603,59 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   defp poll_all(%State{items: items} = state) do
-    {new_items, state} =
+    # Pass 1: poll + advance each item up to (but not through) the merge. Items
+    # that are approved, CI-clean, and up-to-date park at :ready_to_merge;
+    # behind-base items are rebased forward and park at :updating_base.
+    {advanced, state} =
       Enum.map_reduce(items, state, fn item, acc -> poll_item(acc, item) end)
 
+    # Pass 2: serialized merge admission — merge at most one front-of-queue item
+    # per cycle so the queue integrates one PR at a time against a frozen base
+    # (Phase 3, the Crucible).
+    {advanced, state} = admit_one_merge(state, advanced)
+
     # Drop items that have reached :done — they've been closed already.
-    new_items = Enum.reject(new_items, &(&1.status == :done))
-    %{state | items: new_items}
+    advanced = Enum.reject(advanced, &(&1.status == :done))
+    %{state | items: advanced}
+  end
+
+  # Serialized merge admission (#354, Phase 3). Among the items parked at
+  # :ready_to_merge, merge exactly ONE — the front of the queue, ordered by task
+  # priority (0 = P0 highest) then enqueue time. Merging one-at-a-time is what
+  # serializes the integration: once the front merges, `main` advances, the
+  # followers fall :behind_base on the next poll, and each is rebased onto the
+  # new head before it becomes eligible. Merging only among :ready_to_merge
+  # candidates (rather than strictly blocking on an unready higher-priority
+  # item) keeps the queue from stalling behind a PR still in review.
+  defp admit_one_merge(state, items) do
+    case next_to_merge(items) do
+      nil ->
+        {items, state}
+
+      front ->
+        {merged, state} = try_merge(state, front)
+        {replace_item(items, merged), state}
+    end
+  end
+
+  defp next_to_merge(items) do
+    items
+    |> Enum.filter(&(&1.status == :ready_to_merge))
+    |> Enum.sort_by(&queue_order_key/1)
+    |> List.first()
+  end
+
+  # Queue order: lower priority number first (P0 before P4), earliest enqueue as
+  # the tiebreak. Items without an `opened_at` sort last.
+  defp queue_order_key(item) do
+    {Map.get(item, :priority) || 2, opened_at_key(item.opened_at)}
+  end
+
+  defp opened_at_key(%DateTime{} = dt), do: DateTime.to_unix(dt, :microsecond)
+  defp opened_at_key(_), do: 9_223_372_036_854_775_807
+
+  defp replace_item(items, %{task_id: tid} = updated) do
+    Enum.map(items, fn i -> if i.task_id == tid, do: updated, else: i end)
   end
 
   defp poll_item(state, %{status: :failed} = item), do: {item, state}
@@ -617,22 +727,101 @@ defmodule Arbiter.Workflows.MergeQueue do
       unhandled_changes_requested?(item, mr_state) ->
         dispatch_revise(state, item, mr_state)
 
+      # Base-aware continuous auto-update (#354, Phase 3): an approved PR that
+      # has fallen :behind_base (the integration branch moved under it) is
+      # rebased forward via update-branch and parked at :updating_base. A PR
+      # that was already :ready_to_merge drops back here when the base moves, so
+      # it re-bases onto the post-merge head before its own merge. A rebase that
+      # can't apply surfaces as `conflicting: true` on a later poll → the
+      # conflict-resolver guard at the top of this cond (Phase 2).
+      base_update_needed?(state, item, mr_state) ->
+        update_base(state, item)
+
+      # Caught up after a base update (no longer :behind_base): rejoin the normal
+      # ladder and re-evaluate against the current MR state.
+      item.status == :updating_base ->
+        advance_status(
+          state,
+          %{item | status: :awaiting_approval, base_updated_at: nil},
+          mr_state
+        )
+
+      # Merge-ready rungs PARK at :ready_to_merge; the actual merge is admitted
+      # one-at-a-time by admit_one_merge/2 (Phase 3) so the queue serializes.
       item.status == :awaiting_approval and mr_state.approved and mr_state.ci_clean ->
-        try_merge(state, %{item | status: :ready_to_merge})
+        {%{item | status: :ready_to_merge}, state}
 
       item.status == :awaiting_approval and mr_state.approved ->
         {%{item | status: :ci_running}, state}
 
       item.status == :ci_running and mr_state.ci_clean ->
-        try_merge(state, %{item | status: :ready_to_merge})
+        {%{item | status: :ready_to_merge}, state}
 
       item.status == :ready_to_merge and mr_state.ci_clean ->
-        try_merge(state, item)
+        # Stay ready — admit_one_merge/2 merges the front of the queue.
+        {item, state}
+
+      item.status == :ready_to_merge ->
+        # Was ready but the MR is no longer mergeable this cycle (CI regressed or
+        # the approval was dismissed). Demote so we don't admit a stale merge.
+        {%{item | status: :awaiting_approval}, state}
 
       true ->
         # No transition this cycle.
         {item, state}
     end
+  end
+
+  # An approved PR needs a base update when the adapter can perform one and the
+  # adapter classified the block as :behind_base (the base advanced under it).
+  # Gated on approval per the directive — only approved, in-queue PRs are kept
+  # continuously rebased. Adapters without update_branch/1 (Direct, GitLab) skip
+  # this entirely, degrading to the pre-Phase-3 behaviour.
+  defp base_update_needed?(state, item, mr_state) do
+    base_update_supported?(state.adapter) and
+      item.status in [:awaiting_approval, :updating_base, :ci_running, :ready_to_merge] and
+      Map.get(mr_state, :approved) == true and
+      Map.get(mr_state, :block_reason) == :behind_base
+  end
+
+  defp base_update_supported?(adapter) when is_atom(adapter),
+    do: function_exported?(adapter, :update_branch, 1)
+
+  # Rebase the PR forward onto the moved base. The update may complete
+  # asynchronously on the forge, so we park at :updating_base and let the next
+  # poll observe the result. update-branch errors are non-fatal: a genuine base
+  # conflict is surfaced by the next get/1's `conflicting` field (→ resolver),
+  # not inferred from this return value.
+  defp update_base(state, item) do
+    case safe_update_branch(state.adapter, item.mr_ref) do
+      :ok ->
+        Logger.info(
+          "MergeQueue: rebasing #{item_branch_label(item)} onto moved base (update-branch)"
+        )
+
+        {%{item | status: :updating_base, base_updated_at: DateTime.utc_now()}, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "MergeQueue: update-branch for #{item_branch_label(item)} failed: " <>
+            "#{inspect(reason)}; awaiting conflict signal on next poll"
+        )
+
+        {%{
+           item
+           | status: :updating_base,
+             base_updated_at: DateTime.utc_now(),
+             last_error: {:update_branch_failed, reason}
+         }, state}
+    end
+  end
+
+  defp safe_update_branch(adapter, mr_ref) when is_atom(adapter) do
+    adapter.update_branch(mr_ref)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # Handle a CONFLICTING MR payload. First observation spawns the resolver;
@@ -890,7 +1079,9 @@ defmodule Arbiter.Workflows.MergeQueue do
         end
 
       {:error, reason} ->
-        Logger.warning("MergeQueue: task #{item.task_id} vanished before close: #{inspect(reason)}")
+        Logger.warning(
+          "MergeQueue: task #{item.task_id} vanished before close: #{inspect(reason)}"
+        )
     end
 
     state
@@ -905,11 +1096,16 @@ defmodule Arbiter.Workflows.MergeQueue do
       status: :opening,
       strategy: strategy,
       base: nil,
+      # Task priority (0 = P0 highest … 4 = P4 lowest), captured at enqueue so
+      # the serialized merge admission can order the queue without reloading the
+      # task. Defaults to P2 for items that predate the field / lack a task.
+      priority: 2,
       opened_at: nil,
       last_polled_at: nil,
       last_error: nil,
       resolver_spawned_at: nil,
       prior_status: nil,
+      base_updated_at: nil,
       last_handled_review_id: nil
     }
 
@@ -1005,6 +1201,37 @@ defmodule Arbiter.Workflows.MergeQueue do
       items: s.items
     }
   end
+
+  # Project the live items into the dashboard's Crucible view (#354, Phase 3),
+  # ordered front-of-queue first and stamped with a 1-based position.
+  defp build_queue_view(%State{items: items, workspace_id: ws_id, adapter: adapter}) do
+    items
+    |> Enum.sort_by(&queue_order_key/1)
+    |> Enum.with_index(1)
+    |> Enum.map(fn {item, position} ->
+      %{
+        workspace_id: ws_id,
+        task_id: item.task_id,
+        mr_ref: item.mr_ref,
+        status: item.status,
+        priority: Map.get(item, :priority) || 2,
+        position: position,
+        base: item.base,
+        merger_url: merger_url_for(adapter, item.mr_ref),
+        last_error: item.last_error
+      }
+    end)
+  end
+
+  defp merger_url_for(adapter, ref) when is_atom(adapter) and is_binary(ref) and ref != "" do
+    adapter.link_for(ref)
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
+  end
+
+  defp merger_url_for(_adapter, _ref), do: nil
 
   # Load the workspace and resolve the adapter module. Returns {adapter, workspace}
   # with workspace=nil if the load fails (e.g. fake ID in supervisor tests or DB
