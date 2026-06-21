@@ -1416,6 +1416,128 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  # ---- adapter-specific async-tool instruction (bd-1mlr56) -----------------
+
+  describe "adapter-specific async tool instruction in review_prompt/1" do
+    # Helper to build a minimal state map with a workspace_id for prompt tests.
+    defp state_for(task, ws, opts \\ %{}) do
+      Map.merge(
+        %{
+          task_id: task.id,
+          branch: "feature/rev",
+          target_branch: "main",
+          worktree_path: nil,
+          round: 1,
+          head_sha: nil,
+          workspace_id: ws.id
+        },
+        opts
+      )
+    end
+
+    test "Claude workspace emits the async-parallel instruction block", %{ws: ws} do
+      # The setup creates a Claude workspace (no `agent.type` set → defaults to claude).
+      task = new_task(ws)
+      prompt = ReviewGate.review_prompt(state_for(task, ws))
+
+      assert prompt =~ "ASYNC TOOLS",
+             "Claude workspace must include the ASYNC TOOLS block"
+
+      assert prompt =~ "including in parallel or with background execution modes",
+             "Claude workspace must permit parallel and background execution"
+
+      refute prompt =~ "synchronously",
+             "Claude workspace must not include the sync-only instruction"
+    end
+
+    test "Claude workspace emits async instruction in verdict_reprompt_prompt/1", %{ws: ws} do
+      task = new_task(ws)
+      prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), :no_verdict)
+
+      assert prompt =~ "ASYNC TOOLS"
+      assert prompt =~ "including in parallel or with background execution modes"
+      refute prompt =~ "synchronously"
+    end
+
+    test "Gemini workspace emits the sync-only instruction block, not the async block",
+         %{ws: _ws} do
+      {:ok, gemini_ws} =
+        Ash.create(Workspace, %{
+          name: "gemini-ws-#{System.unique_integer([:positive])}",
+          prefix: "gm",
+          config: %{
+            "review" => %{"required" => true},
+            "review_agent" => %{"type" => "gemini"}
+          }
+        })
+
+      task = new_task(gemini_ws)
+      prompt = ReviewGate.review_prompt(state_for(task, gemini_ws))
+
+      refute prompt =~ "ASYNC TOOLS",
+             "Gemini workspace must not include the ASYNC TOOLS heading"
+
+      refute prompt =~ "including in parallel or with background execution modes",
+             "Gemini workspace must not include the Claude parallel-execution phrase"
+
+      assert prompt =~ "synchronously",
+             "Gemini workspace must include the sync-only instruction"
+    end
+
+    test "Gemini workspace emits sync-only instruction in verdict_reprompt_prompt/1" do
+      {:ok, gemini_ws} =
+        Ash.create(Workspace, %{
+          name: "gemini-reprompt-ws-#{System.unique_integer([:positive])}",
+          prefix: "gr",
+          config: %{
+            "review" => %{"required" => true},
+            "review_agent" => %{"type" => "gemini"}
+          }
+        })
+
+      task = new_task(gemini_ws)
+      prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, gemini_ws), :empty_findings)
+
+      refute prompt =~ "ASYNC TOOLS"
+      assert prompt =~ "synchronously"
+    end
+
+    test "nil workspace_id defaults to the Claude async block" do
+      state = %{
+        task_id: "no-ws-task",
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1,
+        head_sha: nil,
+        workspace_id: nil
+      }
+
+      prompt = ReviewGate.review_prompt(state)
+
+      assert prompt =~ "ASYNC TOOLS",
+             "nil workspace must fall back to the Claude async block"
+
+      assert prompt =~ "background execution modes"
+    end
+
+    test "missing workspace_id key defaults to the Claude async block" do
+      # Some test helpers build state maps without workspace_id. The prompt
+      # must not crash and must fall back to the Claude block.
+      state = %{
+        task_id: "no-ws-key-task",
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1,
+        head_sha: nil
+      }
+
+      prompt = ReviewGate.review_prompt(state)
+      assert prompt =~ "ASYNC TOOLS"
+    end
+  end
+
   defp safe_stop(pid) do
     if Process.alive?(pid), do: GenServer.stop(pid, :normal)
   catch
