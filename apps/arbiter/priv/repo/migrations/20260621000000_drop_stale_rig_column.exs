@@ -22,8 +22,16 @@ defmodule Arbiter.Repo.Migrations.DropStaleRigColumn do
   use Ecto.Migration
 
   def up do
-    execute("ALTER TABLE worker_runs DROP COLUMN rig")
-    execute("ALTER TABLE worker_runs ADD COLUMN repo TEXT")
+    %{rows: rows} = repo().query!("PRAGMA table_info(worker_runs)")
+    col_names = Enum.map(rows, fn row -> Enum.at(row, 1) end)
+
+    if "rig" in col_names do
+      execute("ALTER TABLE worker_runs DROP COLUMN rig")
+    end
+
+    unless "repo" in col_names do
+      execute("ALTER TABLE worker_runs ADD COLUMN repo TEXT")
+    end
   end
 
   def down do
