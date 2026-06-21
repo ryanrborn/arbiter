@@ -91,9 +91,11 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_show",
       tiers: @both,
       description:
-        "Read one task (id, title, status, notes, tracker, `auto_close`, and child-progress " <>
-          "`child_closed`/`child_total` over its `parent_of` children, …). A worker reads its " <>
-          "own task (the `id` argument may be omitted); a coordinator must pass the `id`.",
+        "Read one task (id, title, status, description, acceptance, and child-progress " <>
+          "`child_closed`/`child_total` over its `parent_of` children). A worker reads its " <>
+          "own task (the `id` argument may be omitted); a coordinator must pass the `id`. " <>
+          "Pass `full: true` to include review fields (notes, qa_notes, deployment_notes, " <>
+          "pr_body, pr_ref, tracker_ref, target_branch, assignee, auto_close, timestamps).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -101,6 +103,13 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "description" =>
               "Task id (e.g. \"bd-dem49g\"). Optional for a worker (defaults to its own task)."
+          },
+          "full" => %{
+            "type" => "boolean",
+            "description" =>
+              "When true, return the complete record including notes, qa_notes, " <>
+                "deployment_notes, pr_body, pr_ref, tracker_ref, target_branch, assignee, " <>
+                "auto_close, and timestamps. Defaults to false (slim payload for workers)."
           }
         },
         "additionalProperties" => false
