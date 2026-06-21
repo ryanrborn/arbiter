@@ -143,7 +143,8 @@ defmodule Arbiter.Worker.DispatchTest do
       assert {:ok, "!test"} = Worker.open_mr(pid, "feature/guard", "Guard", "", open_opts)
       assert Worker.state(pid).status == :awaiting_review
 
-      assert {:error, {:task_awaiting_review, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert {:error, {:task_awaiting_review, _}} =
+               Dispatch.dispatch(task.id, start_driver: false)
     end
   end
 
@@ -933,7 +934,11 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "opt-out", workspace_id: ws.id})
 
       {:ok, result} =
-        Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false, provision_worktree: false)
+        Dispatch.dispatch(task.id,
+          repo: "st/repo",
+          start_driver: false,
+          provision_worktree: false
+        )
 
       assert result.worktree_path == nil
     end
@@ -1092,7 +1097,9 @@ defmodule Arbiter.Worker.DispatchTest do
       {:ok, task} = Ash.create(Issue, %{title: "fix pass task", workspace_id: ws.id})
 
       {:ok, task} =
-        Ash.update(task, %{notes: "## ReviewGate verdict: REQUEST_CHANGES\n\nFix the null guard."},
+        Ash.update(
+          task,
+          %{notes: "## ReviewGate verdict: REQUEST_CHANGES\n\nFix the null guard."},
           action: :update
         )
 
@@ -1136,6 +1143,52 @@ defmodule Arbiter.Worker.DispatchTest do
       review_prompt = Dispatch.prompt_for_task(task, review: true)
       refute review_prompt =~ "Prior review findings"
       refute review_prompt =~ "existing PR"
+    end
+  end
+
+  describe "conflict_resolve_briefing/3 (#354, Phase 2b)" do
+    test "embeds the task intent and the rebase/resolve/test/push steps", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "Widget refactor",
+          description: "Extract the widget builder.",
+          acceptance: "- builder is pure\n- tests pass",
+          workspace_id: ws.id
+        })
+
+      briefing = Dispatch.conflict_resolve_briefing(task, "feature/widget", "main")
+
+      # Intent context — resolve conflicts honoring the original task.
+      assert briefing =~ "Widget refactor"
+      assert briefing =~ "Extract the widget builder."
+      assert briefing =~ "builder is pure"
+
+      # The narrow, hardened job: rebase, resolve, run tests, force-push.
+      assert briefing =~ "git fetch origin main"
+      assert briefing =~ "git rebase origin/main"
+      assert briefing =~ "Run the test suite"
+      assert briefing =~ "git push --force-with-lease origin feature/widget"
+      assert briefing =~ "arb done"
+
+      # Must NOT invite re-implementation or a new PR.
+      assert briefing =~ "open a new PR"
+      assert briefing =~ "re-implement"
+    end
+
+    test "the legacy ConflictResolver prompt now delegates to the hardened briefing", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "Conflicty change", workspace_id: ws.id})
+
+      via_resolver =
+        Arbiter.Workflows.MergeQueue.ConflictResolver.prompt_for(%{
+          task: task,
+          branch: "feature/c",
+          target_branch: "develop"
+        })
+
+      assert via_resolver == Dispatch.conflict_resolve_briefing(task, "feature/c", "develop")
+      assert via_resolver =~ "git rebase origin/develop"
+      assert via_resolver =~ "Run the test suite"
     end
   end
 

@@ -8,6 +8,101 @@ defmodule Arbiter.Worker.WatchdogTest do
   alias Arbiter.Test.StubMerger
   alias Arbiter.Test.StubFixPassDispatcher
 
+  # A stand-in for the resolver's `Arbiter.Worker` GenServer. The REAL resolver
+  # worker does NOT exit when its rebase acolyte finishes — it lingers in a
+  # terminal status (:completed/:failed) until task :close — so the Watchdog must
+  # detect completion from the worker's *status*, not a process `:DOWN` (#354
+  # review). This fake models exactly that: it stays alive and answers `:snapshot`
+  # with a fixed status, and self-terminates when the owning test process dies so
+  # cases don't leak processes.
+  defmodule FakeResolverWorker do
+    @moduledoc false
+    use GenServer
+
+    def start(status, owner) when is_atom(status) and is_pid(owner),
+      do: GenServer.start(__MODULE__, {status, owner})
+
+    @impl true
+    def init({status, owner}) do
+      Process.monitor(owner)
+      {:ok, status}
+    end
+
+    @impl true
+    def handle_call(:snapshot, _from, status), do: {:reply, %{status: status}, status}
+
+    @impl true
+    def handle_info({:DOWN, _ref, :process, _pid, _reason}, status), do: {:stop, :normal, status}
+    def handle_info(_msg, status), do: {:noreply, status}
+  end
+
+  # Injectable conflict resolver for the Phase 2b auto-resolve tests (#354). The
+  # Watchdog calls `resolve/1` + `escalate_unresolved/4` from its own process, so
+  # results are routed back to the test via a per-task pid stashed in
+  # :persistent_term (unique task ids keep cases isolated).
+  defmodule StubConflictResolver do
+    @moduledoc false
+    @behaviour Arbiter.Workflows.MergeQueue.ConflictResolver
+
+    alias Arbiter.Worker.WatchdogTest.FakeResolverWorker
+
+    @doc """
+    Arm the stub for `task_id`. Opts:
+      * `:pid` — the resolver worker the Watchdog gets back. The fake stays alive
+        (mirroring the real resolver, which lingers after its acolyte exits):
+        * `:completed` (default) — reports a terminal status, so the Watchdog
+          detects the pass finished *without the process dying* and can
+          retry/escalate (a fresh fake is minted per `resolve/1` call);
+        * `:running` — reports `:running`, so the resolver stays "in flight" and
+          exactly one dispatch happens;
+        * a pid — used verbatim.
+      * `:result` — `:ok` (default) or `{:error, reason}`.
+    """
+    def arm(task_id, test_pid, opts \\ []) when is_list(opts) do
+      :persistent_term.put({__MODULE__, task_id}, {test_pid, opts})
+    end
+
+    defp lookup(task_id), do: :persistent_term.get({__MODULE__, task_id}, nil)
+
+    @impl true
+    def resolve(%{task_id: task_id} = args) do
+      case lookup(task_id) do
+        {pid, opts} ->
+          send(pid, {:resolve_called, args})
+
+          case Keyword.get(opts, :result, :ok) do
+            :ok ->
+              worker_pid = resolver_worker(Keyword.get(opts, :pid, :completed), pid)
+              send(pid, {:resolver_spawned, worker_pid})
+              {:ok, %{worker_pid: worker_pid, worktree_path: "/tmp/fake", branch: "feat/x"}}
+
+            {:error, _} = err ->
+              err
+          end
+
+        nil ->
+          {:error, :no_stub_armed}
+      end
+    end
+
+    defp resolver_worker(status, owner) when status in [:completed, :failed, :running] do
+      {:ok, p} = FakeResolverWorker.start(status, owner)
+      p
+    end
+
+    defp resolver_worker(p, _owner) when is_pid(p), do: p
+
+    @impl true
+    def escalate_unresolved(task_id, ws_id, branch, reason) do
+      case lookup(task_id) do
+        {pid, _} -> send(pid, {:escalate_called, task_id, ws_id, branch, reason})
+        _ -> :ok
+      end
+
+      :ok
+    end
+  end
+
   setup do
     StubMerger.reset()
     StubFixPassDispatcher.reset()
@@ -15,6 +110,17 @@ defmodule Arbiter.Worker.WatchdogTest do
   end
 
   defp new_task_id, do: "watchdog-test-#{System.unique_integer([:positive])}"
+
+  # An unpersisted Workspace struct with an id — enough for the Watchdog, which
+  # only reads `.id` (for the escalation's `workspace_id`) and `.config`. The
+  # exhaustion escalation needs a binary workspace_id to address its coordinator
+  # page; without one it logs loudly and sends nothing (the Low review finding).
+  defp test_workspace(config \\ %{}) do
+    %Arbiter.Tasks.Workspace{
+      id: "ws-#{System.unique_integer([:positive])}",
+      config: config
+    }
+  end
 
   # A :running worker the Watchdog can drive to a terminal state.
   defp running_worker do
@@ -192,23 +298,34 @@ defmodule Arbiter.Worker.WatchdogTest do
   end
 
   describe "blocked-merge detection (#354)" do
-    test "records the block reason on the worker and keeps the PR parked (no fail)" do
+    test "an approved :conflict records the reason, dispatches a rebase acolyte, and does not fail" do
       {pid, task_id} = running_worker()
-      # An approved-but-conflicting PR: the merger can't merge it. The Warden
-      # must detect + record the reason within one poll and NOT fail the worker.
+      # An approved-but-conflicting PR. Phase 2b: the Warden records the reason
+      # AND dispatches a rebase-resolve acolyte against the existing worktree
+      # (rather than only parking). A :running stub stays "in flight" so this
+      # is a single dispatch. The worker must NOT be failed.
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+
       StubMerger.queue_get("!b1", [
         %{status: :open, approved: true, block_reason: :conflict}
       ])
 
-      start_watchdog(pid, task_id, "!b1", auto_merge: false)
+      start_watchdog(pid, task_id, "!b1",
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver
+      )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
 
       wait_until(fn ->
         status = Map.get(Worker.state(pid).meta, :last_merger_status)
         is_map(status) and Map.get(status, :block_reason) == :conflict
       end)
 
-      # Detection must not fail the worker — it stays parked for a human/Phase 2.
+      # Auto-resolve must not fail the worker — it stays parked while the acolyte
+      # rebases, and a single in-flight resolver is never escalated.
       refute Worker.state(pid).status == :failed
+      refute_receive {:escalate_called, _, _, _, _}, 200
     end
 
     test "a clear block reason (nil) leaves the normal flow untouched" do
@@ -307,15 +424,148 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
-  describe "Phase 2a leaves :conflict / :needs_approval unaffected (#354)" do
-    test ":conflict never triggers update-branch or a fix pass" do
+  describe "conflict auto-resolve (#354, Phase 2b)" do
+    test "dispatches the rebase acolyte with the task id + mr ref" do
       {pid, task_id} = running_worker()
-      # auto_merge: false keeps the worker parked so we can observe several polls.
-      StubMerger.queue_get("!na1", [%{status: :open, approved: true, block_reason: :conflict}])
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+      StubMerger.queue_get("!c1", [%{status: :open, approved: true, block_reason: :conflict}])
 
-      start_watchdog(pid, task_id, "!na1",
+      start_watchdog(pid, task_id, "!c1",
         auto_merge: false,
-        fix_pass_dispatcher: StubFixPassDispatcher
+        conflict_resolver: StubConflictResolver
+      )
+
+      assert_receive {:resolve_called, args}, 1_000
+      assert args.task_id == task_id
+      assert args.pr_ref == "!c1"
+    end
+
+    test "after max_conflict_attempts rebase passes it escalates with the attempt count" do
+      {pid, task_id} = running_worker()
+      # A :completed resolver lingers alive in a terminal status (the real
+      # resolver never exits on a normal finish), so each pass is detected as
+      # done via the worker's status and the next poll (still conflicting) tears
+      # it down and spawns the next attempt until the cap is hit.
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c2", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!c2",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 2,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      assert_receive {:escalate_called, ^task_id, _ws, _branch, reason}, 1_000
+      assert reason =~ "exhausted"
+      assert reason =~ "2 rebase attempt"
+      # Escalation must not fail the worker — it stays parked for a human.
+      refute Worker.state(pid).status == :failed
+    end
+
+    test "tears down the prior (lingering) resolver before dispatching the next attempt" do
+      {pid, task_id} = running_worker()
+      # The resolver reports a terminal status but stays ALIVE (like the real
+      # `Arbiter.Worker`, which lingers until task :close). Under the old `:DOWN`
+      # mechanism this never fired a completion, so attempt #2 never dispatched
+      # and the lingering worker kept its `:conflict` registry slot. The fix
+      # detects completion via status and stops the prior resolver first.
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c8", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!c8",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 2,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolver_spawned, first}, 1_000
+      assert_receive {:resolver_spawned, second}, 1_000
+      assert first != second
+      # The second attempt only dispatches after the first is stopped, freeing its
+      # registry slot — so the first resolver is no longer alive.
+      wait_until(fn -> not Process.alive?(first) end)
+    end
+
+    test "only dispatches max_conflict_attempts acolytes, not one per poll" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c3", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!c3",
+        workspace: test_workspace(),
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 2,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, _}, 1_000
+      assert_receive {:resolve_called, _}, 1_000
+      assert_receive {:escalate_called, _, _, _, _}, 1_000
+      # Past the cap the Warden stays parked and must not keep spawning acolytes
+      # or re-paging on every subsequent poll.
+      refute_receive {:resolve_called, _}, 200
+      refute_receive {:escalate_called, _, _, _, _}, 200
+    end
+
+    test "a cleared conflict resets the counter so it never escalates" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      # Conflict on the first poll, mergeable thereafter — the rebase cleared it.
+      StubMerger.queue_get("!c4", [
+        %{status: :open, approved: true, block_reason: :conflict},
+        %{status: :open, approved: true}
+      ])
+
+      start_watchdog(pid, task_id, "!c4",
+        auto_merge: false,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 2,
+        interval_ms: 15
+      )
+
+      assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+      # Conflict cleared on the next poll → counter resets → no escalation ever.
+      refute_receive {:escalate_called, _, _, _, _}, 300
+    end
+
+    test "a resolved conflict lets the next poll auto-merge (re-attempt merge)" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      # Conflict, then mergeable+approved — the resolver's force-push cleared it
+      # and the Warden's next poll re-attempts (and lands) the merge.
+      StubMerger.queue_get("!c5", [
+        %{status: :open, approved: true, block_reason: :conflict},
+        %{status: :open, approved: true}
+      ])
+
+      start_watchdog(pid, task_id, "!c5",
+        auto_merge: true,
+        conflict_resolver: StubConflictResolver,
+        max_conflict_attempts: 2,
+        interval_ms: 15
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!c5") >= 1
+    end
+
+    test "auto_resolve_conflict: false falls back to the Phase 1 escalation (no dispatch)" do
+      {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :running)
+      StubMerger.queue_get("!c6", [%{status: :open, approved: true, block_reason: :conflict}])
+
+      start_watchdog(pid, task_id, "!c6",
+        auto_merge: false,
+        auto_resolve_conflict: false,
+        conflict_resolver: StubConflictResolver
       )
 
       wait_until(fn ->
@@ -323,31 +573,35 @@ defmodule Arbiter.Worker.WatchdogTest do
         is_map(status) and Map.get(status, :block_reason) == :conflict
       end)
 
-      Process.sleep(80)
-      assert StubMerger.update_branch_count("!na1") == 0
-      assert StubFixPassDispatcher.call_count() == 0
+      # With auto-resolve off, no rebase acolyte is dispatched.
+      refute_receive {:resolve_called, _}, 200
+      refute Worker.state(pid).status == :failed
     end
 
-    test ":needs_approval never triggers update-branch or a fix pass" do
+    test "exhaustion with no workspace_id is logged loudly, not silently swallowed" do
       {pid, task_id} = running_worker()
+      StubConflictResolver.arm(task_id, self(), pid: :completed)
+      StubMerger.queue_get("!c7", [%{status: :open, approved: true, block_reason: :conflict}])
 
-      StubMerger.queue_get("!na2", [
-        %{status: :open, approved: true, block_reason: :needs_approval}
-      ])
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!c7",
+            workspace: nil,
+            auto_merge: false,
+            conflict_resolver: StubConflictResolver,
+            max_conflict_attempts: 1,
+            interval_ms: 15
+          )
 
-      start_watchdog(pid, task_id, "!na2",
-        auto_merge: false,
-        fix_pass_dispatcher: StubFixPassDispatcher
-      )
+          # One rebase pass, then the cap is hit. With no workspace_id the
+          # coordinator page has no addressable mailbox, so nothing is sent…
+          assert_receive {:resolve_called, %{task_id: ^task_id}}, 1_000
+          refute_receive {:escalate_called, _, _, _, _}, 300
+        end)
 
-      wait_until(fn ->
-        status = Map.get(Worker.state(pid).meta, :last_merger_status)
-        is_map(status) and Map.get(status, :block_reason) == :needs_approval
-      end)
-
-      Process.sleep(80)
-      assert StubMerger.update_branch_count("!na2") == 0
-      assert StubFixPassDispatcher.call_count() == 0
+      # …but the give-up is surfaced loudly rather than vanishing (Low finding).
+      assert log =~ "workspace_id is nil"
+      refute Worker.state(pid).status == :failed
     end
   end
 
