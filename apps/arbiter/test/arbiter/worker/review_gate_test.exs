@@ -1169,6 +1169,123 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  describe "stale-base defence (bd-ased52)" do
+    # The reviewer must diff against the merge-base, not the moving target tip,
+    # so a target that advanced mid-run can't be mis-attributed to the branch.
+    test "review_prompt anchors the diff on the merge-base and warns off two-dot",
+         %{ws: ws} do
+      task = new_task(ws)
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1,
+        head_sha: nil,
+        base_sha: "abc1234"
+      }
+
+      prompt = ReviewGate.review_prompt(state)
+
+      assert prompt =~ "git diff abc1234..HEAD",
+             "review_prompt must point the reviewer at the merge-base diff"
+
+      assert prompt =~ "Do NOT use `git diff main..HEAD`",
+             "review_prompt must warn against the two-dot diff that leaks target commits"
+    end
+
+    # A branch that conflicts with the advanced target must escalate (a Summons)
+    # rather than be reviewed against a stale base — and the reviewer must never
+    # be spawned (mirrors the #97 abort-on-conflict posture).
+    test "a branch that conflicts with an advanced target escalates before the reviewer spawns",
+         %{repo: repo, ws: ws} do
+      # Give the rig an origin remote and push main, so update_from_target can
+      # fetch + merge origin/main.
+      remote = Path.join(Path.dirname(repo), "remote-conflict.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = git(["remote", "add", "origin", remote], repo)
+      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+      task = new_task(ws)
+      branch = "feature/conflict"
+
+      sub_wt = Path.join(Path.dirname(repo), "conflict-wt")
+
+      on_exit(fn ->
+        _ = System.cmd("git", ["-C", repo, "worktree", "remove", "--force", sub_wt])
+        File.rm_rf!(sub_wt)
+        File.rm_rf!(remote)
+      end)
+
+      # Branch cut from origin/main; it edits README.md and commits.
+      {_, 0} =
+        System.cmd("git", ["-C", repo, "worktree", "add", sub_wt, "-b", branch, "origin/main"],
+          stderr_to_stdout: true
+        )
+
+      File.write!(Path.join(sub_wt, "README.md"), "branch version\n")
+      {_, 0} = git(["add", "README.md"], sub_wt)
+      {_, 0} = git(["commit", "-q", "-m", "branch readme"], sub_wt)
+
+      # The target advances mid-run, editing the SAME file differently → conflict.
+      File.write!(Path.join(repo, "README.md"), "fleet version\n")
+      {_, 0} = git(["add", "README.md"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "fleet readme"], repo)
+      {_, 0} = git(["push", "-q", "origin", "main"], repo)
+
+      # Park the author at :awaiting_review_gate (review_spawn: false, no
+      # worktree_path so the worker commit gate skips).
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_spawn: false
+      }
+
+      {:ok, author} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(author), do: GenServer.stop(author, :normal) end)
+      :ok = Worker.advance(author, :claude)
+      send(author, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(author)) end)
+
+      # The reviewer command must NEVER run — the gate escalates on conflict first.
+      {:ok, _gate} =
+        ReviewGate.start(
+          author: author,
+          task_id: task.id,
+          workspace_id: ws.id,
+          repo: "trib/repo",
+          worktree_path: sub_wt,
+          branch: branch,
+          target_branch: "main",
+          command: [@reviewer, "APPROVE"],
+          timeout_ms: 5_000
+        )
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(author)) end, 6_000)
+      snap = Worker.state(author)
+      assert snap.meta.failure_reason == :review_gate_rejected
+      assert snap.meta.review_gate_findings =~ "conflicts with its target"
+      assert snap.meta.review_gate_findings =~ "README.md"
+
+      # The branch was NOT merged and the worktree is clean (merge aborted).
+      assert merge_commit_count(repo) == 0
+      assert {:ok, false} = Arbiter.Worker.Worktree.has_uncommitted?(sub_wt)
+
+      # The reviewer was never spawned: no #review run row exists.
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == review_id)),
+             "the reviewer must NOT run when the branch conflicts with its target"
+    end
+  end
+
   describe "review_prompt/1 HEAD-SHA anchoring (bd-1mksks)" do
     # The review prompt must embed the HEAD SHA verified at spawn time so the
     # reviewer can confirm it is on the correct commit before diffing.
