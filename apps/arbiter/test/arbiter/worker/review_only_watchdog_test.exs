@@ -333,6 +333,86 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     end
   end
 
+  # ---- bd-do82bt regression: Driver closes task on review APPROVE (no pr_ref) ----
+
+  describe "Driver closes task after review APPROVE with no pr_ref (bd-do82bt)" do
+    test "APPROVE + no pr_ref: Driver closes the task when worker reaches :completed" do
+      # Regression for bd-do82bt: review_opts/1 was unconditionally setting
+      # start_driver: false, so a completed review worker's task was never
+      # closed. Verify that with a Driver attached in claude_driven mode, a
+      # no-pr_ref APPROVE leads to task :closed.
+      ws = new_workspace()
+      task = new_task(ws)
+
+      worker_pid = start_reviewer(task, ["VERDICT: APPROVE", "looks good"])
+
+      {:ok, driver_pid} =
+        Arbiter.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          # In claude_driven mode the driver never ticks the machine; use the
+          # test process as a stand-in for the machine PID — it won't die.
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 200
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Wait for the Driver to close the task.
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :closed
+    end
+
+    test "REQUEST_CHANGES: Driver leaves the task :in_progress for a fix-pass" do
+      # Regression for bd-do82bt: REQUEST_CHANGES fails the worker (not completes),
+      # so the Driver exits without closing the task. The task must stay :in_progress
+      # so a fix-pass can be dispatched.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-50"}, action: :update)
+
+      worker_pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:5 missing guard"
+        ])
+
+      {:ok, driver_pid} =
+        Arbiter.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 200
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Wait for the worker to fail.
+      wait_until(fn -> Worker.state(worker_pid).status == :failed end)
+
+      # Driver should exit after seeing :failed.
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
+
+      # Task must remain :in_progress for the fix-pass.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :in_progress
+    end
+  end
+
   # ---- bd-btcyn6 fallback: adapter-derived verdict when VERDICT sentinel missing ----
 
   describe "adapter-derived verdict fallback (bd-btcyn6)" do
