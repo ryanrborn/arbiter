@@ -250,7 +250,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       # No review_only flag, no branch — should complete as before.
       meta = %{output_lines: ["VERDICT: APPROVE", "some work done"]}
-      {:ok, pid} = Worker.start(task_id: task.id, repo: "rv/repo", workspace_id: ws.id, meta: meta)
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "rv/repo", workspace_id: ws.id, meta: meta)
+
       :ok = Worker.advance(pid, :claude)
       on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 

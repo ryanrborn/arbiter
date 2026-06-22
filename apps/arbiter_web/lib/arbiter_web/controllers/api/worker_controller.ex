@@ -49,7 +49,8 @@ defmodule ArbiterWeb.Api.WorkerController do
 
           {:error, {:task_closed, _}} ->
             {:error,
-             {:invalid_request, "task is closed; reopen it before dispatching", %{task_id: task_id}}}
+             {:invalid_request, "task is closed; reopen it before dispatching",
+              %{task_id: task_id}}}
 
           {:error, {:task_awaiting_review, _}} ->
             {:error,

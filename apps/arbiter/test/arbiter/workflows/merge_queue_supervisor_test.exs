@@ -37,7 +37,10 @@ defmodule Arbiter.Workflows.MergeQueueSupervisorTest do
       pid = start_for_test(ws_id)
 
       assert {:error, {:already_started, ^pid}} =
-               MergeQueueSupervisor.start_merge_queue(ws_id, auto_tick: false, repo: "octo/widget")
+               MergeQueueSupervisor.start_merge_queue(ws_id,
+                 auto_tick: false,
+                 repo: "octo/widget"
+               )
     end
 
     test "whereis/1 returns nil for an unknown workspace" do
