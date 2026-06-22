@@ -126,8 +126,11 @@ defmodule Arbiter.WorkerAwaitingReviewTest do
     # hosted-forge adapters that approval is never posted (the ReviewGate is in-
     # process), so the worker hung at :awaiting_review forever. With the
     # `via_review_gate: true` flag the Watchdog treats any non-terminal poll as
-    # `:approved` and force-auto-merges on its first poll.
-    test "open_mr with via_review_gate: true drives worker to :completed without forge approval" do
+    # `:approved` and skips forge-side approval polling.
+    #
+    # bd-ddtbhb: `via_review_gate` alone no longer implies auto_merge. The
+    # caller must pass `force_merge: true` to merge regardless of workspace lane.
+    test "open_mr with via_review_gate + force_merge drives worker to :completed without forge approval" do
       {pid, _task_id} = running_worker()
       StubMerger.next_open_ref("!99")
       # No queue_get → StubMerger.get/1 returns %{status: :open, approved: false}
@@ -139,14 +142,42 @@ defmodule Arbiter.WorkerAwaitingReviewTest do
                  "feature/trib",
                  "ReviewGate-approved merge",
                  "",
-                 open_opts(via_review_gate: true, interval_ms: 20, initial_delay_ms: 0)
+                 open_opts(via_review_gate: true, force_merge: true, interval_ms: 20, initial_delay_ms: 0)
                )
 
       wait_until(fn -> Worker.state(pid).status == :completed end)
       assert Worker.state(pid).meta.result == :merged
       # The Watchdog must have called the adapter's merge/1 — that's the whole
-      # point of via_review_gate: don't just wait for a human, actually merge.
+      # point of force_merge: don't just wait for a human, actually merge.
       assert StubMerger.merge_count("!99") >= 1
+    end
+
+    test "via_review_gate alone (without force_merge) respects workspace auto_merge setting" do
+      # bd-ddtbhb: via_review_gate alone means (a) skip forge-approval polling,
+      # NOT (b) merge regardless of lane. A workspace with auto_merge off must
+      # not auto-merge even when via_review_gate is set.
+      {pid, _task_id} = running_worker()
+      StubMerger.next_open_ref("!101")
+
+      assert {:ok, "!101"} =
+               Worker.open_mr(
+                 pid,
+                 "feature/via-only",
+                 "via_review_gate only",
+                 "",
+                 open_opts(
+                   via_review_gate: true,
+                   auto_merge: false,
+                   interval_ms: 20,
+                   initial_delay_ms: 0,
+                   max_polls: 1_000
+                 )
+               )
+
+      # Let the Watchdog poll a few times — it must NOT auto-merge.
+      Process.sleep(120)
+      assert Worker.state(pid).status == :awaiting_review
+      assert StubMerger.merge_count("!101") == 0
     end
 
     test "without via_review_gate, the same scenario reproduces the silent hang" do

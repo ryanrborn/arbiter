@@ -1,22 +1,24 @@
 defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   @moduledoc """
-  Regression tests for bd-4ji58d and bd-btcyn6.
+  Regression tests for bd-4ji58d, bd-btcyn6, and bd-ddtbhb.
 
   When a coordinator dispatches a reviewer via `worker_review` / `arb worker
   review`, the resulting worker is tagged `review_only: true` and has no
-  branch/worktree. Before this fix, any verdict (APPROVE or REQUEST_CHANGES)
-  caused the reviewer worker to complete normally, which prompted the Driver
-  to close the task — without ever merging the PR.
+  branch/worktree.
 
-  After the fix (bd-4ji58d):
+  After bd-4ji58d + bd-ddtbhb:
 
-    * APPROVE → reviewer worker parks at :awaiting_review and the Watchdog
-      merges the task's pr_ref automatically (via_review_gate: true path).
+    * APPROVE → reviewer worker completes normally (review already posted to
+      the forge). The Driver closes the task. The reviewer NEVER merges —
+      that is the PR author's job or the workspace's auto-merge policy.
     * REQUEST_CHANGES → reviewer worker fails (not completes) so the Driver
       does NOT close the task; it stays :in_progress for a fix-pass.
     * No verdict → same as REQUEST_CHANGES (fail, task stays :in_progress).
-    * No pr_ref on the task → APPROVE falls through to complete normally
-      (nothing to merge).
+    * pr_ref set or unset → makes no difference to APPROVE; always completes.
+
+  The full ReviewGate merge path (fleet-authored work: enter_review_gate →
+  merge_branch with force_merge: true) is a separate path and still merges on
+  APPROVE regardless of workspace auto_merge.
 
   bd-btcyn6 regression: a reviewer that submits the review verdict via the
   tracker CLI (`gh pr review`) and also emits the required `VERDICT:` sentinel
@@ -109,7 +111,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- APPROVE path ----------------------------------------------------------
 
   describe "APPROVE verdict" do
-    test "parks at :awaiting_review with the task's pr_ref when APPROVE is detected" do
+    test "completes the worker when the task has a pr_ref (reviewer never merges)" do
+      # bd-ddtbhb: a coordinator-dispatched reviewer that APPROVEs must NOT
+      # start a merging Watchdog, even when a pr_ref is recorded on the task.
+      # The review was already posted to the forge; merging is the author's job.
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-42"}, action: :update)
@@ -123,27 +128,23 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
+      wait_until(fn -> Worker.state(pid).status == :completed end)
 
-      snap = Worker.state(pid)
-      assert snap.status == :awaiting_review
-      assert snap.mr_ref == "pr-42"
+      assert Worker.state(pid).status == :completed
+      # No merge must have been attempted.
+      assert StubMerger.merge_count("pr-42") == 0
     end
 
-    test "Watchdog auto-merges and completes the worker when the PR is approved" do
+    test "completes the worker and does not merge even when Watchdog would fire" do
+      # bd-ddtbhb: even with permissive Watchdog timing, APPROVE on a
+      # coordinator-dispatched reviewer completes immediately without parking
+      # at :awaiting_review or starting the Watchdog at all.
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-99"}, action: :update)
 
-      # Queue: first poll returns approved, second returns merged.
-      StubMerger.queue_get("pr-99", [
-        %{status: :open, approved: true},
-        %{status: :merged}
-      ])
-
       pid =
         start_reviewer(task, ["VERDICT: APPROVE", "great work"], %{
-          # Let the Watchdog poll immediately so the merge fires without sleeping.
           watchdog_initial_delay_ms: 0,
           watchdog_interval_ms: 50
         })
@@ -152,14 +153,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       wait_until(fn -> Worker.state(pid).status == :completed end, 3_000)
 
-      snap = Worker.state(pid)
-      assert snap.status == :completed
-      assert snap.mr_ref == "pr-99"
-      # Watchdog's via_review_gate path calls merge on the first approved poll.
-      assert StubMerger.merge_count("pr-99") >= 1
+      assert Worker.state(pid).status == :completed
+      assert StubMerger.merge_count("pr-99") == 0
     end
 
-    test "completes normally when the task has no pr_ref (nothing to merge)" do
+    test "completes normally when the task has no pr_ref" do
       ws = new_workspace()
       task = new_task(ws)
 
@@ -268,19 +266,16 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   # ---- bd-btcyn6 regression: adapter-submitted verdict completion path ------
 
   describe "adapter-submitted verdict (bd-btcyn6)" do
-    test "APPROVE after posting gh pr review parks at :awaiting_review (not failed/INCONCLUSIVE)" do
-      # Regression for bd-btcyn6: a reviewer that posts the GitHub review via
-      # `gh pr review --approve` AND emits the required `VERDICT: APPROVE`
-      # sentinel (as the updated review prompt demands) must land in
-      # :awaiting_review, NOT :failed. Previously the completion path only
-      # parsed stdout for the sentinel and returned INCONCLUSIVE when it was
-      # absent; with the updated prompt the sentinel is always present.
+    test "APPROVE after posting gh pr review completes cleanly (not failed/INCONCLUSIVE)" do
+      # Regression for bd-btcyn6 + bd-ddtbhb: a reviewer that posts the GitHub
+      # review via `gh pr review --approve` AND emits the required `VERDICT:
+      # APPROVE` sentinel must land in :completed, NOT :failed or INCONCLUSIVE.
+      # (Previously expected :awaiting_review; after bd-ddtbhb the reviewer
+      # completes directly without parking — it must not merge.)
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-200"}, action: :update)
 
-      # Simulate the reviewer's stdout: it posts via `gh pr review --approve`,
-      # then emits the VERDICT: sentinel the updated prompt requires, then arb done.
       pid =
         start_reviewer(task, [
           "Reviewed PR #200 — all changes look good.",
@@ -291,11 +286,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
+      wait_until(fn -> Worker.state(pid).status == :completed end)
 
-      snap = Worker.state(pid)
-      assert snap.status == :awaiting_review
-      assert snap.mr_ref == "pr-200"
+      assert Worker.state(pid).status == :completed
+      assert StubMerger.merge_count("pr-200") == 0
     end
 
     test "REQUEST_CHANGES after posting gh pr review fails the worker (not INCONCLUSIVE)" do
@@ -417,10 +411,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
   describe "adapter-derived verdict fallback (bd-btcyn6)" do
     test "APPROVE derived from adapter review when stdout has no VERDICT sentinel" do
-      # Belt-and-suspenders for bd-btcyn6: if the reviewer posts `gh pr review
-      # --approve` but (contrary to the updated prompt) omits the VERDICT sentinel,
-      # the completion path falls back to querying the adapter's PR review state and
-      # derives APPROVE from the submitted APPROVED review — not INCONCLUSIVE.
+      # Belt-and-suspenders for bd-btcyn6 + bd-ddtbhb: if the reviewer posts
+      # `gh pr review --approve` but omits the VERDICT sentinel, the completion
+      # path falls back to querying the adapter's PR review state and derives
+      # APPROVE — then completes without merging (not INCONCLUSIVE, not
+      # :awaiting_review).
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-300"}, action: :update)
@@ -440,11 +435,10 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(pid, {:__claude_session_done__, "arb done"})
 
-      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
+      wait_until(fn -> Worker.state(pid).status == :completed end)
 
-      snap = Worker.state(pid)
-      assert snap.status == :awaiting_review
-      assert snap.mr_ref == "pr-300"
+      assert Worker.state(pid).status == :completed
+      assert StubMerger.merge_count("pr-300") == 0
     end
 
     test "REQUEST_CHANGES derived from adapter review when stdout has no VERDICT sentinel" do
@@ -500,6 +494,46 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       snap = Worker.state(pid)
       assert snap.status == :failed
       assert StubMerger.merge_count("pr-302") == 0
+    end
+  end
+
+  # ---- bd-ddtbhb acceptance: coordinator reviewer with pr_ref never merges ---
+
+  describe "APPROVE + pr_ref does not merge, Driver closes task (bd-ddtbhb)" do
+    test "APPROVE with pr_ref: Driver closes the task, PR not merged" do
+      # Acceptance test for bd-ddtbhb: a coordinator-dispatched reviewer that
+      # APPROVEs a task WITH a pr_ref must not merge. The reviewer completes,
+      # the Driver closes the task, and the PR stays unmerged.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-400"}, action: :update)
+
+      worker_pid = start_reviewer(task, ["VERDICT: APPROVE", "LGTM"])
+
+      {:ok, driver_pid} =
+        Arbiter.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 200
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Driver must close the task.
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :closed
+
+      # The PR must NOT have been merged.
+      assert StubMerger.merge_count("pr-400") == 0
     end
   end
 end

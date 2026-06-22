@@ -1332,9 +1332,10 @@ defmodule Arbiter.Worker do
   # `worker_review` / `arb worker review`): parse the APPROVE / REQUEST_CHANGES
   # verdict from the reviewer's captured output and act on it.
   #
-  # APPROVE → park at :awaiting_review and start the Watchdog with via_review_gate:
-  # true so it merges the task's pr_ref on its first poll. Mirrors the full
-  # ReviewGate approve path without going through the ReviewGate machinery.
+  # APPROVE → complete the worker so the Driver closes the task. The review has
+  # already been posted to the forge by the reviewer; a coordinator-dispatched
+  # reviewer must NEVER merge the PR (bd-ddtbhb). The full ReviewGate merge
+  # path (fleet-authored work) is a separate path and is unaffected.
   #
   # REQUEST_CHANGES / :no_verdict → fail the worker (not complete it) so the
   # Driver does NOT close the task. The task stays :in_progress for the
@@ -1421,79 +1422,12 @@ defmodule Arbiter.Worker do
   end
 
   # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
-  # has no branch of its own — the PR lives on the task's pr_ref. If a pr_ref
-  # is present: park at :awaiting_review and start the Watchdog with
-  # via_review_gate: true so it merges on the first poll. If no pr_ref is recorded
-  # (reviewer was dispatched against a task with no open PR), complete normally.
-  defp trigger_watchdog_on_approval(%State{task_id: task_id} = state) do
-    case fetch_task_pr_ref(task_id) do
-      {:ok, pr_ref} ->
-        opts = merge_opts_from_meta(state.meta, %{via_review_gate: true})
-
-        case resolve_merger(state, opts) do
-          {:ok, adapter, workspace} ->
-            Arbiter.Mergers.prepare(workspace)
-            merger_url = safe_link_for(adapter, pr_ref)
-
-            new_state = %State{
-              state
-              | status: :awaiting_review,
-                mr_ref: pr_ref,
-                merger_url: merger_url,
-                merger_adapter: adapter,
-                step_started_at: DateTime.utc_now(),
-                meta:
-                  state.meta
-                  |> Map.put(:mr_ref, pr_ref)
-                  |> Map.put(:merger_url, merger_url)
-            }
-
-            watchdog_ok? =
-              try do
-                start_watchdog(new_state, workspace, opts) == :ok
-              rescue
-                e ->
-                  Logger.warning(
-                    "Worker: review_only APPROVE: Watchdog startup raised for task=#{task_id}: #{Exception.message(e)}"
-                  )
-
-                  false
-              catch
-                :exit, reason ->
-                  Logger.warning(
-                    "Worker: review_only APPROVE: Watchdog startup exit for task=#{task_id}: #{inspect(reason)}"
-                  )
-
-                  false
-              end
-
-            unless watchdog_ok? do
-              escalate_watchdog_failure(new_state)
-            end
-
-            new_state
-
-          {:error, reason} ->
-            Logger.warning(
-              "Worker: review_only APPROVE: could not resolve merger for task=#{task_id}: " <>
-                "#{inspect(reason)}; completing without merge"
-            )
-
-            complete_now(state, :claude_done)
-        end
-
-      {:error, :no_pr_ref} ->
-        # No open PR on the task — complete normally, nothing to merge.
-        complete_now(state, :claude_done)
-
-      {:error, reason} ->
-        Logger.warning(
-          "Worker: review_only APPROVE: could not load task pr_ref for task=#{task_id}: " <>
-            "#{inspect(reason)}; completing without merge"
-        )
-
-        complete_now(state, :claude_done)
-    end
+  # has already posted the review to the forge; we must NOT merge — that is the
+  # PR author's job (or the workspace's auto-merge policy, if any). Just complete
+  # the worker so the Driver closes the task. (bd-ddtbhb: decoupled from the
+  # full ReviewGate merge path which handles fleet-authored work.)
+  defp trigger_watchdog_on_approval(%State{} = state) do
+    complete_now(state, :claude_done)
   end
 
   # Load the pr_ref from the task's current DB record. Returns {:ok, pr_ref}
@@ -2194,10 +2128,11 @@ defmodule Arbiter.Worker do
   defp apply_review_gate_verdict(%State{} = state, {:approve, findings}) do
     record_review_gate_outcome(state, :approve, findings)
     branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
-    # Tell the Watchdog the gate approved this MR. Without this, hosted-forge
-    # adapters (Github) park forever at :awaiting_review waiting for a
-    # PR-level approval the ReviewGate never posts (bd-66ey1o).
-    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_review_gate: true}))
+    # Tell the Watchdog the gate approved this MR. Without via_review_gate,
+    # hosted-forge adapters (Github) park forever at :awaiting_review waiting
+    # for a PR-level approval the ReviewGate never posts (bd-66ey1o). force_merge
+    # makes this the explicit merge-regardless-of-lane signal (bd-ddtbhb).
+    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_review_gate: true, force_merge: true}))
   end
 
   defp apply_review_gate_verdict(%State{} = state, {:request_changes, findings}) do
@@ -2591,11 +2526,10 @@ defmodule Arbiter.Worker do
   # Spawn the Watchdog that polls for approval. auto_merge + poll interval come
   # from the workspace config (opts may override, primarily for tests).
   #
-  # The `:via_review_gate` opt (carried through from the ReviewGate-APPROVE merge
-  # path) tells the Watchdog the gate has already approved this MR; it short-
-  # circuits hosted-forge approval polling and merges on its first poll. The
-  # workspace's auto_merge setting is irrelevant in that case — a ReviewGate
-  # APPROVE is the merge-now signal.
+  # The `:via_review_gate` opt tells the Watchdog the gate has already approved
+  # this MR; it short-circuits hosted-forge approval polling (meaning a). It does
+  # NOT implicitly force auto_merge — that is opt-in via `:force_merge` (meaning
+  # b). The ReviewGate APPROVE merge path passes both (bd-ddtbhb).
   defp start_watchdog(%State{} = state, workspace, opts) do
     # Test escape hatch: :watchdog_start_error in opts simulates a Watchdog startup
     # failure without needing a real error condition, mirroring :review_spawn for
@@ -2612,7 +2546,7 @@ defmodule Arbiter.Worker do
 
     auto_merge =
       cond do
-        via_review_gate -> true
+        Map.get(opts, :force_merge, false) -> true
         Map.has_key?(opts, :auto_merge) -> Map.fetch!(opts, :auto_merge)
         true -> workspace_auto_merge?(workspace)
       end
