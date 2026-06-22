@@ -142,7 +142,12 @@ defmodule Arbiter.WorkerAwaitingReviewTest do
                  "feature/trib",
                  "ReviewGate-approved merge",
                  "",
-                 open_opts(via_review_gate: true, force_merge: true, interval_ms: 20, initial_delay_ms: 0)
+                 open_opts(
+                   via_review_gate: true,
+                   force_merge: true,
+                   interval_ms: 20,
+                   initial_delay_ms: 0
+                 )
                )
 
       wait_until(fn -> Worker.state(pid).status == :completed end)

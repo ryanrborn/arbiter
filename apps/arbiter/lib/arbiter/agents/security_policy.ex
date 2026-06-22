@@ -16,7 +16,7 @@ defmodule Arbiter.Agents.SecurityPolicy do
   adapter (`Arbiter.Agents.Claude.Security`) translates it into
   `--permission-mode` / `--settings` / `--dangerously-skip-permissions`; a
   future adapter (antigravity, Codex, …) maps the *same* struct to its own
-  flags. See `docs/acolyte-security.md` and the harness design
+  flags. See `docs/worker-security.md` and the harness design
   (`docs/agent-harness-design.md`, bd-c6xf18).
 
   ## Shape
