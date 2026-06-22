@@ -554,11 +554,6 @@ defmodule Arbiter.Worker do
       resumed_from_run_id: resumed_from_run_id(state.meta)
     }
 
-    # Include the dispatch-time model tier as a fallback for workers that fail
-    # before record_run_finished overwrites it with the canonical name from init.
-    meta = state.meta || %{}
-    attrs = if model = Map.get(meta, :model), do: Map.put(attrs, :model, model), else: attrs
-
     case Ash.create(Arbiter.Workers.Run, attrs) do
       {:ok, run} ->
         %State{state | run_id: run.id}
@@ -897,7 +892,11 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
-    {:reply, :ok, %State{state | meta: Map.put(state.meta, key, value)}}
+    state = %State{state | meta: Map.put(state.meta, key, value)}
+    if key == :model and not is_nil(state.run_id) do
+      backfill_run_model(state.run_id, value, state.task_id)
+    end
+    {:reply, :ok, state}
   end
 
   # Open a Claude session port. Called by Arbiter.Worker.ClaudeSession.start/1
