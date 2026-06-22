@@ -180,5 +180,24 @@ defmodule Arbiter.Agents.Agent do
   """
   @callback auth_probe_argv(opts :: keyword()) :: {:ok, [String.t()]} | {:error, term()}
 
-  @optional_callbacks [spawn_env: 1, security_enforced?: 0, auth_probe_argv: 1, resolved_model: 1]
+  @doc """
+  The async-tool instruction block to embed in reviewer prompts.
+
+  Adapters return provider-appropriate phrasing — Claude reviewers support
+  background execution modes; Gemini reviewers must run all tools
+  synchronously because the CLI has no native `run_in_background` /
+  notification mechanism and stalls when background execution is requested.
+
+  Optional — adapters that omit this callback fall through to a caller-side
+  default (the Claude async block), so existing adapters remain unaffected.
+  """
+  @callback async_tool_instruction() :: String.t()
+
+  @optional_callbacks [
+    spawn_env: 1,
+    security_enforced?: 0,
+    auth_probe_argv: 1,
+    resolved_model: 1,
+    async_tool_instruction: 0
+  ]
 end
