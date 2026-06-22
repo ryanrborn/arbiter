@@ -627,9 +627,10 @@ defmodule Arbiter.Worker do
   end
 
   defp capture_output_lines(%State{} = state) do
-    state.meta
-    |> Kernel.||(%{})
-    |> Map.get(:output_lines, [])
+    (state.meta || %{})
+    |> Map.get(:output_lines)
+    |> List.wrap()
+    |> Enum.reject(&is_nil/1)
     |> Enum.take(-@max_output_lines)
   end
 
