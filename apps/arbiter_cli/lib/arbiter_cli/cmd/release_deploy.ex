@@ -43,10 +43,10 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   `ARB_DATA_HOME`):
 
       <data-home>/
-        current -> releases/v2026.6.0      # atomically-swapped symlink
+        current -> releases/v0.1.0      # atomically-swapped symlink
         releases/
-          v2026.6.0/bin/arbiter
-          v2026.5.0/bin/arbiter
+          v0.1.0/bin/arbiter
+          v0.0.2/bin/arbiter
           …
 
   The systemd unit is expected to exec `<data-home>/current/bin/arbiter start`,
