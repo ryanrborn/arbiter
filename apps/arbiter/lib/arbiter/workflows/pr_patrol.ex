@@ -11,7 +11,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     * Any review on the PR has `state == "CHANGES_REQUESTED"`
       (highest-priority signal).
 
-  Future triggers (deferred to a follow-up task — see BUILD-SUMMARY):
+  Future triggers (deferred to a follow-up task):
 
     * `statusCheckRollup` contains FAILURE — needs the GraphQL API or a
       separate `check-runs` fetch keyed off the PR head SHA.

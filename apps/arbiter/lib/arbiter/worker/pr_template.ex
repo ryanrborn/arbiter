@@ -37,10 +37,9 @@ defmodule Arbiter.Worker.PRTemplate do
   placeholders and ANY of them resolve to non-empty, the line stays (and the
   empty placeholders are blanked in-place).
 
-  This is line-granularity, not section-granularity — see BUILD-SUMMARY for
-  the rationale (templates that need a whole section conditioned on tracker
-  type can simply put the tracker placeholder on its own line; the section
-  header before it stays).
+  This is line-granularity, not section-granularity. Templates that need a
+  whole section conditioned on tracker type can simply put the tracker
+  placeholder on its own line; the section header before it stays.
   """
 
   alias Arbiter.Tasks.Issue

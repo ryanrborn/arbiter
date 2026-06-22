@@ -5,8 +5,7 @@ defmodule ArbiterCli.Cmd.List do
 
   Filters are passed through to `GET /api/issues` as query params. `--labels`
   is accepted for interface parity with `bd`, but the current Issue resource
-  has no labels field — the flag is ignored with a stderr warning. See
-  BUILD-SUMMARY for the deviation.
+  has no labels field — the flag is ignored with a stderr warning.
 
   With `--tracker`, the workspace's external tracker is also queried (e.g.
   open GitHub issues assigned to the workspace user) and merged into the
