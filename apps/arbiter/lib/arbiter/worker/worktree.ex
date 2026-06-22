@@ -229,8 +229,9 @@ defmodule Arbiter.Worker.Worktree do
   # ignore patterns do NOT match a symlink, so `git status --porcelain` emits
   # `?? deps`. Counting that as "uncommitted" false-fails the commit gate on
   # genuinely-committed work — the inverse of the bug the gate exists to catch.
-  # See bd-dg0gs6 / #172.
-  @ignored_artifact_paths ~w(deps deps/ _build _build/)
+  # See bd-dg0gs6 / #172. `.mcp.json` is the per-worktree MCP runtime config
+  # (see bd-2wwuuf); a leaked top-level instance also false-fails the gate.
+  @ignored_artifact_paths ~w(deps deps/ _build _build/ .mcp.json)
 
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
