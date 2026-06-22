@@ -1,0 +1,105 @@
+name: Build and Publish Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to release (e.g. v2026.6.0)"
+        required: true
+
+jobs:
+  build:
+    name: Build OTP Release
+    runs-on: ubuntu-latest
+    container:
+      image: redhat/ubi8
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            git \
+            curl \
+            make \
+            gcc \
+            gcc-c++ \
+            openssl-devel \
+            ncurses-devel \
+            unzip \
+            tar \
+            gzip \
+            which
+
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/OTP 28
+        run: |
+          OTP_VERSION="28.0"
+          curl -fsSL "https://repo.hex.pm/builds/otp/linux/OTP-${OTP_VERSION}.tar.gz" -o /tmp/otp.tar.gz
+          mkdir -p /opt/otp
+          tar -xzf /tmp/otp.tar.gz -C /opt/otp
+          /opt/otp/OTP-${OTP_VERSION}/Install -minimal /opt/otp/OTP-${OTP_VERSION}
+          echo "/opt/otp/OTP-${OTP_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Install Elixir 1.19
+        run: |
+          ELIXIR_VERSION="1.19.0"
+          OTP_MAJOR="28"
+          curl -fsSL "https://repo.hex.pm/builds/elixir/v${ELIXIR_VERSION}-otp-${OTP_MAJOR}.zip" -o /tmp/elixir.zip
+          mkdir -p /opt/elixir
+          unzip -q /tmp/elixir.zip -d /opt/elixir
+          echo "/opt/elixir/bin" >> "$GITHUB_PATH"
+
+      - name: Bootstrap Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Get production dependencies
+        run: |
+          MIX_ENV=prod mix deps.get --only prod
+
+      - name: Build OTP release
+        run: |
+          MIX_ENV=prod mix release arbiter
+        env:
+          MIX_ENV: prod
+
+      - name: Build arb escript
+        run: |
+          cd apps/arbiter_cli && MIX_ENV=prod mix escript.build
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package and checksum release
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          TARBALL="arbiter-${TAG}-linux.tar.gz"
+          tar -czf "${TARBALL}" -C _build/prod/rel arbiter
+          sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+          echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: "Arbiter ${{ steps.tag.outputs.name }}"
+          files: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL }}.sha256
+            apps/arbiter_cli/arb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
