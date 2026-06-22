@@ -370,8 +370,10 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Dispatch a worker to work a task in the workspace. Requires a `can_dispatch` coordinator " <>
-          "token and is depth-limited (the dispatch-recursion guardrail). Pass `provider` to start a " <>
-          "worker session (`claude` or `gemini`); omit it to park the task in_progress.",
+          "token and is depth-limited (the dispatch-recursion guardrail). Omitting `provider` " <>
+          "resolves the worker from the workspace's `agent.type` config (first healthy provider via " <>
+          "ProviderPool). Pass `provider` to override; set `no_agent: true` to park the task " <>
+          "in_progress without spawning a worker (hand-off / manual-attach workflows).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -382,7 +384,12 @@ defmodule Arbiter.MCP.Catalog do
             "type" => "string",
             "enum" => ["claude", "gemini"],
             "description" =>
-              "Worker provider to dispatch. Omit to park the task in_progress (no worker)."
+              "Override the workspace's default provider. Omit to use the workspace `agent.type` config."
+          },
+          "no_agent" => %{
+            "type" => "boolean",
+            "description" =>
+              "Dry dispatch — park the task in_progress without spawning a worker. Use for hand-off / manual-attach workflows."
           },
           "with_claude" => %{
             "type" => "boolean",

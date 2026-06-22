@@ -389,9 +389,12 @@ defmodule Arbiter.MCP.Tools do
        — cheap insurance against a misconfigured coordinator fan-out.
 
   The slung worker's own scope token is minted one level deeper (`depth + 1`),
-  so a chain of dispatches is tracked. With a `provider` (`"claude"` | `"gemini"`,
-  or the deprecated `with_claude: true` alias) a worker session is started;
-  without one the task simply parks `:in_progress` (no agent spawned).
+  so a chain of dispatches is tracked. When `provider` is omitted, the workspace's
+  `agent.type` config is consulted and the first healthy provider is selected via
+  `ProviderPool` — identical to the REST dispatch default. Pass an explicit
+  `provider` (`"claude"` | `"gemini"`, or the deprecated `with_claude: true` alias)
+  to override. Set `no_agent: true` to park the task `:in_progress` without
+  spawning a worker (hand-off / manual-attach path).
   Backs onto `Arbiter.Worker.Dispatch.dispatch/2`.
   """
   @spec worker_dispatch(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
@@ -1033,40 +1036,46 @@ defmodule Arbiter.MCP.Tools do
     |> maybe_put_kw(:model, fetch_string(args, "model"))
   end
 
-  # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the REST
-  # `POST /api/workers/dispatch` contract: a `provider` dispatches a real worker
-  # session (forcing that agent via `agent_type`); the deprecated `with_claude`
-  # boolean is still honored as an alias for `provider: "claude"`; otherwise the
-  # task parks `:in_progress` (no Driver).
+  # Map `worker_dispatch` arguments onto `Dispatch.dispatch/2` opts, mirroring the
+  # REST `POST /api/workers/dispatch` contract: an explicit `provider` (or deprecated
+  # `with_claude`) forces that agent via `agent_type`; `no_agent: true` parks the
+  # task `:in_progress` (hand-off path); otherwise the workspace's `agent.type`
+  # config is used to pick the first healthy provider.
   defp worker_dispatch_opts(scope, args) do
     base = dispatch_opts(scope, args)
 
     case dispatch_provider(args) do
-      nil ->
+      :park ->
         Keyword.put(base, :start_driver, false)
+
+      nil ->
+        # No provider specified — resolve from workspace `agent.type` config.
+        Keyword.put(base, :start_claude, true)
 
       type when is_atom(type) ->
         base |> Keyword.put(:start_claude, true) |> Keyword.put(:agent_type, type)
     end
   end
 
-  # Resolve the worker provider from `worker_dispatch` args. Prefers the explicit
-  # `provider` field (`"claude"` | `"gemini"`), falling back to the deprecated
-  # `with_claude: true` alias. Returns `nil` when neither selects a worker — the
-  # task then parks in_progress.
+  # Resolve the worker provider from `worker_dispatch` args. Returns `:park` for
+  # an explicit `no_agent` opt-in, a provider atom when specified via `provider`
+  # or the deprecated `with_claude`, or `nil` to signal "use the workspace default".
   defp dispatch_provider(args) do
-    case Map.get(args, "provider") do
-      "claude" ->
+    cond do
+      Map.get(args, "no_agent") in [true, "true"] ->
+        :park
+
+      Map.get(args, "provider") == "claude" ->
         :claude
 
-      "gemini" ->
+      Map.get(args, "provider") == "gemini" ->
         :gemini
 
-      _ ->
-        case Map.get(args, "with_claude") do
-          v when v in [true, "true"] -> :claude
-          _ -> nil
-        end
+      Map.get(args, "with_claude") in [true, "true"] ->
+        :claude
+
+      true ->
+        nil
     end
   end
 

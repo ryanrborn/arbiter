@@ -12,7 +12,7 @@ Run `arb prime` at the start of every session.
 You coordinate; the fleet executes. Core loop:
 
 1. File an issue with crisp acceptance criteria, difficulty, and priority.
-2. Sling to a ship (`arb sling <id> [<ship>] --with-claude`).
+2. Sling to a ship (`arb sling <id> [<ship>]`).
 3. Monitor — `arb prime` / `arb worker show <id>` / `arb worker list`.
 4. Tribunal (pre-merge review gate) escalates for your judgment; decide, don't
    rubber-stamp.
