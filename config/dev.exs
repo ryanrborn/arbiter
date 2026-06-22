@@ -35,10 +35,10 @@ config :arbiter_web, ArbiterWeb.Endpoint,
   live_reload: [
     web_console_logger: true,
     patterns: [
-      ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$"E,
-      ~r"priv/gettext/.*\.po$"E,
-      ~r"lib/arbiter_web/router\.ex$"E,
-      ~r"lib/arbiter_web/(controllers|live|components)/.*\.(ex|heex)$"E
+      ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
+      ~r"priv/gettext/.*\.po$",
+      ~r"lib/arbiter_web/router\.ex$",
+      ~r"lib/arbiter_web/(controllers|live|components)/.*\.(ex|heex)$"
     ]
   ]
 
