@@ -3,8 +3,8 @@
 **Status:** design proposal (this is the spike deliverable; not yet approved)
 **Date:** 2026-06-03
 **Task:** bd-c6xf18
-**Author:** acolyte
-**Reviewer of record:** Tribunal (this branch)
+**Author:** worker
+**Reviewer of record:** review gate (this branch)
 **Depends on:** bd-3rdlgp (usage ledger — landed on `feature/77`, not yet on `main`)
 
 ## TL;DR
@@ -15,7 +15,7 @@ until we have ledger data showing that today's pain — cost or rate-limits —
 isn't already cured by the two cheaper levers we have not yet pulled:**
 
 1. **Anthropic model-tiering inside the existing Claude harness**
-   (Haiku for trivial, Sonnet by default, Opus for hard / for Tribunal review).
+   (Haiku for trivial, Sonnet by default, Opus for hard / review gate work).
    Claude Code already accepts `--model`; this is a one-line argv change plus a
    workspace config knob.
 2. **Multi-key rotation inside the Claude adapter** for rate-limit relief, with
@@ -24,7 +24,7 @@ isn't already cured by the two cheaper levers we have not yet pulled:**
 Both are reversible and measurable through the existing `Arbiter.Usage.Event`
 ledger. A multi-vendor adapter, by contrast, is ~3–5 days per harness *plus*
 ongoing maintenance against an upstream CLI we don't control, *plus* the very
-real risk that a weaker agent's higher Tribunal-rejection rate eats the cost
+real risk that a weaker agent's higher review-gate rejection rate eats the cost
 savings in rework.
 
 The harness *abstraction* is still worth building now (it is also the seam where
@@ -47,25 +47,25 @@ without committing to it.
 
 ## 2. What ships today
 
-`Arbiter.Polecat.ClaudeSession` is the only worker harness. Its surface is:
+`Arbiter.Worker.ClaudeSession` is the only worker harness. Its surface is:
 
 - **Spawn:** `Port.open/2` on `claude --print <prompt> --output-format stream-json --verbose`,
   wrapped in `sh -c 'exec "$@" < /dev/null'` so the child's stdin closes cleanly.
-- **Owner:** the parent `Arbiter.Polecat` GenServer.
+- **Owner:** the parent `Arbiter.Worker` GenServer.
 - **Stream:** per-line JSON events (`system/init`, `assistant`, `user`/tool_result,
   `result`). The session module parses these into display lines and pushes to
-  PubSub topic `polecat:<task_id>`.
+  PubSub topic `worker:<task_id>`.
 - **Completion sentinel:** a regex `~r/\barb done\b/` matched only against
-  assistant text (not tool output) — so an acolyte that greps for "arb done"
+  assistant text (not tool output) — so a worker that greps for "arb done"
   can't false-complete.
 - **Usage capture:** `ClaudeSession.absorb_usage/2` parses `init.model` and
-  `result.usage`/`result.total_cost_usd` into a payload that the polecat writes
+  `result.usage`/`result.total_cost_usd` into a payload that the worker writes
   to `Arbiter.Usage.Event` on session exit. The Event row already has a
   `provider` column ("claude" today) — the schema is pre-shaped for non-Claude
   agents.
 
-The `Sling.maybe_start_claude/4` call in `apps/arbiter/lib/arbiter/polecat/sling.ex`
-is the one site where Claude is named. Tribunal spawns its own
+The `Dispatch.maybe_start_agent/4` call in `apps/arbiter/lib/arbiter/worker/dispatch.ex`
+is the one site where Claude is named. The review gate spawns its own
 `ClaudeSession` for the reviewer pass — second site.
 
 There is **no model knob** today. Whatever default model Claude Code picks is
@@ -105,10 +105,10 @@ The proposal copies that shape verbatim. New names:
 
 ### 4.1 `Arbiter.Agents.Agent` behaviour
 
-The contract is intentionally narrow. The polecat is the port owner; the
+The contract is intentionally narrow. The worker is the port owner; the
 adapter only *produces argv*, *parses events*, *recognizes completion*, and
 *surfaces structured usage*. Everything stateful (port ownership, PubSub
-broadcast, line-cap buffering, durable log append) stays in the polecat /
+broadcast, line-cap buffering, durable log append) stays in the worker /
 session module.
 
 ```elixir
@@ -211,14 +211,14 @@ Missing keys fall back to `{type: "claude", config: {model: <CLI default>}}` —
 no surprises for existing workspaces.
 
 The `agent` block also carries a `security` sub-object — the normalized,
-provider-agnostic acolyte permission + sandbox posture (`mode`, `allow`,
+provider-agnostic worker permission + sandbox posture (`mode`, `allow`,
 `deny`, `sandbox`). It is resolved by `Arbiter.Agents.SecurityPolicy` and
 mapped per-adapter (`Arbiter.Agents.Claude.Security`). See
-`docs/acolyte-security.md` (bd-9u10op) for the full shape and the safe
+`docs/worker-security.md` (bd-9u10op) for the full shape and the safe
 defaults; it is omitted here to keep this section focused on routing.
 
-`review_agent` is independent of `agent`. The Tribunal-stronger-than-worker
-pattern (cheap acolyte writes, stronger reviewer judges) is expressed by
+`review_agent` is independent of `agent`. The review-gate-stronger-than-worker
+pattern (cheap worker writes, stronger reviewer judges) is expressed by
 asymmetric config. Same shape for both, so a workspace could also flip it
 (strong worker, cheap reviewer) if data ever supports that.
 
@@ -301,13 +301,13 @@ Workspace override example:
 A rule merges on top of the default mapping for that tier — keys the
 rule omits keep their defaults.
 
-### 4.5 Where the seam cuts in `Sling`
+### 4.5 Where the seam cuts in `Dispatch`
 
-Today (sling.ex:309–343):
+Today (dispatch.ex):
 
 ```elixir
-defp maybe_start_claude(%Issue{} = task, polecat_pid, worktree_path, opts) do
-  case Keyword.get(opts, :start_claude, false) do
+defp maybe_start_agent(%Issue{} = task, worker_pid, worktree_path, opts) do
+  case Keyword.get(opts, :start_agent, false) do
     true ->
       session_opts = [...prompt: prompt_for(task)]
       ClaudeSession.start(session_opts)
@@ -319,14 +319,14 @@ end
 After Phase B:
 
 ```elixir
-defp maybe_start_agent(%Issue{} = task, polecat_pid, worktree_path, opts) do
+defp maybe_start_agent(%Issue{} = task, worker_pid, worktree_path, opts) do
   case Keyword.get(opts, :start_agent, false) do
     true ->
       workspace = load_workspace(task)
       agent_choice = Agents.Routing.choose(task, workspace, ledger_snapshot())
       Agents.prepare(workspace)
       AgentSession.start(
-        owner: polecat_pid,
+        owner: worker_pid,
         worktree_path: worktree_path,
         agent: agent_choice,                # %{type:, config:}
         prompt: prompt_for(task),
@@ -347,13 +347,13 @@ only the implementation moves.
 
 **What it is:** add `--model haiku|sonnet|opus` to the existing default argv,
 sourced from `workspace.config["agent"]["model"]` (or a workspace knob using the
-existing config shape, with no new "agent" sub-object). Tribunal reviewer reads
+existing config shape, with no new "agent" sub-object). The reviewer reads
 the same knob from `review_agent.model`.
 
 **Where it shines:** captures most of the cost win. Haiku is roughly 5× cheaper
 than Sonnet on input tokens (per Anthropic's public pricing — verify before
 committing), so a workspace that routes P3/P4 tasks to Haiku can plausibly halve
-its acolyte spend with zero new harness code. The Tribunal already spawns a
+its worker spend with zero new harness code. The review gate already spawns a
 distinct second session, so making *that* one Opus while keeping the worker on
 Sonnet is asymmetric routing for free.
 
@@ -362,7 +362,7 @@ binds) and doesn't address resilience (Anthropic outages take the whole system
 down).
 
 **Cost:** ~1–2 days end-to-end, including a workspace migration and a CLI flag
-on `arb sling`.
+on `arb dispatch`.
 
 ### 5.2 Multi-key / multi-account rotation, inside the Claude adapter
 
@@ -391,9 +391,9 @@ enough for trivial tasks, the per-token cost is ~zero).
 **Where it fails:** quality variance is the silent tax. Claude Code is, today,
 the strongest autonomous coding harness — that is the explicit framing in the
 task description and matches every benchmark we've seen. A task that fails
-Tribunal once costs two Claude-Code-Opus reviewer sessions plus one acolyte
+the review gate once costs two Claude-Code-Opus reviewer sessions plus one worker
 session of whatever-we-routed-to. If routing a P3 task to a weaker harness
-raises the Tribunal-rejection rate from, say, 10% to 30%, the rework dominates
+raises the rejection rate from, say, 10% to 30%, the rework dominates
 the per-token savings.
 
 **Cost:** ~3–5 days *per adapter* to MVP, plus a permanent maintenance tax
@@ -405,7 +405,7 @@ delta without running the experiment**.
 
 | Risk | Treatment |
 |---|---|
-| Quality variance — weaker agent → more Tribunal rejections → *more* tokens, not fewer | **Cannot estimate without running the experiment.** Recommendation: gate any non-Claude adapter on a measured A/B: same set of representative tasks, two cohorts, compare *cost-per-merged-task* (not raw cost-per-token), using the existing `:work` + `:review` ledger split. |
+| Quality variance — weaker agent → more review gate rejections → *more* tokens, not fewer | **Cannot estimate without running the experiment.** Recommendation: gate any non-Claude adapter on a measured A/B: same set of representative tasks, two cohorts, compare *cost-per-merged-task* (not raw cost-per-token), using the existing `:work` + `:review` ledger split. |
 | Maintenance cost of N adapters | Materially real. Each adapter is a CLI we don't own, a stream format that can change, a tool protocol that can change. Mitigation: do not ship an adapter for a vendor whose CLI doesn't have a stable stream-events flag and a versioned release cadence. |
 | Normalized cost model | The Usage.Event schema (already shipped on `feature/77`) has `provider`, `tokens_in/out`, `cache_*`, `cost_usd`, `duration_ms`. That is the right shape — adapters just need to fill it. Normalization is a *write-time* concern in each adapter, not a runtime concern in the dispatcher. |
 | Cheaper levers first | Adopted as the recommendation. Both ship before the first non-Claude adapter. |
@@ -420,12 +420,12 @@ Each phase is independently shippable and reversible.
   `workspace.config["agent"]["model"]` (introduce the `"agent"` sub-object now
   even though there's no adapter machinery yet — same shape stays valid in
   Phase B). **Landed alongside Phase B's `Agents.Claude.default_argv/2`.**
-- `arb sling --model <name>` as the one-shot override. **Threaded through
-  CLI → `/api/polecats/sling` → `Sling.sling/2` → `apply_model_override/2`,
+- `arb dispatch --model <name>` as the one-shot override. **Threaded through
+  CLI → `/api/workers/dispatch` → `Dispatch.dispatch/2` → `apply_model_override/2`,
   wins over both the workspace default and any routing rule.**
-- Tribunal reads `review_agent.model` similarly. Default unset means "use the
+- The review gate reads `review_agent.model` similarly. Default unset means "use the
   CLI default" (no behavioral change for existing workspaces). **Implemented
-  via `Tribunal.build_session_opts/5`: reviewer spawns route through
+  via `ReviewGate.build_session_opts/5`: reviewer spawns route through
   `Agents.reviewer_for_workspace/1` + `Agents.prepare(ws, :review_agent)`;
   implementer (revise) spawns route through `Routing.choose/3` so a revise
   round honors the same policy the initial dispatch did.**
@@ -437,9 +437,9 @@ Each phase is independently shippable and reversible.
 - Introduce `Arbiter.Agents.Agent`, `Arbiter.Agents`, `Arbiter.Agents.Claude`.
 - Lift `ClaudeSession`'s parsing into the `Claude` adapter, leaving the port-
   owner + buffering + PubSub plumbing in a renamed `AgentSession` module.
-- `Sling.maybe_start_claude` → `Sling.maybe_start_agent`; flag rename with
+- `Dispatch.maybe_start_claude` → `Dispatch.maybe_start_agent`; flag rename with
   alias.
-- Tribunal's reviewer spawn goes through the same path.
+- The review gate's reviewer spawn goes through the same path.
 - `:static` and `:by_priority` routing policies.
 
 Exit criteria: existing test suite passes unchanged; new tests cover the
@@ -463,7 +463,7 @@ dispatcher and the `:by_priority` policy.
     oriented; would need a non-trivial adapter shim.
   - **gemini-cli**: a moving target; assess at the time.
 - Build the adapter. Run the A/B (~10–20 representative tasks each cohort).
-- **Stop here** if the second adapter shows >20% Tribunal-rejection-rate delta
+- **Stop here** if the second adapter shows >20% review-gate rejection-rate delta
   on cohort tasks — that is the "more tokens, not fewer" outcome and the
   recommendation is to revert.
 
@@ -473,7 +473,7 @@ Only meaningful once there are two adapters in flight.
 
 ## 8. What this design does NOT do
 
-- **Does not change the Tribunal protocol.** Same `VERDICT: APPROVE | REQUEST_CHANGES`
+- **Does not change the review gate protocol.** Same `VERDICT: APPROVE | REQUEST_CHANGES`
   sentinel; same `arb done` completion sentinel. Adapters that don't speak this
   protocol natively must be prompt-engineered to do so — same way we prompt-
   engineer Claude today.
@@ -481,10 +481,10 @@ Only meaningful once there are two adapters in flight.
   neutral. Adapters just fill in `provider` and the structured fields they
   have. Missing fields → `nil` (already supported).
 - **Does not introduce a queue or a scheduler.** Routing is a synchronous
-  per-sling decision. If we later want capacity controls, a `Task.Supervisor`
-  with `max_children` slots in cleanly — see decision-doc Tier 3.
+  per-dispatch decision. If we later want capacity controls, a `Task.Supervisor`
+  with `max_children` slots in cleanly.
 - **Does not solve "rework attribution"** beyond what the ledger already gives
-  us. The ledger writes a new `:work` row on every re-sling, so per-task spend
+  us. The ledger writes a new `:work` row on every re-dispatch, so per-task spend
   *including* rework is already queryable. Routing policy can read that — it
   just isn't useful until we have two adapters to swing between.
 
@@ -492,7 +492,7 @@ Only meaningful once there are two adapters in flight.
 
 These do not block Phase A or Phase B. They block Phase D.
 
-1. **What's the measured Tribunal-rejection-rate delta between Claude-Sonnet
+1. **What's the measured review-gate rejection-rate delta between Claude-Sonnet
    and a second vendor?** Cannot answer without running the A/B.
 2. **What's the per-token pricing normalization story across vendors?**
    The ledger schema supports `cost_usd`; adapters compute it. Per-cached-token
@@ -502,25 +502,25 @@ These do not block Phase A or Phase B. They block Phase D.
    Stage 1: workspace-level + per-priority. Stage 2 (only if needed):
    `task.agent_type` override column, mirroring `task.tracker_type`.
 4. **Failover semantics.** If the active agent's CLI is missing, do we fall
-   back to a different agent or fail the sling? Recommendation: *fail* — silent
+   back to a different agent or fail the dispatch? Recommendation: *fail* — silent
    fallback is a footgun for cost-routing decisions.
 
 ## 10. Recommendation, restated
 
 **Build the abstraction in Phase B; ship the cheap wins in Phase A; do not ship
-a second vendor until ledger data justifies it.** The Tribunal gate makes the
+a second vendor until ledger data justifies it.** The review gate makes the
 heterogeneous-agent experiment safer to *eventually* run than it would be
 without a quality gate, but it does not make the experiment cheap or risk-free.
 Measure first.
 
 The single most useful thing this work unlocks is **legibility of cost**:
 once a workspace can route P0 to Opus and P4 to Haiku and have those choices
-show up cleanly in `arb usage`, we'll see the shape of the spend and the
+show up cleanly in `arb usage`, we'll see the shape of the worker spend and the
 multi-vendor question will answer itself.
 
 ## 11. Gemini usage scraping — findings (bd-guegdl)
 
-`bd-guegdl` added the `provider` sling parameter (CLI `--provider`, MCP
+`bd-guegdl` added the `provider` dispatch parameter (CLI `--provider`, MCP
 `provider`) and, as part of it, spiked **what the Gemini CLI actually emits** so
 we can decide a usage-parse strategy rather than guessing.
 
@@ -531,7 +531,7 @@ we can decide a usage-parse strategy rather than guessing.
   time via the new optional `Agent.resolved_model/1` callback
   (`Arbiter.Agents.Gemini.resolved_model/1`) and threaded onto the session
   (`ClaudeSession` `:provider` / `:model` opts), because the Gemini CLI emits no
-  model the polecat can read mid-stream on the current spawn path (`agy -p` /
+  model the worker can read mid-stream on the current spawn path (`agy -p` /
   `gemini -p`, no `--output-format`).
 * **Cost and token counts are NOT yet captured for Gemini.** See below.
 

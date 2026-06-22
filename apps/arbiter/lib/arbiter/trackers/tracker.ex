@@ -7,9 +7,6 @@ defmodule Arbiter.Trackers.Tracker do
   resolves which adapter to use for a given task by reading
   `issue.tracker_type`.
 
-  See `docs/decision-doc.md` section 8 for the design rationale and the full
-  matrix of adapters / formats.
-
   ## Callback semantics
 
     * `fetch/1` — pull the canonical record from the tracker. Shape is

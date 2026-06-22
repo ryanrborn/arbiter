@@ -1,11 +1,11 @@
-# Acolyte security: configurable permissions & sandboxing
+# Worker security: configurable permissions & sandboxing
 
 **Task:** bd-9u10op · **Builds on:** bd-c6xf18 (pluggable agent harness),
 bd-3y2mda (config-dir isolation)
 
 ## The problem this fixes
 
-An acolyte (a worker or reviewer) is an autonomous coding agent spawned in a
+A worker (a worker or reviewer) is an autonomous coding agent spawned in a
 git worktree via `claude --print …`. Before this change it ran with **no
 permission flags**, so it silently inherited the **host operator's** global
 `~/.claude/settings.json` — which on a developer install routinely carried
@@ -14,8 +14,8 @@ on the host, with full filesystem and network reach, contained to its worktree
 only by convention.
 
 On 2026-06-03 that posture bit us: with an empty deny and no sandbox, a
-stack-lifecycle acolyte's `git merge` wedged the live server. There was no
-Arbiter-level way to say "an acolyte in this domain may do X but not Y, and is
+stack-lifecycle worker's `git merge` wedged the live server. There was no
+Arbiter-level way to say "a worker in this domain may do X but not Y, and is
 isolated to its worktree."
 
 This change makes the posture **explicit, configurable, and
@@ -55,11 +55,11 @@ syntax.
 
 #### Why `:bypass` is the headless-safe default
 
-Acolytes are headless — they run via `claude --print` with no human watching.
+Workers are headless — they run via `claude --print` with no human watching.
 The interactive permission classifier in `:auto` mode was designed for
 *interactive* sessions: it can pause and ask "do you want to allow this?" When
-no human is present, that prompt has no one to answer it, and the acolyte
-freezes mid-task. The directive stalls silently.
+no human is present, that prompt has no one to answer it, and the worker
+freezes mid-task. The task stalls silently.
 
 `:bypass` uses `--dangerously-skip-permissions` to skip the interactive
 classifier entirely, preventing headless freezes. Crucially, the deny list is a
@@ -94,7 +94,7 @@ workspace config removes those categories from the per-spawn `--settings` deny
 list, but the config-dir floor still carries them. The practical effect is that
 the config-dir safe-default denies are a **hard minimum** that cannot be removed
 through workspace config alone — only changing `SecurityPolicy.base/0` or the
-install-level `acolyte_security_policy` app env removes them.
+install-level `:acolyte_security_policy` app env removes them.
 
 ### Sandbox
 
@@ -153,7 +153,7 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 
 ### Per-task / per-dispatch override
 
-`Arbiter.Polecat.Sling.sling/2` accepts a `:security` map (same shape as
+`Arbiter.Worker.Dispatch.dispatch/2` accepts a `:security` map (same shape as
 `agent.security`) or a `:security_mode` shorthand, layered last.
 
 ### Resolution precedence
@@ -177,7 +177,7 @@ that sets them.
 
 ### No more host inheritance
 
-`Arbiter.Agents.Claude.ConfigDir` runs every acolyte against an isolated
+`Arbiter.Agents.Claude.ConfigDir` runs every worker against an isolated
 `CLAUDE_CONFIG_DIR`. It now:
 
 * **symlinks only `.credentials.json`** (OAuth/token refresh) from the operator
@@ -186,7 +186,7 @@ that sets them.
   non-empty-deny floor — instead of symlinking the operator's, and
 * writes its own task-focused `CLAUDE.md` (never the operator's persona).
 
-So no acolyte spawn — worker, reviewer, or bare ad-hoc run — inherits the host
+So no worker spawn — worker, reviewer, or bare ad-hoc run — inherits the host
 operator's permission posture.
 
 ## Provider-agnostic by construction
@@ -210,7 +210,7 @@ whether the declared posture is actually being enforced by the running adapter.
 
 * **`arb prime`** — a `security:` block in the active-workspace section (mode,
   sandbox, deny counts).
-* **Dashboard** — a per-acolyte permission-mode badge on the active workers
+* **Dashboard** — a per-worker permission-mode badge on the active workers
   list (ghost for `auto`, warning for `strict`, error for `bypass`).
 * **REST** — `GET /api/workspaces/:id` includes a resolved `security_posture`
   object with `provider`, `policy_enforced`, and the full policy summary. This
