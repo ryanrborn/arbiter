@@ -343,6 +343,109 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  Bring the worktree's current branch up to date with `target_branch` by
+  fetching `origin/<target_branch>` and merging it into the branch.
+
+  Run before a code review so the reviewer sees the branch against the CURRENT
+  target tip rather than the (possibly older) base it was cut from. When the
+  target advances mid-run, an un-updated branch makes the target's unrelated
+  commits look like the branch's own work — the bd-ased52 false-reject. Merging
+  (rather than rebasing) keeps history append-only, so a branch with an
+  already-open PR does not need a force-push.
+
+  Returns:
+
+    * `{:ok, :up_to_date}` — `origin/<target>` was already an ancestor of HEAD;
+      nothing to merge.
+    * `{:ok, :merged}` — `origin/<target>` merged cleanly into the branch.
+    * `{:error, {:conflict, %{files: [path], output: raw}}}` — the merge hit
+      textual conflicts; the merge was ABORTED so the worktree is left clean on
+      the branch's own HEAD (never half-merged). The caller must NOT review a
+      conflicted branch — it should escalate for resolution (mirrors #97).
+    * `{:error, reason}` — `origin` is missing, the fetch failed, or git failed
+      for another reason. Callers should treat this as fail-open (proceed
+      without the update); a merge-base diff still isolates the branch's own
+      changes.
+  """
+  @spec update_from_target(path(), String.t()) ::
+          {:ok, :up_to_date | :merged}
+          | {:error, {:conflict, %{files: [String.t()], output: String.t()}} | error_reason()}
+  def update_from_target(path, target_branch)
+      when is_binary(path) and is_binary(target_branch) do
+    ref = "origin/" <> target_branch
+
+    with :ok <- ensure_origin_remote(path),
+         :ok <- fetch_origin_branch(path, target_branch),
+         :ok <- ensure_origin_ref(path, target_branch) do
+      merge_target(path, ref)
+    end
+  end
+
+  # Merge `ref` (origin/<target>) into the current branch. If `ref` is already
+  # an ancestor of HEAD there is nothing to do. On a conflicted merge, capture
+  # the conflicting paths (while the index still holds them), abort, and report
+  # the conflict — never leave the worktree half-merged.
+  defp merge_target(path, ref) do
+    case run_git(["merge-base", "--is-ancestor", ref, "HEAD"], cd: path) do
+      {:ok, _} ->
+        {:ok, :up_to_date}
+
+      {:error, _not_ancestor} ->
+        case run_git(["merge", "--no-edit", ref], cd: path) do
+          {:ok, _} -> {:ok, :merged}
+          {:error, {:git_failed, output}} -> abort_merge(path, output)
+        end
+    end
+  end
+
+  defp abort_merge(path, output) do
+    conflicts =
+      case run_git(["diff", "--name-only", "--diff-filter=U"], cd: path) do
+        {:ok, out} -> String.split(out, "\n", trim: true)
+        {:error, _} -> []
+      end
+
+    _ = run_git(["merge", "--abort"], cd: path)
+
+    if conflicts == [] do
+      # A non-conflict merge failure (e.g. local changes would be overwritten);
+      # surface as a generic git error so the caller fails open.
+      {:error, {:git_failed, output}}
+    else
+      {:error, {:conflict, %{files: conflicts, output: output}}}
+    end
+  end
+
+  @doc """
+  Return the SHA of the merge-base (fork point) between the worktree's HEAD and
+  `target_branch`, preferring the fetched `origin/<target>` ref and falling
+  back to the local `<target>` ref.
+
+  The merge-base is the commit the branch was cut from. Diffing
+  `<merge_base>..HEAD` shows ONLY the branch's own changes — even when the
+  target advanced after the branch was cut, and even after `update_from_target/2`
+  merged the target in (the merge-base then equals the target tip). This is the
+  diff a reviewer must use to avoid mis-attributing the target's later commits
+  to the branch (bd-ased52). Returns `nil` if neither ref resolves or git fails.
+  """
+  @spec merge_base(path(), String.t()) :: String.t() | nil
+  def merge_base(path, target_branch)
+      when is_binary(path) and is_binary(target_branch) do
+    Enum.find_value(["origin/" <> target_branch, target_branch], fn ref ->
+      case run_git(["merge-base", ref, "HEAD"], cd: path) do
+        {:ok, out} ->
+          case String.trim(out) do
+            "" -> nil
+            sha -> sha
+          end
+
+        {:error, _} ->
+          nil
+      end
+    end)
+  end
+
+  @doc """
   Push the worktree at `path` to a remote.
 
   ## Options

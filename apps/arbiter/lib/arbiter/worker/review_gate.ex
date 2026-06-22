@@ -337,7 +337,13 @@ defmodule Arbiter.Worker.ReviewGate do
       # finish_revise/1 after each revise round. Used to:
       #   1. prove which commit the reviewer saw (surfaces in the prompt and thread)
       #   2. detect whether the revise implementer actually committed new changes
-      head_sha: nil
+      head_sha: nil,
+      # bd-ased52: the merge-base (fork point) between the branch and its target,
+      # resolved once at reviewer spawn time after the branch is brought current.
+      # The reviewer (and the escalation diff) diff `base_sha..HEAD` so commits
+      # that landed on the target AFTER the branch was cut are never attributed
+      # to the branch. nil when no worktree / git is unavailable.
+      base_sha: nil
     }
 
     Process.monitor(author)
@@ -346,6 +352,26 @@ defmodule Arbiter.Worker.ReviewGate do
 
   @impl true
   def handle_continue(:spawn_reviewer, state) do
+    # bd-ased52: bring the branch up to date with its target BEFORE anything
+    # else, so the reviewer diffs against the current target tip rather than the
+    # stale base it was cut from. A branch that conflicts with the advanced
+    # target escalates instead of being reviewed stale.
+    case prepare_branch_for_review(state) do
+      {:error, {:conflict, summons}} ->
+        Logger.warning(
+          "ReviewGate: branch `#{state.branch}` conflicts with `#{state.target_branch}` " <>
+            "for task=#{state.task_id}; escalating instead of reviewing a stale base"
+        )
+
+        report(state, {:request_changes, summons})
+        {:stop, :normal, %{state | reported?: true}}
+
+      {:ok, state} ->
+        spawn_reviewer_after_update(state)
+    end
+  end
+
+  defp spawn_reviewer_after_update(state) do
     # bd-1mksks: verify that commits exist on the branch BEFORE spawning the
     # reviewer. The worker commit gate (bd-ofql8k) already guards the initial
     # dispatch, but this check is a second layer of defence that also covers the
@@ -386,6 +412,96 @@ defmodule Arbiter.Worker.ReviewGate do
             {:stop, :normal, %{state | reported?: true}}
         end
     end
+  end
+
+  # ---- bring the branch current with its target (bd-ased52) ---------------
+
+  # Before reviewing, bring the branch up to date with its target so the
+  # reviewer diffs against the CURRENT target tip, not the stale base it was cut
+  # from. When the target advances mid-run, an un-updated branch makes the
+  # target's unrelated commits look like the branch's own work — a phantom
+  # "out-of-scope" / "empty branch" finding that false-rejects correct work.
+  #
+  #   * clean update (merged / already up to date) → proceed; record the
+  #     merge-base so the reviewer diff isolates the branch's own changes.
+  #   * conflict → do NOT review a stale/conflicted branch. Return a conflict
+  #     Summons so the gate escalates for resolution (mirrors the #97
+  #     abort-on-conflict posture; the merge is aborted by update_from_target/2,
+  #     leaving the worktree clean).
+  #   * any other git error (no origin, fetch failed) → fail open and proceed;
+  #     the merge-base diff still isolates the branch's own changes.
+  #
+  # Skipped when there is no worktree, or the worktree is not checked out on the
+  # branch under review (mirrors reviewer_commit_check/1's branch guard) — an
+  # ad-hoc / test rig pointed at a repo on `main` must not try to merge.
+  defp prepare_branch_for_review(
+         %{worktree_path: wt, branch: branch, target_branch: target} = state
+       )
+       when is_binary(wt) do
+    case Arbiter.Worker.Worktree.current_branch(wt) do
+      {:ok, ^branch} ->
+        case Arbiter.Worker.Worktree.update_from_target(wt, target) do
+          {:ok, result} ->
+            Logger.info(
+              "ReviewGate: branch `#{branch}` #{result} with `#{target}` for task=#{state.task_id}"
+            )
+
+            {:ok, with_base_sha(state)}
+
+          {:error, {:conflict, info}} ->
+            {:error, {:conflict, conflict_summons(state, info)}}
+
+          {:error, reason} ->
+            Logger.warning(
+              "ReviewGate: could not update branch `#{branch}` from `#{target}` for " <>
+                "task=#{state.task_id} (proceeding with merge-base diff): #{inspect(reason)}"
+            )
+
+            {:ok, with_base_sha(state)}
+        end
+
+      _ ->
+        # Worktree is on a different branch (or current_branch failed) — don't
+        # merge into something we don't own; still resolve the merge-base for
+        # the reviewer diff.
+        {:ok, with_base_sha(state)}
+    end
+  end
+
+  defp prepare_branch_for_review(state), do: {:ok, with_base_sha(state)}
+
+  defp with_base_sha(%{worktree_path: wt, target_branch: target} = state) when is_binary(wt) do
+    %{state | base_sha: Arbiter.Worker.Worktree.merge_base(wt, target)}
+  end
+
+  defp with_base_sha(state), do: state
+
+  # The escalation findings for a branch that conflicts with its target: name
+  # the conflicting files and instruct resolution. A request_changes verdict, so
+  # the author parks + escalates to the Admiral rather than merging stale work.
+  defp conflict_summons(state, %{files: files}) do
+    files_block =
+      case files do
+        [] -> "  (conflicting paths could not be determined)"
+        _ -> Enum.map_join(files, "\n", &("  - " <> &1))
+      end
+
+    """
+    Branch `#{state.branch}` conflicts with its target `#{state.target_branch}`
+    and cannot be reviewed in a stale/conflicted state. The review gate fetched
+    `origin/#{state.target_branch}` and tried to merge it into the branch to bring
+    the diff current, but the merge hit textual conflicts. The merge was ABORTED,
+    so the worktree is left clean on the branch's own HEAD.
+
+    Resolve the conflict before review: merge or rebase `origin/#{state.target_branch}`
+    into `#{state.branch}`, resolve the conflicting files, commit, and re-run the
+    gate. Surfacing the conflict here is intentional — reviewing a stale base would
+    mis-attribute the target's commits to this branch (bd-ased52).
+
+    Conflicting files:
+    #{files_block}
+    """
+    |> String.trim()
   end
 
   # A ReviewGate is NOT a worker, but it lives under Arbiter.Worker.Supervisor —
@@ -847,7 +963,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     #{render_thread(state.thread)}
 
-    ## Current diff (#{state.branch} vs #{state.target_branch})
+    ## Current diff (#{state.branch} since #{diff_range(state)})
 
     ```
     #{current_diff(state)}
@@ -877,9 +993,10 @@ defmodule Arbiter.Worker.ReviewGate do
   defp role_label(:system), do: "ReviewGate"
 
   # The current diff of the branch under review, capped. Best-effort: the
-  # escalation is still useful without it.
-  defp current_diff(%{worktree_path: wt, target_branch: tb}) when is_binary(wt) do
-    case System.cmd("git", ["-C", wt, "diff", "#{tb}...HEAD"], stderr_to_stdout: true) do
+  # escalation is still useful without it. Diffs against the merge-base
+  # (`diff_range/1`) so the target's later commits never appear in the payload.
+  defp current_diff(%{worktree_path: wt} = state) when is_binary(wt) do
+    case System.cmd("git", ["-C", wt, "diff", diff_range(state)], stderr_to_stdout: true) do
       {out, 0} -> cap(out, @diff_cap_bytes)
       {out, _} -> "(could not compute diff)\n" <> cap(out, 2_000)
     end
@@ -890,6 +1007,13 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp current_diff(_state), do: "(diff unavailable — no worktree)"
+
+  # The git range the reviewer (and the escalation diff) should use: the
+  # merge-base when known (`base_sha..HEAD` isolates the branch's own changes
+  # even after the target advanced), else the three-dot form against the target
+  # (which also reaches the merge-base). bd-ased52.
+  defp diff_range(%{base_sha: base}) when is_binary(base), do: "#{base}..HEAD"
+  defp diff_range(%{target_branch: target}), do: "#{target}...HEAD"
 
   # bd-ofql8k defense-in-depth: an empty `base..HEAD` diff is NOT the same as
   # "no work" — the worker may have edited files and forgotten to commit. Pair
@@ -1276,20 +1400,16 @@ defmodule Arbiter.Worker.ReviewGate do
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
     #{head_sha_instruction(state)}
-    #{pr_review_block(state)}Review ONLY the diff. Inspect it with, e.g.:
-
-        git diff #{state.target_branch}...HEAD
-        git log --oneline #{state.target_branch}..HEAD
-
+    #{pr_review_block(state)}#{diff_guidance(state)}
     Judge the change against the acceptance criteria AND for correctness,
     regressions, and obvious defects.
 
-    NOTE (bd-ofql8k): if `git diff #{state.target_branch}...HEAD` looks empty,
-    also run `git status` BEFORE concluding "no code exists". An empty
-    `base..HEAD` plus a non-empty `git status` means the implementer edited
-    files but forgot to commit — the work is in the worktree, just not in
-    history. In that case REQUEST_CHANGES with a finding that names the
-    uncommitted files and asks for a commit, rather than reporting "no work."
+    NOTE (bd-ofql8k): if the diff above looks empty, also run `git status` BEFORE
+    concluding "no code exists". An empty diff plus a non-empty `git status` means
+    the implementer edited files but forgot to commit — the work is in the
+    worktree, just not in history. In that case REQUEST_CHANGES with a finding
+    that names the uncommitted files and asks for a commit, rather than reporting
+    "no work."
 
     *** ABSOLUTE RULE: DO NOT boot the app. No `mix phx.server`, no `iex -S mix`,
     no `mix run`. Running a second app instance is hazardous. You review the diff
@@ -1435,6 +1555,46 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp work_so_far_briefing(_state), do: ""
+
+  # bd-ased52: tell the reviewer to diff against the merge-base (the fork point),
+  # NOT the moving target tip. When `base_sha` is known (the normal path, after
+  # the branch is brought current), the prompt names the exact commit so the
+  # reviewer cannot accidentally run `git diff <target>..HEAD` (two-dot) — which,
+  # if the target advanced during the run, shows the target's unrelated commits
+  # as if THIS branch made them and produces phantom out-of-scope findings.
+  # Without a worktree (`base_sha` nil) it falls back to the three-dot form,
+  # which also reaches the merge-base.
+  defp diff_guidance(%{base_sha: base, target_branch: target}) when is_binary(base) do
+    """
+    This branch may have been cut from an OLDER `#{target}` than the current tip,
+    and `#{target}` can advance DURING the run. Review ONLY this branch's own
+    changes by diffing against the merge-base (the fork point) — commit `#{base}` —
+    NOT the moving `#{target}` tip:
+
+        git diff #{base}..HEAD
+        git log --oneline #{base}..HEAD
+
+    Do NOT use `git diff #{target}..HEAD` (two-dot against the tip): if `#{target}`
+    advanced after this branch was cut, that command shows the target's unrelated
+    commits as if THIS branch made them — phantom "out-of-scope" / "empty branch"
+    findings against code the implementer never wrote. (`git diff #{target}...HEAD`,
+    three-dot, reaches the same merge-base and is also safe.)
+    """
+  end
+
+  defp diff_guidance(%{target_branch: target}) do
+    """
+    Review ONLY the diff. Diff against the merge-base so commits that landed on
+    `#{target}` after this branch was cut are not mis-attributed to the branch:
+
+        git diff #{target}...HEAD
+        git log --oneline #{target}..HEAD
+
+    Use the three-dot form (`#{target}...HEAD`); avoid two-dot `#{target}..HEAD`
+    for the diff — if the target advanced during the run it shows unrelated
+    `#{target}` commits as this branch's work.
+    """
+  end
 
   # bd-1mksks: embed the verified HEAD SHA into the review prompt so the
   # reviewer can confirm it is on the correct commit before running `git diff`.
