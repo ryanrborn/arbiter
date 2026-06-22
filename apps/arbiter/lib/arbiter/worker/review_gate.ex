@@ -1418,6 +1418,12 @@ defmodule Arbiter.Worker.ReviewGate do
 
     #{async_tool_block(state)}
 
+    NOTE: If you run tests or any build command, wrap it with a hard timeout so
+    a cold compilation pass cannot exhaust the reviewer session — e.g.
+    `timeout 120 mix test`. If the command times out or fails to compile, issue
+    your VERDICT based on the diff alone and note that live test verification
+    was unavailable — do not wait indefinitely for output that will not arrive.
+
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
         VERDICT: APPROVE
