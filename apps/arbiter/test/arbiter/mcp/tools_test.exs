@@ -114,13 +114,17 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "full: false returns slim fields only", ctx do
-      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => false})
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => false})
+
       refute Map.has_key?(data, :notes)
       refute Map.has_key?(data, :auto_close)
     end
 
     test "full: true returns complete record including review fields", ctx do
-      assert {:ok, data} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+      assert {:ok, data} =
+               Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+
       assert Map.has_key?(data, :notes)
       assert Map.has_key?(data, :qa_notes)
       assert Map.has_key?(data, :deployment_notes)
@@ -686,7 +690,10 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, task} = Ash.create(Issue, %{title: "default dispatch", workspace_id: ctx.ws.id})
 
       assert {:error, {:invalid, msg}} =
-               Tools.worker_dispatch(ctx.coordinator, %{"task_id" => task.id, "repo" => "test/repo"})
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "test/repo"
+               })
 
       assert msg =~ "repo"
 
@@ -785,7 +792,9 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "pl-other", prefix: "plo"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign pc", workspace_id: other_ws.id})
 
-      {:ok, _pid} = Worker.start(task_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+      {:ok, _pid} =
+        Worker.start(task_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+
       on_exit(fn -> Worker.stop(foreign.id, :normal) end)
 
       assert {:ok, %{workers: workers}} = Tools.worker_list(ctx.coordinator, %{})
@@ -886,7 +895,9 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, here} = Tools.task_show(ctx.agnostic, %{"id" => ctx.task.id})
       assert here.id == ctx.task.id
 
-      assert {:ok, there} = Tools.task_show(ctx.agnostic, %{"id" => ctx.foreign.id, "full" => true})
+      assert {:ok, there} =
+               Tools.task_show(ctx.agnostic, %{"id" => ctx.foreign.id, "full" => true})
+
       assert there.id == ctx.foreign.id
       assert there.workspace_id == ctx.other_ws.id
     end

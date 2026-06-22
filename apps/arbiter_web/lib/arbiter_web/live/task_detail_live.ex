@@ -547,7 +547,10 @@ defmodule ArbiterWeb.TaskDetailLive do
                       ]}
                     >
                       <td>
-                        <span class={["badge badge-xs", run_step_class(Map.get(@usage_by_run, r.id), r)]}>
+                        <span class={[
+                          "badge badge-xs",
+                          run_step_class(Map.get(@usage_by_run, r.id), r)
+                        ]}>
                           {run_step_label(Map.get(@usage_by_run, r.id), r)}
                         </span>
                       </td>
@@ -574,8 +577,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                           class="btn btn-ghost btn-xs gap-1"
                           title="View full output"
                         >
-                          <.icon name="hero-arrow-top-right-on-square" class="size-3" />
-                          output
+                          <.icon name="hero-arrow-top-right-on-square" class="size-3" /> output
                         </.link>
                       </td>
                     </tr>
@@ -777,17 +779,21 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp run_step_label(%UsageEvent{step: :review}, _), do: "review"
   defp run_step_label(%UsageEvent{step: :other}, _), do: "other"
   defp run_step_label(%UsageEvent{step: :work}, _), do: "work"
+
   defp run_step_label(_, %Run{task_id: task_id}) when is_binary(task_id) do
     if String.ends_with?(task_id, "#review"), do: "review", else: "work"
   end
+
   defp run_step_label(_, _), do: "work"
 
   defp run_step_class(%UsageEvent{step: :review}, _), do: "badge-secondary"
   defp run_step_class(%UsageEvent{step: :other}, _), do: "badge-ghost"
   defp run_step_class(%UsageEvent{}, _), do: "badge-primary"
+
   defp run_step_class(_, %Run{task_id: task_id}) when is_binary(task_id) do
     if String.ends_with?(task_id, "#review"), do: "badge-secondary", else: "badge-primary"
   end
+
   defp run_step_class(_, _), do: "badge-primary"
 
   defp run_model_label(%UsageEvent{model: m}) when is_binary(m) do

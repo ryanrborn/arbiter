@@ -29,7 +29,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
     @impl true
     def resolve(args) do
-      if pid = Application.get_env(:arbiter, :test_resolver_pid), do: send(pid, {:resolve_called, args})
+      if pid = Application.get_env(:arbiter, :test_resolver_pid),
+        do: send(pid, {:resolve_called, args})
+
       {:ok, %{worker: :stub}}
     end
 
@@ -978,7 +980,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       workspace: ws
     } do
       {:ok, agent} =
-        Agent.start_link(fn -> %{205 => %{reviews: "APPROVED", pr: %{"mergeStateStatus" => "behind"}}} end)
+        Agent.start_link(fn ->
+          %{205 => %{reviews: "APPROVED", pr: %{"mergeStateStatus" => "behind"}}}
+        end)
 
       mutable_pr_stub(agent)
       task = adopted_task(ws, "#205", 2)
@@ -1013,7 +1017,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       on_exit(fn -> Application.delete_env(:arbiter, :test_resolver_pid) end)
 
       {:ok, agent} =
-        Agent.start_link(fn -> %{213 => %{reviews: "APPROVED", pr: %{"mergeStateStatus" => "behind"}}} end)
+        Agent.start_link(fn ->
+          %{213 => %{reviews: "APPROVED", pr: %{"mergeStateStatus" => "behind"}}}
+        end)
 
       mutable_pr_stub(agent)
       task = adopted_task(ws, "#213", 2)

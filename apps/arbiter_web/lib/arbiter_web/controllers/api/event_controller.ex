@@ -72,7 +72,11 @@ defmodule ArbiterWeb.Api.EventController do
 
   defp parse_topics(%{"subscribe" => s}) when is_binary(s) and s != "" do
     requested =
-      s |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+      s
+      |> String.split(",")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
 
     valid = Events.valid_topics()
     invalid = Enum.reject(requested, &(&1 in valid))

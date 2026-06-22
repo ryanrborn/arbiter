@@ -1024,7 +1024,10 @@ defmodule Arbiter.MCP.Tools do
 
   defp ensure_dispatch_depth(%Scope{depth: depth}) do
     max = MCP.max_depth()
-    if depth < max, do: :ok, else: {:error, {:unauthorized, "dispatch depth limit (#{max}) reached"}}
+
+    if depth < max,
+      do: :ok,
+      else: {:error, {:unauthorized, "dispatch depth limit (#{max}) reached"}}
   end
 
   # The opts common to every worker-dispatch tool (dispatch / resume / review):
@@ -1093,7 +1096,9 @@ defmodule Arbiter.MCP.Tools do
     do: "task #{id} is closed; reopen it before dispatching"
 
   defp dispatch_error_message(:no_repo_configured), do: "no repos configured for this workspace"
-  defp dispatch_error_message({:repo_not_found, repo}), do: "repo #{inspect(repo)} is not configured"
+
+  defp dispatch_error_message({:repo_not_found, repo}),
+    do: "repo #{inspect(repo)} is not configured"
 
   defp dispatch_error_message({:ambiguous_repo, repos}),
     do: "multiple repos available (#{Enum.join(repos, ", ")}); pass `repo` explicitly"

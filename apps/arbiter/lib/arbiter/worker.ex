@@ -1105,6 +1105,7 @@ defmodule Arbiter.Worker do
           end
 
         model = session_model || Map.get(session, :model)
+        had_model? = not is_nil(Map.get(meta, :model))
 
         meta =
           meta
@@ -1122,11 +1123,31 @@ defmodule Arbiter.Worker do
           broadcast_lifecycle(:updated, new_state)
         end
 
+        # Race-condition patch: if the worker already terminated (fail_now/complete_now
+        # fired) but model arrived late via a subsequent session event, write just the
+        # model column to the existing worker_runs row so it is never left NULL.
+        if not had_model? and not is_nil(model) and
+             new_state.status in [:completed, :failed] and
+             not is_nil(new_state.run_id) do
+          backfill_run_model(new_state.run_id, model, new_state.task_id)
+        end
+
         new_state
 
       _ ->
         state
     end
+  end
+
+  defp backfill_run_model(run_id, model, task_id) do
+    with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, %{model: model}, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("backfill_model", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("backfill_model", task_id, e)
   end
 
   defp maybe_put(map, _key, nil), do: map

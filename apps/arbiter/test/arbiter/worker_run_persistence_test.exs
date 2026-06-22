@@ -94,6 +94,71 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.model == "claude-opus-4-8"
   end
 
+  test "model backfilled onto Run row when session exit event arrives after terminal transition" do
+    # Regression: the race condition where fail_now fires before the stream-json
+    # init event is processed. The worker terminates with model=nil in meta; then
+    # the port's exit handler calls sync_session_meta which now finds the model
+    # and patches the existing DB row rather than leaving it NULL.
+    #
+    # We reproduce it by: failing the worker first (no model in meta), THEN
+    # opening a ClaudeSession with a stream-json fixture that emits an init event.
+    # Port data arrives after the terminal transition, so sync_session_meta fires
+    # on an already-failed worker — which is the exact race the backfill covers.
+    task_id = "bd-runmodelrace-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    # Fail the worker with no model in meta (simulates fail_now before session exit).
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.fail(pid, :uncommitted_at_completion)
+
+    [pre_run] = runs_for(task_id)
+    assert pre_run.status == :failed
+    assert pre_run.model == nil
+
+    # Now open a session AFTER the fail. The port will output a stream-json init
+    # event carrying the model; sync_session_meta will detect the model arriving
+    # on a terminal worker and backfill the DB row.
+    cwd = System.tmp_dir!()
+
+    init_event =
+      Jason.encode!(%{
+        "type" => "system",
+        "subtype" => "init",
+        "model" => "claude-haiku-4-5",
+        "session_id" => "sess-backfill"
+      })
+
+    events_path = Path.join(cwd, "backfill-events-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(events_path, init_event <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["cat", events_path]
+      )
+
+    # Wait for the port to exit and the backfill DB write to land.
+    :ok =
+      wait_until(
+        fn ->
+          case runs_for(task_id) do
+            [%{model: m}] when not is_nil(m) -> true
+            _ -> false
+          end
+        end,
+        2000
+      )
+
+    [run] = runs_for(task_id)
+    assert run.status == :failed
+    assert run.model == "claude-haiku-4-5"
+  end
+
   test "completing a worker stamps the Run row :completed with output_lines" do
     task_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 

@@ -372,7 +372,9 @@ defmodule Arbiter.Mergers.GitlabTest do
       # When CI has actually failed, the resolved pipeline value wins regardless
       # of the detailed-status string.
       result =
-        block_get(%{"detailed_merge_status" => "ci_must_pass"}, [%{"id" => 9, "status" => "failed"}])
+        block_get(%{"detailed_merge_status" => "ci_must_pass"}, [
+          %{"id" => 9, "status" => "failed"}
+        ])
 
       assert result.block_reason == :ci_failed
     end
