@@ -203,6 +203,30 @@ defmodule Arbiter.Worker.WorktreeTest do
       File.write!(Path.join(path, "lib_real.ex"), "defmodule X do end\n")
       assert {:ok, true} = Worktree.has_uncommitted?(path)
     end
+
+    # Regression for bd-5diu69: per-task worktrees receive a per-run .mcp.json
+    # (the MCP runtime config, see bd-2wwuuf). A leaked top-level untracked
+    # .mcp.json false-fails the commit gate on committed work. A worktree with
+    # commits ahead of base + ONLY an untracked .mcp.json must read as clean.
+    test "ignores leaked .mcp.json artifact entry", %{repo: repo} do
+      {:ok, path} = Worktree.create(repo, "feature/mcp-json", "main")
+
+      # Make a commit to be ahead of base (matches the real scenario).
+      File.write!(Path.join(path, "work.ex"), "defmodule Work do end\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "work.ex"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "add work"])
+
+      # Worktree is clean before adding artifacts.
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      # Leaked .mcp.json should be disregarded.
+      File.write!(Path.join(path, ".mcp.json"), "{}")
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      # A genuine untracked source file still counts as dirty.
+      File.write!(Path.join(path, "lib_real.ex"), "defmodule X do end\n")
+      assert {:ok, true} = Worktree.has_uncommitted?(path)
+    end
   end
 
   describe "cleanup/1" do
