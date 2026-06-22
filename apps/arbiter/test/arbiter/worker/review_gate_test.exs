@@ -1228,6 +1228,110 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  describe "review_prompt/1 PR-aware review (bd-129xh4)" do
+    # When the author opened a PR before the gate ran, the reviewer prompt must
+    # point at the real PR so it can `gh pr diff <n>` instead of only diffing
+    # the local branch.
+    test "embeds gh pr commands when a pr_ref is present", %{ws: ws} do
+      task = new_task(ws)
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1,
+        head_sha: nil,
+        pr_ref: "ryanrborn/arbiter#42"
+      }
+
+      prompt = ReviewGate.review_prompt(state)
+
+      assert prompt =~ "PR #42",
+             "review_prompt must name the open PR number when a pr_ref is present"
+
+      assert prompt =~ "gh pr diff 42",
+             "review_prompt must offer `gh pr diff <n>` so the reviewer reads the PR diff"
+
+      assert prompt =~ "gh pr review 42",
+             "review_prompt must offer `gh pr review <n>` for inline comments"
+    end
+
+    test "accepts the bare '#42' ref form", %{ws: ws} do
+      task = new_task(ws)
+      state = %{task_id: task.id, branch: "feature/rev", target_branch: "main", pr_ref: "#42"}
+
+      assert ReviewGate.review_prompt(state) =~ "gh pr diff 42"
+    end
+
+    test "omits the PR block when no pr_ref is set (branch-diff fallback)", %{ws: ws} do
+      task = new_task(ws)
+      state = %{task_id: task.id, branch: "feature/rev", target_branch: "main", pr_ref: nil}
+
+      prompt = ReviewGate.review_prompt(state)
+
+      refute prompt =~ "gh pr diff",
+             "review_prompt must not mention gh pr when no PR was opened"
+
+      assert prompt =~ "git diff main...HEAD",
+             "review_prompt must still include the branch-diff command on the fallback path"
+    end
+  end
+
+  describe "PR opened before the reviewer (bd-129xh4)" do
+    # With a hosted merger configured, the author must OPEN the PR before parking
+    # at :awaiting_review_gate — so the reviewer has a real PR to review. The
+    # open must NOT merge; the merge still happens later, on APPROVE.
+    test "opens the PR (without merging) before the review gate, recording pr_ref",
+         %{repo: repo, ws: ws} do
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.next_open_ref("acme/repo#88")
+
+      task = new_task(ws)
+
+      {pid, _branch} =
+        start_author(task, repo, %{merger_adapter_override: Arbiter.Test.StubMerger})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      # The PR was opened before the gate, but NOT merged yet.
+      assert Arbiter.Test.StubMerger.last_open() != nil,
+             "the author must open the PR before kicking off the reviewer"
+
+      assert Arbiter.Test.StubMerger.merge_count("acme/repo#88") == 0,
+             "opening the PR for review must not merge it"
+
+      # The pr_ref is persisted so the reviewer (and later the MergeQueue) adopt
+      # the same PR.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.pr_ref == "acme/repo#88"
+    end
+
+    test "APPROVE after a pre-opened PR still merges the same PR", %{repo: repo, ws: ws} do
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.next_open_ref("acme/repo#88")
+
+      task = new_task(ws)
+
+      {pid, _branch} =
+        start_author(task, repo, %{
+          merger_adapter_override: Arbiter.Test.StubMerger,
+          watchdog_interval_ms: 20,
+          watchdog_initial_delay_ms: 0,
+          watchdog_max_polls: 50
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 3_000)
+      assert Arbiter.Test.StubMerger.merge_count("acme/repo#88") >= 1
+    end
+  end
+
   describe "review-gate hardening (bd-2y0gd5)" do
     test "snapshotting the supervisor's children never crashes the ReviewGate",
          %{repo: repo, ws: ws} do

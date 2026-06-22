@@ -2054,6 +2054,18 @@ defmodule Arbiter.Worker do
   defp enter_review_gate(%State{} = state, branch) do
     meta = Map.put(state.meta || %{}, :review_gate_branch, branch)
 
+    # bd-129xh4: when a hosted merger is configured (github/gitlab), open the PR
+    # BEFORE the reviewer runs so it can review the real PR (`gh pr diff <n>`)
+    # rather than a bare branch. The open is idempotent — the merge still runs
+    # on APPROVE through the unchanged merge_branch path, which adopts this same
+    # PR. A failure (or the local :direct strategy) falls back to branch-diff
+    # review rather than blocking it; the reviewer's prompt drops the PR hint.
+    meta =
+      case maybe_open_pr_for_review(%State{state | meta: meta}, branch) do
+        {:ok, pr_ref} -> Map.put(meta, :review_pr_ref, pr_ref)
+        _ -> meta
+      end
+
     parked = %State{
       state
       | status: :awaiting_review_gate,
@@ -2107,6 +2119,7 @@ defmodule Arbiter.Worker do
         |> maybe_opt(:timeout_ms, Map.get(meta, :review_timeout_ms))
         |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
+        |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
 
       case Arbiter.Worker.ReviewGate.start(opts) do
         {:ok, pid} ->
@@ -2403,6 +2416,84 @@ defmodule Arbiter.Worker do
 
       {:error, reason} ->
         {:error, reason, state}
+    end
+  end
+
+  # bd-129xh4: open the PR for `branch` BEFORE the reviewer runs, WITHOUT
+  # merging or starting the Watchdog, so the ReviewGate's reviewer reviews a
+  # real PR (`gh pr diff <n>`) instead of a bare branch. Only fires for a
+  # hosted-forge merger (github/gitlab); the local :direct strategy has no
+  # remote PR — its `open` performs the merge — so it is skipped and the
+  # reviewer falls back to the branch diff. Returns `{:ok, pr_ref}` when a PR
+  # was opened, or `:none` when no hosted merger is configured / the open failed
+  # (the caller proceeds with branch-diff review either way). The merge still
+  # happens later, on APPROVE, through the unchanged merge_branch path — its
+  # adapter.open is idempotent and adopts the PR opened here.
+  defp maybe_open_pr_for_review(%State{} = state, branch)
+       when is_binary(branch) and branch != "" do
+    opts = merge_opts_from_meta(state.meta, %{})
+
+    case resolve_merger(state, opts) do
+      {:ok, adapter, workspace} ->
+        if hosted_forge_merger?(workspace, opts) do
+          open_pr_without_merge(state, adapter, workspace, branch, opts)
+        else
+          :none
+        end
+
+      {:error, _reason} ->
+        :none
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: pre-review PR open raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :none
+  end
+
+  defp maybe_open_pr_for_review(_state, _branch), do: :none
+
+  # A hosted forge (github/gitlab) has a real remote PR worth opening ahead of
+  # review; the local :direct strategy does not. An explicit `:adapter` override
+  # (tests) is treated as hosted so the pre-review open path can be exercised.
+  defp hosted_forge_merger?(workspace, opts) do
+    cond do
+      Map.get(opts, :adapter) ->
+        true
+
+      match?(%Arbiter.Tasks.Workspace{}, workspace) ->
+        Arbiter.Tasks.Workspace.merger_strategy(workspace) in [:github, :gitlab]
+
+      true ->
+        false
+    end
+  end
+
+  # Open the PR via the adapter and record it on the task, but do NOT park the
+  # worker or start the Watchdog — that all happens later on APPROVE. Records
+  # pr_ref so the MergeQueue adopts this PR rather than opening a duplicate.
+  defp open_pr_without_merge(%State{} = state, adapter, workspace, branch, opts) do
+    Arbiter.Mergers.prepare(workspace)
+    title = Map.get(state.meta, :merge_title) || "Merge #{state.task_id}"
+    description = build_pr_body(state.task_id, Map.get(state.meta, :worktree_path))
+    open_opts = build_open_opts(state, opts)
+
+    case safe_open(adapter, branch, title, description, open_opts) do
+      {:ok, mr_ref} ->
+        merger_url = safe_link_for(adapter, mr_ref)
+        record_pr_ref_on_task(state, mr_ref)
+        sync_tracker_pr_opened(state, mr_ref, merger_url)
+        {:ok, mr_ref}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: pre-review PR open failed for task=#{state.task_id}: #{inspect(reason)} " <>
+            "— falling back to branch-diff review"
+        )
+
+        :none
     end
   end
 

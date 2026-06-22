@@ -193,6 +193,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:timeout_ms, non_neg_integer()}
           | {:verdict_retries, non_neg_integer()}
           | {:rounds, pos_integer()}
+          | {:pr_ref, String.t() | nil}
 
   @doc """
   Start a ReviewGate under `Arbiter.Worker.Supervisor`.
@@ -304,6 +305,10 @@ defmodule Arbiter.Worker.ReviewGate do
       worktree_path: Keyword.get(opts, :worktree_path),
       branch: Keyword.fetch!(opts, :branch),
       target_branch: Keyword.get(opts, :target_branch, "main"),
+      # bd-129xh4: the open PR/MR ref (e.g. "owner/repo#42" or "#42") when the
+      # author opened the PR before the gate ran. nil when no hosted merger is
+      # configured — the reviewer then falls back to the local branch diff.
+      pr_ref: Keyword.get(opts, :pr_ref),
       command: Keyword.get(opts, :command),
       revise_command: Keyword.get(opts, :revise_command),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
@@ -1271,7 +1276,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
     The work is on branch `#{state.branch}`, cut from `#{state.target_branch}`.
     #{head_sha_instruction(state)}
-    Review ONLY the diff. Inspect it with, e.g.:
+    #{pr_review_block(state)}Review ONLY the diff. Inspect it with, e.g.:
 
         git diff #{state.target_branch}...HEAD
         git log --oneline #{state.target_branch}..HEAD
@@ -1453,6 +1458,49 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp head_sha_instruction(_state), do: ""
+
+  # bd-129xh4: when the author opened the PR before the gate ran, point the
+  # reviewer at the real PR so it can `gh pr diff <n>` / record an inline review
+  # with `gh pr review <n>` instead of only diffing the local branch. Emits
+  # nothing when no PR was opened (no hosted merger configured) — the reviewer
+  # then falls back to the `git diff` instructions that follow.
+  defp pr_review_block(state) do
+    case pr_number(Map.get(state, :pr_ref)) do
+      nil ->
+        ""
+
+      number ->
+        """
+        A GitHub pull request is already open for this branch: PR ##{number}. Prefer
+        reviewing it through the PR so your verdict lands against the real diff:
+
+            gh pr diff #{number}
+            gh pr view #{number}
+
+        You may leave inline review comments with `gh pr review #{number}`. The local
+        `git diff` below is equivalent if `gh` is unavailable.
+
+        """
+    end
+  end
+
+  # Extract the numeric PR/MR id from a merger ref. Handles both the bare
+  # ("#42") and embedded ("owner/repo#42") forms; returns nil for anything
+  # without a trailing number.
+  defp pr_number(ref) when is_binary(ref) do
+    case ref |> String.split("#") |> List.last() do
+      n when is_binary(n) ->
+        case Integer.parse(n) do
+          {int, ""} -> int
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp pr_number(_), do: nil
 
   @doc """
   Build the reviewer's re-review prompt for round >= 2: the base review prompt,
