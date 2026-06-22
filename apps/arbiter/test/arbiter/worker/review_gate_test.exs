@@ -1723,6 +1723,21 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert prompt =~ "synchronously"
     end
 
+    test "review_prompt/1 always includes the timeout fallback note (bd-c1qbee)", %{ws: ws} do
+      # Every reviewer — Claude or Gemini — must be told to wrap test commands
+      # with a hard timeout and issue VERDICT-from-diff if they cannot complete.
+      # Fixes the hang observed in bd-c8uki0#review#r2 (cold _build, mix test
+      # background-jobbed, session exited with zero tokens and no VERDICT).
+      task = new_task(ws)
+      prompt = ReviewGate.review_prompt(state_for(task, ws))
+
+      assert prompt =~ "timeout 120 mix test",
+             "review_prompt must recommend a hard timeout wrapper for mix test"
+
+      assert prompt =~ "VERDICT based on the diff alone",
+             "review_prompt must instruct the reviewer to fall back to diff-only VERDICT when tests cannot complete"
+    end
+
     test "nil workspace_id defaults to the Claude async block" do
       state = %{
         task_id: "no-ws-task",
