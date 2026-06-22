@@ -69,7 +69,7 @@ defmodule ArbiterCli.Cmd.Create do
 
   `--labels` is accepted for interface parity with `bd` but the current Issue
   resource has no `labels` field; the value is reported back in a warning
-  unless `--json` is set. See the BUILD-SUMMARY for the deviation.
+  unless `--json` is set. The `labels` field is not yet part of the Issue resource.
   """
 
   alias ArbiterCli.{Client, Output, Workspace}

@@ -29,3 +29,7 @@ erl_crash.dump
 # Arbiter.MCP.AgentConfig with a bearer scope token baked in. Never commit it.
 .mcp.json
 
+# Agent-generated build artifacts — not part of the canonical repo.
+BUILD-SUMMARY-*.md
+MORNING-BRIEF.md
+
