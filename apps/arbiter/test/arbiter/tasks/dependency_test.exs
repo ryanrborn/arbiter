@@ -206,9 +206,11 @@ defmodule Arbiter.Tasks.DependencyTest do
       refute MapSet.member?(ready_ids, b.id)
     end
 
-    test ":blocks edge gates readiness on the from side too", %{a: a, b: b} do
-      # a blocks b ⇒ from a's perspective, a has an open :blocks edge whose
-      # target b is open ⇒ a is NOT ready by the readiness rule.
+    test ":blocks edge blocks the to_issue (blocked task), not the from_issue (blocker)",
+         %{a: a, b: b} do
+      # a blocks b: b cannot be worked on until a is closed.
+      # a (the blocker) has nothing blocking it and IS ready.
+      # b (the blocked task) is NOT ready while a is open.
       {:ok, _} =
         Ash.create(Dependency, %{
           from_issue_id: a.id,
@@ -217,7 +219,31 @@ defmodule Arbiter.Tasks.DependencyTest do
         })
 
       ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
-      refute MapSet.member?(ready_ids, a.id)
+      assert MapSet.member?(ready_ids, a.id)
+      refute MapSet.member?(ready_ids, b.id)
+    end
+
+    test ":blocks edge blocks to_issue even when blocker is :in_progress (regression bd-3hpqqi)",
+         %{a: a, b: b} do
+      # Repro shape: blocker (a) transitions to :in_progress before the blocked
+      # task (b) is picked up. In_progress tasks are NOT in open_ids, so the
+      # previous code missed the :blocks edge and falsely returned b as ready.
+      {:ok, a_ip} = Ash.update(a, %{status: :in_progress})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: a_ip.id,
+          to_issue_id: b.id,
+          type: :blocks
+        })
+
+      ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
+      refute MapSet.member?(ready_ids, b.id),
+             "b must not be ready while its blocker (a) is still in_progress"
+
+      {:ok, _closed_a} = Ash.update(a_ip, %{}, action: :close)
+      ready_ids_after = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
+      assert MapSet.member?(ready_ids_after, b.id), "b must be ready once its blocker closes"
     end
 
     test ":relates_to does NOT gate readiness", %{a: a, b: b} do
@@ -264,8 +290,10 @@ defmodule Arbiter.Tasks.DependencyTest do
       refute MapSet.member?(ready_ids, a.id)
     end
 
-    test "multiple gating deps: dependent is ready only when ALL targets closed",
+    test "multiple gating deps: task is ready only when ALL blockers are closed",
          %{a: a, b: b, c: c} do
+      # a depends_on b  → a is blocked while b is open (:depends_on direction)
+      # c blocks a      → a is blocked while c is open (:blocks direction, from=c to=a)
       {:ok, _} =
         Ash.create(Dependency, %{
           from_issue_id: a.id,
@@ -275,15 +303,15 @@ defmodule Arbiter.Tasks.DependencyTest do
 
       {:ok, _} =
         Ash.create(Dependency, %{
-          from_issue_id: a.id,
-          to_issue_id: c.id,
+          from_issue_id: c.id,
+          to_issue_id: a.id,
           type: :blocks
         })
 
       refute Issue.ready() |> Enum.any?(&(&1.id == a.id))
 
       {:ok, _} = Ash.update(b, %{}, action: :close)
-      # Still blocked on c
+      # Still blocked on c (c blocks a and c is still open)
       refute Issue.ready() |> Enum.any?(&(&1.id == a.id))
 
       {:ok, _} = Ash.update(c, %{}, action: :close)
