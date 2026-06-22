@@ -1291,14 +1291,7 @@ defmodule Arbiter.Worker.ReviewGate do
     by reading it — you do not run the application. (Reading files and running
     `git` is fine.)
 
-    *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
-    tool — including in parallel or with background execution modes. However,
-    you MUST wait for every background task to complete and read its full
-    output before producing your VERDICT. A VERDICT issued while any
-    background task is still running is invalid: you would be judging on
-    incomplete evidence. Do not exit, do not print your VERDICT, and do not
-    print `arb done` until every tool you launched has finished and you have
-    read its result.
+    #{async_tool_block(state)}
 
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
@@ -1481,6 +1474,27 @@ defmodule Arbiter.Worker.ReviewGate do
     ----------------------------------------------------------------------
 
     """ <> review_prompt(state)
+  end
+
+  # Returns the async-tool instruction block appropriate for the adapter
+  # configured as the reviewer for this workspace. Falls back to the Claude
+  # block when the workspace is absent or the adapter does not implement the
+  # callback — preserving existing behaviour for Claude-only workspaces.
+  defp async_tool_block(state) do
+    adapter =
+      state
+      |> Map.get(:workspace_id)
+      |> load_workspace()
+      |> then(&Agents.reviewer_for_workspace/1)
+
+    block =
+      if function_exported?(adapter, :async_tool_instruction, 0) do
+        adapter.async_tool_instruction()
+      else
+        Arbiter.Agents.Claude.async_tool_instruction()
+      end
+
+    String.trim_trailing(block)
   end
 
   defp load_task(task_id) do

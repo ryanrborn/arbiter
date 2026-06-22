@@ -148,6 +148,18 @@ defmodule Arbiter.Agents.Claude do
   end
 
   @impl true
+  def async_tool_instruction do
+    "*** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic\n" <>
+      "    tool — including in parallel or with background execution modes. However,\n" <>
+      "    you MUST wait for every background task to complete and read its full\n" <>
+      "    output before producing your VERDICT. A VERDICT issued while any\n" <>
+      "    background task is still running is invalid: you would be judging on\n" <>
+      "    incomplete evidence. Do not exit, do not print your VERDICT, and do not\n" <>
+      "    print `arb done` until every tool you launched has finished and you have\n" <>
+      "    read its result."
+  end
+
+  @impl true
   def usage_attrs(session),
     do: ClaudeSession.usage_summary(session) |> Map.put(:provider, provider())
 
