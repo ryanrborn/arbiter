@@ -46,8 +46,8 @@ jobs:
 
       - name: Install Erlang/OTP 28
         run: |
-          OTP_RPM_VERSION="28.0.4-1"
-          curl -fsSL "https://github.com/rabbitmq/erlang-rpm/releases/download/v28.0.4/erlang-${OTP_RPM_VERSION}.el8.x86_64.rpm" -o /tmp/erlang.rpm
+          OTP_RPM_VERSION="28.5.0.2-1"
+          curl -fsSL "https://github.com/rabbitmq/erlang-rpm/releases/download/v28.5.0.2/erlang-${OTP_RPM_VERSION}.el8.x86_64.rpm" -o /tmp/erlang.rpm
           dnf install -y /tmp/erlang.rpm
 
       - name: Install Elixir 1.19
