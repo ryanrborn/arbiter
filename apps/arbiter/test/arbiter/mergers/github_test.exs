@@ -683,7 +683,9 @@ defmodule Arbiter.Mergers.GithubTest do
 
     test "resolves an embedded owner/repo ref for the update-branch path" do
       stub(fn conn ->
-        assert conn.request_path == "/repos/leo-technologies-llc/verus_server/pulls/7/update-branch"
+        assert conn.request_path ==
+                 "/repos/leo-technologies-llc/verus_server/pulls/7/update-branch"
+
         conn |> Plug.Conn.put_status(202) |> Req.Test.json(%{})
       end)
 
