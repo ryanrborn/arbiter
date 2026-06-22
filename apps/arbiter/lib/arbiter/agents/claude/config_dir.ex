@@ -254,38 +254,44 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
     dst = Path.join(dir, name)
 
     cond do
-      not File.exists?(src) -> :ok
-      linked_to?(dst, src) -> :ok
-      true -> relink(src, dst)
+      not File.exists?(src) ->
+        :ok
+
+      # Never symlink credentials: a worker refreshing its OAuth token would
+      # write through the symlink and corrupt the operator's credentials.
+      # Always copy; refresh whenever the source is newer than the destination.
+      fresh_copy?(src, dst) ->
+        :ok
+
+      true ->
+        recopy(src, dst)
     end
   end
 
-  # True when `dst` is already a symlink pointing at `src` — the idempotent
-  # fast-path, so a re-seed on every spawn does no filesystem work.
-  defp linked_to?(dst, src) do
-    match?({:ok, ^src}, File.read_link(dst))
+  # True when dst is a regular file (not a symlink) whose mtime >= src mtime.
+  defp fresh_copy?(src, dst) do
+    case {File.lstat(src), File.lstat(dst)} do
+      {{:ok, %{type: :regular, mtime: sm}}, {:ok, %{type: :regular, mtime: dm}}} ->
+        dm >= sm
+
+      _ ->
+        false
+    end
   end
 
-  # Replace whatever is at `dst` with a symlink to `src`; fall back to a copy if
-  # the filesystem doesn't support symlinks. Best-effort — failures are logged
+  # Replace dst with a fresh copy of src. Best-effort — failures are logged
   # but never abort the spawn.
-  defp relink(src, dst) do
+  defp recopy(src, dst) do
     _ = File.rm(dst)
 
-    case File.ln_s(src, dst) do
+    case File.cp(src, dst) do
       :ok ->
         :ok
 
-      {:error, _} ->
-        case File.cp(src, dst) do
-          :ok ->
-            :ok
-
-          {:error, reason} ->
-            Logger.warning(
-              "Arbiter.Agents.Claude.ConfigDir: could not seed #{inspect(dst)} (#{inspect(reason)})"
-            )
-        end
+      {:error, reason} ->
+        Logger.warning(
+          "Arbiter.Agents.Claude.ConfigDir: could not seed #{inspect(dst)} (#{inspect(reason)})"
+        )
     end
   end
 end
