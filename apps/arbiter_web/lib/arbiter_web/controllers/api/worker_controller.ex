@@ -355,7 +355,13 @@ defmodule ArbiterWeb.Api.WorkerController do
 
     base
     |> Keyword.put(:start_claude, start_claude)
-    |> Keyword.put(:start_driver, false)
+    |> then(fn opts ->
+      # Suppress the Driver only when no Claude subprocess is involved
+      # (test-mode dispatch with with_claude: false). For real reviews
+      # (start_claude: true), the Driver runs in claude_driven mode and
+      # is the sole component that closes the task on :completed.
+      if start_claude, do: opts, else: Keyword.put(opts, :start_driver, false)
+    end)
     |> add_model_override(params["model"])
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
   end
