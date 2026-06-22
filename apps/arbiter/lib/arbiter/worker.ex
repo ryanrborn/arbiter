@@ -630,7 +630,7 @@ defmodule Arbiter.Worker do
     (state.meta || %{})
     |> Map.get(:output_lines)
     |> List.wrap()
-    |> Enum.filter(&(is_binary(&1) and byte_size(&1) > 0))
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
     |> Enum.take(-@max_output_lines)
   end
 
