@@ -17,8 +17,6 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       Path.join(System.tmp_dir!(), "arb-units-#{System.unique_integer([:positive])}")
 
     Process.put(:bd2_unit_dir, unit_dir)
-    # Pin the ExecStart binary so the generated unit is deterministic.
-    Process.put(:bd2_arb_exe, "/opt/arbiter/apps/arbiter_cli/arb")
     # Quiet the progress chatter (same seam `arb start` uses).
     Process.put(:bd2_sleep, fn _ -> :ok end)
     # The active-work guard calls GET /api/workers. Simulate an unreachable
@@ -56,14 +54,16 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       unit = Path.join(dir, "arbiter.service")
       assert File.exists?(unit)
 
+      home = System.user_home!()
       contents = File.read!(unit)
-      assert contents =~ "ExecStart=/opt/arbiter/apps/arbiter_cli/arb start --timeout"
-      assert contents =~ "Type=oneshot"
-      assert contents =~ "RemainAfterExit=yes"
+      assert contents =~ "ExecStart=#{home}/.arbiter/current/bin/arbiter start"
+      assert contents =~ "Type=exec"
+      refute contents =~ "RemainAfterExit"
       assert contents =~ "WantedBy=default.target"
-      assert contents =~ "WorkingDirectory=/tmp/arbiter-install-test"
-      # MIX_HOME must be pinned so Phoenix/Mix can boot under systemd.
-      assert contents =~ "Environment=MIX_HOME="
+      assert contents =~ "WorkingDirectory=#{home}/.arbiter"
+      assert contents =~ "EnvironmentFile=-#{home}/.arbiter/arbiter.env"
+      # Release is self-contained — no MIX_HOME needed in the unit.
+      refute contents =~ "Environment=MIX_HOME="
 
       # Orchestration, in the user manager, in order.
       assert_received {:cmd, "systemctl", ["--user", "daemon-reload"]}
@@ -196,20 +196,27 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
 
   describe "unit_contents/2" do
     test "user units omit docker ordering (can't cross the manager boundary)" do
-      contents = InstallService.unit_contents(:user, "/srv/arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
       refute contents =~ "docker.service"
       assert contents =~ "WantedBy=default.target"
-      assert contents =~ "EnvironmentFile=-/srv/arbiter/.arbiter.env"
+      assert contents =~ "EnvironmentFile=-/home/user/.arbiter/arbiter.env"
     end
 
-    test "pins MIX_HOME so Mix can resolve archives/escripts under systemd" do
-      mix_home = System.get_env("MIX_HOME") || Path.join(System.user_home!(), ".mix")
-      contents = InstallService.unit_contents(:user, "/srv/arbiter")
-      assert contents =~ "Environment=MIX_HOME=#{mix_home}"
+    test "uses the release binary as ExecStart" do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      assert contents =~ "ExecStart=/home/user/.arbiter/current/bin/arbiter start"
+      assert contents =~ "Type=exec"
+      refute contents =~ "RemainAfterExit"
+    end
+
+    test "does not bake MIX_HOME or PATH into the unit (release is self-contained)" do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      refute contents =~ "MIX_HOME"
+      refute contents =~ ~r/Environment=PATH=/
     end
 
     test "includes Restart=on-failure and RestartSec so systemd auto-retries" do
-      contents = InstallService.unit_contents(:user, "/srv/arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
       assert contents =~ "Restart=on-failure"
       assert contents =~ "RestartSec=10"
     end

@@ -1,14 +1,12 @@
 defmodule ArbiterCli.Cmd.InstallService do
   @moduledoc """
   `arb install-service [--system] [--uninstall] [--json]` — install a systemd
-  unit so the Arbiter stack (Postgres + Phoenix) comes up automatically at
-  machine boot, with no manual `mix phx.server`.
+  unit so the Arbiter stack comes up automatically at machine boot via the OTP
+  release binary.
 
-  The unit's `ExecStart` is just `arb start` (bd-cw6rka), so there is exactly
-  one definition of "bring the stack up": ensure the Postgres container, start
-  Phoenix detached, and wait for the API to go green. The service is a
-  `Type=oneshot` with `RemainAfterExit=yes` — once `arb start` exits 0 the unit
-  is considered active, and the detached Phoenix keeps running.
+  The unit's `ExecStart` is `~/.arbiter/current/bin/arbiter start` — the
+  self-contained OTP release. The service runs as a long-lived foreground
+  process (`Type=exec`), tracked by systemd for the full lifetime of the VM.
 
   ## Scope
 
@@ -23,22 +21,18 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   ## What it writes
 
-  The unit carries enough environment to run outside your shell:
-
-    * `PATH` is copied from the current environment so `mix`, `docker`, and
-      friends resolve.
-    * `ARB_HOME` is pinned to the resolved project root (also the
-      `WorkingDirectory`), with `ARB_HOST` / `ARB_WORKSPACE` forwarded when set.
-    * `EnvironmentFile=-<root>/.arbiter.env` is referenced optionally (the
-      leading `-` means "skip if absent") so secrets like `GITHUB_TOKEN` live in
-      a file you control rather than baked into a world-readable unit.
+  The unit references `EnvironmentFile=~/.arbiter/arbiter.env` (created and
+  managed by this command) for secrets and optional overrides. The OTP release
+  is self-contained, so `PATH`, `MIX_HOME`, and similar mix-era env vars are
+  not needed in the unit. `ARB_HOST` and `ARB_WORKSPACE`, when set in the
+  installing shell, are forwarded as `Environment=` lines.
 
   ## Secret capture
 
   A boot-time service starts with no interactive shell, so the API keys you
   normally export (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) are
   not visible to it. To bridge that gap, install captures any of those keys that
-  are set in the *installing* shell and writes them to `<root>/.arbiter.env`
+  are set in the *installing* shell and writes them to `~/.arbiter/arbiter.env`
   (the same file `EnvironmentFile=` points at). Existing entries are preserved —
   a managed key already present is updated in place, sibling keys and comments
   are left untouched — and the file is locked to `0600` since it holds secrets.
@@ -46,7 +40,7 @@ defmodule ArbiterCli.Cmd.InstallService do
   ## Idempotent
 
   Re-running rewrites the unit and reloads the daemon, so it's safe to run
-  twice — handy after upgrading or moving the checkout.
+  twice — handy after upgrading the release.
 
   ## Teardown
 
@@ -66,16 +60,6 @@ defmodule ArbiterCli.Cmd.InstallService do
   @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
 
   @unit_name "arbiter.service"
-
-  # `arb start` now runs `mix compile` synchronously before launching Phoenix,
-  # so `--timeout` only covers the post-compilation health-check poll (Phoenix
-  # starts in seconds once the beam cache is warm). The systemd timeout must
-  # cover compile + startup: allow 15 min so even a from-scratch recompile
-  # doesn't cause a false failure. `Restart=on-failure` is a safety net so
-  # systemd auto-retries rather than requiring a manual kick if the timeout is
-  # still exceeded.
-  @start_timeout_s 120
-  @systemd_timeout_s 900
 
   def run(argv) do
     if Output.help?(argv) do
@@ -102,17 +86,18 @@ defmodule ArbiterCli.Cmd.InstallService do
     root = resolve_root()
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
+    arbiter_home = Path.join(System.user_home!(), ".arbiter")
     path = unit_path(scope)
-    contents = unit_contents(scope, root)
+    contents = unit_contents(scope, arbiter_home)
 
-    secrets = capture_secrets(root)
+    secrets = capture_secrets(arbiter_home)
 
     write_unit(path, contents)
     daemon_reload(scope)
     enable_now(scope)
     linger = if scope == :user, do: enable_linger(), else: :not_applicable
 
-    emit_installed(mode, scope, path, root, linger, secrets)
+    emit_installed(mode, scope, path, arbiter_home, linger, secrets)
   end
 
   # ---- secret capture ----------------------------------------------------
@@ -131,14 +116,14 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   @doc """
   Forward any of `@captured_secrets` set in the current environment into
-  `<root>/.arbiter.env`, preserving any keys already present. Returns
+  `<arbiter_home>/arbiter.env`, preserving any keys already present. Returns
   `{:written, path, keys}` listing the keys captured, or `{:none, path}` when
   the environment carries none of them.
   """
   @spec capture_secrets(String.t()) ::
           {:written, String.t(), [String.t()]} | {:none, String.t()}
-  def capture_secrets(root) do
-    path = Path.join(root, ".arbiter.env")
+  def capture_secrets(arbiter_home) do
+    path = Path.join(arbiter_home, "arbiter.env")
 
     captured =
       Enum.flat_map(@captured_secrets, fn key ->
@@ -256,18 +241,17 @@ defmodule ArbiterCli.Cmd.InstallService do
   # ---- unit file ---------------------------------------------------------
 
   @doc """
-  The systemd unit file content for `scope`, with `ExecStart` set to this
-  `arb` binary's `start`. Pure (given the environment) so it's easy to assert
-  on in tests.
+  The systemd unit file content for `scope`, pointing `ExecStart` at the OTP
+  release binary under `arbiter_home/current/bin/arbiter`. Pure (given the
+  environment) so it's easy to assert on in tests.
   """
   @spec unit_contents(:user | :system, String.t()) :: String.t()
-  def unit_contents(scope, root) do
-    arb = arb_executable()
+  def unit_contents(scope, arbiter_home) do
+    release_bin = Path.join([arbiter_home, "current", "bin", "arbiter"])
     wanted_by = if scope == :system, do: "multi-user.target", else: "default.target"
 
     # System units can order against the docker daemon; a user manager runs in
-    # a different bus and can't, so it leans on `arb start`'s own
-    # `docker compose up -d` (which fails loudly if the daemon isn't ready).
+    # a different bus and can't.
     ordering =
       if scope == :system do
         "After=network-online.target docker.service\nWants=network-online.target\n"
@@ -281,13 +265,11 @@ defmodule ArbiterCli.Cmd.InstallService do
     Documentation=https://github.com/penumbral/arbiter
     #{ordering}
     [Service]
-    Type=oneshot
-    RemainAfterExit=yes
-    WorkingDirectory=#{root}
-    EnvironmentFile=-#{Path.join(root, ".arbiter.env")}
-    #{environment_lines(root)}
-    ExecStart=#{arb} start --timeout #{@start_timeout_s}
-    TimeoutStartSec=#{@systemd_timeout_s}
+    Type=exec
+    WorkingDirectory=#{arbiter_home}
+    EnvironmentFile=-#{Path.join(arbiter_home, "arbiter.env")}
+    #{release_environment_lines()}
+    ExecStart=#{release_bin} start
     Restart=on-failure
     RestartSec=10
 
@@ -296,21 +278,14 @@ defmodule ArbiterCli.Cmd.InstallService do
     """
   end
 
-  # `Environment=` lines for the values the stack needs outside an interactive
-  # shell. PATH, ARB_HOME, and MIX_HOME are always pinned; ARB_HOST /
-  # ARB_WORKSPACE are forwarded only when set, so we don't freeze a stale
-  # default into the unit. MIX_HOME must be present or Phoenix fails to boot
-  # under systemd (Mix can't find its archives/escripts otherwise); prefer the
-  # current MIX_HOME, falling back to the standard `~/.mix`.
-  defp environment_lines(root) do
-    mix_home = System.get_env("MIX_HOME") || Path.join(System.user_home!(), ".mix")
-
+  # Optional `Environment=` pass-throughs. The OTP release is self-contained
+  # (no MIX_HOME or PATH needed). ARB_HOST and ARB_WORKSPACE are forwarded
+  # when set so the running node picks up the same coordinator and workspace as
+  # the installing shell; secrets live in the EnvironmentFile instead.
+  defp release_environment_lines do
     [
-      {"PATH", System.get_env("PATH")},
-      {"ARB_HOME", root},
       {"ARB_HOST", System.get_env("ARB_HOST")},
-      {"ARB_WORKSPACE", System.get_env("ARB_WORKSPACE")},
-      {"MIX_HOME", mix_home}
+      {"ARB_WORKSPACE", System.get_env("ARB_WORKSPACE")}
     ]
     |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
     |> Enum.map_join("\n", fn {k, v} -> "Environment=#{k}=#{v}" end)
@@ -448,27 +423,6 @@ defmodule ArbiterCli.Cmd.InstallService do
   defp default_unit_dir(:system), do: "/etc/systemd/system"
 
   defp unit_path(scope), do: Path.join(unit_dir(scope), @unit_name)
-
-  # Absolute path of the running `arb` escript, baked into ExecStart so the
-  # unit resolves the same binary at boot. Prefer the running escript's path
-  # (when it's a real file on disk), else an `arb` found on PATH, else a bare
-  # `arb` and trust the unit's own PATH. Tests pin it via `:bd2_arb_exe`.
-  defp arb_executable do
-    cond do
-      (pinned = Process.get(:bd2_arb_exe)) && is_binary(pinned) -> pinned
-      (path = escript_path()) && File.regular?(path) -> path
-      path = System.find_executable("arb") -> path
-      true -> "arb"
-    end
-  end
-
-  defp escript_path do
-    :escript.script_name() |> to_string() |> Path.expand()
-  rescue
-    _ -> nil
-  catch
-    _, _ -> nil
-  end
 
   # ---- output ------------------------------------------------------------
 
