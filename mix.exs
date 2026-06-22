@@ -1,7 +1,7 @@
 defmodule Arbiter.Umbrella.MixProject do
   use Mix.Project
 
-  @version "2026.6.0"
+  @version "0.1.0"
 
   def project do
     [

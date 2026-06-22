@@ -240,7 +240,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
 
   describe "auto-rollback on failed health check" do
     test "re-points current to the prior release and restarts, exits 1", %{home: home} do
-      prior_tag = "v2026.6.0"
+      prior_tag = "v0.0.2"
       prior = seed_release(home, prior_tag)
       point_current(home, prior)
 
