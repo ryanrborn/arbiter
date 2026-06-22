@@ -41,7 +41,9 @@ defmodule ArbiterCli.Main do
 
       arb server start    [--timeout SECONDS] [--json]
       arb server restart  [--timeout SECONDS] [--json]
-      arb server deploy   [--timeout SECONDS] [--json] [--force]
+      arb server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+                          deploy from a GitHub Release (add --git-pull for the
+                          legacy git-pull deploy).
       arb server migrate  [--json]
       arb server doctor   [--json]
       arb server version  [--json]
