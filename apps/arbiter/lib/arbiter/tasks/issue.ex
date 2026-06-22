@@ -420,12 +420,10 @@ defmodule Arbiter.Tasks.Issue do
   @doc "List of valid tracker_type atoms."
   def tracker_types, do: @tracker_types
 
-  @gating_dep_types [:blocks, :depends_on]
-
   @doc """
   Returns the list of "ready" issues — issues whose `status == :open` and which
   have no open gating dependencies (`:blocks` or `:depends_on` edges) whose
-  target (`to_issue`) is itself not closed.
+  relevant blocker is itself not closed.
 
   Informational dep types (`:relates_to`, `:discovered_from`, `:parent_of`) do
   NOT gate readiness — only `:blocks` and `:depends_on` count.
@@ -461,34 +459,61 @@ defmodule Arbiter.Tasks.Issue do
       []
     else
       open_ids = MapSet.new(open_issues, & &1.id)
+      all_deps = Ash.read!(Arbiter.Tasks.Dependency)
 
-      gating_deps =
-        Arbiter.Tasks.Dependency
-        |> Ash.read!()
-        |> Enum.filter(fn d ->
-          d.type in @gating_dep_types and MapSet.member?(open_ids, d.from_issue_id)
+      # :depends_on — from=blocked_candidate, to=blocker.
+      # Candidate is blocked while the blocker (to_issue) is not closed.
+      depends_on_gating =
+        Enum.filter(all_deps, fn d ->
+          d.type == :depends_on and MapSet.member?(open_ids, d.from_issue_id)
         end)
 
-      if gating_deps == [] do
+      # :blocks — from=blocker, to=blocked_candidate.
+      # Candidate (to_issue) is blocked while the blocker (from_issue) is not closed.
+      # We must filter on to_issue_id here — the blocker may be :in_progress (not
+      # in open_ids), which is the shape that caused the false-ready bug.
+      blocks_gating =
+        Enum.filter(all_deps, fn d ->
+          d.type == :blocks and MapSet.member?(open_ids, d.to_issue_id)
+        end)
+
+      if depends_on_gating == [] and blocks_gating == [] do
         open_issues
       else
-        target_ids = gating_deps |> Enum.map(& &1.to_issue_id) |> Enum.uniq()
+        issues_to_fetch =
+          (Enum.map(depends_on_gating, & &1.to_issue_id) ++
+             Enum.map(blocks_gating, & &1.from_issue_id))
+          |> Enum.uniq()
 
-        targets_by_id =
-          target_ids
+        fetched_by_id =
+          issues_to_fetch
           |> Enum.map(&Ash.get!(__MODULE__, &1))
           |> Map.new(&{&1.id, &1})
 
-        blocked_from_ids =
-          gating_deps
+        # :depends_on: blocked if the dependency target (to_issue) is not closed
+        blocked_by_depends_on =
+          depends_on_gating
           |> Enum.filter(fn d ->
-            case Map.fetch(targets_by_id, d.to_issue_id) do
+            case Map.fetch(fetched_by_id, d.to_issue_id) do
               {:ok, target} -> target.status != :closed
               :error -> false
             end
           end)
           |> Enum.map(& &1.from_issue_id)
-          |> MapSet.new()
+
+        # :blocks: blocked if the blocker (from_issue) is not closed
+        blocked_by_blocks =
+          blocks_gating
+          |> Enum.filter(fn d ->
+            case Map.fetch(fetched_by_id, d.from_issue_id) do
+              {:ok, blocker} -> blocker.status != :closed
+              :error -> false
+            end
+          end)
+          |> Enum.map(& &1.to_issue_id)
+
+        blocked_from_ids =
+          MapSet.new(blocked_by_depends_on ++ blocked_by_blocks)
 
         Enum.reject(open_issues, fn i -> MapSet.member?(blocked_from_ids, i.id) end)
       end
