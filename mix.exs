@@ -1,20 +1,33 @@
 defmodule Arbiter.Umbrella.MixProject do
   use Mix.Project
 
+  @version "2026.6.0"
+
   def project do
     [
       apps_path: "apps",
-      version: "0.1.0",
+      version: @version,
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      releases: releases()
     ]
   end
 
   def cli do
     [
       preferred_envs: [precommit: :test]
+    ]
+  end
+
+  defp releases do
+    [
+      arbiter: [
+        applications: [arbiter: :permanent, arbiter_web: :permanent],
+        include_executables_for: [:unix],
+        version: @version
+      ]
     ]
   end
 
