@@ -2132,7 +2132,11 @@ defmodule Arbiter.Worker do
     # hosted-forge adapters (Github) park forever at :awaiting_review waiting
     # for a PR-level approval the ReviewGate never posts (bd-66ey1o). force_merge
     # makes this the explicit merge-regardless-of-lane signal (bd-ddtbhb).
-    merge_branch(state, branch, merge_opts_from_meta(state.meta, %{via_review_gate: true, force_merge: true}))
+    merge_branch(
+      state,
+      branch,
+      merge_opts_from_meta(state.meta, %{via_review_gate: true, force_merge: true})
+    )
   end
 
   defp apply_review_gate_verdict(%State{} = state, {:request_changes, findings}) do

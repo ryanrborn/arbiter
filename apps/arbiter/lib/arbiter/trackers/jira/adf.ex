@@ -29,8 +29,8 @@ defmodule Arbiter.Trackers.Jira.ADF do
   Nested lists, blockquotes, tables, links, images, hard-breaks, HTML,
   raw embeds. These are deliberately out of scope for the QA/Deployment
   notes use case. If a future caller needs them, extend `parse_inline/1`
-  and `parse_blocks/1`. The decision-doc covers the rationale: we
-  format-convert, we do not author full Markdown.
+  and `parse_blocks/1`. The rationale: we format-convert, we do not author
+  full Markdown.
 
   ## Public API
 
