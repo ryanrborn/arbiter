@@ -322,4 +322,96 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert {:error, :invalid_branch_name} = Worktree.attach(repo, nil)
     end
   end
+
+  # Commit `content` to `file` in `path` and return :ok.
+  defp commit(path, file, content, msg) do
+    File.write!(Path.join(path, file), content)
+    {_, 0} = System.cmd("git", ["-C", path, "add", file], stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", msg], stderr_to_stdout: true)
+    :ok
+  end
+
+  # Advance origin/main with a commit to `file` (made in `repo`, pushed).
+  defp advance_origin_main(repo, file, content, msg) do
+    :ok = commit(repo, file, content, msg)
+
+    {_, 0} =
+      System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"], stderr_to_stdout: true)
+
+    :ok
+  end
+
+  defp changed_files(path, range) do
+    {out, 0} =
+      System.cmd("git", ["-C", path, "diff", "--name-only", range], stderr_to_stdout: true)
+
+    out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)
+  end
+
+  # bd-ased52: bring the branch current with its (possibly advanced) target
+  # before review, and isolate the branch's own changes via the merge-base.
+  describe "update_from_target/2 + merge_base/2" do
+    test "no-op when the target has not advanced", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/upd-noop", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+
+      assert {:ok, :up_to_date} = Worktree.update_from_target(wt, "main")
+      assert {:ok, false} = Worktree.has_uncommitted?(wt)
+    end
+
+    test "merges an advanced target and the change set EXCLUDES the target's unrelated file",
+         %{repo: repo} do
+      # Branch cut from the OLD main; only touches a.txt.
+      {:ok, wt} = Worktree.create(repo, "feature/upd-merge", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+
+      # The target advances mid-run with an UNRELATED file (b.txt).
+      :ok = advance_origin_main(repo, "b.txt", "fleet work\n", "main b")
+
+      assert {:ok, :merged} = Worktree.update_from_target(wt, "main")
+      assert {:ok, false} = Worktree.has_uncommitted?(wt)
+      assert {:ok, "feature/upd-merge"} = Worktree.current_branch(wt)
+
+      base = Worktree.merge_base(wt, "main")
+      assert is_binary(base)
+
+      files = changed_files(wt, "#{base}..HEAD")
+
+      assert "a.txt" in files,
+             "the branch's own change must be in the merge-base diff"
+
+      refute "b.txt" in files,
+             "the target's unrelated commit must NOT appear in the branch's change set"
+    end
+
+    test "a conflicting target advance returns {:error, {:conflict, _}} and leaves a clean tree",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/upd-conflict", "main")
+      # The branch edits README.md (a file that exists on main)...
+      :ok = commit(wt, "README.md", "branch version\n", "branch readme")
+      # ...and the target advances editing the SAME file differently.
+      :ok = advance_origin_main(repo, "README.md", "fleet version\n", "main readme")
+
+      assert {:error, {:conflict, %{files: files}}} = Worktree.update_from_target(wt, "main")
+      assert "README.md" in files
+
+      # The merge was aborted: the worktree is clean and still on its branch.
+      assert {:ok, false} = Worktree.has_uncommitted?(wt)
+      assert {:ok, "feature/upd-conflict"} = Worktree.current_branch(wt)
+    end
+
+    test "merge_base/2 resolves the fork point of an un-updated branch", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/mb", "main")
+      :ok = commit(wt, "a.txt", "branch work\n", "branch a")
+      :ok = advance_origin_main(repo, "b.txt", "fleet work\n", "main b")
+
+      # Without updating, the merge-base is still the original fork point, so a
+      # base..HEAD diff already excludes the target's later commit.
+      base = Worktree.merge_base(wt, "main")
+      assert is_binary(base)
+      files = changed_files(wt, "#{base}..HEAD")
+      assert "a.txt" in files
+      refute "b.txt" in files
+    end
+  end
 end
