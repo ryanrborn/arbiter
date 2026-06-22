@@ -14,7 +14,6 @@ defmodule Arbiter.Trackers do
   workspace's `config["tracker"]["type"]` at create-time, unless explicitly
   overridden by the caller.
 
-  See `docs/decision-doc.md` section 8.
   """
 
   alias Arbiter.Tasks.Issue

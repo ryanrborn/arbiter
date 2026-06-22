@@ -5,8 +5,7 @@ defmodule Arbiter.Tasks.Workspace do
   routing, and so on.
 
   These live in a single JSON `config` column. Missing keys fall back to a
-  `:none` tracker. See `~/dev/arbiter/docs/decision-doc.md` section 8 (tracker
-  abstraction).
+  `:none` tracker. Tracker abstraction: see `Arbiter.Trackers`.
 
   ## Default workspace
 

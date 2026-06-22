@@ -70,7 +70,7 @@ config :arbiter,
 #   }
 #
 # Per-domain overrides go in `workspace.config["agent"]["security"]`; see
-# docs/acolyte-security.md.
+# docs/worker-security.md.
 config :arbiter, :acolyte_security_policy, %{}
 
 config :arbiter_web,

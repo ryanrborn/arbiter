@@ -9,12 +9,12 @@ Run `arb prime` at the start of every session.
 
 ## 1. Role & Loop
 
-You coordinate; the fleet executes. Core loop:
+You coordinate; the workers execute. Core loop:
 
 1. File an issue with crisp acceptance criteria, difficulty, and priority.
-2. Sling to a ship (`arb sling <id> [<ship>]`).
+2. Dispatch to a repo (`arb dispatch <id> [<repo>]`).
 3. Monitor — `arb prime` / `arb worker show <id>` / `arb worker list`.
-4. Tribunal (pre-merge review gate) escalates for your judgment; decide, don't
+4. Review gate (pre-merge) escalates for your judgment; decide, don't
    rubber-stamp.
 5. Merge and close the issue (or let close-on-merge handle it).
 
@@ -34,7 +34,7 @@ Workflow:
 arb claim 42
 arb update <task-id> --difficulty <n>
 
-# Option B: Create a new local directive
+# Option B: Create a new local task
 arb create "Fix widget crash on startup" --description "..."
 arb update <task-id> --difficulty <n>
 ```
@@ -44,7 +44,7 @@ Difficulty scale (D0–D4):
 ```
 D0 Trivial  — single-file, fully specified, no judgment (typo, config, doc edit)
 D1 Simple   — localized, clear approach, light reasoning; follows existing pattern
-D2 Moderate — multi-file or some design choice (default if omitted by coordinator)
+D2 Moderate — multi-file or some design choice (default if omitted)
 D3 Hard     — cross-cutting, non-obvious design, correctness-critical
 D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 ```
@@ -53,7 +53,7 @@ D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
-  acolyte.
+  worker.
 - **PRIORITY (P0–P4)** — drives scheduling urgency.
 - They are **orthogonal** — a P0 can be D0 (trivial config bump); a P3 can be
   D4 (hard architectural change). Do not conflate them.
@@ -64,16 +64,16 @@ sanity-check your call.
 
 ## 4. Concurrency Discipline
 
-Parallel acolytes are good. **Keep concurrent directives FILE-DISJOINT.**
+Parallel workers are good. **Keep concurrent tasks FILE-DISJOINT.**
 
-Directives that touch the same file — especially the CLI verb list,
+Tasks that touch the same file — especially the CLI verb list,
 command-alias map, or the router — **will collide at merge**. The
-auto-conflict-resolver helps, but do not rely on it. Serialize those directives.
+auto-conflict-resolver helps, but do not rely on it. Serialize those tasks.
 
 ## 5. Freshness
 
-Acolytes branch from the ship's base branch. A stale ship means stale, possibly
-regressed state for every new acolyte. Keep ships current; let provisioning
+Workers branch from the repo's base branch. A stale repo means stale, possibly
+regressed state for every new worker. Keep repos current; let provisioning
 fetch from origin.
 
 ## 6. Config Safety
@@ -91,16 +91,16 @@ vernacular).
 A real deploy = pull + run migrations + rebuild the CLI escript + restart the
 server.
 
-**Restarting the server KILLS all in-flight acolytes** and abandons their work.
+**Restarting the server KILLS all in-flight workers** and abandons their work.
 Before restarting:
 
-1. Check for active acolytes (`arb prime` or `arb worker list`).
+1. Check for active workers (`arb prime` or `arb worker list`).
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
 ## 8. Trust State, But Verify
 
-- An acolyte can show "running" while its subprocess is dead — check the port or
+- A worker can show "running" while its subprocess is dead — check the port or
   log, not just status.
 - A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
   Read the real `git diff origin/main...<branch>` before calling work "empty"
@@ -108,7 +108,7 @@ Before restarting:
 - Close-on-merge can miss on out-of-band merges — close the issue manually if it
   stalls.
 
-## 9. Tribunal
+## 9. Review Gate
 
 The pre-merge review gate. After the round cap it escalates for **your**
 judgment.
@@ -133,10 +133,10 @@ Never hardcode model names. Route via abstract tiers:
 | premium | Hard / correctness-critical work |
 
 Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
-sling time.
+dispatch time.
 
 **Verify CLI flags against the installed agent CLI version** — a wrong flag
-crashes the acolyte at launch with no useful error.
+crashes the worker at launch with no useful error.
 
 ## 12. Review Capability
 
@@ -153,102 +153,104 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 | Company / shared | OFF | A human merges |
 | Self-dev / experimental | ON | Safe to automate |
 
-## 14. Vernacular
+## 14. Legacy aliases
 
-| Term | Meaning |
-|------|---------|
-| Admiral | Coordinator — you |
-| Acolyte | Worker — a worker agent |
-| Fleet | The set of active acolytes |
-| Directive | Issue — a unit of work |
-| Campaign | Batch — a batch of related issues |
-| Strike Force | A set of directives deployed together |
-| Inquisitor | Reviewer agent |
-| Crucible | The review / escalation system |
-| Tribunal | The pre-merge review gate |
-| Warden | The process managing the acolyte subprocess |
-| Dispatch | The act of slinging an acolyte |
-| Outpost | Ship — a local git repo for worktrees |
-| Summons | The initial prompt given to a new acolyte |
-| Refinery | The merge queue |
-| Witness | A monitor / watchdog |
+Older docs and transcripts use themed names for generic concepts. The mapping,
+for reference:
 
-## 15. Active Monitoring — Admiral Inbox
+| Legacy term | Current term |
+|-------------|--------------|
+| Acolyte / Polecat | Worker |
+| Admiral | Coordinator (you) |
+| Tribunal | Review gate |
+| Warden | Watchdog |
+| Refinery | Merge queue |
+| Inquisitor | Reviewer |
+| Crucible | Review / escalation system |
+| Witness | Monitor |
+| Rig / Outpost | Repo / worktree |
+| Sling | Dispatch |
+| Campaign / Strike Force | Batch |
+| Fleet | The set of active workers |
+| Directive | Task / issue |
+| Summons | Work prompt |
 
-The Admiral inbox is your command center for real-time coordination. Acolytes
+## 15. Active Monitoring — Coordinator Inbox
+
+The coordinator inbox is your command center for real-time coordination. Workers
 escalate here automatically when they hit blocking decisions; stand a background
-poll and check regularly while the fleet is in flight.
+poll and check regularly while workers are in flight.
 
 ### Polling Command
 
-Check the Admiral inbox with:
+Check the coordinator inbox with:
 
 ```bash
-arb inbox              # check all unread messages
-arb inbox <task-id>   # check messages for a specific task
+arb message inbox              # check all unread messages
+arb message inbox <task-id>   # check messages for a specific task
 ```
 
-Or use the continuous monitor (recommended while acolytes are flying):
+Or use the continuous monitor (recommended while workers are in flight):
 
 ```bash
 arb notify             # background daemon that alerts on inbox changes
 ```
 
-**Suggested cadence:** Poll every ~60 seconds while acolytes are in flight.
-This catches tribunal escalations and critical failures before they stall the work.
+**Suggested cadence:** Poll every ~60 seconds while workers are in flight.
+This catches review gate escalations and critical failures before they stall work.
 
 ### What to Look For
 
-The Admiral inbox surfaces three classes of escalations:
+The coordinator inbox surfaces three classes of escalations:
 
-1. **Tribunal Escalations** — An acolyte's code review hit the round cap and is
-   waiting for your judgment. The tribunal system has flagged it as needing
-   Admiral ruling to unblock. **These are decision gates — read them and rule.**
+1. **Review Gate Escalations** — A worker's code review hit the round cap and is
+   waiting for your judgment. The review gate has flagged it as needing
+   coordinator ruling to unblock. **These are decision gates — read them and rule.**
 
-2. **Auth Failures** — An acolyte could not authenticate to a remote system
+2. **Auth Failures** — A worker could not authenticate to a remote system
    (tracker API, GitHub, etc.). **These require credential fixes or permission
-   corrections at the Admiral level.**
+   corrections at the coordinator level.**
 
-3. **Acolyte Crashes** — An acolyte encountered an unrecoverable error and
+3. **Worker Crashes** — A worker encountered an unrecoverable error and
    terminated. **Check the logs and retry or escalate.**
 
 Use `arb show <task-id>` to see the full transcript and context for any message.
 
-### Responding to a Tribunal Escalation
+### Responding to a Review Gate Escalation
 
-When the inbox surfaces a tribunal escalation:
+When the inbox surfaces a review gate escalation:
 
 1. **Read the full transcript:**
    ```bash
    arb show <task-id>   # see the complete exchange
    ```
 
-2. **Send your ruling to the acolyte:**
+2. **Send your ruling to the worker:**
    ```bash
    arb message <task-id> "Your ruling here: approve / reject / clarify and retry"
    ```
 
-3. **Resume the acolyte to continue work:**
+3. **Resume the worker to continue:**
    ```bash
-   arb resume <task-id> <ship>   # acolyte picks up from where it left off
+   arb resume <task-id> <repo>   # worker picks up from where it left off
    ```
 
-The acolyte will see your message, incorporate your judgment, and continue the
+The worker will see your message, incorporate your judgment, and continue the
 work (or stop if you rejected).
 
-### Fleet Status Sweep
+### Worker Status Sweep
 
-While polling is happening, periodically sweep the full fleet for failures that
+While polling is happening, periodically sweep all workers for failures that
 may not yet be in the inbox:
 
 ```bash
-arb worker list        # list all active and recently-completed acolytes
+arb worker list        # list all active and recently-completed workers
 ```
 
 Look for:
-- **status=failed** — An acolyte stopped with an error. Check `arb show <task-id>`
+- **status=failed** — A worker stopped with an error. Check `arb show <task-id>`
   for the reason and decide whether to retry or escalate.
-- **status=running** — Expected; the acolyte is working.
+- **status=running** — Expected; the worker is working.
 - **status=success** — Work completed; ready for the next phase (review, merge).
 
 Catch failures early — don't wait for them to be reported upstream.
