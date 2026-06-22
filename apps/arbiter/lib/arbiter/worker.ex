@@ -892,7 +892,11 @@ defmodule Arbiter.Worker do
   end
 
   def handle_call({:report, key, value}, _from, %State{} = state) do
-    {:reply, :ok, %State{state | meta: Map.put(state.meta, key, value)}}
+    state = %State{state | meta: Map.put(state.meta, key, value)}
+    if key == :model and not is_nil(state.run_id) do
+      backfill_run_model(state.run_id, value, state.task_id)
+    end
+    {:reply, :ok, state}
   end
 
   # Open a Claude session port. Called by Arbiter.Worker.ClaudeSession.start/1
