@@ -86,6 +86,14 @@ defmodule Arbiter.Agents.Gemini do
   end
 
   @impl true
+  def async_tool_instruction do
+    "*** TOOLS: Run all tools synchronously — wait inline for each result\n" <>
+      "    before proceeding to the next. Do not use background execution modes: run\n" <>
+      "    each diagnostic tool, test, or linter in the foreground and read its\n" <>
+      "    complete output before issuing your VERDICT."
+  end
+
+  @impl true
   def init_session(_opts \\ []) do
     %{
       line_buf: "",
