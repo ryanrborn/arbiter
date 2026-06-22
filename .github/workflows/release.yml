@@ -20,6 +20,11 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+      ELIXIR_ERL_OPTIONS: "+fnu"
+
     steps:
       - name: Install system dependencies
         run: |
@@ -34,7 +39,8 @@ jobs:
             unzip \
             tar \
             gzip \
-            which
+            which \
+            glibc-langpack-en
 
       - uses: actions/checkout@v4
 
@@ -52,6 +58,11 @@ jobs:
           mkdir -p /opt/elixir
           unzip -q /tmp/elixir.zip -d /opt/elixir
           echo "/opt/elixir/bin" >> "$GITHUB_PATH"
+
+      - name: Verify UTF-8 locale
+        run: |
+          locale
+          python3 -c "import locale; print(locale.getlocale())" || true
 
       - name: Bootstrap Hex and Rebar
         run: |
