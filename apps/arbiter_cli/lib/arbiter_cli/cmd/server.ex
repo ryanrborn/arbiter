@@ -4,9 +4,14 @@ defmodule ArbiterCli.Cmd.Server do
 
       arb server start    [--timeout SECONDS] [--json]
       arb server restart  [--timeout SECONDS] [--json]
-      arb server deploy   [--timeout SECONDS] [--json] [--force]
-                          git pull --ff-only main → migrate → rebuild CLI
-                          if changed → restart Phoenix.
+      arb server deploy   [--version vX.Y.Z] [--timeout SECONDS] [--json] [--force]
+                          deploy from a GitHub Release: download + verify
+                          arbiter-<v>-linux.tar.gz → migrate → atomically swap
+                          the current symlink → restart → health-check, with
+                          auto-rollback on failure.
+      arb server deploy --git-pull [--timeout SECONDS] [--json] [--force]
+                          legacy path: git pull --ff-only main → migrate →
+                          rebuild CLI if changed → restart Phoenix.
       arb server migrate  [--json]
                           run pending database migrations as an explicit step.
       arb server doctor   [--json]
@@ -19,7 +24,7 @@ defmodule ArbiterCli.Cmd.Server do
     case argv do
       ["start" | rest] -> Cmd.Start.run(rest)
       ["restart" | rest] -> Cmd.Restart.run(rest)
-      ["deploy" | rest] -> Cmd.Update.deploy(rest)
+      ["deploy" | rest] -> deploy(rest)
       ["migrate" | rest] -> migrate(rest)
       ["doctor" | rest] -> Cmd.Doctor.run(rest)
       ["version" | rest] -> Cmd.Version.run(rest)
@@ -27,6 +32,17 @@ defmodule ArbiterCli.Cmd.Server do
       ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("server requires a subcommand", usage_hint())
       [unknown | _] -> Output.die("unknown server subcommand: #{unknown}", usage_hint())
+    end
+  end
+
+  # `arb server deploy` — deploy from a GitHub Release (the new default). The
+  # legacy git-pull deploy is preserved behind `--git-pull` until the cutover
+  # to release-based deploys is complete.
+  defp deploy(argv) do
+    if "--git-pull" in argv do
+      Cmd.Update.deploy(argv -- ["--git-pull"])
+    else
+      Cmd.ReleaseDeploy.run(argv)
     end
   end
 
