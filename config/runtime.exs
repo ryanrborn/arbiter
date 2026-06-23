@@ -21,7 +21,13 @@ if config_env() == :prod do
   config :arbiter_web, ArbiterWeb.Endpoint,
     http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}],
     secret_key_base: secret_key_base,
-    server: true
+    server: true,
+    url: [
+      host: System.get_env("PHX_HOST") || "localhost",
+      port: String.to_integer(System.get_env("PORT", "4848")),
+      scheme: "http"
+    ],
+    check_origin: false
 
   config :arbiter, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 end
