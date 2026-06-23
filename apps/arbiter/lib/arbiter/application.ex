@@ -45,6 +45,10 @@ defmodule Arbiter.Application do
       {Registry, keys: :unique, name: Arbiter.Workflows.MachineRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: Arbiter.Workflows.MachineSupervisor},
       {Registry, keys: :unique, name: Arbiter.Workflows.MergeQueueRegistry},
+      # Runs background external-PR reviews (`arb review --pr`) off the request
+      # path: the CLI/MCP call returns a "dispatched" ack immediately while the
+      # CodeReview adapter workflow posts findings + a verdict to the PR.
+      {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
       MergeQueueSupervisor
     ] ++ boot_tasks(auto_start?)
   end

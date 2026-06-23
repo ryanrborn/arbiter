@@ -601,6 +601,43 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.worker_review(ctx.coordinator, %{"task_id" => foreign.id})
     end
 
+    test "external review (pr) refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.worker_review(no_dispatch, %{"pr" => "octo/widget#5"})
+    end
+
+    test "external review (pr) on a direct-strategy workspace is unsupported", ctx do
+      # The bound workspace has no merge config → :direct, which can't review an
+      # external PR. The dispatch gate passes; the strategy check rejects it.
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(ctx.coordinator, %{"pr" => "octo/widget#5"})
+
+      assert msg =~ "not supported"
+    end
+
+    test "external review (pr) acks against a github-strategy workspace" do
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "rv-github",
+          prefix: "rvg",
+          config: %{"merge" => %{"strategy" => "github", "config" => %{}}}
+        })
+
+      coordinator = %Scope{tier: :coordinator, workspace_id: gh_ws.id, can_dispatch: true}
+
+      assert {:ok, ack} =
+               Tools.worker_review(coordinator, %{
+                 "pr" => "https://github.com/leo/verus_sigv4/pull/5"
+               })
+
+      assert ack.external == true
+      assert ack.status == "dispatched"
+      assert ack.mr_ref == "leo/verus_sigv4#5"
+      assert ack.strategy == :github
+    end
+
     test "resume surfaces the no-worktree error for a task never slung", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ctx.ws.id})
 

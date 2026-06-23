@@ -252,9 +252,38 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert json_response(conn, 404)
     end
 
-    test "requires a task_id", %{conn: conn} do
+    test "requires a task_id or pr", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/review", %{})
       assert json_response(conn, 400)
+    end
+
+    test "external PR review acks against a github-strategy workspace", %{conn: conn} do
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "ctrl-gh-ws",
+          prefix: "cgh",
+          config: %{"merge" => %{"strategy" => "github", "config" => %{}}}
+        })
+
+      conn =
+        post(conn, ~p"/api/workers/review", %{
+          "pr" => "https://github.com/leo/verus_sigv4/pull/5",
+          "workspace" => gh_ws.name
+        })
+
+      body = json_response(conn, 201)
+      assert body["data"]["external"] == true
+      assert body["data"]["status"] == "dispatched"
+      assert body["data"]["mr_ref"] == "leo/verus_sigv4#5"
+      assert body["data"]["strategy"] == "github"
+    end
+
+    test "external PR review on a direct-strategy workspace is rejected", %{conn: conn, ws: ws} do
+      conn =
+        post(conn, ~p"/api/workers/review", %{"pr" => "octo/widget#1", "workspace" => ws.name})
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "not supported"
     end
   end
 

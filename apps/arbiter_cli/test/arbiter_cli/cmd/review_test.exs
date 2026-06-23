@@ -96,4 +96,64 @@ defmodule ArbiterCli.Cmd.ReviewTest do
       assert err =~ "not found" || err =~ "404"
     end
   end
+
+  describe "arb review --pr (external PR)" do
+    test "posts pr/repo/workspace and renders the dispatched ack" do
+      parent = self()
+      name = Process.get(:bd2_stub_name)
+
+      Req.Test.stub(name, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", "/api/workers/review"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(parent, {:body, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{
+              "data" => %{
+                "external" => true,
+                "status" => "dispatched",
+                "pr" => "leo/verus_sigv4#5",
+                "mr_ref" => "leo/verus_sigv4#5",
+                "strategy" => "github",
+                "link" => "https://github.com/leo/verus_sigv4/pull/5"
+              }
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{error: "unmatched"})
+        end
+      end)
+
+      {out, _err, code} =
+        capture(fn ->
+          ArbiterCli.Cmd.Review.run(["--pr", "leo/verus_sigv4#5", "--repo", "verus_sigv4"])
+        end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["pr"] == "leo/verus_sigv4#5"
+      assert body["repo"] == "verus_sigv4"
+      refute Map.has_key?(body, "task_id")
+
+      assert out =~ "External review dispatched:"
+      assert out =~ "leo/verus_sigv4#5"
+      assert out =~ "github"
+      assert out =~ "https://github.com/leo/verus_sigv4/pull/5"
+    end
+
+    test "--pr with --json emits the JSON payload" do
+      stub_post("/api/workers/review", %{
+        "data" => %{"external" => true, "pr" => "#5", "mr_ref" => "#5", "strategy" => "github"}
+      })
+
+      {out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Review.run(["--pr", "#5", "--json"]) end)
+
+      assert code == 0
+      assert {:ok, decoded} = Jason.decode(out)
+      assert decoded["data"]["pr"] == "#5"
+    end
+  end
 end

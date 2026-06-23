@@ -187,6 +187,35 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
+  def ref_for_pr(pr, _opts) when is_binary(pr) do
+    pr = String.trim(pr)
+
+    cond do
+      # Full forge URL: https://<host>/<group>/<project>/-/merge_requests/<iid>
+      m = Regex.run(~r{/-/merge_requests/(\d+)}, pr) ->
+        [_, iid] = m
+        {:ok, ref_for(iid)}
+
+      # Bare iid or GitLab's own "!<iid>" shorthand.
+      m = Regex.run(~r/^!?(\d+)$/, pr) ->
+        [_, iid] = m
+        {:ok, ref_for(iid)}
+
+      true ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message:
+             "could not parse #{inspect(pr)} as a GitLab MR reference — expected an MR URL " <>
+               "(…/-/merge_requests/N), a bare iid, or \"!N\". The MR is resolved within the " <>
+               "workspace's configured project_id.",
+           raw: pr
+         }}
+    end
+  end
+
+  @impl true
   def get_diff(mr_ref, _opts) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do
