@@ -78,6 +78,10 @@ jobs:
         run: |
           MIX_ENV=prod mix cmd --app arbiter_web mix assets.setup
 
+      - name: Compile (prod)
+        run: |
+          MIX_ENV=prod mix compile
+
       - name: Build and digest web assets
         run: |
           MIX_ENV=prod mix cmd --app arbiter_web mix assets.deploy
