@@ -99,6 +99,16 @@ arb worker log <worker-id>
 
 Once complete, the Merge Queue picks it up (if configured) or you can merge manually via the dashboard.
 
+### Running as a systemd service
+
+To run Arbiter as a self-contained OTP release under a systemd user unit, install and enable it with:
+
+```sh
+arb install service
+```
+
+This installs the service, enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`.
+
 ## Initialize your Admiral session
 
 The Admiral is a dedicated Claude Code session that acts as your
