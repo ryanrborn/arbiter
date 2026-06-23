@@ -1192,6 +1192,12 @@ defmodule Arbiter.Worker.Dispatch do
     (e.g. an upstream API shape changed) and marks them read. To leave a flag
     for another worker, use `arb message <their-task-id> <text>`.
 
+    Between major steps, also check for `.arbiter/INBOX` in your working
+    directory. If it exists, read it, act on any Admiral instructions it
+    contains, then delete the file to acknowledge receipt. Treat it as a
+    real-time message from the Admiral — it takes precedence over your current
+    task if it redirects you.
+
     *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
     tool — including in parallel or with background execution modes. However,
     you MUST wait for every background task to complete and read its full

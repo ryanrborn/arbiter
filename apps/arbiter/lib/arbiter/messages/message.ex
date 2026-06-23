@@ -67,6 +67,11 @@ defmodule Arbiter.Messages.Message do
                Arbiter.Messages.Message.broadcast_new(message)
                {:ok, message}
              end)
+
+      change after_action(fn _changeset, message, _context ->
+               Arbiter.Messages.WorktreeDelivery.maybe_deliver(message)
+               {:ok, message}
+             end)
     end
 
     update :mark_read do
