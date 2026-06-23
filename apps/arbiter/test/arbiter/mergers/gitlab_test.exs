@@ -634,4 +634,24 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert msg =~ @env_var
     end
   end
+
+  # ref_for_pr/2 — construct an mr_ref for an external MR (bd-d4ealy).
+  describe "ref_for_pr/2" do
+    test "parses an MR URL into a !iid ref" do
+      assert {:ok, "!7"} =
+               Gitlab.ref_for_pr("https://gitlab.com/group/proj/-/merge_requests/7", %{})
+    end
+
+    test "parses a bare iid" do
+      assert {:ok, "!42"} = Gitlab.ref_for_pr("42", %{})
+    end
+
+    test "parses GitLab's own !N shorthand" do
+      assert {:ok, "!42"} = Gitlab.ref_for_pr("!42", %{})
+    end
+
+    test "an unparseable identifier returns a validation error" do
+      assert {:error, %Error{kind: :validation_failed}} = Gitlab.ref_for_pr("nonsense", %{})
+    end
+  end
 end

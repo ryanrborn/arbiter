@@ -1100,4 +1100,57 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:error, %Error{kind: :config_missing}} = Github.get("#1")
     end
   end
+
+  # ref_for_pr/2 — construct an mr_ref for an external PR (bd-d4ealy).
+  describe "ref_for_pr/2" do
+    test "parses a github.com PR URL into an embedded ref" do
+      assert {:ok, "leo/verus_sigv4#5"} =
+               Github.ref_for_pr("https://github.com/leo/verus_sigv4/pull/5", %{})
+    end
+
+    test "parses an enterprise-host PR URL (host is not constrained)" do
+      assert {:ok, "org/proj#12"} =
+               Github.ref_for_pr("https://github.example.com/org/proj/pull/12", %{})
+    end
+
+    test "parses an owner/repo#N slug" do
+      assert {:ok, "octo/widget#42"} = Github.ref_for_pr("octo/widget#42", %{})
+    end
+
+    test "parses an owner/repo/pull/N slug" do
+      assert {:ok, "octo/widget#7"} = Github.ref_for_pr("octo/widget/pull/7", %{})
+    end
+
+    test "a bare number with no repo_path mints a bare ref (falls back to active cfg)" do
+      assert {:ok, "#42"} = Github.ref_for_pr("42", %{})
+      assert {:ok, "#42"} = Github.ref_for_pr("#42", %{})
+    end
+
+    test "a bare number with a repo_path embeds the owner/repo from the origin remote" do
+      repo = tmp_git_repo("git@github.com:leo/verus_auth_server.git")
+      assert {:ok, "leo/verus_auth_server#394"} = Github.ref_for_pr("394", %{repo_path: repo})
+    end
+
+    test "a bare number with an unresolvable repo_path falls back to a bare ref" do
+      dir = Path.join(System.tmp_dir!(), "no-remote-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+      assert {:ok, "#9"} = Github.ref_for_pr("9", %{repo_path: dir})
+    end
+
+    test "an unparseable identifier returns a validation error" do
+      assert {:error, %Error{kind: :validation_failed}} = Github.ref_for_pr("not a pr", %{})
+    end
+  end
+
+  # Minimal git repo whose `origin` remote is set to the given URL, so
+  # RepoResolver.from_remote/1 can derive {owner, repo}.
+  defp tmp_git_repo(origin_url) do
+    dir = Path.join(System.tmp_dir!(), "gh-ref-#{:erlang.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    {_, 0} = System.cmd("git", ["init", "-q", dir])
+    {_, 0} = System.cmd("git", ["-C", dir, "remote", "add", "origin", origin_url])
+    on_exit(fn -> File.rm_rf!(dir) end)
+    dir
+  end
 end

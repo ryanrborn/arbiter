@@ -435,15 +435,30 @@ defmodule Arbiter.MCP.Tools do
   # ---- worker_review -----------------------------------------------------
 
   @doc """
-  Dispatch a **review-only** worker against the PR/MR linked to a task
-  (`arb review`): no worktree, no per-task branch, no route through the
-  merge queue/merger. Coordinator only, and gated by the dispatch-recursion guardrail
-  (`can_dispatch` + `depth`) — a review dispatch spawns an agent. The child
-  worker's scope is minted one level deeper. Backs onto
-  `Arbiter.Worker.Dispatch.dispatch/2` with `review: true`.
+  Dispatch a **review-only** worker (`arb review`): no worktree, no per-task
+  branch, no route through the merge queue/merger. Coordinator only, and gated
+  by the dispatch-recursion guardrail (`can_dispatch` + `depth`) — a review
+  spawns an agent.
+
+  Two shapes:
+
+    * `task_id` → review the PR/MR linked to a task. Backs onto
+      `Arbiter.Worker.Dispatch.dispatch/2` with `review: true`; the child
+      worker's scope is minted one level deeper.
+    * `pr` (URL or number, + optional `repo`/`workspace`) → review an
+      **external / non-arbiter PR** through the MR adapter
+      (`Arbiter.Reviews.ExternalReview`): no task, no branch. Findings + a
+      verdict are posted to the PR.
   """
   @spec worker_review(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_review(%Scope{} = scope, args) do
+    case fetch_string(args, "pr") do
+      pr when is_binary(pr) -> worker_review_external(scope, args, pr)
+      _ -> worker_review_task(scope, args)
+    end
+  end
+
+  defp worker_review_task(%Scope{} = scope, args) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
@@ -457,6 +472,28 @@ defmodule Arbiter.MCP.Tools do
       case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
+      end
+    end
+  end
+
+  # External PR review: same dispatch gating (it spawns a reviewer), but resolves
+  # the MR provider from the (scope-bound or named) workspace rather than a task.
+  defp worker_review_external(%Scope{} = scope, args, pr) do
+    with :ok <- ensure_can_dispatch(scope),
+         :ok <- ensure_dispatch_depth(scope),
+         {:ok, ws_ref} <- authorized_workspace(scope, args) do
+      opts = [
+        pr: pr,
+        repo: fetch_string(args, "repo"),
+        workspace: ws_ref
+      ]
+
+      case Arbiter.Reviews.ExternalReview.dispatch(opts) do
+        {:ok, ack} ->
+          {:ok, ack}
+
+        {:error, reason} ->
+          {:error, {:invalid, Arbiter.Reviews.ExternalReview.describe_error(reason)}}
       end
     end
   end
