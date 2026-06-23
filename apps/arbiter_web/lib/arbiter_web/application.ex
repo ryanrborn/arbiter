@@ -13,6 +13,9 @@ defmodule ArbiterWeb.Application do
 
     children = [
       ArbiterWeb.Telemetry,
+      # Outbound HTTP pool for the Anthropic proxy (bd-5boun6) — forwards Claude
+      # CLI traffic to api.anthropic.com and streams SSE responses back.
+      {Finch, name: ArbiterWeb.Finch},
       # Routes Arbiter.MCP session ids → their open GET /mcp SSE streams so
       # server-initiated messages reach the right client (ArbiterWeb.MCP.Session).
       {Registry, keys: :unique, name: ArbiterWeb.MCP.Session.registry()},

@@ -84,7 +84,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox workspace_show task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync)
+  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync)
 
   @raw_tools [
     %{
@@ -171,6 +171,16 @@ defmodule Arbiter.MCP.Catalog do
         "Show the scope's own workspace: config and the resolved worker security posture.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.workspace_show/2
+    },
+    %{
+      name: "quota_get",
+      tiers: @both,
+      description:
+        "Current Anthropic rate-limit / quota state for the scope's workspace (captured by the " <>
+          "local proxy): 5h + 7d utilization, reset times, status, and which window binds. " <>
+          "Returns `{\"claude\": null}` when nothing has been captured yet.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.quota_get/2
     },
     %{
       name: "task_update_progress",
