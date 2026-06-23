@@ -151,6 +151,11 @@ defmodule Arbiter.Reviews.ExternalReview do
   # The review targets the MR provider, so an adapter that can't mint a ref for
   # an externally-authored PR (Direct — local merge, no forge) cannot run one.
   defp ensure_supports_external(adapter, strategy) do
+    # function_exported?/2 does not load the module; in interactive/mix mode the
+    # adapter may not be loaded yet, so ensure it is before the export check —
+    # otherwise every external review is wrongly rejected as unsupported.
+    Code.ensure_loaded(adapter)
+
     if function_exported?(adapter, :ref_for_pr, 2) do
       :ok
     else
