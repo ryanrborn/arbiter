@@ -91,6 +91,24 @@ defmodule Arbiter.Trackers.Tracker do
   @type status ::
           :open | :in_progress | :closed | :pr_opened | :approved_unmerged | :merged
 
+  @typedoc """
+  A field the tracker *gates* a transition on — i.e. the provider refuses the
+  transition until the field is populated. Returned by `gating_fields/2`.
+
+    * `:id` — the tracker-native field id (e.g. `"customfield_10184"`).
+    * `:key` — the task-domain key the value is produced under (`:qa_notes`,
+      `:deployment_notes`, ...), or `nil` when the field has no task-domain
+      mapping (the sync layer then treats it as a genuinely-missing field and
+      escalates it by `:name`).
+    * `:name` — the human-facing field label, used when escalating a missing
+      required field (e.g. `"QA Testing Notes"`).
+  """
+  @type gating_field :: %{
+          required(:id) => String.t(),
+          required(:key) => atom() | nil,
+          required(:name) => String.t()
+        }
+
   @typedoc "Normalized open-item summary used by `list_open/1`."
   @type summary :: %{
           required(:ref) => ref,
@@ -179,6 +197,28 @@ defmodule Arbiter.Trackers.Tracker do
               :ok | {:error, :not_supported} | {:error, term()}
 
   @doc """
+  Return the fields the tracker *gates* the transition mapped from `status` on
+  — the fields the provider requires populated before it will accept the
+  transition. Provider-agnostic by design: the adapter (not the sync layer)
+  knows which transition it will invoke and which fields that transition
+  requires, so the gate stays correct without any provider-specific logic
+  leaking up into the workflow/sync layer.
+
+  The sync layer uses this to push the bead's produced values into the gating
+  fields *before* attempting the transition, and to escalate — naming the exact
+  missing field — when a required field has no produced value.
+
+  Returns `{:ok, []}` when the transition isn't gated (the common case). A
+  benign "this tracker doesn't model that event" reason (e.g.
+  `:status_unmapped`) is returned as `{:error, reason}` and the sync layer
+  treats it as "no gate" (there's no transition to gate). Optional — adapters
+  without field gating don't implement it, and `Arbiter.Trackers.gating_fields/2`
+  returns `{:ok, []}` for them.
+  """
+  @callback gating_fields(ref, status) ::
+              {:ok, [gating_field]} | {:error, term()}
+
+  @doc """
   Check whether the ref has already been claimed by another Arbiter
   installation. Returns `:ok` if clear, or
   `{:error, {:already_claimed, comment_body}}` if a prior-ownership marker is
@@ -202,5 +242,9 @@ defmodule Arbiter.Trackers.Tracker do
   """
   @callback signal_claim(ref, task_id :: String.t(), context :: map()) :: :ok
 
-  @optional_callbacks add_remote_link: 3, add_comment: 2, check_prior_claim: 1, signal_claim: 3
+  @optional_callbacks add_remote_link: 3,
+                      add_comment: 2,
+                      check_prior_claim: 1,
+                      signal_claim: 3,
+                      gating_fields: 2
 end
