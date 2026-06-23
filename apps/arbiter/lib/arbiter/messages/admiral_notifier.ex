@@ -201,9 +201,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
           "`#{event}` lifecycle event.",
         tracker && "Tracker: #{tracker}#{ref && " #{ref}"}",
         "Error: #{describe_reason(reason)}",
-        "This usually means the workspace `status_map` / `transition_graph` " <>
-          "doesn't match the tracker's real workflow. Reconcile the config " <>
-          "(see Arbiter.Trackers.Jira.Config) and re-run the sync."
+        sync_hint(reason)
       ]
       |> Enum.reject(&is_nil/1)
       |> Enum.join("\n")
@@ -365,11 +363,28 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   defp block_remediation(_other), do: "inspect the PR on the forge."
 
-  defp describe_reason(%{__struct__: _, message: msg, kind: kind}) when is_binary(msg),
+  defp describe_reason(%{message: msg, kind: kind}) when is_binary(msg),
     do: "#{msg} (#{kind})"
 
   defp describe_reason(reason) when is_binary(reason), do: reason
   defp describe_reason(reason), do: inspect(reason)
+
+  # A required tracker field had no produced value on the bead — name the
+  # specific field(s) rather than the generic status_map hint, which would
+  # send the operator down the wrong path (this is a missing-value problem, not
+  # a config-mismatch one).
+  defp sync_hint(%{kind: :gated_fields_missing, missing_fields: names})
+       when is_list(names) and names != [] do
+    "The bead has not produced a value for required tracker field(s): " <>
+      "#{Enum.join(names, ", ")}. Populate them on the task " <>
+      "(e.g. `arb issue update <id> --qa-notes ... --deployment-notes ...`) and re-run the sync."
+  end
+
+  defp sync_hint(_reason) do
+    "This usually means the workspace `status_map` / `transition_graph` " <>
+      "doesn't match the tracker's real workflow. Reconcile the config " <>
+      "(see Arbiter.Trackers.Jira.Config) and re-run the sync."
+  end
 
   # ---- core ---------------------------------------------------------------
 

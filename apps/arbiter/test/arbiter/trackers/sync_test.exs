@@ -220,4 +220,122 @@ defmodule Arbiter.Trackers.SyncTest do
       assert escalations_for(ws.id) == []
     end
   end
+
+  describe "gated transition: push produced fields before transitioning" do
+    # The VR-17958 incident: the pr_opened -> "In Code Review" transition is
+    # GATED on QA Testing Notes + Deployment Notes. The worker had already
+    # produced both on the bead, but arbiter escalated instead of pushing them.
+    # The gate is discovered from Jira (`expand=transitions.fields`), so no
+    # provider-specific logic lives in this sync layer.
+
+    defp jira_issue_with(ws, attrs) do
+      {:ok, issue} =
+        Ash.create(
+          Issue,
+          Map.merge(
+            %{
+              title: "tracked",
+              tracker_type: :jira,
+              tracker_ref: @ref,
+              skip_upstream_create: true,
+              workspace_id: ws.id
+            },
+            attrs
+          )
+        )
+
+      issue
+    end
+
+    # GET /transitions advertises the gated "Pull request created" transition
+    # (required QA + Deployment fields); PUT records the field write; POST
+    # records the transition.
+    defp gated_pr_opened_stub(test_pid) do
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "51",
+                  "name" => "Pull request created",
+                  "to" => %{"name" => "In Code Review"},
+                  "fields" => %{
+                    "customfield_10184" => %{"required" => true, "name" => "QA Testing Notes"},
+                    "customfield_10185" => %{"required" => true, "name" => "Deployment Notes"}
+                  }
+                }
+              ]
+            })
+
+          conn.method == "PUT" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:put_fields, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:transition, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "1"})
+        end
+      end)
+    end
+
+    test "pushes the produced QA + Deployment notes, THEN transitions" do
+      test_pid = self()
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+
+      issue =
+        jira_issue_with(ws, %{
+          qa_notes: "Hit GET /v2/foo with a valid token; expect 200 + the new field.",
+          deployment_notes: "No migration. Behind the `foo_v2` flag, default off."
+        })
+
+      gated_pr_opened_stub(test_pid)
+
+      assert :ok = Sync.lifecycle(issue, :pr_opened, pr_url: "https://x/pr/1")
+
+      # Fields are written first…
+      assert_receive {:put_fields, %{"fields" => fields}}
+      assert fields["customfield_10184"]["type"] == "doc"
+      assert fields["customfield_10185"]["type"] == "doc"
+      # …then the gated transition fires.
+      assert_receive {:transition, %{"transition" => %{"id" => "51"}}}
+      # No escalation: the gate was satisfied automatically.
+      assert escalations_for(ws.id) == []
+    end
+
+    test "escalates naming the exact missing field; does NOT transition" do
+      test_pid = self()
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+
+      # QA Notes produced, Deployment Notes genuinely missing.
+      issue = jira_issue_with(ws, %{qa_notes: "Smoke-test the endpoint.", deployment_notes: nil})
+
+      gated_pr_opened_stub(test_pid)
+
+      assert :ok = Sync.lifecycle(issue, :pr_opened, pr_url: "https://x/pr/1")
+
+      # Nothing is written or transitioned — the gate isn't satisfiable.
+      refute_receive {:put_fields, _}
+      refute_receive {:transition, _}
+
+      # The escalation names the specific missing field, not a generic
+      # status_map hint.
+      escalations = escalations_for(ws.id)
+      assert length(escalations) == 1
+      [summons] = escalations
+      assert summons.subject =~ "tracker sync failed"
+      assert summons.body =~ "Deployment Notes"
+      refute summons.body =~ "QA Testing Notes"
+      refute summons.body =~ "status_map"
+    end
+  end
 end

@@ -458,11 +458,22 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
           {"GET", _} when binary_part(path, byte_size(path) - 12, 12) == "/transitions" ->
             send(test_pid, {:jira, :get_transitions, path})
 
+            # The "Code Merged" transition GATES on QA Testing Notes +
+            # Deployment Notes — Jira reports that via `expand=transitions.fields`
+            # (the adapter requests it). The gate is *discovered*, not hardcoded.
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "transitions" => [
-                %{"id" => "31", "name" => "Code Merged", "to" => %{"name" => "Code Complete"}}
+                %{
+                  "id" => "31",
+                  "name" => "Code Merged",
+                  "to" => %{"name" => "Code Complete"},
+                  "fields" => %{
+                    "customfield_10184" => %{"required" => true, "name" => "QA Testing Notes"},
+                    "customfield_10185" => %{"required" => true, "name" => "Deployment Notes"}
+                  }
+                }
               ]
             })
 
