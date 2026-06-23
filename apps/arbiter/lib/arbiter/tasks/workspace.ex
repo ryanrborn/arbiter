@@ -45,7 +45,8 @@ defmodule Arbiter.Tasks.Workspace do
   use Ash.Resource,
     otp_app: :arbiter,
     domain: Arbiter.Tasks,
-    data_layer: AshSqlite.DataLayer
+    data_layer: AshSqlite.DataLayer,
+    extensions: [AshCloak]
 
   @valid_tracker_types ~w(none jira shortcut linear github)
   @valid_merger_strategies ~w(direct gitlab github)
@@ -55,12 +56,40 @@ defmodule Arbiter.Tasks.Workspace do
     repo Arbiter.Repo
   end
 
+  # Encrypt the `secrets` attribute at rest. ash_cloak renames the raw attribute
+  # to `encrypted_secrets` (a binary/bytea column, public?: false, sensitive?:
+  # true), wires writes through AES-256-GCM, and adds a decrypting calculation.
+  #
+  # We deliberately do NOT enable `decrypt_by_default`: auto-loading that
+  # calculation immediately after a write (Ash 3.25 / ash_cloak 0.2) trips an
+  # internal calculation-attach error. Instead, internal callers decrypt on
+  # demand via `secrets_map/1`, which reads the always-selected stored
+  # `encrypted_secrets` column. The decrypted value is NEVER serialised — see
+  # ArbiterWeb workspace_json.
+  cloak do
+    vault(Arbiter.Vault)
+    attributes([:secrets])
+  end
+
   actions do
     defaults [:read, :destroy]
 
     create :create do
       primary? true
       accept [:name, :description, :prefix, :config]
+
+      argument :secrets, :map do
+        allow_nil? true
+
+        description """
+        Write-only map of secret key → token string, merge-patched into the
+        workspace's encrypted secrets. A key with a null value removes it.
+        Never returned in any read response. Referenced via
+        `credentials_ref: "secret:<key>"`.
+        """
+      end
+
+      change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergeQueue, []}
     end
@@ -69,6 +98,18 @@ defmodule Arbiter.Tasks.Workspace do
       primary? true
       accept [:name, :description, :prefix, :config]
       require_atomic? false
+
+      argument :secrets, :map do
+        allow_nil? true
+
+        description """
+        Write-only map of secret key → token string, merge-patched into the
+        workspace's existing encrypted secrets. A key with a null value removes
+        it; omitting the argument leaves all secrets untouched.
+        """
+      end
+
+      change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
     end
 
@@ -135,8 +176,47 @@ defmodule Arbiter.Tasks.Workspace do
       """
     end
 
+    # Encrypted at rest via ash_cloak (see the `cloak` block). At compile time
+    # this attribute is renamed to `encrypted_secrets` (binary column,
+    # public?: false) and replaced by a decrypting calculation of the same name.
+    # Holds %{String.t() => String.t()} — secret key → token. Write-only:
+    # set through the create/update `secrets` argument, never serialised.
+    attribute :secrets, :map do
+      public? false
+      allow_nil? true
+      default %{}
+
+      description "Encrypted tracker/merger credentials. Resolved via credentials_ref \"secret:<key>\"."
+    end
+
     create_timestamp :created_at
     update_timestamp :updated_at
+  end
+
+  @doc """
+  Decrypts and returns the workspace's secrets map.
+
+  Reads the stored `encrypted_secrets` column (always selected, since it is a
+  plain attribute) and decrypts it with `Arbiter.Vault`. Returns `%{}` when no
+  secrets are set or the column is unloaded — so callers can treat "no secrets"
+  and "missing key" uniformly.
+
+  This is the internal read path for `credentials_ref: "secret:<key>"`
+  resolution (see `Arbiter.Agents.CredentialsRef`). The values are never
+  serialised; only `secret_keys` (names) are exposed via the API.
+  """
+  @spec secrets_map(t()) :: %{optional(String.t()) => String.t()}
+  def secrets_map(workspace) do
+    case Map.get(workspace, :encrypted_secrets) do
+      enc when is_binary(enc) ->
+        enc
+        |> Base.decode64!()
+        |> Arbiter.Vault.decrypt!()
+        |> Ash.Helpers.non_executable_binary_to_term()
+
+      _ ->
+        %{}
+    end
   end
 
   @doc """

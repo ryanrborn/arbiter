@@ -17,6 +17,13 @@ config :arbiter_web, ArbiterWeb.Endpoint,
   secret_key_base: "tP+Fx7+LODDAMtW348NLPMEFQgFBNOCXEW1X3LdQHm5YMSdusJH7vaCC+c18IJgi",
   server: false
 
+# Cloak vault key for the test suite. Arbiter.Vault reads ARBITER_CLOAK_KEY at
+# runtime and refuses to boot without it; this config fallback injects a fixed
+# (non-secret) 32-byte AES key so the suite encrypts/decrypts workspace secrets
+# without depending on a real environment variable. Never used outside :test.
+config :arbiter, Arbiter.Vault,
+  key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
 config :arbiter, :github_http_stub, true
 config :arbiter, :jira_http_stub, true
 config :arbiter, :shortcut_http_stub, true

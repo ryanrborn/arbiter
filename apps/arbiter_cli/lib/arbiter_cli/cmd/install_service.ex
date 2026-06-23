@@ -112,6 +112,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     ANTHROPIC_API_KEY_2
     GEMINI_API_KEY
     GOOGLE_GENAI_API_KEY
+    ARBITER_CLOAK_KEY
   )
 
   @doc """
