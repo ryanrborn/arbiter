@@ -43,10 +43,19 @@ defmodule ArbiterWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
-  plug Plug.Parsers,
-    parsers: [:urlencoded, :multipart, :json],
-    pass: ["*/*"],
-    json_decoder: Phoenix.json_library()
+  # The Anthropic proxy (bd-5boun6) forwards raw request bodies verbatim to
+  # api.anthropic.com, so it must NOT have its body parsed/consumed here. Every
+  # other route parses as usual.
+  @parsers_opts Plug.Parsers.init(
+                  parsers: [:urlencoded, :multipart, :json],
+                  pass: ["*/*"],
+                  json_decoder: Phoenix.json_library()
+                )
+
+  plug :parse_except_proxy
+
+  defp parse_except_proxy(%Plug.Conn{path_info: ["proxy" | _]} = conn, _opts), do: conn
+  defp parse_except_proxy(conn, _opts), do: Plug.Parsers.call(conn, @parsers_opts)
 
   plug Plug.MethodOverride
   plug Plug.Head

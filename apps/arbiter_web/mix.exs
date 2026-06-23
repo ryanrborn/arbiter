@@ -59,6 +59,7 @@ defmodule ArbiterWeb.MixProject do
       {:gettext, "~> 1.0"},
       {:arbiter, in_umbrella: true},
       {:jason, "~> 1.2"},
+      {:finch, "~> 0.19"},
       {:bandit, "~> 1.5"}
     ]
   end

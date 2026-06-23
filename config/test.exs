@@ -29,6 +29,12 @@ config :arbiter, :auto_start_refineries, false
 # dir of their own.
 config :arbiter, :acolyte_isolate_config, false
 
+# Anthropic quota proxy (bd-5boun6): off in test so adapter/dispatch specs see
+# the raw spawn env. Specs that exercise the wiring flip this on per-test.
+config :arbiter, :anthropic_proxy,
+  enabled: false,
+  base_url: "http://127.0.0.1:4848/proxy/anthropic"
+
 # Arbiter.MCP (bd-dem49g): the server stays enabled (Plug tests exercise it), but
 # per-spawn `.mcp.json` injection into worktrees is off by default so existing
 # Sling tests don't write config files or mint tokens. Tests that exercise

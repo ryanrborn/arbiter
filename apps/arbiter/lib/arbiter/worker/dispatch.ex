@@ -674,7 +674,9 @@ defmodule Arbiter.Worker.Dispatch do
       AdmiralNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
-      probe_opts = preflight_opts(opts)
+      # Route the probe through the same quota-capturing proxy a real spawn
+      # uses (bd-5boun6) so `claude --print ping` updates quota state too.
+      probe_opts = preflight_opts(opts) ++ anthropic_proxy_opts(adapter, workspace)
 
       case Preflight.check(adapter, probe_opts) do
         :ok ->
@@ -847,7 +849,10 @@ defmodule Arbiter.Worker.Dispatch do
         # the argv — no inheritance of the operator's ~/.claude (bd-9u10op).
         policy = SecurityPolicy.resolve(workspace, security_override(opts))
 
-        agent_opts = agent_opts_from_choice(choice) ++ [security: policy]
+        agent_opts =
+          agent_opts_from_choice(choice) ++
+            [security: policy] ++ anthropic_proxy_opts(adapter, workspace)
+
         prompt = prompt_for_task(task, opts)
 
         provider = Atom.to_string(choice.type)
@@ -965,6 +970,21 @@ defmodule Arbiter.Worker.Dispatch do
       []
     end
   end
+
+  # Route Claude CLI traffic through the local quota-capturing proxy (bd-5boun6)
+  # by exporting ANTHROPIC_BASE_URL with the workspace id baked into the path, so
+  # captured rate-limit headers are attributed to this workspace. Claude-only —
+  # Gemini ignores it — and a no-op when the proxy is disabled (e.g. test env).
+  defp anthropic_proxy_opts(Arbiter.Agents.Claude, workspace) do
+    if Arbiter.Quota.proxy_enabled?() do
+      ws_id = workspace && workspace.id
+      [anthropic_base_url: Arbiter.Quota.worker_base_url(ws_id)]
+    else
+      []
+    end
+  end
+
+  defp anthropic_proxy_opts(_adapter, _workspace), do: []
 
   # The concrete model the adapter will dispatch with, if it can name one ahead
   # of the stream (optional `resolved_model/1` callback). Returns nil for
