@@ -15,25 +15,17 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   adapter's own `status_map` (e.g. GitHub `:closed -> "closed"`,
   `:open`/`:in_progress -> "open"`).
 
-  ## Gated forward transition (Jira / LeoTech)
+  ## Gated forward transition
 
-  Some trackers gate the forward (closing) transition on custom fields being
-  populated — LeoTech's Jira (Verus / VR) refuses to move a ticket forward
-  until its "QA Testing Notes" and "Deployment Notes" fields are filled. So
-  before a `:closed` transition on a gated tracker we:
-
-    1. **Gate-check** the task's `qa_notes` + `deployment_notes`. If either is
-       blank we log a clear, actionable error and **skip** the transition
-       entirely — rather than firing a transition Jira would reject for empty
-       fields. The notes are produced as an explicit completion step of
-       tracker-backed work (see the work prompt in `Arbiter.Worker.Dispatch`).
-    2. **Push** the notes via `Arbiter.Trackers.update_fields/2` (Markdown →
-       ADF is handled by the Jira adapter), so the gated fields are filled
-       *before* the transition is attempted.
-    3. **Transition** the ticket.
-
-  Non-closing transitions (`open ⇄ in_progress`, reopen) never touch the
-  custom fields.
+  Some trackers gate a forward transition on custom fields being populated —
+  LeoTech's Jira (Verus / VR) refuses to move a ticket forward until its "QA
+  Testing Notes" and "Deployment Notes" fields are filled. That gate is handled
+  **provider-agnostically inside `Arbiter.Trackers.Sync.transition_event/2`**:
+  it asks the adapter which fields gate the transition (`Tracker.gating_fields/2`),
+  pushes the bead's produced values into them *before* transitioning, and
+  escalates — naming the exact missing field — when a required value hasn't been
+  produced. This change therefore carries no provider-specific gating logic; it
+  just routes the status transition through `Sync`.
 
   ## Failure is loud, not swallowed
 
@@ -75,33 +67,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
 
   defp sync(issue) do
     Trackers.prepare(issue, load_workspace(issue.workspace_id))
-
-    case ensure_completion_notes_pushed(issue) do
-      :ok ->
-        do_transition(issue)
-
-      {:error, %{gate: true, message: message}} ->
-        # The gated tracker would reject this forward transition for empty
-        # custom fields. Surface a clear, actionable error and DON'T attempt
-        # the transition — a blocked/failed transition is worse than a
-        # skipped one the operator can retry after filling the notes.
-        Logger.error(
-          "SyncTracker: gated transition BLOCKED for task=#{issue.id} " <>
-            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{message} " <>
-            "Skipping the forward transition. Populate qa_notes + deployment_notes " <>
-            "on the task (e.g. `arb issue update #{issue.id} --qa-notes ... --deployment-notes ...`) " <>
-            "and re-run the sync."
-        )
-
-      {:error, reason} ->
-        # Pushing the notes failed (network/auth/etc). Skip the transition
-        # rather than fire it into a gate that would reject it anyway.
-        Logger.warning(
-          "SyncTracker: failed to push completion notes for task=#{issue.id} " <>
-            "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref}: #{inspect(reason)} " <>
-            "— skipping the gated transition."
-        )
-    end
+    do_transition(issue)
   rescue
     e ->
       Logger.warning("SyncTracker: error syncing task=#{issue.id}: #{Exception.message(e)}")
@@ -173,49 +139,6 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   # Unknown tracker type or :none — assume closed to avoid spurious retries.
   # :none is already gated out in maybe_sync/4 before do_transition is reached.
   defp upstream_closed?(_, _), do: true
-
-  # Only the forward (closing) transition is gated; open ⇄ in_progress and
-  # reopen never touch the gated custom fields. For non-gated trackers
-  # (GitHub, None, …) there is nothing to push and no gate to honor.
-  defp ensure_completion_notes_pushed(%{status: :closed} = issue) do
-    if gated_tracker?(issue.tracker_type) do
-      push_gated_notes(issue)
-    else
-      :ok
-    end
-  end
-
-  defp ensure_completion_notes_pushed(_issue), do: :ok
-
-  # Trackers whose forward transition is gated on populated completion notes.
-  defp gated_tracker?(:jira), do: true
-  defp gated_tracker?(_), do: false
-
-  defp push_gated_notes(issue) do
-    qa = issue.qa_notes
-    deploy = issue.deployment_notes
-
-    cond do
-      blank?(qa) and blank?(deploy) ->
-        {:error, gate_error("QA Notes and Deployment Notes are both empty")}
-
-      blank?(qa) ->
-        {:error, gate_error("QA Notes is empty")}
-
-      blank?(deploy) ->
-        {:error, gate_error("Deployment Notes is empty")}
-
-      true ->
-        Trackers.update_fields(issue, %{qa_notes: qa, deployment_notes: deploy})
-    end
-  end
-
-  defp gate_error(what) do
-    %{
-      gate: true,
-      message: what <> " — the tracker requires both before a forward transition."
-    }
-  end
 
   defp load_workspace(nil), do: nil
 
