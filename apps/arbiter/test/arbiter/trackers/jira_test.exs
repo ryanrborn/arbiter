@@ -271,6 +271,97 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
+  describe "gating_fields/2" do
+    test "returns the required fields of the transition reaching the target status" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert String.ends_with?(conn.request_path, "/transitions")
+        # The adapter asks Jira for per-transition field metadata.
+        assert conn.query_string =~ "expand=transitions.fields"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "61",
+              "name" => "Code Merged",
+              "to" => %{"name" => "Done"},
+              "fields" => %{
+                "customfield_10300" => %{"required" => true, "name" => "QA Notes"},
+                "customfield_10400" => %{"required" => true, "name" => "Deployment Notes"},
+                # present but NOT required — must be excluded.
+                "summary" => %{"required" => false, "name" => "Summary"}
+              }
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, fields} = Jira.gating_fields(@ref, :closed)
+
+      # Required fields only, reverse-mapped to their task-domain keys.
+      assert Enum.sort_by(fields, & &1.id) == [
+               %{id: "customfield_10300", key: :qa_notes, name: "QA Notes"},
+               %{id: "customfield_10400", key: :deployment_notes, name: "Deployment Notes"}
+             ]
+    end
+
+    test "returns [] when the reaching transition has no required fields" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "61",
+              "name" => "Code Merged",
+              "to" => %{"name" => "Done"},
+              "fields" => %{"summary" => %{"required" => false, "name" => "Summary"}}
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, []} = Jira.gating_fields(@ref, :closed)
+    end
+
+    test "a required field with no task-domain mapping carries key: nil and its Jira name" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "61",
+              "name" => "Code Merged",
+              "to" => %{"name" => "Done"},
+              "fields" => %{
+                "customfield_99999" => %{"required" => true, "name" => "Mystery Field"}
+              }
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [%{id: "customfield_99999", key: nil, name: "Mystery Field"}]} =
+               Jira.gating_fields(@ref, :closed)
+    end
+
+    test "returns {:error, :status_unmapped} for an event with no target status" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "status_map" => %{"closed" => ""}
+      })
+
+      # No HTTP: map_status short-circuits before the transitions request.
+      assert {:error, %Error{kind: :status_unmapped}} = Jira.gating_fields(@ref, :closed)
+    end
+  end
+
   describe "plan_transition_path/3 (pure BFS)" do
     @graph %{
       "Backlog" => [

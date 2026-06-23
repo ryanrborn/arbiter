@@ -82,6 +82,20 @@ defmodule Arbiter.Trackers.Sync do
   """
   @spec transition_event(Issue.t(), atom()) :: :ok | {:error, term()}
   def transition_event(%Issue{} = issue, event) when is_atom(event) do
+    case ensure_gated_fields_pushed(issue, event) do
+      :ok ->
+        do_transition(issue, event)
+
+      {:error, reason} ->
+        # Either a required field has no produced value (escalate naming it) or
+        # pushing the produced values failed on the wire. Both are loud, and we
+        # do NOT attempt the transition the provider would reject anyway.
+        notify_failure(issue, event, reason)
+        {:error, reason}
+    end
+  end
+
+  defp do_transition(issue, event) do
     case Trackers.transition(issue, event) do
       :ok ->
         :ok
@@ -101,6 +115,73 @@ defmodule Arbiter.Trackers.Sync do
     end
   end
 
+  # Push the bead's produced field values into the transition's gating fields
+  # BEFORE the transition is attempted. The adapter (not this layer) decides
+  # which fields gate the transition — see `Tracker.gating_fields/2` — so this
+  # stays provider-agnostic: Jira's `field_ids` today, any future tracker via
+  # its own adapter.
+  #
+  #   * No gate (`{:ok, []}`) → nothing to push, proceed to transition.
+  #   * A required field with no produced value on the bead → `{:error, ...}`
+  #     naming the exact field (escalated by the caller).
+  #   * All required fields have produced values → push them, then transition.
+  #
+  # A benign adapter reason (e.g. `:status_unmapped` — the tracker doesn't model
+  # this event, so there's no transition to gate) is treated as "no gate"; the
+  # transition path then skips it quietly.
+  defp ensure_gated_fields_pushed(issue, event) do
+    case Trackers.gating_fields(issue, event) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, fields} ->
+        push_resolved_fields(issue, fields)
+
+      {:error, reason} ->
+        if loud?(reason), do: {:error, reason}, else: :ok
+    end
+  end
+
+  defp push_resolved_fields(issue, fields) do
+    {present, missing} =
+      Enum.split_with(fields, fn f -> not blank?(produced_value(issue, f.key)) end)
+
+    cond do
+      missing != [] ->
+        {:error, missing_fields_reason(missing)}
+
+      present == [] ->
+        :ok
+
+      true ->
+        values = Map.new(present, fn f -> {f.key, produced_value(issue, f.key)} end)
+
+        case Trackers.update_fields(issue, values) do
+          :ok -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  # The bead carries the worker-produced values under task-domain keys
+  # (`:qa_notes`, `:deployment_notes`, `:description`, ...). A gating field with
+  # no task-domain key (`nil`) has no produced value by definition.
+  defp produced_value(_issue, nil), do: nil
+  defp produced_value(issue, key) when is_atom(key), do: Map.get(issue, key)
+
+  defp missing_fields_reason(missing) do
+    names = missing |> Enum.map(& &1.name) |> Enum.uniq()
+
+    %{
+      kind: :gated_fields_missing,
+      missing_fields: names,
+      message:
+        "the tracker gates this transition on field(s) the bead hasn't produced: " <>
+          "#{Enum.join(names, ", ")}. Produce the value(s) on the task " <>
+          "(e.g. qa_notes / deployment_notes) and re-run the sync"
+    }
+  end
+
   @doc """
   Log loudly and raise an escalation for a tracker-sync failure. The
   single place a swallowed-error regression would have to get past.
@@ -110,7 +191,7 @@ defmodule Arbiter.Trackers.Sync do
     Logger.error(
       "Trackers.Sync: FAILED to sync task=#{issue.id} tracker=#{issue.tracker_type} " <>
         "ref=#{issue.tracker_ref} on #{event}: #{describe(reason)} — raising escalation. " <>
-        "Reconcile the workspace status_map / transition_graph with the tracker workflow."
+        log_hint(reason)
     )
 
     AdmiralNotifier.tracker_sync_failed(
@@ -182,10 +263,17 @@ defmodule Arbiter.Trackers.Sync do
   def loud?(%{kind: kind}) when kind in @benign_kinds, do: false
   def loud?(_), do: true
 
-  defp describe(%{__struct__: _, message: msg, kind: kind}) when is_binary(msg),
+  defp describe(%{message: msg, kind: kind}) when is_binary(msg),
     do: "#{msg} (#{kind})"
 
   defp describe(reason), do: inspect(reason)
+
+  # The describe/1 message already names the missing field and the remedy for a
+  # gated-fields failure, so don't append the (misleading) status_map hint.
+  defp log_hint(%{kind: :gated_fields_missing}), do: ""
+
+  defp log_hint(_reason),
+    do: "Reconcile the workspace status_map / transition_graph with the tracker workflow."
 
   defp load_workspace(nil), do: nil
 

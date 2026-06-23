@@ -268,6 +268,76 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
+  @impl true
+  def gating_fields(ref, status) when is_binary(ref) and is_atom(status) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_status} <- map_status(cfg, status),
+         {:ok, transitions} <- list_raw_transitions(cfg, ref, with_fields: true) do
+      # The gate lives on the *specific transition* the adapter will invoke to
+      # reach the target — the same one `transition/2` resolves (a direct edge,
+      # or the first hop of a multi-hop path). Discovering it from Jira (rather
+      # than a hardcoded field list) keeps this provider-accurate and free of
+      # per-workspace gating config.
+      case gating_transition(cfg, ref, transitions, target_status) do
+        {:ok, transition} -> {:ok, required_field_descriptors(cfg, transition)}
+        :none -> {:ok, []}
+      end
+    end
+  end
+
+  # Resolve the transition `transition/2` would fire first: a live transition
+  # that lands directly on the target, else the first hop of the planned
+  # multi-hop path. Returns `:none` (treated as "no gate") when there's no
+  # reachable/known first hop — `transition/2` surfaces that loudly on its own,
+  # so we don't double-report it here.
+  defp gating_transition(cfg, ref, transitions, target_status) do
+    case Enum.find(transitions, fn t -> transition_target(t) == target_status end) do
+      %{} = direct ->
+        {:ok, direct}
+
+      nil ->
+        case current_status_name(cfg, ref) do
+          {:ok, ^target_status} -> :none
+          {:ok, current} -> first_hop_transition(cfg, transitions, current, target_status)
+          {:error, _} -> :none
+        end
+    end
+  end
+
+  defp first_hop_transition(cfg, transitions, current, target_status) do
+    case plan_transition_path(cfg.transition_graph, current, target_status) do
+      {:ok, [first_name | _]} ->
+        case Enum.find(transitions, fn t -> t["name"] == first_name end) do
+          %{} = t -> {:ok, t}
+          _ -> :none
+        end
+
+      _ ->
+        :none
+    end
+  end
+
+  # Map a transition's required-field metadata to provider-agnostic descriptors.
+  # `expand=transitions.fields` returns `fields` as
+  # `%{field_id => %{"required" => bool, "name" => label, ...}}`. We keep only
+  # the required ones and reverse-map each id to its task-domain key (via
+  # `field_ids`) so the sync layer can pull the bead's produced value; an id
+  # with no task-domain mapping yields `key: nil` and is escalated by name.
+  defp required_field_descriptors(cfg, %{"fields" => fields}) when is_map(fields) do
+    reverse = Map.new(cfg.field_ids, fn {k, v} -> {v, k} end)
+
+    fields
+    |> Enum.filter(fn {_id, meta} -> is_map(meta) and meta["required"] == true end)
+    |> Enum.map(fn {id, meta} ->
+      %{id: id, key: Map.get(reverse, id), name: field_label(meta, id)}
+    end)
+  end
+
+  defp required_field_descriptors(_cfg, _transition), do: []
+
+  defp field_label(%{"name" => name}, _id) when is_binary(name) and name != "", do: name
+  defp field_label(_meta, id), do: id
+
   # ---- Tracker behaviour: claim callbacks ------------------------------------
 
   @impl true
@@ -435,8 +505,18 @@ defmodule Arbiter.Trackers.Jira do
 
   # ---- Internals: transitions ---------------------------------------------
 
-  defp list_raw_transitions(cfg, ref) do
-    case request(cfg, :get, "/issue/#{ref}/transitions", []) do
+  defp list_raw_transitions(cfg, ref, opts \\ []) do
+    req_opts =
+      if Keyword.get(opts, :with_fields, false) do
+        # `expand=transitions.fields` makes Jira include, per transition, the
+        # field metadata (`required`, `name`, ...) for the screen that
+        # transition presents — i.e. exactly which fields *gate* it.
+        [params: [expand: "transitions.fields"]]
+      else
+        []
+      end
+
+    case request(cfg, :get, "/issue/#{ref}/transitions", req_opts) do
       {:ok, %Req.Response{status: status_code, body: %{"transitions" => list}}}
       when status_code in 200..299 and is_list(list) ->
         {:ok, list}

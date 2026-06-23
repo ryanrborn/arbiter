@@ -164,6 +164,33 @@ defmodule Arbiter.Trackers do
     do: for_task(issue).list_transitions(ref)
 
   @doc """
+  Return the fields the task's tracker gates the transition mapped from
+  `status` on (fields the provider requires populated before it accepts the
+  transition).
+
+  Resolves the adapter from `tracker_type` and dispatches to its optional
+  `gating_fields/2`. Adapters that don't implement it — or tasks with no
+  `tracker_ref` — return `{:ok, []}` (no gate). Callers must have seeded the
+  adapter's per-process config first (see `prepare/2`).
+  """
+  @spec gating_fields(Issue.t(), Tracker.status()) ::
+          {:ok, [Tracker.gating_field()]} | {:error, term()}
+  def gating_fields(%Issue{tracker_ref: ref} = issue, status) do
+    adapter = for_task(issue)
+
+    cond do
+      not is_binary(ref) or ref == "" ->
+        {:ok, []}
+
+      function_exported?(adapter, :gating_fields, 2) ->
+        adapter.gating_fields(ref, status)
+
+      true ->
+        {:ok, []}
+    end
+  end
+
+  @doc """
   Lists open items from the workspace's configured tracker — used by
   `arb list --tracker` to surface upstream backlog alongside local tasks.
 
