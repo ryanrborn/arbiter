@@ -1,9 +1,6 @@
-# arbiter
+# Arbiter
 
-A local-first project coordination system. Track work as Directives
-(tasks), group them into Strike Forces (convoys), and dispatch Acolyte
-(worker) agents to work them — with a LiveView dashboard and a CLI
-(`arb`) for interacting with everything.
+**Arbiter** is an AI-driven issue tracker and autonomous coding agent harness. It coordinates work across your projects through a CLI (`arb`) and a LiveView dashboard. Tasks are tracked as **Directives**, dispatched to **Acolyte** agents for autonomous execution, and merged through a **Review Gate** and **Merge Queue** for code quality and safety.
 
 ## Prerequisites
 
@@ -48,38 +45,59 @@ export PATH="$HOME/.local/bin:$PATH"
 Re-run step 4 (and copy the binary again) any time you pull changes to
 `apps/arbiter_cli`.
 
-## Start the server
+## Architecture
 
-```sh
-mix phx.server
-```
+**Workspaces** — isolated coordination scopes. A workspace holds a set of Directives, dispatch policies, and tooling configuration. Each has its own CLI vernacular (naming convention for resources).
 
-The dashboard is at **http://127.0.0.1:4848**.
+**Warships** — registered git repositories. Acolytes check out code on Warships to work on Directives.
 
-Keep this running in a terminal (or as a background service) — `arb`
-talks to it over HTTP.
+**Directives** — tasks/issues to be worked. Can be tracked in an external system (Jira, GitHub, Linear) or managed locally. Status flows from creation through ready → in_progress → done.
 
-Or use the one-shot convenience:
+**Acolytes** — autonomous worker agents spawned via Claude Code (or future adapters). Each Acolyte receives a Directive, works it in an isolated git worktree, and reports completion with a PR or notes. Their full transcript is retained for audit and learning.
+
+**Review Gate** — optional quality checkpoint. A second Claude agent reviews the Acolyte's work before merging. Can be disabled per-Directive.
+
+**Merge Queue** — batches approved changes and applies them to the Warship in sequence. Handles merge conflicts, CI status checks, and rollback on failure.
+
+## Quick-start
+
+### 1. Start the server
+
+Run this once to get the stack up:
 
 ```sh
 arb start
 ```
 
-`arb start` is a no-op if the stack is already up; otherwise it runs
-`docker compose up -d` and launches `mix phx.server` detached, then
-polls `arb doctor` until everything is green.
+(Or manually: `docker compose up -d && mix phx.server`)
 
-To have the stack come up automatically at boot (no manual `arb start`),
-install it as a systemd service:
+The dashboard is at **http://127.0.0.1:4848**.
+
+### 2. Configure a workspace
+
+Visit the dashboard's **Workspace** page and configure:
+- **Warships** (repos to work in)
+- **Acolyte** settings (Claude model, timeout, etc.)
+- Optionally a **Tracker** (Jira, GitHub, Linear) and **Merger** strategy
+
+Or edit `config/dev.exs` directly and restart the server.
+
+### 3. Dispatch your first directive
+
+Create a Directive via the dashboard or CLI:
 
 ```sh
-arb install-service          # user unit + loginctl enable-linger
-arb install-service --system # system-wide unit (needs sudo)
+arb issue create "Fix typo in README"
+arb issue dispatch <id> my-project
 ```
 
-This writes a unit whose `ExecStart` is `arb start`, enables it, and
-prints how to check status/logs. `arb install-service --uninstall`
-removes it again.
+Watch the Acolyte work in the dashboard, or tail the transcript:
+
+```sh
+arb worker log <worker-id>
+```
+
+Once complete, the Merge Queue picks it up (if configured) or you can merge manually via the dashboard.
 
 ## Initialize your Admiral session
 
@@ -109,46 +127,68 @@ The Admiral will check whether the server is running, start it if
 needed, orient itself with `arb prime`, and be ready to coordinate your
 work.
 
-## Adding Ships (projects)
+### Manual server control
 
-A **Ship** (internally still called a "rig") is a local git repository
-that Acolytes can work in. Add your projects via the dashboard
-(Workspace → edit config), or in `config/dev.exs`:
+For manual control (useful in development), run the server components separately:
+
+```sh
+# Terminal 1: database
+docker compose up
+
+# Terminal 2: Phoenix server (in another tab)
+mix phx.server
+```
+
+To start both in one command:
+
+```sh
+docker compose up -d && mix phx.server
+```
+
+#### Systemd service (optional)
+
+To have the stack start automatically at boot:
+
+```sh
+arb install-service          # user unit + loginctl enable-linger
+arb install-service --system # system-wide unit (needs sudo)
+```
+
+Uninstall with `arb install-service --uninstall`.
+
+## Adding Warships (projects)
+
+A **Warship** is a local git repository that Acolytes check out and work in. Register your projects via the dashboard (Workspace → Warships), or directly in `config/dev.exs`:
 
 ```elixir
 config :arbiter, :rig_paths, %{
-  "my-project" => Path.expand("~/dev/my-project")
+  "my-project" => Path.expand("~/dev/my-project"),
+  "another-project" => Path.expand("~/dev/another-project")
 }
 ```
 
-Restart the server after editing `dev.exs`.
+After editing `config/dev.exs`, restart the server for changes to take effect.
 
-## Quick reference
+## CLI Reference
 
-The CLI uses an `arb <resource> <verb>` grammar. The resources are neutral
-base terms — `issue`, `worker`, `batch`, `repo` — and themed vocabularies
-(the Sith "polecat", "task", "convoy", "warship", "sling", …) layer on top as
-aliases.
+The CLI uses an `arb <resource> <verb>` grammar: `arb [resource] verb [args]`.
 
-```
-arb prime                    # mission briefing — run at the start of a session
-arb issue list               # list all issues
-arb issue ready              # issues ready to be worked (deps closed)
-arb issue show <id>          # detail on one issue
-arb issue create <title>     # create a new issue
-arb issue dispatch <id> [rig]# dispatch a worker to an issue
-arb worker list              # list running workers
-arb worker log <id>          # full durable transcript of a worker's run
-arb batch list               # list batches in the active workspace
-arb repo list                # registered repos (rigs)
-arb workspace list           # configured workspaces
-arb server doctor            # health-check the stack
-arb server start             # boot SQLite-backed Phoenix if down
-arb server deploy            # pull main → migrate → rebuild CLI → restart
-arb install service          # systemd unit so the stack starts at boot
-```
+### Key commands
 
-All commands accept `--help` and `--json`.
+| Command | Purpose |
+|---------|---------|
+| `arb prime` | Mission briefing — run at session start to check workspace status |
+| `arb issue list` | List all Directives in the workspace |
+| `arb issue show <id>` | View a Directive's details and history |
+| `arb issue create <title>` | Create a new Directive |
+| `arb issue dispatch <id> [warship]` | Dispatch an Acolyte to work on a Directive |
+| `arb worker list` | List running and completed Acolytes |
+| `arb worker log <id>` | Read an Acolyte's full transcript (durable) |
+| `arb server start` | Boot the stack (no-op if already up) |
+| `arb server doctor` | Health-check the Postgres DB and server |
+| `arb config [workspace]` | Edit workspace configuration (tracker, merger, vernacular) |
+
+All commands accept `--help` and `--json` for structured output.
 
 ### Vernacular aliases
 
