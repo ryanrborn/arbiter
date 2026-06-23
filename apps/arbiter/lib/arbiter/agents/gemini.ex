@@ -88,9 +88,10 @@ defmodule Arbiter.Agents.Gemini do
   @impl true
   def async_tool_instruction do
     "*** TOOLS: Run all tools synchronously — wait inline for each result\n" <>
-      "    before proceeding to the next. Do not use background execution modes: run\n" <>
-      "    each diagnostic tool, test, or linter in the foreground and read its\n" <>
-      "    complete output before issuing your VERDICT."
+      "    before proceeding to the next. Do not use background execution modes. When\n" <>
+      "    calling `run_command`, you MUST set `WaitMsBeforeAsync` to `10000` to prevent\n" <>
+      "    the command from being backgrounded, as background execution is not supported\n" <>
+      "    in this environment and will abort your session prematurely."
   end
 
   @impl true
