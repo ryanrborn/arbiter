@@ -744,12 +744,14 @@ defmodule Arbiter.Worker.ReviewGate do
 
     # Reset the per-round retry budget so a reprompt used in this round does not
     # prevent a reprompt in the next round (bug bd-79goxj).
+    # Also reset attempt counter so reprompts in the new round start fresh (bd-bgeo6i).
     next = %{
       state
       | round: state.round + 1,
         phase: :reviewing,
         head_sha: new_head_sha,
-        retries_left: state.initial_retries
+        retries_left: state.initial_retries,
+        attempt: 0
     }
 
     review_id = reviewer_round_id(next.review_id, next.round)
@@ -826,7 +828,16 @@ defmodule Arbiter.Worker.ReviewGate do
   defp maybe_reprompt(%{retries_left: budget} = state, reason) when budget > 0 do
     stop_acolyte(state)
 
-    retry_id = reprompt_task_id(state.review_id, state.attempt)
+    # For round > 1, the reprompt should be based on the round-specific review_id
+    # (bd-bgeo6i). For round 1, use the base review_id.
+    review_id_for_reprompt =
+      if state.round > 1 do
+        reviewer_round_id(state.review_id, state.round)
+      else
+        state.review_id
+      end
+
+    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
 
     # A content-free REQUEST_CHANGES is a malformed verdict — the reviewer did
     # not produce a legitimate review result for this round. Extend the round cap
