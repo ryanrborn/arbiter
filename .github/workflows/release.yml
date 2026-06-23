@@ -74,6 +74,14 @@ jobs:
         run: |
           MIX_ENV=prod mix deps.get --only prod
 
+      - name: Install asset build tools
+        run: |
+          MIX_ENV=prod mix cmd --app arbiter_web mix assets.setup
+
+      - name: Build and digest web assets
+        run: |
+          MIX_ENV=prod mix cmd --app arbiter_web mix assets.deploy
+
       - name: Build OTP release
         run: |
           MIX_ENV=prod mix release arbiter
@@ -97,7 +105,7 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.name }}"
           TARBALL="arbiter-${TAG}-linux.tar.gz"
-          tar -czf "${TARBALL}" -C _build/prod/rel arbiter
+          tar -czf "${TARBALL}" -C _build/prod/rel/arbiter .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
 
