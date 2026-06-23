@@ -33,7 +33,7 @@ defmodule Arbiter.MCP.Catalog do
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
   | `worker_resume` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.resume/2` |
-  | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) |
+  | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) / `Arbiter.Reviews.ExternalReview.dispatch/1` (`pr`) |
   | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
   | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
@@ -428,24 +428,41 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_review",
       tiers: @coordinator,
       description:
-        "Dispatch a review-only worker against the PR/MR linked to a task (`arb review`): no worktree, " <>
-          "no branch, no merge. Requires a `can_dispatch` coordinator token and is depth-limited. " <>
-          "Claude-driven by default; pass `with_claude: false` to dispatch without spawning an agent.",
+        "Dispatch a review-only worker (`arb review`): no worktree, no branch, no merge. Requires a " <>
+          "`can_dispatch` coordinator token and is depth-limited. Pass `task_id` to review the PR/MR " <>
+          "linked to a task (claude-driven; `with_claude: false` skips the agent), or `pr` (URL or " <>
+          "number, + optional `repo`/`workspace`) to review an external / non-arbiter PR through the " <>
+          "MR adapter — findings + a verdict are posted to the PR, no task or branch required.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
-          "task_id" => %{"type" => "string", "description" => "Task to review (required)."},
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Task to review (one of `task_id` or `pr` is required)."
+          },
+          "pr" => %{
+            "type" => "string",
+            "description" =>
+              "External PR/MR to review: a forge URL, an `owner/repo#N` slug, or a number " <>
+                "(pass `repo` so a bare number resolves to owner/repo)."
+          },
           "repo" => %{
             "type" => "string",
-            "description" => "Local checkout the reviewer runs in (needs `gh`/`git`)."
+            "description" =>
+              "Local checkout. Task review: the reviewer's cwd (needs `gh`/`git`). " <>
+                "`pr`: resolves owner/repo for a bare PR number."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" => "(`pr` only) Workspace name/id whose MR provider to target."
           },
           "model" => %{"type" => "string", "description" => "Per-dispatch model override."},
           "with_claude" => %{
             "type" => "boolean",
-            "description" => "Spawn the reviewer agent (default true)."
+            "description" => "(task review) Spawn the reviewer agent (default true)."
           }
         },
-        "required" => ["task_id"],
+        "required" => [],
         "additionalProperties" => false
       },
       handler: &Tools.worker_review/2

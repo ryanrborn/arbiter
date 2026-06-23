@@ -11,9 +11,13 @@ defmodule ArbiterWeb.Api.WorkerController do
       `with_gemini` booleans). With a provider a worker subprocess works the task
       and the Driver closes it on `arb done`; with `no_agent` the task parks in
       `:in_progress` (no Driver).
-    * `POST /api/workers/review`          — :review (body: `task_id`, optional `repo`).
-      Dispatches a review-only worker: no worktree, no per-task branch, no
-      route through the merge queue/merger. Always claude-driven.
+    * `POST /api/workers/review`          — :review.
+      Two shapes: (a) `task_id` (+ optional `repo`) dispatches a review-only
+      worker against the PR/MR linked to a task — no worktree, no per-task
+      branch, no merge-queue route, always claude-driven. (b) `pr` (URL or
+      number, + optional `repo`/`workspace`) reviews an **external / non-arbiter
+      PR** via the MR adapter (`Arbiter.Reviews.ExternalReview`): no task, no
+      branch — findings + a verdict are posted to that PR.
     * `GET  /api/workers`                 — :index (list active workers)
     * `GET  /api/workers/:task_id`        — :show (full snapshot inc. recent output).
       When no live worker exists for the task, falls back to the most recent
@@ -25,6 +29,7 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
   alias Arbiter.Worker.Dispatch
@@ -99,6 +104,11 @@ defmodule ArbiterWeb.Api.WorkerController do
   """
   def review(conn, params) do
     case params do
+      # External / non-arbiter PR review (bd-d4ealy): no task, no branch — point
+      # the reviewer at an arbitrary PR by URL/number through the MR adapter.
+      %{"pr" => pr} when is_binary(pr) and pr != "" ->
+        review_external(conn, params)
+
       %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
         opts = review_opts(params)
 
@@ -126,7 +136,29 @@ defmodule ArbiterWeb.Api.WorkerController do
         end
 
       _ ->
-        {:error, {:invalid_request, "task_id is required", %{}}}
+        {:error, {:invalid_request, "task_id or pr is required", %{}}}
+    end
+  end
+
+  # External / non-arbiter PR review (bd-d4ealy). Validates synchronously
+  # (workspace + MR adapter + PR ref) so a bad PR / unsupported strategy 422s
+  # immediately, then runs the CodeReview adapter workflow in the background and
+  # acks with the resolved mr_ref + link. `repo`/`workspace` are optional.
+  defp review_external(conn, params) do
+    opts = [
+      pr: params["pr"],
+      repo: params["repo"],
+      workspace: params["workspace"]
+    ]
+
+    case ExternalReview.dispatch(opts) do
+      {:ok, ack} ->
+        conn
+        |> put_status(:created)
+        |> json(%{data: ack})
+
+      {:error, reason} ->
+        {:error, {:invalid_request, ExternalReview.describe_error(reason), %{pr: params["pr"]}}}
     end
   end
 
