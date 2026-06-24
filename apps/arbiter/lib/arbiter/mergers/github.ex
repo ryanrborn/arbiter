@@ -166,7 +166,7 @@ defmodule Arbiter.Mergers.Github do
          ci_clean: Map.get(pr, "mergeStateStatus") == "clean",
          conflicting:
            Map.get(pr, "mergeable") == false or Map.get(pr, "mergeStateStatus") == "dirty",
-         block_reason: block_reason(pr, status, pipeline, approved, changes_requested),
+         block_reason: block_reason(cfg, pr, status, pipeline, approved, changes_requested),
          url: Map.get(pr, "html_url") || ""
        }}
     end
@@ -486,17 +486,20 @@ defmodule Arbiter.Mergers.Github do
   # on so an approved-but-unmergeable PR never parks silently. Derived from
   # GitHub's merge-state signal plus the resolved CI pipeline and review state:
   #
-  #   :conflict       — mergeable=false / mergeable_state "dirty"
-  #   :behind_base    — "behind" (no conflict, just stale relative to base)
-  #   :ci_failed      — a required check failed (pipeline :failed)
-  #   :needs_approval — "blocked" by required review, or a dismissed approval
-  #   :draft          — PR is a draft
-  #   :blocked_other  — blocked by some other forge rule
-  defp block_reason(_pr, status, _pipeline, _approved, _changes_requested)
+  #   :conflict                  — mergeable=false / mergeable_state "dirty"
+  #   :behind_base               — "behind" (no conflict, just stale vs base)
+  #   :ci_failed                 — a required check failed (pipeline :failed)
+  #   :needs_approval            — "blocked" by required review, or a dismissed
+  #                                approval (a review the fleet can still wait on)
+  #   :needs_nonauthor_approval  — "blocked" purely on a required review of a
+  #                                fleet-authored PR (the fleet can't self-approve)
+  #   :draft                     — PR is a draft
+  #   :blocked_other             — blocked by some other forge rule
+  defp block_reason(_cfg, _pr, status, _pipeline, _approved, _changes_requested)
        when status in [:merged, :closed],
        do: nil
 
-  defp block_reason(pr, _status, pipeline, _approved, changes_requested) do
+  defp block_reason(cfg, pr, _status, pipeline, _approved, changes_requested) do
     state = merge_state(pr)
     draft? = Map.get(pr, "draft") == true or state == "draft"
 
@@ -506,9 +509,44 @@ defmodule Arbiter.Mergers.Github do
       state == "behind" -> :behind_base
       pipeline == :failed -> :ci_failed
       changes_requested -> :needs_approval
-      state == "blocked" -> :needs_approval
+      state == "blocked" -> blocked_review_reason(cfg, pr)
       state in ["clean", "has_hooks", "unstable", "unknown", nil] -> nil
       true -> :blocked_other
+    end
+  end
+
+  # A "blocked" merge state on an otherwise-green PR (no conflict, not behind,
+  # CI not failed, no outstanding CHANGES_REQUESTED) means the only thing missing
+  # is a required approving review. If that PR was opened by the fleet's *own*
+  # identity (the authenticated token's user), the forge's branch protection
+  # requires an approval from someone *other than the author* — which the fleet
+  # can never supply, because GitHub forbids approving your own pull request. The
+  # Watchdog treats `:needs_nonauthor_approval` specially: it parks indefinitely
+  # and summons a human once, instead of failing at the auto_merge poll ceiling
+  # (bd-c3lchp / lt-4kjaoe). When authorship can't be confirmed as the fleet's,
+  # fall back to the generic `:needs_approval` (a reviewer may still act).
+  defp blocked_review_reason(cfg, pr) do
+    if fleet_authored?(cfg, pr), do: :needs_nonauthor_approval, else: :needs_approval
+  end
+
+  # True only when the PR's author login matches the authenticated token's own
+  # login. Skips the `/user` lookup entirely when the PR carries no author, so
+  # the common path (and stubs that don't model `/user`) never make the call.
+  defp fleet_authored?(cfg, pr) do
+    case get_in(pr, ["user", "login"]) do
+      login when is_binary(login) and login != "" -> login == authenticated_login(cfg)
+      _ -> false
+    end
+  end
+
+  # The login of the token's own identity (GET /user). Best-effort: any failure
+  # (a GitHub App token with no user, a network error) yields nil so the caller
+  # falls back to the generic block reason. Reached only in the narrow
+  # blocked-on-review branch, not on every poll.
+  defp authenticated_login(cfg) do
+    case request(cfg, :get, "/user", []) |> handle_json() do
+      {:ok, %{"login" => login}} when is_binary(login) and login != "" -> login
+      _ -> nil
     end
   end
 

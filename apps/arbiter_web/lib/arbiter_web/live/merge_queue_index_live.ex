@@ -359,6 +359,10 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   defp block_reason_label(:behind_base), do: "Blocked · behind base"
   defp block_reason_label(:ci_failed), do: "Blocked · CI failed"
   defp block_reason_label(:needs_approval), do: "Blocked · needs approval"
+
+  defp block_reason_label(:needs_nonauthor_approval),
+    do: "Parked · awaiting human reviewer"
+
   defp block_reason_label(:draft), do: "Blocked · draft"
   defp block_reason_label(:blocked_other), do: "Blocked"
   defp block_reason_label(other), do: "Blocked · #{other}"

@@ -42,6 +42,17 @@ defmodule Arbiter.Worker.Watchdog do
   count. The remaining reasons (`:conflict`, `:needs_approval`, `:draft`,
   `:blocked_other`) keep the Phase 1 behaviour: escalate once and park.
 
+  ## Non-author-approval block (bd-c3lchp)
+
+  A fleet-authored PR that is fully green but parked on a required *non-author*
+  approval (the forge's branch protection requires a reviewer other than the
+  author — which the fleet can never be, having authored the PR) is a special
+  case the adapters report as `:needs_nonauthor_approval`. The auto_merge poll
+  ceiling used to mark such a PR FAILED even though nothing was broken. The
+  Watchdog now parks it: it summons a human reviewer **once** and lifts its poll
+  ceiling to `:infinity`, handing off to indefinite watching so a later human
+  approval auto-merges. No failed worker, on any forge.
+
   ### Webhook upgrade (design only — not implemented here)
 
   Polling is the shipped mechanism. A future push path would add
@@ -207,7 +218,13 @@ defmodule Arbiter.Worker.Watchdog do
   (`Arbiter.Mergers.get/1`). `nil` when the MR is mergeable or already terminal.
   """
   @type block_reason ::
-          :conflict | :behind_base | :ci_failed | :needs_approval | :draft | :blocked_other
+          :conflict
+          | :behind_base
+          | :ci_failed
+          | :needs_approval
+          | :needs_nonauthor_approval
+          | :draft
+          | :blocked_other
 
   @doc """
   Read the merge-block reason a `Arbiter.Mergers.get/1` result carries, or `nil`
@@ -525,14 +542,47 @@ defmodule Arbiter.Worker.Watchdog do
   # rather than paging on a conflict, and only escalates after the bounded
   # retries are exhausted (see `maybe_auto_resolve_conflict/2`). So skip the
   # generic page here for `:conflict` — the other reasons still escalate.
-  defp maybe_escalate_merge_block(%{auto_resolve_conflict: true} = state, result) do
+  # A fleet-authored PR blocked only on a required *non-author* approval can
+  # never auto-merge on its own: the fleet authored it, and the forge's branch
+  # protection / approval rules require a *different* reviewer the fleet can't
+  # supply (it cannot approve its own PR). The 30-poll auto_merge ceiling used to
+  # mark this FAILED (`{:awaiting_review_timeout, 30}`) even on a fully-green PR
+  # (bd-c3lchp / lt-4kjaoe). Park it instead: summon a human reviewer once and
+  # hand off to indefinite watching, so a later human approval auto-merges.
+  #
+  # Read from the *raw* block_reason rather than `effective_block_reason/1`: this
+  # block is meaningful *before* approval (it is precisely *why* no approval has
+  # landed), whereas the approval gate deliberately suppresses pre-approval
+  # blocks. The adapters (`Github` / `Gitlab`) only emit this reason for the
+  # narrow case — green, no changes requested, blocked solely on a required
+  # review the author can't satisfy — so an ordinary "awaiting first review" PR
+  # still flows through the normal pending path.
+  defp maybe_escalate_merge_block(state, result) do
+    if block_reason(result) == :needs_nonauthor_approval do
+      handle_nonauthor_approval(state, result)
+    else
+      route_merge_block(state, result)
+    end
+  end
+
+  # Summon a human reviewer once (debounced on `last_block_reason`) and convert
+  # the lane to indefinite park-and-watch by lifting `max_polls` to `:infinity`,
+  # so `reschedule/1`'s auto_merge ceiling can never fail this worker. The worker
+  # stays at `:awaiting_review`; whenever the human approval lands, the ongoing
+  # poll sees `:approved` and auto-merges (or, on a manual lane, a human merges).
+  defp handle_nonauthor_approval(state, result) do
+    state = debounce_escalate_block(state, :needs_nonauthor_approval)
+    apply_outcome(effective_outcome(state, result), result, %{state | max_polls: :infinity})
+  end
+
+  defp route_merge_block(%{auto_resolve_conflict: true} = state, result) do
     case effective_block_reason(result) do
       :conflict -> reschedule(state)
       _ -> do_maybe_escalate_merge_block(state, result)
     end
   end
 
-  defp maybe_escalate_merge_block(state, result), do: do_maybe_escalate_merge_block(state, result)
+  defp route_merge_block(state, result), do: do_maybe_escalate_merge_block(state, result)
 
   defp do_maybe_escalate_merge_block(state, result) do
     case effective_block_reason(result) do

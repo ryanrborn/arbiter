@@ -290,6 +290,23 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       assert body =~ "fix the failing checks"
     end
 
+    test "a non-author-approval block names the human-reviewer remediation (bd-c3lchp)" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.merge_blocked(
+                 %{task_id: task_id, workspace_id: ws},
+                 "#3609",
+                 :needs_nonauthor_approval
+               )
+
+      body = only_merge_escalation(ws).body
+      assert body =~ "reviewer other than the author"
+      assert body =~ "human reviewer"
+      assert body =~ "parked"
+    end
+
     test "a block with no workspace posts nothing" do
       assert :ok =
                AdmiralNotifier.merge_blocked(
