@@ -20,7 +20,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   require Logger
 
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Workflows.PRPatrol
 
   @registry Arbiter.Workflows.PRPatrolRegistry
@@ -36,26 +36,28 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   end
 
   @doc """
-  Start a PRPatrol for a workspace if it is configured for GitHub merges.
-  Returns `:skip` when the workspace has no github repo derivable from config.
-  Idempotent: returns the existing pid via `{:error, {:already_started, pid}}`
-  if one is already running for the workspace.
+  Start a PRPatrol for a workspace if its merge adapter implements `list_open/0`.
+  Returns `:skip` when the adapter doesn't support listing open MRs, or when no
+  repo string can be derived from workspace config (needed to dispatch follow-up
+  workers). Idempotent: returns the existing pid via `{:error, {:already_started,
+  pid}}` if one is already running for the workspace.
   """
   @spec start_patrol(Workspace.t(), keyword()) :: DynamicSupervisor.on_start_child() | :skip
   def start_patrol(%Workspace{} = workspace, opts \\ []) do
-    case github_repo(workspace) do
-      nil ->
-        :skip
+    adapter = resolve_adapter(workspace)
 
-      repo ->
-        child_opts =
-          opts
-          |> Keyword.put(:repo, repo)
-          |> Keyword.put(:workspace_id, workspace.id)
-          |> Keyword.put_new(:interval_ms, patrol_interval_ms())
-          |> Keyword.put(:name, via(workspace.id))
+    with true <- not is_nil(adapter) and function_exported?(adapter, :list_open, 0),
+         repo when is_binary(repo) <- patrol_repo(workspace) do
+      child_opts =
+        opts
+        |> Keyword.put(:repo, repo)
+        |> Keyword.put(:workspace_id, workspace.id)
+        |> Keyword.put_new(:interval_ms, patrol_interval_ms())
+        |> Keyword.put(:name, via(workspace.id))
 
-        DynamicSupervisor.start_child(__MODULE__, {PRPatrol, child_opts})
+      DynamicSupervisor.start_child(__MODULE__, {PRPatrol, child_opts})
+    else
+      _ -> :skip
     end
   end
 
@@ -124,9 +126,19 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
       :ok
   end
 
-  # Derive "owner/repo" from the workspace's GitHub merge config, or nil when
-  # not configured for github or missing owner/repo fields.
-  defp github_repo(%Workspace{} = workspace) do
+  # Resolve the merge adapter for a workspace, or nil on unknown strategy.
+  defp resolve_adapter(workspace) do
+    Mergers.for_workspace(workspace)
+  rescue
+    ArgumentError -> nil
+  end
+
+  # Derive a repo identifier string for follow-up worker dispatch. Returns nil
+  # when the workspace config doesn't carry enough info to derive one.
+  #
+  # GitHub: "owner/repo" from merge config. Other adapters: extend here as their
+  # patrol support lands.
+  defp patrol_repo(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
     case get_in(config, ["merge", "strategy"]) do

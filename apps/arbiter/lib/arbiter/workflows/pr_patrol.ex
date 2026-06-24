@@ -47,7 +47,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   use GenServer
 
   alias Arbiter.Tasks.Issue
-  alias Arbiter.GitHub
+  alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Worker
   require Ash.Query
 
@@ -56,6 +56,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   defstruct [
     :repo,
     :workspace_id,
+    :workspace,
     :interval_ms,
     :timer_ref,
     ticks: 0,
@@ -84,9 +85,16 @@ defmodule Arbiter.Workflows.PRPatrol do
     workspace_id = Keyword.fetch!(opts, :workspace_id)
     interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
 
+    workspace =
+      case Ash.get(Workspace, workspace_id) do
+        {:ok, ws} -> ws
+        _ -> nil
+      end
+
     state = %__MODULE__{
       repo: repo,
       workspace_id: workspace_id,
+      workspace: workspace,
       interval_ms: interval_ms
     }
 
@@ -120,47 +128,58 @@ defmodule Arbiter.Workflows.PRPatrol do
   # ---- tick logic ----
 
   defp do_tick(state) do
-    case GitHub.pr_list_open(state.repo) do
-      {:ok, prs} ->
-        Enum.each(prs, &maybe_dispatch(&1, state))
-        %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now()}
+    result =
+      with %Workspace{} <- state.workspace,
+           adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
+           true <- function_exported?(adapter, :list_open, 0),
+           :ok <- Mergers.prepare(state.workspace),
+           {:ok, mrs} <- adapter.list_open() do
+        Enum.each(mrs, &maybe_dispatch(&1, state, adapter))
+        :ok
+      else
+        # On any failure (missing workspace, unsupported adapter, API error),
+        # still bump the tick counter so callers can detect the patrol is alive.
+        _ -> :noop
+      end
 
-      {:error, _} ->
-        # On API failure, still bump the tick counter so callers can detect
-        # the patrol is alive. The next cycle will retry.
-        %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now()}
-    end
+    _ = result
+    %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now()}
   end
 
-  defp maybe_dispatch(%{"number" => pr_number} = pr, state) do
-    if actionable?(state.repo, pr_number) and not deduped?(pr_number) do
-      task = create_follow_up(pr, state)
+  defp resolve_adapter(workspace) do
+    Mergers.for_workspace(workspace)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
+    t_type = tracker_type(adapter)
+
+    if actionable?(adapter, mr_ref) and not deduped?(pr_number, t_type) do
+      task = create_follow_up(mr, state, t_type)
       _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
     end
   end
 
-  defp actionable?(repo, pr_number) do
-    case GitHub.pr_list_reviews(repo, pr_number) do
-      {:ok, reviews} when is_list(reviews) ->
-        Enum.any?(reviews, fn r -> r["state"] == "CHANGES_REQUESTED" end)
-
-      _ ->
-        false
+  defp actionable?(adapter, mr_ref) do
+    case adapter.list_review_feedback(mr_ref) do
+      {:ok, %{changes_requested: true}} -> true
+      _ -> false
     end
   end
 
-  defp deduped?(pr_number) do
+  defp deduped?(pr_number, t_type) do
     ref = to_string(pr_number)
 
     Issue
-    |> Ash.Query.filter(tracker_type == :github and tracker_ref == ^ref and status != :closed)
+    |> Ash.Query.filter(tracker_type == ^t_type and tracker_ref == ^ref and status != :closed)
     |> Ash.read!()
     |> Enum.any?()
   end
 
-  defp create_follow_up(pr, state) do
-    title = "PR ##{pr["number"]}: #{pr["title"]} needs follow-up"
+  defp create_follow_up(%{number: number, title: title, url: url}, state, t_type) do
+    issue_title = "PR ##{number}: #{title} needs follow-up"
 
     description =
       """
@@ -168,21 +187,34 @@ defmodule Arbiter.Workflows.PRPatrol do
 
       Trigger: at least one review with state=CHANGES_REQUESTED.
 
-      Original PR: #{pr["html_url"] || ""}
+      Original PR: #{url}
       """
 
     {:ok, task} =
       Ash.create(Issue, %{
-        title: title,
+        title: issue_title,
         description: description,
         issue_type: :task,
         priority: 2,
-        tracker_type: :github,
-        tracker_ref: to_string(pr["number"]),
+        tracker_type: t_type,
+        tracker_ref: to_string(number),
         workspace_id: state.workspace_id
       })
 
     task
+  end
+
+  # Derive the tracker_type atom from the merger registry (single source of
+  # truth) and raise on an unregistered adapter, so a new forge adapter can
+  # never silently fall through to :github — which would corrupt dedup and
+  # trigger duplicate-task storms once it implements list_open/0.
+  defp tracker_type(adapter) do
+    Arbiter.Mergers.adapters()
+    |> Enum.find_value(fn {type, module} -> if module == adapter, do: type end)
+    |> case do
+      nil -> raise(ArgumentError, "tracker_type/1: unregistered merger adapter #{inspect(adapter)}")
+      type -> type
+    end
   end
 
   defp schedule_next(state) do

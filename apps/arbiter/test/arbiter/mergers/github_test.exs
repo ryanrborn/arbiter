@@ -682,6 +682,41 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "list_open/0" do
+    test "GETs open PRs and returns embedded mr_refs" do
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} == {"GET", "/repos/octo/widget/pulls"}
+        assert conn.query_string =~ "state=open"
+        assert conn.query_string =~ "per_page=100"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json([
+          %{
+            "number" => 42,
+            "title" => "Add lea_reports passthrough",
+            "html_url" => "https://gh/pr/42"
+          }
+        ])
+      end)
+
+      assert {:ok, [mr]} = Github.list_open()
+      assert mr.ref == "octo/widget#42"
+      assert mr.number == 42
+      assert mr.title == "Add lea_reports passthrough"
+      assert mr.url == "https://gh/pr/42"
+    end
+
+    test "missing owner/repo in cfg → {:error, %Error{kind: :config_missing}}" do
+      # Only credentials are configured — neither owner nor repo is set, and
+      # list_open/0 takes no :repo_path to derive them from, so it must surface
+      # a config_missing error rather than hitting the API with a bad path.
+      Config.put_active(%{"credentials_ref" => "env:#{@env_var}"})
+
+      assert {:error, %Error{kind: :config_missing}} = Github.list_open()
+    end
+  end
+
   describe "merge/1" do
     test "PUTs /merge with the configured merge_method" do
       stub(fn conn ->
