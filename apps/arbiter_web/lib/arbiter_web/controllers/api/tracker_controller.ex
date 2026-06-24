@@ -42,9 +42,6 @@ defmodule ArbiterWeb.Api.TrackerController do
         {:error, :not_supported} ->
           json(conn, %{data: [], supported: false})
 
-        {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
-          tracker_error_response(conn, err)
-
         {:error, _} = err ->
           err
       end
@@ -68,9 +65,6 @@ defmodule ArbiterWeb.Api.TrackerController do
         {:error, :not_supported} ->
           {:error,
            {:invalid_request, "tracker #{tracker_type} does not support outbound ticket creation"}}
-
-        {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
-          tracker_error_response(conn, err)
 
         {:error, _} = err ->
           err
@@ -128,27 +122,5 @@ defmodule ArbiterWeb.Api.TrackerController do
       {:ok, ws} -> {:ok, ws}
       {:error, _} = err -> err
     end
-  end
-
-  defp tracker_error_response(conn, %Arbiter.Trackers.GitHub.Error{} = err) do
-    http_status =
-      case err.kind do
-        :config_missing -> :bad_request
-        :unauthenticated -> :unauthorized
-        :forbidden -> :forbidden
-        :not_found -> :not_found
-        :validation_failed -> :unprocessable_entity
-        _ -> :bad_gateway
-      end
-
-    conn
-    |> put_status(http_status)
-    |> json(%{
-      error: %{
-        type: "tracker_error",
-        message: err.message,
-        details: %{kind: Atom.to_string(err.kind), status: err.status}
-      }
-    })
   end
 end

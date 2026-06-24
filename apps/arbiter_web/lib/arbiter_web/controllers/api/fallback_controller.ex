@@ -12,6 +12,9 @@ defmodule ArbiterWeb.Api.FallbackController do
     * `"validation_error"` — 422 — `%Ash.Error.Invalid{}` (validation failures)
     * `"not_found"` — 404 — `%Ash.Error.Query.NotFound{}`
     * `"invalid_request"` — 400 — malformed params (bad atom values etc.)
+    * `"tracker_error"` — varies — a normalised error struct from any tracker
+      adapter (`GitHub`, `Jira`, `Shortcut`, …). The HTTP status is derived
+      from the error `kind` so every tracker reports failures the same way.
 
   Anything else falls through to a generic 500.
   """
@@ -78,6 +81,19 @@ defmodule ArbiterWeb.Api.FallbackController do
     })
   end
 
+  # Tracker adapter errors share an identical normalised shape
+  # (`%{kind, status, message, raw}`) across every backend. Render them all
+  # through one helper so a Jira or Shortcut failure reports the same way a
+  # GitHub one always has.
+  def call(conn, {:error, %Arbiter.Trackers.GitHub.Error{} = err}),
+    do: tracker_error_response(conn, err)
+
+  def call(conn, {:error, %Arbiter.Trackers.Jira.Error{} = err}),
+    do: tracker_error_response(conn, err)
+
+  def call(conn, {:error, %Arbiter.Trackers.Shortcut.Error{} = err}),
+    do: tracker_error_response(conn, err)
+
   def call(conn, {:error, %Ash.Error.Unknown{} = err}) do
     # Surface the cause when we can but never the full stack.
     causes = err |> Map.get(:errors, []) |> Enum.map(&inspect/1)
@@ -106,6 +122,31 @@ defmodule ArbiterWeb.Api.FallbackController do
   end
 
   # --- helpers ---
+
+  # Map a normalised tracker error to a JSON response. The struct shape is
+  # identical across adapters, so we match structurally on the fields rather
+  # than per-adapter. `kind` drives the HTTP status.
+  defp tracker_error_response(conn, %{kind: kind, status: status, message: message}) do
+    http_status =
+      case kind do
+        :config_missing -> :bad_request
+        :unauthenticated -> :unauthorized
+        :forbidden -> :forbidden
+        :not_found -> :not_found
+        :validation_failed -> :unprocessable_entity
+        _ -> :bad_gateway
+      end
+
+    conn
+    |> put_status(http_status)
+    |> json(%{
+      error: %{
+        type: "tracker_error",
+        message: message,
+        details: %{kind: Atom.to_string(kind), status: status}
+      }
+    })
+  end
 
   defp contains_not_found?(%Ash.Error.Invalid{errors: errors}) do
     Enum.any?(errors, &match?(%Ash.Error.Query.NotFound{}, &1))

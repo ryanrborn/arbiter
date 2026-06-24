@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.ClaimTest do
   test "missing ref exits non-zero" do
     {_out, err, code} = capture(fn -> Claim.run([]) end)
     assert code != 0
-    assert err =~ "issue number"
+    assert err =~ "tracker ref"
   end
 
   test "too many positionals fail with usage" do

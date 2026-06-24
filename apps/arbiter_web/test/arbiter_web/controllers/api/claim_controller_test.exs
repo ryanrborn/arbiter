@@ -3,8 +3,10 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
 
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Trackers.GitHub.Config
+  alias Arbiter.Trackers.Jira.Config, as: JiraConfig
 
   @viewer "ctrl-acolyte"
+  @jira_account_id "ctrl-jira-account"
   @env_var "ARBITER_CLAIM_CTRL_TOKEN"
 
   setup %{conn: conn} do
@@ -26,17 +28,58 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
         }
       })
 
+    {:ok, jira_ws} =
+      Ash.create(Workspace, %{
+        name: "claim-ctrl-jira",
+        prefix: "ccj",
+        config: %{
+          "tracker" => %{
+            "type" => "jira",
+            "config" => %{
+              "host" => "test.atlassian.net",
+              "project_key" => "TEST",
+              "credentials_ref" => "env:#{@env_var}",
+              "email" => "tester@example.com"
+            }
+          }
+        }
+      })
+
     {:ok, none_ws} = Ash.create(Workspace, %{name: "claim-ctrl-none", prefix: "ccno"})
 
     on_exit(fn ->
       Config.clear()
+      JiraConfig.clear()
       System.delete_env(@env_var)
     end)
 
-    {:ok, conn: put_req_header(conn, "accept", "application/json"), gh: github_ws, none: none_ws}
+    {:ok,
+     conn: put_req_header(conn, "accept", "application/json"),
+     gh: github_ws,
+     jira: jira_ws,
+     none: none_ws}
   end
 
   defp stub(fun), do: Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fun)
+  defp stub_jira(fun), do: Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fun)
+
+  defp jira_issue_payload(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "key" => "TEST-43",
+        "fields" => %{
+          "summary" => "Wire up the Jira thing",
+          "description" => nil,
+          "assignee" => %{"accountId" => @jira_account_id},
+          "status" => %{
+            "name" => "To Do",
+            "statusCategory" => %{"key" => "new"}
+          }
+        }
+      },
+      overrides
+    )
+  end
 
   defp issue_payload(overrides \\ %{}) do
     Map.merge(
@@ -150,9 +193,47 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
     end
 
-    test "400 when workspace tracker isn't github", %{conn: conn, none: ws} do
+    test "400 when workspace has no claim-capable tracker", %{conn: conn, none: ws} do
       conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "43"})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
+    end
+
+    test "claims a Jira issue through the workspace's Jira adapter", %{conn: conn, jira: ws} do
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", "/rest/api/3/issue/TEST-43"} ->
+            Req.Test.json(conn, jira_issue_payload())
+        end
+      end)
+
+      conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "TEST-43"})
+      body = json_response(conn, 201)
+      assert body["status"] == "created"
+      assert body["task"]["tracker_type"] == "jira"
+      assert body["task"]["tracker_ref"] == "TEST-43"
+      assert body["task"]["title"] == "Wire up the Jira thing"
+    end
+
+    test "renders a Jira tracker error with the mapped HTTP status", %{conn: conn, jira: ws} do
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", "/rest/api/3/issue/TEST-99"} ->
+            conn
+            |> Plug.Conn.put_status(404)
+            |> Req.Test.json(%{"errorMessages" => ["not found"]})
+        end
+      end)
+
+      conn = post(conn, ~p"/api/workspaces/#{ws.id}/claim", %{"ref" => "TEST-99"})
+
+      assert %{"error" => %{"type" => "tracker_error", "details" => %{"kind" => "not_found"}}} =
+               json_response(conn, 404)
     end
   end
 

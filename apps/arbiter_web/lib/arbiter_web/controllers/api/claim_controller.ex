@@ -1,6 +1,12 @@
 defmodule ArbiterWeb.Api.ClaimController do
   @moduledoc """
-  REST endpoints for the GitHub-issue ↔ task bridge.
+  REST endpoints for the tracker-issue ↔ task bridge.
+
+  Claim dispatches through the workspace's configured tracker adapter
+  (`github`, `jira`, `shortcut`, …), so `ref` is whatever that tracker uses —
+  a GitHub issue number (`"42"`), a Jira key (`"VR-1234"`), a Shortcut story
+  id, etc. The adapter defines the assignment-as-claim signal; workspaces
+  without a claim-capable tracker get a 400.
 
   Routes:
 
@@ -34,7 +40,9 @@ defmodule ArbiterWeb.Api.ClaimController do
       })
     else
       {:error, :tracker_not_supported} ->
-        {:error, {:invalid_request, "workspace tracker is not github"}}
+        {:error,
+         {:invalid_request,
+          "workspace has no tracker that supports claim; configure a tracker (github, jira, shortcut)"}}
 
       {:error, {:already_claimed, body}} ->
         conn
@@ -62,9 +70,6 @@ defmodule ArbiterWeb.Api.ClaimController do
       {:error, {:invalid_ref, raw}} ->
         {:error, {:invalid_request, "invalid issue ref: #{inspect(raw)}"}}
 
-      {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
-        tracker_error_response(conn, err)
-
       {:error, _} = err ->
         err
     end
@@ -74,12 +79,6 @@ defmodule ArbiterWeb.Api.ClaimController do
     with {:ok, workspace} <- get_workspace(workspace_id),
          {:ok, plan} <- Claim.plan(workspace) do
       json(conn, %{data: Enum.map(plan, &serialize_action/1)})
-    else
-      {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
-        tracker_error_response(conn, err)
-
-      {:error, _} = err ->
-        err
     end
   end
 
@@ -99,12 +98,6 @@ defmodule ArbiterWeb.Api.ClaimController do
           applied: true
         })
       end
-    else
-      {:error, %Arbiter.Trackers.GitHub.Error{} = err} ->
-        tracker_error_response(conn, err)
-
-      {:error, _} = err ->
-        err
     end
   end
 
@@ -115,7 +108,7 @@ defmodule ArbiterWeb.Api.ClaimController do
       action: "create",
       ref: ref,
       title: summary[:title],
-      html_url: summary[:html_url]
+      url: summary[:url]
     }
   end
 
@@ -162,26 +155,4 @@ defmodule ArbiterWeb.Api.ClaimController do
 
   defp status_code_for(:created), do: :created
   defp status_code_for(:existing), do: :ok
-
-  defp tracker_error_response(conn, %Arbiter.Trackers.GitHub.Error{} = err) do
-    http_status =
-      case err.kind do
-        :config_missing -> :bad_request
-        :unauthenticated -> :unauthorized
-        :forbidden -> :forbidden
-        :not_found -> :not_found
-        :validation_failed -> :unprocessable_entity
-        _ -> :bad_gateway
-      end
-
-    conn
-    |> put_status(http_status)
-    |> json(%{
-      error: %{
-        type: "tracker_error",
-        message: err.message,
-        details: %{kind: Atom.to_string(err.kind), status: err.status}
-      }
-    })
-  end
 end
