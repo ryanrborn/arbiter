@@ -65,7 +65,7 @@ defmodule ArbiterCli.Cmd.Sync do
   end
 
   defp print_action(%{"action" => "create", "ref" => ref, "title" => title}) do
-    IO.puts("  + create task for ##{ref}: #{title}")
+    IO.puts("  + create task for #{format_ref(ref)}: #{title}")
   end
 
   defp print_action(%{"action" => "close", "task_id" => id, "reason" => reason}) do
@@ -73,6 +73,13 @@ defmodule ArbiterCli.Cmd.Sync do
   end
 
   defp print_action(other), do: IO.puts("  ? #{inspect(other)}")
+
+  # GitHub issue refs are bare numbers and read naturally with a `#` prefix
+  # (`#43`); other trackers (Jira `VR-1234`, Shortcut ids) carry their own
+  # prefix, so print them as-is.
+  defp format_ref(ref) when is_binary(ref) do
+    if Regex.match?(~r/^\d+$/, ref), do: "##{ref}", else: ref
+  end
 
   defp print_result(%{"outcome" => "created", "task" => task}) do
     IO.puts("  + created #{task["id"]} (#{task["tracker_type"]}:#{task["tracker_ref"]})")

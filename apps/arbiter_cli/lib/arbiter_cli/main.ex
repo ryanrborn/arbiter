@@ -17,7 +17,7 @@ defmodule ArbiterCli.Main do
                                   [--pr-body text]
       arb issue close     <id> [--reason ...]
       arb issue reopen    <id>
-      arb issue claim     <issue#> [--force] [--repo <repo>]
+      arb issue claim     <ref> [--force] [--repo <repo>]
       arb issue sync      [--dry]
       arb issue ready
       arb issue dispatch  <id> [<repo>] [--with-claude] [--model <name>]
