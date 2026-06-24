@@ -25,7 +25,7 @@ defmodule ArbiterCli.Cmd.Doctor do
         :text -> emit_text(results)
       end
 
-      if Enum.any?(results, fn r -> r.status == :fail end) do
+      if Enum.any?(results, fn r -> r.status == :fail and r.fatal end) do
         Output.halt(1)
       end
     end
@@ -53,9 +53,13 @@ defmodule ArbiterCli.Cmd.Doctor do
   @spec reachable?() :: boolean()
   def reachable?, do: check_phoenix().status == :ok
 
-  @doc "True when every health check passes (doctor is fully green)."
+  @doc "True when every fatal health check passes. Non-fatal checks (like version mismatch) don't block readiness."
   @spec green?() :: boolean()
-  def green?, do: Enum.all?(checks(), fn r -> r.status == :ok end)
+  def green? do
+    Enum.all?(checks(), fn r ->
+      r.status == :ok or (r.status == :fail and not r.fatal)
+    end)
+  end
 
   @doc """
   Print the human-readable health report to stdout and return whether all
@@ -95,27 +99,29 @@ defmodule ArbiterCli.Cmd.Doctor do
 
   defmodule Result do
     @moduledoc false
-    defstruct [:name, :status, :detail, :hint]
+    defstruct [:name, :status, :detail, :hint, :fatal]
 
     @type t :: %__MODULE__{
             name: String.t(),
             status: :ok | :fail,
             detail: nil | String.t(),
-            hint: nil | String.t()
+            hint: nil | String.t(),
+            fatal: boolean()
           }
   end
 
   defp check_phoenix do
     case Client.get("/api/workspaces") do
       {:ok, _} ->
-        %Result{name: "phoenix reachable", status: :ok, detail: Client.base_url()}
+        %Result{name: "phoenix reachable", status: :ok, detail: Client.base_url(), fatal: true}
 
       {:error, %Client.Error{kind: :connection_refused} = err} ->
         %Result{
           name: "phoenix reachable",
           status: :fail,
           detail: err.message,
-          hint: err.hint
+          hint: err.hint,
+          fatal: true
         }
 
       {:error, %Client.Error{} = err} ->
@@ -123,7 +129,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "phoenix reachable",
           status: :fail,
           detail: err.message,
-          hint: err.hint
+          hint: err.hint,
+          fatal: true
         }
     end
   end
@@ -134,7 +141,8 @@ defmodule ArbiterCli.Cmd.Doctor do
         %Result{
           name: "at least one workspace exists",
           status: :ok,
-          detail: "#{length(list)} workspace(s)"
+          detail: "#{length(list)} workspace(s)",
+          fatal: true
         }
 
       {:ok, _} ->
@@ -142,7 +150,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "at least one workspace exists",
           status: :fail,
           detail: "no workspaces found",
-          hint: "Run `mix run priv/repo/seeds.exs` or create one via the API."
+          hint: "Run `mix run priv/repo/seeds.exs` or create one via the API.",
+          fatal: true
         }
 
       {:error, %Client.Error{} = err} ->
@@ -150,7 +159,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "at least one workspace exists",
           status: :fail,
           detail: err.message,
-          hint: err.hint
+          hint: err.hint,
+          fatal: true
         }
     end
   end
@@ -166,13 +176,15 @@ defmodule ArbiterCli.Cmd.Doctor do
             name: "version",
             status: :fail,
             detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
-            hint: "Rebuild the escript (`mix escript.build`) and/or redeploy the server."
+            hint: "Rebuild the escript (`mix escript.build`) and/or redeploy the server.",
+            fatal: false
           }
         else
           %Result{
             name: "version",
             status: :ok,
-            detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)"
+            detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)",
+            fatal: true
           }
         end
 
@@ -180,14 +192,16 @@ defmodule ArbiterCli.Cmd.Doctor do
         %Result{
           name: "version",
           status: :ok,
-          detail: "CLI #{cli_vsn} @ #{cli_sha} (server unreachable)"
+          detail: "CLI #{cli_vsn} @ #{cli_sha} (server unreachable)",
+          fatal: true
         }
 
       {:error, %Client.Error{} = err} ->
         %Result{
           name: "version",
           status: :ok,
-          detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})"
+          detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})",
+          fatal: true
         }
     end
   end
@@ -198,7 +212,8 @@ defmodule ArbiterCli.Cmd.Doctor do
         %Result{
           name: "active workspace resolves",
           status: :ok,
-          detail: "#{ws["name"]} (#{ws["id"]})"
+          detail: "#{ws["name"]} (#{ws["id"]})",
+          fatal: true
         }
 
       {:error, msg} ->
@@ -206,7 +221,8 @@ defmodule ArbiterCli.Cmd.Doctor do
           name: "active workspace resolves",
           status: :fail,
           detail: msg,
-          hint: "Set ARB_WORKSPACE or create a workspace named \"default\"."
+          hint: "Set ARB_WORKSPACE or create a workspace named \"default\".",
+          fatal: true
         }
     end
   end

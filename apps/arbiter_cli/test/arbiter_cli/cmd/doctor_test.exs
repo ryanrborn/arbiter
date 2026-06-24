@@ -63,4 +63,42 @@ defmodule ArbiterCli.Cmd.DoctorTest do
     assert is_list(checks)
     assert length(checks) == 4
   end
+
+  test "version mismatch is non-fatal (exit 0 but shows [fail])" do
+    mismatched_version_resp = %{
+      "version" => "0.1.0",
+      "sha" => "mismatched_sha",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {mismatched_version_resp, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] phoenix reachable"
+    assert out =~ "[ ok ] at least one workspace exists"
+    assert out =~ "[ ok ] active workspace resolves"
+    assert out =~ "[fail] version"
+    assert out =~ "Rebuild the escript"
+  end
+
+  test "version mismatch does not block arb start readiness" do
+    mismatched_version_resp = %{
+      "version" => "0.1.0",
+      "sha" => "mismatched_sha",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {mismatched_version_resp, 200}}
+    ])
+
+    assert Doctor.green?() == true
+  end
 end
