@@ -6,13 +6,30 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   alias Arbiter.Workflows.PRPatrol
   require Ash.Query
 
-  @stub_name Arbiter.GitHub.HTTP
+  # PRPatrol now routes forge calls through the MR adapter (Arbiter.Mergers.Github),
+  # whose Req plug is Arbiter.Mergers.Github.HTTP — not the old Arbiter.GitHub.HTTP.
+  @stub_name Arbiter.Mergers.Github.HTTP
 
   setup do
     {:ok, ws} =
       Ash.create(Workspace, %{
         name: "prpatrol-#{System.unique_integer([:positive])}",
-        prefix: "pp"
+        prefix: "pp",
+        # PRPatrol now resolves its forge adapter from the workspace's merge
+        # strategy (provider-agnostic, via the MR adapter). Without a github
+        # merge config the strategy is :direct, which has no `list_open/0`, so
+        # every tick no-ops and the task-creation tests pass vacuously. Configure
+        # github here so the tick tests exercise the real adapter path.
+        config: %{
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{
+              "owner" => "owner",
+              "repo" => "repo",
+              "credentials_ref" => "env:GITHUB_TOKEN"
+            }
+          }
+        }
       })
 
     # `:github_http_stub` is set globally in config/test.exs; don't touch it.
@@ -88,6 +105,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
             |> Plug.Conn.put_status(200)
             |> Req.Test.json([%{"state" => "APPROVED"}])
 
+          conn.request_path == "/repos/owner/repo/pulls/41/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
           true ->
             conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
         end
@@ -114,6 +134,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json([%{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}])
+
+          conn.request_path == "/repos/owner/repo/pulls/42/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
 
           true ->
             conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
@@ -145,6 +168,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/43/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
 
           true ->
             conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
@@ -182,6 +208,9 @@ defmodule Arbiter.Workflows.PRPatrolTest do
             conn
             |> Plug.Conn.put_status(200)
             |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/44/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
 
           true ->
             conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})

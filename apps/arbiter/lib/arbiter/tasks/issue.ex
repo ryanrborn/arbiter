@@ -47,7 +47,7 @@ defmodule Arbiter.Tasks.Issue do
 
   @statuses ~w(open in_progress closed)a
   @issue_types ~w(task bug feature epic chore decision)a
-  @tracker_types ~w(none jira shortcut linear github)a
+  @tracker_types ~w(none jira shortcut linear github gitlab)a
 
   sqlite do
     table "issues"
