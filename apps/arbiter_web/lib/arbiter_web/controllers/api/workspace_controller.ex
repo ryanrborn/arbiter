@@ -32,7 +32,9 @@ defmodule ArbiterWeb.Api.WorkspaceController do
   end
 
   def create(conn, params) do
-    attrs = Map.take(params, ["name", "description", "prefix", "config"])
+    # `secrets` is a write-only action argument (merge-patched then encrypted
+    # via ash_cloak); it is never read back in any response. See WorkspaceJSON.
+    attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets"])
 
     case Ash.create(Workspace, attrs) do
       {:ok, ws} ->
@@ -46,7 +48,10 @@ defmodule ArbiterWeb.Api.WorkspaceController do
   end
 
   def update(conn, %{"id" => id} = params) do
-    attrs = Map.take(params, ["name", "description", "prefix", "config"])
+    # `secrets`, when present, is merge-patched into the existing encrypted
+    # secrets (a key with a null value removes it); omitting it leaves them
+    # untouched. Write-only — never serialised back. See WorkspaceJSON.
+    attrs = Map.take(params, ["name", "description", "prefix", "config", "secrets"])
 
     with {:ok, ws} <- Ash.get(Workspace, id),
          {:ok, updated} <- Ash.update(ws, attrs) do

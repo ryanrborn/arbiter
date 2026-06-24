@@ -35,6 +35,11 @@ defmodule Arbiter.Application do
 
     [
       Arbiter.Repo,
+      # Cloak vault for encrypting workspace secrets at rest. Started early (it
+      # has no deps) and resolves ARBITER_CLOAK_KEY in its init — a missing key
+      # aborts the boot here, before any workspace read can hit an encrypted
+      # column. See Arbiter.Vault.
+      Arbiter.Vault,
       {DNSCluster, query: Application.get_env(:arbiter, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Arbiter.PubSub},
       Arbiter.Agents.ProviderPool,

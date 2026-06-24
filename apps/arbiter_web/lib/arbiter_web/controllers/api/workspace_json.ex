@@ -20,6 +20,11 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       description: ws.description,
       prefix: ws.prefix,
       config: ws.config,
+      # Names of the configured secrets ONLY — never the decrypted values. This
+      # lets `arb workspace secret ls` show what's set without exposing tokens.
+      # The encrypted `secrets`/`encrypted_secrets` is deliberately never
+      # serialised; reference a secret from config via `credentials_ref: "secret:<key>"`.
+      secret_keys: secret_key_names(ws),
       # The *resolved* worker security posture (install default + this
       # domain's overrides) — single source of truth for `arb prime` and the
       # dashboard, so neither re-derives it from raw config.
@@ -38,6 +43,12 @@ defmodule ArbiterWeb.Api.WorkspaceJSON do
       created_at: iso(ws.created_at),
       updated_at: iso(ws.updated_at)
     }
+  end
+
+  # Sorted key names of the workspace's secrets (values are NEVER returned).
+  # Decrypts the stored column on demand via `Workspace.secrets_map/1`.
+  defp secret_key_names(%Workspace{} = ws) do
+    ws |> Workspace.secrets_map() |> Map.keys() |> Enum.sort()
   end
 
   defp security_enforced?(adapter) do

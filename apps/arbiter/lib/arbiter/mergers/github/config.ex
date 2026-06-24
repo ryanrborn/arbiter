@@ -45,6 +45,7 @@ defmodule Arbiter.Mergers.Github.Config do
   back to `:squash`.
   """
 
+  alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.Github.Error
 
@@ -77,9 +78,14 @@ defmodule Arbiter.Mergers.Github.Config do
     :ok
   end
 
-  def put_active(%Workspace{config: config}) do
+  def put_active(%Workspace{config: config} = workspace) do
     merger_config = get_in(config || %{}, ["merge", "config"]) || %{}
-    Process.put(@pdict_key, merger_config)
+
+    Process.put(
+      @pdict_key,
+      CredentialsRef.embed_secrets(merger_config, Workspace.secrets_map(workspace))
+    )
+
     :ok
   end
 
@@ -157,36 +163,27 @@ defmodule Arbiter.Mergers.Github.Config do
     end
   end
 
+  # Resolve the token via the shared credentials_ref DSL (env: / secret: /
+  # literal), mapping its tagged failures onto the merger's config_missing error.
   defp fetch_token(raw) do
-    case Map.get(raw, "credentials_ref") do
-      "env:" <> name ->
-        case System.get_env(name) do
-          v when is_binary(v) and v != "" ->
-            {:ok, v}
+    case CredentialsRef.resolve(Map.get(raw, "credentials_ref"), raw) do
+      {:ok, token} ->
+        {:ok, token}
 
-          _ ->
-            {:error,
-             %Error{
-               kind: :config_missing,
-               status: nil,
-               message: "GitHub merger credentials env var #{inspect(name)} is unset",
-               raw: nil
-             }}
-        end
+      {:env_unset, name} ->
+        {:error, config_missing("GitHub merger credentials env var #{inspect(name)} is unset")}
 
-      v when is_binary(v) and v != "" ->
-        # literal token — discouraged outside of tests
-        {:ok, v}
-
-      _ ->
+      {:secret_not_found, key} ->
         {:error,
-         %Error{
-           kind: :config_missing,
-           status: nil,
-           message: "GitHub merger config missing \"credentials_ref\"",
-           raw: nil
-         }}
+         config_missing("GitHub merger secret #{inspect(key)} is not set on the workspace")}
+
+      :missing ->
+        {:error, config_missing("GitHub merger config missing \"credentials_ref\"")}
     end
+  end
+
+  defp config_missing(message) do
+    %Error{kind: :config_missing, status: nil, message: message, raw: nil}
   end
 
   defp reviewers(raw) do

@@ -42,6 +42,12 @@ defmodule Arbiter.MixProject do
       {:ash_paper_trail, "~> 0.5"},
       {:ash_sqlite, "~> 0.2"},
       {:ash, "~> 3.0"},
+
+      # Encrypt sensitive Workspace attributes (tracker/merger secrets) at rest.
+      # ash_cloak wires the Cloak vault into the Ash resource; cloak provides the
+      # AES-256-GCM cipher. See Arbiter.Vault and Arbiter.Tasks.Workspace.
+      {:ash_cloak, "~> 0.2.1"},
+      {:cloak, "~> 1.1"},
       {:dns_cluster, "~> 0.2.0"},
       {:phoenix_pubsub, "~> 2.1"},
       {:ecto_sql, "~> 3.13"},
