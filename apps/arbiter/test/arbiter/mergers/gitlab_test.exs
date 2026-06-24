@@ -391,9 +391,69 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert result.block_reason == :ci_failed
     end
 
-    test "not_approved classifies as :needs_approval" do
+    test "not_approved with no resolvable author classifies as :needs_approval" do
+      # No `author.username` on the MR → authorship can't be confirmed as the
+      # fleet's, so we never call `/user` and fall back to the generic reason.
       assert block_get(%{"detailed_merge_status" => "not_approved"}).block_reason ==
                :needs_approval
+    end
+
+    # A not_approved MR opened by the authenticated fleet identity is parked on a
+    # required non-author approval GitLab's rules forbid the author from giving
+    # (bd-c3lchp).
+    defp block_get_authored(mr_fields, viewer_username) do
+      mr = Map.merge(%{"iid" => @iid, "state" => "opened"}, mr_fields)
+
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(mr)
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/api/v4/user" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"username" => viewer_username})
+        end
+      end)
+
+      {:ok, result} = Gitlab.get(@ref)
+      result
+    end
+
+    test "not_approved on a fleet-authored MR classifies as :needs_nonauthor_approval" do
+      result =
+        block_get_authored(
+          %{"detailed_merge_status" => "not_approved", "author" => %{"username" => "fleet-bot"}},
+          "fleet-bot"
+        )
+
+      assert result.block_reason == :needs_nonauthor_approval
+    end
+
+    test "not_approved on an MR authored by someone else stays :needs_approval" do
+      result =
+        block_get_authored(
+          %{"detailed_merge_status" => "not_approved", "author" => %{"username" => "a-human"}},
+          "fleet-bot"
+        )
+
+      assert result.block_reason == :needs_approval
+    end
+
+    test "requested_changes stays :needs_approval even when fleet-authored" do
+      # A genuine change request is a review action, not the author-can't-approve
+      # park case.
+      result =
+        block_get_authored(
+          %{
+            "detailed_merge_status" => "requested_changes",
+            "author" => %{"username" => "fleet-bot"}
+          },
+          "fleet-bot"
+        )
+
+      assert result.block_reason == :needs_approval
     end
 
     test "draft classifies as :draft" do

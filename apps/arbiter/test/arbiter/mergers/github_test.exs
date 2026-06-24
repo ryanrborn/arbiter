@@ -505,8 +505,88 @@ defmodule Arbiter.Mergers.GithubTest do
       assert block_get(%{"mergeable_state" => "behind"}).block_reason == :behind_base
     end
 
-    test "blocked classifies as :needs_approval" do
+    test "blocked with no resolvable author classifies as :needs_approval" do
+      # No `user.login` on the PR → authorship can't be confirmed as the fleet's,
+      # so we never even call `/user` and fall back to the generic reason.
       assert block_get(%{"mergeable_state" => "blocked"}).block_reason == :needs_approval
+    end
+
+    # A blocked PR whose author IS the authenticated fleet identity is parked on a
+    # required non-author approval the fleet can never supply (bd-c3lchp).
+    defp block_get_authored(pr_fields, viewer_login) do
+      pr = Map.merge(%{"state" => "open", "merged" => false, "html_url" => "u"}, pr_fields)
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/octo/widget/pulls/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr)
+
+          conn.request_path == "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.request_path == "/user" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => viewer_login})
+
+          String.contains?(conn.request_path, "/check-runs") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => []})
+        end
+      end)
+
+      {:ok, result} = Github.get(@ref)
+      result
+    end
+
+    test "blocked on a fleet-authored PR classifies as :needs_nonauthor_approval" do
+      result =
+        block_get_authored(
+          %{"mergeable_state" => "blocked", "user" => %{"login" => "fleet-bot"}},
+          "fleet-bot"
+        )
+
+      assert result.block_reason == :needs_nonauthor_approval
+    end
+
+    test "blocked on a PR authored by someone else stays :needs_approval" do
+      result =
+        block_get_authored(
+          %{"mergeable_state" => "blocked", "user" => %{"login" => "a-human"}},
+          "fleet-bot"
+        )
+
+      assert result.block_reason == :needs_approval
+    end
+
+    test "blocked with CHANGES_REQUESTED stays :needs_approval even when fleet-authored" do
+      # An outstanding change request is a real review action, not the
+      # author-can't-self-approve park case — keep the revise-able reason.
+      pr = %{
+        "state" => "open",
+        "merged" => false,
+        "html_url" => "u",
+        "mergeable_state" => "blocked",
+        "user" => %{"login" => "fleet-bot"}
+      }
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/octo/widget/pulls/42" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(pr)
+
+          conn.request_path == "/repos/octo/widget/pulls/42/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "rev"}}])
+
+          conn.request_path == "/user" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "fleet-bot"})
+
+          String.contains?(conn.request_path, "/check-runs") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => []})
+        end
+      end)
+
+      assert {:ok, result} = Github.get(@ref)
+      assert result.block_reason == :needs_approval
     end
 
     test "draft classifies as :draft" do

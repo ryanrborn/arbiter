@@ -338,6 +338,51 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "non-author-approval park (bd-c3lchp)" do
+    test "an auto_merge lane parks instead of failing at the poll ceiling" do
+      {pid, task_id} = running_worker()
+      # A fully-green PR that is not yet approved and is parked on a required
+      # non-author approval the fleet can't supply. The stub repeats the last
+      # result once drained, so this reason recurs on every poll.
+      StubMerger.queue_get("!na1", [
+        %{status: :open, approved: false, block_reason: :needs_nonauthor_approval}
+      ])
+
+      # A tiny ceiling: a *normal* pending PR on an auto_merge lane would fail
+      # after the very first poll. The non-author-approval handling must lift the
+      # ceiling to :infinity so the worker parks rather than failing.
+      start_watchdog(pid, task_id, "!na1",
+        auto_merge: true,
+        max_polls: 1,
+        workspace: test_workspace()
+      )
+
+      # Let well more than `max_polls` intervals elapse (interval_ms: 20).
+      Process.sleep(150)
+
+      refute Worker.state(pid).status == :failed
+    end
+
+    test "a later approval on a parked PR auto-merges and completes" do
+      {pid, task_id} = running_worker()
+      # First poll: blocked on the non-author approval. Second poll: a human has
+      # approved, so the now-green PR auto-merges.
+      StubMerger.queue_get("!na2", [
+        %{status: :open, approved: false, block_reason: :needs_nonauthor_approval},
+        %{status: :open, approved: true, block_reason: nil}
+      ])
+
+      start_watchdog(pid, task_id, "!na2",
+        auto_merge: true,
+        max_polls: 1,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert StubMerger.merge_count("!na2") >= 1
+    end
+  end
+
   describe "auto-resolve :behind_base (#354 Phase 2a)" do
     test "runs update-branch on an approved behind-base PR, then merges when caught up" do
       {pid, task_id} = running_worker()
