@@ -101,4 +101,63 @@ defmodule ArbiterCli.Cmd.DoctorTest do
 
     assert Doctor.green?() == true
   end
+
+  test "release build with matching version shows [ ok ] (SHA unavailable)" do
+    # When the server is an OTP release, it may report sha: "unknown" because
+    # no git process is available at runtime. If the semantic version matches
+    # the CLI, the check should pass — this is the expected state after
+    # `arb server deploy`.
+    release_version_resp = %{
+      "version" => ArbiterCli.Version.app_version(),
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {release_version_resp, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[ ok ] version"
+    assert out =~ "release build"
+  end
+
+  test "release build with matching version is fully green" do
+    release_version_resp = %{
+      "version" => ArbiterCli.Version.app_version(),
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {release_version_resp, 200}}
+    ])
+
+    assert Doctor.green?() == true
+  end
+
+  test "release build with mismatched version shows [fail] but is non-fatal" do
+    release_version_resp = %{
+      "version" => "0.0.1",
+      "sha" => "unknown",
+      "built_at" => "2024-01-01T00:00:00Z",
+      "booted_at" => "2024-01-01T00:01:00Z"
+    }
+
+    stub_routes([
+      {{"get", "/api/workspaces"}, {@workspaces_resp, 200}},
+      {{"get", "/api/version"}, {release_version_resp, 200}}
+    ])
+
+    {out, _err, exit_code} = capture(fn -> Doctor.run([]) end)
+    assert exit_code == 0
+    assert out =~ "[fail] version"
+    assert out =~ "release"
+    assert Doctor.green?() == true
+  end
 end

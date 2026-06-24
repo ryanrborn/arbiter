@@ -171,21 +171,44 @@ defmodule ArbiterCli.Cmd.Doctor do
 
     case Client.get("/api/version") do
       {:ok, %{"sha" => server_sha, "version" => server_vsn}} ->
-        if cli_sha != server_sha do
-          %Result{
-            name: "version",
-            status: :fail,
-            detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
-            hint: "Rebuild the escript (`mix escript.build`) and/or redeploy the server.",
-            fatal: false
-          }
-        else
-          %Result{
-            name: "version",
-            status: :ok,
-            detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)",
-            fatal: true
-          }
+        cond do
+          cli_sha == server_sha ->
+            %Result{
+              name: "version",
+              status: :ok,
+              detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)",
+              fatal: true
+            }
+
+          server_sha == "unknown" and cli_vsn == server_vsn ->
+            # Release build: no git SHA embedded, but the semantic version matches.
+            # This is expected after `arb server deploy` — treat as ok.
+            %Result{
+              name: "version",
+              status: :ok,
+              detail: "#{cli_vsn} (server is a release build; SHA unavailable)",
+              fatal: true
+            }
+
+          server_sha == "unknown" ->
+            # Release build: no SHA and semantic versions differ — genuine drift.
+            %Result{
+              name: "version",
+              status: :fail,
+              detail: "CLI #{cli_vsn} / server #{server_vsn} (server is a release; SHA unavailable)",
+              hint: "Redeploy the server to version #{cli_vsn} or reinstall the CLI.",
+              fatal: false
+            }
+
+          true ->
+            # Both SHAs are known but differ.
+            %Result{
+              name: "version",
+              status: :fail,
+              detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
+              hint: "Rebuild the escript (`mix escript.build`) and/or redeploy the server.",
+              fatal: false
+            }
         end
 
       {:error, %Client.Error{kind: :connection_refused}} ->
