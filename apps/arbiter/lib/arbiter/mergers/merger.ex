@@ -77,6 +77,21 @@ defmodule Arbiter.Mergers.Merger do
   @type verdict :: :approve | :request_changes
 
   @typedoc """
+  A summary of an open MR/PR returned by `list_open/0`.
+
+    * `:ref` — an opaque `t:mr_ref/0` ready to pass to other callbacks.
+    * `:number` — the MR/PR number.
+    * `:title` — the MR/PR title.
+    * `:url` — a human-clickable URL for the MR/PR.
+  """
+  @type open_mr :: %{
+          required(:ref) => mr_ref(),
+          required(:number) => pos_integer(),
+          required(:title) => String.t(),
+          required(:url) => String.t()
+        }
+
+  @typedoc """
   A single piece of human PR-side review feedback surfaced by
   `list_review_feedback/1`.
 
@@ -200,6 +215,19 @@ defmodule Arbiter.Mergers.Merger do
   @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
 
   @doc """
+  List open merge requests / pull requests in the configured repository.
+
+  Returns `{:ok, [open_mr()]}` (an empty list when no open MRs exist — not
+  an error) or `{:error, term()}`. Each `open_mr` carries an opaque
+  `t:mr_ref/0` ready to pass to `list_review_feedback/1` or other callbacks.
+
+  Optional — adapters with no concept of an open-MR listing (e.g. `Direct`)
+  simply don't implement it; callers guard with `function_exported?/3` and
+  skip the patrol for that strategy.
+  """
+  @callback list_open() :: {:ok, [open_mr()]} | {:error, term()}
+
+  @doc """
   Construct an `t:mr_ref/0` for an **existing, externally-authored** PR/MR from
   an operator-supplied identifier — a forge URL, an `owner/repo#n` slug, or a
   bare number/`#n` — so `arb review --pr <url|number>` can point a review-only
@@ -222,5 +250,5 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback ref_for_pr(pr :: String.t(), opts :: map()) :: {:ok, mr_ref} | {:error, term()}
 
-  @optional_callbacks update_branch: 1, failing_check_logs: 1, ref_for_pr: 2
+  @optional_callbacks update_branch: 1, failing_check_logs: 1, ref_for_pr: 2, list_open: 0
 end

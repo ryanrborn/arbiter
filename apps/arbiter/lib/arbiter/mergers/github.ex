@@ -334,6 +334,34 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
+  def list_open do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, owner} <- require_owner_repo(cfg, :owner),
+         {:ok, repo} <- require_owner_repo(cfg, :repo),
+         {:ok, prs} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls",
+             params: [state: "open", per_page: 100]
+           )
+           |> handle_json() do
+      mrs =
+        prs
+        |> List.wrap()
+        |> Enum.map(fn pr ->
+          number = pr["number"]
+
+          %{
+            ref: build_mr_ref(:embedded, owner, repo, number),
+            number: number,
+            title: pr["title"] || "",
+            url: pr["html_url"] || ""
+          }
+        end)
+
+      {:ok, mrs}
+    end
+  end
+
+  @impl true
   def ref_for_pr(pr, opts) when is_binary(pr) and is_map(opts) do
     pr = String.trim(pr)
 
@@ -371,6 +399,40 @@ defmodule Arbiter.Mergers.Github do
                "an \"owner/repo#N\" slug, or a number (pass --repo so a bare number can be " <>
                "resolved to owner/repo via the checkout's origin remote)",
            raw: pr
+         }}
+    end
+  end
+
+  # Returns {:ok, value} for a required cfg field (owner or repo), or a
+  # :config_missing error when the field is nil (not set in workspace config).
+  defp require_owner_repo(cfg, :owner) do
+    case cfg.owner do
+      v when is_binary(v) and v != "" ->
+        {:ok, v}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :config_missing,
+           status: nil,
+           message: "GitHub merger config missing \"owner\"",
+           raw: nil
+         }}
+    end
+  end
+
+  defp require_owner_repo(cfg, :repo) do
+    case cfg.repo do
+      v when is_binary(v) and v != "" ->
+        {:ok, v}
+
+      _ ->
+        {:error,
+         %Error{
+           kind: :config_missing,
+           status: nil,
+           message: "GitHub merger config missing \"repo\"",
+           raw: nil
          }}
     end
   end
