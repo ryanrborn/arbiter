@@ -6,6 +6,7 @@ defmodule Arbiter.Application do
   use Application
 
   alias Arbiter.Workflows.MergeQueueSupervisor
+  alias Arbiter.Workflows.PRPatrolSupervisor
 
   @impl true
   def start(_type, _args) do
@@ -54,7 +55,9 @@ defmodule Arbiter.Application do
       # path: the CLI/MCP call returns a "dispatched" ack immediately while the
       # CodeReview adapter workflow posts findings + a verdict to the PR.
       {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
-      MergeQueueSupervisor
+      MergeQueueSupervisor,
+      {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
+      PRPatrolSupervisor
     ] ++ boot_tasks(auto_start?)
   end
 
@@ -108,6 +111,11 @@ defmodule Arbiter.Application do
       Supervisor.child_spec(
         {Task, fn -> MergeQueueSupervisor.start_for_existing_workspaces() end},
         id: :merge_queue_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task, fn -> PRPatrolSupervisor.start_for_existing_workspaces() end},
+        id: :pr_patrol_boot_task,
         restart: :temporary
       )
     ]
