@@ -92,6 +92,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergeQueue, []}
+      change {Arbiter.Tasks.Workspace.Changes.StartPRPatrol, []}
     end
 
     update :update do
