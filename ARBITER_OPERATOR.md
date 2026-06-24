@@ -140,9 +140,19 @@ crashes the worker at launch with no useful error.
 
 ## 12. Review Capability
 
-`arb review <id>` reviews a PR/MR tracker-side: fetches the diff and posts
-findings + verdict via the configured tracker API. The PR author needs **no**
-Arbiter setup.
+`arb review <id>` reviews the PR/MR linked to an Arbiter task: fetches the diff
+and posts findings + verdict. The PR author needs **no** Arbiter setup.
+
+`arb review --pr <url|number> [--repo <checkout>] [--workspace <ref>]` reviews an
+**external / non-arbiter PR** — one the fleet never opened (a coworker's PR) —
+with no task and no branch. It constructs a merge-request ref through the
+workspace's **MR provider** (the `config["merge"]["strategy"]` adapter —
+github/gitlab, *not* the issue tracker, so a Jira-tracked workspace still reviews
+its GitHub PRs) and runs the CodeReview adapter workflow: read diff → post inline
+findings → submit a verdict, all on the PR. `--pr` accepts a forge URL, an
+`owner/repo#N` slug, or a bare number (pass `--repo` so a number resolves to
+owner/repo via the checkout's `origin` remote). The same is exposed over MCP as
+`worker_review` with a `pr` argument.
 
 ## 13. Lanes & Merge Posture
 

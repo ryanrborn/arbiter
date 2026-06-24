@@ -199,5 +199,28 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
 
-  @optional_callbacks update_branch: 1, failing_check_logs: 1
+  @doc """
+  Construct an `t:mr_ref/0` for an **existing, externally-authored** PR/MR from
+  an operator-supplied identifier — a forge URL, an `owner/repo#n` slug, or a
+  bare number/`#n` — so `arb review --pr <url|number>` can point a review-only
+  pass at a PR the fleet never opened (bd-d4ealy).
+
+  This is the provider-agnostic seam that keeps `mr_ref` minting from being
+  hard-coded to GitHub: each adapter parses the forms it recognizes into its own
+  opaque ref shape (GitHub's `"<owner>/<repo>#<n>"`, GitLab's `"!<n>"`, …) and
+  the external-review orchestrator stays adapter-blind.
+
+  `opts` may carry `:repo_path` (a local checkout) so an adapter can derive the
+  target repo from the checkout's `origin` remote when the identifier is a bare
+  number (e.g. GitHub embeds the derived `owner/repo` into the ref).
+
+  Returns `{:ok, mr_ref}` or `{:error, term()}` (an unparseable identifier).
+
+  Optional — adapters with no concept of an external PR (e.g. `Direct`, the
+  local-merge strategy) simply don't implement it; callers guard with
+  `function_exported?/3` and reject external review for that strategy.
+  """
+  @callback ref_for_pr(pr :: String.t(), opts :: map()) :: {:ok, mr_ref} | {:error, term()}
+
+  @optional_callbacks update_branch: 1, failing_check_logs: 1, ref_for_pr: 2
 end
