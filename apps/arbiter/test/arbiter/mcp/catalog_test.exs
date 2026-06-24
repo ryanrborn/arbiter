@@ -8,7 +8,7 @@ defmodule Arbiter.MCP.CatalogTest do
   @coordinator %Scope{tier: :coordinator, workspace_id: "w"}
 
   # The both-tier tools a worker may also reach.
-  @both_tier ~w(task_show inbox_check task_update_progress workspace_show
+  @both_tier ~w(task_show inbox_check task_update_progress workspace_show quota_get
                 message_send notify_list)
 
   # Coordinator-only tools; never visible to a worker.
@@ -18,7 +18,7 @@ defmodule Arbiter.MCP.CatalogTest do
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox)
 
   # Tools that call resolve_workspace_id and thus expose the optional `workspace` param.
-  @workspace_resolving_tools ~w(task_ready coordinator_inbox workspace_show task_create
+  @workspace_resolving_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create
                                 worker_list task_list usage_summarize notify_list tracker_claim tracker_sync
                                 worker_review)
 

@@ -55,8 +55,16 @@ config :arbiter,
     Arbiter.Messages,
     Arbiter.Workers,
     Arbiter.Usage,
+    Arbiter.Quota,
     Arbiter.Workflows
   ]
+
+# Local HTTP proxy that intercepts Claude CLI traffic to capture Anthropic's
+# `anthropic-ratelimit-unified-*` quota headers (bd-5boun6). Worker spawns get
+# `ANTHROPIC_BASE_URL` pointed at this proxy so every request is recorded.
+config :arbiter, :anthropic_proxy,
+  enabled: true,
+  base_url: "http://127.0.0.1:4848/proxy/anthropic"
 
 # Install-wide default acolyte security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline
