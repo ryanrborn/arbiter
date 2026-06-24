@@ -208,6 +208,39 @@ defmodule ArbiterCli.Cmd.StartTest do
       assert out =~ "did not come up within 1s"
       assert out =~ "[fail] phoenix reachable"
     end
+
+    test "exits 0 even when CLI version does not match server (version mismatch is non-fatal)" do
+      stub_transport_error(:get, "/api/workspaces", :econnrefused)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+
+      mismatched_version_resp = %{
+        "version" => "0.1.0",
+        "sha" => "mismatched_sha",
+        "built_at" => "2024-01-01T00:00:00Z",
+        "booted_at" => "2024-01-01T00:01:00Z"
+      }
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+
+        if cmd == "sh" do
+          stub_routes([
+            {{"get", "/api/workspaces"}, {@green, 200}},
+            {{"get", "/api/version"}, {mismatched_version_resp, 200}}
+          ])
+        end
+
+        {"", 0}
+      end)
+
+      {out, _err, code} = capture(fn -> Start.run([]) end)
+
+      assert code == 0
+      assert out =~ "Arbiter stack is up"
+      assert out =~ "[fail] version"
+    end
   end
 
   describe "project_root/0" do
