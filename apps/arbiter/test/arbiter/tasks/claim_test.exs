@@ -464,6 +464,15 @@ defmodule Arbiter.Tasks.ClaimTest do
 
           {"GET", "/api/v3/stories/43"} ->
             Req.Test.json(conn, sc_story_payload())
+
+          {"GET", "/api/v3/stories/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/api/v3/stories/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/api/v3/stories/43"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
         end
       end)
 
@@ -596,6 +605,15 @@ defmodule Arbiter.Tasks.ClaimTest do
 
           {"GET", "/api/v3/stories/43"} ->
             Req.Test.json(conn, sc_story_payload())
+
+          {"GET", "/api/v3/stories/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/api/v3/stories/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/api/v3/stories/43"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
         end
       end)
 

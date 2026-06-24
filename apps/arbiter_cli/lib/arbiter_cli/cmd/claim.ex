@@ -1,13 +1,16 @@
 defmodule ArbiterCli.Cmd.Claim do
   @moduledoc """
-  `arb claim <issue#> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a task
-  linked to a GitHub issue assigned to the workspace user.
+  `arb claim <ref> [--force] [--difficulty N] [--repo <repo>] [--json]` — create a task
+  linked to a tracker issue assigned to the workspace user.
 
-  POSTs to `/api/workspaces/:workspace_id/claim`. The server fetches the
-  issue via the workspace's GitHub tracker, verifies it's assigned to the
-  workspace's authenticated user (the claim signal), and either creates a
-  new task or returns the existing one if a task already references that
-  issue.
+  POSTs to `/api/workspaces/:workspace_id/claim`. The server dispatches
+  through the workspace's configured tracker adapter — GitHub, Jira,
+  Shortcut, etc. — so `<ref>` is whatever that tracker uses: a GitHub issue
+  number (`arb claim 43`), a Jira key (`arb claim VR-1234`), a Shortcut story
+  id, and so on. The adapter fetches the issue, verifies it's assigned to the
+  workspace's authenticated user (the adapter-defined claim signal), and
+  either creates a new task or returns the existing one if a task already
+  references that issue.
 
   Flags:
     --force        Skip the assignment-as-claim check. Use only when you
@@ -39,9 +42,16 @@ defmodule ArbiterCli.Cmd.Claim do
 
       ref =
         case rest do
-          [r] -> r
-          [] -> Output.die("claim requires an issue number (e.g. `arb claim 43`)")
-          _ -> Output.die("claim takes a single positional argument: <issue#>")
+          [r] ->
+            r
+
+          [] ->
+            Output.die(
+              "claim requires a tracker ref (e.g. `arb claim 43` for GitHub, `arb claim VR-1234` for Jira)"
+            )
+
+          _ ->
+            Output.die("claim takes a single positional argument: <ref>")
         end
 
       workspace_id = Workspace.id_or_halt()
