@@ -109,6 +109,47 @@ arb install service
 
 This installs the service, enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`.
 
+### Encryption key (`ARBITER_CLOAK_KEY`) — required
+
+Arbiter encrypts workspace secrets (tracker / merger credentials) at rest using
+AES-256-GCM via [`ash_cloak`](https://hex.pm/packages/ash_cloak). **The server
+refuses to start without an encryption key.** Generate a 32-byte Base64 key and
+add it to your environment before deploying:
+
+```sh
+echo "ARBITER_CLOAK_KEY=$(openssl rand -base64 32)" >> ~/.arbiter/arbiter.env
+# (for a non-service run, put it in the project-root .arbiter.env or export it)
+```
+
+`arb install service` forwards `ARBITER_CLOAK_KEY` from the installing shell
+into `~/.arbiter/arbiter.env` automatically if it is set. Treat this key like a
+database password: back it up and keep it stable — rotating it (re-encrypting
+existing secrets) is a separate runbook and is not yet automated. Losing it
+makes existing encrypted secrets unrecoverable.
+
+### Storing tracker / merger credentials in the database
+
+Instead of pointing `credentials_ref` at an environment variable
+(`credentials_ref: "env:SHORTCUT_API_TOKEN"`), you can store the token directly
+on the workspace, encrypted at rest, and reference it with a `secret:` ref. This
+needs no server-side env var and no restart:
+
+```sh
+# 1. store the encrypted secret on the workspace
+arb workspace secret set tracker_token sct_rw_...
+
+# 2. point the tracker config at it
+arb config set tracker.config.credentials_ref secret:tracker_token
+
+# inspect / remove (values are never shown — only key names)
+arb workspace secret ls
+arb workspace secret rm tracker_token
+```
+
+Existing `env:` refs keep working unchanged, so you can migrate one workspace at
+a time. Secret **values** are never returned by the API or CLI — only the key
+names are listed.
+
 ## Initialize your Admiral session
 
 The Admiral is a dedicated Claude Code session that acts as your

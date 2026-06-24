@@ -36,6 +36,7 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   literal token (discouraged outside of tests).
   """
 
+  alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers.Gitlab.Error
 
@@ -64,9 +65,14 @@ defmodule Arbiter.Mergers.Gitlab.Config do
     :ok
   end
 
-  def put_active(%Workspace{config: config}) do
+  def put_active(%Workspace{config: config} = workspace) do
     merge_config = get_in(config || %{}, ["merge", "config"]) || %{}
-    Process.put(@pdict_key, merge_config)
+
+    Process.put(
+      @pdict_key,
+      CredentialsRef.embed_secrets(merge_config, Workspace.secrets_map(workspace))
+    )
+
     :ok
   end
 
@@ -146,36 +152,26 @@ defmodule Arbiter.Mergers.Gitlab.Config do
     end
   end
 
+  # Resolve the token via the shared credentials_ref DSL (env: / secret: /
+  # literal), mapping its tagged failures onto GitLab's config_missing error.
   defp fetch_token(raw) do
-    case Map.get(raw, "credentials_ref") do
-      "env:" <> name ->
-        case System.get_env(name) do
-          v when is_binary(v) and v != "" ->
-            {:ok, v}
+    case CredentialsRef.resolve(Map.get(raw, "credentials_ref"), raw) do
+      {:ok, token} ->
+        {:ok, token}
 
-          _ ->
-            {:error,
-             %Error{
-               kind: :config_missing,
-               status: nil,
-               message: "GitLab credentials env var #{inspect(name)} is unset",
-               raw: nil
-             }}
-        end
+      {:env_unset, name} ->
+        {:error, config_missing("GitLab credentials env var #{inspect(name)} is unset")}
 
-      v when is_binary(v) and v != "" ->
-        # literal token — discouraged outside of tests
-        {:ok, v}
+      {:secret_not_found, key} ->
+        {:error, config_missing("GitLab secret #{inspect(key)} is not set on the workspace")}
 
-      _ ->
-        {:error,
-         %Error{
-           kind: :config_missing,
-           status: nil,
-           message: "GitLab config missing \"credentials_ref\"",
-           raw: nil
-         }}
+      :missing ->
+        {:error, config_missing("GitLab config missing \"credentials_ref\"")}
     end
+  end
+
+  defp config_missing(message) do
+    %Error{kind: :config_missing, status: nil, message: message, raw: nil}
   end
 
   defp stringy(nil), do: nil

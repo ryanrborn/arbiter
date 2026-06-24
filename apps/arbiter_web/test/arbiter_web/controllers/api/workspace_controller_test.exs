@@ -135,6 +135,81 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
     end
   end
 
+  describe "secrets (write-only, encrypted)" do
+    test "POST accepts secrets and never returns their values", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/workspaces", %{
+          name: "sec-api-create",
+          prefix: "sac",
+          secrets: %{"tracker_token" => "sct_rw_secret"}
+        })
+
+      body = json_response(conn, 201)
+      # The plaintext is nowhere in the serialised response...
+      refute Jason.encode!(body) =~ "sct_rw_secret"
+      refute Map.has_key?(body, "secrets")
+      refute Map.has_key?(body, "encrypted_secrets")
+      # ...but the key name is surfaced for `arb workspace secret ls`.
+      assert body["secret_keys"] == ["tracker_token"]
+    end
+
+    test "GET never returns secret values, only key names", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "sec-api-get",
+          secrets: %{"b_token" => "vvv", "a_token" => "www"}
+        })
+
+      conn = get(conn, ~p"/api/workspaces/#{ws.id}")
+      body = json_response(conn, 200)
+
+      refute Jason.encode!(body) =~ "vvv"
+      refute Jason.encode!(body) =~ "www"
+      # Sorted key names only.
+      assert body["secret_keys"] == ["a_token", "b_token"]
+    end
+
+    test "PATCH merge-patches secrets (set, then remove via null)", %{conn: conn} do
+      {:ok, ws} = Ash.create(Workspace, %{name: "sec-api-patch", secrets: %{"keep" => "1"}})
+
+      conn = patch(conn, ~p"/api/workspaces/#{ws.id}", %{secrets: %{"added" => "2"}})
+      body = json_response(conn, 200)
+      assert body["secret_keys"] == ["added", "keep"]
+
+      conn =
+        patch(
+          build_conn() |> put_req_header("accept", "application/json"),
+          ~p"/api/workspaces/#{ws.id}",
+          %{secrets: %{"keep" => nil}}
+        )
+
+      body = json_response(conn, 200)
+      assert body["secret_keys"] == ["added"]
+    end
+
+    test "the secret: ref resolves end-to-end with no env var", %{conn: conn} do
+      conn =
+        post(conn, ~p"/api/workspaces", %{
+          name: "sec-api-e2e",
+          prefix: "e2e",
+          secrets: %{"tracker_token" => "sct_e2e"},
+          config: %{
+            "tracker" => %{
+              "type" => "shortcut",
+              "config" => %{"credentials_ref" => "secret:tracker_token"}
+            }
+          }
+        })
+
+      id = json_response(conn, 201)["id"]
+
+      {:ok, ws} = Ash.get(Workspace, id)
+      Arbiter.Trackers.Shortcut.Config.put_active(ws)
+      assert {:ok, %{token: "sct_e2e"}} = Arbiter.Trackers.Shortcut.Config.resolve()
+      Arbiter.Trackers.Shortcut.Config.clear()
+    end
+  end
+
   describe "PATCH /api/workspaces/:id/config" do
     setup do
       initial = %{
