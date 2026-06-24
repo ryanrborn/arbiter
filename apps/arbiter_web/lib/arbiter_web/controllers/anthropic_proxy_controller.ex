@@ -76,7 +76,13 @@ defmodule ArbiterWeb.AnthropicProxyController do
     headers = forward_request_headers(conn)
 
     request = Finch.build(method, url, headers, body)
+    stream_upstream(conn, request, workspace_id, 3)
+  end
 
+  # Stream the upstream response back, retrying transient transport errors that
+  # arrive BEFORE any bytes reach the client (connect/reset blips to
+  # api.anthropic.com). Once streaming has started we can only unwind. (bd-5boun6)
+  defp stream_upstream(conn, request, workspace_id, attempts_left) do
     acc = %{conn: conn, workspace_id: workspace_id, status: 200, started?: false}
 
     case Finch.stream(request, @finch, acc, &handle_stream/2) do
@@ -84,14 +90,16 @@ defmodule ArbiterWeb.AnthropicProxyController do
         conn
 
       {:ok, %{conn: conn, status: status, started?: false}} ->
-        # The headers callback never opened a chunked response (a bodiless,
-        # headerless upstream reply) — send a bare status so the client isn't
-        # left hanging.
         send_resp(conn, status, "")
 
-      # Finch surfaces a transport error as `{:error, exception, acc}` (the acc
-      # carries whatever conn state we'd built). If we'd already started
-      # streaming we can only unwind; otherwise we answer 502.
+      {:error, reason, %{conn: conn, started?: false}} when attempts_left > 1 ->
+        Logger.warning(
+          "anthropic proxy upstream error (retrying, " <>
+            "#{attempts_left - 1} left): #{inspect(reason)}"
+        )
+
+        stream_upstream(conn, request, workspace_id, attempts_left - 1)
+
       {:error, reason, %{conn: conn, started?: started?}} ->
         Logger.warning("anthropic proxy upstream error: #{inspect(reason)}")
         if started?, do: conn, else: bad_gateway(conn)
@@ -147,9 +155,19 @@ defmodule ArbiterWeb.AnthropicProxyController do
   # Finch sets it to api.anthropic.com; `authorization` / `anthropic-*` /
   # `x-api-key` pass through untouched so OAuth and API-key auth both work.
   defp forward_request_headers(conn) do
-    Enum.reject(conn.req_headers, fn {name, _} ->
-      String.downcase(name) in @hop_by_hop
-    end)
+    # Force identity encoding upstream (bd-5boun6 fix): the proxy streams the
+    # body through verbatim, so a gzipped response truncated by a mid-stream
+    # upstream blip reaches the CLI as a corrupt gzip stream (ZlibError) that
+    # kills the session. Requesting identity keeps responses uncompressed, so a
+    # truncation is at worst incomplete-but-valid bytes. Captured rate-limit
+    # headers are unaffected.
+    forwarded =
+      Enum.reject(conn.req_headers, fn {name, _} ->
+        n = String.downcase(name)
+        n in @hop_by_hop or n == "accept-encoding"
+      end)
+
+    [{"accept-encoding", "identity"} | forwarded]
   end
 
   # Mirror upstream response headers back to the CLI, minus the ones that don't
