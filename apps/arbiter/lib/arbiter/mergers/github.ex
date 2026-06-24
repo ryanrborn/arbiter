@@ -333,6 +333,60 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  @impl true
+  def ref_for_pr(pr, opts) when is_binary(pr) and is_map(opts) do
+    pr = String.trim(pr)
+
+    cond do
+      # Full forge URL: https://github[.enterprise.host]/<owner>/<repo>/pull[s]/<n>
+      m = Regex.run(~r{//[^/\s]+/([^/\s]+)/([^/\s]+?)(?:\.git)?/pulls?/(\d+)}, pr) ->
+        [_, owner, repo, number] = m
+        {:ok, build_mr_ref(:embedded, owner, repo, String.to_integer(number))}
+
+      # Slug forms: "<owner>/<repo>#<n>" or "<owner>/<repo>/pull[s]/<n>"
+      m = Regex.run(~r{^([^/\s]+)/([^/\s#]+?)(?:\.git)?(?:#|/pulls?/)(\d+)$}, pr) ->
+        [_, owner, repo, number] = m
+        {:ok, build_mr_ref(:embedded, owner, repo, String.to_integer(number))}
+
+      # Bare number or "#<n>": embed the {owner, repo} derived from the local
+      # checkout's origin remote when a :repo_path is given (so the ref talks to
+      # that external repo regardless of workspace cfg); otherwise mint a bare
+      # ref that falls back to the active workspace cfg's owner/repo.
+      m = Regex.run(~r/^#?(\d+)$/, pr) ->
+        [_, number] = m
+        number = String.to_integer(number)
+
+        case derive_owner_repo(opts) do
+          {:ok, {owner, repo}} -> {:ok, build_mr_ref(:embedded, owner, repo, number)}
+          :none -> {:ok, build_mr_ref(:bare, nil, nil, number)}
+        end
+
+      true ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: nil,
+           message:
+             "could not parse #{inspect(pr)} as a GitHub PR reference — expected a PR URL, " <>
+               "an \"owner/repo#N\" slug, or a number (pass --repo so a bare number can be " <>
+               "resolved to owner/repo via the checkout's origin remote)",
+           raw: pr
+         }}
+    end
+  end
+
+  # Derive {owner, repo} from a local checkout's origin remote, for a bare PR
+  # number. Returns :none when no :repo_path was supplied (the caller then mints
+  # a bare ref that resolves against the active workspace cfg).
+  defp derive_owner_repo(%{repo_path: path}) when is_binary(path) and path != "" do
+    case RepoResolver.from_remote(path) do
+      {:ok, {_owner, _repo}} = ok -> ok
+      {:error, _} -> :none
+    end
+  end
+
+  defp derive_owner_repo(_opts), do: :none
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
