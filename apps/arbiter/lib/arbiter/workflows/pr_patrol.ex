@@ -204,9 +204,18 @@ defmodule Arbiter.Workflows.PRPatrol do
     task
   end
 
-  defp tracker_type(Arbiter.Mergers.Github), do: :github
-  defp tracker_type(Arbiter.Mergers.Gitlab), do: :gitlab
-  defp tracker_type(_), do: :github
+  # Derive the tracker_type atom from the merger registry (single source of
+  # truth) and raise on an unregistered adapter, so a new forge adapter can
+  # never silently fall through to :github — which would corrupt dedup and
+  # trigger duplicate-task storms once it implements list_open/0.
+  defp tracker_type(adapter) do
+    Arbiter.Mergers.adapters()
+    |> Enum.find_value(fn {type, module} -> if module == adapter, do: type end)
+    |> case do
+      nil -> raise(ArgumentError, "tracker_type/1: unregistered merger adapter #{inspect(adapter)}")
+      type -> type
+    end
+  end
 
   defp schedule_next(state) do
     if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
