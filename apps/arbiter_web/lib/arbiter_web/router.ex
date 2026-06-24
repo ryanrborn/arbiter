@@ -95,6 +95,9 @@ defmodule ArbiterWeb.Router do
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)
 
+    # Anthropic quota snapshot (captured by the local proxy)
+    get("/quota", QuotaController, :show)
+
     # Workers (workflow runner)
     post("/workers/dispatch", WorkerController, :dispatch)
     post("/workers/review", WorkerController, :review)
@@ -105,6 +108,14 @@ defmodule ArbiterWeb.Router do
     get("/workers/:task_id", WorkerController, :show)
     get("/workers/:task_id/log", WorkerController, :log)
     post("/workers/:task_id/stop", WorkerController, :stop)
+  end
+
+  # Local transparent proxy to api.anthropic.com (bd-5boun6). Workers route
+  # Claude CLI traffic here so the `anthropic-ratelimit-unified-*` quota headers
+  # are captured. Not piped through `:api` — the controller forwards the raw
+  # body/headers and streams SSE responses itself, owning content negotiation.
+  scope "/proxy/anthropic", ArbiterWeb do
+    match(:*, "/*path", AnthropicProxyController, :forward)
   end
 
   # Server-push event stream — long-lived chunked HTTP connection for coordinator

@@ -151,6 +151,20 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- quota_get ----------------------------------------------------------
+
+  @doc """
+  Current Anthropic quota state for the scope's workspace, captured by the
+  local proxy. Resolution mirrors `workspace_show`. Returns `%{claude: nil}`
+  when no snapshot has been captured yet.
+  """
+  @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def quota_get(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+      {:ok, %{claude: Arbiter.Quota.serialize(ws_id)}}
+    end
+  end
+
   # ---- task_update_progress ----------------------------------------------
 
   @doc """
