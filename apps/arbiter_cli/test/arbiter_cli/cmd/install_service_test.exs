@@ -99,6 +99,52 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       assert c1 == 0
       assert c2 == 0
     end
+
+    test "writes PATH from the installing shell into arbiter.env so the service finds agent CLIs" do
+      record_cmds()
+
+      System.put_env("PATH", "/custom/bin:/usr/bin")
+
+      on_exit(fn ->
+        System.delete_env("PATH")
+      end)
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+
+      home = System.user_home!()
+      env_file = Path.join(home, ".arbiter/arbiter.env")
+      assert File.exists?(env_file)
+      env_contents = File.read!(env_file)
+      assert env_contents =~ "PATH=/custom/bin:/usr/bin"
+    end
+
+    test "PATH in arbiter.env is updated on re-install (idempotent)" do
+      record_cmds()
+
+      System.put_env("PATH", "/first/path:/usr/bin")
+
+      {_o1, _e1, c1} = capture(fn -> InstallService.run([]) end)
+
+      System.put_env("PATH", "/second/path:/usr/bin")
+
+      {_o2, _e2, c2} = capture(fn -> InstallService.run([]) end)
+
+      on_exit(fn ->
+        System.delete_env("PATH")
+      end)
+
+      assert c1 == 0
+      assert c2 == 0
+
+      home = System.user_home!()
+      env_file = Path.join(home, ".arbiter/arbiter.env")
+      env_contents = File.read!(env_file)
+      # The latest PATH wins; the old one is gone.
+      assert env_contents =~ "PATH=/second/path:/usr/bin"
+      refute env_contents =~ "/first/path"
+    end
   end
 
   describe "install (system scope)" do
@@ -209,7 +255,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       refute contents =~ "RemainAfterExit"
     end
 
-    test "does not bake MIX_HOME or PATH into the unit (release is self-contained)" do
+    test "does not bake MIX_HOME or PATH directly into the unit (PATH goes in EnvironmentFile instead)" do
       contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
       refute contents =~ "MIX_HOME"
       refute contents =~ ~r/Environment=PATH=/

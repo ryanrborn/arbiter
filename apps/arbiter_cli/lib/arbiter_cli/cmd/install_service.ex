@@ -91,6 +91,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     contents = unit_contents(scope, arbiter_home)
 
     secrets = capture_secrets(arbiter_home)
+    capture_path(arbiter_home)
 
     write_unit(path, contents)
     daemon_reload(scope)
@@ -142,6 +143,23 @@ defmodule ArbiterCli.Cmd.InstallService do
         merged = path |> read_env_entries() |> merge_env_entries(pairs)
         write_env_file(path, render_env_entries(merged))
         {:written, path, Enum.map(pairs, &elem(&1, 0))}
+    end
+  end
+
+  # Capture the installing shell's PATH into `<arbiter_home>/arbiter.env` so
+  # the login-less systemd service can find agent CLIs (e.g. `claude` in
+  # ~/.local/bin, mise shims) that live outside the stripped system PATH.
+  # Uses the same idempotent merge as `capture_secrets/1`.
+  defp capture_path(arbiter_home) do
+    case System.get_env("PATH") do
+      v when is_binary(v) and v != "" ->
+        env_path = Path.join(arbiter_home, "arbiter.env")
+        merged = env_path |> read_env_entries() |> merge_env_entries([{"PATH", v}])
+        write_env_file(env_path, render_env_entries(merged))
+        :written
+
+      _ ->
+        :skipped
     end
   end
 
