@@ -6,6 +6,7 @@ defmodule Arbiter.Agents.Gemini.Config do
   seeded by `Arbiter.Agents.prepare/1` and stored in the process dictionary.
   """
 
+  alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
@@ -55,9 +56,10 @@ defmodule Arbiter.Agents.Gemini.Config do
     :ok
   end
 
-  def put_active(%Workspace{config: config}, role) when role in [:agent, :review_agent] do
+  def put_active(%Workspace{config: config} = workspace, role)
+      when role in [:agent, :review_agent] do
     raw = get_in(config || %{}, [Atom.to_string(role), "config"]) || %{}
-    Process.put(@pdict_key, raw)
+    Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     :ok
   end
 
@@ -100,7 +102,7 @@ defmodule Arbiter.Agents.Gemini.Config do
 
     case cfg.api_keys do
       [] ->
-        case resolve_ref(cfg.credentials_ref) do
+        case resolve_ref(cfg.credentials_ref, cfg.raw) do
           nil -> ambient_api_key()
           key -> key
         end
@@ -108,7 +110,7 @@ defmodule Arbiter.Agents.Gemini.Config do
       keys ->
         keys
         |> rotate_pick()
-        |> resolve_ref()
+        |> resolve_ref(cfg.raw)
     end
   end
 
@@ -200,17 +202,19 @@ defmodule Arbiter.Agents.Gemini.Config do
     System.get_env("GEMINI_API_KEY") || System.get_env("GOOGLE_GENAI_API_KEY")
   end
 
-  defp resolve_ref(nil), do: nil
-  defp resolve_ref(""), do: nil
+  # Resolve a ref (env: / secret: / literal) against the active config map
+  # (which carries the workspace's embedded secrets). A missing credential is
+  # not an error for Gemini — it resolves to nil and the caller falls back to
+  # the ambient GEMINI_API_KEY / GOOGLE_GENAI_API_KEY.
+  defp resolve_ref(nil, _raw), do: nil
+  defp resolve_ref("", _raw), do: nil
 
-  defp resolve_ref("env:" <> name) do
-    case System.get_env(name) do
-      v when is_binary(v) and v != "" -> v
+  defp resolve_ref(ref, raw) do
+    case CredentialsRef.resolve(ref, raw) do
+      {:ok, value} -> value
       _ -> nil
     end
   end
-
-  defp resolve_ref(literal) when is_binary(literal), do: literal
 
   defp rotate_pick(keys) do
     idx = Process.get(@rotation_key, 0)

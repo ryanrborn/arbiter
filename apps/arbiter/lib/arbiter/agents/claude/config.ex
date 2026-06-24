@@ -58,6 +58,7 @@ defmodule Arbiter.Agents.Claude.Config do
   workspace to declare an `ANTHROPIC_API_KEY` env var.
   """
 
+  alias Arbiter.Agents.CredentialsRef
   alias Arbiter.Tasks.Workspace
 
   @pdict_key {__MODULE__, :active_workspace_config}
@@ -113,9 +114,10 @@ defmodule Arbiter.Agents.Claude.Config do
     :ok
   end
 
-  def put_active(%Workspace{config: config}, role) when role in [:agent, :review_agent] do
+  def put_active(%Workspace{config: config} = workspace, role)
+      when role in [:agent, :review_agent] do
     raw = get_in(config || %{}, [Atom.to_string(role), "config"]) || %{}
-    Process.put(@pdict_key, raw)
+    Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     :ok
   end
 
@@ -170,12 +172,12 @@ defmodule Arbiter.Agents.Claude.Config do
 
     case cfg.api_keys do
       [] ->
-        resolve_ref(cfg.credentials_ref)
+        resolve_ref(cfg.credentials_ref, cfg.raw)
 
       keys ->
         keys
         |> rotate_pick()
-        |> resolve_ref()
+        |> resolve_ref(cfg.raw)
     end
   end
 
@@ -252,17 +254,19 @@ defmodule Arbiter.Agents.Claude.Config do
 
   # ---- Internals --------------------------------------------------------
 
-  defp resolve_ref(nil), do: nil
-  defp resolve_ref(""), do: nil
+  # Resolve a ref (env: / secret: / literal) against the active config map
+  # (which carries the workspace's embedded secrets). Unlike trackers/mergers,
+  # a missing credential is not an error for Claude — it resolves to nil and the
+  # CLI falls back to the user's own login.
+  defp resolve_ref(nil, _raw), do: nil
+  defp resolve_ref("", _raw), do: nil
 
-  defp resolve_ref("env:" <> name) do
-    case System.get_env(name) do
-      v when is_binary(v) and v != "" -> v
+  defp resolve_ref(ref, raw) do
+    case CredentialsRef.resolve(ref, raw) do
+      {:ok, value} -> value
       _ -> nil
     end
   end
-
-  defp resolve_ref(literal) when is_binary(literal), do: literal
 
   defp rotate_pick(keys) do
     idx = Process.get(@rotation_key, 0)
