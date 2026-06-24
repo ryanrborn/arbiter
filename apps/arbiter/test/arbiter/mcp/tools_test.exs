@@ -210,6 +210,25 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "quota_get/2" do
+    test "returns null claude quota before anything is captured", ctx do
+      assert {:ok, %{claude: nil}} = Tools.quota_get(ctx.worker, %{})
+    end
+
+    test "returns the captured snapshot for the scope's workspace", ctx do
+      {:ok, _} =
+        Arbiter.Quota.capture(ctx.ws.id, [
+          {"anthropic-ratelimit-unified-5h-utilization", "0.42"},
+          {"anthropic-ratelimit-unified-5h-status", "allowed"},
+          {"anthropic-ratelimit-unified-representative-claim", "five_hour"}
+        ])
+
+      assert {:ok, %{claude: claude}} = Tools.quota_get(ctx.worker, %{})
+      assert claude.utilization_5h == 0.42
+      assert claude.representative_claim == "five_hour"
+    end
+  end
+
   describe "task_update_progress/2" do
     test "a worker records qa/deployment notes on its own task", ctx do
       assert {:ok, data} =
