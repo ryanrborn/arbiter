@@ -127,7 +127,7 @@ defmodule Arbiter.Mergers.Gitlab do
              conflicting:
                Map.get(body, "has_conflicts", false) == true or
                  merge_status == "cannot_be_merged",
-             block_reason: block_reason(body, status, pipeline),
+             block_reason: block_reason(cfg, body, status, pipeline),
              url: Map.get(body, "web_url") || link_for(ref_for(iid))
            }}
 
@@ -482,12 +482,14 @@ defmodule Arbiter.Mergers.Gitlab do
   # `detailed_merge_status` (richest signal); falls back to `merge_status` /
   # `has_conflicts` on older GitLab versions that omit it.
   #
-  #   :conflict       — merge conflict with the target branch
-  #   :behind_base    — fast-forward-only target needs a rebase
-  #   :ci_failed      — required pipeline actually failed
-  #   :needs_approval — required approvals not yet satisfied
-  #   :draft          — MR is a draft / work in progress
-  #   :blocked_other  — blocked by some other settled rule (unresolved threads, …)
+  #   :conflict                  — merge conflict with the target branch
+  #   :behind_base               — fast-forward-only target needs a rebase
+  #   :ci_failed                 — required pipeline actually failed
+  #   :needs_approval            — required approvals not yet satisfied
+  #   :needs_nonauthor_approval  — `not_approved` on a fleet-authored MR (GitLab's
+  #                                approval rules forbid the author self-approving)
+  #   :draft                     — MR is a draft / work in progress
+  #   :blocked_other             — blocked by some other settled rule (threads, …)
   #
   # In-progress / transient statuses map to `nil` (not a block): "ci_still_running"
   # / "ci_must_pass" mean CI is required but not yet green — it may still be
@@ -495,9 +497,9 @@ defmodule Arbiter.Mergers.Gitlab do
   # never the detailed-status string; and "preparing" / "checking" / "unchecked"
   # mean GitLab is still computing the merge status. Escalating any of these
   # would fire while the MR is merely being prepared, not genuinely blocked.
-  defp block_reason(_body, status, _pipeline) when status in [:merged, :closed], do: nil
+  defp block_reason(_cfg, _body, status, _pipeline) when status in [:merged, :closed], do: nil
 
-  defp block_reason(body, _status, pipeline) do
+  defp block_reason(cfg, body, _status, pipeline) do
     draft? = Map.get(body, "draft") == true or Map.get(body, "work_in_progress") == true
     detailed = Map.get(body, "detailed_merge_status")
     merge_status = Map.get(body, "merge_status")
@@ -519,7 +521,7 @@ defmodule Arbiter.Mergers.Gitlab do
         :ci_failed
 
       detailed in ["not_approved", "approvals_syncing", "requested_changes"] ->
-        :needs_approval
+        approval_block_reason(cfg, body, detailed)
 
       detailed == "mergeable" ->
         nil
@@ -541,6 +543,55 @@ defmodule Arbiter.Mergers.Gitlab do
 
       true ->
         :blocked_other
+    end
+  end
+
+  # `not_approved` on an otherwise-green MR means the only thing left is a
+  # required approval. If the MR was opened by the fleet's own identity, GitLab's
+  # approval rules require an approval from someone *other than the author* (a
+  # project commonly enables "prevent author approval"), which the fleet can't
+  # supply. The Watchdog parks + summons a human once on `:needs_nonauthor_approval`
+  # rather than failing at the poll ceiling (bd-c3lchp). `requested_changes` is a
+  # genuine review action and `approvals_syncing` is transient, so both stay
+  # `:needs_approval`; non-fleet authorship also falls back to `:needs_approval`.
+  defp approval_block_reason(cfg, body, "not_approved") do
+    if fleet_authored?(cfg, body), do: :needs_nonauthor_approval, else: :needs_approval
+  end
+
+  defp approval_block_reason(_cfg, _body, _detailed), do: :needs_approval
+
+  # True only when the MR's author username matches the authenticated token's own
+  # username. Skips the `/user` lookup when the MR carries no author, so the
+  # common path (and stubs that don't model `/user`) never make the call.
+  defp fleet_authored?(cfg, body) do
+    case get_in(body, ["author", "username"]) do
+      name when is_binary(name) and name != "" -> name == authenticated_username(cfg)
+      _ -> false
+    end
+  end
+
+  # The username of the token's own identity (`GET /user`, at the API root rather
+  # than the project-scoped base `request/4` uses). Best-effort: any failure
+  # yields nil so the caller falls back to the generic block reason. Reached only
+  # in the narrow `not_approved` branch, not on every poll.
+  defp authenticated_username(cfg) do
+    opts =
+      [
+        method: :get,
+        url: "https://#{cfg.host}/api/v4/user",
+        headers: headers(cfg),
+        receive_timeout: 15_000,
+        retry: false
+      ]
+      |> Keyword.merge(stub_opts())
+
+    case Req.request(opts) do
+      {:ok, %Req.Response{status: status, body: %{"username" => name}}}
+      when status in 200..299 and is_binary(name) and name != "" ->
+        name
+
+      _ ->
+        nil
     end
   end
 

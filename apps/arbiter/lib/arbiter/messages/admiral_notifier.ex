@@ -232,7 +232,8 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   Fired by `Arbiter.Worker.Watchdog` when an approved/parked PR can't merge and
   the merger adapter has classified *why* (`:conflict`, `:behind_base`,
-  `:ci_failed`, `:needs_approval`, `:draft`, `:blocked_other`). Unlike the
+  `:ci_failed`, `:needs_approval`, `:needs_nonauthor_approval`, `:draft`,
+  `:blocked_other`). Unlike the
   broadcast lifecycle notifications, this is an addressed `:escalation` **mailbox**
   message (`to_ref: "admiral"`) so it lands in `arb inbox` as an actionable item
   — the whole point of Phase 1 is that a blocked merge never parks silently.
@@ -340,6 +341,11 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "required CI checks are failing"
   defp block_label(:needs_approval), do: "required approval is missing"
+
+  defp block_label(:needs_nonauthor_approval),
+    do:
+      "a required approval from a reviewer other than the author (the fleet cannot self-approve)"
+
   defp block_label(:draft), do: "the PR is still a draft"
   defp block_label(:blocked_other), do: "a forge merge rule is unsatisfied"
   defp block_label(other), do: "merge is blocked (#{other})"
@@ -355,6 +361,12 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   defp block_remediation(:needs_approval),
     do: "approve the PR, or re-request review if a prior approval was dismissed."
+
+  defp block_remediation(:needs_nonauthor_approval),
+    do:
+      "have a human reviewer (someone other than the PR author) approve the PR — " <>
+        "the fleet authored it and the forge forbids self-approval. The PR is parked " <>
+        "and will auto-merge once approved; no further action is needed to keep it alive."
 
   defp block_remediation(:draft), do: "mark the PR ready for review."
 
