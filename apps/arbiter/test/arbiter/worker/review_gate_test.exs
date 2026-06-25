@@ -114,6 +114,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   defp init_rig(dir) do
     repo = Path.join(dir, "repo")
+    bare = Path.join(dir, "origin.git")
     File.mkdir_p!(repo)
     {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
     {_, 0} = git(["config", "user.email", "repo@example.com"], repo)
@@ -122,6 +123,9 @@ defmodule Arbiter.Worker.ReviewGateTest do
     File.write!(Path.join(repo, "README.md"), "seed\n")
     {_, 0} = git(["add", "README.md"], repo)
     {_, 0} = git(["commit", "-q", "-m", "seed"], repo)
+    {_, 0} = System.cmd("git", ["clone", "--bare", "-q", repo, bare])
+    {_, 0} = git(["remote", "add", "origin", bare], repo)
+    {_, 0} = git(["fetch", "-q", "origin"], repo)
     repo
   end
 
@@ -1201,10 +1205,11 @@ defmodule Arbiter.Worker.ReviewGateTest do
     test "a branch that conflicts with an advanced target escalates before the reviewer spawns",
          %{repo: repo, ws: ws} do
       # Give the rig an origin remote and push main, so update_from_target can
-      # fetch + merge origin/main.
+      # fetch + merge origin/main. init_rig already added origin (origin.git), so
+      # point it at this test's bare conflict repo instead.
       remote = Path.join(Path.dirname(repo), "remote-conflict.git")
       {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
-      {_, 0} = git(["remote", "add", "origin", remote], repo)
+      {_, 0} = git(["remote", "set-url", "origin", remote], repo)
       {_, 0} = git(["push", "-q", "origin", "main"], repo)
 
       task = new_task(ws)
