@@ -124,13 +124,31 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       {:ok, _} = Message.mark_read(other)
 
       conn = delete(conn, ~p"/api/messages", %{to_ref: "admiral"})
-      assert %{"data" => %{"deleted" => 1}} = json_response(conn, 200)
+      assert %{"data" => %{"deleted_read" => 1, "deleted_unread" => 0, "remaining_unread" => 1}} = json_response(conn, 200)
 
       # The unread admiral message and the other task's read message survive.
       remaining = Ash.read!(Message) |> Enum.map(& &1.id) |> MapSet.new()
       assert MapSet.member?(remaining, unread.id)
       assert MapSet.member?(remaining, other.id)
       refute MapSet.member?(remaining, read.id)
+    end
+
+    test "all=true destroys both read and unread messages addressed to to_ref", %{conn: conn} do
+      {:ok, unread} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "unread"})
+
+      {:ok, read} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "read"})
+
+      {:ok, _} = Message.mark_read(read)
+
+      conn = delete(conn, ~p"/api/messages", %{to_ref: "admiral", all: "true"})
+
+      assert %{"data" => %{"deleted_read" => 1, "deleted_unread" => 1, "remaining_unread" => 0}} =
+               json_response(conn, 200)
+
+      assert {:error, _} = Ash.get(Message, read.id)
+      assert {:error, _} = Ash.get(Message, unread.id)
     end
 
     test "requires to_ref so it can't wipe the table", %{conn: conn} do

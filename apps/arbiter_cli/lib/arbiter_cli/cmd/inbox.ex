@@ -9,14 +9,15 @@ defmodule ArbiterCli.Cmd.Inbox do
       arb inbox --all           the 20 most recent (read + unread)
       arb inbox read <id>       show one message in full, mark it read
       arb inbox clear           destroy every already-read Admiral message
+      arb inbox clear --all     destroy all messages (read + unread)
       arb inbox <task-id>       (worker path) a task's unread mail; drained
                                 — marked read on fetch
 
   The Admiral view is read-only triage: listing does NOT mark mail read. You
-  drain it deliberately with `read <id>` (one) and `clear` (the read tail).
-  The task path is the inverse — workers auto-drain their queue on fetch, so
-  `arb inbox <task-id>` at the top of each workflow step shows new direction
-  exactly once.
+  drain it deliberately with `read <id>` (one) and `clear` (read only) or
+  `clear --all` (everything). The task path is the inverse — workers auto-drain
+  their queue on fetch, so `arb inbox <task-id>` at the top of each workflow
+  step shows new direction exactly once.
 
   Line format:
 
@@ -47,7 +48,8 @@ defmodule ArbiterCli.Cmd.Inbox do
         ["--all"] -> admiral_inbox(false, mode)
         ["read", id] -> read_one(id, mode)
         ["read"] -> Output.die("inbox read requires a message id: `arb inbox read <id>`")
-        ["clear"] -> clear(mode)
+        ["clear"] -> clear(false, mode)
+        ["clear", "--all"] -> clear(true, mode)
         [task_id] -> task_inbox(task_id, mode)
         _ -> Output.die("inbox: unrecognized arguments. See `arb help`.")
       end
@@ -142,18 +144,57 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- clear ---------------------------------------------------------------
 
-  defp clear(mode) do
-    case Client.delete("/api/messages", to_ref: @admiral) do
-      {:ok, %{"data" => %{"deleted" => n}}} -> emit_cleared(n, mode)
-      {:ok, _} -> emit_cleared(0, mode)
-      {:error, err} -> Output.die(err)
+  defp clear(clear_all, mode) do
+    params = [to_ref: @admiral]
+    params = if clear_all, do: params ++ [all: "true"], else: params
+
+    case Client.delete("/api/messages", params) do
+      {:ok, %{"data" => data}} ->
+        deleted_read = data["deleted_read"] || 0
+        deleted_unread = data["deleted_unread"] || 0
+        remaining_unread = data["remaining_unread"] || 0
+        emit_cleared(deleted_read, deleted_unread, remaining_unread, clear_all, mode)
+
+      {:ok, _} ->
+        emit_cleared(0, 0, 0, clear_all, mode)
+
+      {:error, err} ->
+        Output.die(err)
     end
   end
 
-  defp emit_cleared(n, :json), do: IO.puts(Jason.encode!(%{"deleted" => n}))
+  defp emit_cleared(read, unread, remaining, _clear_all, :json) do
+    IO.puts(
+      Jason.encode!(%{
+        data: %{
+          deleted_read: read,
+          deleted_unread: unread,
+          remaining_unread: remaining
+        }
+      })
+    )
+  end
 
-  defp emit_cleared(0, :text), do: IO.puts("Nothing to clear (no read mail).")
-  defp emit_cleared(n, :text), do: IO.puts("Cleared #{n} read message#{plural(n)}.")
+  defp emit_cleared(0, 0, 0, _clear_all, :text) do
+    IO.puts("Nothing to clear (inbox is empty).")
+  end
+
+  defp emit_cleared(read, 0, 0, false, :text) do
+    IO.puts("Cleared #{read} read message#{plural(read)}.")
+  end
+
+  defp emit_cleared(read, 0, unread, false, :text) when unread > 0 do
+    IO.puts(
+      "Cleared #{read} read message#{plural(read)}; #{unread} unread message#{plural(unread)} remain — use `clear --all` to remove them."
+    )
+  end
+
+  defp emit_cleared(read, unread, 0, true, :text) do
+    total = read + unread
+    IO.puts(
+      "Cleared #{read} read + #{unread} unread message#{if total == 1, do: "", else: "s"} (#{total} total)."
+    )
+  end
 
   defp plural(1), do: ""
   defp plural(_), do: "s"
