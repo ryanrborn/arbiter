@@ -78,6 +78,14 @@ defmodule ArbiterWeb.WorkerDetailLive do
     {:noreply, refresh_mailbox(socket)}
   end
 
+  def handle_info({:message_read, _message}, socket) do
+    {:noreply, refresh_mailbox(socket)}
+  end
+
+  def handle_info({:mailbox_cleared, _workspace_id}, socket) do
+    {:noreply, refresh_mailbox(socket)}
+  end
+
   # Lightweight 1s tick: only advances the clock so the header's elapsed-time
   # counter stays live. No data reads here.
   def handle_info(:tick, socket) do

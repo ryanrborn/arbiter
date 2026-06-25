@@ -206,6 +206,25 @@ defmodule Arbiter.Messages.Message do
 
   def broadcast_read(_message), do: :ok
 
+  @doc """
+  Broadcast `{:mailbox_cleared, workspace_id}` on a workspace's message topic.
+
+  Called by `clear_read/2` and `clear_all/2` after destroying messages, so
+  every open LiveView session refreshes its inbox panel without a manual page
+  reload. Silent-on-failure, mirroring `broadcast_new/1`.
+  """
+  def broadcast_cleared(workspace_id) when is_binary(workspace_id) do
+    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(workspace_id), {:mailbox_cleared, workspace_id})
+    :ok
+  rescue
+    e ->
+      require Logger
+      Logger.debug("Messages.Message.broadcast_cleared/1 swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  def broadcast_cleared(_workspace_id), do: :ok
+
   # ---- convenience helpers -------------------------------------------------
 
   @doc """
@@ -284,6 +303,11 @@ defmodule Arbiter.Messages.Message do
     read = Ash.read!(read_query)
     Enum.each(read, &Ash.destroy!/1)
 
+    read
+    |> Enum.map(& &1.workspace_id)
+    |> Enum.uniq()
+    |> Enum.each(&broadcast_cleared/1)
+
     # Count unread that remain
     unread_query =
       __MODULE__
@@ -322,6 +346,11 @@ defmodule Arbiter.Messages.Message do
     unread_count = Enum.count(all_messages, &is_nil(&1.read_at))
 
     Enum.each(all_messages, &Ash.destroy!/1)
+
+    all_messages
+    |> Enum.map(& &1.workspace_id)
+    |> Enum.uniq()
+    |> Enum.each(&broadcast_cleared/1)
 
     {:ok, read_count, unread_count, 0}
   end

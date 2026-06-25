@@ -119,7 +119,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "Admiral Mailbox"
+      assert html =~ "Coordinator Mailbox"
       assert html =~ "needs a decision"
       assert html =~ "the device API contract is ambiguous"
       assert html =~ "bd-soren"
@@ -213,6 +213,66 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert {:error, _} = Ash.get(Message, read_msg.id)
       assert {:ok, %Message{}} = Ash.get(Message, unread_msg.id)
       assert render(view) =~ "still-unread"
+    end
+
+    test "clear_all via CLI/API (external PubSub) updates the inbox live without refresh",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-12tg9s: clear_all destroyed messages but never
+      # broadcast a PubSub event, so open dashboard sessions stayed stale.
+      {:ok, _} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :completion,
+          to_ref: "admiral",
+          subject: "live-clear-test",
+          body: "should disappear live"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      assert render(view) =~ "live-clear-test"
+
+      # Simulate arb inbox clear --all (the external, non-LiveView path).
+      Message.clear_all("admiral", workspace_id: ws.id)
+
+      # The {:mailbox_cleared, _} broadcast must drive a live refresh
+      # without any manual page reload.
+      refute render(view) =~ "live-clear-test"
+    end
+
+    test "clear_read via CLI/API (external PubSub) updates the inbox live without refresh",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-12tg9s: clear_read had the same missing broadcast.
+      {:ok, msg} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "read-then-cleared"
+        })
+
+      {:ok, _} = Message.mark_read(msg)
+
+      {:ok, unread} =
+        Message.send_mail(%{
+          workspace_id: ws.id,
+          kind: :info,
+          to_ref: "admiral",
+          body: "stays-unread"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+      # Only unread shows in the inbox panel.
+      assert render(view) =~ "stays-unread"
+
+      # External clear_read: destroys the read message and broadcasts.
+      Message.clear_read("admiral", workspace_id: ws.id)
+
+      # The unread message must still be present (clear_read doesn't touch unread).
+      assert render(view) =~ "stays-unread"
+      # The read message is gone from the DB.
+      assert {:error, _} = Ash.get(Message, msg.id)
+      # And the unread one is still there.
+      assert {:ok, _} = Ash.get(Message, unread.id)
     end
   end
 end
