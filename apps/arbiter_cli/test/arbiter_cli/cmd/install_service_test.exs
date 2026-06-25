@@ -16,7 +16,18 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     unit_dir =
       Path.join(System.tmp_dir!(), "arb-units-#{System.unique_integer([:positive])}")
 
+    # Redirect arbiter_home to a temp dir so capture_path / capture_secrets
+    # never write to the real ~/.arbiter/arbiter.env. Without this seam, tests
+    # that set PATH to a test value (e.g. "/second/path:/usr/bin") would
+    # corrupt the production env file, breaking worker spawns after the next
+    # `arb server deploy` triggers a systemd restart.
+    arbiter_home =
+      Path.join(System.tmp_dir!(), "arb-home-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(arbiter_home)
+
     Process.put(:bd2_unit_dir, unit_dir)
+    Process.put(:bd2_arbiter_home, arbiter_home)
     # Quiet the progress chatter (same seam `arb start` uses).
     Process.put(:bd2_sleep, fn _ -> :ok end)
     # The active-work guard calls GET /api/workers. Simulate an unreachable
@@ -27,10 +38,11 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     on_exit(fn ->
       System.delete_env("ARB_HOME")
       File.rm_rf(unit_dir)
+      File.rm_rf(arbiter_home)
       if prior_acolyte_id, do: System.put_env("ARB_ACOLYTE_BEAD_ID", prior_acolyte_id)
     end)
 
-    {:ok, unit_dir: unit_dir}
+    {:ok, unit_dir: unit_dir, arbiter_home: arbiter_home}
   end
 
   # Record every shelled-out command and report success.
@@ -44,7 +56,10 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
   end
 
   describe "install (user scope)" do
-    test "writes the unit, reloads, enables, and enables linger", %{unit_dir: dir} do
+    test "writes the unit, reloads, enables, and enables linger", %{
+           unit_dir: dir,
+           arbiter_home: arbiter_home
+         } do
       record_cmds()
 
       {out, _err, code} = capture(fn -> InstallService.run([]) end)
@@ -54,14 +69,13 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       unit = Path.join(dir, "arbiter.service")
       assert File.exists?(unit)
 
-      home = System.user_home!()
       contents = File.read!(unit)
-      assert contents =~ "ExecStart=#{home}/.arbiter/current/bin/arbiter start"
+      assert contents =~ "ExecStart=#{arbiter_home}/current/bin/arbiter start"
       assert contents =~ "Type=exec"
       refute contents =~ "RemainAfterExit"
       assert contents =~ "WantedBy=default.target"
-      assert contents =~ "WorkingDirectory=#{home}/.arbiter"
-      assert contents =~ "EnvironmentFile=-#{home}/.arbiter/arbiter.env"
+      assert contents =~ "WorkingDirectory=#{arbiter_home}"
+      assert contents =~ "EnvironmentFile=-#{arbiter_home}/arbiter.env"
       # Release is self-contained — no MIX_HOME needed in the unit.
       refute contents =~ "Environment=MIX_HOME="
 
@@ -100,7 +114,8 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       assert c2 == 0
     end
 
-    test "writes PATH from the installing shell into arbiter.env so the service finds agent CLIs" do
+    test "writes PATH from the installing shell into arbiter.env so the service finds agent CLIs",
+         %{arbiter_home: arbiter_home} do
       record_cmds()
 
       System.put_env("PATH", "/custom/bin:/usr/bin")
@@ -113,14 +128,15 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
 
       assert code == 0
 
-      home = System.user_home!()
-      env_file = Path.join(home, ".arbiter/arbiter.env")
+      env_file = Path.join(arbiter_home, "arbiter.env")
       assert File.exists?(env_file)
       env_contents = File.read!(env_file)
       assert env_contents =~ "PATH=/custom/bin:/usr/bin"
     end
 
-    test "PATH in arbiter.env is updated on re-install (idempotent)" do
+    test "PATH in arbiter.env is updated on re-install (idempotent)", %{
+           arbiter_home: arbiter_home
+         } do
       record_cmds()
 
       System.put_env("PATH", "/first/path:/usr/bin")
@@ -138,8 +154,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       assert c1 == 0
       assert c2 == 0
 
-      home = System.user_home!()
-      env_file = Path.join(home, ".arbiter/arbiter.env")
+      env_file = Path.join(arbiter_home, "arbiter.env")
       env_contents = File.read!(env_file)
       # The latest PATH wins; the old one is gone.
       assert env_contents =~ "PATH=/second/path:/usr/bin"
