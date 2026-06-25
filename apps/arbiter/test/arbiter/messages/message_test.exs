@@ -149,6 +149,72 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  describe "PubSub broadcast on clear_read/2" do
+    test "broadcasts {:mailbox_cleared, workspace_id} on the workspace topic" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
+
+      {:ok, m} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "to clear"})
+
+      assert_receive {:new_message, _}
+      {:ok, _} = Message.mark_read(m)
+      assert_receive {:message_read, _}
+
+      Message.clear_read("admiral", workspace_id: @ws)
+
+      assert_receive {:mailbox_cleared, @ws}
+    end
+
+    test "broadcasts once per distinct workspace_id" do
+      ws2 = "ws-msg-test-2"
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws2))
+
+      {:ok, m1} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "ws1"})
+
+      {:ok, m2} =
+        Message.send_mail(%{workspace_id: ws2, to_ref: "admiral", kind: :info, body: "ws2"})
+
+      {:ok, _} = Message.mark_read(m1)
+      {:ok, _} = Message.mark_read(m2)
+
+      # Drain :new_message and :message_read noise.
+      assert_receive {:new_message, _}
+      assert_receive {:new_message, _}
+      assert_receive {:message_read, _}
+      assert_receive {:message_read, _}
+
+      Message.clear_read("admiral")
+
+      received =
+        for _ <- 1..2 do
+          receive do
+            {:mailbox_cleared, ws} -> ws
+          after
+            500 -> nil
+          end
+        end
+
+      assert Enum.sort(received) == Enum.sort([@ws, ws2])
+    end
+  end
+
+  describe "PubSub broadcast on clear_all/2" do
+    test "broadcasts {:mailbox_cleared, workspace_id} on the workspace topic" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "unread too"})
+
+      assert_receive {:new_message, _}
+
+      Message.clear_all("admiral", workspace_id: @ws)
+
+      assert_receive {:mailbox_cleared, @ws}
+    end
+  end
+
   describe "clear_read/2" do
     test "destroys only already-read mail addressed to to_ref, keeping unread" do
       {:ok, read} =
