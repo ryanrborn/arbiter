@@ -676,6 +676,25 @@ defmodule Arbiter.Worker.WatchdogTest do
       # via_review_gate was on. Approval overriding is for :pending only.
       assert StubMerger.merge_count("!t2") == 0
     end
+
+    test "via_review_gate bypasses :needs_nonauthor_approval block — no infinite loop (bd-cuzvg9)" do
+      {pid, task_id} = running_worker()
+      # Simulate a fleet-authored PR that reports :needs_nonauthor_approval
+      # (branch protection requires a non-author review). With via_review_gate: true,
+      # the ReviewGate has already provided the code review — we must NOT call
+      # handle_nonauthor_approval (which sets max_polls: :infinity and causes an
+      # infinite retry loop when safe_merge keeps failing). Instead, route through
+      # the normal path: effective_outcome maps :pending → :approved, merge fires.
+      StubMerger.queue_get("!tnav",
+        [%{status: :open, approved: false, block_reason: :needs_nonauthor_approval}]
+      )
+
+      start_watchdog(pid, task_id, "!tnav", via_review_gate: true)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!tnav") >= 1
+    end
   end
 
   describe "watchdog (bd-66ey1o / bd-akr4il)" do
