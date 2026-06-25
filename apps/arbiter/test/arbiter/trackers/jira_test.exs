@@ -269,6 +269,48 @@ defmodule Arbiter.Trackers.JiraTest do
 
       assert {:error, %Error{kind: :no_transition_path}} = Jira.transition(@ref, :closed)
     end
+
+    test "returns :ok (no escalation) when the issue is already in the Done statusCategory" do
+      # Simulates closing an already-Done Jira ticket (e.g. a wrongly-imported bead
+      # whose upstream issue was already Done). The workspace maps :closed to "Code
+      # Merged" but the issue is currently "Done" — both Done-category, no path exists
+      # between them. Without the fix this returns :no_transition_path and escalates.
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "status_map" => %{"closed" => "Code Merged"}
+      })
+
+      stub(fn conn ->
+        assert conn.method == "GET"
+
+        if String.ends_with?(conn.request_path, "/transitions") do
+          # From Done state, only re-open transitions are available — no path to Code Merged.
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "transitions" => [
+              %{"id" => "10", "name" => "Reopen", "to" => %{"name" => "To Do"}}
+            ]
+          })
+        else
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "fields" => %{
+              "status" => %{
+                "name" => "Done",
+                "statusCategory" => %{"key" => "done"}
+              }
+            }
+          })
+        end
+      end)
+
+      assert :ok = Jira.transition(@ref, :closed)
+    end
   end
 
   describe "gating_fields/2" do
@@ -600,7 +642,7 @@ defmodule Arbiter.Trackers.JiraTest do
         body = Jason.decode!(raw)
 
         assert body["jql"] =~ "currentUser()"
-        assert body["jql"] =~ "resolution = Unresolved"
+        assert body["jql"] =~ "statusCategory != Done"
         assert body["maxResults"] == 100
         # Fields are explicit — /search/jql returns only id/key otherwise.
         assert "summary" in body["fields"]
