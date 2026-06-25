@@ -9,8 +9,9 @@ defmodule ArbiterWeb.Api.MessageController do
     * `POST /api/messages`           — :create (body: kind, from_ref, to_ref,
                                        subject, body, directive_ref, workspace_id)
     * `POST /api/messages/:id/read`  — :read (stamp read_at = now)
-    * `DELETE /api/messages`         — :clear (destroy READ messages addressed
-                                       to `to_ref`; requires `to_ref`)
+    * `DELETE /api/messages`         — :clear (destroy messages addressed to
+                                       `to_ref`; filters: all=true destroys
+                                       read+unread; absent/false destroys read only)
 
   Newest first. `arb inbox` / `arb notify` / `arb msg` / `arb message` drive
   these.
@@ -68,9 +69,23 @@ defmodule ArbiterWeb.Api.MessageController do
 
   # Drain the read tail of a mailbox: destroy every *already-read* message
   # addressed to `to_ref`. Unread mail is left untouched — you read it first,
-  # then clear. `to_ref` is required so a stray call can't wipe the table.
-  def clear(conn, %{"to_ref" => to_ref}) when is_binary(to_ref) and to_ref != "" do
-    json(conn, %{data: %{deleted: Message.clear_read(to_ref)}})
+  # then clear. Pass `all=true` to destroy both read and unread.
+  # `to_ref` is required so a stray call can't wipe the table.
+  def clear(conn, %{"to_ref" => to_ref} = params) when is_binary(to_ref) and to_ref != "" do
+    {:ok, deleted_read, deleted_unread, remaining_unread} =
+      if params["all"] in ["true", true] do
+        Message.clear_all(to_ref)
+      else
+        Message.clear_read(to_ref)
+      end
+
+    json(conn, %{
+      data: %{
+        deleted_read: deleted_read,
+        deleted_unread: deleted_unread,
+        remaining_unread: remaining_unread
+      }
+    })
   end
 
   def clear(_conn, _params), do: {:error, {:invalid_request, "clear requires to_ref"}}
