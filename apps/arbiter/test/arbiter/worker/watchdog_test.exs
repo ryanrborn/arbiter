@@ -679,28 +679,29 @@ defmodule Arbiter.Worker.WatchdogTest do
 
     test "via_review_gate bypasses :needs_nonauthor_approval block — no infinite loop (bd-cuzvg9)" do
       {pid, task_id} = running_worker()
-      # Simulate a fleet-authored PR that reports :needs_nonauthor_approval
-      # (branch protection requires a non-author review). With via_review_gate: true,
-      # the ReviewGate has already provided the code review — we must NOT call
-      # handle_nonauthor_approval (which sets max_polls: :infinity and causes an
-      # infinite retry loop when safe_merge keeps failing). Instead, route through
-      # the normal path: effective_outcome maps :pending → :approved, merge fires.
+      # Simulate a fleet-authored PR under branch protection: merge keeps failing
+      # with :blocked. With via_review_gate: true the ReviewGate has already
+      # provided the code review, so handle_nonauthor_approval must NOT be called
+      # (it would set max_polls: :infinity and park the worker forever).
+      # The fix routes through the normal path, which respects the finite max_polls
+      # ceiling — after cap polls the worker fails with {:awaiting_review_timeout, 3}.
+      # Under the bug (max_polls: :infinity) reschedule never trips the ceiling and
+      # the worker never transitions, causing wait_until to time out.
       StubMerger.queue_get("!tnav",
         [%{status: :open, approved: false, block_reason: :needs_nonauthor_approval}]
       )
 
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          start_watchdog(pid, task_id, "!tnav", via_review_gate: true)
-          wait_until(fn -> Worker.state(pid).status == :completed end)
-        end)
+      StubMerger.set_merge_result({:error, :blocked})
 
-      assert Worker.state(pid).meta.result == :merged
-      assert StubMerger.merge_count("!tnav") >= 1
-      # The buggy path (missing `and not state.via_review_gate`) calls
-      # debounce_escalate_block which logs "merge blocked (needs_nonauthor_approval)".
-      # The fix must not take that path — assert the escalation log is absent.
-      refute log =~ "merge blocked (needs_nonauthor_approval)"
+      start_watchdog(pid, task_id, "!tnav",
+        via_review_gate: true,
+        interval_ms: 10,
+        initial_delay_ms: 0,
+        max_polls: 3
+      )
+
+      wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+      assert Worker.state(pid).meta.failure_reason == {:awaiting_review_timeout, 3}
     end
   end
 
