@@ -7,9 +7,19 @@ defmodule ArbiterCli.Cmd.Worker do
       arb worker runs <task-id>   — list every historical run for the task
       arb worker log <task-id>    — full uncapped durable transcript (audit)
       arb worker stop <task-id>   — terminate a running worker cleanly
+      arb worker resume <task-id> [<repo>] [--model <name>] — resume the prior session
       arb worker review <task-id> [--repo <repo>] [--model <name>] — spawn a review worker
 
   Use `arb dispatch` to start a worker in the first place.
+
+  `resume` continues the task's PRIOR Claude session — it re-spawns the worker
+  with `claude --print --resume <session_id>` in the SAME preserved worktree, so
+  the original mind picks up where it left off (token exhaustion, kill, mid-task
+  exit). This is distinct from `arb dispatch`, which starts a fresh session in a
+  fresh worktree. When there is no resumable prior session/worktree, `resume`
+  fails with a clear message rather than silently starting fresh. The repo is
+  optional — it's inherited from the task's most recent run when omitted. The
+  top-level `arb resume <task-id>` alias behaves identically.
 
   `show` reports a live worker's full snapshot when one is running. When no
   live worker exists for the task it falls back to the most recent historical
@@ -68,6 +78,12 @@ defmodule ArbiterCli.Cmd.Worker do
         ["stop" | _] ->
           Output.die("worker stop requires: <task-id>")
 
+        ["resume", task_id | opts] ->
+          resume(task_id, opts, mode)
+
+        ["resume" | _] ->
+          Output.die("worker resume requires: <task-id>")
+
         ["review", task_id | opts] ->
           review(task_id, opts, mode)
 
@@ -76,7 +92,7 @@ defmodule ArbiterCli.Cmd.Worker do
 
         [] ->
           Output.die(
-            "worker requires a subcommand: `list`, `show`, `runs`, `log`, `stop`, or `review`"
+            "worker requires a subcommand: `list`, `show`, `runs`, `log`, `stop`, `resume`, or `review`"
           )
 
         [unknown | _] ->
@@ -119,6 +135,31 @@ defmodule ArbiterCli.Cmd.Worker do
   defp stop(task_id, mode) do
     case Client.post("/api/workers/#{task_id}/stop", %{}) do
       {:ok, payload} -> emit_stop(payload, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  # Session-level resume (bd-1z7624). `[<repo>]` is positional (inherited from
+  # the task's most recent run when omitted); `--model` is an optional per-run
+  # override. POSTs to the same endpoint regardless of whether the user typed
+  # `arb worker resume` or the top-level `arb resume` alias.
+  defp resume(task_id, opts, mode) do
+    {flags, rest, _invalid} = OptionParser.parse(opts, switches: @switches)
+
+    repo =
+      case rest do
+        [] -> nil
+        [repo] -> repo
+        _ -> Output.die("worker resume takes at most: <task-id> [<repo>]")
+      end
+
+    body =
+      %{}
+      |> maybe_put("repo", repo || flags[:repo])
+      |> maybe_put("model", flags[:model])
+
+    case Client.post("/api/workers/#{task_id}/resume", body) do
+      {:ok, payload} -> emit_resume(payload, mode)
       {:error, err} -> Output.die(err)
     end
   end
@@ -224,6 +265,30 @@ defmodule ArbiterCli.Cmd.Worker do
 
   defp emit_stop(payload, :text) do
     IO.puts("Stopped worker for issue #{payload["task_id"]}.")
+  end
+
+  defp emit_resume(payload, :json), do: IO.puts(Jason.encode!(payload))
+
+  defp emit_resume(payload, :text) do
+    task = payload["task"] || %{}
+    worker = payload["worker"] || %{}
+    machine = payload["machine"] || %{}
+
+    IO.puts("Resume:")
+    IO.puts("  Issue:    #{task["id"]} — #{task["title"]}")
+    IO.puts("  Status:   #{task["status"]}")
+    IO.puts("  Worker:   #{worker["pid"]}")
+    IO.puts("  Machine:  #{machine["id"]} #{machine["pid"]}")
+
+    case payload["worktree_path"] do
+      nil -> :ok
+      path -> IO.puts("  Worktree: #{path} (reused)")
+    end
+
+    case payload["claude_started"] do
+      true -> IO.puts("  Session:  resumed")
+      _ -> :ok
+    end
   end
 
   defp emit_review(payload, :json), do: IO.puts(Jason.encode!(payload))

@@ -907,7 +907,14 @@ defmodule Arbiter.Worker do
   # collide.
   def handle_call({:__claude_session_open__, port_args, session_config}, _from, %State{} = state) do
     try do
-      port = Arbiter.Worker.ClaudeSession.open_port(port_args)
+      # bd-1z7624: a session-level resume (`arb worker resume`) seeds the worker
+      # with :resume_session_id. Inject `--resume <id>` (+ the terse continue
+      # prompt) into THIS spawn so it continues the prior Claude session, but
+      # stash the PRISTINE argv as :claude_spawn — the bd-t9uq25 auto-resume
+      # rebuilds each `--resume` from pristine args + the latest session id, so a
+      # polluted spawn would stack duplicate flags. One-shot: consumed below.
+      {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
+      port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
       now = DateTime.utc_now()
 
       session =
@@ -935,7 +942,8 @@ defmodule Arbiter.Worker do
       meta =
         (state.meta || %{})
         |> Map.put(:claude_session, true)
-        |> Map.put(:claude_spawn, port_args)
+        |> Map.put(:claude_spawn, pristine_args)
+        |> Map.delete(:resume_session_id)
 
       new_state = %State{state | claude_sessions: sessions, meta: meta}
       new_state = sync_session_meta(new_state, port)
@@ -943,6 +951,33 @@ defmodule Arbiter.Worker do
       {:reply, {:ok, port}, new_state}
     rescue
       e -> {:reply, {:error, {:port_open_failed, Exception.message(e)}}, state}
+    end
+  end
+
+  # bd-1z7624: build the spawn argv for the first session, injecting
+  # `--resume <session_id>` when this worker was started for a session-level
+  # resume. Returns `{spawn_args, pristine_args}`: `spawn_args` carries the
+  # `--resume` flag (+ the terse continue prompt) for THIS launch, `pristine_args`
+  # is the untouched argv to stash as :claude_spawn so later auto-resumes rebuild
+  # cleanly. With no resume marker — or a custom/fixture argv lacking a `--print`
+  # slot — both are the original args (no injection).
+  defp resume_spawn_args(%State{meta: meta} = state, port_args) do
+    case meta && Map.get(meta, :resume_session_id) do
+      sid when is_binary(sid) and sid != "" ->
+        case inject_resume_argv(port_args, sid, continue_prompt(state)) do
+          {:ok, resumed_args} ->
+            Logger.info(
+              "Worker: bd-1z7624 session-resume task=#{state.task_id} session=#{sid}"
+            )
+
+            {resumed_args, port_args}
+
+          _ ->
+            {port_args, port_args}
+        end
+
+      _ ->
+        {port_args, port_args}
     end
   end
 

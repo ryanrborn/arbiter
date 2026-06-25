@@ -1,35 +1,40 @@
 defmodule ArbiterCli.Cmd.ResumeTest do
   use ArbiterCli.CliCase, async: false
 
-  describe "arb resume" do
+  # bd-1z7624: `arb worker resume` (and the top-level `arb resume` alias) route
+  # through the worker subcommand dispatcher to POST /api/workers/:task_id/resume.
+  # These drive the real wired path — ArbiterCli.Cmd.Worker.run(["resume", ...]).
+  defp run_resume(args), do: ArbiterCli.Cmd.Worker.run(["resume" | args])
+
+  describe "arb worker resume" do
     test "missing task-id fails with usage hint" do
-      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run([]) end)
-      assert err =~ "resume requires a task id"
+      {_out, err, code} = capture(fn -> run_resume([]) end)
+      assert err =~ "worker resume requires"
       assert code != 0
     end
 
     test "too many positional args fails" do
-      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run(["a", "b", "c"]) end)
-      assert err =~ "at most two positional"
+      {_out, err, code} = capture(fn -> run_resume(["a", "b", "c"]) end)
+      assert err =~ "at most"
       assert code != 0
     end
 
     test "happy path posts to /api/workers/:task_id/resume and renders text" do
       stub_post(
-        "/api/workers/bd-auma3z/resume",
+        "/api/workers/bd-1z7624/resume",
         %{
-          "task" => %{"id" => "bd-auma3z", "title" => "resume cmd", "status" => "in_progress"},
-          "worker" => %{"task_id" => "bd-auma3z", "pid" => "#PID<0.123.0>"},
+          "task" => %{"id" => "bd-1z7624", "title" => "resume cmd", "status" => "in_progress"},
+          "worker" => %{"task_id" => "bd-1z7624", "pid" => "#PID<0.123.0>"},
           "machine" => %{"id" => "mc-1", "pid" => "#PID<0.124.0>"},
-          "worktree_path" => "/wt/feature-bd-auma3z",
+          "worktree_path" => "/wt/feature-bd-1z7624",
           "claude_started" => true
         }
       )
 
-      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-auma3z"]) end)
+      {out, _err, code} = capture(fn -> run_resume(["bd-1z7624"]) end)
       assert code == 0
       assert out =~ "Resume:"
-      assert out =~ "bd-auma3z — resume cmd"
+      assert out =~ "bd-1z7624 — resume cmd"
       assert out =~ "(reused)"
       assert out =~ "resumed"
     end
@@ -41,7 +46,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
         "machine" => %{"id" => "m", "pid" => "y"}
       })
 
-      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-1", "--json"]) end)
+      {out, _err, code} = capture(fn -> run_resume(["bd-1", "--json"]) end)
       assert code == 0
       assert {:ok, decoded} = Jason.decode(out)
       assert decoded["task"]["id"] == "bd-1"
@@ -53,15 +58,15 @@ defmodule ArbiterCli.Cmd.ResumeTest do
         %{
           "error" => %{
             "type" => "invalid_request",
-            "message" => "no preserved worktree for this task"
+            "message" => "no prior Claude session recorded for this task"
           }
         },
         422
       )
 
-      {_out, err, code} = capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-x"]) end)
+      {_out, err, code} = capture(fn -> run_resume(["bd-x"]) end)
       assert code != 0
-      assert err =~ "worktree" || err =~ "422"
+      assert err =~ "session" || err =~ "422"
     end
 
     test "repo and --model forward in the request body" do
@@ -88,7 +93,7 @@ defmodule ArbiterCli.Cmd.ResumeTest do
       end)
 
       {_out, _err, code} =
-        capture(fn -> ArbiterCli.Cmd.Resume.run(["bd-9", "my/repo", "--model", "opus"]) end)
+        capture(fn -> run_resume(["bd-9", "my/repo", "--model", "opus"]) end)
 
       assert code == 0
       assert_receive {:body, body}
