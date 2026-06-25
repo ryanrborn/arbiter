@@ -370,6 +370,30 @@ defmodule ArbiterWeb.TaskDetailLive do
                   </h3>
                   <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80">{@task.acceptance}</pre>
                 </div>
+
+                <%!-- bd-5lc99r: for a `task`-type directive the findings summary in
+                     `notes` is the deliverable, so surface it prominently (primary
+                     accent) with a placeholder while it is still blank. Other types
+                     show notes as supporting context only when present. --%>
+                <div :if={@task.issue_type == :task} class="space-y-1">
+                  <h3 class="text-sm font-medium text-primary flex items-center gap-1.5">
+                    <.icon name="hero-document-text" class="size-4" /> Findings
+                  </h3>
+                  <%= if present?(@task.notes) do %>
+                    <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-primary/40 p-3 rounded-box font-mono text-base-content/80">{@task.notes}</pre>
+                  <% else %>
+                    <p class="text-xs italic text-base-content/50 bg-base-100 border border-base-300 p-3 rounded-box">
+                      No findings recorded yet — the acolyte writes its results here before completing.
+                    </p>
+                  <% end %>
+                </div>
+
+                <div :if={@task.issue_type != :task and present?(@task.notes)} class="space-y-1">
+                  <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
+                    <.icon name="hero-document-text" class="size-4" /> Notes
+                  </h3>
+                  <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80">{@task.notes}</pre>
+                </div>
               </div>
             </section>
 
@@ -702,6 +726,12 @@ defmodule ArbiterWeb.TaskDetailLive do
   defp status_badge_class(:in_progress), do: "badge-info"
   defp status_badge_class(:closed), do: "badge-ghost"
   defp status_badge_class(_), do: ""
+
+  # bd-5lc99r: a string field counts as present only when it is non-nil and not
+  # blank after trimming — used to decide whether the findings/notes section has
+  # real content to render.
+  defp present?(v) when is_binary(v), do: String.trim(v) != ""
+  defp present?(_), do: false
 
   defp worker_status_class(:idle), do: "badge-ghost"
   defp worker_status_class(:running), do: "badge-info"

@@ -875,6 +875,44 @@ defmodule Arbiter.Worker.DispatchTest do
       assert result.worktree_path == nil
     end
 
+    test "skips worktree for a task issue_type even with a configured repo (bd-5lc99r)",
+         %{ws: ws} do
+      # A `task` is non-reviewable ops/research work with no code deliverable, so
+      # dispatch must not provision a worktree by default — even though `st/repo`
+      # is configured and a feature/bug/chore would get one here.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "research spike",
+          workspace_id: ws.id,
+          issue_type: :task
+        })
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
+      assert result.worktree_path == nil
+    end
+
+    test "provision_worktree: true forces a worktree even for a task type (bd-5lc99r)",
+         %{ws: ws} do
+      # The rare task that genuinely needs a repo checkout to inspect can opt back
+      # in with an explicit flag.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "task needing a checkout",
+          workspace_id: ws.id,
+          issue_type: :task
+        })
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "st/repo",
+          start_driver: false,
+          provision_worktree: true
+        )
+
+      assert is_binary(result.worktree_path)
+      assert File.dir?(result.worktree_path)
+    end
+
     test "per-workspace rig_paths overrides the Application env", %{repo: repo} do
       {:ok, ws_local} =
         Ash.create(Workspace, %{
@@ -1144,6 +1182,55 @@ defmodule Arbiter.Worker.DispatchTest do
       review_prompt = Dispatch.prompt_for_task(task, review: true)
       refute review_prompt =~ "Prior review findings"
       refute review_prompt =~ "existing PR"
+    end
+  end
+
+  describe "task-type dispatch prompt (bd-5lc99r)" do
+    test "a task-type directive gets the findings-in-notes briefing, not the work prompt",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "investigate the flaky deploy",
+          workspace_id: ws.id,
+          issue_type: :task
+        })
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      # Frames the deliverable as a findings summary in notes via the MCP tool.
+      assert prompt =~ "findings"
+      assert prompt =~ "notes"
+      assert prompt =~ "task_update_progress"
+      assert prompt =~ "notes gate"
+
+      # Explicitly NOT the code-change/PR work prompt.
+      refute prompt =~ "author a pr_body"
+      refute prompt =~ "git commit"
+    end
+
+    test "a non-task type still gets the standard work prompt", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "build the thing",
+          workspace_id: ws.id,
+          issue_type: :feature
+        })
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      refute prompt =~ "notes gate"
+    end
+
+    test "review: true wins over a task issue_type (reviewer still reviews)", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "task but reviewed",
+          workspace_id: ws.id,
+          issue_type: :task
+        })
+
+      prompt = Dispatch.prompt_for_task(task, review: true)
+      refute prompt =~ "notes gate"
     end
   end
 

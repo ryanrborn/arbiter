@@ -18,7 +18,10 @@ defmodule Arbiter.Tasks.IssueTest do
       assert issue.title == "first"
       assert issue.status == :open
       assert issue.priority == 2
-      assert issue.issue_type == :task
+      # bd-5lc99r: the default issue_type is `:feature` (a reviewable type), not
+      # `:task`. `:task` is now an opt-in non-reviewable type, so untyped work
+      # must default to the reviewable path.
+      assert issue.issue_type == :feature
       assert issue.tracker_type == :none
       assert issue.tracker_ref == nil
       assert issue.closed_at == nil

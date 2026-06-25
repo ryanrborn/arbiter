@@ -492,6 +492,11 @@ defmodule Arbiter.Worker.Dispatch do
         _ -> %{worktree_path: worktree_path}
       end
 
+    # bd-5lc99r: stamp the directive's issue_type so the worker's completion path
+    # can route a `task` type through the notes gate (no commit/review gate, no
+    # PR) instead of the commit/review/merge path.
+    base = Map.put(base, :issue_type, task.issue_type)
+
     base = maybe_put_resume_meta(base, opts)
 
     case worktree_path && resolve_repo_path(task, Keyword.get(opts, :repo)) do
@@ -579,6 +584,14 @@ defmodule Arbiter.Worker.Dispatch do
   defp maybe_provision_worktree(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :provision_worktree, true) == false ->
+        {:ok, nil}
+
+      # bd-5lc99r: a `task` issue type is non-reviewable ops/research/spike work
+      # whose deliverable is a findings summary in `notes`, not a code change.
+      # It needs no branch to merge, so skip worktree provisioning by default.
+      # An explicit `provision_worktree: true` still forces one for the rare task
+      # that genuinely needs a repo checkout to inspect.
+      task.issue_type == :task and Keyword.get(opts, :provision_worktree) != true ->
         {:ok, nil}
 
       true ->
@@ -1172,9 +1185,10 @@ defmodule Arbiter.Worker.Dispatch do
 
   @doc false
   def prompt_for_task(%Issue{} = task, opts) do
-    case Keyword.get(opts, :review, false) do
-      true -> review_prompt(task)
-      _ -> work_prompt(task, opts)
+    cond do
+      Keyword.get(opts, :review, false) == true -> review_prompt(task)
+      task.issue_type == :task -> task_prompt(task)
+      true -> work_prompt(task, opts)
     end
   end
 
@@ -1304,6 +1318,71 @@ defmodule Arbiter.Worker.Dispatch do
 
     on a line by itself, exactly. The worker watches your stdout and
     will mark the task complete when it sees that marker.
+    """
+  end
+
+  # bd-5lc99r: briefing for a `task` issue type — non-reviewable ops/research/
+  # spike work. The deliverable is a findings/results summary written to the
+  # directive's `notes` field via the `task_update_progress` MCP tool, NOT a code
+  # change, commit, or PR. The notes gate (Arbiter.Worker) blocks `arb done`
+  # until `notes` is non-blank, so this prompt frames the whole job around
+  # producing those findings and deliberately omits the commit/push/PR-body
+  # steps the standard work prompt carries.
+  defp task_prompt(%Issue{} = task) do
+    """
+    You are a worker working autonomously on task #{task.id}.
+
+    Title: #{task.title}
+
+    Description:
+    #{task.description || "(none)"}
+
+    Acceptance:
+    #{task.acceptance || "(none)"}
+
+    This is a `task`-type directive: non-reviewable ops / research / spike work.
+    It produces NO code change, NO commit, and NO pull request. Your deliverable
+    is a findings / results summary written to the directive's `notes` field.
+
+    No worktree is provisioned by default — you are not expected to edit a repo.
+    If the work genuinely requires inspecting code you may read files, but do not
+    author a branch or open a PR.
+
+    Your job:
+      1. Do the investigation / ops work the directive describes.
+      2. Write your findings to the directive's `notes` field by calling the
+         `task_update_progress` MCP tool with its `notes` argument (Markdown is
+         fine). Make it self-contained: what you investigated, what you found,
+         and any recommendation or conclusion the Admiral needs — they read it
+         via `arb show #{task.id}` and the dashboard.
+
+    A notes gate enforces this: if you print `arb done` while `notes` is still
+    blank, you will be reprompted to write your findings before the directive
+    can close. Do NOT shell out to the `arb` CLI for the notes — use the
+    `task_update_progress` MCP tool.
+    #{completion_notes_step(task)}
+    Coordination: at the start of each step, check your mailbox by running
+
+        arb inbox #{task.id}
+
+    This shows any direction from the Admiral or flags from sibling workers and
+    marks them read. To leave a flag for another worker, use
+    `arb message <their-task-id> <text>`.
+
+    Between major steps, also check for `.arbiter/INBOX` in your working
+    directory. If it exists, read it, act on any Admiral instructions it
+    contains, then delete the file to acknowledge receipt.
+
+    *** ASYNC TOOLS: You may run any diagnostic tool — including in parallel or
+    with background execution modes. However, you MUST wait for every background
+    task to complete and read its full output before printing `arb done`.
+
+    When you are completely done — findings written to `notes` — print the line:
+
+        arb done
+
+    on a line by itself, exactly. The worker watches your stdout and will mark
+    the task complete when it sees that marker.
     """
   end
 

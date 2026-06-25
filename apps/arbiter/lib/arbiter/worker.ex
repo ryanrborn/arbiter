@@ -532,6 +532,14 @@ defmodule Arbiter.Worker do
   defp review_only?(%{"review_only" => true}), do: true
   defp review_only?(_), do: false
 
+  # bd-5lc99r: a `task` issue type is non-reviewable work — its deliverable is a
+  # findings summary written to `notes`, not a code change. Dispatch stamps the
+  # task's `:issue_type` into the worker meta; the completion path reads it here
+  # to route through the notes gate instead of the commit/review gates.
+  defp task_type?(%{issue_type: :task}), do: true
+  defp task_type?(%{issue_type: "task"}), do: true
+  defp task_type?(_), do: false
+
   # ---- Run history (Arbiter.Workers.Run) -------------------------------
 
   # Best-effort: create the persistent Run row for this worker. Returns the
@@ -1324,6 +1332,26 @@ defmodule Arbiter.Worker do
   #     fix-pass rather than silently closing with the PR unreviewed. Non-review
   #     workers with no branch complete directly as before.
   defp on_claude_done(%State{meta: meta} = state) do
+    cond do
+      # bd-5lc99r: a `task` issue type is non-reviewable ops/research/spike work.
+      # It produces a findings summary in `notes`, NOT a code change — so there
+      # is no commit gate, no review gate, no PR, and no merge. The only gate is
+      # the notes gate: refuse to let `arb done` close the directive until the
+      # acolyte has written its findings to `notes`. Then complete directly,
+      # regardless of whether a worktree/branch exists (the worktree is optional
+      # for a task and is never integrated).
+      task_type?(meta) and not review_only?(meta) ->
+        case notes_gate(state) do
+          :ok -> complete_now(state, :claude_done)
+          {:gate, :blank} -> handle_notes_gate(state)
+        end
+
+      true ->
+        on_claude_done_reviewable(state, meta)
+    end
+  end
+
+  defp on_claude_done_reviewable(%State{} = state, meta) do
     case mergeable_branch(meta) do
       nil ->
         if review_only?(meta) do
@@ -1581,18 +1609,30 @@ defmodule Arbiter.Worker do
   # When the argv is a test fixture (`claude_command:` opt) we re-run the same
   # argv so a fixture-based test exercises the gate-retry-then-fail cycle
   # without us second-guessing what the fixture does.
-  defp respawn_with_commit_nudge(%State{meta: meta} = state, reason) do
+  defp respawn_with_commit_nudge(%State{} = state, reason) do
+    respawn_with_nudge(state, commit_nudge_prompt(state, reason),
+      attempts_key: :commit_nudge_attempts,
+      label: "bd-ofql8k commit gate tripped (#{reason})"
+    )
+  end
+
+  # Shared relaunch mechanism for the gate nudges (commit gate bd-ofql8k, notes
+  # gate bd-5lc99r). Swaps the nudge prompt into the stashed claude argv, opens
+  # a fresh port in the same cwd, and bumps the gate-specific attempt counter so
+  # the cap in the caller bounds the retry loop.
+  defp respawn_with_nudge(%State{meta: meta} = state, nudge, opts) do
+    attempts_key = Keyword.fetch!(opts, :attempts_key)
+    label = Keyword.get(opts, :label, "gate")
     spawn_args = meta && Map.get(meta, :claude_spawn)
-    nudge = commit_nudge_prompt(state, reason)
 
     with %{} = port_args <- spawn_args || :no_spawn_args,
          {:ok, new_args} <- inject_nudge_argv(port_args, nudge),
          {:ok, port} <- safe_open_port(new_args) do
-      next_attempts = ((meta && Map.get(meta, :commit_nudge_attempts)) || 0) + 1
+      next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
 
       Logger.info(
-        "Worker: bd-ofql8k commit gate tripped (#{reason}) for task=#{state.task_id}; " <>
-          "relaunching worker with nudge (attempt #{next_attempts}/#{commit_nudge_cap(meta)})"
+        "Worker: #{label} for task=#{state.task_id}; " <>
+          "relaunching worker with nudge (attempt #{next_attempts})"
       )
 
       session_config = %{
@@ -1618,7 +1658,7 @@ defmodule Arbiter.Worker do
 
       new_meta =
         meta
-        |> Map.put(:commit_nudge_attempts, next_attempts)
+        |> Map.put(attempts_key, next_attempts)
         |> Map.put(:claude_spawn, new_args)
 
       sessions = Map.put(state.claude_sessions, port, session)
@@ -1719,6 +1759,97 @@ defmodule Arbiter.Worker do
 
     If you skipped the work, do it now and commit. Then print `arb done`
     again on its own line.
+    """
+  end
+
+  # ---- bd-5lc99r notes gate -------------------------------------------------
+  #
+  # A `task` issue type is non-reviewable ops/research/spike work whose
+  # deliverable is a findings summary in the directive's `notes`, not a code
+  # change. The notes gate is the task-type analogue of the commit gate: it
+  # refuses to let `arb done` close the directive while `notes` is blank, and
+  # reprompts the acolyte to write its findings via the `task_update_progress`
+  # MCP tool.
+  #
+  # Returns `:ok` to proceed, or `{:gate, :blank}` to divert. A DB read failure
+  # fails OPEN (mirrors the commit gate's git-failure policy): a transient hiccup
+  # must not strand a real completion behind an unreadable directive.
+  defp notes_gate(%State{task_id: task_id}) do
+    case fetch_task_notes(task_id) do
+      {:ok, notes} when is_binary(notes) ->
+        if String.trim(notes) == "", do: {:gate, :blank}, else: :ok
+
+      {:ok, _} ->
+        {:gate, :blank}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Worker: bd-5lc99r notes gate could not read notes for task=#{task_id} " <>
+            "(#{inspect(reason)}); failing open."
+        )
+
+        :ok
+    end
+  end
+
+  defp fetch_task_notes(task_id) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, %{notes: notes}} -> {:ok, notes}
+      {:error, _} = err -> err
+    end
+  rescue
+    e -> {:error, e}
+  end
+
+  # The worker signalled done on a task-type directive but `notes` is still
+  # blank. Mirror the commit gate's bounded send-back: relaunch the same session
+  # with a nudge telling it to write findings to `notes`, capped by
+  # `meta[:notes_nudge_cap]` (default 1; tests pass 0 to assert the structural
+  # gate without the retry layer). On cap exhaustion or a respawn failure, fail
+  # the worker rather than silently close a directive with no deliverable.
+  defp handle_notes_gate(%State{meta: meta} = state) do
+    cap = notes_nudge_cap(meta)
+    attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
+
+    cond do
+      attempts >= cap ->
+        park_notes_gate(state, :cap_exhausted)
+
+      true ->
+        case respawn_with_notes_nudge(state) do
+          {:ok, new_state} -> new_state
+          {:error, why} -> park_notes_gate(state, {:respawn_failed, why})
+        end
+    end
+  end
+
+  defp respawn_with_notes_nudge(%State{} = state) do
+    respawn_with_nudge(state, notes_nudge_prompt(state),
+      attempts_key: :notes_nudge_attempts,
+      label: "bd-5lc99r notes gate tripped (blank notes)"
+    )
+  end
+
+  defp notes_nudge_cap(meta), do: (meta && Map.get(meta, :notes_nudge_cap)) || 1
+
+  defp notes_nudge_prompt(%State{task_id: task_id}) do
+    """
+    bd-5lc99r notes gate: you printed `arb done` for task #{task_id}, but this is
+    a `task`-type directive whose deliverable is a findings summary written to
+    the directive's `notes` field — and `notes` is still blank. A task produces
+    no code change and no PR; the notes ARE the deliverable, so completion is
+    blocked until they exist.
+
+    Do EXACTLY this, then print `arb done` again on its own line:
+
+      1. Call the `task_update_progress` MCP tool with its `notes` argument set
+         to your findings / results summary for this directive (Markdown is fine).
+      2. Make it self-contained: what you investigated, what you found, and any
+         recommendation or conclusion the Admiral needs — they read it via
+         `arb show #{task_id}` and the dashboard.
+
+    Do NOT shell out to the `arb` CLI for the notes — use the MCP tool. Then
+    print `arb done`.
     """
   end
 
@@ -2052,6 +2183,74 @@ defmodule Arbiter.Worker do
 
     :error
   end
+
+  # bd-5lc99r: the notes gate could not be satisfied (nudge cap exhausted or the
+  # send-back relaunch failed). Escalate to the Admiral and fail the worker so
+  # the directive is not silently closed without its findings deliverable.
+  #
+  # Unlike the commit gate, we deliberately do NOT write the gate-trip summary
+  # into `notes` — that field IS what the gate checks, so polluting it would let
+  # a re-dispatched worker satisfy the gate without producing real findings. The
+  # escalation mail surfaces the trip to the Admiral instead.
+  defp park_notes_gate(%State{} = state, why) do
+    summary = notes_gate_summary(state, why)
+    escalate_notes_gate(state, summary)
+
+    meta = Map.put(state.meta || %{}, :notes_gate_detail, why)
+    fail_now(%State{state | meta: meta}, :blank_notes_at_completion)
+  end
+
+  defp notes_gate_summary(%State{task_id: task_id, meta: meta}, why) do
+    attempts = (meta && Map.get(meta, :notes_nudge_attempts)) || 0
+    cap = notes_nudge_cap(meta)
+
+    detail_blurb =
+      case why do
+        :cap_exhausted ->
+          "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
+            "`notes` is still blank."
+
+        {:respawn_failed, sub} ->
+          "Could not relaunch the worker for a send-back nudge: #{inspect(sub)}."
+
+        other ->
+          "Detail: #{inspect(other)}."
+      end
+
+    """
+    bd-5lc99r notes gate tripped for task #{task_id}: this is a `task`-type
+    directive whose deliverable is a findings summary in `notes`, but `notes`
+    is blank and `arb done` was signalled.
+
+    #{detail_blurb}
+
+    The directive cannot close without its findings. Re-dispatch it and ensure
+    the acolyte writes its results to `notes` via the `task_update_progress` MCP
+    tool before completing.
+    """
+    |> String.trim()
+  end
+
+  defp escalate_notes_gate(%State{workspace_id: ws_id, task_id: task_id}, summary)
+       when is_binary(ws_id) do
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: task_id,
+      subject: "Notes gate: blank findings on task-type directive (#{task_id})",
+      body: summary
+    })
+
+    :ok
+  rescue
+    e -> log_commit_gate_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_notes_gate(_state, _summary), do: :ok
 
   # The shared "integrate this branch" path: open the MR / run the merge, or fail
   # the worker (not silently complete it) if the adapter rejects.
