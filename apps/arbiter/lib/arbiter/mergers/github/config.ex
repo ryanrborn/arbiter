@@ -102,6 +102,31 @@ defmodule Arbiter.Mergers.Github.Config do
   end
 
   @doc """
+  Override the `owner` and `repo` in the current process's active GitHub config.
+
+  Used by `Arbiter.Workflows.PRPatrol` to seed the per-patrol repo before
+  calling `list_open/0`. Multi-repo workspaces omit `repo` from their merge
+  config (the per-rig repo is derived from the rig's git remote at open time),
+  so each PRPatrol instance calls this with its own `"owner/repo"` slug to make
+  `list_open/0` resolve the correct REST endpoint.
+
+  Merges into the existing pdict config so credentials and other settings set
+  by `put_active/1` are preserved. No-op when the slug can't be parsed.
+  """
+  @spec override_repo(String.t()) :: :ok
+  def override_repo(repo_slug) when is_binary(repo_slug) do
+    case String.split(repo_slug, "/", parts: 2) do
+      [owner, repo] when owner != "" and repo != "" ->
+        raw = Process.get(@pdict_key) || %{}
+        Process.put(@pdict_key, Map.merge(raw, %{"owner" => owner, "repo" => repo}))
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  @doc """
   Resolve the active GitHub merger config into a fully-populated struct (with
   the token already looked up from env). Returns `{:ok, config}` or
   `{:error, %Error{kind: :config_missing}}`.
