@@ -717,6 +717,86 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "list_open_review_threads/1" do
+    test "POSTs the GraphQL query and returns only unresolved threads, normalized" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/graphql"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["query"] =~ "reviewThreads"
+        assert decoded["variables"] == %{"owner" => "octo", "repo" => "widget", "number" => 42}
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => %{
+            "repository" => %{
+              "pullRequest" => %{
+                "reviewThreads" => %{
+                  "nodes" => [
+                    %{
+                      "id" => "RT_open",
+                      "isResolved" => false,
+                      "path" => "lib/foo.ex",
+                      "line" => 12,
+                      "comments" => %{
+                        "nodes" => [
+                          %{"body" => "consider renaming", "author" => %{"login" => "copilot"}}
+                        ]
+                      }
+                    },
+                    %{
+                      "id" => "RT_resolved",
+                      "isResolved" => true,
+                      "path" => "lib/bar.ex",
+                      "line" => 3,
+                      "comments" => %{
+                        "nodes" => [%{"body" => "done", "author" => %{"login" => "x"}}]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        })
+      end)
+
+      assert {:ok, [thread]} = Github.list_open_review_threads(@ref)
+      assert thread.id == "RT_open"
+      assert thread.path == "lib/foo.ex"
+      assert thread.line == 12
+      assert thread.author == "copilot"
+      assert thread.body == "consider renaming"
+    end
+
+    test "no review threads → {:ok, []}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => %{
+            "repository" => %{"pullRequest" => %{"reviewThreads" => %{"nodes" => []}}}
+          }
+        })
+      end)
+
+      assert {:ok, []} = Github.list_open_review_threads(@ref)
+    end
+
+    test "GraphQL query-level errors (HTTP 200 with errors) surface as {:error, %Error{}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"errors" => [%{"message" => "Could not resolve to a Repository"}]})
+      end)
+
+      assert {:error, %Error{message: "Could not resolve to a Repository"}} =
+               Github.list_open_review_threads(@ref)
+    end
+  end
+
   describe "merge/1" do
     test "PUTs /merge with the configured merge_method" do
       stub(fn conn ->

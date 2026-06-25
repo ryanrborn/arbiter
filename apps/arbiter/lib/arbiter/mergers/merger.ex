@@ -114,6 +114,28 @@ defmodule Arbiter.Mergers.Merger do
         }
 
   @typedoc """
+  A single **unresolved** review thread / inline review discussion surfaced
+  by `list_open_review_threads/1` (bd-823q7e). Normalized across forges so the
+  workflow layer never sees a GitHub GraphQL `reviewThread` or a GitLab
+  discussion shape — only this provider-agnostic map.
+
+    * `:id` — opaque thread/discussion id (a GitHub `reviewThread` node id, a
+      GitLab discussion id). Stable enough to dedup/debounce on.
+    * `:path` — the file the thread anchors to; `nil` for a file-level or
+      MR-level (non-positional) thread.
+    * `:line` — the line the thread anchors to; `nil` when unavailable.
+    * `:author` — the handle that opened the thread (best-effort; may be `nil`).
+    * `:body` — the opening comment's text (best-effort; may be `nil`).
+  """
+  @type review_thread :: %{
+          required(:id) => term(),
+          optional(:path) => String.t() | nil,
+          optional(:line) => pos_integer() | nil,
+          optional(:author) => String.t() | nil,
+          optional(:body) => String.t() | nil
+        }
+
+  @typedoc """
   A single failing CI check surfaced by `failing_check_logs/1` so the Warden
   can brief a fix-pass acolyte with the failure (#354, Phase 2a).
 
@@ -228,6 +250,30 @@ defmodule Arbiter.Mergers.Merger do
   @callback list_open() :: {:ok, [open_mr()]} | {:error, term()}
 
   @doc """
+  List the **unresolved** review threads / inline review discussions on
+  `mr_ref` — the provider-agnostic "open review feedback" signal PRPatrol
+  triggers on (bd-823q7e).
+
+  This is distinct from `list_review_feedback/1`: that surface reports the
+  latest *verdict* state (CHANGES_REQUESTED) and the raw comment bodies, but
+  carries no resolution state, so a `COMMENTED` review with inline comments —
+  e.g. an automated reviewer leaving line comments without requesting changes
+  — is invisible to it. Resolution state only lives on the forge's thread
+  primitive: GitHub's `pullRequest.reviewThreads { isResolved }` (GraphQL),
+  GitLab's MR discussions (`notes[].resolvable` / `resolved`). Each adapter
+  queries its own primitive and returns only the **open** (unresolved) threads,
+  already normalized to `t:review_thread/0`.
+
+  Returns `{:ok, [review_thread()]}` (an empty list when every thread is
+  resolved or the PR has none — not an error) or `{:error, term()}`.
+
+  Optional — adapters with no review-thread surface (e.g. `Direct`, the
+  local-merge strategy) simply don't implement it; callers guard with
+  `function_exported?/3` and treat the absence as "no open review feedback".
+  """
+  @callback list_open_review_threads(mr_ref) :: {:ok, [review_thread()]} | {:error, term()}
+
+  @doc """
   Construct an `t:mr_ref/0` for an **existing, externally-authored** PR/MR from
   an operator-supplied identifier — a forge URL, an `owner/repo#n` slug, or a
   bare number/`#n` — so `arb review --pr <url|number>` can point a review-only
@@ -250,5 +296,9 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback ref_for_pr(pr :: String.t(), opts :: map()) :: {:ok, mr_ref} | {:error, term()}
 
-  @optional_callbacks update_branch: 1, failing_check_logs: 1, ref_for_pr: 2, list_open: 0
+  @optional_callbacks update_branch: 1,
+                      failing_check_logs: 1,
+                      ref_for_pr: 2,
+                      list_open: 0,
+                      list_open_review_threads: 1
 end
