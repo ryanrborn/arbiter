@@ -86,4 +86,31 @@ defmodule Arbiter.Mergers do
 
     :ok
   end
+
+  @doc """
+  Like `prepare/1`, but also overrides the per-process `owner`/`repo` from an
+  explicit `"owner/repo"` slug.
+
+  Used by `Arbiter.Workflows.PRPatrol` so each per-repo patrol instance seeds
+  `list_open/0` with the correct repo, even when the workspace's merge config
+  omits `repo` (multi-repo workspace shape where repo is derived per-rig from
+  the rig's git remote at open time).
+
+  Callers that run in single-repo workspaces or already have the repo set in
+  the workspace config can still use `prepare/1` — or pass `nil` as `repo` to
+  this function, which falls back to `prepare/1` with no override.
+  """
+  @spec prepare_with_repo(Workspace.t() | nil, String.t() | nil) :: :ok
+  def prepare_with_repo(workspace, nil), do: prepare(workspace)
+  def prepare_with_repo(nil, _repo), do: :ok
+
+  def prepare_with_repo(%Workspace{} = workspace, repo) when is_binary(repo) and repo != "" do
+    :ok = prepare(workspace)
+
+    if Workspace.merger_strategy(workspace) == :github do
+      Arbiter.Mergers.Github.Config.override_repo(repo)
+    end
+
+    :ok
+  end
 end

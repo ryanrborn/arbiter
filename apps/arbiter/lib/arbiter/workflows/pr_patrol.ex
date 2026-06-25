@@ -138,7 +138,7 @@ defmodule Arbiter.Workflows.PRPatrol do
       with %Workspace{} <- state.workspace,
            adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
            true <- function_exported?(adapter, :list_open, 0),
-           :ok <- Mergers.prepare(state.workspace),
+           :ok <- Mergers.prepare_with_repo(state.workspace, state.repo),
            {:ok, mrs} <- adapter.list_open() do
         Enum.each(mrs, &maybe_dispatch(&1, state, adapter))
         :ok
