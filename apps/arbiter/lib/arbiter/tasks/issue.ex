@@ -314,7 +314,15 @@ defmodule Arbiter.Tasks.Issue do
     attribute :issue_type, :atom do
       allow_nil? false
       public? true
-      default :task
+      # bd-5lc99r: `:task` is now an OPT-IN non-reviewable type (ops/research/
+      # spikes — deliverable is a findings summary in `notes`, no commit/review/
+      # PR). Because the catch-all creation paths (CLI `arb create` without
+      # `--type`, tracker/GitHub sync in Tasks.Claim, the REST API, untyped MCP
+      # creates) fall through to this default, it MUST be a reviewable type or
+      # every untyped coding task would silently skip the worktree/commit/review
+      # path. `:feature` is the generic reviewable default; choose `:task`
+      # explicitly to get the non-reviewable findings workflow.
+      default :feature
       constraints one_of: @issue_types
     end
 

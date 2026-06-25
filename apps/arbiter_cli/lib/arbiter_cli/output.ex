@@ -180,19 +180,44 @@ defmodule ArbiterCli.Output do
       |> Enum.join("\n")
 
     sections =
-      [
-        {"Description", issue["description"]},
-        {"Acceptance", issue["acceptance"]},
-        {"Notes", issue["notes"]},
-        {"QA notes", issue["qa_notes"]},
-        {"Deployment notes", issue["deployment_notes"]}
-      ]
+      issue
+      |> detail_sections()
       |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
       |> Enum.map(fn {k, v} -> "\n#{k}:\n  " <> indent(v) end)
       |> Enum.join("")
 
     header <> sections
   end
+
+  # bd-5lc99r: for a `task`-type directive the deliverable IS the findings
+  # summary in `notes`, so surface it first and labelled "Findings", with an
+  # explicit placeholder when still blank so the Admiral can see the deliverable
+  # is pending. Every other issue type keeps the standard ordering, where `notes`
+  # is supporting context rather than the headline.
+  defp detail_sections(%{"issue_type" => "task"} = issue) do
+    findings = blank_to(issue["notes"], "(no findings recorded yet)")
+
+    [
+      {"Findings (notes)", findings},
+      {"Description", issue["description"]},
+      {"Acceptance", issue["acceptance"]},
+      {"QA notes", issue["qa_notes"]},
+      {"Deployment notes", issue["deployment_notes"]}
+    ]
+  end
+
+  defp detail_sections(issue) do
+    [
+      {"Description", issue["description"]},
+      {"Acceptance", issue["acceptance"]},
+      {"Notes", issue["notes"]},
+      {"QA notes", issue["qa_notes"]},
+      {"Deployment notes", issue["deployment_notes"]}
+    ]
+  end
+
+  defp blank_to(v, fallback) when v in [nil, ""], do: fallback
+  defp blank_to(v, _fallback), do: v
 
   defp difficulty_label(nil), do: nil
   defp difficulty_label(n) when is_integer(n) and n in 0..4, do: "D#{n}"
