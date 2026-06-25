@@ -273,7 +273,7 @@ defmodule Arbiter.Messages.Message do
   def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
     read_query =
       __MODULE__
-      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at))
+      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at) and kind in ^@mailbox_kinds)
 
     read_query =
       case Keyword.get(opts, :workspace_id) do
