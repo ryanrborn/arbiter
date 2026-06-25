@@ -33,3 +33,6 @@ erl_crash.dump
 BUILD-SUMMARY-*.md
 MORNING-BRIEF.md
 
+
+# Arbiter run artifacts
+.arbiter/
