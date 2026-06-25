@@ -558,7 +558,7 @@ defmodule Arbiter.Worker.Watchdog do
   # review the author can't satisfy — so an ordinary "awaiting first review" PR
   # still flows through the normal pending path.
   defp maybe_escalate_merge_block(state, result) do
-    if block_reason(result) == :needs_nonauthor_approval do
+    if block_reason(result) == :needs_nonauthor_approval and not state.via_review_gate do
       handle_nonauthor_approval(state, result)
     else
       route_merge_block(state, result)
