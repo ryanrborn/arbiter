@@ -32,6 +32,8 @@ defmodule ArbiterWeb.Layouts do
     doc: "request path of the current page, used to highlight the active nav link"
   )
 
+  attr(:quota, :any, default: nil, doc: "AnthropicQuota struct for the topbar widget, or nil")
+
   slot(:inner_block, required: true)
 
   def app(assigns) do
@@ -81,6 +83,35 @@ defmodule ArbiterWeb.Layouts do
           </li>
         </ul>
       </nav>
+      <%!-- Quota widget: desktop only, hidden on mobile per #496 --%>
+      <div class="hidden lg:flex flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2" title="Anthropic quota">
+        <div class="flex items-center gap-1.5">
+          <span class="text-base-content/40 w-4 shrink-0">5h</span>
+          <div class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+            <div
+              :if={@quota && @quota.utilization_5h}
+              class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+              style={"width: #{quota_pct(@quota.utilization_5h)}%; background-color: #{quota_color(@quota.utilization_5h)};"}
+            />
+          </div>
+          <span class="text-base-content/60 tabular-nums w-12">
+            {quota_reset_label(@quota && @quota.reset_5h_at)}
+          </span>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span class="text-base-content/40 w-4 shrink-0">7d</span>
+          <div class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+            <div
+              :if={@quota && @quota.utilization_7d}
+              class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+              style={"width: #{quota_pct(@quota.utilization_7d)}%; background-color: #{quota_color(@quota.utilization_7d)};"}
+            />
+          </div>
+          <span class="text-base-content/60 tabular-nums w-12">
+            {quota_reset_label(@quota && @quota.reset_7d_at)}
+          </span>
+        </div>
+      </div>
       <div class="flex-none ml-2">
         <.theme_toggle />
       </div>
@@ -108,6 +139,27 @@ defmodule ArbiterWeb.Layouts do
 
   defp nav_class_for(true), do: "menu-active font-semibold"
   defp nav_class_for(false), do: ""
+
+  defp quota_pct(nil), do: 0
+  defp quota_pct(u) when is_float(u), do: min(100, round(u * 100))
+
+  defp quota_color(nil), do: "#22c55e"
+  defp quota_color(u) when u >= 0.9, do: "#ef4444"
+  defp quota_color(u) when u >= 0.7, do: "#f59e0b"
+  defp quota_color(_), do: "#22c55e"
+
+  defp quota_reset_label(nil), do: "—"
+
+  defp quota_reset_label(%DateTime{} = dt) do
+    secs = DateTime.diff(dt, DateTime.utc_now())
+
+    cond do
+      secs <= 0 -> "now"
+      secs < 60 -> "#{secs}s"
+      secs < 3600 -> "#{div(secs, 60)}m"
+      true -> "#{div(secs, 3600)}h#{div(rem(secs, 3600), 60)}m"
+    end
+  end
 
   @doc """
   Shows the flash group with standard titles and content.
