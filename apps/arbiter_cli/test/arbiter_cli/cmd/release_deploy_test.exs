@@ -349,6 +349,59 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
   end
 
+  # ---- PATH refresh -------------------------------------------------------
+
+  describe "PATH refresh in arbiter.env" do
+    test "deploy writes the deploying shell's PATH into arbiter.env", %{home: home} do
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      System.put_env("PATH", "/deploy/shell/bin:/usr/bin")
+
+      on_exit(fn -> System.delete_env("PATH") end)
+
+      {_out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 0
+
+      env_file = Path.join(home, "arbiter.env")
+      assert File.exists?(env_file)
+      contents = File.read!(env_file)
+      assert contents =~ "PATH=/deploy/shell/bin:/usr/bin"
+    end
+
+    test "deploy overwrites a stale PATH in arbiter.env with the deploying shell's PATH", %{
+           home: home
+         } do
+      # Pre-seed a corrupted arbiter.env (simulating test pollution or a
+      # previous bad deploy).
+      env_file = Path.join(home, "arbiter.env")
+      File.write!(env_file, "GITHUB_TOKEN=tok\nPATH=/second/path:/usr/bin\n")
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+      stub_release(@vsn, tarball, sha)
+      stub_cmds()
+
+      System.put_env("PATH", "/correct/bin:/usr/local/bin:/usr/bin")
+
+      on_exit(fn -> System.delete_env("PATH") end)
+
+      {_out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 0
+
+      contents = File.read!(env_file)
+      # The stale placeholder is gone; the correct PATH is in place.
+      refute contents =~ "/second/path"
+      assert contents =~ "PATH=/correct/bin:/usr/local/bin:/usr/bin"
+      # Unrelated keys are preserved.
+      assert contents =~ "GITHUB_TOKEN=tok"
+    end
+  end
+
   # ---- worker guard ------------------------------------------------------
 
   describe "active-work guard" do
