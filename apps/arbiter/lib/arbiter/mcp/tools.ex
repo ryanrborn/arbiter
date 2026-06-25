@@ -122,13 +122,21 @@ defmodule Arbiter.MCP.Tools do
       messages = Message.inbox("admiral", workspace_id: ws_id)
       _ = Enum.each(messages, &Message.mark_read/1)
 
-      cleared = if clear, do: Message.clear_read("admiral", workspace_id: ws_id), else: 0
+      {deleted_read, deleted_unread, remaining_unread} =
+        if clear do
+          {:ok, dr, du, ru} = Message.clear_read("admiral", workspace_id: ws_id)
+          {dr, du, ru}
+        else
+          {0, 0, 0}
+        end
 
       {:ok,
        %{
          messages: Enum.map(messages, &serialize_message/1),
          count: length(messages),
-         cleared: cleared
+         deleted_read: deleted_read,
+         deleted_unread: deleted_unread,
+         remaining_unread: remaining_unread
        }}
     end
   end

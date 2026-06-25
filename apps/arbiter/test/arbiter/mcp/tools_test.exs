@@ -155,7 +155,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, _} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
 
-      assert {:ok, %{messages: [msg], count: 1, cleared: 0}} =
+      assert {:ok, %{messages: [msg], count: 1, deleted_read: 0, deleted_unread: 0, remaining_unread: 0}} =
                Tools.coordinator_inbox(ctx.coordinator, %{})
 
       assert msg.body == "Escalation!"
@@ -178,8 +178,8 @@ defmodule Arbiter.MCP.ToolsTest do
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
 
       # With clear: true — lists "second" (count: 1), marks it read, then clears all already-read
-      # messages. "first" and "second" are both read at this point, so cleared: 2.
-      assert {:ok, %{count: 1, cleared: 2}} =
+      # messages. "first" and "second" are both read at this point, so deleted_read: 2.
+      assert {:ok, %{count: 1, deleted_read: 2, deleted_unread: 0, remaining_unread: 0}} =
                Tools.coordinator_inbox(ctx.coordinator, %{"clear" => true})
     end
 

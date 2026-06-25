@@ -159,7 +159,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, unread} =
         Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "unread", workspace_id: @ws})
 
-      assert Message.clear_read("admiral") == 1
+      assert Message.clear_read("admiral") == {:ok, 1, 0, 1}
 
       assert {:error, _} = Ash.get(Message, read.id)
       assert {:ok, _} = Ash.get(Message, unread.id)
@@ -175,7 +175,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} = Message.mark_read(mine)
       {:ok, _} = Message.mark_read(theirs)
 
-      assert Message.clear_read("admiral") == 1
+      assert Message.clear_read("admiral") == {:ok, 1, 0, 0}
       assert {:ok, _} = Ash.get(Message, theirs.id)
     end
   end

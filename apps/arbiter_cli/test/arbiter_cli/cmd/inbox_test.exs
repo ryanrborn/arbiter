@@ -110,18 +110,54 @@ defmodule ArbiterCli.Cmd.InboxTest do
   end
 
   describe "arb inbox clear" do
-    test "reports how many read messages were destroyed" do
-      stub_delete("/api/messages", %{"data" => %{"deleted" => 3}}, 200)
+    test "reports how many read messages were destroyed (no unread)" do
+      stub_delete(
+        "/api/messages",
+        %{"data" => %{"deleted_read" => 3, "deleted_unread" => 0, "remaining_unread" => 0}},
+        200
+      )
+
       {out, _err, code} = capture(fn -> Inbox.run(["clear"]) end)
       assert code == 0
       assert out =~ "Cleared 3 read messages."
     end
 
-    test "says nothing to clear when zero" do
-      stub_delete("/api/messages", %{"data" => %{"deleted" => 0}}, 200)
+    test "reports read messages cleared and unread remaining when unread exists" do
+      stub_delete(
+        "/api/messages",
+        %{"data" => %{"deleted_read" => 2, "deleted_unread" => 0, "remaining_unread" => 4}},
+        200
+      )
+
       {out, _err, code} = capture(fn -> Inbox.run(["clear"]) end)
       assert code == 0
-      assert out =~ "Nothing to clear"
+      assert out =~ "Cleared 2 read messages"
+      assert out =~ "4 unread messages remain"
+      assert out =~ "clear --all"
+    end
+
+    test "says inbox is empty when nothing to clear" do
+      stub_delete(
+        "/api/messages",
+        %{"data" => %{"deleted_read" => 0, "deleted_unread" => 0, "remaining_unread" => 0}},
+        200
+      )
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear"]) end)
+      assert code == 0
+      assert out =~ "Nothing to clear (inbox is empty)"
+    end
+
+    test "clears all messages with --all flag" do
+      stub_delete(
+        "/api/messages",
+        %{"data" => %{"deleted_read" => 2, "deleted_unread" => 4, "remaining_unread" => 0}},
+        200
+      )
+
+      {out, _err, code} = capture(fn -> Inbox.run(["clear", "--all"]) end)
+      assert code == 0
+      assert out =~ "Cleared 2 read + 4 unread messages (6 total)"
     end
   end
 

@@ -266,16 +266,50 @@ defmodule Arbiter.Messages.Message do
   @doc """
   Drain the read tail of a mailbox: destroy every *already-read* message
   addressed to `to_ref`. Unread mail is left untouched — you read it first,
-  then clear. Returns the number of messages destroyed. Pass `workspace_id:`
-  to scope to one workspace.
-
-  Mirrors the `DELETE /api/messages` (`:clear`) contract; the REST layer and
-  the dashboard's Admiral mailbox both route through here.
+  then clear. Returns `{:ok, deleted_read, deleted_unread, remaining_unread}`
+  where remaining_unread is the count of unread messages that still exist after
+  the deletion. Pass `workspace_id:` to scope to one workspace.
   """
   def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
+    read_query =
+      __MODULE__
+      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at) and kind in ^@mailbox_kinds)
+
+    read_query =
+      case Keyword.get(opts, :workspace_id) do
+        ws when is_binary(ws) -> Ash.Query.filter(read_query, workspace_id == ^ws)
+        _ -> read_query
+      end
+
+    read = Ash.read!(read_query)
+    Enum.each(read, &Ash.destroy!/1)
+
+    # Count unread that remain
+    unread_query =
+      __MODULE__
+      |> Ash.Query.filter(to_ref == ^to_ref and is_nil(read_at) and kind in ^@mailbox_kinds)
+
+    unread_query =
+      case Keyword.get(opts, :workspace_id) do
+        ws when is_binary(ws) -> Ash.Query.filter(unread_query, workspace_id == ^ws)
+        _ -> unread_query
+      end
+
+    unread_count = Ash.count!(unread_query)
+
+    {:ok, length(read), 0, unread_count}
+  end
+
+  @doc """
+  Clear all messages (read and unread) addressed to `to_ref`. Returns
+  `{:ok, deleted_read, deleted_unread, remaining_unread}` where remaining_unread
+  is always 0 since all messages are deleted. Pass `workspace_id:` to scope
+  to one workspace.
+  """
+  def clear_all(to_ref, opts \\ []) when is_binary(to_ref) do
     query =
       __MODULE__
-      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at))
+      |> Ash.Query.filter(to_ref == ^to_ref and kind in ^@mailbox_kinds)
 
     query =
       case Keyword.get(opts, :workspace_id) do
@@ -283,9 +317,13 @@ defmodule Arbiter.Messages.Message do
         _ -> query
       end
 
-    read = Ash.read!(query)
-    Enum.each(read, &Ash.destroy!/1)
-    length(read)
+    all_messages = Ash.read!(query)
+    read_count = Enum.count(all_messages, &(not is_nil(&1.read_at)))
+    unread_count = Enum.count(all_messages, &is_nil(&1.read_at))
+
+    Enum.each(all_messages, &Ash.destroy!/1)
+
+    {:ok, read_count, unread_count, 0}
   end
 
   @doc """
