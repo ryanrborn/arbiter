@@ -68,7 +68,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       check and was rolled back.
   """
 
-  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.Restart, Cmd.Start, Output}
+  alias ArbiterCli.{Client, Cmd.Doctor, Cmd.InstallService, Cmd.Restart, Cmd.Start, Output}
 
   # How many *prior* releases to keep around for rollback after a successful
   # deploy. The current release is always retained on top of these.
@@ -133,6 +133,14 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
       unpack!(tarball, target_dir)
       run_migrations!(target_dir)
+
+      # Refresh the PATH in arbiter.env from the deploying shell before
+      # restarting the service. The EnvironmentFile= directive loads this file,
+      # so any stale or test-corrupted PATH= line here would break every worker
+      # spawn after the restart. Writing now ensures the service always boots
+      # with the same PATH the operator used to invoke this deploy.
+      refresh_env_path()
+      preflight_claude_path()
 
       prior_target = current_target(current_link)
       atomic_symlink_swap!(current_link, target_dir)
@@ -496,6 +504,39 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
     case File.stat(Path.join(releases_dir(), tag), time: :posix) do
       {:ok, %File.Stat{mtime: mtime}} -> mtime
       _ -> 0
+    end
+  end
+
+  # ---- env refresh --------------------------------------------------------
+
+  # Write the deploying shell's PATH into arbiter.env so the restarted service
+  # inherits a working PATH (one that finds claude, arb, mise shims, etc.).
+  # Idempotent: uses the same read/merge/write logic as `arb install service`.
+  defp refresh_env_path do
+    home = data_home()
+    case InstallService.capture_path(home) do
+      :written -> log("Refreshed PATH in #{home}/arbiter.env.")
+      :skipped -> :ok
+    end
+  end
+
+  # Verify that `claude` is resolvable after the deploy.  The check runs against
+  # the PATH visible to the deploy process — the same PATH that was just written
+  # into arbiter.env — so a missing claude is caught before callers block on a
+  # failing dispatch.
+  defp preflight_claude_path do
+    case System.find_executable("claude") do
+      nil ->
+        log(
+          "warning: `claude` not found on PATH (#{System.get_env("PATH", "")}). " <>
+            "Worker spawns will fail. Add claude's directory to your shell PATH " <>
+            "and re-run `arb install service` to persist it."
+        )
+
+        false
+
+      _path ->
+        true
     end
   end
 
