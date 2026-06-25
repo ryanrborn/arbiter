@@ -25,6 +25,11 @@ defmodule Arbiter.Mergers.DirectTest do
       # The merge commit carries the title we passed as the message.
       assert {subject, 0} = git(dir, ["log", "-1", "--pretty=%s"])
       assert String.trim(subject) == "Merge feature/x"
+
+      # The merge commit was pushed: origin/main points at the same commit as local main.
+      assert {local_sha, 0} = git(dir, ["rev-parse", "main"])
+      assert {remote_sha, 0} = git(dir, ["rev-parse", "origin/main"])
+      assert String.trim(local_sha) == String.trim(remote_sha)
     end
 
     @tag :tmp_dir
@@ -38,6 +43,11 @@ defmodule Arbiter.Mergers.DirectTest do
 
       assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
       assert File.exists?(Path.join(dir, "feature.txt"))
+
+      # The merge commit was pushed to origin.
+      assert {local_sha, 0} = git(dir, ["rev-parse", "main"])
+      assert {remote_sha, 0} = git(dir, ["rev-parse", "origin/main"])
+      assert String.trim(local_sha) == String.trim(remote_sha)
     end
 
     @tag :tmp_dir
@@ -113,8 +123,13 @@ defmodule Arbiter.Mergers.DirectTest do
   # ---- helpers ----
 
   # Builds a repo with `main` (one commit) and a `feature/x` branch that adds
-  # feature.txt on top of it. Leaves HEAD on main.
+  # feature.txt on top of it. Leaves HEAD on main. Sets up a bare "origin"
+  # remote so open/4 can push the merged target branch.
   defp build_repo(dir) do
+    remote = Path.join(dir, "origin.git")
+    File.mkdir_p!(remote)
+    {_, 0} = git(remote, ["init", "--bare", "-q"])
+
     {_, 0} = git(dir, ["init", "-q"])
     {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
     {_, 0} = git(dir, ["config", "user.name", "Worker"])
@@ -132,6 +147,10 @@ defmodule Arbiter.Mergers.DirectTest do
     {_, 0} = git(dir, ["commit", "-q", "-m", "add feature"])
 
     {_, 0} = git(dir, ["checkout", "-q", "main"])
+
+    {_, 0} = git(dir, ["remote", "add", "origin", remote])
+    {_, 0} = git(dir, ["push", "-q", "-u", "origin", "main"])
+    {_, 0} = git(dir, ["push", "-q", "origin", "feature/x"])
   end
 
   # Builds a repo where `main` and `feature/conflict` both modify the same line

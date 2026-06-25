@@ -79,8 +79,13 @@ defmodule Arbiter.Mergers.Direct do
 
         with {:ok, _} <- run_git(["checkout", target], path) do
           case run_git(["merge", "--no-ff"] ++ message_args(title) ++ [branch], path) do
-            {:ok, _} -> {:ok, "direct:" <> branch}
-            {:error, {:git_failed, output}} -> abort_failed_merge(path, branch, output)
+            {:ok, _} ->
+              with {:ok, _} <- run_git(["push", "origin", target], path) do
+                {:ok, "direct:" <> branch}
+              end
+
+            {:error, {:git_failed, output}} ->
+              abort_failed_merge(path, branch, output)
           end
         end
 
