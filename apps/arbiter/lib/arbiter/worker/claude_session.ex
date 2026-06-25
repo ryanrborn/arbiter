@@ -808,6 +808,16 @@ defmodule Arbiter.Worker.ClaudeSession do
   # bd-crqku8: always inject ARB_ACOLYTE_BEAD_ID so any `arb restart/update/
   # start` invoked from inside the worker session can detect it and refuse,
   # preventing an worker from bouncing the live orchestrating server.
+  #
+  # bd-4hkzn3: prepend release-env cleanup pairs so ROOTDIR / BINDIR /
+  # RELEASE_* inherited from the systemd OTP release service unit are unset in
+  # every worker child shell. Without this, `mix test` (and `arb inbox`) in a
+  # worktree tries to boot from the release's ERTS rather than the
+  # per-worktree mise-pinned toolchain, crashing with a missing boot file and
+  # forcing the Tribunal to static-analysis-only. The cleanup pairs are a
+  # no-op on a plain dev VM (ReleaseEnv.clean_pairs/0 returns [] when no
+  # release vars are detected). Caller-explicit `:env` is appended after the
+  # cleanup so it can always override specific vars if needed.
   defp env_pairs(opts, task_id) do
     base =
       case Keyword.fetch(opts, :env) do
@@ -815,12 +825,14 @@ defmodule Arbiter.Worker.ClaudeSession do
         _ -> Arbiter.Agents.Claude.ConfigDir.env()
       end
 
+    release_clean = Arbiter.Worker.ReleaseEnv.clean_pairs()
+
     case task_id do
       id when is_binary(id) and id != "" ->
-        base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
+        release_clean ++ base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
 
       _ ->
-        base
+        release_clean ++ base
     end
   end
 end
