@@ -1447,6 +1447,55 @@ defmodule Arbiter.Worker.ReviewGateTest do
       wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 3_000)
       assert Arbiter.Test.StubMerger.merge_count("acme/repo#88") >= 1
     end
+
+    # Regression for bd-7d5smn: the pre-review PR was opened with the internal
+    # "Merge <id>: ..." title prefix instead of the clean task title.
+    test "pre-review PR uses the clean task title, not the internal merge_title prefix",
+         %{repo: repo, ws: ws} do
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.next_open_ref("acme/repo#89")
+
+      task = new_task(ws, %{title: "Add frobulation support"})
+
+      {pid, _branch} =
+        start_author(task, repo, %{merger_adapter_override: Arbiter.Test.StubMerger})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      opened = Arbiter.Test.StubMerger.last_open()
+      assert opened != nil, "pre-review PR must have been opened"
+
+      assert opened.title == "Add frobulation support",
+             "PR title must be the clean task title, got: #{inspect(opened.title)}"
+
+      refute String.contains?(opened.title, "Merge #{task.id}"),
+             "PR title must NOT carry the internal fleet prefix"
+    end
+
+    # Regression for bd-7d5smn: the pre-review PR was opened with a filled raw
+    # template body rather than the worker-authored pr_body stored on the task.
+    test "pre-review PR uses the worker-authored pr_body when present (bd-7d5smn)",
+         %{repo: repo, ws: ws} do
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.next_open_ref("acme/repo#90")
+
+      task = new_task(ws)
+      worker_body = "## Summary\nFixed the thing.\n\n## Test plan\n- [x] mix test"
+      {:ok, task} = Ash.update(task, %{pr_body: worker_body}, action: :update)
+
+      {pid, _branch} =
+        start_author(task, repo, %{merger_adapter_override: Arbiter.Test.StubMerger})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      opened = Arbiter.Test.StubMerger.last_open()
+      assert opened != nil, "pre-review PR must have been opened"
+
+      assert opened.description == worker_body,
+             "PR body must be the worker-authored pr_body, got: #{inspect(opened.description)}"
+    end
   end
 
   describe "review-gate hardening (bd-2y0gd5)" do
