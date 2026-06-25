@@ -86,7 +86,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     root = resolve_root()
     # Persist the root so `arb start/restart/update` resolve it from any cwd.
     Start.record_home(root)
-    arbiter_home = Path.join(System.user_home!(), ".arbiter")
+    arbiter_home = arbiter_home_path()
     path = unit_path(scope)
     contents = unit_contents(scope, arbiter_home)
 
@@ -146,11 +146,16 @@ defmodule ArbiterCli.Cmd.InstallService do
     end
   end
 
-  # Capture the installing shell's PATH into `<arbiter_home>/arbiter.env` so
-  # the login-less systemd service can find agent CLIs (e.g. `claude` in
-  # ~/.local/bin, mise shims) that live outside the stripped system PATH.
-  # Uses the same idempotent merge as `capture_secrets/1`.
-  defp capture_path(arbiter_home) do
+  @doc """
+  Capture the installing shell's PATH into `<arbiter_home>/arbiter.env` so
+  the login-less systemd service can find agent CLIs (e.g. `claude` in
+  ~/.local/bin, mise shims) that live outside the stripped system PATH.
+  Uses the same idempotent merge as `capture_secrets/1`.
+  Called from `arb install service` and from `arb server deploy` (to refresh
+  the PATH on every release deploy, preventing stale or test-corrupted values).
+  """
+  @spec capture_path(String.t()) :: :written | :skipped
+  def capture_path(arbiter_home) do
     case System.get_env("PATH") do
       v when is_binary(v) and v != "" ->
         env_path = Path.join(arbiter_home, "arbiter.env")
@@ -422,6 +427,19 @@ defmodule ArbiterCli.Cmd.InstallService do
           "could not locate the Arbiter project root (no compose.yml found)",
           "Set ARB_HOME to your Arbiter checkout, or run `arb install-service` from inside it."
         )
+    end
+  end
+
+  @doc """
+  The arbiter data home directory. Defaults to `~/.arbiter`; tests override
+  via the `:bd2_arbiter_home` process-dict seam so they write to a tmp dir
+  rather than the real `~/.arbiter/arbiter.env`.
+  """
+  @spec arbiter_home_path() :: String.t()
+  def arbiter_home_path do
+    case Process.get(:bd2_arbiter_home) do
+      dir when is_binary(dir) -> dir
+      _ -> Path.join(System.user_home!(), ".arbiter")
     end
   end
 
