@@ -57,6 +57,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
   alias Arbiter.Worker.ClaudeSession
@@ -212,6 +213,71 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
+  @doc """
+  Session-level resume (bd-1z7624, #472): re-spawn the worker continuing the
+  task's PRIOR Claude session via `claude --print --resume <session_id>` in the
+  SAME preserved worktree — NOT a fresh agent. This is the manual trigger for
+  the automatic session-resume machinery from bd-t9uq25: it looks up the task's
+  most-recent captured `session_id` (from the usage ledger) and threads it into
+  the spawn, so the worker's first session opens with `--resume` and the prior
+  session's full context is preserved.
+
+  Distinct from `resume/2` (bd-auma3z), which attaches a *fresh* agent briefed
+  with a git-derived summary. Session resume keeps the original mind; use it
+  when the prior run stopped mid-task (token exhaustion, kill, crash-exit) and
+  you want it to literally pick up where it left off — the same thing the
+  `:exited_without_done` auto-resume does, triggered manually for a task.
+
+  ## Steps
+
+  1. Load + validate the task (must not be `:closed`).
+  2. Refuse if a worker is still actively working the task — stop it first.
+  3. Resolve the repo (explicit opt, else the task's most recent run's repo).
+  4. Require the preserved worktree to still exist on disk (`{:error,
+     :no_outpost}` if it was cleaned up — nothing to resume; dispatch fresh).
+  5. Look up the most-recent captured `session_id` for the task. No session id
+     on record → `{:error, :no_session}` (nothing to resume at the session
+     level; dispatch fresh instead). We never silently start a fresh session.
+  6. Stop any lingering prior worker so a fresh run row starts cleanly.
+  7. Delegate to `dispatch/2` with `:resume_session_id` set — the worker injects
+     `--resume <session_id>` into its first spawn and stashes the *pristine*
+     argv, so the bd-t9uq25 auto-resume keeps working correctly on top.
+
+  Returns the same `{:ok, dispatch_result()}` / `{:error, reason}` shape as
+  `dispatch/2`. Session-resume-specific errors: `{:error, :no_outpost}`,
+  `{:error, :no_session}`, `{:error, {:acolyte_active, status}}`,
+  `{:error, :repo_unknown}`.
+  """
+  @spec resume_session(String.t(), dispatch_opts()) ::
+          {:ok, dispatch_result()} | {:error, term()}
+  def resume_session(task_id, opts \\ []) when is_binary(task_id) do
+    with {:ok, task} <- load_task(task_id),
+         :ok <- ensure_not_closed(task),
+         :ok <- ensure_not_active(task_id),
+         {:ok, repo} <- resolve_resume_repo(task, opts),
+         {:ok, _worktree_path} <- resume_worktree(task, repo),
+         {:ok, session_id} <- latest_session_id(task_id) do
+      prior_run_id = latest_run_id(task_id)
+
+      # Free the registry slot the same way resume/2 does: a stopped worker
+      # lingers in :failed, still registered under task_id, and would make
+      # dispatch/2 attach to the dead one instead of starting a fresh run.
+      # Stopping it never touches the worktree, so it stays preserved.
+      _ = stop_prior_worker(task_id)
+
+      resume_opts =
+        opts
+        |> Keyword.put(:repo, repo)
+        |> Keyword.put(:start_claude, true)
+        |> Keyword.put(:resume, true)
+        |> Keyword.put(:resume_session_id, session_id)
+        |> Keyword.put(:resumed_from_run_id, prior_run_id)
+        |> Keyword.put(:existing_pr_ref, task.pr_ref)
+
+      dispatch(task_id, resume_opts)
+    end
+  end
+
   # Resume only applies to a stopped/failed/dead worker. If a worker is still
   # live in a working state, refuse rather than stomp in-flight work — the
   # operator should `arb worker stop` it first. A :failed (the stopped state)
@@ -298,6 +364,29 @@ defmodule Arbiter.Worker.Dispatch do
     |> List.first()
   rescue
     _ -> nil
+  end
+
+  # The most-recent captured upstream session id for the task, newest first.
+  # Drawn from the usage ledger (`Arbiter.Usage.Event`), where the worker
+  # persists each Claude session's `session_id` on its terminal `result` event.
+  # The task_id filter is exact, so ReviewGate reviewer rows (which carry a
+  # `#review` suffix) are excluded — we resume the author's session, not a
+  # reviewer's. `{:error, :no_session}` when none was ever captured: the task
+  # was never worked by a session-capable agent, so there is nothing to resume
+  # at the session level (the caller must dispatch fresh).
+  defp latest_session_id(task_id) when is_binary(task_id) do
+    Event
+    |> Ash.Query.filter(task_id == ^task_id and not is_nil(session_id))
+    |> Ash.Query.sort(occurred_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Event{session_id: sid} when is_binary(sid) and sid != "" -> {:ok, sid}
+      _ -> {:error, :no_session}
+    end
+  rescue
+    _ -> {:error, :no_session}
   end
 
   # `review: true` is the convenience hook used by `arb review`: it forces the
@@ -431,6 +520,10 @@ defmodule Arbiter.Worker.Dispatch do
         |> Map.put(:resume, true)
         |> put_if_present(:resumed_from_run_id, Keyword.get(opts, :resumed_from_run_id))
         |> put_if_present(:existing_pr_ref, Keyword.get(opts, :existing_pr_ref))
+        # bd-1z7624: session-level resume threads the prior session id so the
+        # worker's first spawn opens with `claude --print --resume <id>`. nil on
+        # a fresh dispatch or the bd-auma3z fresh-agent resume.
+        |> put_if_present(:resume_session_id, Keyword.get(opts, :resume_session_id))
 
       _ ->
         base

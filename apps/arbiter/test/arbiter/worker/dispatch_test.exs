@@ -2,8 +2,9 @@ defmodule Arbiter.Worker.DispatchTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Tasks.{Issue, Workspace}
+  alias Arbiter.Usage.Event
   alias Arbiter.Worker
-  alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.{Dispatch, Worktree}
   alias Arbiter.Workers.Run
   require Ash.Query
 
