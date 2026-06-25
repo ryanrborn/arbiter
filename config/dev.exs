@@ -13,12 +13,9 @@ config :arbiter, :worktree_root, Path.expand("~/dev/arbiter-worktrees")
 # (Arbiter.Worker.OutputLog). One file per run: <root>/<run_id>.log.
 config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-worker-logs")
 
-config :arbiter, Arbiter.Repo,
-  database: Path.expand("~/dev/arbiter_dev.sqlite3"),
-  journal_mode: :wal,
-  busy_timeout: 5000,
-  stacktrace: true,
-  pool_size: 5
+# DB path is set in runtime.exs via DATABASE_PATH (all envs). Stacktrace is
+# dev-only; the rest of the Repo config is covered by the runtime block.
+config :arbiter, Arbiter.Repo, stacktrace: true
 
 config :arbiter_web, ArbiterWeb.Endpoint,
   http: [ip: {0, 0, 0, 0}, port: 4848],
