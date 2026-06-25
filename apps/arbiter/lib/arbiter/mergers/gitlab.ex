@@ -297,6 +297,29 @@ defmodule Arbiter.Mergers.Gitlab do
   def list_review_feedback(mr_ref) when is_binary(mr_ref),
     do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
 
+  # The unresolved review threads on an MR — the provider-agnostic "open review
+  # feedback" signal PRPatrol triggers on (bd-823q7e). GitLab models a review
+  # thread as a *discussion* whose notes carry `resolvable` / `resolved`; a
+  # discussion is open when it has at least one resolvable note that is not
+  # resolved. Non-resolvable, system, and individual (non-discussion) notes are
+  # ignored. Each open discussion is normalized to a `t:review_thread/0`.
+  @impl true
+  def list_open_review_threads(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, discussions} <-
+           request(cfg, :get, "/merge_requests/#{iid}/discussions", params: [per_page: 100])
+           |> handle_json() do
+      threads =
+        discussions
+        |> List.wrap()
+        |> Enum.filter(&unresolved_discussion?/1)
+        |> Enum.map(&normalize_discussion/1)
+
+      {:ok, threads}
+    end
+  end
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
@@ -676,6 +699,31 @@ defmodule Arbiter.Mergers.Gitlab do
     diff = Map.get(change, "diff") || ""
 
     "diff --git a/#{old_path} b/#{new_path}\n--- a/#{old_path}\n+++ b/#{new_path}\n" <> diff
+  end
+
+  # A discussion is an *open review thread* when it has at least one resolvable
+  # note that is not yet resolved. GitLab marks the diff/inline notes that make
+  # up a review thread as `resolvable: true`; general comments and system notes
+  # are `resolvable: false` and never count.
+  defp unresolved_discussion?(%{"notes" => notes}) when is_list(notes) do
+    Enum.any?(notes, fn note ->
+      Map.get(note, "resolvable") == true and Map.get(note, "resolved") != true
+    end)
+  end
+
+  defp unresolved_discussion?(_), do: false
+
+  defp normalize_discussion(%{} = discussion) do
+    first = discussion |> Map.get("notes") |> List.wrap() |> List.first() || %{}
+    position = Map.get(first, "position") || %{}
+
+    %{
+      id: Map.get(discussion, "id"),
+      path: Map.get(position, "new_path") || Map.get(position, "old_path"),
+      line: Map.get(position, "new_line") || Map.get(position, "old_line"),
+      author: get_in(first, ["author", "username"]),
+      body: Map.get(first, "body")
+    }
   end
 
   defp post_summary_note(cfg, iid, body, prefix) do

@@ -81,6 +81,34 @@ defmodule Arbiter.Mergers.Github do
   # How much of each failing check's output to keep in the fix-pass briefing.
   @log_tail_limit 4_000
 
+  # GraphQL query for a PR's review threads + their resolution state. REST has
+  # no `isResolved` field, so unresolved-thread detection (bd-823q7e) goes
+  # through GraphQL. `first: 100` covers all but pathological PRs; we don't
+  # paginate (PRPatrol only needs "are there any open threads", and the
+  # follow-up worker re-reads the PR itself).
+  @review_threads_query """
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        reviewThreads(first: 100) {
+          nodes {
+            id
+            isResolved
+            path
+            line
+            comments(first: 1) {
+              nodes {
+                body
+                author { login }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
@@ -358,6 +386,28 @@ defmodule Arbiter.Mergers.Github do
         end)
 
       {:ok, mrs}
+    end
+  end
+
+  # The unresolved review threads on a PR. GitHub only exposes per-thread
+  # resolution state through GraphQL (`pullRequest.reviewThreads { isResolved }`);
+  # the REST `/pulls/:n/comments` surface `list_review_feedback/1` uses has no
+  # `isResolved`, so a COMMENTED review's inline comments are invisible there.
+  # We keep only the unresolved nodes and normalize each to a `t:review_thread/0`.
+  @impl true
+  def list_open_review_threads(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_review_threads(cfg, owner, repo, number) do
+      threads =
+        body
+        |> get_in(["data", "repository", "pullRequest", "reviewThreads", "nodes"])
+        |> List.wrap()
+        |> Enum.reject(&is_nil/1)
+        |> Enum.reject(fn node -> Map.get(node, "isResolved") == true end)
+        |> Enum.map(&normalize_review_thread/1)
+
+      {:ok, threads}
     end
   end
 
@@ -879,6 +929,65 @@ defmodule Arbiter.Mergers.Github do
     case Integer.parse(str) do
       {n, ""} when n > 0 -> {:ok, n}
       _ -> :error
+    end
+  end
+
+  # ---- Internals: review threads (GraphQL) ---------------------------------
+
+  # POST the review-threads query to GitHub's GraphQL endpoint. GraphQL returns
+  # HTTP 200 even for query-level errors (carried in a top-level "errors" list),
+  # so surface those as an error rather than silently treating an error payload
+  # as "no threads".
+  defp graphql_review_threads(cfg, owner, repo, number) do
+    variables = %{"owner" => owner, "repo" => repo, "number" => number}
+    payload = %{"query" => @review_threads_query, "variables" => variables}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp normalize_review_thread(node) do
+    comment =
+      node
+      |> get_in(["comments", "nodes"])
+      |> List.wrap()
+      |> List.first()
+      |> Kernel.||(%{})
+
+    %{
+      id: Map.get(node, "id"),
+      path: Map.get(node, "path"),
+      line: Map.get(node, "line"),
+      author: get_in(comment, ["author", "login"]),
+      body: Map.get(comment, "body")
+    }
+  end
+
+  defp graphql_error_message(errors) do
+    errors
+    |> Enum.map(&Map.get(&1, "message"))
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("; ")
+    |> case do
+      "" -> "GraphQL query error"
+      msg -> msg
     end
   end
 

@@ -9,19 +9,25 @@ defmodule Arbiter.Workflows.PRPatrol do
   A PR is considered "actionable" when any of these is true:
 
     * Any review on the PR has `state == "CHANGES_REQUESTED"`
-      (highest-priority signal).
+      (highest-priority signal), via `list_review_feedback/1`.
+
+    * The PR has at least one **unresolved review thread / inline review
+      comment**, via the adapter's `list_open_review_threads/1` primitive
+      (bd-823q7e). This catches a `COMMENTED` review that leaves inline
+      comments without requesting changes — e.g. an automated reviewer — which
+      the CHANGES_REQUESTED signal alone misses.
+
+  Both signals are read through the provider-agnostic `Arbiter.Mergers.Merger`
+  adapter: PRPatrol never sees GitHub GraphQL or GitLab discussion shapes, only
+  the normalized `changes_requested` boolean and `t:Arbiter.Mergers.Merger.review_thread/0`
+  list. An adapter without a thread surface (e.g. `Direct`) simply doesn't
+  implement `list_open_review_threads/1`; PRPatrol guards with
+  `function_exported?/3` and treats its absence as "no open review feedback".
 
   Future triggers (deferred to a follow-up task):
 
     * `statusCheckRollup` contains FAILURE — needs the GraphQL API or a
       separate `check-runs` fetch keyed off the PR head SHA.
-    * Unresolved review threads — only available via GraphQL
-      `pullRequest.reviewThreads`.
-
-  Both deferred triggers require API surface that doesn't exist on
-  `Arbiter.GitHub` yet; rather than building the surface speculatively, the
-  CHANGES_REQUESTED case (the most common in practice) is shipped first and
-  the other two are filed as follow-ups.
 
   ## Dedup
 
@@ -155,17 +161,53 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
     t_type = tracker_type(adapter)
 
-    if actionable?(adapter, mr_ref) and not deduped?(pr_number, t_type) do
-      task = create_follow_up(mr, state, t_type)
+    with reason when is_binary(reason) <- actionable_reason(adapter, mr_ref),
+         false <- deduped?(pr_number, t_type) do
+      task = create_follow_up(mr, state, t_type, reason)
       _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
+    else
+      _ -> :noop
     end
   end
 
-  defp actionable?(adapter, mr_ref) do
+  # The trigger reason this PR is actionable for (a human-readable string folded
+  # into the follow-up task), or nil when nothing needs attention. CHANGES_REQUESTED
+  # takes priority; otherwise any unresolved review thread / inline comment fires.
+  defp actionable_reason(adapter, mr_ref) do
+    cond do
+      changes_requested?(adapter, mr_ref) ->
+        "at least one review with state=CHANGES_REQUESTED"
+
+      true ->
+        case open_review_thread_count(adapter, mr_ref) do
+          n when n > 0 ->
+            "#{n} unresolved review thread(s) / inline review comment(s)"
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  defp changes_requested?(adapter, mr_ref) do
     case adapter.list_review_feedback(mr_ref) do
       {:ok, %{changes_requested: true}} -> true
       _ -> false
+    end
+  end
+
+  # The count of unresolved review threads, via the adapter's optional
+  # `list_open_review_threads/1` primitive. Adapters without a thread surface
+  # (e.g. Direct) don't export it — treat that as zero.
+  defp open_review_thread_count(adapter, mr_ref) do
+    if function_exported?(adapter, :list_open_review_threads, 1) do
+      case adapter.list_open_review_threads(mr_ref) do
+        {:ok, threads} when is_list(threads) -> length(threads)
+        _ -> 0
+      end
+    else
+      0
     end
   end
 
@@ -178,14 +220,14 @@ defmodule Arbiter.Workflows.PRPatrol do
     |> Enum.any?()
   end
 
-  defp create_follow_up(%{number: number, title: title, url: url}, state, t_type) do
+  defp create_follow_up(%{number: number, title: title, url: url}, state, t_type, reason) do
     issue_title = "PR ##{number}: #{title} needs follow-up"
 
     description =
       """
       Auto-filed by PRPatrol against #{state.repo}.
 
-      Trigger: at least one review with state=CHANGES_REQUESTED.
+      Trigger: #{reason}.
 
       Original PR: #{url}
       """
@@ -212,8 +254,11 @@ defmodule Arbiter.Workflows.PRPatrol do
     Arbiter.Mergers.adapters()
     |> Enum.find_value(fn {type, module} -> if module == adapter, do: type end)
     |> case do
-      nil -> raise(ArgumentError, "tracker_type/1: unregistered merger adapter #{inspect(adapter)}")
-      type -> type
+      nil ->
+        raise(ArgumentError, "tracker_type/1: unregistered merger adapter #{inspect(adapter)}")
+
+      type ->
+        type
     end
   end
 

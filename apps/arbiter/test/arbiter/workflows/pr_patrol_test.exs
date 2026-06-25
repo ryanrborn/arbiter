@@ -156,6 +156,109 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert is_pid(Worker.whereis(task.id))
     end
 
+    test "COMMENTED review with an unresolved review thread → 1 task created, worker spawned",
+         %{ws: ws} do
+      # The Copilot-on-#3609 case: the review is COMMENTED (not CHANGES_REQUESTED),
+      # so changes_requested? is false — but it left an inline comment that lives
+      # in an unresolved review thread, which the GraphQL primitive surfaces.
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"number" => 50, "title" => "commented only", "html_url" => "https://gh/pr/50"}
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/50/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "COMMENTED", "user" => %{"login" => "copilot"}}])
+
+          conn.request_path == "/repos/owner/repo/pulls/50/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and conn.request_path == "/graphql" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{
+                    "reviewThreads" => %{
+                      "nodes" => [
+                        %{
+                          "id" => "RT_1",
+                          "isResolved" => false,
+                          "path" => "lib/x.ex",
+                          "line" => 5,
+                          "comments" => %{
+                            "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            })
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      [task] = tasks_for_repo()
+      assert task.tracker_ref == "50"
+      assert task.title =~ "PR #50"
+      assert task.description =~ "unresolved review thread"
+      assert is_pid(Worker.whereis(task.id))
+    end
+
+    test "COMMENTED review with all threads resolved → no task", %{ws: ws} do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 51, "title" => "resolved", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/51/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "COMMENTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/51/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and conn.request_path == "/graphql" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{
+                    "reviewThreads" => %{
+                      "nodes" => [%{"id" => "RT_1", "isResolved" => true}]
+                    }
+                  }
+                }
+              }
+            })
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = PRPatrol.tick(name)
+      assert tasks_for_repo() == []
+    end
+
     test "dedup: second tick with the same actionable PR does NOT create another task", %{ws: ws} do
       stub(fn conn ->
         cond do

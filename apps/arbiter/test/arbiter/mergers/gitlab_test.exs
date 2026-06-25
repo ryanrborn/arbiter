@@ -714,4 +714,56 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :validation_failed}} = Gitlab.ref_for_pr("nonsense", %{})
     end
   end
+
+  describe "list_open_review_threads/1" do
+    test "GETs discussions and returns only unresolved resolvable threads, normalized" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "#{base_path()}/#{@iid}/discussions"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json([
+          # Unresolved resolvable diff thread → kept.
+          %{
+            "id" => "disc_open",
+            "notes" => [
+              %{
+                "resolvable" => true,
+                "resolved" => false,
+                "body" => "please fix",
+                "author" => %{"username" => "reviewer"},
+                "position" => %{"new_path" => "lib/foo.ex", "new_line" => 9}
+              }
+            ]
+          },
+          # Resolved thread → dropped.
+          %{
+            "id" => "disc_resolved",
+            "notes" => [%{"resolvable" => true, "resolved" => true, "body" => "ok"}]
+          },
+          # Non-resolvable general note → dropped.
+          %{
+            "id" => "disc_general",
+            "notes" => [%{"resolvable" => false, "body" => "just a comment"}]
+          }
+        ])
+      end)
+
+      assert {:ok, [thread]} = Gitlab.list_open_review_threads(@ref)
+      assert thread.id == "disc_open"
+      assert thread.path == "lib/foo.ex"
+      assert thread.line == 9
+      assert thread.author == "reviewer"
+      assert thread.body == "please fix"
+    end
+
+    test "no discussions → {:ok, []}" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      assert {:ok, []} = Gitlab.list_open_review_threads(@ref)
+    end
+  end
 end
