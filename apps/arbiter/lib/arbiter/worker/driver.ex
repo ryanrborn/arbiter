@@ -248,12 +248,12 @@ defmodule Arbiter.Worker.Driver do
     {:stop, :normal, state}
   end
 
+  def handle_info(_msg, state), do: {:noreply, state}
+
   @impl true
   def terminate(_reason, state) do
     maybe_cleanup_worktree(state)
   end
-
-  def handle_info(_msg, state), do: {:noreply, state}
 
   # ---- internals ---------------------------------------------------------
 
