@@ -541,7 +541,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "stats"
       assert html =~ "Open Issues"
       assert html =~ "Active Workers"
-      assert html =~ "Admiral Inbox"
+      assert html =~ "Coordinator Inbox"
       assert html =~ "all clear"
     end
   end

@@ -142,6 +142,10 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply, refresh_admiral_inbox(socket)}
   end
 
+  def handle_info({:mailbox_cleared, _workspace_id}, socket) do
+    {:noreply, refresh_admiral_inbox(socket)}
+  end
+
   # Lightweight 1s tick: only advances the clock so elapsed counters and
   # relative timestamps stay live. No data reads here.
   def handle_info(:tick, socket) do
