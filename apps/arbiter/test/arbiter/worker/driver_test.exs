@@ -523,6 +523,37 @@ defmodule Arbiter.Worker.DriverTest do
       assert File.exists?(Path.join(wt_path, "scratch.txt"))
     end
 
+    test "removes the worktree when the worker fails (claude_driven :failed path)", %{
+      ws: ws,
+      wt_path: wt_path
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "cw-fail", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true,
+          worktree_path: wt_path,
+          cleanup_worktree: true
+        )
+
+      :ok = Worker.fail(worker_pid, :claude_crashed)
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      refute File.dir?(wt_path)
+    end
+
     test "skips cleanup when the worktree has commits ahead of base", %{ws: ws, wt_path: wt_path} do
       # Commit a new file in the worktree, then have a clean working tree.
       File.write!(Path.join(wt_path, "new.txt"), "claude wrote me\n")
