@@ -33,6 +33,7 @@ defmodule Arbiter.Test.StubMerger do
         open_ref: "!stub",
         opens: [],
         review_feedbacks: %{},
+        review_threads: %{},
         update_branches: %{},
         update_branch_result: :ok,
         failing_checks: %{}
@@ -72,6 +73,13 @@ defmodule Arbiter.Test.StubMerger do
   def set_review_feedback(ref, feedback) when is_map(feedback) do
     ensure_started()
     Agent.update(@name, fn s -> put_in(s, [:review_feedbacks, ref], feedback) end)
+    :ok
+  end
+
+  @doc "Set the `list_open_review_threads/1` result list for `ref`."
+  def set_review_threads(ref, threads) when is_list(threads) do
+    ensure_started()
+    Agent.update(@name, fn s -> put_in(s, [:review_threads, ref], threads) end)
     :ok
   end
 
@@ -191,6 +199,13 @@ defmodule Arbiter.Test.StubMerger do
     {:ok, result}
   end
 
+  @impl true
+  def list_open_review_threads(ref) do
+    ensure_started()
+    threads = Agent.get(@name, fn s -> Map.get(s.review_threads, ref, []) end)
+    {:ok, threads}
+  end
+
   # ---- internals ----------------------------------------------------------
 
   defp ensure_started do
@@ -204,6 +219,7 @@ defmodule Arbiter.Test.StubMerger do
                    open_ref: "!stub",
                    opens: [],
                    review_feedbacks: %{},
+                   review_threads: %{},
                    update_branches: %{},
                    update_branch_result: :ok,
                    failing_checks: %{}
