@@ -210,7 +210,7 @@ defmodule Arbiter.Trackers.Jira do
           _ -> "currentUser()"
         end
 
-      jql = "assignee = #{assignee_jql} AND resolution = Unresolved ORDER BY updated DESC"
+      jql = "assignee = #{assignee_jql} AND statusCategory != Done ORDER BY updated DESC"
 
       fetch_search_pages(cfg, jql, nil, [])
     end
@@ -296,9 +296,9 @@ defmodule Arbiter.Trackers.Jira do
         {:ok, direct}
 
       nil ->
-        case current_status_name(cfg, ref) do
-          {:ok, ^target_status} -> :none
-          {:ok, current} -> first_hop_transition(cfg, transitions, current, target_status)
+        case current_status_info(cfg, ref) do
+          {:ok, ^target_status, _cat} -> :none
+          {:ok, current, _cat} -> first_hop_transition(cfg, transitions, current, target_status)
           {:error, _} -> :none
         end
     end
@@ -574,10 +574,20 @@ defmodule Arbiter.Trackers.Jira do
   # No direct edge to the target — fetch the issue's current status and BFS the
   # configured transition graph for a path, executing each hop in turn.
   defp resolve_multi_hop(cfg, ref, target_status) do
-    with {:ok, current_status} <- current_status_name(cfg, ref) do
+    with {:ok, current_status, current_category} <- current_status_info(cfg, ref) do
       cond do
         current_status == target_status ->
-          # Already there — nothing to do.
+          # Already at the exact target status — nothing to do.
+          :ok
+
+        current_category == "done" ->
+          # Issue is already in Jira's Done status category (statusCategory.key = "done")
+          # even though the exact status name differs from the target (e.g. issue is
+          # "Done" but workspace maps :closed to "Code Merged"). Treat as a no-op:
+          # the issue is complete and no further transition is needed. Without this check
+          # the BFS returns :no_transition_path and the sync layer escalates — which
+          # produces noisy escalations when reconciling wrongly-imported beads whose
+          # Jira tickets were already Done.
           :ok
 
         true ->
@@ -687,21 +697,26 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
-  defp current_status_name(cfg, ref) do
+  # Returns {:ok, status_name, category_key} where category_key is the
+  # statusCategory.key string (e.g. "done", "indeterminate", "new") or nil
+  # when Jira omits the statusCategory field.
+  defp current_status_info(cfg, ref) do
     case request(cfg, :get, "/issue/#{ref}", params: [fields: "status"]) do
       {:ok, %Req.Response{status: status_code, body: body}} when status_code in 200..299 ->
-        case get_in(body, ["fields", "status", "name"]) do
-          name when is_binary(name) and name != "" ->
-            {:ok, name}
+        status = get_in(body, ["fields", "status"]) || %{}
+        name = status["name"]
+        category_key = get_in(status, ["statusCategory", "key"])
 
-          _ ->
-            {:error,
-             %Error{
-               kind: :validation_failed,
-               status: status_code,
-               message: "issue #{ref} response missing fields.status.name",
-               raw: body
-             }}
+        if is_binary(name) and name != "" do
+          {:ok, name, category_key}
+        else
+          {:error,
+           %Error{
+             kind: :validation_failed,
+             status: status_code,
+             message: "issue #{ref} response missing fields.status.name",
+             raw: body
+           }}
         end
 
       {:ok, %Req.Response{status: status_code, body: body}} ->
