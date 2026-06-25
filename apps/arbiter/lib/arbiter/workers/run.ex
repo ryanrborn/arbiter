@@ -64,6 +64,7 @@ defmodule Arbiter.Workers.Run do
         :repo,
         :workspace_id,
         :worker_type,
+        :model,
         :status,
         :started_at,
         :completed_at,
