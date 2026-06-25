@@ -1015,7 +1015,9 @@ defmodule Arbiter.Worker do
             {:noreply, on_claude_done(state)}
 
           true ->
-            {:noreply, fail_stopped(state, session)}
+            # bd-t9uq25: exited without `arb done` — try to resume the session
+            # in place (bounded) before failing + discarding the worktree.
+            {:noreply, maybe_resume_continuation(state, session)}
         end
 
       :error ->
@@ -1683,6 +1685,194 @@ defmodule Arbiter.Worker do
     If you skipped the work, do it now and commit. Then print `arb done`
     again on its own line.
     """
+  end
+
+  # ---- bd-t9uq25: resume a session that exited mid-task without `arb done` ----
+  #
+  # The deferred stop check routes here when a worker subprocess exits, no other
+  # session is live, and the run never signalled `arb done`. Rather than failing
+  # and discarding the (preserved) worktree, re-spawn the SAME Claude session via
+  # `claude --print --resume <session_id> "<continue>"` so it picks up where it
+  # left off (verified to preserve context headlessly under --print). Bounded two
+  # ways so a stuck agent can't loop forever:
+  #   * a hard attempt cap (`:resume_cap`, default 3), and
+  #   * a no-progress guard: if a resumed session exits having changed nothing in
+  #     the worktree (same fingerprint as when it started), stop and fail.
+  # Only `:exited_without_done` stops resume; auth/credit/rate/crash/kill fall
+  # straight through to fail_stopped (keeping the credential-watchdog escalation).
+  @resumable_stop_categories [:exited_without_done]
+
+  defp maybe_resume_continuation(%State{meta: meta} = state, session) do
+    exit_status = Map.get(session, :exit_status)
+    output_lines = Enum.reverse(Map.get(session, :output_lines, []))
+    reason = Arbiter.Worker.StopReason.classify(exit_status, output_lines)
+
+    session_id =
+      session |> Arbiter.Worker.ClaudeSession.usage_summary() |> Map.get(:session_id)
+
+    cap = resume_cap(meta)
+    attempts = (meta && Map.get(meta, :resume_attempts)) || 0
+    prev_fp = meta && Map.get(meta, :resume_fingerprint)
+    cur_fp = worktree_fingerprint(state)
+
+    case resume_decision(reason.category, session_id, attempts, cap, prev_fp, cur_fp) do
+      :resume ->
+        case respawn_with_resume(state, session_id, cur_fp) do
+          {:ok, new_state} -> new_state
+          {:error, _why} -> fail_stopped(state, session)
+        end
+
+      {:fail, why} ->
+        if why in [:cap_exhausted, :no_progress] do
+          Logger.info(
+            "Worker: task=#{state.task_id} not resuming (#{why}, attempt " <>
+              "#{attempts}/#{cap}) — failing."
+          )
+        end
+
+        fail_stopped(state, session)
+    end
+  end
+
+  # Pure resume/fail decision — isolated so the guard logic (hard cap +
+  # no-progress) is unit-testable without spawning a session. Returns `:resume`
+  # or `{:fail, why}`.
+  @doc false
+  def resume_decision(category, session_id, attempts, cap, prev_fp, cur_fp) do
+    cond do
+      category not in @resumable_stop_categories -> {:fail, :not_resumable_category}
+      is_nil(session_id) -> {:fail, :no_session_id}
+      attempts >= cap -> {:fail, :cap_exhausted}
+      attempts > 0 and not is_nil(prev_fp) and cur_fp == prev_fp -> {:fail, :no_progress}
+      true -> :resume
+    end
+  end
+
+  # Re-spawn Claude against the SAME session id with a terse "keep going" prompt,
+  # in the same worktree. Mirrors respawn_with_commit_nudge/2 but injects
+  # `--resume <session_id>` and does NOT persist the resume argv onto
+  # :claude_spawn — each resume rebuilds from the pristine spawn args + the
+  # latest session id, so we never stack multiple `--resume` flags.
+  defp respawn_with_resume(%State{meta: meta} = state, session_id, fingerprint) do
+    spawn_args = meta && Map.get(meta, :claude_spawn)
+    prompt = continue_prompt(state)
+
+    with %{} = port_args <- spawn_args || :no_spawn_args,
+         {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt),
+         {:ok, port} <- safe_open_port(new_args) do
+      next_attempts = ((meta && Map.get(meta, :resume_attempts)) || 0) + 1
+
+      Logger.info(
+        "Worker: bd-t9uq25 resuming task=#{state.task_id} session=#{session_id} " <>
+          "(attempt #{next_attempts}/#{resume_cap(meta)})"
+      )
+
+      now = DateTime.utc_now()
+
+      session =
+        %{
+          task_id: state.task_id,
+          topic: "worker:" <> state.task_id,
+          line_cap: Arbiter.Worker.ClaudeSession.line_cap(),
+          done_regex: Arbiter.Worker.ClaudeSession.done_regex()
+        }
+        |> Map.put(:port, port)
+        |> Map.put(:output_lines, [])
+        |> Map.put(:line_buf, "")
+        |> Map.put(:exit_status, nil)
+        |> Map.put(:exited_at, nil)
+        |> Map.put(:started_at, now)
+        |> Map.put(:activity, "resuming")
+        |> Map.put(:activity_at, now)
+        |> Map.put(:output_log, open_output_log(state))
+
+      new_meta =
+        (meta || %{})
+        |> Map.put(:resume_attempts, next_attempts)
+        |> Map.put(:resume_fingerprint, fingerprint)
+
+      sessions = Map.put(state.claude_sessions, port, session)
+
+      {:ok,
+       %State{
+         state
+         | claude_sessions: sessions,
+           meta: new_meta,
+           status: :running,
+           step_started_at: now
+       }}
+    else
+      :no_spawn_args -> {:error, :no_spawn_args}
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected, other}}
+    end
+  end
+
+  defp resume_cap(meta) do
+    (meta && Map.get(meta, :resume_cap)) ||
+      Application.get_env(:arbiter, :worker_resume_cap, 3)
+  end
+
+  # Insert `--resume <session_id>` immediately after `--print` and swap the
+  # prompt that follows it (same argv shape as inject_nudge_argv/2). No `--print`
+  # slot (test fixtures / custom commands) → can't build a resume invocation, so
+  # the caller falls back to failing.
+  @doc false
+  def inject_resume_argv(%{argv: argv} = port_args, session_id, prompt)
+       when is_list(argv) and is_binary(session_id) do
+    case Enum.find_index(argv, &(&1 == "--print")) do
+      nil ->
+        {:error, :no_print_slot}
+
+      idx when idx + 1 < length(argv) ->
+        {before, [_old_prompt | after_prompt]} = Enum.split(argv, idx + 1)
+        new_argv = before ++ ["--resume", session_id, prompt] ++ after_prompt
+        {:ok, %{port_args | argv: new_argv}}
+
+      _ ->
+        {:error, :no_print_slot}
+    end
+  end
+
+  def inject_resume_argv(_port_args, _session_id, _prompt), do: {:error, :missing_argv}
+
+  defp continue_prompt(%State{task_id: task_id}) do
+    """
+    Your previous session for task #{task_id} ended before you finished — you
+    did not print `arb done`. Your work so far is preserved in this worktree.
+    Pick up exactly where you left off, complete the remaining work, and when the
+    task is fully done print `arb done` on its own line.
+    """
+  end
+
+  # A content fingerprint of the worktree's work-in-progress: HEAD commit +
+  # tracked diff vs HEAD + the set of untracked files. The no-progress guard
+  # compares it across a resume — an identical fingerprint means the resumed
+  # session changed nothing. nil when there's no worktree on disk (the hard cap
+  # still bounds attempts).
+  defp worktree_fingerprint(%State{meta: meta}) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    if is_binary(worktree) and File.dir?(worktree) do
+      payload =
+        [
+          git_out(worktree, ["rev-parse", "HEAD"]),
+          git_out(worktree, ["diff", "HEAD"]),
+          git_out(worktree, ["ls-files", "--others", "--exclude-standard"])
+        ]
+        |> Enum.join("\n")
+
+      :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
+    end
+  end
+
+  defp git_out(worktree, args) do
+    case System.cmd("git", ["-C", worktree | args], stderr_to_stdout: true) do
+      {out, 0} -> out
+      _ -> ""
+    end
+  rescue
+    _ -> ""
   end
 
   # Final park: record on the task, escalate to the Admiral, fail the worker.
