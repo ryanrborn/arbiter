@@ -689,11 +689,18 @@ defmodule Arbiter.Worker.WatchdogTest do
         [%{status: :open, approved: false, block_reason: :needs_nonauthor_approval}]
       )
 
-      start_watchdog(pid, task_id, "!tnav", via_review_gate: true)
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!tnav", via_review_gate: true)
+          wait_until(fn -> Worker.state(pid).status == :completed end)
+        end)
 
-      wait_until(fn -> Worker.state(pid).status == :completed end)
       assert Worker.state(pid).meta.result == :merged
       assert StubMerger.merge_count("!tnav") >= 1
+      # The buggy path (missing `and not state.via_review_gate`) calls
+      # debounce_escalate_block which logs "merge blocked (needs_nonauthor_approval)".
+      # The fix must not take that path — assert the escalation log is absent.
+      refute log =~ "merge blocked (needs_nonauthor_approval)"
     end
   end
 
