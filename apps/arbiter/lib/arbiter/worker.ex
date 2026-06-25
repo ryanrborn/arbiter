@@ -2027,7 +2027,7 @@ defmodule Arbiter.Worker do
   # (bd-66ey1o: the ReviewGate approves in-process, it does NOT post a GitHub
   # review).
   defp merge_branch(%State{meta: meta} = state, branch, opts) when is_map(opts) do
-    title = Map.get(meta, :merge_title) || "Merge #{state.task_id}"
+    title = pr_title_for(state.task_id, meta)
     description = build_pr_body(state.task_id, Map.get(meta, :worktree_path))
 
     case do_open_mr(state, branch, title, description, opts) do
@@ -2036,19 +2036,56 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # Build the PR/MR body from the repo's pull_request_template.md, falling back
-  # to a minimal default when the template is absent or the task can't be loaded.
+  # The PR/MR title to open with. Uses the clean task title when available,
+  # falling back to the internal merge_title stashed in meta (bd-7d5smn: strip
+  # the "Merge <id>:" prefix from outbound PRs).
+  defp pr_title_for(task_id, meta) do
+    case Ash.get(Arbiter.Tasks.Issue, task_id) do
+      {:ok, task} when is_binary(task.title) and task.title != "" ->
+        task.title
+
+      _ ->
+        Map.get(meta, :merge_title) || "Merge #{task_id}"
+    end
+  rescue
+    _ -> Map.get(meta, :merge_title) || "Merge #{task_id}"
+  end
+
+  # Build the PR/MR body. Precedence (mirrors MergeQueue.pr_description_for/1,
+  # bd-53xrmi / bd-7d5smn):
+  #
+  #   1. Worker-authored pr_body stored on the task — verbatim, highest priority.
+  #   2. Repo's pull_request_template.md filled with task metadata.
+  #   3. PRTemplate.default_body/1 when no template file exists.
+  #
+  # Falls back to "" only when the task cannot be loaded at all.
   defp build_pr_body(task_id, worktree_path) do
     case Ash.get(Arbiter.Tasks.Issue, task_id) do
       {:ok, task} ->
-        template = is_binary(worktree_path) && PRTemplate.read(worktree_path)
-        if template, do: PRTemplate.fill(template, task), else: PRTemplate.default_body(task)
+        case task.pr_body do
+          b when is_binary(b) and b != "" ->
+            case String.trim(b) do
+              "" ->
+                fill_template_body(task, worktree_path)
+
+              _ ->
+                b
+            end
+
+          _ ->
+            fill_template_body(task, worktree_path)
+        end
 
       _ ->
         ""
     end
   rescue
     _ -> ""
+  end
+
+  defp fill_template_body(task, worktree_path) do
+    template = is_binary(worktree_path) && PRTemplate.read(worktree_path)
+    if template, do: PRTemplate.fill(template, task), else: PRTemplate.default_body(task)
   end
 
   # A merge failed. The adapter has already restored the canonical tree (the
@@ -2676,7 +2713,7 @@ defmodule Arbiter.Worker do
   # pr_ref so the MergeQueue adopts this PR rather than opening a duplicate.
   defp open_pr_without_merge(%State{} = state, adapter, workspace, branch, opts) do
     Arbiter.Mergers.prepare(workspace)
-    title = Map.get(state.meta, :merge_title) || "Merge #{state.task_id}"
+    title = pr_title_for(state.task_id, state.meta)
     description = build_pr_body(state.task_id, Map.get(state.meta, :worktree_path))
     open_opts = build_open_opts(state, opts)
 
