@@ -344,6 +344,78 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — multi-repo workspace (no repo in config)" do
+    test "patrol with explicit repo works when workspace config omits repo field", %{ws: _ws} do
+      # Simulates the leotech multi-repo shape: owner is set, but repo is absent
+      # from the workspace merge config. The per-patrol repo ("owner/explicit-repo")
+      # must be injected via prepare_with_repo so list_open/0 resolves the correct
+      # REST endpoint. Without the fix, list_open/0 would return {:error, config_missing}.
+      {:ok, multi_ws} =
+        Ash.create(Workspace, %{
+          name: "multi-repo-#{System.unique_integer([:positive])}",
+          prefix: "mr",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/explicit-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "number" => 60,
+                "title" => "multi-repo PR",
+                "html_url" => "https://gh/pr/60"
+              }
+            ])
+
+          conn.request_path == "/repos/owner/explicit-repo/pulls/60/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}
+            ])
+
+          conn.request_path == "/repos/owner/explicit-repo/pulls/60/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      name = String.to_atom("PRPatrol_multirepo_#{System.unique_integer([:positive])}")
+
+      {:ok, pid} =
+        PRPatrol.start_link(
+          repo: "owner/explicit-repo",
+          workspace_id: multi_ws.id,
+          interval_ms: 60_000,
+          name: name
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+      :ok = PRPatrol.tick(name)
+
+      tasks = tasks_for_repo()
+      assert length(tasks) == 1
+      [task] = tasks
+      assert task.tracker_ref == "60"
+      assert task.title =~ "PR #60"
+      assert task.workspace_id == multi_ws.id
+      assert is_pid(Worker.whereis(task.id))
+    end
+  end
+
   describe "tick/1 — error handling" do
     test "GitHub list API failure → bumps tick counter, does not crash", %{ws: ws} do
       stub(fn conn ->
