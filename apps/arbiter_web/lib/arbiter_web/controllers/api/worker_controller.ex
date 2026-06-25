@@ -22,6 +22,11 @@ defmodule ArbiterWeb.Api.WorkerController do
     * `GET  /api/workers/:task_id`        — :show (full snapshot inc. recent output).
       When no live worker exists for the task, falls back to the most recent
       `Arbiter.Workers.Run` row so finished/exited runs stay inspectable.
+    * `POST /api/workers/:task_id/resume` — :resume (bd-1z7624, #472).
+      Session-level resume: re-spawns the worker continuing the task's PRIOR
+      Claude session (`claude --print --resume <session_id>`) in the SAME
+      preserved worktree. Refuses (pointing at `arb dispatch`) when no prior
+      session/worktree exists — never silently starts fresh.
     * `POST /api/workers/:task_id/stop`   — :stop (terminate worker cleanly)
     * `GET  /api/workers/:task_id/log`    — :log (full, uncapped durable
       transcript of the task's most recent run; the audit source of record).
@@ -163,16 +168,23 @@ defmodule ArbiterWeb.Api.WorkerController do
   end
 
   @doc """
-  Resume a stopped worker (bd-auma3z). Re-attaches a fresh agent to the task's
-  preserved worktree with a git-derived briefing of the prior run's
-  work, so it continues rather than restarting from scratch. Always
-  claude-driven. Renders the same payload as `dispatch/2`.
+  Resume a stopped worker at the SESSION level (bd-1z7624, #472). Re-spawns the
+  worker continuing the task's PRIOR Claude session via `claude --print --resume
+  <session_id>` in the SAME preserved worktree, so the original mind picks up
+  where it left off — distinct from `arb dispatch` (a fresh session + worktree).
+
+  Backed by `Arbiter.Worker.Dispatch.resume_session/2`, which looks up the
+  task's most-recent captured `session_id` + preserved worktree and re-spawns
+  through the bd-t9uq25 resume path. Refuses with a clear error (pointing at
+  `arb dispatch`) when there is no resumable prior session or worktree — it
+  never silently starts fresh. Always claude-driven; renders the same payload
+  as `dispatch/2`.
   """
   def resume(conn, %{"task_id" => task_id} = params)
       when is_binary(task_id) and task_id != "" do
     opts = resume_opts(params)
 
-    case Dispatch.resume(task_id, opts) do
+    case Dispatch.resume_session(task_id, opts) do
       {:ok, result} ->
         conn
         |> put_status(:created)
@@ -188,7 +200,15 @@ defmodule ArbiterWeb.Api.WorkerController do
       {:error, :no_outpost} ->
         {:error,
          {:invalid_request,
-          "no preserved worktree for this task — nothing to resume; dispatch it fresh instead",
+          "no preserved worktree for this task — nothing to resume; start fresh with " <>
+            "`arb dispatch #{task_id}`",
+          %{task_id: task_id}}}
+
+      {:error, :no_session} ->
+        {:error,
+         {:invalid_request,
+          "no prior Claude session recorded for this task — nothing to resume at the " <>
+            "session level; start fresh with `arb dispatch #{task_id}`",
           %{task_id: task_id}}}
 
       {:error, :repo_unknown} ->
@@ -350,9 +370,9 @@ defmodule ArbiterWeb.Api.WorkerController do
   defp normalize_provider("gemini"), do: :gemini
   defp normalize_provider(_), do: nil
 
-  # Map request params onto `Dispatch.resume/2` opts. Repo is optional — resume
-  # falls back to the task's most recent run's repo when omitted. `--model` is an
-  # optional per-dispatch override, same as dispatch.
+  # Map request params onto `Dispatch.resume_session/2` opts. Repo is optional —
+  # resume falls back to the task's most recent run's repo when omitted.
+  # `--model` is an optional per-dispatch override, same as dispatch.
   defp resume_opts(params) do
     [repo: params["repo"]]
     |> add_model_override(params["model"])
