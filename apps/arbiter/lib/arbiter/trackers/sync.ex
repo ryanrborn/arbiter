@@ -272,6 +272,18 @@ defmodule Arbiter.Trackers.Sync do
   # gated-fields failure, so don't append the (misleading) status_map hint.
   defp log_hint(%{kind: :gated_fields_missing}), do: ""
 
+  # Provider's real error is already in the describe/1 output; appending the
+  # config hint here would be actively misleading.
+  defp log_hint(%{kind: :validation_failed}), do: ""
+  defp log_hint(%{kind: :unauthenticated}), do: ""
+  defp log_hint(%{kind: :forbidden}), do: ""
+  defp log_hint(%{kind: :server_error}), do: ""
+  defp log_hint(%{kind: :network}), do: ""
+
+  # No path through the graph IS a config-mismatch — keep the hint.
+  defp log_hint(%{kind: :no_transition_path}),
+    do: "Reconcile the workspace status_map / transition_graph with the tracker workflow."
+
   defp log_hint(_reason),
     do: "Reconcile the workspace status_map / transition_graph with the tracker workflow."
 
