@@ -392,10 +392,47 @@ defmodule Arbiter.Messages.AdmiralNotifier do
       "(e.g. `arb issue update <id> --qa-notes ... --deployment-notes ...`) and re-run the sync."
   end
 
+  # Provider explicitly rejected the payload (field-validation gate, required
+  # fields not populated, etc.). The provider's real reason is already in the
+  # "Error:" line — no secondary hint needed; the status_map hint would be
+  # actively misleading here.
+  defp sync_hint(%{kind: :validation_failed}), do: nil
+
+  # Auth / permission failures — config-mismatch hint is wrong; name the
+  # actual remediation so the operator goes to the right place.
+  defp sync_hint(%{kind: :unauthenticated}) do
+    "The tracker rejected the credentials — re-authenticate and update the workspace token."
+  end
+
+  defp sync_hint(%{kind: :forbidden}) do
+    "The tracker rejected the request as forbidden — verify that the API token " <>
+      "has the necessary permissions/scopes for this project and operation."
+  end
+
+  # Transient failures — no config change indicated.
+  defp sync_hint(%{kind: :server_error}) do
+    "The tracker returned a server error — this is likely transient. " <>
+      "Retry the sync or check the tracker's status page."
+  end
+
+  defp sync_hint(%{kind: :network}) do
+    "A network error occurred reaching the tracker — check connectivity and retry."
+  end
+
+  # Genuine config-mismatch: the adapter found the target status in status_map
+  # but BFS could not find any path through the configured transition_graph.
+  defp sync_hint(%{kind: :no_transition_path}) do
+    "No path exists through the configured `transition_graph` to the target status. " <>
+      "Reconcile the workspace `status_map` / `transition_graph` with the tracker's " <>
+      "actual workflow (see Arbiter.Trackers.Jira.Config) and re-run the sync."
+  end
+
+  # Catch-all for any other unexpected error: demote the config hint to a
+  # secondary suggestion rather than the primary explanation.
   defp sync_hint(_reason) do
-    "This usually means the workspace `status_map` / `transition_graph` " <>
-      "doesn't match the tracker's real workflow. Reconcile the config " <>
-      "(see Arbiter.Trackers.Jira.Config) and re-run the sync."
+    "If this persists unexpectedly, also check that the workspace `status_map` / " <>
+      "`transition_graph` matches the tracker's real workflow " <>
+      "(see Arbiter.Trackers.Jira.Config)."
   end
 
   # ---- core ---------------------------------------------------------------

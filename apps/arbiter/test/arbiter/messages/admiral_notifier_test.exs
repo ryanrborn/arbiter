@@ -356,6 +356,112 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
     end
   end
 
+  describe "tracker_sync_failed/3 (bd-1dun7v)" do
+    defp only_tracker_escalation(ws) do
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      escalation
+    end
+
+    test "raises an addressed escalation on a validation_failed error" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      reason = %Arbiter.Trackers.Jira.Error{
+        kind: :validation_failed,
+        status: 400,
+        message:
+          "QA Testing Notes and Deployment Notes must be filled out prior to transitioning to Code Review",
+        raw: nil
+      }
+
+      assert :ok =
+               AdmiralNotifier.tracker_sync_failed(
+                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-1"},
+                 :code_review,
+                 reason
+               )
+
+      escalation = only_tracker_escalation(ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "admiral"
+      assert escalation.directive_ref == task_id
+      assert escalation.subject =~ "tracker sync failed"
+      # The provider's real error must be front-and-center
+      assert escalation.body =~
+               "QA Testing Notes and Deployment Notes must be filled out prior to transitioning to Code Review"
+
+      # The misleading config-mismatch hint must NOT appear
+      refute escalation.body =~ "status_map"
+      refute escalation.body =~ "transition_graph"
+    end
+
+    test "includes a path-finding hint for no_transition_path (config mismatch)" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      reason = %Arbiter.Trackers.Jira.Error{
+        kind: :no_transition_path,
+        status: nil,
+        message: "no transition path to \"Code Review\" in the configured workflow graph",
+        raw: nil
+      }
+
+      assert :ok =
+               AdmiralNotifier.tracker_sync_failed(
+                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-2"},
+                 :code_review,
+                 reason
+               )
+
+      body = only_tracker_escalation(ws).body
+      # Provider error surfaced
+      assert body =~ "no transition path"
+      # Config hint is appropriate here
+      assert body =~ "transition_graph"
+    end
+
+    test "surfaces credentials hint for unauthenticated errors" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      reason = %Arbiter.Trackers.Jira.Error{
+        kind: :unauthenticated,
+        status: 401,
+        message: "HTTP 401",
+        raw: nil
+      }
+
+      assert :ok =
+               AdmiralNotifier.tracker_sync_failed(
+                 %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-3"},
+                 :in_progress,
+                 reason
+               )
+
+      body = only_tracker_escalation(ws).body
+      assert body =~ "credentials"
+      refute body =~ "status_map"
+    end
+
+    test "a sync failure with no workspace posts nothing" do
+      reason = %Arbiter.Trackers.Jira.Error{
+        kind: :validation_failed,
+        status: 400,
+        message: "some error",
+        raw: nil
+      }
+
+      assert :ok =
+               AdmiralNotifier.tracker_sync_failed(
+                 %{task_id: "bd-noworkspace", workspace_id: nil},
+                 :in_progress,
+                 reason
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
   describe "preflight_failed/2 (bd-awi4nw)" do
     alias Arbiter.Worker.StopReason
 
