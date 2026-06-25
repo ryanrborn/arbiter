@@ -136,6 +136,7 @@ defmodule Arbiter.Worker.Driver do
     Logger.warning("Worker.Driver hit max_ticks=#{m} for task=#{state.task_id}; stopping")
 
     safe(fn -> Worker.fail(state.worker_pid, {:driver_timeout, m}) end)
+    maybe_cleanup_worktree(state)
     {:stop, :normal, state}
   end
 
@@ -164,6 +165,7 @@ defmodule Arbiter.Worker.Driver do
           "Worker.Driver (claude_driven) hit max_ticks=#{m} for task=#{state.task_id}; stopping"
         )
 
+        maybe_cleanup_worktree(state)
         {:stop, :normal, state}
     end
   end
@@ -181,6 +183,7 @@ defmodule Arbiter.Worker.Driver do
           "Worker.Driver (claude_driven): worker failed for task=#{state.task_id}; leaving task :in_progress"
         )
 
+        maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
       %{status: status} when status in [:idle, :running, :awaiting] ->
@@ -227,19 +230,27 @@ defmodule Arbiter.Worker.Driver do
         )
 
         safe(fn -> Worker.fail(state.worker_pid, reason) end)
+        maybe_cleanup_worktree(state)
         {:stop, :normal, state}
     end
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{worker_pid: pid} = state) do
     Logger.warning("Worker.Driver: worker died for task=#{state.task_id}")
+    maybe_cleanup_worktree(state)
     {:stop, :normal, state}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, _reason}, %{machine_pid: pid} = state) do
     Logger.warning("Worker.Driver: machine died for task=#{state.task_id}")
     safe(fn -> Worker.fail(state.worker_pid, :machine_died) end)
+    maybe_cleanup_worktree(state)
     {:stop, :normal, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    maybe_cleanup_worktree(state)
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
