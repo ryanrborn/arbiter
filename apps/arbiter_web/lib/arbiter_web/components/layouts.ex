@@ -4,6 +4,7 @@ defmodule ArbiterWeb.Layouts do
   used by your application.
   """
   use ArbiterWeb, :html
+  import ArbiterWeb.QuotaHelpers
 
   # Embed all files in layouts/* within this module.
   # The default root.html.heex file contains the HTML
@@ -91,7 +92,7 @@ defmodule ArbiterWeb.Layouts do
             <div
               :if={@quota && @quota.utilization_5h}
               class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              style={"width: #{quota_pct(@quota.utilization_5h)}%; background-color: #{quota_color(@quota.utilization_5h)};"}
+              style={"width: #{quota_pct(@quota.utilization_5h)}%; background-color: #{quota_color(@quota.utilization_5h, @quota.overage_status)};"}
             />
           </div>
           <span class="text-base-content/60 tabular-nums w-12">
@@ -104,7 +105,7 @@ defmodule ArbiterWeb.Layouts do
             <div
               :if={@quota && @quota.utilization_7d}
               class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              style={"width: #{quota_pct(@quota.utilization_7d)}%; background-color: #{quota_color(@quota.utilization_7d)};"}
+              style={"width: #{quota_pct(@quota.utilization_7d)}%; background-color: #{quota_color(@quota.utilization_7d, @quota.overage_status)};"}
             />
           </div>
           <span class="text-base-content/60 tabular-nums w-12">
@@ -139,27 +140,6 @@ defmodule ArbiterWeb.Layouts do
 
   defp nav_class_for(true), do: "menu-active font-semibold"
   defp nav_class_for(false), do: ""
-
-  defp quota_pct(nil), do: 0
-  defp quota_pct(u) when is_float(u), do: min(100, round(u * 100))
-
-  defp quota_color(nil), do: "#22c55e"
-  defp quota_color(u) when u >= 0.9, do: "#ef4444"
-  defp quota_color(u) when u >= 0.7, do: "#f59e0b"
-  defp quota_color(_), do: "#22c55e"
-
-  defp quota_reset_label(nil), do: "—"
-
-  defp quota_reset_label(%DateTime{} = dt) do
-    secs = DateTime.diff(dt, DateTime.utc_now())
-
-    cond do
-      secs <= 0 -> "now"
-      secs < 60 -> "#{secs}s"
-      secs < 3600 -> "#{div(secs, 60)}m"
-      true -> "#{div(secs, 3600)}h#{div(rem(secs, 3600), 60)}m"
-    end
-  end
 
   @doc """
   Shows the flash group with standard titles and content.
