@@ -361,14 +361,14 @@ defmodule ArbiterWeb.TaskDetailLive do
                   <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
                     <.icon name="hero-bars-3-bottom-left" class="size-4" /> Description
                   </h3>
-                  <pre class="whitespace-pre-wrap break-words text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.description}</pre>
+                  <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.description}</pre>
                 </div>
 
                 <div :if={@task.acceptance} class="space-y-1">
                   <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
                     <.icon name="hero-check-badge" class="size-4" /> Acceptance
                   </h3>
-                  <pre class="whitespace-pre-wrap break-words text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.acceptance}</pre>
+                  <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.acceptance}</pre>
                 </div>
 
                 <%!-- bd-5lc99r: for a `task`-type directive the findings summary in
@@ -380,7 +380,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     <.icon name="hero-document-text" class="size-4" /> Findings
                   </h3>
                   <%= if present?(@task.notes) do %>
-                    <pre class="whitespace-pre-wrap break-words text-xs bg-base-100 border border-primary/40 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.notes}</pre>
+                    <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-primary/40 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.notes}</pre>
                   <% else %>
                     <p class="text-xs italic text-base-content/50 bg-base-100 border border-base-300 p-3 rounded-box">
                       No findings recorded yet — the acolyte writes its results here before completing.
@@ -392,7 +392,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                   <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
                     <.icon name="hero-document-text" class="size-4" /> Notes
                   </h3>
-                  <pre class="whitespace-pre-wrap break-words text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.notes}</pre>
+                  <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.notes}</pre>
                 </div>
               </div>
             </section>
