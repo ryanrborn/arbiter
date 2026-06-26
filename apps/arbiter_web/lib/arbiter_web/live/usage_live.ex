@@ -11,6 +11,7 @@ defmodule ArbiterWeb.UsageLive do
   """
 
   use ArbiterWeb, :live_view
+  import ArbiterWeb.QuotaHelpers
 
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
@@ -134,7 +135,7 @@ defmodule ArbiterWeb.UsageLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path}>
+    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
       <div class="p-6 max-w-7xl mx-auto space-y-6">
         <%!-- ── Header ───────────────────────────────────────────────── --%>
         <div>
@@ -146,6 +147,65 @@ defmodule ArbiterWeb.UsageLive do
             Multiple rows per task expose rework spend (re-dispatchs).
           </p>
         </div>
+
+        <%!-- ── Quota windows ──────────────────────────────────────── --%>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <%!-- 5h card --%>
+          <div class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-5 gap-3">
+              <div class="flex items-baseline justify-between">
+                <h3 class="font-semibold">5-Hour Window</h3>
+                <span class="text-xs text-base-content/40">
+                  {quota_reset_text(@quota && @quota.reset_5h_at)}
+                </span>
+              </div>
+              <div class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden">
+                <div
+                  :if={@quota && @quota.utilization_5h}
+                  class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
+                  style={"width: #{quota_pct(@quota.utilization_5h)}%; background-color: #{quota_color(@quota.utilization_5h, @quota.overage_status)};"}
+                />
+              </div>
+              <div class="flex justify-center text-xs font-mono text-base-content/50">
+                <span :if={@quota && @quota.utilization_5h} class="font-semibold text-base-content/80">
+                  {quota_pct(@quota.utilization_5h)}% utilized
+                </span>
+                <span :if={!(@quota && @quota.utilization_5h)} class="text-base-content/30">
+                  —
+                </span>
+              </div>
+            </div>
+          </div>
+          <%!-- 7d card --%>
+          <div class="card bg-base-200 border border-base-300 shadow-sm">
+            <div class="card-body p-5 gap-3">
+              <div class="flex items-baseline justify-between">
+                <h3 class="font-semibold">7-Day Window</h3>
+                <span class="text-xs text-base-content/40">
+                  {quota_reset_text(@quota && @quota.reset_7d_at)}
+                </span>
+              </div>
+              <div class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden">
+                <div
+                  :if={@quota && @quota.utilization_7d}
+                  class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
+                  style={"width: #{quota_pct(@quota.utilization_7d)}%; background-color: #{quota_color(@quota.utilization_7d, @quota.overage_status)};"}
+                />
+              </div>
+              <div class="flex justify-center text-xs font-mono text-base-content/50">
+                <span :if={@quota && @quota.utilization_7d} class="font-semibold text-base-content/80">
+                  {quota_pct(@quota.utilization_7d)}% utilized
+                </span>
+                <span :if={!(@quota && @quota.utilization_7d)} class="text-base-content/30">
+                  —
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="text-xs text-base-content/40 -mt-2">
+          Data captured via local Anthropic proxy. Updates on each API request — not real-time.
+        </p>
 
         <%!-- ── Controls ─────────────────────────────────────────────── --%>
         <div class="flex flex-wrap items-center gap-3">

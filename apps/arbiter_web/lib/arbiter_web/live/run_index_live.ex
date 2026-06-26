@@ -79,7 +79,7 @@ defmodule ArbiterWeb.RunIndexLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path}>
+    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
       <div class="p-6 max-w-7xl mx-auto space-y-6">
         <div class="flex items-start justify-between gap-4">
           <.index_header
