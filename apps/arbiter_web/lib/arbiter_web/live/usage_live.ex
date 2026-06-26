@@ -131,6 +131,9 @@ defmodule ArbiterWeb.UsageLive do
     Enum.reduce(rollup, 0, fn r, acc -> acc + (r.tokens_in || 0) + (r.tokens_out || 0) end)
   end
 
+  defp rework_pct(_rework, grand) when grand == 0.0 or is_nil(grand), do: 0
+  defp rework_pct(rework, grand), do: round(rework / grand * 100)
+
   # ---- render ----
 
   @impl true
@@ -295,7 +298,7 @@ defmodule ArbiterWeb.UsageLive do
             <div class="stat-desc">
               {if @rework_tasks == [],
                 do: "none re-slung",
-                else: "#{format_usd(@rework_cost)} re-slung"}
+                else: "#{format_usd(@rework_cost)} re-slung · #{rework_pct(@rework_cost, @grand_cost)}% of total"}
             </div>
           </div>
         </div>
