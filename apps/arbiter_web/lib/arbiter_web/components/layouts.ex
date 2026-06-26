@@ -46,8 +46,8 @@ defmodule ArbiterWeb.Layouts do
         </.link>
       </div>
 
-      <%!-- Desktop nav: md and above --%>
-      <nav class="hidden md:flex flex-none">
+      <%!-- Desktop nav: lg and above --%>
+      <nav class="flex max-lg:hidden flex-none">
         <ul class="menu menu-horizontal gap-1 text-sm p-0">
           <li>
             <.link navigate={~p"/"} class={nav_class(@current_path, "/")}>
@@ -87,7 +87,7 @@ defmodule ArbiterWeb.Layouts do
         </ul>
       </nav>
       <%!-- Quota widget: lg+ topbar; compact version also shown in mobile hamburger --%>
-      <div class="hidden lg:flex flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2" title="Anthropic quota">
+      <div class="flex max-lg:hidden flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2" title="Anthropic quota">
         <div class="flex items-center gap-1.5">
           <span class="text-base-content/40 w-4 shrink-0">5h</span>
           <div class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
@@ -119,8 +119,8 @@ defmodule ArbiterWeb.Layouts do
       <div class="flex-none ml-2 flex items-center gap-2">
         <.theme_toggle />
 
-        <%!-- Mobile hamburger: below md --%>
-        <details id="mobile-nav" class="dropdown dropdown-end md:hidden">
+        <%!-- Mobile hamburger: below lg --%>
+        <details id="mobile-nav" class="dropdown dropdown-end lg:hidden" phx-hook="DetailsPreserve">
           <summary class="btn btn-ghost btn-sm px-2" aria-label="Open navigation">
             <.icon name="hero-bars-3" class="size-5" />
           </summary>
@@ -189,7 +189,7 @@ defmodule ArbiterWeb.Layouts do
               </.link>
             </li>
             <li :if={@quota} class="border-t border-base-300 mt-0.5 pt-0.5 pointer-events-none">
-              <div class="flex flex-col gap-0.5 px-2 py-1 text-xs font-mono select-none">
+              <div class="flex flex-col gap-0.5 px-2 py-1 text-xs font-mono select-none w-full items-stretch">
                 <div class="flex items-center gap-1.5">
                   <span class="text-base-content/40 w-4 shrink-0">5h</span>
                   <div class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
