@@ -66,6 +66,30 @@ defmodule Arbiter.Worker.NotesGateTest do
     task
   end
 
+  defp tmp_dir!(tag) do
+    dir = Path.join(System.tmp_dir!(), "#{tag}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  # Drive a REAL session port that does the agent's work and exits cleanly
+  # (status 0) WITHOUT ever printing `arb done` — the exact wrap-up failure mode
+  # from bd-2da6ay. The port exit (not a synthetic done message) is what routes
+  # the worker through the deferred stop check.
+  defp exit_clean_without_done(pid, tag) do
+    cwd = tmp_dir!(tag)
+
+    {:ok, _port} =
+      Arbiter.Worker.ClaudeSession.start(
+        owner: pid,
+        worktree_path: cwd,
+        command: ["sh", "-c", "echo 'findings recorded; wrapping up'; exit 0"]
+      )
+
+    :ok
+  end
+
   defp start_worker(task, extra_meta) do
     meta =
       Map.merge(
@@ -152,6 +176,62 @@ defmodule Arbiter.Worker.NotesGateTest do
       wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
 
       assert Worker.state(pid).meta.failure_reason == :blank_notes_at_completion
+    end
+  end
+
+  describe "exit-without-done finalization (bd-2da6ay)" do
+    # The wrap-up failure mode: a task-type worker reaches the end of its work
+    # and the subprocess exits cleanly (status 0) but the agent never printed
+    # `arb done`. Before this fix the worker routed into the bd-t9uq25 resume
+    # loop, which only replayed the identical clean exit — burning Opus until
+    # the resume cap was exhausted, then failing. Now the worker finalizes
+    # through the notes gate the same way `arb done` does.
+
+    test "clean exit with populated notes completes via the notes gate (no resume loop)",
+         %{ws: ws} do
+      task = new_task(ws, "## Findings\n\nInvestigation complete. Conclusion: viable.")
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      :ok = exit_clean_without_done(pid, "ng-exit-populated")
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      assert snap.status == :completed
+      # It completed straight through the notes gate — never down the resume
+      # path (no resume attempt was ever recorded) and never failed.
+      refute Map.has_key?(snap.meta, :resume_attempts)
+      refute Map.has_key?(snap.meta, :stop_reason)
+    end
+
+    test "clean exit with blank notes fails + escalates instead of looping on resume",
+         %{ws: ws} do
+      task = new_task(ws)
+      # Pin the nudge cap to 0 so we hit the structural park path immediately,
+      # without respawning a session.
+      pid = start_worker(task, %{notes_nudge_cap: 0})
+
+      :ok = exit_clean_without_done(pid, "ng-exit-blank")
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      snap = Worker.state(pid)
+      # Failed via the notes gate (concrete cause), NOT via the resume/stop path.
+      assert snap.meta.failure_reason == :blank_notes_at_completion
+      assert snap.meta.notes_gate_detail == :cap_exhausted
+      refute Map.has_key?(snap.meta, :resume_attempts)
+
+      # Task stays open — the notes gate never pollutes the notes field.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.status == :closed
+
+      # Admiral receives the notes-gate escalation naming the failure.
+      escalation =
+        Message.inbox("admiral", workspace_id: ws.id)
+        |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
+
+      assert escalation
+      assert escalation.subject =~ "Notes gate"
     end
   end
 end

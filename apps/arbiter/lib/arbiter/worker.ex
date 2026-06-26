@@ -1057,6 +1057,23 @@ defmodule Arbiter.Worker do
           run_signalled_done?(state) ->
             {:noreply, on_claude_done(state)}
 
+          # bd-2da6ay: a non-reviewable `task`-type worker whose subprocess
+          # exited cleanly (status 0) at wrap-up without ever printing `arb
+          # done`. Its deliverable is a findings summary in `notes`, NOT a
+          # worktree change — so a clean exit means the agent reached the end of
+          # its work and quit; it just never emitted the sentinel. Resuming
+          # (bd-t9uq25) only replays the identical clean exit, burning Opus on a
+          # loop that can never converge (observed: 3× on bd-8ggqep, ~$6.28).
+          # Finalize deterministically through the same notes gate `arb done`
+          # uses instead: populated notes complete the task; blank notes nudge
+          # up to the cap then escalate with a concrete cause. Infra failures
+          # (auth/credit/rate/killed/crashed) are NOT clean exits, so they fall
+          # through to the resume/fail_stopped path and keep their specific
+          # escalations (e.g. the credential watchdog).
+          task_type?(state.meta) and not review_only?(state.meta) and
+              clean_exit_without_done?(session) ->
+            {:noreply, finalize_task_type_stop(state)}
+
           true ->
             # bd-t9uq25: exited without `arb done` — try to resume the session
             # in place (bounded) before failing + discarding the worktree.
@@ -1828,6 +1845,37 @@ defmodule Arbiter.Worker do
       attempts_key: :notes_nudge_attempts,
       label: "bd-5lc99r notes gate tripped (blank notes)"
     )
+  end
+
+  # bd-2da6ay: did the session that just closed exit cleanly (status 0) without
+  # signalling `arb done` — i.e. the agent reached the end and quit, as opposed
+  # to being killed / crashing / hitting an auth or rate-limit wall? Reuses the
+  # exact StopReason classification the resume path keys off, scoped to the one
+  # session. Only a clean exit routes a task-type worker through the notes gate;
+  # every other category stays on the resume/fail_stopped path so its specific
+  # escalation (credential watchdog, host-health) still fires.
+  defp clean_exit_without_done?(session) do
+    exit_status = Map.get(session, :exit_status)
+    output_lines = Enum.reverse(Map.get(session, :output_lines, []))
+
+    Arbiter.Worker.StopReason.classify(exit_status, output_lines).category ==
+      :exited_without_done
+  end
+
+  # bd-2da6ay: finalize a task-type worker that exited without `arb done` by
+  # routing through the same notes gate `arb done` itself uses. on_claude_done/1
+  # for a task type either completes (notes populated — the findings exist, the
+  # missing sentinel was just a handshake glitch) or diverts to the notes gate
+  # (blank notes — nudge up to the cap, then park + escalate with a concrete
+  # cause). Either way the task finalizes deterministically rather than silently
+  # looping on resume.
+  defp finalize_task_type_stop(%State{} = state) do
+    Logger.info(
+      "Worker: bd-2da6ay task=#{state.task_id} (task type) exited cleanly without " <>
+        "`arb done`; finalizing through the notes gate instead of resuming."
+    )
+
+    on_claude_done(state)
   end
 
   defp notes_nudge_cap(meta), do: (meta && Map.get(meta, :notes_nudge_cap)) || 1
