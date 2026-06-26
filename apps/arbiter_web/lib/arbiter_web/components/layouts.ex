@@ -86,7 +86,7 @@ defmodule ArbiterWeb.Layouts do
           </li>
         </ul>
       </nav>
-      <%!-- Quota widget: desktop only, hidden on mobile --%>
+      <%!-- Quota widget: lg+ topbar; compact version also shown in mobile hamburger --%>
       <div class="hidden lg:flex flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2" title="Anthropic quota">
         <div class="flex items-center gap-1.5">
           <span class="text-base-content/40 w-4 shrink-0">5h</span>
@@ -187,6 +187,36 @@ defmodule ArbiterWeb.Layouts do
               >
                 About
               </.link>
+            </li>
+            <li :if={@quota} class="border-t border-base-300 mt-0.5 pt-0.5 pointer-events-none">
+              <div class="flex flex-col gap-0.5 px-2 py-1 text-xs font-mono select-none">
+                <div class="flex items-center gap-1.5">
+                  <span class="text-base-content/40 w-4 shrink-0">5h</span>
+                  <div class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+                    <div
+                      :if={@quota.utilization_5h}
+                      class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+                      style={"width: #{quota_pct(@quota.utilization_5h)}%; background-color: #{quota_color(@quota.utilization_5h, @quota.overage_status)};"}
+                    />
+                  </div>
+                  <span class="text-base-content/60 tabular-nums w-12 text-right">
+                    {quota_reset_label(@quota.reset_5h_at)}
+                  </span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <span class="text-base-content/40 w-4 shrink-0">7d</span>
+                  <div class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+                    <div
+                      :if={@quota.utilization_7d}
+                      class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
+                      style={"width: #{quota_pct(@quota.utilization_7d)}%; background-color: #{quota_color(@quota.utilization_7d, @quota.overage_status)};"}
+                    />
+                  </div>
+                  <span class="text-base-content/60 tabular-nums w-12 text-right">
+                    {quota_reset_label(@quota.reset_7d_at)}
+                  </span>
+                </div>
+              </div>
             </li>
           </ul>
         </details>
