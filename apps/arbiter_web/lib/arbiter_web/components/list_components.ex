@@ -113,15 +113,17 @@ defmodule ArbiterWeb.ListComponents do
 
   def filter_tabs(assigns) do
     ~H"""
-    <div role="tablist" class="tabs tabs-box w-fit" id="filter-tabs">
-      <.link
-        :for={{label, value} <- @tabs}
-        patch={@tab_path.(value)}
-        role="tab"
-        class={["tab", @active == value && "tab-active"]}
-      >
-        {label}
-      </.link>
+    <div class="overflow-x-auto">
+      <div role="tablist" class="tabs tabs-box w-fit" id="filter-tabs">
+        <.link
+          :for={{label, value} <- @tabs}
+          patch={@tab_path.(value)}
+          role="tab"
+          class={["tab", @active == value && "tab-active"]}
+        >
+          {label}
+        </.link>
+      </div>
     </div>
     """
   end

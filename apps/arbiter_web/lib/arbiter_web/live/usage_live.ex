@@ -136,7 +136,7 @@ defmodule ArbiterWeb.UsageLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
-      <div class="p-6 max-w-7xl mx-auto space-y-6">
+      <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <%!-- ── Header ───────────────────────────────────────────────── --%>
         <div>
           <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2">
