@@ -8,10 +8,11 @@ defmodule ArbiterWeb.QuotaHelpers do
   def quota_pct(u) when is_number(u), do: min(100, round(u * 100))
 
   # Resolve a progress-bar color from utilization + optional overage status.
-  # A non-nil/non-"ok" overage_status clamps to red regardless of utilization
-  # (e.g. Anthropic's "in_overage" can arrive before utilization reaches 0.9).
+  # "in_overage" forces red because Anthropic signals active overage before
+  # utilization reaches 0.9. "rejected" is a billing policy flag (no overage
+  # plan) — not an active usage alert — so it follows utilization coloring.
   def quota_color(u, overage_status \\ nil)
-  def quota_color(_, overage) when overage not in [nil, "ok"], do: "#ef4444"
+  def quota_color(_, "in_overage"), do: "#ef4444"
   def quota_color(nil, _), do: "#22c55e"
   def quota_color(u, _) when u >= 0.9, do: "#ef4444"
   def quota_color(u, _) when u >= 0.7, do: "#f59e0b"

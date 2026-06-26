@@ -26,10 +26,19 @@ import {hooks as colocatedHooks} from "phoenix-colocated/arbiter_web"
 import topbar from "../vendor/topbar"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+
+// Preserve <details> open state across LiveView patches (e.g. PubSub-triggered re-renders).
+const Hooks = {
+  DetailsPreserve: {
+    beforeUpdate() { this.wasOpen = this.el.open },
+    updated() { if (this.wasOpen) this.el.open = true },
+  },
+}
+
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, ...Hooks},
 })
 
 // Show progress bar on live navigation and form submits
