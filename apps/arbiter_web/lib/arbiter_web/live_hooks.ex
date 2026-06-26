@@ -8,6 +8,12 @@ defmodule ArbiterWeb.LiveHooks do
   `:current_path`, kept in sync across `live_navigate`/`live_patch` via a
   `handle_params` hook. The `Layouts.app` nav reads it to highlight the
   active link.
+
+  ## `:quota`
+
+  Loads the latest Anthropic quota snapshot for the default workspace and
+  assigns it as `:quota` on the socket. Returns `nil` when no snapshot has
+  been captured yet.
   """
 
   import Phoenix.Component, only: [assign: 3]
@@ -22,5 +28,15 @@ defmodule ArbiterWeb.LiveHooks do
       end)
 
     {:cont, socket}
+  end
+
+  def on_mount(:quota, _params, _session, socket) do
+    quota =
+      case Arbiter.Quota.default_workspace_id() do
+        {:ok, ws_id} -> Arbiter.Quota.latest(ws_id)
+        _ -> nil
+      end
+
+    {:cont, assign(socket, :quota, quota)}
   end
 end

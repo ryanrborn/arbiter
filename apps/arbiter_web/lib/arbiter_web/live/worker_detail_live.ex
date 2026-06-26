@@ -337,7 +337,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path}>
+    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
       <div class="p-6 max-w-7xl mx-auto space-y-6">
         <%!-- ── Header ───────────────────────────────────────────────── --%>
         <div class="flex flex-wrap items-center justify-between gap-4">
