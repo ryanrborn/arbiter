@@ -17,7 +17,9 @@ defmodule ArbiterWeb.LiveHooks do
   """
 
   import Phoenix.Component, only: [assign: 3]
-  import Phoenix.LiveView, only: [attach_hook: 4]
+  import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
+
+  require Logger
 
   def on_mount(:current_path, _params, _session, socket) do
     socket =
@@ -31,12 +33,37 @@ defmodule ArbiterWeb.LiveHooks do
   end
 
   def on_mount(:quota, _params, _session, socket) do
-    quota =
-      case Arbiter.Quota.default_workspace_id() do
-        {:ok, ws_id} -> Arbiter.Quota.latest(ws_id)
-        _ -> nil
-      end
+    case Arbiter.Quota.default_workspace_id() do
+      {:ok, ws_id} ->
+        quota = Arbiter.Quota.latest(ws_id)
 
-    {:cont, assign(socket, :quota, quota)}
+        socket =
+          socket
+          |> assign(:quota, quota)
+          |> assign(:_quota_workspace_id, ws_id)
+          |> maybe_subscribe_quota(ws_id)
+
+        {:cont, socket}
+
+      _ ->
+        {:cont, assign(socket, :quota, nil)}
+    end
+  end
+
+  defp maybe_subscribe_quota(socket, workspace_id) do
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "quota:#{workspace_id}")
+      attach_hook(socket, :quota_updates, :handle_info, fn msg, socket ->
+        case msg do
+          {:quota_updated, ^workspace_id, quota} ->
+            {:halt, assign(socket, :quota, quota)}
+
+          _ ->
+            {:cont, socket}
+        end
+      end)
+    else
+      socket
+    end
   end
 end

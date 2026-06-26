@@ -94,11 +94,32 @@ defmodule Arbiter.Quota do
             |> Map.put(:provider, provider)
             |> Map.put_new(:captured_at, DateTime.utc_now() |> DateTime.truncate(:second))
 
-          AnthropicQuota
-          |> Ash.Changeset.for_create(:upsert, full)
-          |> Ash.create()
+          result =
+            AnthropicQuota
+            |> Ash.Changeset.for_create(:upsert, full)
+            |> Ash.create()
+
+          with {:ok, quota} <- result do
+            broadcast_quota_update(ws_id, quota)
+          end
+
+          result
         end
     end
+  end
+
+  # Broadcast quota update to all subscribers for the workspace
+  defp broadcast_quota_update(workspace_id, quota) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      "quota:#{workspace_id}",
+      {:quota_updated, workspace_id, quota}
+    )
+  rescue
+    e ->
+      require Logger
+      Logger.debug("quota pubsub broadcast failed: #{inspect(e)}")
+      :error
   end
 
   @doc """
