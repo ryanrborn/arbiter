@@ -55,7 +55,7 @@ defmodule ArbiterWeb.RunDetailLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
-      <div class="p-6 max-w-7xl mx-auto space-y-6">
+      <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <%= if @run do %>
           <%!-- ── Header ─────────────────────────────────────────────── --%>
           <div class="flex flex-wrap items-center justify-between gap-4">

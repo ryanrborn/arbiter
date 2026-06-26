@@ -45,7 +45,9 @@ defmodule ArbiterWeb.Layouts do
           <img src="/images/arbiter-wordmark.png" alt="Arbiter" class="h-7 w-auto" />
         </.link>
       </div>
-      <nav class="flex-none">
+
+      <%!-- Desktop nav: md and above --%>
+      <nav class="hidden md:flex flex-none">
         <ul class="menu menu-horizontal gap-1 text-sm p-0">
           <li>
             <.link navigate={~p"/"} class={nav_class(@current_path, "/")}>
@@ -84,7 +86,7 @@ defmodule ArbiterWeb.Layouts do
           </li>
         </ul>
       </nav>
-      <%!-- Quota widget: desktop only, hidden on mobile per #496 --%>
+      <%!-- Quota widget: desktop only, hidden on mobile --%>
       <div class="hidden lg:flex flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2" title="Anthropic quota">
         <div class="flex items-center gap-1.5">
           <span class="text-base-content/40 w-4 shrink-0">5h</span>
@@ -113,8 +115,81 @@ defmodule ArbiterWeb.Layouts do
           </span>
         </div>
       </div>
-      <div class="flex-none ml-2">
+
+      <div class="flex-none ml-2 flex items-center gap-2">
         <.theme_toggle />
+
+        <%!-- Mobile hamburger: below md --%>
+        <details id="mobile-nav" class="dropdown dropdown-end md:hidden">
+          <summary class="btn btn-ghost btn-sm px-2" aria-label="Open navigation">
+            <.icon name="hero-bars-3" class="size-5" />
+          </summary>
+          <ul class="dropdown-content menu bg-base-200 border border-base-300 rounded-box shadow-lg z-[100] w-48 p-2 gap-0.5 mt-1 text-sm">
+            <li>
+              <.link
+                navigate={~p"/"}
+                class={nav_class(@current_path, "/")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                Dashboard
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/tasks"}
+                class={nav_class(@current_path, "/tasks")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                {cap_plural("issue")}
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/workers"}
+                class={nav_class(@current_path, "/workers")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                {cap_plural("worker")}
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/merge_queue"}
+                class={nav_class(@current_path, "/merge_queue")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                {cap_plural("merge queue")}
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/audit"}
+                class={nav_class(@current_path, "/audit")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                Audit log
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/usage"}
+                class={nav_class(@current_path, "/usage")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                Usage
+              </.link>
+            </li>
+            <li>
+              <.link
+                href={~p"/about"}
+                class={nav_class(@current_path, "/about")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                About
+              </.link>
+            </li>
+          </ul>
+        </details>
       </div>
     </header>
 
