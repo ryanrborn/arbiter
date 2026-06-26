@@ -66,6 +66,14 @@ config :arbiter, :anthropic_proxy,
   enabled: true,
   base_url: "http://127.0.0.1:4848/proxy/anthropic"
 
+# Finch receive_timeout for the proxy's upstream requests to api.anthropic.com,
+# in milliseconds. Because the proxy streams chunk-by-chunk, this is a
+# per-chunk idle timeout — a generous value buys time-to-first-token headroom
+# for large-context Opus calls without capping long healthy generations.
+# Override at runtime with ANTHROPIC_PROXY_RECEIVE_TIMEOUT (ms).
+config :arbiter_web, :anthropic_proxy,
+  receive_timeout: 120_000
+
 # Install-wide default acolyte security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline
 # lives in `Arbiter.Agents.SecurityPolicy.base/0` — auto mode, a non-empty
