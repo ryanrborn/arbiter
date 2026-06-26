@@ -84,8 +84,9 @@ defmodule ArbiterWeb.AnthropicProxyController do
   # api.anthropic.com). Once streaming has started we can only unwind. (bd-5boun6)
   defp stream_upstream(conn, request, workspace_id, attempts_left) do
     acc = %{conn: conn, workspace_id: workspace_id, status: 200, started?: false}
+    t0 = System.monotonic_time(:millisecond)
 
-    case Finch.stream(request, @finch, acc, &handle_stream/2) do
+    case Finch.stream(request, @finch, acc, &handle_stream/2, receive_timeout: receive_timeout()) do
       {:ok, %{conn: conn, started?: true}} ->
         conn
 
@@ -93,17 +94,30 @@ defmodule ArbiterWeb.AnthropicProxyController do
         send_resp(conn, status, "")
 
       {:error, reason, %{conn: conn, started?: false}} when attempts_left > 1 ->
+        elapsed = System.monotonic_time(:millisecond) - t0
+
         Logger.warning(
-          "anthropic proxy upstream error (retrying, " <>
-            "#{attempts_left - 1} left): #{inspect(reason)}"
+          "anthropic proxy upstream error (retrying, #{attempts_left - 1} left, " <>
+            "elapsed_ms=#{elapsed}, started?=false): #{inspect(reason)}"
         )
 
         stream_upstream(conn, request, workspace_id, attempts_left - 1)
 
       {:error, reason, %{conn: conn, started?: started?}} ->
-        Logger.warning("anthropic proxy upstream error: #{inspect(reason)}")
+        elapsed = System.monotonic_time(:millisecond) - t0
+
+        Logger.warning(
+          "anthropic proxy upstream error (elapsed_ms=#{elapsed}, started?=#{started?}): #{inspect(reason)}"
+        )
+
         if started?, do: conn, else: bad_gateway(conn)
     end
+  end
+
+  defp receive_timeout do
+    :arbiter_web
+    |> Application.get_env(:anthropic_proxy, [])
+    |> Keyword.get(:receive_timeout, 120_000)
   end
 
   # ---- Finch streaming callbacks ----------------------------------------
