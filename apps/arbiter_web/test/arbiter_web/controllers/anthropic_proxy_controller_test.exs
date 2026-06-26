@@ -34,18 +34,29 @@ defmodule ArbiterWeb.AnthropicProxyControllerTest do
         |> put_resp_header("set-cookie", "sess=secret")
         |> put_resp_header("cf-ray", "abc123")
 
-      if String.contains?(conn.query_string, "sse") do
-        conn = conn |> put_resp_content_type("text/event-stream") |> send_chunked(200)
-        {:ok, conn} = chunk(conn, "event: message_start\ndata: {\"type\":\"start\"}\n\n")
-        {:ok, conn} = chunk(conn, "event: content_block_delta\ndata: {\"text\":\"hello\"}\n\n")
-        {:ok, conn} = chunk(conn, "event: message_stop\ndata: {}\n\n")
-        conn
-      else
-        {:ok, body, conn} = read_body(conn)
+      cond do
+        String.contains?(conn.query_string, "sse") ->
+          conn = conn |> put_resp_content_type("text/event-stream") |> send_chunked(200)
+          {:ok, conn} = chunk(conn, "event: message_start\ndata: {\"type\":\"start\"}\n\n")
+          {:ok, conn} = chunk(conn, "event: content_block_delta\ndata: {\"text\":\"hello\"}\n\n")
+          {:ok, conn} = chunk(conn, "event: message_stop\ndata: {}\n\n")
+          conn
 
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(200, Jason.encode!(%{ok: true, echo: body}))
+        String.contains?(conn.query_string, "slow") ->
+          # Delay long enough for a very short receive_timeout to fire.
+          Process.sleep(100)
+          {:ok, body, conn} = read_body(conn)
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, Jason.encode!(%{ok: true, echo: body}))
+
+        true ->
+          {:ok, body, conn} = read_body(conn)
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, Jason.encode!(%{ok: true, echo: body}))
       end
     end
   end
@@ -151,6 +162,24 @@ defmodule ArbiterWeb.AnthropicProxyControllerTest do
         conn
         |> put_req_header("content-type", "application/json")
         |> post(~s(/proxy/anthropic/#{ws.id}/v1/messages), "{}")
+
+      assert resp.status == 502
+      assert resp.resp_body =~ "proxy_error"
+    end
+
+    test "applies configured receive_timeout and returns 502 when upstream is too slow", %{
+      conn: conn,
+      ws: ws
+    } do
+      # A 5ms timeout is too short for the stub's 100ms sleep — this verifies
+      # that the configured value is wired through to the Finch request.
+      Application.put_env(:arbiter_web, :anthropic_proxy, receive_timeout: 5)
+      on_exit(fn -> Application.delete_env(:arbiter_web, :anthropic_proxy) end)
+
+      resp =
+        conn
+        |> put_req_header("content-type", "application/json")
+        |> post(~s(/proxy/anthropic/#{ws.id}/v1/messages?slow=true), "{}")
 
       assert resp.status == 502
       assert resp.resp_body =~ "proxy_error"
