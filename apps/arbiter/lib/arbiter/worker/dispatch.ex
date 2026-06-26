@@ -1300,10 +1300,20 @@ defmodule Arbiter.Worker.Dispatch do
     for another worker, use `arb message <their-task-id> <text>`.
 
     Between major steps, also check for `.arbiter/INBOX` in your working
-    directory. If it exists, read it, act on any Admiral instructions it
-    contains, then delete the file to acknowledge receipt. Treat it as a
-    real-time message from the Admiral — it takes precedence over your current
-    task if it redirects you.
+    directory using `[ -f .arbiter/INBOX ] && cat .arbiter/INBOX` (this does
+    NOT error when the file is absent — the normal case). If it exists, read
+    it, act on any Admiral instructions it contains, then delete the file to
+    acknowledge receipt. Treat it as a real-time message from the Admiral — it
+    takes precedence over your current task if it redirects you.
+
+    CRITICAL — continuation discipline: NEVER end a response with only a plan
+    or a statement of the next step (for example, announcing that you will now
+    write a test instead of writing it). After ANY check (mailbox /
+    `.arbiter/INBOX` / git status), immediately continue with the next
+    concrete tool call in the same turn. Your session is non-interactive: a
+    turn that contains no tool call ENDS the session. The only correct way to
+    finish is to print `arb done` once the work is complete — if you are about
+    to stop without having printed `arb done`, keep working.
 
     *** ASYNC TOOLS: You may run tests, linters, compilers, or any diagnostic
     tool — including in parallel or with background execution modes. However,
