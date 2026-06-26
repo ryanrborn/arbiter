@@ -82,6 +82,7 @@ defmodule ArbiterWeb.UsageLive do
     |> assign(:main_rollup, main_rollup)
     |> assign(:top_tasks, top_tasks)
     |> assign(:rework_tasks, rework_tasks)
+    |> assign(:rework_cost, sum_cost(rework_tasks))
     |> assign(:grand_cost, sum_cost(main_rollup))
     |> assign(:grand_tokens, sum_tokens(main_rollup))
   end
@@ -292,7 +293,9 @@ defmodule ArbiterWeb.UsageLive do
               {length(@rework_tasks)}
             </div>
             <div class="stat-desc">
-              {if @rework_tasks == [], do: "none re-slung", else: "re-slung ≥ twice"}
+              {if @rework_tasks == [],
+                do: "none re-slung",
+                else: "#{format_usd(@rework_cost)} re-slung"}
             </div>
           </div>
         </div>
@@ -449,6 +452,13 @@ defmodule ArbiterWeb.UsageLive do
                   if(@rework_tasks == [], do: "badge-ghost", else: "badge-warning")
                 ]}>
                   {length(@rework_tasks)}
+                </span>
+                <span
+                  :if={@rework_tasks != []}
+                  class="font-mono tabular-nums text-sm font-semibold text-warning"
+                  title="Total spend on rework tasks"
+                >
+                  {format_usd(@rework_cost)}
                 </span>
               </h2>
 
