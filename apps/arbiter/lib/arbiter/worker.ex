@@ -2318,13 +2318,20 @@ defmodule Arbiter.Worker do
     end
   end
 
-  # The PR/MR title to open with. Uses the clean task title when available,
-  # falling back to the internal merge_title stashed in meta (bd-7d5smn: strip
-  # the "Merge <id>:" prefix from outbound PRs).
+  # The PR/MR title to open with. Formats according to the workspace's
+  # pr_title_format convention (e.g. conventional commits for leotech), falling
+  # back to the internal merge_title stashed in meta when the task can't be
+  # loaded (bd-7d5smn: strip the "Merge <id>:" prefix from outbound PRs).
   defp pr_title_for(task_id, meta) do
     case Ash.get(Arbiter.Tasks.Issue, task_id) do
       {:ok, task} when is_binary(task.title) and task.title != "" ->
-        task.title
+        case Ash.load(task, [:workspace]) do
+          {:ok, task_with_ws} ->
+            Arbiter.Mergers.PRTitle.format(task_with_ws, task_with_ws.workspace)
+
+          _ ->
+            Arbiter.Mergers.PRTitle.format(task, nil)
+        end
 
       _ ->
         Map.get(meta, :merge_title) || "Merge #{task_id}"

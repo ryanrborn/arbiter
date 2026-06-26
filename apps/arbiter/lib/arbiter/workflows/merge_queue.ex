@@ -524,7 +524,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     base = resolve_base(state, task)
 
     branch = strategy_for(task.workspace, "merge", "branch_prefix", "") <> task.id
-    title = task.title
+    title = Arbiter.Mergers.PRTitle.format(task, task.workspace)
     description = pr_description_for(task)
 
     worktree_path = state.worktree_module.worktree_path(branch)

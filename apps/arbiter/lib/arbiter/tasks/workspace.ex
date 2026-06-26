@@ -269,6 +269,24 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  PR/MR title formatting convention for this workspace.
+
+  Read from `config["merge"]["pr_title_format"]`:
+
+    * `"conventional_commit"` — emit `type: [TICKET] description` (Conventional
+      Commits format). Stripping internal team prefixes (`VS:`, etc.) and
+      de-duplicating trailing ticket parentheticals.
+    * anything else / absent — `:raw` (pass the task title through unchanged).
+  """
+  @spec pr_title_format(t()) :: :conventional_commit | :raw
+  def pr_title_format(workspace) do
+    case get_in(workspace.config || %{}, ["merge", "pr_title_format"]) do
+      "conventional_commit" -> :conventional_commit
+      _ -> :raw
+    end
+  end
+
+  @doc """
   Workspace-override for the Watchdog watchdog cap (`config["merge"]["watchdog_max_polls"]`).
 
   Returns a positive integer, `:infinity`, or `nil` when not configured (the
