@@ -1,20 +1,23 @@
 defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   @moduledoc """
-  Regression tests for bd-4ji58d, bd-btcyn6, and bd-ddtbhb.
+  Regression tests for bd-4ji58d, bd-btcyn6, bd-ddtbhb, and bd-bs3z04.
 
   When a coordinator dispatches a reviewer via `worker_review` / `arb worker
   review`, the resulting worker is tagged `review_only: true` and has no
   branch/worktree.
 
-  After bd-4ji58d + bd-ddtbhb:
+  After bd-4ji58d + bd-ddtbhb + bd-bs3z04:
 
     * APPROVE → reviewer worker completes normally (review already posted to
-      the forge). The Driver closes the task. The reviewer NEVER merges —
-      that is the PR author's job or the workspace's auto-merge policy.
+      the forge). The Driver closes the task. The reviewer also signals
+      MergeQueue via {:worker_done, task_id} if the task has a pr_ref, so
+      the workspace's auto-merge policy can merge the approved PR.
+      For :direct workspaces (no PR workflow), the MergeQueue handles the
+      signal by closing the task directly without calling the forge merge API.
     * REQUEST_CHANGES → reviewer worker fails (not completes) so the Driver
       does NOT close the task; it stays :in_progress for a fix-pass.
     * No verdict → same as REQUEST_CHANGES (fail, task stays :in_progress).
-    * pr_ref set or unset → makes no difference to APPROVE; always completes.
+    * pr_ref absent → MergeQueue signal is skipped; Driver still closes task.
 
   The full ReviewGate merge path (fleet-authored work: enter_review_gate →
   merge_branch with force_merge: true) is a separate path and still merges on
@@ -497,13 +500,19 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     end
   end
 
-  # ---- bd-ddtbhb acceptance: coordinator reviewer with pr_ref never merges ---
+  # ---- bd-ddtbhb / bd-bs3z04 acceptance: coordinator reviewer with pr_ref ----
+  # APPROVE signals MergeQueue (bd-bs3z04). For :direct-strategy workspaces the
+  # MergeQueue handles the signal by closing the task without calling merge/1,
+  # so the forge merge count stays 0. The Driver and MergeQueue both attempt the
+  # close; the second silently no-ops on an already-closed task.
 
-  describe "APPROVE + pr_ref does not merge, Driver closes task (bd-ddtbhb)" do
-    test "APPROVE with pr_ref: Driver closes the task, PR not merged" do
-      # Acceptance test for bd-ddtbhb: a coordinator-dispatched reviewer that
-      # APPROVEs a task WITH a pr_ref must not merge. The reviewer completes,
-      # the Driver closes the task, and the PR stays unmerged.
+  describe "APPROVE + pr_ref signals MergeQueue; direct workspace skips forge merge (bd-ddtbhb, bd-bs3z04)" do
+    test "APPROVE with pr_ref: task closed, PR not merged by forge (direct workspace)" do
+      # Acceptance test for bd-ddtbhb + bd-bs3z04. Workspace has no merge
+      # config (:direct strategy). MergeQueue receives the {:worker_done} signal,
+      # closes the task directly (no forge merge call), and the forge merge count
+      # stays 0. The Driver also closes the task on :completed; whichever lands
+      # first wins, the other silently no-ops.
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-400"}, action: :update)
@@ -532,7 +541,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :closed
 
-      # The PR must NOT have been merged.
+      # :direct strategy never calls the forge merge API.
       assert StubMerger.merge_count("pr-400") == 0
     end
   end

@@ -1510,13 +1510,33 @@ defmodule Arbiter.Worker do
   end
 
   # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
-  # has already posted the review to the forge; we must NOT merge — that is the
-  # PR author's job (or the workspace's auto-merge policy, if any). Just complete
-  # the worker so the Driver closes the task. (bd-ddtbhb: decoupled from the
-  # full ReviewGate merge path which handles fleet-authored work.)
+  # has already posted the forge-level review approval. Complete the worker so
+  # the Driver closes the task, and also signal MergeQueue to adopt and merge
+  # the PR according to the workspace's auto-merge policy. (bd-ddtbhb, bd-bs3z04)
   defp trigger_watchdog_on_approval(%State{} = state) do
-    complete_now(state, :claude_done)
+    new_state = complete_now(state, :claude_done)
+    maybe_enqueue_approved_pr(new_state)
+    new_state
   end
+
+  # Broadcast {:worker_done, task_id} to the workspace MergeQueue when the
+  # coordinator reviewer approves a task that already has a PR open. This lets
+  # the workspace's auto-merge policy drive the merge now that the forge-level
+  # approval has been submitted. Skipped when workspace_id is nil or no pr_ref.
+  defp maybe_enqueue_approved_pr(%State{workspace_id: ws_id, task_id: task_id})
+       when is_binary(ws_id) do
+    with {:ok, _pr_ref} <- fetch_task_pr_ref(task_id) do
+      Phoenix.PubSub.broadcast(
+        Arbiter.PubSub,
+        "worker:done:" <> ws_id,
+        {:worker_done, task_id}
+      )
+    end
+
+    :ok
+  end
+
+  defp maybe_enqueue_approved_pr(_), do: :ok
 
   # Load the pr_ref from the task's current DB record. Returns {:ok, pr_ref}
   # when present, {:error, :no_pr_ref} when nil/blank, and {:error, reason}
