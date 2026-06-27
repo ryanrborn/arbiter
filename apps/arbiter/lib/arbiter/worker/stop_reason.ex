@@ -25,6 +25,12 @@ defmodule Arbiter.Worker.StopReason do
       billing. Remediation: top up credits or rotate to a funded key.
     * `:rate_limited` — 429 / rate-limit / overloaded / resource exhausted.
       Often transient; remediation is retry/backoff.
+    * `:gateway_error` — 502 / 503 / upstream unreachable from the local
+      Anthropic proxy (transient network blip between the harness and
+      api.anthropic.com). Distinct from a rate-limit or auth failure: the
+      session was healthy, the transport layer dropped the request.
+      Remediation: auto-resume — the session context is intact, a retry should
+      succeed once connectivity recovers.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:crashed` — non-zero exit with no recognized signature. The
@@ -51,6 +57,7 @@ defmodule Arbiter.Worker.StopReason do
           :auth_expired
           | :credit_exhausted
           | :rate_limited
+          | :gateway_error
           | :killed
           | :crashed
           | :exited_without_done
@@ -102,6 +109,21 @@ defmodule Arbiter.Worker.StopReason do
     | retry[^\n]{0,20}after
   /ix
 
+  # Matches the local Anthropic proxy's 502/503 error body and common upstream
+  # connectivity failures. Ordered AFTER rate-limit so an "overloaded" 503 from
+  # Anthropic itself is captured as rate-limited (the right remediation), while
+  # a proxy-side "upstream unreachable" 502 is captured here.
+  @gateway_error_signature ~r/
+      proxy_error
+    | upstream[ _]unreachable
+    | \b502\b
+    | bad[ _]gateway
+    | \b503\b[^\n]{0,40}(service[ _]unavailable|temporarily)
+    | upstream[^\n]{0,40}(timeout|unreachable|refused)
+    | connection[^\n]{0,40}(refused|reset|timeout)
+    | receive[ _]timeout
+  /ix
+
   @doc """
   Classify a stop from the subprocess exit status and captured output.
 
@@ -147,6 +169,17 @@ defmodule Arbiter.Worker.StopReason do
           category: :rate_limited,
           summary: "agent was rate-limited / the API was overloaded",
           remediation: "Usually transient — retry with backoff, or reduce concurrent workers.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      Regex.match?(@gateway_error_signature, haystack) ->
+        %__MODULE__{
+          category: :gateway_error,
+          summary: "agent lost connectivity to the API (transient gateway / proxy error)",
+          remediation:
+            "Transient network blip between the harness proxy and Anthropic. " <>
+              "Auto-resuming the session — if retries are exhausted, check proxy logs.",
           exit_status: exit_status,
           signal: signal
         }
@@ -206,6 +239,7 @@ defmodule Arbiter.Worker.StopReason do
         :auth_expired -> "credentials expired"
         :credit_exhausted -> "credits exhausted"
         :rate_limited -> "rate-limited"
+        :gateway_error -> "gateway error (proxy/upstream)"
         :killed -> "killed by signal #{reason.signal}"
         :crashed -> "crashed"
         :exited_without_done -> "exited without completing"
