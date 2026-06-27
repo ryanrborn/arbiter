@@ -8,10 +8,12 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   use ArbiterWeb, :live_view
 
+  alias Arbiter.Mergers
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Issue.Version
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Trackers
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ReviewGate
@@ -74,7 +76,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   defp refresh_task(socket) do
-    case Ash.get(Issue, socket.assigns.task_id) do
+    case Ash.get(Issue, socket.assigns.task_id, load: [:child_total, :child_closed]) do
       {:ok, task} -> assign(socket, :task, task)
       {:error, _} -> assign(socket, :task, nil)
     end
@@ -342,9 +344,24 @@ defmodule ArbiterWeb.TaskDetailLive do
 
                   <%= if @task.tracker_type != :none do %>
                     <dt class="font-medium text-base-content/60">Tracker</dt>
-                    <dd>
+                    <dd class="flex items-center gap-1.5 flex-wrap">
                       <span class="badge badge-ghost badge-sm">{@task.tracker_type}</span>
-                      <code class="text-xs text-base-content/70 ml-1">{@task.tracker_ref}</code>
+                      <%= if present?(@task.tracker_ref) do %>
+                        <% tracker_url = tracker_url(@workspace, @task.tracker_ref) %>
+                        <%= if tracker_url != "" do %>
+                          <a
+                            href={tracker_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            class="link link-hover text-xs font-mono text-primary flex items-center gap-0.5"
+                          >
+                            {@task.tracker_ref}
+                            <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                          </a>
+                        <% else %>
+                          <code class="text-xs text-base-content/70">{@task.tracker_ref}</code>
+                        <% end %>
+                      <% end %>
                     </dd>
                   <% end %>
 
@@ -353,6 +370,40 @@ defmodule ArbiterWeb.TaskDetailLive do
                     <dd class="flex items-center gap-1.5">
                       <.icon name="hero-user-circle" class="size-4 text-base-content/50" />
                       {@task.assignee}
+                    </dd>
+                  <% end %>
+
+                  <%= if (@task.child_total || 0) > 0 do %>
+                    <dt class="font-medium text-base-content/60">Children</dt>
+                    <dd class="flex items-center gap-2">
+                      <span class="text-xs font-mono">
+                        {@task.child_closed || 0}/{@task.child_total} closed
+                      </span>
+                      <progress
+                        class="progress progress-primary w-20 h-2"
+                        value={@task.child_closed || 0}
+                        max={@task.child_total}
+                      >
+                      </progress>
+                    </dd>
+                  <% end %>
+
+                  <dt class="font-medium text-base-content/60">Created</dt>
+                  <dd class="text-xs font-mono text-base-content/70">
+                    {format_audit_ts(@task.created_at)}
+                  </dd>
+
+                  <%= if @task.updated_at do %>
+                    <dt class="font-medium text-base-content/60">Updated</dt>
+                    <dd class="text-xs font-mono text-base-content/70">
+                      {format_audit_ts(@task.updated_at)}
+                    </dd>
+                  <% end %>
+
+                  <%= if @task.closed_at do %>
+                    <dt class="font-medium text-base-content/60">Closed</dt>
+                    <dd class="text-xs font-mono text-base-content/70">
+                      {format_audit_ts(@task.closed_at)}
                     </dd>
                   <% end %>
                 </dl>
@@ -394,6 +445,65 @@ defmodule ArbiterWeb.TaskDetailLive do
                   </h3>
                   <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.notes}</pre>
                 </div>
+
+                <%!-- Merge section — pr_ref, target_branch, pr_body --%>
+                <%= if present?(@task.pr_ref) or present?(@task.target_branch) or present?(@task.pr_body) do %>
+                  <div class="border-t border-base-300 pt-3 space-y-2">
+                    <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
+                      <.icon name="hero-code-bracket" class="size-4" /> Merge
+                    </h3>
+                    <dl class="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
+                      <%= if present?(@task.pr_ref) do %>
+                        <dt class="font-medium text-base-content/60">PR / MR</dt>
+                        <dd>
+                          <% pr_url = pr_url(@workspace, @task.pr_ref) %>
+                          <%= if pr_url != "" do %>
+                            <a
+                              href={pr_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="link link-hover text-xs font-mono text-primary flex items-center gap-0.5"
+                            >
+                              #{@task.pr_ref}
+                              <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                            </a>
+                          <% else %>
+                            <code class="text-xs text-base-content/70">#{@task.pr_ref}</code>
+                          <% end %>
+                        </dd>
+                      <% end %>
+                      <%= if present?(@task.target_branch) do %>
+                        <dt class="font-medium text-base-content/60">Target</dt>
+                        <dd>
+                          <code class="badge badge-ghost badge-sm font-mono">
+                            {@task.target_branch}
+                          </code>
+                        </dd>
+                      <% end %>
+                    </dl>
+                    <div :if={present?(@task.pr_body)} class="space-y-1">
+                      <h4 class="text-xs font-medium text-base-content/50">PR description</h4>
+                      <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.pr_body}</pre>
+                    </div>
+                  </div>
+                <% end %>
+
+                <%!-- QA & Deployment section --%>
+                <%= if present?(@task.qa_notes) or present?(@task.deployment_notes) do %>
+                  <div class="border-t border-base-300 pt-3 space-y-2">
+                    <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
+                      <.icon name="hero-clipboard-document-check" class="size-4" /> QA & Deployment
+                    </h3>
+                    <div :if={present?(@task.qa_notes)} class="space-y-1">
+                      <h4 class="text-xs font-medium text-base-content/50">QA notes</h4>
+                      <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.qa_notes}</pre>
+                    </div>
+                    <div :if={present?(@task.deployment_notes)} class="space-y-1">
+                      <h4 class="text-xs font-medium text-base-content/50">Deployment notes</h4>
+                      <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.deployment_notes}</pre>
+                    </div>
+                  </div>
+                <% end %>
               </div>
             </section>
 
@@ -720,6 +830,26 @@ defmodule ArbiterWeb.TaskDetailLive do
   end
 
   # ---- view helpers (status visuals + formatting) ----
+
+  defp tracker_url(nil, _ref), do: ""
+  defp tracker_url(_workspace, nil), do: ""
+  defp tracker_url(_workspace, ""), do: ""
+
+  defp tracker_url(%Workspace{} = workspace, ref) do
+    Trackers.link_for_workspace(workspace, ref)
+  rescue
+    _ -> ""
+  end
+
+  defp pr_url(nil, _ref), do: ""
+  defp pr_url(_workspace, nil), do: ""
+  defp pr_url(_workspace, ""), do: ""
+
+  defp pr_url(%Workspace{} = workspace, ref) do
+    Mergers.link_for_workspace(workspace, ref)
+  rescue
+    _ -> ""
+  end
 
   # Canonical directive-status mapping (matches dashboard + doctrine).
   defp status_badge_class(:open), do: "badge-success"
