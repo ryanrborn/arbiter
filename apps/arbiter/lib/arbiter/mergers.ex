@@ -86,4 +86,29 @@ defmodule Arbiter.Mergers do
 
     :ok
   end
+
+  @doc """
+  Returns a human-clickable URL for a PR/MR ref in the context of the given workspace.
+
+  Resolves the merger adapter from `workspace.config["merge"]["strategy"]`, seeds
+  the adapter's per-process config, and delegates to `link_for/1`. Mirrors
+  `Arbiter.Trackers.link_for_workspace/2`.
+
+  Returns an empty string when the strategy is `:direct` (no remote web UI) or
+  when `mr_ref` is nil/blank.
+  """
+  @spec link_for_workspace(Workspace.t() | nil, String.t() | nil) :: String.t()
+  def link_for_workspace(nil, _mr_ref), do: ""
+  def link_for_workspace(_workspace, nil), do: ""
+  def link_for_workspace(_workspace, ""), do: ""
+
+  def link_for_workspace(%Workspace{} = workspace, mr_ref) when is_binary(mr_ref) do
+    adapter = for_workspace(workspace)
+
+    case Workspace.merger_strategy(workspace) do
+      :github -> Github.with_workspace(workspace, fn -> adapter.link_for(mr_ref) end)
+      :gitlab -> Gitlab.with_workspace(workspace, fn -> adapter.link_for(mr_ref) end)
+      _ -> adapter.link_for(mr_ref)
+    end
+  end
 end
