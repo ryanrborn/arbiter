@@ -1912,9 +1912,12 @@ defmodule Arbiter.Worker do
   #   * a hard attempt cap (`:resume_cap`, default 3), and
   #   * a no-progress guard: if a resumed session exits having changed nothing in
   #     the worktree (same fingerprint as when it started), stop and fail.
-  # Only `:exited_without_done` stops resume; auth/credit/rate/crash/kill fall
-  # straight through to fail_stopped (keeping the credential-watchdog escalation).
-  @resumable_stop_categories [:exited_without_done]
+  # `:exited_without_done` and `:gateway_error` are auto-resumed; auth/credit/
+  # rate/crash/kill fall straight through to fail_stopped.
+  # gateway_error: the local proxy got a transient 502/503 from Anthropic; the
+  # session context is intact so a `claude --resume` picks up where it left off
+  # (bd-298jz0 investigation — Mode A from issue #512 harness safety net).
+  @resumable_stop_categories [:exited_without_done, :gateway_error]
 
   defp maybe_resume_continuation(%State{meta: meta} = state, session) do
     exit_status = Map.get(session, :exit_status)

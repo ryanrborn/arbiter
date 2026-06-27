@@ -83,6 +83,7 @@ defmodule ArbiterWeb.UsageLive do
     |> assign(:top_tasks, top_tasks)
     |> assign(:rework_tasks, rework_tasks)
     |> assign(:rework_cost, sum_cost(rework_tasks))
+    |> assign(:rework_extra_cost, sum_extra_cost(rework_tasks))
     |> assign(:grand_cost, sum_cost(main_rollup))
     |> assign(:grand_tokens, sum_tokens(main_rollup))
   end
@@ -96,6 +97,10 @@ defmodule ArbiterWeb.UsageLive do
   # Tasks with more than one :work row — re-dispatchs, which is the rework story
   # #77 was built to expose. Queries :work events directly rather than going
   # through summarize/1 because summarize groups all steps together per task.
+  #
+  # extra_cost_usd = cost of sessions 2+ (by occurred_at), i.e. the spend that
+  # would have been zero if the first attempt had succeeded. This is a tighter
+  # "wasted spend" signal than total_cost_usd (which includes the first session).
   defp load_rework_tasks(since) do
     base_query = Ash.Query.filter(Event, step == :work)
 
@@ -112,19 +117,28 @@ defmodule ArbiterWeb.UsageLive do
     end)
     |> Enum.filter(fn {_task_id, events} -> length(events) > 1 end)
     |> Enum.map(fn {task_id, events} ->
+      sorted = Enum.sort_by(events, & &1.occurred_at, DateTime)
+      total = Enum.reduce(sorted, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
+      first_cost = hd(sorted).cost_usd || 0.0
+
       %{
         task_id: task_id,
-        work_sessions: length(events),
-        total_cost_usd: Enum.reduce(events, 0.0, fn ev, acc -> acc + (ev.cost_usd || 0.0) end)
+        work_sessions: length(sorted),
+        total_cost_usd: total,
+        extra_cost_usd: total - first_cost
       }
     end)
-    |> Enum.sort_by(fn r -> -(r.total_cost_usd || 0.0) end)
+    |> Enum.sort_by(fn r -> -(r.extra_cost_usd || 0.0) end)
   rescue
     _ -> []
   end
 
   defp sum_cost(rollup) do
     Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.total_cost_usd || 0.0) end)
+  end
+
+  defp sum_extra_cost(rollup) do
+    Enum.reduce(rollup, 0.0, fn r, acc -> acc + (r.extra_cost_usd || 0.0) end)
   end
 
   defp sum_tokens(rollup) do
@@ -298,7 +312,8 @@ defmodule ArbiterWeb.UsageLive do
             <div class="stat-desc">
               {if @rework_tasks == [],
                 do: "none re-slung",
-                else: "#{format_usd(@rework_cost)} re-slung · #{rework_pct(@rework_cost, @grand_cost)}% of total"}
+                else:
+                  "#{format_usd(@rework_extra_cost)} extra · #{rework_pct(@rework_extra_cost, @grand_cost)}% of total"}
             </div>
           </div>
         </div>
@@ -459,9 +474,9 @@ defmodule ArbiterWeb.UsageLive do
                 <span
                   :if={@rework_tasks != []}
                   class="font-mono tabular-nums text-sm font-semibold text-warning"
-                  title="Total spend on rework tasks"
+                  title={"Extra sessions cost (#{format_usd(@rework_cost)} total on rework tasks)"}
                 >
-                  {format_usd(@rework_cost)}
+                  {format_usd(@rework_extra_cost)} extra
                 </span>
               </h2>
 
@@ -500,8 +515,17 @@ defmodule ArbiterWeb.UsageLive do
                       <.icon name="hero-arrow-path" class="size-3" />
                       {r.work_sessions}× work
                     </span>
-                    <span class="font-mono tabular-nums text-xs text-warning shrink-0 font-semibold">
+                    <span
+                      class="font-mono tabular-nums text-xs text-warning/60 shrink-0"
+                      title={"Total cost across all #{r.work_sessions} sessions"}
+                    >
                       {format_usd(r.total_cost_usd)}
+                    </span>
+                    <span
+                      class="font-mono tabular-nums text-xs text-warning shrink-0 font-semibold"
+                      title="Extra sessions cost (sessions beyond the first)"
+                    >
+                      +{format_usd(r.extra_cost_usd)} extra
                     </span>
                   </div>
                 </li>
