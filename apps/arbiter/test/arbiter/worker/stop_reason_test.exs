@@ -68,6 +68,42 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — gateway / proxy errors (bd-298jz0)" do
+    test "proxy_error body from the local Anthropic proxy (502)" do
+      reason =
+        StopReason.classify(1, [
+          ~s({"error":{"type":"proxy_error","message":"upstream unreachable"}})
+        ])
+
+      assert reason.category == :gateway_error
+      assert reason.summary =~ "gateway"
+      assert reason.remediation =~ "Auto-resuming"
+    end
+
+    test "plain 502 in output" do
+      reason = StopReason.classify(1, ["HTTP 502 Bad Gateway"])
+      assert reason.category == :gateway_error
+    end
+
+    test "upstream timeout phrase" do
+      reason = StopReason.classify(1, ["upstream connection timeout"])
+      assert reason.category == :gateway_error
+    end
+
+    test "overloaded 503 from Anthropic is still rate_limited (not gateway)" do
+      # Anthropic returns 529/503 + "overloaded" — that phrase is in the rate-limit
+      # signature which is checked first; gateway_error only catches infra-level
+      # transport failures that don't carry the overloaded text.
+      reason = StopReason.classify(1, ["HTTP 503 the API is currently overloaded"])
+      assert reason.category == :rate_limited
+    end
+
+    test "gateway_error label is compact" do
+      reason = StopReason.classify(1, ["proxy_error"])
+      assert StopReason.label(reason) == "gateway error (proxy/upstream) (exit 1)"
+    end
+  end
+
   describe "classify/2 — signals / crashes / clean exit" do
     test "128+N exit band maps to a kill signal" do
       # 137 = 128 + 9 (SIGKILL)
