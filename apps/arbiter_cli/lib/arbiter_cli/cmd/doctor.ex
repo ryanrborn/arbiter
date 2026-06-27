@@ -172,41 +172,33 @@ defmodule ArbiterCli.Cmd.Doctor do
     case Client.get("/api/version") do
       {:ok, %{"sha" => server_sha, "version" => server_vsn}} ->
         cond do
+          major_version(cli_vsn) != major_version(server_vsn) ->
+            %Result{
+              name: "version",
+              status: :fail,
+              detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
+              hint: "Major version mismatch — upgrade both CLI and server to the same major.",
+              fatal: false
+            }
+
           cli_sha == server_sha ->
             %Result{
               name: "version",
               status: :ok,
               detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)",
-              fatal: true
-            }
-
-          server_sha == "unknown" and cli_vsn == server_vsn ->
-            # Release build: no git SHA embedded, but the semantic version matches.
-            # This is expected after `arb server deploy` — treat as ok.
-            %Result{
-              name: "version",
-              status: :ok,
-              detail: "#{cli_vsn} (server is a release build; SHA unavailable)",
-              fatal: true
-            }
-
-          server_sha == "unknown" ->
-            # Release build: no SHA and semantic versions differ — genuine drift.
-            %Result{
-              name: "version",
-              status: :fail,
-              detail: "CLI #{cli_vsn} / server #{server_vsn} (server is a release; SHA unavailable)",
-              hint: "Redeploy the server to version #{cli_vsn} or reinstall the CLI.",
               fatal: false
             }
 
           true ->
-            # Both SHAs are known but differ.
+            sha_note =
+              if server_sha == "unknown",
+                do: "server is a release build",
+                else: "server @ #{server_sha}"
+
             %Result{
               name: "version",
-              status: :fail,
-              detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
-              hint: "Rebuild the escript (`mix escript.build`) and/or redeploy the server.",
+              status: :ok,
+              detail: "#{cli_vsn} @ #{cli_sha} (#{sha_note})",
               fatal: false
             }
         end
@@ -226,6 +218,13 @@ defmodule ArbiterCli.Cmd.Doctor do
           detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})",
           fatal: true
         }
+    end
+  end
+
+  defp major_version(vsn) do
+    case Version.parse(vsn) do
+      {:ok, %Version{major: major}} -> major
+      :error -> nil
     end
   end
 

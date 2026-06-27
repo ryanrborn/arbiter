@@ -4,7 +4,11 @@ defmodule Arbiter.MixProject do
   def project do
     [
       app: :arbiter,
-      version: "0.1.0",
+      version:
+        case System.cmd("git", ["describe", "--tags", "--abbrev=0"], stderr_to_stdout: true) do
+          {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+          _ -> File.read!(Path.join([__DIR__, "../../VERSION"])) |> String.trim()
+        end,
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
