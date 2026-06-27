@@ -10,7 +10,15 @@ defmodule ArbiterCli.Version do
   SHA — whenever `git pull` moves the branch tip to a new commit.
   """
 
-  @app_version Mix.Project.config()[:version]
+  @version_file Path.join([__DIR__, "../../../../VERSION"])
+  @external_resource @version_file
+
+  @app_version (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+                       stderr_to_stdout: true
+                     ) do
+                  {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+                  _ -> File.read!(@version_file) |> String.trim()
+                end)
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
   @git_dir Path.expand("../../../../", __DIR__) |> Path.join(".git")

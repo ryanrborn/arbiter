@@ -1,7 +1,10 @@
 defmodule Arbiter.Umbrella.MixProject do
   use Mix.Project
 
-  @version "0.1.4"
+  @version (case System.cmd("git", ["describe", "--tags", "--abbrev=0"], stderr_to_stdout: true) do
+              {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+              _ -> File.read!(Path.join(__DIR__, "VERSION")) |> String.trim()
+            end)
 
   def project do
     [
