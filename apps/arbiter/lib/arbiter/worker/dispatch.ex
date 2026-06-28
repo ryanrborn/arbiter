@@ -959,7 +959,7 @@ defmodule Arbiter.Worker.Dispatch do
           agent_opts_from_choice(choice) ++
             [security: policy] ++ anthropic_proxy_opts(adapter, workspace)
 
-        prompt = prompt_for_task(task, opts)
+        prompt = prompt_for_task(task, Keyword.put(opts, :worktree_path, worktree_path))
 
         provider = Atom.to_string(choice.type)
 
@@ -1267,10 +1267,30 @@ defmodule Arbiter.Worker.Dispatch do
   # absent (empty prefix) on a normal fresh dispatch.
   defp work_prompt(%Issue{} = task, opts) do
     resume_prefix = Keyword.get(opts, :resume_context) || ""
-    resume_prefix <> base_work_prompt(task)
+    resume_prefix <> base_work_prompt(task, opts)
   end
 
-  defp base_work_prompt(%Issue{} = task) do
+  defp base_work_prompt(%Issue{} = task, opts) do
+    worktree_path = Keyword.get(opts, :worktree_path)
+
+    isolation_section =
+      if worktree_path do
+        """
+
+        FILESYSTEM ISOLATION — Your worktree is at:
+
+            #{worktree_path}
+
+        You MUST only write files inside this directory. Do NOT use absolute
+        paths that point outside it — especially not to the main repo checkout
+        (e.g. /home/ryan/dev/arbiter/...). Writing to the main repo corrupts
+        Phoenix hot-reload and cascades to kill every other running worker.
+        Always use relative paths or paths rooted at #{worktree_path}.
+        """
+      else
+        ""
+      end
+
     """
     You are a worker working autonomously on task #{task.id}.
 
@@ -1283,6 +1303,7 @@ defmodule Arbiter.Worker.Dispatch do
     #{task.acceptance || "(none)"}
     #{prior_review_findings_section(task)}
     Your current directory is a fresh git worktree on a per-task branch.
+    #{isolation_section}
     Work the task to completion: load context, design, implement, test,
     commit on this branch, and push it.
 

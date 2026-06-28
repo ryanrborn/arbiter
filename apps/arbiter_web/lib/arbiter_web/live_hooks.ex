@@ -53,6 +53,7 @@ defmodule ArbiterWeb.LiveHooks do
   defp maybe_subscribe_quota(socket, workspace_id) do
     if connected?(socket) do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, "quota:#{workspace_id}")
+
       attach_hook(socket, :quota_updates, :handle_info, fn msg, socket ->
         case msg do
           {:quota_updated, ^workspace_id, quota} ->

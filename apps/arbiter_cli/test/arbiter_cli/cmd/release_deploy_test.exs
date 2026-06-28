@@ -373,8 +373,8 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
     end
 
     test "deploy overwrites a stale PATH in arbiter.env with the deploying shell's PATH", %{
-           home: home
-         } do
+      home: home
+    } do
       # Pre-seed a corrupted arbiter.env (simulating test pollution or a
       # previous bad deploy).
       env_file = Path.join(home, "arbiter.env")

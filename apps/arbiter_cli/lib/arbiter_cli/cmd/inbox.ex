@@ -191,6 +191,7 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   defp emit_cleared(read, unread, 0, true, :text) do
     total = read + unread
+
     IO.puts(
       "Cleared #{read} read + #{unread} unread message#{if total == 1, do: "", else: "s"} (#{total} total)."
     )

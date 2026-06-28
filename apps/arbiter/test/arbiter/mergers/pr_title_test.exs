@@ -29,15 +29,29 @@ defmodule Arbiter.Mergers.PRTitleTest do
 
   describe "format/2 with conventional_commit workspace" do
     test "bug with Jira tracker ref produces fix: [TICKET] desc" do
-      i = issue(%{issue_type: :bug, title: "VS: fix tenant_timezone (VR-17958)", tracker_ref: "VR-17958"})
+      i =
+        issue(%{
+          issue_type: :bug,
+          title: "VS: fix tenant_timezone (VR-17958)",
+          tracker_ref: "VR-17958"
+        })
+
       ws = workspace_with_format("conventional_commit")
       assert PRTitle.format(i, ws) == "fix: [VR-17958] fix tenant_timezone"
     end
 
     test "feature with Jira tracker ref produces feat: [TICKET] desc" do
-      i = issue(%{issue_type: :feature, title: "VS: support new lea_reports object in conversational AI response (VR-17892)", tracker_ref: "VR-17892"})
+      i =
+        issue(%{
+          issue_type: :feature,
+          title: "VS: support new lea_reports object in conversational AI response (VR-17892)",
+          tracker_ref: "VR-17892"
+        })
+
       ws = workspace_with_format("conventional_commit")
-      assert PRTitle.format(i, ws) == "feat: [VR-17892] support new lea_reports object in conversational AI response"
+
+      assert PRTitle.format(i, ws) ==
+               "feat: [VR-17892] support new lea_reports object in conversational AI response"
     end
 
     test "strips leading all-caps team prefix (VS:)" do
@@ -80,7 +94,13 @@ defmodule Arbiter.Mergers.PRTitleTest do
     end
 
     test "produces no Merge <bead>: prefix in the output" do
-      i = issue(%{issue_type: :feature, title: "VS: CAI support new lea_reports object (VR-17892)", tracker_ref: "VR-17892"})
+      i =
+        issue(%{
+          issue_type: :feature,
+          title: "VS: CAI support new lea_reports object (VR-17892)",
+          tracker_ref: "VR-17892"
+        })
+
       ws = workspace_with_format("conventional_commit")
       result = PRTitle.format(i, ws)
       refute String.contains?(result, "Merge ")

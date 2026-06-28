@@ -71,8 +71,7 @@ config :arbiter, :anthropic_proxy,
 # per-chunk idle timeout — a generous value buys time-to-first-token headroom
 # for large-context Opus calls without capping long healthy generations.
 # Override at runtime with ANTHROPIC_PROXY_RECEIVE_TIMEOUT (ms).
-config :arbiter_web, :anthropic_proxy,
-  receive_timeout: 120_000
+config :arbiter_web, :anthropic_proxy, receive_timeout: 120_000
 
 # Install-wide default acolyte security posture (the floor every spawn
 # inherits before per-domain workspace overrides). The hardcoded safe baseline

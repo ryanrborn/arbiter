@@ -201,15 +201,13 @@ defmodule ArbiterWeb.Api.WorkerController do
         {:error,
          {:invalid_request,
           "no preserved worktree for this task — nothing to resume; start fresh with " <>
-            "`arb dispatch #{task_id}`",
-          %{task_id: task_id}}}
+            "`arb dispatch #{task_id}`", %{task_id: task_id}}}
 
       {:error, :no_session} ->
         {:error,
          {:invalid_request,
           "no prior Claude session recorded for this task — nothing to resume at the " <>
-            "session level; start fresh with `arb dispatch #{task_id}`",
-          %{task_id: task_id}}}
+            "session level; start fresh with `arb dispatch #{task_id}`", %{task_id: task_id}}}
 
       {:error, :repo_unknown} ->
         {:error,

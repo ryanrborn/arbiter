@@ -23,6 +23,7 @@ defmodule Arbiter.Worker.ReleaseEnvTest do
 
       for {name, value} <- pairs do
         assert is_binary(name), "expected string key, got: #{inspect(name)}"
+
         assert value == false or is_binary(value),
                "expected false or string value for #{name}, got: #{inspect(value)}"
       end

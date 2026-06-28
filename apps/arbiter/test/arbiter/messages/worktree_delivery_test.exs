@@ -9,7 +9,8 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
   defp new_task_id, do: "wt-delivery-#{System.unique_integer([:positive])}"
 
   defp start_worker(task_id, worktree_path) do
-    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", meta: %{worktree_path: worktree_path})
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", meta: %{worktree_path: worktree_path})
 
     on_exit(fn ->
       if Process.alive?(pid), do: GenServer.stop(pid, :normal)

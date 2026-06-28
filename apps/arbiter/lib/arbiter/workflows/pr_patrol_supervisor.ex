@@ -119,9 +119,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
     end
   rescue
     e ->
-      Logger.warning(
-        "PRPatrolSupervisor: enumeration crashed at boot: #{Exception.message(e)}"
-      )
+      Logger.warning("PRPatrolSupervisor: enumeration crashed at boot: #{Exception.message(e)}")
 
       :ok
   end

@@ -1183,6 +1183,27 @@ defmodule Arbiter.Worker.DispatchTest do
       refute review_prompt =~ "Prior review findings"
       refute review_prompt =~ "existing PR"
     end
+
+    test "includes worktree isolation section when worktree_path is given (bd-cwov25)",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "coding task", workspace_id: ws.id})
+
+      prompt =
+        Dispatch.prompt_for_task(task, worktree_path: "/home/ryan/dev/arbiter-worktrees/feat-x")
+
+      assert prompt =~ "FILESYSTEM ISOLATION"
+      assert prompt =~ "/home/ryan/dev/arbiter-worktrees/feat-x"
+      assert prompt =~ "Do NOT use absolute"
+    end
+
+    test "omits worktree isolation section when no worktree_path is given (bd-cwov25)",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "coding task", workspace_id: ws.id})
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      refute prompt =~ "FILESYSTEM ISOLATION"
+    end
   end
 
   describe "task-type dispatch prompt (bd-5lc99r)" do
