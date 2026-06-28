@@ -137,17 +137,18 @@ defmodule Arbiter.Worker.PRTemplateTest do
       assert PRTemplate.fill("type: {{tracker.type}}", task) == "type: none"
     end
 
-    test "unregistered tracker type (:linear / :github pre-Phase-5) — safe_link_for catches the raise" do
+    test "unregistered tracker type — safe_link_for catches the raise" do
       # Trackers.link_for raises ArgumentError for unregistered tracker types.
       # PRTemplate should treat that as no-link and drop the line, not crash.
-      # (:jira is registered as of gte-029; :linear and :github remain Phase 5.)
+      # All five current tracker types are registered; use a hypothetical future
+      # type to verify the fallback still works.
       task = %Issue{
         id: "x-1",
         title: "t",
         priority: 2,
         issue_type: :task,
-        tracker_type: :linear,
-        tracker_ref: "LIN-1"
+        tracker_type: :future_unregistered_tracker,
+        tracker_ref: "FUT-1"
       }
 
       template = "Link: {{tracker.link}}"
