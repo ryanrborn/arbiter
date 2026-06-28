@@ -228,6 +228,57 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def tracker_sync_failed(_snapshot, _event, _reason), do: :ok
 
   @doc """
+  Escalate a stalled auto-merge to the Admiral (bd-6gxosc).
+
+  Fired by `Arbiter.Worker.Watchdog` after N consecutive `safe_merge` failures on
+  an approved PR — the merge keeps failing (race, transient forge error, unknown
+  `mergeable_state`) but the Watchdog keeps retrying silently. After the threshold
+  is hit, this surfaces the stall as an actionable `:escalation` mailbox item so
+  the Admiral can intervene if needed. The Watchdog continues retrying; it does
+  NOT stop. `attempts` is the total consecutive failure count; `reason` is the
+  last error from the merger adapter. Best-effort, returns `:ok`.
+  """
+  @spec auto_merge_stalled(map(), String.t() | nil, non_neg_integer(), term()) :: :ok
+  def auto_merge_stalled(%{workspace_id: ws_id} = snapshot, mr_ref, attempts, reason)
+      when is_binary(ws_id) and is_integer(attempts) do
+    task_id = Map.get(snapshot, :task_id, "system")
+
+    subject = "#{task_id} auto-merge stalled (#{attempts} consecutive failures)"
+
+    body =
+      [
+        "#{title_for(task_id)} is approved but auto-merge has failed #{attempts} consecutive time(s).",
+        mr_ref && "PR/MR: #{mr_ref}",
+        "Last error: #{describe_reason(reason)}",
+        "The Watchdog is still retrying — you can wait for it to resolve (e.g. once " <>
+          "the forge finishes computing `mergeable_state`) or merge manually. " <>
+          "No action is required if the next poll succeeds."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: task_id,
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.auto_merge_stalled/4 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def auto_merge_stalled(_snapshot, _mr_ref, _attempts, _reason), do: :ok
+
+  @doc """
   Escalate a blocked merge to the coordinator (#354, Phase 1).
 
   Fired by `Arbiter.Worker.Watchdog` when an approved/parked PR can't merge and

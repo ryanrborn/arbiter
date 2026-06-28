@@ -101,6 +101,11 @@ defmodule Arbiter.Worker.Watchdog do
   # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
   @default_fix_pass_dispatcher Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
+  # Consecutive safe_merge failures before the Warden pages the Admiral with a
+  # stall notification (bd-6gxosc). The Watchdog keeps retrying after notifying;
+  # the counter resets on a successful merge so a future stall re-notifies.
+  @default_merge_fail_notify_threshold 3
+
   # Registry suffix the fix-pass worker registers under — MUST match
   # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
   @fix_pass_registry_suffix ":fixpass"
@@ -133,6 +138,7 @@ defmodule Arbiter.Worker.Watchdog do
           | {:auto_resolve_conflict, boolean()}
           | {:max_conflict_attempts, pos_integer()}
           | {:conflict_resolver, module()}
+          | {:merge_fail_notify_threshold, pos_integer()}
 
   @type opts :: [opt()]
 
@@ -363,7 +369,14 @@ defmodule Arbiter.Worker.Watchdog do
           conflict_resolving: false,
           conflict_resolver_pid: nil,
           conflict_branch: nil,
-          conflict_escalated: false
+          conflict_escalated: false,
+          # Consecutive safe_merge failures (bd-6gxosc). Resets to 0 on success;
+          # a notification fires once when the count first hits the threshold, then
+          # is suppressed until the counter resets and re-hits the threshold.
+          merge_fail_count: 0,
+          merge_fail_notify_threshold:
+            Keyword.get(opts, :merge_fail_notify_threshold, @default_merge_fail_notify_threshold),
+          merge_stall_notified: false
         }
 
         Process.monitor(worker_pid)
@@ -420,7 +433,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp apply_outcome(:merged, _result, state) do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
     safe(fn -> Worker.complete(state.worker_pid, :merged) end)
-    {:stop, :normal, state}
+    {:stop, :normal, %{state | merge_fail_count: 0, merge_stall_notified: false}}
   end
 
   defp apply_outcome(:closed, _result, state) do
@@ -442,9 +455,29 @@ defmodule Arbiter.Worker.Watchdog do
       {:error, reason} ->
         # Merge failed (race, branch conflict, transient). Stay parked and let
         # the next poll re-attempt rather than failing the task outright.
+        fail_count = state.merge_fail_count + 1
+
         Logger.warning(
-          "Worker.Watchdog: auto-merge failed for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry"
+          "Worker.Watchdog: auto-merge failed for task=#{state.task_id} mr=#{state.mr_ref}: #{inspect(reason)}; will retry (consecutive failure #{fail_count})"
         )
+
+        state = %{state | merge_fail_count: fail_count}
+
+        state =
+          if fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified do
+            safe(fn ->
+              Arbiter.Messages.AdmiralNotifier.auto_merge_stalled(
+                snapshot(state),
+                state.mr_ref,
+                fail_count,
+                reason
+              )
+            end)
+
+            %{state | merge_stall_notified: true}
+          else
+            state
+          end
 
         reschedule(state)
     end
