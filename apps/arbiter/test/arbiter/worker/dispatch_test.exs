@@ -407,6 +407,35 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
+    # bd-9fjy6j: a task-type issue has no worktree (deliverable is notes, not a
+    # branch), but Claude still needs a cwd. It falls back to the repo's main
+    # checkout — same as a review dispatch — and no worktree is provisioned.
+    test "task-type dispatch with start_claude runs from the main checkout without a worktree",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "taskrepo")
+
+      Application.put_env(:arbiter, :repo_paths, %{"task/repo" => repo})
+
+      on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "audit: parity check", issue_type: :task, workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "task/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sleep", "2"]
+        )
+
+      # No worktree provisioned — task deliverable is notes, not a branch.
+      assert result.worktree_path == nil
+      # Claude still launched — cwd resolved to main checkout.
+      assert is_port(result.claude_port)
+    end
+
     # Counterpart: a normal work dispatch DOES get the MCP config — but only ever
     # inside its own isolated worktree, never the repo.
     test "work dispatch writes .mcp.json into its isolated worktree (not the repo)",
