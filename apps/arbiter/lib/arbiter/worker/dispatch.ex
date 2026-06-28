@@ -907,10 +907,15 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Resolve a sensible cwd for a review session that has no per-task worktree.
-  # Only fires when `review: true` is set so a regular dispatch without
-  # provision_worktree still surfaces `:missing_worktree` instead of silently
-  # running Claude in the repo's main checkout.
+  # Resolve a sensible cwd for sessions that skip worktree provisioning:
+  #   - review dispatches (`review: true`) — read-only code review, no branch
+  #   - task-type issues — deliverable is notes, not a PR; safe on main checkout
+  # Regular feature/bug/chore dispatches without a worktree still surface
+  # `:missing_worktree` rather than silently running from the main checkout.
+  defp review_cwd(%Issue{issue_type: :task} = task, opts) do
+    resolve_repo_path(task, Keyword.get(opts, :repo))
+  end
+
   defp review_cwd(%Issue{} = task, opts) do
     case Keyword.get(opts, :review, false) do
       true -> resolve_repo_path(task, Keyword.get(opts, :repo))
