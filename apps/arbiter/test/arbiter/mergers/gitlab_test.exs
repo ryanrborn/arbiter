@@ -705,6 +705,7 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:error, %Error{kind: :config_missing}} = Gitlab.open("b", "t", "d", %{})
       assert {:error, %Error{kind: :config_missing}} = Gitlab.get(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.update_branch(@ref)
+      assert {:error, %Error{kind: :config_missing}} = Gitlab.failing_check_logs(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.merge(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.close(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.add_comment(@ref, "x")
@@ -738,6 +739,151 @@ defmodule Arbiter.Mergers.GitlabTest do
 
     test "an unparseable identifier returns a validation error" do
       assert {:error, %Error{kind: :validation_failed}} = Gitlab.ref_for_pr("nonsense", %{})
+    end
+  end
+
+  describe "failing_check_logs/1" do
+    @pipelines_path "/api/v4/projects/12345/merge_requests/42/pipelines"
+    @pipeline_id 99
+    @jobs_path "/api/v4/projects/12345/pipelines/99/jobs"
+    @job_id 55
+    @trace_path "/api/v4/projects/12345/jobs/55/trace"
+
+    test "returns failing job names, log tails, and URLs" do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => @pipeline_id, "status" => "failed"}])
+
+          @jobs_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "id" => @job_id,
+                "name" => "rspec",
+                "status" => "failed",
+                "web_url" => "https://gitlab.com/grp/proj/-/jobs/55"
+              }
+            ])
+
+          @trace_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Plug.Conn.resp(200, "some test output\nfailure at line 42")
+        end
+      end)
+
+      assert {:ok, [check]} = Gitlab.failing_check_logs(@ref)
+      assert check.name == "rspec"
+      assert check.summary =~ "failure at line 42"
+      assert check.url == "https://gitlab.com/grp/proj/-/jobs/55"
+    end
+
+    test "returns {:ok, []} when no pipelines exist" do
+      stub(fn conn ->
+        assert conn.request_path == @pipelines_path
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      assert {:ok, []} = Gitlab.failing_check_logs(@ref)
+    end
+
+    test "returns {:ok, []} when the latest pipeline succeeded" do
+      stub(fn conn ->
+        assert conn.request_path == @pipelines_path
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json([%{"id" => @pipeline_id, "status" => "success"}])
+      end)
+
+      assert {:ok, []} = Gitlab.failing_check_logs(@ref)
+    end
+
+    test "skips successful jobs in a failed pipeline" do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => @pipeline_id, "status" => "failed"}])
+
+          @jobs_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"id" => 10, "name" => "build", "status" => "success"},
+              %{
+                "id" => @job_id,
+                "name" => "test",
+                "status" => "failed",
+                "web_url" => "https://gitlab.com/grp/proj/-/jobs/55"
+              }
+            ])
+
+          "/api/v4/projects/12345/jobs/10/trace" ->
+            conn |> Plug.Conn.put_status(200) |> Plug.Conn.resp(200, "build ok")
+
+          @trace_path ->
+            conn |> Plug.Conn.put_status(200) |> Plug.Conn.resp(200, "test failed")
+        end
+      end)
+
+      assert {:ok, [check]} = Gitlab.failing_check_logs(@ref)
+      assert check.name == "test"
+    end
+
+    test "log tail is truncated to 4_000 chars (keeps the tail, not the head)" do
+      long_log = String.duplicate("x", 5_000)
+
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => @pipeline_id, "status" => "failed"}])
+
+          @jobs_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"id" => @job_id, "name" => "rspec", "status" => "failed"}
+            ])
+
+          @trace_path ->
+            conn |> Plug.Conn.put_status(200) |> Plug.Conn.resp(200, long_log)
+        end
+      end)
+
+      assert {:ok, [check]} = Gitlab.failing_check_logs(@ref)
+      assert String.starts_with?(check.summary, "…")
+      assert String.length(check.summary) == 4_001
+    end
+
+    test "trace fetch failure yields an empty summary, not an error" do
+      stub(fn conn ->
+        case conn.request_path do
+          @pipelines_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => @pipeline_id, "status" => "failed"}])
+
+          @jobs_path ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => @job_id, "name" => "rspec", "status" => "failed"}])
+
+          @trace_path ->
+            conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => "forbidden"})
+        end
+      end)
+
+      assert {:ok, [check]} = Gitlab.failing_check_logs(@ref)
+      assert check.name == "rspec"
+      assert check.summary == ""
     end
   end
 
