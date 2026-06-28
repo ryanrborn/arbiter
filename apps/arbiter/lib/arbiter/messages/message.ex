@@ -214,7 +214,12 @@ defmodule Arbiter.Messages.Message do
   reload. Silent-on-failure, mirroring `broadcast_new/1`.
   """
   def broadcast_cleared(workspace_id) when is_binary(workspace_id) do
-    Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(workspace_id), {:mailbox_cleared, workspace_id})
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      topic(workspace_id),
+      {:mailbox_cleared, workspace_id}
+    )
+
     :ok
   rescue
     e ->

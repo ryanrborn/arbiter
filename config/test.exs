@@ -21,8 +21,7 @@ config :arbiter_web, ArbiterWeb.Endpoint,
 # runtime and refuses to boot without it; this config fallback injects a fixed
 # (non-secret) 32-byte AES key so the suite encrypts/decrypts workspace secrets
 # without depending on a real environment variable. Never used outside :test.
-config :arbiter, Arbiter.Vault,
-  key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+config :arbiter, Arbiter.Vault, key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 config :arbiter, :github_http_stub, true
 config :arbiter, :jira_http_stub, true
