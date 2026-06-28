@@ -1016,4 +1016,37 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
     end
   end
+
+  describe "add_comment/2" do
+    test "POSTs Markdown body to the issue comments endpoint and returns :ok" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/repos/#{@owner}/#{@repo}/issues/#{@ref}/comments"
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert %{"body" => "Hello from Arbiter"} = Jason.decode!(body)
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => 1, "body" => "Hello from Arbiter"})
+      end)
+
+      assert :ok = GitHub.add_comment(@ref, "Hello from Arbiter")
+    end
+
+    test "returns {:error, %Error{}} on HTTP error" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed}} = GitHub.add_comment(@ref, "body")
+    end
+
+    test "returns {:error, %Error{kind: :config_missing}} when config is absent" do
+      Config.clear()
+      assert {:error, %Error{kind: :config_missing}} = GitHub.add_comment(@ref, "body")
+    end
+  end
 end
