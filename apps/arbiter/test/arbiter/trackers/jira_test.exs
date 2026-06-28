@@ -1000,6 +1000,100 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
+  describe "search_by_title/1" do
+    test "returns matching issues (exact, case-insensitive match)" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/rest/api/3/search/jql"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "issues" => [
+            %{
+              "key" => "VR-10",
+              "fields" => %{"summary" => "Fix the Thing"}
+            },
+            %{
+              "key" => "VR-11",
+              "fields" => %{"summary" => "Fix the Thing and more"}
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, [%{ref: "VR-10", title: "Fix the Thing", url: url}]} =
+               Jira.search_by_title("fix the thing")
+
+      assert url == "https://#{@host}/browse/VR-10"
+    end
+
+    test "returns empty list when no exact match" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "issues" => [
+            %{"key" => "VR-20", "fields" => %{"summary" => "Something else entirely"}}
+          ]
+        })
+      end)
+
+      assert {:ok, []} = Jira.search_by_title("My Title")
+    end
+
+    test "scopes JQL to the active workspace project" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        parsed = Jason.decode!(body)
+        assert String.contains?(parsed["jql"], ~s[project = "#{@project}"])
+
+        Req.Test.json(conn, %{"issues" => []})
+      end)
+
+      assert {:ok, []} = Jira.search_by_title("any title")
+    end
+
+    test "excludes Done statusCategory from JQL" do
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        parsed = Jason.decode!(body)
+        assert String.contains?(parsed["jql"], "statusCategory != Done")
+
+        Req.Test.json(conn, %{"issues" => []})
+      end)
+
+      assert {:ok, []} = Jira.search_by_title("any title")
+    end
+
+    test "returns empty list when response has no issues key" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"total" => 0})
+      end)
+
+      assert {:ok, []} = Jira.search_by_title("anything")
+    end
+
+    test "returns error on API failure" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{"errorMessages" => ["invalid JQL"]})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 400}} =
+               Jira.search_by_title("bad query")
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = Jira.search_by_title("test")
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()
