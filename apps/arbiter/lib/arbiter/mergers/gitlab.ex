@@ -141,6 +141,19 @@ defmodule Arbiter.Mergers.Gitlab do
   end
 
   @impl true
+  def update_branch(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      # GitLab's rebase endpoint (PUT …/rebase) queues an async rebase of the
+      # MR branch onto the target branch and returns 202 Accepted. A 409 means
+      # the rebase can't be applied cleanly (conflict); the queue treats that as
+      # non-fatal and lets the next get/1 poll surface the conflict state.
+      request(cfg, :put, "/merge_requests/#{iid}/rebase", json: %{})
+      |> handle_ok()
+    end
+  end
+
+  @impl true
   def merge(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, iid} <- iid_from_ref(mr_ref) do

@@ -474,6 +474,31 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  describe "update_branch/1" do
+    test "202: PUTs the rebase endpoint and returns :ok" do
+      stub(fn conn ->
+        assert conn.method == "PUT"
+        assert conn.request_path == "#{base_path()}/#{@iid}/rebase"
+
+        conn
+        |> Plug.Conn.put_status(202)
+        |> Req.Test.json(%{"rebase_in_progress" => true})
+      end)
+
+      assert :ok = Gitlab.update_branch(@ref)
+    end
+
+    test "409: conflict returns {:error, %Error{kind: :conflict}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(409)
+        |> Req.Test.json(%{"message" => "Rebase failed."})
+      end)
+
+      assert {:error, %Error{kind: :conflict, status: 409}} = Gitlab.update_branch(@ref)
+    end
+  end
+
   describe "merge/1" do
     test "200: PUTs the merge endpoint and returns :ok" do
       stub(fn conn ->
@@ -679,6 +704,7 @@ defmodule Arbiter.Mergers.GitlabTest do
 
       assert {:error, %Error{kind: :config_missing}} = Gitlab.open("b", "t", "d", %{})
       assert {:error, %Error{kind: :config_missing}} = Gitlab.get(@ref)
+      assert {:error, %Error{kind: :config_missing}} = Gitlab.update_branch(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.merge(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.close(@ref)
       assert {:error, %Error{kind: :config_missing}} = Gitlab.add_comment(@ref, "x")
