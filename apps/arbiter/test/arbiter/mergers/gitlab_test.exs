@@ -887,6 +887,47 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  describe "list_open/0" do
+    test "GETs opened MRs and returns normalized open_mr list" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == base_path()
+        assert conn.query_string =~ "state=opened"
+        assert conn.query_string =~ "per_page=100"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json([
+          %{
+            "iid" => 42,
+            "title" => "Implement feature X",
+            "web_url" => "https://gitlab.com/group/project/-/merge_requests/42"
+          }
+        ])
+      end)
+
+      assert {:ok, [mr]} = Gitlab.list_open()
+      assert mr.ref == "!42"
+      assert mr.number == 42
+      assert mr.title == "Implement feature X"
+      assert mr.url == "https://gitlab.com/group/project/-/merge_requests/42"
+    end
+
+    test "no open MRs → {:ok, []}" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      assert {:ok, []} = Gitlab.list_open()
+    end
+
+    test "missing config → {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = Gitlab.list_open()
+    end
+  end
+
   describe "list_open_review_threads/1" do
     test "GETs discussions and returns only unresolved resolvable threads, normalized" do
       stub(fn conn ->
