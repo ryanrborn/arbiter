@@ -242,9 +242,28 @@ defmodule Arbiter.Trackers.Tracker do
   """
   @callback signal_claim(ref, task_id :: String.t(), context :: map()) :: :ok
 
+  @doc """
+  Search upstream tracker items whose title matches `title` (case-insensitive
+  substring or exact match, depending on the adapter).
+
+  Used during task creation to detect duplicates before opening a new item —
+  callers check the returned list and skip creation when a sufficiently-similar
+  item already exists.
+
+  Returns `{:ok, [summary]}` on success (empty list when nothing matches) or
+  `{:error, term()}` on failure. Each element in the list is a `t:summary/0`
+  map — the same shape produced by `list_open/1`.
+
+  Optional — adapters that cannot search by title simply do not implement
+  this callback. The dispatcher in `Arbiter.Trackers` guards the call with
+  `function_exported?/3` and falls back to skipping the dedup check.
+  """
+  @callback search_by_title(title :: String.t()) :: {:ok, [summary()]} | {:error, term()}
+
   @optional_callbacks add_remote_link: 3,
                       add_comment: 2,
                       check_prior_claim: 1,
                       signal_claim: 3,
-                      gating_fields: 2
+                      gating_fields: 2,
+                      search_by_title: 1
 end
