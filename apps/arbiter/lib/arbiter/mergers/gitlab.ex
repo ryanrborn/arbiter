@@ -347,6 +347,30 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
+  @impl true
+  def list_open do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, mrs} <-
+           request(cfg, :get, "/merge_requests", params: [state: "opened", per_page: 100])
+           |> handle_json() do
+      summaries =
+        mrs
+        |> List.wrap()
+        |> Enum.map(fn mr ->
+          iid = mr["iid"]
+
+          %{
+            ref: ref_for(iid),
+            number: iid,
+            title: mr["title"] || "",
+            url: mr["web_url"] || ""
+          }
+        end)
+
+      {:ok, summaries}
+    end
+  end
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
