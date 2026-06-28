@@ -62,6 +62,105 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
     pid
   end
 
+  defp start_watchdog(worker_pid, task_id, ws, mr_ref, opts) do
+    base = [
+      task_id: task_id,
+      worker: worker_pid,
+      mr_ref: mr_ref,
+      adapter: StubMerger,
+      workspace: ws,
+      interval_ms: 20,
+      initial_delay_ms: 0
+    ]
+
+    {:ok, wpid} = Arbiter.Worker.Watchdog.start(Keyword.merge(base, opts))
+    on_exit(fn -> if Process.alive?(wpid), do: GenServer.stop(wpid, :normal) end)
+    wpid
+  end
+
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait(fun, deadline)
+  end
+
+  defp do_wait(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        ExUnit.Assertions.flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait(fun, deadline)
+    end
+  end
+
+  describe "auto-merge stall notification (bd-6gxosc)" do
+    test "Admiral receives an inbox escalation after N consecutive safe_merge failures" do
+      ws = new_workspace()
+      task = new_task(ws)
+      pid = running_worker(task, ws)
+
+      StubMerger.queue_get("!stall1", [%{status: :open, approved: true}])
+      StubMerger.set_merge_result({:error, :mergeable_state_unknown})
+
+      start_watchdog(pid, task.id, ws, "!stall1",
+        auto_merge: true,
+        merge_fail_notify_threshold: 3
+      )
+
+      # Wait until at least 3 merge attempts have been made.
+      wait_until(fn -> StubMerger.merge_count("!stall1") >= 3 end)
+      # Let a poll interval pass to ensure the notifier call fires.
+      Process.sleep(60)
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+
+      stall_msg =
+        Enum.find(escalations, fn m ->
+          m.kind == :escalation and m.directive_ref == task.id and
+            String.contains?(m.subject || "", "stalled")
+        end)
+
+      assert stall_msg, "expected an Admiral escalation for the stalled auto-merge"
+      assert stall_msg.subject =~ task.id
+      assert stall_msg.body =~ "!stall1"
+      assert stall_msg.body =~ "3"
+      assert stall_msg.body =~ "mergeable_state_unknown"
+    end
+
+    test "only one stall message is sent per stall episode (no repeated inbox spam)" do
+      ws = new_workspace()
+      task = new_task(ws)
+      pid = running_worker(task, ws)
+
+      StubMerger.queue_get("!stall2", [%{status: :open, approved: true}])
+      StubMerger.set_merge_result({:error, :transient})
+
+      start_watchdog(pid, task.id, ws, "!stall2",
+        auto_merge: true,
+        merge_fail_notify_threshold: 3
+      )
+
+      # Let 6+ failures accumulate (2× the threshold).
+      wait_until(fn -> StubMerger.merge_count("!stall2") >= 6 end)
+      Process.sleep(40)
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+
+      stall_msgs =
+        Enum.filter(escalations, fn m ->
+          m.kind == :escalation and m.directive_ref == task.id and
+            String.contains?(m.subject || "", "stalled")
+        end)
+
+      assert length(stall_msgs) == 1,
+             "expected exactly 1 stall escalation, got #{length(stall_msgs)}"
+    end
+  end
+
   describe "Watchdog startup failure (bd-91rnwq)" do
     test "worker stays :awaiting_review when Watchdog fails to start" do
       ws = new_workspace()
