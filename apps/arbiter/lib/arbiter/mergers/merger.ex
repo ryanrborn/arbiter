@@ -16,9 +16,9 @@ defmodule Arbiter.Mergers.Merger do
 
   Every adapter mints an opaque `t:mr_ref/0` (a binary) from `open/4` and
   accepts it back on the remaining callbacks. Callers should treat it as
-  opaque — its internal shape is adapter-specific (e.g. `"direct:<branch>"`
-  for `Direct`, a project/MR-iid pair for GitLab, an owner/repo/PR-number
-  triple for GitHub).
+  opaque — its internal shape is adapter-specific (e.g.
+  `"direct:<branch>|<repo_path>|<target>"` for `Direct`, a
+  project/MR-iid pair for GitLab, an owner/repo/PR-number triple for GitHub).
 
   ## `opts` map (passed to `open/4`)
 
@@ -203,21 +203,23 @@ defmodule Arbiter.Mergers.Merger do
   @doc """
   Update the MR's head branch from its base — the mechanical rebase-forward the
   base-aware merge queue (Crucible, #354 Phase 3) runs to keep an in-flight PR
-  continuously rebased as the integration branch moves. For GitHub this is `PUT
-  /pulls/:n/update-branch` (equivalently `gh pr update-branch`); for a local
-  adapter it is a rebase/merge of the base onto the branch + push.
+  continuously rebased as the integration branch moves. For hosted forges
+  (GitHub: `PUT /pulls/:n/update-branch`; GitLab: `PUT …/rebase`) the update
+  may complete asynchronously — the queue re-polls `get/1` to observe the
+  result. For `Direct`, this is a local `git rebase <target_branch>` on the
+  working branch inside the repo (synchronous, returns `:ok` once the rebase
+  applies cleanly).
 
-  Returns `:ok` once the update is accepted (it may complete asynchronously on
-  the forge — the queue re-polls). Returns `{:error, term()}` when the update
-  can't be performed (e.g. the merge would conflict). The queue treats the
-  error as non-fatal: it does not classify the conflict from this return, but
-  re-polls and lets `get/1`'s `conflicting` field route a genuine conflict to
-  the resolver (so a base-introduced conflict surfaces during the rebase step,
-  not at merge time).
+  Returns `:ok` once the update is accepted. Returns `{:error, term()}` when
+  the update can't be performed (e.g. the rebase/merge would conflict). The
+  queue treats the error as non-fatal: it does not classify the conflict from
+  this return, but re-polls and lets `get/1`'s `conflicting` field route a
+  genuine conflict to the resolver (so a base-introduced conflict surfaces
+  during the rebase step, not at merge time).
 
-  Optional — adapters that can't update a branch (e.g. `Direct`, `GitLab` until
-  wired) simply don't implement it; callers guard with `function_exported?/3`
-  and fall back to leaving the PR un-rebased.
+  Optional — adapters that have no meaningful way to update a branch simply
+  don't implement it; callers guard with `function_exported?/3` and fall back
+  to leaving the PR un-rebased.
   """
   @callback update_branch(mr_ref) :: :ok | {:error, term()}
 

@@ -18,11 +18,30 @@ defmodule Arbiter.Mergers.Direct do
 
   `:target_branch` defaults to `"main"` when omitted.
 
+  ## mr_ref format
+
+  The opaque `mr_ref` produced by `open/4` encodes the branch, repo path, and
+  target branch as a `"|"`-delimited string so that callbacks that receive only
+  the ref can perform local git operations without additional opts:
+
+      "direct:<branch>|<repo_path>|<target_branch>"
+
+  Callers must treat the format as opaque. `branch_from_ref/1` decodes the
+  branch name when needed.
+
   ## Callback semantics
 
     * `open/4` — checks out `target_branch` and runs `git merge --no-ff
-      <branch>` in `repo_path`. Returns `{:ok, "direct:" <> branch}`. The
-      merge commit message is `title` when given, otherwise git's default.
+      <branch>` in `repo_path`. Returns `{:ok, ref}` where `ref` encodes the
+      branch, repo path, and target branch. The merge commit message is `title`
+      when given, otherwise git's default.
+    * `update_branch/1` — rebases the working branch forward onto its base
+      (`git checkout <branch>` then `git rebase <target_branch>` inside
+      `repo_path`). Returns `:ok` on success or
+      `{:error, {:rebase_conflict, %{branch:, base:, files:, output:}}}` on a
+      conflict (the rebase is aborted so the tree stays clean). Returns
+      `{:error, :no_repo_path}` when the ref doesn't carry a repo path (e.g.
+      an old-format or hand-constructed ref).
     * `get/1` — always `{:ok, %{status: :merged}}`; once `open/4` succeeds the
       branch is already integrated, so there is no other state to report.
     * `merge/1`, `close/1`, `add_comment/2`, `request_review/2` — no-ops
@@ -81,7 +100,7 @@ defmodule Arbiter.Mergers.Direct do
           case run_git(["merge", "--no-ff"] ++ message_args(title) ++ [branch], path) do
             {:ok, _} ->
               with {:ok, _} <- run_git(["push", "origin", target], path) do
-                {:ok, "direct:" <> branch}
+                {:ok, encode_ref(branch, path, target)}
               end
 
             {:error, {:git_failed, output}} ->
@@ -117,6 +136,32 @@ defmodule Arbiter.Mergers.Direct do
   @impl true
   def list_review_feedback(_mr_ref),
     do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
+
+  # Rebase the working branch forward onto its base. A Direct repo is a real
+  # local git repo; keeping the branch current with main is meaningful.
+  # The repo path and target branch are decoded from the mr_ref (they are
+  # encoded there by open/4). Returns {:error, :no_repo_path} for hand-crafted
+  # or old-format refs that don't carry the path.
+  @impl true
+  def update_branch(mr_ref) when is_binary(mr_ref) do
+    case ref_params(mr_ref) do
+      {branch, repo_path, target} when is_binary(repo_path) ->
+        target_branch = target || "main"
+
+        with {:ok, _} <- run_git(["checkout", branch], repo_path) do
+          case run_git(["rebase", target_branch], repo_path) do
+            {:ok, _} ->
+              :ok
+
+            {:error, {:git_failed, output}} ->
+              abort_failed_rebase(repo_path, branch, target_branch, output)
+          end
+        end
+
+      {_branch, nil, _} ->
+        {:error, :no_repo_path}
+    end
+  end
 
   # ---- Review callbacks ----
 
@@ -173,8 +218,29 @@ defmodule Arbiter.Mergers.Direct do
 
   # ---- helpers ----
 
-  defp branch_from_ref("direct:" <> branch), do: branch
-  defp branch_from_ref(other), do: other
+  # Encode the three fields the adapter needs for local git operations into the
+  # opaque mr_ref. Uses "|" as a delimiter ("|" is not a valid git refname
+  # character and does not appear in well-formed Unix paths on this platform).
+  defp encode_ref(branch, repo_path, target_branch),
+    do: "direct:#{branch}|#{repo_path}|#{target_branch}"
+
+  # Decode all three fields from a ref produced by encode_ref/3.
+  # Gracefully handles the old single-field format ("direct:<branch>") and bare
+  # branch names (no "direct:" prefix) that callers may pass in tests.
+  defp ref_params("direct:" <> rest) do
+    case String.split(rest, "|", parts: 3) do
+      [branch, repo_path, target] -> {branch, repo_path, target}
+      [branch] -> {branch, nil, nil}
+      _ -> {rest, nil, nil}
+    end
+  end
+
+  defp ref_params(other), do: {other, nil, nil}
+
+  defp branch_from_ref(ref) do
+    {branch, _repo, _target} = ref_params(ref)
+    branch
+  end
 
   defp review_file_path(repo_path, branch) do
     leaf = String.replace(branch, "/", "-") <> ".md"
@@ -253,6 +319,20 @@ defmodule Arbiter.Mergers.Direct do
       {:error, {:git_failed, output}}
     else
       {:error, {:merge_conflict, %{branch: branch, files: conflicts, output: output}}}
+    end
+  end
+
+  # A rebase failed. Capture conflicting paths then abort so the tree stays
+  # clean. Same safety invariant as abort_failed_merge/3 — the canonical
+  # checkout must never be left in a partially-applied state.
+  defp abort_failed_rebase(path, branch, base, output) do
+    conflicts = conflicting_files(path)
+    _ = run_git(["rebase", "--abort"], path)
+
+    if conflicts == [] do
+      {:error, {:git_failed, output}}
+    else
+      {:error, {:rebase_conflict, %{branch: branch, base: base, files: conflicts, output: output}}}
     end
   end
 

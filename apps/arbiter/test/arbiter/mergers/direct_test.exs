@@ -8,11 +8,14 @@ defmodule Arbiter.Mergers.DirectTest do
     test "merges the feature branch into target with a --no-ff merge commit", %{tmp_dir: dir} do
       build_repo(dir)
 
-      assert {:ok, "direct:feature/x"} =
+      assert {:ok, ref} =
                Direct.open("feature/x", "Merge feature/x", "", %{
                  repo_path: dir,
                  target_branch: "main"
                })
+
+      # The ref encodes branch, repo path, and target branch.
+      assert ref == "direct:feature/x|#{dir}|main"
 
       # The feature branch's file is now present on main.
       assert File.exists?(Path.join(dir, "feature.txt"))
@@ -38,8 +41,8 @@ defmodule Arbiter.Mergers.DirectTest do
       # Move off main so we can prove open/4 checks main back out itself.
       assert {_, 0} = git(dir, ["checkout", "feature/x"])
 
-      assert {:ok, "direct:feature/x"} =
-               Direct.open("feature/x", "", "", %{repo_path: dir})
+      assert {:ok, ref} = Direct.open("feature/x", "", "", %{repo_path: dir})
+      assert ref == "direct:feature/x|#{dir}|main"
 
       assert {"main\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
       assert File.exists?(Path.join(dir, "feature.txt"))
@@ -93,6 +96,51 @@ defmodule Arbiter.Mergers.DirectTest do
       assert {"", 0} = git(dir, ["status", "--porcelain"])
       assert {"", 0} = git(dir, ["diff", "--name-only", "--diff-filter=U"])
       refute File.read!(Path.join(dir, "shared.txt")) =~ "<<<<<<<"
+    end
+  end
+
+  describe "update_branch/1 — local rebase-forward" do
+    @tag :tmp_dir
+    test "rebases the working branch onto the updated base", %{tmp_dir: dir} do
+      build_repo_for_update(dir)
+
+      # Advance main past the branch's fork point.
+      File.write!(Path.join(dir, "main_advance.txt"), "advanced\n")
+      {_, 0} = git(dir, ["add", "main_advance.txt"])
+      {_, 0} = git(dir, ["commit", "-q", "-m", "advance main"])
+
+      # Now feature/update is behind main. Rebase it forward.
+      mr_ref = "direct:feature/update|#{dir}|main"
+      assert :ok = Direct.update_branch(mr_ref)
+
+      # HEAD is now on the feature branch with the base commit in its history.
+      assert {"feature/update\n", 0} = git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])
+
+      # The rebased branch includes the advance commit.
+      assert {log, 0} = git(dir, ["log", "--oneline", "feature/update"])
+      assert log =~ "advance main"
+    end
+
+    @tag :tmp_dir
+    test "returns {:error, {:rebase_conflict, ...}} on conflict and leaves tree clean",
+         %{tmp_dir: dir} do
+      build_conflict_repo_for_update(dir)
+
+      mr_ref = "direct:feature/conflict|#{dir}|main"
+      assert {:error, {:rebase_conflict, detail}} = Direct.update_branch(mr_ref)
+
+      assert detail.branch == "feature/conflict"
+      assert detail.base == "main"
+      assert "shared.txt" in detail.files
+      assert is_binary(detail.output)
+
+      # Tree is clean after abort — no conflict markers, no unmerged paths.
+      assert {"", 0} = git(dir, ["diff", "--name-only", "--diff-filter=U"])
+      assert {"", 0} = git(dir, ["status", "--porcelain"])
+    end
+
+    test "returns {:error, :no_repo_path} for a ref without encoded repo path" do
+      assert {:error, :no_repo_path} = Direct.update_branch("direct:feature/x")
     end
   end
 
@@ -151,6 +199,53 @@ defmodule Arbiter.Mergers.DirectTest do
     {_, 0} = git(dir, ["remote", "add", "origin", remote])
     {_, 0} = git(dir, ["push", "-q", "-u", "origin", "main"])
     {_, 0} = git(dir, ["push", "-q", "origin", "feature/x"])
+  end
+
+  # Builds a repo for update_branch/1 tests. HEAD is on main; feature/update
+  # branches off the initial commit and adds feature_update.txt. After this
+  # helper returns the caller can advance main to create a "behind" situation.
+  defp build_repo_for_update(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "base.txt"), "base\n")
+    {_, 0} = git(dir, ["add", "base.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/update"])
+    File.write!(Path.join(dir, "feature_update.txt"), "feature update\n")
+    {_, 0} = git(dir, ["add", "feature_update.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "add feature update"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+  end
+
+  # Builds a repo where `feature/conflict` and `main` both modify the same line
+  # of shared.txt, so a rebase of feature/conflict onto main conflicts.
+  # Leaves HEAD on main after adding main's conflicting commit.
+  defp build_conflict_repo_for_update(dir) do
+    {_, 0} = git(dir, ["init", "-q"])
+    {_, 0} = git(dir, ["config", "user.email", "worker@example.test"])
+    {_, 0} = git(dir, ["config", "user.name", "Worker"])
+    {_, 0} = git(dir, ["config", "commit.gpgsign", "false"])
+
+    File.write!(Path.join(dir, "shared.txt"), "original\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "init"])
+    {_, 0} = git(dir, ["branch", "-M", "main"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "-b", "feature/conflict"])
+    File.write!(Path.join(dir, "shared.txt"), "from feature\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "feature change"])
+
+    {_, 0} = git(dir, ["checkout", "-q", "main"])
+    File.write!(Path.join(dir, "shared.txt"), "from main\n")
+    {_, 0} = git(dir, ["add", "shared.txt"])
+    {_, 0} = git(dir, ["commit", "-q", "-m", "main change"])
   end
 
   # Builds a repo where `main` and `feature/conflict` both modify the same line
