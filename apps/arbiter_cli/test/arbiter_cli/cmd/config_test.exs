@@ -305,4 +305,69 @@ defmodule ArbiterCli.Cmd.ConfigTest do
       assert code == 0
     end
   end
+
+  describe "overview" do
+    test "renders grouped sections from config" do
+      config = %{
+        "tracker" => %{"type" => "github", "config" => %{"owner" => "leo"}},
+        "merge" => %{"strategy" => "github", "auto_merge" => true},
+        "agent" => %{"type" => "claude"},
+        "routing" => %{"policy" => "by_priority"},
+        "review" => %{"required" => true, "rounds" => 2},
+        "standing_orders" => ["Check your inbox", "Keep PRs small"]
+      }
+
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(config), 200}}])
+
+      {out, _err, code} = capture(fn -> Config.run(["overview"]) end)
+      assert code == 0
+      assert out =~ "== Tracker =="
+      assert out =~ "type: github"
+      assert out =~ "owner: leo"
+      assert out =~ "== Merge =="
+      assert out =~ "strategy: github"
+      assert out =~ "auto_merge: true"
+      assert out =~ "== Routing =="
+      assert out =~ "policy: by_priority"
+      assert out =~ "== Standing orders =="
+      assert out =~ "1. Check your inbox"
+    end
+
+    test "never prints secret values — only key names" do
+      config = %{"tracker" => %{"type" => "github"}}
+
+      ws = %{
+        "data" => [
+          %{
+            "name" => "default",
+            "id" => @ws_id,
+            "prefix" => "bd",
+            "config" => config,
+            "secret_keys" => ["tracker_token"]
+          }
+        ]
+      }
+
+      stub_routes([{{"get", "/api/workspaces"}, {ws, 200}}])
+
+      {out, _err, code} = capture(fn -> Config.run(["overview"]) end)
+      assert code == 0
+      assert out =~ "== Secrets =="
+      assert out =~ "tracker_token"
+      assert out =~ "value hidden"
+    end
+
+    test "--json emits a structured, secret-safe map" do
+      config = %{"merge" => %{"strategy" => "direct"}, "standing_orders" => ["A"]}
+
+      stub_routes([{{"get", "/api/workspaces"}, {default_ws(config), 200}}])
+
+      {out, _err, code} = capture(fn -> Config.run(["overview", "--json"]) end)
+      assert code == 0
+      decoded = Jason.decode!(out)
+      assert decoded["merge"]["strategy"] == "direct"
+      assert decoded["standing_orders"] == ["A"]
+      assert Map.has_key?(decoded, "secret_keys")
+    end
+  end
 end
