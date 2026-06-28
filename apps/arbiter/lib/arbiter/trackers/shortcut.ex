@@ -262,6 +262,38 @@ defmodule Arbiter.Trackers.Shortcut do
   defp maybe_put_owner_ids(payload, _), do: payload
 
   @impl true
+  def search_by_title(title) when is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      escaped = String.replace(title, "\"", "\\\"")
+      query = "title:\"#{escaped}\""
+
+      case request(cfg, :get, "/search/stories", params: [query: query, page_size: 25]) do
+        {:ok, %Req.Response{status: status_code, body: %{"data" => stories}}}
+        when status_code in 200..299 and is_list(stories) ->
+          norm = normalize_title(title)
+
+          matches =
+            stories
+            |> Enum.filter(fn story ->
+              normalize_title(Map.get(story, "name", "")) == norm
+            end)
+            |> Enum.map(&summarize_story/1)
+
+          {:ok, matches}
+
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          {:ok, []}
+
+        {:ok, %Req.Response{status: status_code, body: body}} ->
+          {:error, http_error(status_code, body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  @impl true
   def list_transitions(ref) when is_binary(ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, workflows} <- list_workflows(cfg) do
@@ -369,6 +401,10 @@ defmodule Arbiter.Trackers.Shortcut do
       if prev, do: Config.put_active(prev), else: Config.clear()
     end
   end
+
+  # ---- Internals: title search --------------------------------------------
+
+  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
 
   # ---- Internals: list_open -----------------------------------------------
 

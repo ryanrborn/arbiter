@@ -635,6 +635,119 @@ defmodule Arbiter.Trackers.ShortcutTest do
     end
   end
 
+  describe "search_by_title/1" do
+    test "returns matching stories (exact, case-insensitive match)" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/api/v3/search/stories"
+        %{"query" => query} = Map.new(URI.decode_query(conn.query_string))
+        assert query =~ "Fix the thing"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => [
+            %{
+              "id" => 1234,
+              "name" => "Fix the thing",
+              "app_url" => "https://app.shortcut.com/story/1234",
+              "completed" => false,
+              "started" => false,
+              "owner_ids" => ["member-abc"]
+            },
+            %{
+              "id" => 1235,
+              "name" => "Fix the thing and more",
+              "app_url" => "https://app.shortcut.com/story/1235",
+              "completed" => false,
+              "started" => false,
+              "owner_ids" => []
+            }
+          ],
+          "next" => nil
+        })
+      end)
+
+      assert {:ok, [summary]} = Shortcut.search_by_title("Fix the thing")
+      assert summary.ref == "1234"
+      assert summary.title == "Fix the thing"
+      assert summary.url == "https://app.shortcut.com/story/1234"
+      assert summary.status == :open
+      assert summary.assignees == ["member-abc"]
+    end
+
+    test "returns empty list when no exact match" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => [
+            %{
+              "id" => 999,
+              "name" => "Something entirely different",
+              "app_url" => "https://app.shortcut.com/story/999",
+              "completed" => false,
+              "started" => false,
+              "owner_ids" => []
+            }
+          ],
+          "next" => nil
+        })
+      end)
+
+      assert {:ok, []} = Shortcut.search_by_title("My Title")
+    end
+
+    test "case-insensitive match" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => [
+            %{
+              "id" => 42,
+              "name" => "FIX THE THING",
+              "app_url" => "https://app.shortcut.com/story/42",
+              "completed" => false,
+              "started" => false,
+              "owner_ids" => []
+            }
+          ],
+          "next" => nil
+        })
+      end)
+
+      assert {:ok, [%{ref: "42"}]} = Shortcut.search_by_title("fix the thing")
+    end
+
+    test "returns empty list when search response has no data key" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"total" => 0})
+      end)
+
+      assert {:ok, []} = Shortcut.search_by_title("anything")
+    end
+
+    test "returns error on API failure" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(422)
+        |> Req.Test.json(%{"message" => "Validation Failed"})
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422}} =
+               Shortcut.search_by_title("bad query")
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = Shortcut.search_by_title("test")
+    end
+  end
+
   describe "Trackers integration" do
     test "Trackers.for_type(:shortcut) resolves to this adapter (no raise)" do
       assert Arbiter.Trackers.for_type(:shortcut) == Shortcut
