@@ -16,7 +16,10 @@ defmodule Arbiter.Trackers do
 
   """
 
+  require Logger
+
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Messages.Message
   alias Arbiter.Trackers.{GitHub, Jira, None, Shortcut, Tracker}
 
   @type adapter :: module()
@@ -204,7 +207,7 @@ defmodule Arbiter.Trackers do
           {:ok, [Tracker.summary()]} | {:error, :not_supported} | {:error, term()}
   def list_open(%Arbiter.Tasks.Workspace{} = workspace, opts \\ []) do
     type = workspace_tracker_type(workspace)
-    adapter = adapter_for_workspace_type(type)
+    adapter = adapter_for_workspace_type(type, workspace)
 
     with_workspace(type, workspace, fn -> adapter.list_open(opts) end)
   end
@@ -224,7 +227,7 @@ defmodule Arbiter.Trackers do
           {:ok, Tracker.ref()} | {:error, :not_supported} | {:error, term()}
   def create_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, attrs) when is_map(attrs) do
     type = workspace_tracker_type(workspace)
-    adapter = adapter_for_workspace_type(type)
+    adapter = adapter_for_workspace_type(type, workspace)
 
     with_workspace(type, workspace, fn -> adapter.create(attrs) end)
   end
@@ -239,7 +242,7 @@ defmodule Arbiter.Trackers do
   @spec link_for_workspace(Arbiter.Tasks.Workspace.t(), Tracker.ref()) :: String.t()
   def link_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, ref) when is_binary(ref) do
     type = workspace_tracker_type(workspace)
-    adapter = adapter_for_workspace_type(type)
+    adapter = adapter_for_workspace_type(type, workspace)
 
     with_workspace(type, workspace, fn -> adapter.link_for(ref) end)
   end
@@ -268,7 +271,7 @@ defmodule Arbiter.Trackers do
   def search_by_title_for_workspace(%Arbiter.Tasks.Workspace{} = workspace, title)
       when is_binary(title) do
     type = workspace_tracker_type(workspace)
-    adapter = adapter_for_workspace_type(type)
+    adapter = adapter_for_workspace_type(type, workspace)
 
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :search_by_title, 1) do
       with_workspace(type, workspace, fn -> adapter.search_by_title(title) end)
@@ -285,7 +288,7 @@ defmodule Arbiter.Trackers do
   """
   @spec for_workspace(Arbiter.Tasks.Workspace.t()) :: adapter
   def for_workspace(%Arbiter.Tasks.Workspace{} = workspace),
-    do: adapter_for_workspace_type(workspace_tracker_type(workspace))
+    do: adapter_for_workspace_type(workspace_tracker_type(workspace), workspace)
 
   @doc """
   Seed the per-process adapter config for `workspace`, run `fun`, and restore
@@ -314,14 +317,46 @@ defmodule Arbiter.Trackers do
   end
 
   # Unlike for_task/1, the workspace-tracker-type may name an adapter we don't
-  # have shipped (e.g. `:linear`). Fall back to None rather than raising —
-  # the caller is asking us to list, and "no backend yet" is naturally
-  # :not_supported (which is what None returns).
-  defp adapter_for_workspace_type(type) do
+  # have shipped (e.g. `:linear`). Fall back to None, but warn loudly so the
+  # misconfiguration doesn't go unnoticed (the silent fallback is how the
+  # entirely-missing Linear adapter went unnoticed — bd-3ri70e).
+  #
+  # `:none` is intentional and never reaches the :error branch — it is in
+  # @adapters and maps directly to the None adapter.
+  defp adapter_for_workspace_type(type, %Arbiter.Tasks.Workspace{} = workspace) do
     case Map.fetch(@adapters, type) do
-      {:ok, adapter} -> adapter
-      :error -> None
+      {:ok, adapter} ->
+        adapter
+
+      :error ->
+        Logger.warning(
+          "Trackers: workspace #{inspect(workspace.name)} (#{workspace.id}) is configured " <>
+            "with tracker_type=#{inspect(type)} but no adapter is registered for this type — " <>
+            "falling back to None (tracker integration will be a no-op). " <>
+            "If this is intentional, set tracker.type to \"none\" instead. " <>
+            "Registered adapters: #{inspect(Map.keys(@adapters))}"
+        )
+
+        notify_misconfigured_tracker(workspace, type)
+        None
     end
+  end
+
+  defp notify_misconfigured_tracker(%Arbiter.Tasks.Workspace{id: ws_id, name: name}, type) do
+    Message.notify(%{
+      workspace_id: ws_id,
+      subject: "Tracker misconfiguration: #{inspect(type)} has no adapter",
+      body:
+        "Workspace \"#{name}\" is configured with tracker type #{inspect(type)}, " <>
+          "but no adapter is registered for this type. " <>
+          "Tracker integration will be a no-op until the adapter ships or the config is corrected.\n\n" <>
+          "To silence this warning, set `config[\"tracker\"][\"type\"]` to \"none\" " <>
+          "(or a supported type: #{Enum.join(Map.keys(@adapters) -- [:none], ", ")})."
+    })
+  rescue
+    e ->
+      Logger.debug("Trackers.notify_misconfigured_tracker swallowed: #{Exception.message(e)}")
+      :ok
   end
 
   defp do_with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
