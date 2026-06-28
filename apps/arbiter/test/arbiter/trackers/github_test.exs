@@ -867,4 +867,151 @@ defmodule Arbiter.Trackers.GitHubTest do
                GitHub.add_remote_link(@ref, url, title)
     end
   end
+
+  describe "check_prior_claim/1" do
+    test "returns :ok when no comments contain the ownership marker" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/repos/#{@owner}/#{@repo}/issues/#{@ref}/comments"
+
+        Req.Test.json(conn, [
+          %{"id" => 1, "body" => "Just a regular comment"},
+          %{"id" => 2, "body" => "Another comment"}
+        ])
+      end)
+
+      assert :ok = GitHub.check_prior_claim(@ref)
+    end
+
+    test "returns {:error, {:already_claimed, body}} when ownership marker found" do
+      marker_body = "Claimed as bd-abc123 by my-ws (mw). Arbiter installation: some-host."
+
+      stub(fn conn ->
+        Req.Test.json(conn, [
+          %{"id" => 1, "body" => "Normal comment"},
+          %{"id" => 2, "body" => marker_body}
+        ])
+      end)
+
+      assert {:error, {:already_claimed, ^marker_body}} = GitHub.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments endpoint errors (non-fatal)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal error"})
+      end)
+
+      assert :ok = GitHub.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments list is empty" do
+      stub(fn conn ->
+        Req.Test.json(conn, [])
+      end)
+
+      assert :ok = GitHub.check_prior_claim(@ref)
+    end
+  end
+
+  describe "signal_claim/3" do
+    test "posts ownership comment and assigns the user" do
+      calls = Agent.start_link(fn -> [] end) |> elem(1)
+
+      stub(fn conn ->
+        Agent.update(calls, &[{conn.method, conn.request_path} | &1])
+
+        case {conn.method, conn.request_path} do
+          {"POST", "/repos/" <> _ = path} when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(raw)
+            assert decoded["body"] =~ "bd-abc123"
+            assert decoded["body"] =~ "my-ws"
+            assert decoded["body"] =~ "Arbiter installation:"
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 99})
+
+          {"POST", "/repos/" <> _ = path} when binary_part(path, byte_size(path) - 9, 9) == "assignees" ->
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(raw)
+            assert "gh-login-999" in decoded["assignees"]
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"assignees" => [%{"login" => "gh-login-999"}]})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "my-ws",
+        workspace_prefix: "mw",
+        current_user: "gh-login-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
+
+      recorded = Agent.get(calls, & &1) |> Enum.reverse()
+      assert {"POST", "/repos/#{@owner}/#{@repo}/issues/#{@ref}/comments"} in recorded
+      assert {"POST", "/repos/#{@owner}/#{@repo}/issues/#{@ref}/assignees"} in recorded
+
+      Agent.stop(calls)
+    end
+
+    test "returns :ok even when comment POST fails" do
+      stub(fn conn ->
+        case conn.request_path do
+          path when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "error"})
+
+          _ ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"assignees" => []})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "gh-login-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
+    end
+
+    test "returns :ok even when assignees POST fails (e.g. collaborator access denied)" do
+      stub(fn conn ->
+        case conn.request_path do
+          path when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => 99})
+
+          _ ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed"})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "gh-login-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = GitHub.signal_claim(@ref, "bd-abc123", context)
+    end
+  end
 end

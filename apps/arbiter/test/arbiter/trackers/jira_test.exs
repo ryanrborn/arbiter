@@ -822,6 +822,184 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
+  describe "check_prior_claim/1" do
+    test "returns :ok when no comments contain the ownership marker" do
+      stub(fn conn ->
+        assert conn.method == "GET"
+        assert conn.request_path == "/rest/api/3/issue/#{@ref}/comment"
+
+        Req.Test.json(conn, %{
+          "comments" => [
+            %{"renderedBody" => "A regular comment"},
+            %{"renderedBody" => "Another comment"}
+          ]
+        })
+      end)
+
+      assert :ok = Jira.check_prior_claim(@ref)
+    end
+
+    test "returns {:error, {:already_claimed, body}} when ownership marker found in renderedBody" do
+      marker_comment = "Claimed as bd-abc123 by my-ws (mw). Arbiter installation: some-host."
+
+      stub(fn conn ->
+        Req.Test.json(conn, %{
+          "comments" => [
+            %{"renderedBody" => "Normal comment"},
+            %{"renderedBody" => marker_comment}
+          ]
+        })
+      end)
+
+      assert {:error, {:already_claimed, ^marker_comment}} = Jira.check_prior_claim(@ref)
+    end
+
+    test "extracts text from ADF body when renderedBody is absent" do
+      stub(fn conn ->
+        Req.Test.json(conn, %{
+          "comments" => [
+            %{
+              "body" => %{
+                "type" => "doc",
+                "content" => [
+                  %{
+                    "type" => "paragraph",
+                    "content" => [
+                      %{"type" => "text", "text" => "Arbiter installation: some-host."}
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      end)
+
+      assert {:error, {:already_claimed, _}} = Jira.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments endpoint errors (non-fatal)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"errorMessages" => ["Server error"]})
+      end)
+
+      assert :ok = Jira.check_prior_claim(@ref)
+    end
+
+    test "returns :ok when comments list is empty" do
+      stub(fn conn ->
+        Req.Test.json(conn, %{"comments" => []})
+      end)
+
+      assert :ok = Jira.check_prior_claim(@ref)
+    end
+  end
+
+  describe "signal_claim/3" do
+    test "posts ownership comment and assigns the user" do
+      calls = Agent.start_link(fn -> [] end) |> elem(1)
+
+      stub(fn conn ->
+        Agent.update(calls, &[{conn.method, conn.request_path} | &1])
+
+        case {conn.method, conn.request_path} do
+          {"POST", "/rest/api/3/issue/" <> _ = path} ->
+            assert String.ends_with?(path, "/comment")
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(raw)
+            text = get_in(decoded, ["body", "content"]) |> adf_content_text()
+            assert text =~ "bd-abc123"
+            assert text =~ "my-ws"
+            assert text =~ "Arbiter installation:"
+
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => "10001"})
+
+          {"PUT", "/rest/api/3/issue/" <> _ = path} ->
+            assert String.ends_with?(path, "/assignee")
+            {:ok, raw, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(raw)
+            assert decoded["accountId"] == "account-id-999"
+
+            conn
+            |> Plug.Conn.put_status(204)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "my-ws",
+        workspace_prefix: "mw",
+        current_user: "account-id-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = Jira.signal_claim(@ref, "bd-abc123", context)
+
+      recorded = Agent.get(calls, & &1) |> Enum.reverse()
+      assert {"POST", "/rest/api/3/issue/#{@ref}/comment"} in recorded
+      assert {"PUT", "/rest/api/3/issue/#{@ref}/assignee"} in recorded
+
+      Agent.stop(calls)
+    end
+
+    test "returns :ok even when comment POST fails" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", _} ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"errorMessages" => ["error"]})
+
+          {"PUT", _} ->
+            conn
+            |> Plug.Conn.put_status(204)
+            |> Req.Test.json(%{})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "account-id-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = Jira.signal_claim(@ref, "bd-abc123", context)
+    end
+
+    test "returns :ok even when assignee PUT fails" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"POST", _} ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"id" => "10001"})
+
+          {"PUT", _} ->
+            conn
+            |> Plug.Conn.put_status(403)
+            |> Req.Test.json(%{"errorMessages" => ["Not a project member"]})
+        end
+      end)
+
+      context = %{
+        task_id: "bd-abc123",
+        workspace_name: "ws",
+        workspace_prefix: "w",
+        current_user: "account-id-999",
+        host: "arbiter.local"
+      }
+
+      assert :ok = Jira.signal_claim(@ref, "bd-abc123", context)
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()
@@ -841,5 +1019,16 @@ defmodule Arbiter.Trackers.JiraTest do
       # After the block, config is cleared.
       assert {:error, %Error{kind: :config_missing}} = Jira.fetch("OT-1")
     end
+  end
+
+  defp adf_content_text(nil), do: ""
+  defp adf_content_text(nodes) when is_list(nodes) do
+    Enum.map_join(nodes, " ", fn node ->
+      case node do
+        %{"text" => text} when is_binary(text) -> text
+        %{"content" => children} -> adf_content_text(children)
+        _ -> ""
+      end
+    end)
   end
 end
