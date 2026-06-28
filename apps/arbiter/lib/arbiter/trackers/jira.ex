@@ -340,6 +340,42 @@ defmodule Arbiter.Trackers.Jira do
 
   # ---- Tracker behaviour: claim callbacks ------------------------------------
 
+  @ownership_marker "Arbiter installation:"
+
+  @impl true
+  def check_prior_claim(ref) when is_binary(ref) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :get, "/issue/#{ref}/comment", params: [maxResults: 100]) do
+        {:ok, %Req.Response{status: status_code, body: %{"comments" => comments}}}
+        when status_code in 200..299 and is_list(comments) ->
+          case Enum.find(comments, fn c ->
+                 String.contains?(comment_text(c), @ownership_marker)
+               end) do
+            nil -> :ok
+            comment -> {:error, {:already_claimed, comment_text(comment)}}
+          end
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
+  @impl true
+  def signal_claim(ref, task_id, %{
+        workspace_name: name,
+        workspace_prefix: prefix,
+        current_user: account_id,
+        host: host
+      }) do
+    body =
+      "Claimed as #{task_id} by #{name} (#{prefix}). #{@ownership_marker} #{host}."
+
+    add_comment(ref, body)
+    assign_user(ref, account_id)
+    :ok
+  end
+
   @impl true
   def current_user do
     with {:ok, cfg} <- Config.resolve(),
@@ -906,6 +942,32 @@ defmodule Arbiter.Trackers.Jira do
       []
     end
   end
+
+  defp assign_user(ref, account_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      case request(cfg, :put, "/issue/#{ref}/assignee", json: %{"accountId" => account_id}) do
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          :ok
+
+        {:ok, %Req.Response{status: status_code, body: resp_body}} ->
+          {:error, http_error(status_code, resp_body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
+  defp comment_text(%{"renderedBody" => text}) when is_binary(text) and text != "", do: text
+  defp comment_text(%{"body" => body}), do: adf_to_text(body)
+  defp comment_text(_), do: ""
+
+  defp adf_to_text(%{"text" => text}) when is_binary(text), do: text
+
+  defp adf_to_text(%{"content" => nodes}) when is_list(nodes),
+    do: Enum.map_join(nodes, " ", &adf_to_text/1)
+
+  defp adf_to_text(_), do: ""
 
   # ---- Misc ---------------------------------------------------------------
 
