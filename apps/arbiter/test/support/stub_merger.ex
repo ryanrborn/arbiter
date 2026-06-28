@@ -36,7 +36,8 @@ defmodule Arbiter.Test.StubMerger do
         review_threads: %{},
         update_branches: %{},
         update_branch_result: :ok,
-        failing_checks: %{}
+        failing_checks: %{},
+        merge_result: :ok
       }
     end)
 
@@ -96,6 +97,13 @@ defmodule Arbiter.Test.StubMerger do
     :ok
   end
 
+  @doc "Set the result `merge/1` returns (`:ok` or `{:error, term}`)."
+  def set_merge_result(result) do
+    ensure_started()
+    Agent.update(@name, fn s -> %{s | merge_result: result} end)
+    :ok
+  end
+
   @doc "Set the `failing_check_logs/1` result list for `ref`."
   def set_failing_checks(ref, checks) when is_list(checks) do
     ensure_started()
@@ -149,8 +157,11 @@ defmodule Arbiter.Test.StubMerger do
   @impl true
   def merge(ref) do
     ensure_started()
-    Agent.update(@name, fn s -> update_in(s, [:merges, ref], &((&1 || 0) + 1)) end)
-    :ok
+
+    Agent.get_and_update(@name, fn s ->
+      s = update_in(s, [:merges, ref], &((&1 || 0) + 1))
+      {s.merge_result, s}
+    end)
   end
 
   @impl true
@@ -222,7 +233,8 @@ defmodule Arbiter.Test.StubMerger do
                    review_threads: %{},
                    update_branches: %{},
                    update_branch_result: :ok,
-                   failing_checks: %{}
+                   failing_checks: %{},
+                   merge_result: :ok
                  }
                end,
                name: @name
