@@ -1,7 +1,10 @@
 defmodule Arbiter.TrackersTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
   alias Arbiter.Trackers.{GitHub, Jira, None, Shortcut}
 
@@ -31,6 +34,69 @@ defmodule Arbiter.TrackersTest do
 
     test "adapters/0 exposes the registered map" do
       assert Trackers.adapters() == %{none: None, jira: Jira, shortcut: Shortcut, github: GitHub}
+    end
+  end
+
+  describe "for_workspace/1 — adapter resolution with loud-warn fallback" do
+    defp linear_workspace do
+      %Workspace{
+        id: "ws-test-linear",
+        name: "test-workspace",
+        prefix: "bd",
+        config: %{"tracker" => %{"type" => "linear"}}
+      }
+    end
+
+    defp none_workspace do
+      %Workspace{
+        id: "ws-test-none",
+        name: "none-workspace",
+        prefix: "bd",
+        config: %{"tracker" => %{"type" => "none"}}
+      }
+    end
+
+    test "returns None for a workspace configured with :none (intentional — no warning)" do
+      log =
+        capture_log(fn ->
+          assert Trackers.for_workspace(none_workspace()) == None
+        end)
+
+      refute log =~ "tracker_type"
+      refute log =~ "no adapter is registered"
+    end
+
+    test "returns None for a known-but-unimplemented type and emits a Logger.warning" do
+      log =
+        capture_log([level: :warning], fn ->
+          assert Trackers.for_workspace(linear_workspace()) == None
+        end)
+
+      assert log =~ "tracker_type=:linear"
+      assert log =~ "no adapter is registered"
+      assert log =~ "test-workspace"
+    end
+
+    test "warning identifies the workspace name and id" do
+      log =
+        capture_log([level: :warning], fn ->
+          Trackers.for_workspace(linear_workspace())
+        end)
+
+      assert log =~ "ws-test-linear"
+      assert log =~ "test-workspace"
+    end
+
+    test "returns GitHub adapter for a :github-configured workspace without warning" do
+      workspace = %Workspace{
+        id: "ws-github",
+        name: "gh-workspace",
+        prefix: "bd",
+        config: %{"tracker" => %{"type" => "github"}}
+      }
+
+      log = capture_log(fn -> assert Trackers.for_workspace(workspace) == GitHub end)
+      refute log =~ "no adapter is registered"
     end
   end
 
