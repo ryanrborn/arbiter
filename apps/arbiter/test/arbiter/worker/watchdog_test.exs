@@ -685,7 +685,8 @@ defmodule Arbiter.Worker.WatchdogTest do
       # handle_nonauthor_approval (which sets max_polls: :infinity and causes an
       # infinite retry loop when safe_merge keeps failing). Instead, route through
       # the normal path: effective_outcome maps :pending → :approved, merge fires.
-      StubMerger.queue_get("!tnav",
+      StubMerger.queue_get(
+        "!tnav",
         [%{status: :open, approved: false, block_reason: :needs_nonauthor_approval}]
       )
 

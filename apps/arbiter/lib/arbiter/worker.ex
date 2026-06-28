@@ -974,9 +974,7 @@ defmodule Arbiter.Worker do
       sid when is_binary(sid) and sid != "" ->
         case inject_resume_argv(port_args, sid, continue_prompt(state)) do
           {:ok, resumed_args} ->
-            Logger.info(
-              "Worker: bd-1z7624 session-resume task=#{state.task_id} session=#{sid}"
-            )
+            Logger.info("Worker: bd-1z7624 session-resume task=#{state.task_id} session=#{sid}")
 
             {resumed_args, port_args}
 
@@ -2056,7 +2054,7 @@ defmodule Arbiter.Worker do
   # the caller falls back to failing.
   @doc false
   def inject_resume_argv(%{argv: argv} = port_args, session_id, prompt)
-       when is_list(argv) and is_binary(session_id) do
+      when is_list(argv) and is_binary(session_id) do
     case Enum.find_index(argv, &(&1 == "--print")) do
       nil ->
         {:error, :no_print_slot}

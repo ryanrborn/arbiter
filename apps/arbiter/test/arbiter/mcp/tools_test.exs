@@ -155,7 +155,14 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, _} =
         Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
 
-      assert {:ok, %{messages: [msg], count: 1, deleted_read: 0, deleted_unread: 0, remaining_unread: 0}} =
+      assert {:ok,
+              %{
+                messages: [msg],
+                count: 1,
+                deleted_read: 0,
+                deleted_unread: 0,
+                remaining_unread: 0
+              }} =
                Tools.coordinator_inbox(ctx.coordinator, %{})
 
       assert msg.body == "Escalation!"

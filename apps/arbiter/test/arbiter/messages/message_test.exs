@@ -205,7 +205,12 @@ defmodule Arbiter.Messages.MessageTest do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
 
       {:ok, _} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "unread too"})
+        Message.send_mail(%{
+          workspace_id: @ws,
+          to_ref: "admiral",
+          kind: :info,
+          body: "unread too"
+        })
 
       assert_receive {:new_message, _}
 

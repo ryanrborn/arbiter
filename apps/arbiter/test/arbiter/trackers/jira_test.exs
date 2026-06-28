@@ -1022,6 +1022,7 @@ defmodule Arbiter.Trackers.JiraTest do
   end
 
   defp adf_content_text(nil), do: ""
+
   defp adf_content_text(nodes) when is_list(nodes) do
     Enum.map_join(nodes, " ", fn node ->
       case node do

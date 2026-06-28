@@ -923,7 +923,8 @@ defmodule Arbiter.Trackers.GitHubTest do
         Agent.update(calls, &[{conn.method, conn.request_path} | &1])
 
         case {conn.method, conn.request_path} do
-          {"POST", "/repos/" <> _ = path} when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
+          {"POST", "/repos/" <> _ = path}
+          when binary_part(path, byte_size(path) - 8, 8) == "comments" ->
             {:ok, raw, conn} = Plug.Conn.read_body(conn)
             decoded = Jason.decode!(raw)
             assert decoded["body"] =~ "bd-abc123"
@@ -934,7 +935,8 @@ defmodule Arbiter.Trackers.GitHubTest do
             |> Plug.Conn.put_status(201)
             |> Req.Test.json(%{"id" => 99})
 
-          {"POST", "/repos/" <> _ = path} when binary_part(path, byte_size(path) - 9, 9) == "assignees" ->
+          {"POST", "/repos/" <> _ = path}
+          when binary_part(path, byte_size(path) - 9, 9) == "assignees" ->
             {:ok, raw, conn} = Plug.Conn.read_body(conn)
             decoded = Jason.decode!(raw)
             assert "gh-login-999" in decoded["assignees"]

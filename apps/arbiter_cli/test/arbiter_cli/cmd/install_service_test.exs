@@ -57,9 +57,9 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
 
   describe "install (user scope)" do
     test "writes the unit, reloads, enables, and enables linger", %{
-           unit_dir: dir,
-           arbiter_home: arbiter_home
-         } do
+      unit_dir: dir,
+      arbiter_home: arbiter_home
+    } do
       record_cmds()
 
       {out, _err, code} = capture(fn -> InstallService.run([]) end)
@@ -135,8 +135,8 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     end
 
     test "PATH in arbiter.env is updated on re-install (idempotent)", %{
-           arbiter_home: arbiter_home
-         } do
+      arbiter_home: arbiter_home
+    } do
       record_cmds()
 
       System.put_env("PATH", "/first/path:/usr/bin")

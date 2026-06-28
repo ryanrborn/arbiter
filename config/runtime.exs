@@ -22,8 +22,7 @@ if config_env() != :test do
 end
 
 if proxy_timeout = System.get_env("ANTHROPIC_PROXY_RECEIVE_TIMEOUT") do
-  config :arbiter_web, :anthropic_proxy,
-    receive_timeout: String.to_integer(proxy_timeout)
+  config :arbiter_web, :anthropic_proxy, receive_timeout: String.to_integer(proxy_timeout)
 end
 
 if config_env() == :prod do

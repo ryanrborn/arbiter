@@ -238,6 +238,7 @@ defmodule Arbiter.Tasks.DependencyTest do
         })
 
       ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
+
       refute MapSet.member?(ready_ids, b.id),
              "b must not be ready while its blocker (a) is still in_progress"
 

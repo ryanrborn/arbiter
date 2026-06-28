@@ -514,6 +514,7 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
   # Idempotent: uses the same read/merge/write logic as `arb install service`.
   defp refresh_env_path do
     home = data_home()
+
     case InstallService.capture_path(home) do
       :written -> log("Refreshed PATH in #{home}/arbiter.env.")
       :skipped -> :ok
