@@ -56,6 +56,12 @@ defmodule Arbiter.Mergers.Gitlab do
 
   @stub_name Arbiter.Mergers.Gitlab.HTTP
 
+  # Job statuses that count as a CI failure for the fix-pass briefing.
+  @failing_job_statuses ["failed", "canceled"]
+
+  # How much of each failing job's trace to keep in the fix-pass briefing.
+  @log_tail_limit 4_000
+
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
@@ -150,6 +156,14 @@ defmodule Arbiter.Mergers.Gitlab do
       # non-fatal and lets the next get/1 poll surface the conflict state.
       request(cfg, :put, "/merge_requests/#{iid}/rebase", json: %{})
       |> handle_ok()
+    end
+  end
+
+  @impl true
+  def failing_check_logs(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref) do
+      fetch_failing_check_logs(cfg, iid)
     end
   end
 
@@ -649,6 +663,79 @@ defmodule Arbiter.Mergers.Gitlab do
   defp map_pipeline_status("canceled"), do: :failed
   defp map_pipeline_status("running"), do: :running
   defp map_pipeline_status(_), do: :pending
+
+  # Fetch the latest failed pipeline for the MR, collect its failing jobs, and
+  # return a normalized `failing_check` list for the fix-pass briefing. Returns
+  # `{:ok, []}` when no failed pipeline or no failing jobs exist — the fix pass
+  # dispatches without log context rather than erroring.
+  defp fetch_failing_check_logs(cfg, iid) do
+    case request(cfg, :get, "/merge_requests/#{iid}/pipelines", params: [per_page: 20]) do
+      {:ok, %Req.Response{status: status, body: pipelines}} when status in 200..299 ->
+        case find_latest_failed_pipeline(pipelines) do
+          nil ->
+            {:ok, []}
+
+          pipeline_id ->
+            fetch_jobs_for_pipeline(cfg, pipeline_id)
+        end
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp find_latest_failed_pipeline(pipelines) when is_list(pipelines) do
+    pipelines
+    |> Enum.find(fn p -> Map.get(p, "status") in ["failed", "canceled"] end)
+    |> case do
+      %{"id" => id} -> id
+      _ -> nil
+    end
+  end
+
+  defp find_latest_failed_pipeline(_), do: nil
+
+  defp fetch_jobs_for_pipeline(cfg, pipeline_id) do
+    case request(cfg, :get, "/pipelines/#{pipeline_id}/jobs", params: [per_page: 100]) do
+      {:ok, %Req.Response{status: status, body: jobs}} when status in 200..299 ->
+        failing_jobs = jobs |> List.wrap() |> Enum.filter(&failing_job?/1)
+        checks = Enum.map(failing_jobs, &fetch_job_log(cfg, &1))
+        {:ok, checks}
+
+      {:ok, _} ->
+        {:ok, []}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp failing_job?(job), do: Map.get(job, "status") in @failing_job_statuses
+
+  defp fetch_job_log(cfg, job) do
+    job_id = Map.get(job, "id")
+    name = Map.get(job, "name") || "job"
+    url = get_in(job, ["web_url"])
+
+    summary =
+      case request(cfg, :get, "/jobs/#{job_id}/trace", []) do
+        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+          body |> to_string() |> log_tail(@log_tail_limit)
+
+        _ ->
+          ""
+      end
+
+    %{name: name, summary: summary, url: url}
+  end
+
+  defp log_tail(text, limit) when is_binary(text) do
+    len = String.length(text)
+    if len > limit, do: "…" <> String.slice(text, len - limit, limit), else: text
+  end
 
   defp handle_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
 
