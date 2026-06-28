@@ -6,7 +6,7 @@ defmodule Arbiter.TrackersTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
-  alias Arbiter.Trackers.{GitHub, Jira, None, Shortcut}
+  alias Arbiter.Trackers.{GitHub, Jira, Linear, None, Shortcut}
 
   describe "for_task/1 and for_type/1" do
     test "returns Tracker.None for :none-typed issues" do
@@ -26,14 +26,19 @@ defmodule Arbiter.TrackersTest do
       assert Trackers.for_type(:shortcut) == Shortcut
     end
 
-    test "for_type/1 raises ArgumentError for unregistered types (e.g. :linear pre-Phase-5)" do
-      assert_raise ArgumentError, ~r/no tracker adapter registered for :linear/, fn ->
-        Trackers.for_type(:linear)
+    test "for_type/1 returns Tracker.Linear for :linear (wired in Phase 5)" do
+      assert Trackers.for_type(:linear) == Linear
+    end
+
+    test "for_type/1 raises ArgumentError for truly unregistered types" do
+      assert_raise ArgumentError, ~r/no tracker adapter registered for :unknown_tracker/, fn ->
+        Trackers.for_type(:unknown_tracker)
       end
     end
 
     test "adapters/0 exposes the registered map" do
-      assert Trackers.adapters() == %{none: None, jira: Jira, shortcut: Shortcut, github: GitHub}
+      assert Trackers.adapters() ==
+               %{none: None, jira: Jira, shortcut: Shortcut, github: GitHub, linear: Linear}
     end
   end
 
@@ -66,25 +71,28 @@ defmodule Arbiter.TrackersTest do
       refute log =~ "no adapter is registered"
     end
 
-    test "returns None for a known-but-unimplemented type and emits a Logger.warning" do
+    test "returns Linear adapter for a :linear-configured workspace without warning" do
       log =
         capture_log([level: :warning], fn ->
-          assert Trackers.for_workspace(linear_workspace()) == None
+          assert Trackers.for_workspace(linear_workspace()) == Linear
         end)
 
-      assert log =~ "tracker_type=:linear"
-      assert log =~ "no adapter is registered"
-      assert log =~ "test-workspace"
+      refute log =~ "no adapter is registered"
     end
 
-    test "warning identifies the workspace name and id" do
-      log =
-        capture_log([level: :warning], fn ->
-          Trackers.for_workspace(linear_workspace())
-        end)
+    test "returns None silently for unknown string tracker types (atom does not exist)" do
+      # A type string like "notarealtracker" cannot be converted to an existing
+      # atom (no module or code references it), so workspace_tracker_type/1
+      # falls back to :none via the ArgumentError rescue — no warning is emitted.
+      workspace = %Workspace{
+        id: "ws-test-unknown",
+        name: "test-workspace",
+        prefix: "bd",
+        config: %{"tracker" => %{"type" => "notarealtracker"}}
+      }
 
-      assert log =~ "ws-test-linear"
-      assert log =~ "test-workspace"
+      log = capture_log(fn -> assert Trackers.for_workspace(workspace) == None end)
+      refute log =~ "no adapter is registered"
     end
 
     test "returns GitHub adapter for a :github-configured workspace without warning" do

@@ -20,7 +20,7 @@ defmodule Arbiter.Trackers do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Messages.Message
-  alias Arbiter.Trackers.{GitHub, Jira, None, Shortcut, Tracker}
+  alias Arbiter.Trackers.{GitHub, Jira, Linear, None, Shortcut, Tracker}
 
   @type adapter :: module()
 
@@ -28,8 +28,8 @@ defmodule Arbiter.Trackers do
     none: None,
     jira: Jira,
     shortcut: Shortcut,
-    github: GitHub
-    # :linear wired up in Phase 5
+    github: GitHub,
+    linear: Linear
   }
 
   @doc """
@@ -83,6 +83,7 @@ defmodule Arbiter.Trackers do
       :github -> GitHub.Config.put_active(workspace)
       :jira -> Jira.Config.put_active(workspace)
       :shortcut -> Shortcut.Config.put_active(workspace)
+      :linear -> Linear.Config.put_active(workspace)
       _ -> :ok
     end
 
@@ -362,5 +363,6 @@ defmodule Arbiter.Trackers do
   defp do_with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
   defp do_with_workspace(:jira, workspace, fun), do: Jira.with_workspace(workspace, fun)
   defp do_with_workspace(:shortcut, workspace, fun), do: Shortcut.with_workspace(workspace, fun)
+  defp do_with_workspace(:linear, workspace, fun), do: Linear.with_workspace(workspace, fun)
   defp do_with_workspace(_, _workspace, fun), do: fun.()
 end
