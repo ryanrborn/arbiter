@@ -146,7 +146,7 @@ defmodule Arbiter.Worker.Driver do
     # in the same window the Driver's tick budget expires (bd-d1jp4r).
     case safe_worker_state(state.worker_pid) do
       %{status: :completed} = worker_state ->
-        close_task(state.task_id, should_close_upstream(worker_state))
+        close_task(state.task_id, should_close_upstream_for_task(state.task_id, worker_state))
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
@@ -173,7 +173,7 @@ defmodule Arbiter.Worker.Driver do
   def handle_info(:check_worker, state) do
     case safe_worker_state(state.worker_pid) do
       %{status: :completed} = worker_state ->
-        close_upstream = should_close_upstream(worker_state)
+        close_upstream = should_close_upstream_for_task(state.task_id, worker_state)
         close_task(state.task_id, close_upstream)
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
@@ -276,6 +276,35 @@ defmodule Arbiter.Worker.Driver do
   catch
     :exit, _ -> nil
   end
+
+  defp should_close_upstream_for_task(task_id, worker_state) do
+    # Pass close_upstream: true if either:
+    # 1. there's an mr_ref (existing logic), OR
+    # 2. the task has a tracker_ref (need to sync upstream on close)
+    case should_close_upstream(worker_state) do
+      true ->
+        true
+
+      false ->
+        # Check if the task has a tracker_ref that needs syncing
+        case Ash.get(Issue, task_id) do
+          {:ok, task} ->
+            has_tracker_ref?(task)
+
+          :error ->
+            false
+        end
+    end
+  rescue
+    _ -> false
+  end
+
+  defp has_tracker_ref?(%Issue{tracker_ref: ref, tracker_type: type})
+       when is_binary(ref) and ref != "" and type != :none do
+    true
+  end
+
+  defp has_tracker_ref?(_), do: false
 
   defp should_close_upstream(%{mr_ref: mr_ref}) when is_binary(mr_ref) and mr_ref != "", do: true
   defp should_close_upstream(_), do: false
