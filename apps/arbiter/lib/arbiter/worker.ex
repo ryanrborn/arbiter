@@ -145,8 +145,8 @@ defmodule Arbiter.Worker do
       :step_started_at,
       :meta,
       # Opaque merge-request ref minted by the merger adapter on open_mr/5
-      # (e.g. "!42" for GitLab, "direct:<branch>" for Direct). nil until an MR
-      # is opened.
+      # (e.g. "!42" for GitLab, "direct:<branch>|<repo>|<target>" for Direct).
+      # nil until an MR is opened.
       :mr_ref,
       # Human-clickable URL for mr_ref, computed once at open_mr time via the
       # adapter's link_for/1 (some adapters resolve the URL from per-process

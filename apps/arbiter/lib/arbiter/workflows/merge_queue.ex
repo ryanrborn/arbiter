@@ -96,8 +96,11 @@ defmodule Arbiter.Workflows.MergeQueue do
   base-introduced conflict *early* (a 1-commit rebase) rather than late (a
   full-PR rebase at merge time): when the rebase can't apply, the very next
   `get/1` reports `conflicting: true` and the existing conflict-resolver path
-  (Phase 2) takes over. Adapters without `update_branch/1` (Direct, GitLab)
-  simply skip this step — the queue degrades to its pre-Phase-3 behaviour.
+  (Phase 2) takes over. Adapters without `update_branch/1` simply skip this
+  step — the queue degrades to its pre-Phase-3 behaviour. Note: the `Direct`
+  adapter implements `update_branch/1` but bypasses the queue entirely (it
+  transitions to `:done` immediately on enqueue), so Phase 3 rebase logic is
+  moot for Direct-strategy tasks.
 
   ### Serialized merge admission
 
@@ -775,8 +778,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   # An approved PR needs a base update when the adapter can perform one and the
   # adapter classified the block as :behind_base (the base advanced under it).
   # Gated on approval per the directive — only approved, in-queue PRs are kept
-  # continuously rebased. Adapters without update_branch/1 (Direct, GitLab) skip
-  # this entirely, degrading to the pre-Phase-3 behaviour.
+  # continuously rebased. Adapters without update_branch/1 skip this entirely,
+  # degrading to the pre-Phase-3 behaviour.
   defp base_update_needed?(state, item, mr_state) do
     base_update_supported?(state.adapter) and
       item.status in [:awaiting_approval, :updating_base, :ci_running, :ready_to_merge] and
