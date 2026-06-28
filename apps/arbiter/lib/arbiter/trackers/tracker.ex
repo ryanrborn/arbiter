@@ -211,9 +211,13 @@ defmodule Arbiter.Trackers.Tracker do
   Returns `{:ok, []}` when the transition isn't gated (the common case). A
   benign "this tracker doesn't model that event" reason (e.g.
   `:status_unmapped`) is returned as `{:error, reason}` and the sync layer
-  treats it as "no gate" (there's no transition to gate). Optional — adapters
-  without field gating don't implement it, and `Arbiter.Trackers.gating_fields/2`
-  returns `{:ok, []}` for them.
+  treats it as "no gate" (there's no transition to gate).
+
+  **Intentionally Jira-specific.** GitHub and Shortcut have no native
+  required-field-gating mechanism, so their adapters are not expected to
+  implement this callback — its absence there is by design, not a parity gap.
+  Optional — adapters without field gating don't implement it, and
+  `Arbiter.Trackers.gating_fields/2` returns `{:ok, []}` for them.
   """
   @callback gating_fields(ref, status) ::
               {:ok, [gating_field]} | {:error, term()}
