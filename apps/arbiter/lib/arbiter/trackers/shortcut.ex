@@ -102,6 +102,11 @@ defmodule Arbiter.Trackers.Shortcut do
   end
 
   @impl true
+  def add_comment(ref, body) when is_binary(ref) and is_binary(body) do
+    post_comment(ref, body)
+  end
+
+  @impl true
   def add_remote_link(ref, url, title)
       when is_binary(ref) and is_binary(url) and is_binary(title) do
     with {:ok, cfg} <- Config.resolve() do
