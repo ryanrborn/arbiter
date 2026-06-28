@@ -70,6 +70,11 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
+            <.link navigate={~p"/workspaces"} class={nav_class(@current_path, "/workspaces")}>
+              {cap_plural("workspace")}
+            </.link>
+          </li>
+          <li>
             <.link navigate={~p"/audit"} class={nav_class(@current_path, "/audit")}>
               Audit log
             </.link>
@@ -87,7 +92,10 @@ defmodule ArbiterWeb.Layouts do
         </ul>
       </nav>
       <%!-- Quota widget: lg+ topbar; compact version also shown in mobile hamburger --%>
-      <div class="flex max-lg:hidden flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2" title="Anthropic quota">
+      <div
+        class="flex max-lg:hidden flex-col gap-0.5 text-xs font-mono select-none ml-4 mr-2"
+        title="Anthropic quota"
+      >
         <div class="flex items-center gap-1.5">
           <span class="text-base-content/40 w-4 shrink-0">5h</span>
           <div class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
@@ -159,6 +167,15 @@ defmodule ArbiterWeb.Layouts do
                 phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
               >
                 {cap_plural("merge queue")}
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/workspaces"}
+                class={nav_class(@current_path, "/workspaces")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                {cap_plural("workspace")}
               </.link>
             </li>
             <li>
