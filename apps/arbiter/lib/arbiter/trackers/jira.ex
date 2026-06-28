@@ -476,6 +476,67 @@ defmodule Arbiter.Trackers.Jira do
     end
   end
 
+  @doc """
+  Searches open issues in the workspace's configured Jira project for issues
+  whose summary matches `title` (case-insensitive, trimmed exact match).
+
+  Uses JQL `project = "KEY" AND summary ~ "title" AND statusCategory != Done`
+  to narrow the candidate set, then filters client-side for an exact
+  case-insensitive match — mirroring the GitHub adapter's strategy.
+
+  Returns `{:ok, [%{ref, title, url}]}` or `{:error, %Error{}}`.
+  Returns `{:ok, []}` when no matches are found. API errors return
+  `{:error, %Error{}}`.
+  """
+  @impl true
+  @spec search_by_title(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
+  def search_by_title(title) when is_binary(title) do
+    with {:ok, cfg} <- Config.resolve() do
+      escaped = String.replace(title, "\"", "\\\"")
+
+      jql =
+        "project = \"#{cfg.project_key}\" AND summary ~ \"#{escaped}\" " <>
+          "AND statusCategory != Done ORDER BY created DESC"
+
+      body = %{
+        "jql" => jql,
+        "maxResults" => 25,
+        "fields" => ["summary"]
+      }
+
+      case request(cfg, :post, "/search/jql", json: body) do
+        {:ok, %Req.Response{status: status_code, body: %{"issues" => issues}}}
+        when status_code in 200..299 and is_list(issues) ->
+          norm = normalize_title(title)
+
+          matches =
+            issues
+            |> Enum.filter(fn issue ->
+              summary = get_in(issue, ["fields", "summary"]) || ""
+              normalize_title(summary) == norm
+            end)
+            |> Enum.map(fn %{"key" => key} = issue ->
+              %{
+                ref: key,
+                title: get_in(issue, ["fields", "summary"]) || "(no title)",
+                url: "https://#{cfg.host}/browse/#{key}"
+              }
+            end)
+
+          {:ok, matches}
+
+        {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
+          {:ok, []}
+
+        {:ok, %Req.Response{status: status_code, body: resp_body}} ->
+          {:error, http_error(status_code, resp_body)}
+
+        {:error, exception} ->
+          {:error, transport_error(exception)}
+      end
+    end
+  end
+
   # ---- Internals: list_open -----------------------------------------------
 
   # Atlassian removed the old `GET /search` (CHANGE-2046). The replacement
@@ -970,6 +1031,8 @@ defmodule Arbiter.Trackers.Jira do
   defp adf_to_text(_), do: ""
 
   # ---- Misc ---------------------------------------------------------------
+
+  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
 
   defp issue_key?(s), do: Regex.match?(~r/^[A-Z][A-Z0-9_]*-\d+$/, s)
 end
