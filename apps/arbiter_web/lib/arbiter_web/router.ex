@@ -37,6 +37,9 @@ defmodule ArbiterWeb.Router do
 
       live("/merge_queue", MergeQueueIndexLive)
 
+      live("/workspaces", WorkspaceIndexLive)
+      live("/workspaces/:id", WorkspaceDetailLive)
+
       live("/workers", WorkerIndexLive)
       live("/workers/history", RunIndexLive)
       live("/workers/history/:id", RunDetailLive)
