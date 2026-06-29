@@ -112,6 +112,9 @@ defmodule ArbiterWeb.Router do
     get("/workers/:task_id", WorkerController, :show)
     get("/workers/:task_id/log", WorkerController, :log)
     post("/workers/:task_id/stop", WorkerController, :stop)
+
+    # Graph queue operations (C5 of #482)
+    post("/queue/:task_id/resume", QueueController, :resume)
   end
 
   # Local transparent proxy to api.anthropic.com (bd-5boun6). Workers route

@@ -4,14 +4,16 @@ defmodule Arbiter.Workflows.Conductor do
   `Arbiter.Tasks.Graph` to completion: it kicks the graph off, then keeps the
   ready set flowing into `Arbiter.Worker.Dispatch` as work closes.
 
-  This is C4 of #482 — effective concurrency cap + swappable quota gate. The
-  cap each drain cycle is:
+  C4 added the effective concurrency cap + swappable quota gate:
 
       effective_cap = min(workspace_max_concurrent, system_max_concurrent, quota_headroom)
 
-  where `quota_headroom` comes from the pluggable `Arbiter.Workflows.QuotaGate`
-  behaviour (`:unlimited` when quota is healthy, `0` to hold all dispatch).
-  Failure handling (C5) and crash-safety / restart (C6) are separate children.
+  C5 (this child) adds failure handling: when a member's worker fails, the
+  Conductor pauses that node's downstream branch and escalates to the Admiral
+  inbox. Independent branches keep running. The Admiral can resume via the
+  `queue_resume` MCP tool or `arb queue resume <task_id>`.
+
+  Crash-safety / restart (C6) is a separate child.
 
   ## Kickoff
 
@@ -95,6 +97,7 @@ defmodule Arbiter.Workflows.Conductor do
   require Ash.Query
   require Logger
 
+  alias Arbiter.Messages.Message
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Graph
   alias Arbiter.Tasks.GraphMember
@@ -103,6 +106,7 @@ defmodule Arbiter.Workflows.Conductor do
   alias Arbiter.Workflows.ConductorSupervisor
 
   @topic "tasks"
+  @events_topic "events"
   @gating_types [:depends_on, :blocks]
   @default_system_max 16
 
@@ -117,6 +121,10 @@ defmodule Arbiter.Workflows.Conductor do
       :dispatcher,
       :dispatch_depth,
       member_ids: MapSet.new(),
+      # C5: members whose worker has failed
+      failed_ids: MapSet.new(),
+      # C5: members blocked by a failed upstream (their branch is paused)
+      paused_ids: MapSet.new(),
       drained?: false
     ]
   end
@@ -196,6 +204,52 @@ defmodule Arbiter.Workflows.Conductor do
   @spec state(GenServer.server()) :: map()
   def state(server), do: GenServer.call(server, :state)
 
+  @doc """
+  Resume a failed member: re-dispatch it, clear its downstream from the paused
+  set, and continue the drain. Returns `:ok` on success, or:
+
+    * `{:error, :not_member}` — `task_id` is not a member of this graph.
+    * `{:error, :not_failed}` — `task_id` is a member but has not failed.
+    * `{:error, :dispatch_failed}` — re-dispatch call returned `:error`.
+
+  Use `resume_task/1` when you don't have the pid and want the system to
+  locate the right conductor automatically.
+  """
+  @spec resume(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def resume(server, task_id) when is_binary(task_id),
+    do: GenServer.call(server, {:resume, task_id})
+
+  @doc """
+  Find the running Conductor that has `task_id` in its failed set and resume it.
+
+  Searches all running Conductors via the `ConductorSupervisor` Registry. The
+  Admiral calls this when acknowledging a failure escalation — no need to know
+  which graph the task belongs to.
+
+  Returns `:ok`, `{:error, :not_found}` (no conductor holds the task as failed),
+  or any `resume/2` error forwarded from the matched conductor.
+  """
+  @spec resume_task(String.t()) :: :ok | {:error, term()}
+  def resume_task(task_id) when is_binary(task_id) do
+    conductors = ConductorSupervisor.list_conductors()
+
+    result =
+      Enum.find_value(conductors, :not_found, fn {_graph_id, pid} ->
+        snap = GenServer.call(pid, :state)
+
+        if MapSet.member?(snap.failed_ids, task_id) do
+          {:found, pid}
+        else
+          nil
+        end
+      end)
+
+    case result do
+      :not_found -> {:error, :not_found}
+      {:found, pid} -> resume(pid, task_id)
+    end
+  end
+
   # ---- GenServer callbacks ------------------------------------------------
 
   @impl true
@@ -216,6 +270,13 @@ defmodule Arbiter.Workflows.Conductor do
     workspace_max = resolve_workspace_max(opts, workspace_id, system_max)
 
     :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, @topic)
+
+    # C5: subscribe to the workspace-scoped events topic so we receive
+    # worker_failed broadcasts from the Driver without polling.
+    events_sub =
+      if workspace_id, do: "events:" <> workspace_id, else: @events_topic
+
+    :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, events_sub)
 
     state = %State{
       graph_id: graph_id,
@@ -253,6 +314,16 @@ defmodule Arbiter.Workflows.Conductor do
   def handle_info({:task_lifecycle, _event, _issue}, %State{} = state),
     do: {:noreply, state}
 
+  # C5: a member's worker failed — pause its downstream branch and escalate.
+  def handle_info({:event, %{topic: "worker_failed", task_id: id}}, %State{} = state)
+      when is_binary(id) do
+    if MapSet.member?(state.member_ids, id) do
+      {:noreply, handle_member_failure(id, state)}
+    else
+      {:noreply, state}
+    end
+  end
+
   def handle_info(_msg, %State{} = state), do: {:noreply, state}
 
   @impl true
@@ -263,6 +334,32 @@ defmodule Arbiter.Workflows.Conductor do
 
   def handle_call(:state, _from, %State{} = state) do
     {:reply, snapshot(state), state}
+  end
+
+  # C5: resume a failed member — clear it from the failed set, recompute
+  # paused_ids from remaining failed members, re-dispatch, then drain.
+  def handle_call({:resume, task_id}, _from, %State{} = state) do
+    cond do
+      not MapSet.member?(state.member_ids, task_id) ->
+        {:reply, {:error, :not_member}, state}
+
+      not MapSet.member?(state.failed_ids, task_id) ->
+        {:reply, {:error, :not_failed}, state}
+
+      true ->
+        new_failed_ids = MapSet.delete(state.failed_ids, task_id)
+        edges = gating_edges(MapSet.to_list(state.member_ids))
+        new_paused_ids = compute_all_paused(new_failed_ids, edges)
+        state = %{state | failed_ids: new_failed_ids, paused_ids: new_paused_ids}
+
+        case dispatch_one(task_id, state) do
+          :ok ->
+            {:reply, :ok, state}
+
+          :error ->
+            {:reply, {:error, :dispatch_failed}, state}
+        end
+    end
   end
 
   # ---- kickoff helpers ----------------------------------------------------
@@ -408,6 +505,8 @@ defmodule Arbiter.Workflows.Conductor do
         [workspace_id: state.workspace_id]
         |> Issue.ready()
         |> Enum.filter(&MapSet.member?(member_set, &1.id))
+        # C5: don't dispatch tasks whose branch is paused by a failed upstream
+        |> Enum.reject(&MapSet.member?(state.paused_ids, &1.id))
         |> Enum.sort_by(&{&1.priority, &1.id})
 
       conflicts = conflict_adjacency(member_ids)
@@ -609,11 +708,109 @@ defmodule Arbiter.Workflows.Conductor do
       system_max_concurrent: state.system_max_concurrent,
       dispatch_depth: state.dispatch_depth,
       member_ids: state.member_ids,
+      # C5: failure state
+      failed_ids: state.failed_ids,
+      paused_ids: state.paused_ids,
       drained?: state.drained?
     }
   end
 
   defp default_dispatcher do
     Application.get_env(:arbiter, :conductor_dispatcher, Arbiter.Worker.Dispatch)
+  end
+
+  # ---- C5: failure handling -----------------------------------------------
+
+  # Process a member failure: compute downstream, update state, escalate.
+  defp handle_member_failure(failed_id, %State{} = state) do
+    member_list = MapSet.to_list(state.member_ids)
+    edges = gating_edges(member_list)
+    downstream = compute_downstream(failed_id, edges)
+    downstream_only = MapSet.delete(downstream, failed_id)
+
+    new_state = %{state |
+      failed_ids: MapSet.put(state.failed_ids, failed_id),
+      paused_ids: MapSet.union(state.paused_ids, downstream)
+    }
+
+    post_failure_escalation(failed_id, downstream_only, new_state)
+
+    new_state
+  end
+
+  # Post an addressed :escalation mailbox message to the Admiral.
+  defp post_failure_escalation(failed_id, paused_ids, %State{workspace_id: ws_id, graph_id: graph_id})
+       when is_binary(ws_id) do
+    paused_count = MapSet.size(paused_ids)
+    paused_list = paused_ids |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
+
+    subject = "#{failed_id} failed in graph #{graph_id} — #{paused_count} downstream task(s) paused"
+
+    body =
+      [
+        "Worker for #{failed_id} failed. Its downstream branch has been paused.",
+        paused_count > 0 && "Paused tasks: #{paused_list}",
+        "Independent branches are still running.",
+        "To resume: `arb queue resume #{failed_id}` or call the `queue_resume` MCP tool.",
+        "Graph: #{graph_id}"
+      ]
+      |> Enum.filter(& &1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: failed_id,
+      workspace_id: ws_id,
+      directive_ref: failed_id,
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("Conductor[#{graph_id}]: failure escalation swallowed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp post_failure_escalation(_failed_id, _paused_ids, _state), do: :ok
+
+  # Recompute the full paused set from the current failed set. Used after a
+  # resume to remove nodes that are no longer transitively blocked.
+  defp compute_all_paused(failed_ids, edges) do
+    Enum.reduce(failed_ids, MapSet.new(), fn fid, acc ->
+      MapSet.union(acc, compute_downstream(fid, edges))
+    end)
+  end
+
+  # BFS forward from start_id in the reverse-dependency graph to find all
+  # task IDs that transitively depend on start_id. Edges are [{from, to}]
+  # where from depends on to; we walk backwards (from "to" to "from") to find
+  # everything that will be unblocked only when start_id completes.
+  defp compute_downstream(start_id, edges) do
+    # reverse_adj: dependency → set of its direct dependents
+    reverse_adj =
+      Enum.reduce(edges, %{}, fn {from, to}, acc ->
+        Map.update(acc, to, MapSet.new([from]), &MapSet.put(&1, from))
+      end)
+
+    bfs_downstream(MapSet.new([start_id]), MapSet.new([start_id]), reverse_adj)
+  end
+
+  defp bfs_downstream(frontier, visited, reverse_adj) do
+    next =
+      frontier
+      |> Enum.flat_map(fn id ->
+        Map.get(reverse_adj, id, MapSet.new()) |> MapSet.to_list()
+      end)
+      |> MapSet.new()
+      |> MapSet.difference(visited)
+
+    if MapSet.size(next) == 0 do
+      visited
+    else
+      bfs_downstream(next, MapSet.union(visited, next), reverse_adj)
+    end
   end
 end
