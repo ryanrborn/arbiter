@@ -60,6 +60,8 @@ defmodule ArbiterCli.Cmd.InstallService do
   @switches [system: :boolean, uninstall: :boolean, json: :boolean, force: :boolean]
 
   @unit_name "arbiter.service"
+  @logrotate_service_name "arbiter-logrotate.service"
+  @logrotate_timer_name "arbiter-logrotate.timer"
 
   def run(argv) do
     if Output.help?(argv) do
@@ -93,12 +95,89 @@ defmodule ArbiterCli.Cmd.InstallService do
     secrets = capture_secrets(arbiter_home)
     capture_path(arbiter_home)
 
+    log_paths = if scope == :user, do: setup_log_dir(arbiter_home), else: nil
+
     write_unit(path, contents)
     daemon_reload(scope)
     enable_now(scope)
+    if scope == :user, do: enable_logrotate_timer()
     linger = if scope == :user, do: enable_linger(), else: :not_applicable
 
-    emit_installed(mode, scope, path, arbiter_home, linger, secrets)
+    emit_installed(mode, scope, path, arbiter_home, linger, secrets, log_paths)
+  end
+
+  # Create ~/.arbiter/log/, write a logrotate config, and install a user-scoped
+  # systemd service + daily timer so rotation runs automatically without cron or
+  # manual intervention. Uses copytruncate so the running service's open file
+  # descriptor keeps working without a restart.
+  defp setup_log_dir(arbiter_home) do
+    log_dir = Path.join(arbiter_home, "log")
+    File.mkdir_p!(log_dir)
+
+    log_file = Path.join(log_dir, "arbiter.log")
+    state_file = Path.join(log_dir, "logrotate.state")
+    config_path = Path.join(log_dir, "logrotate.conf")
+
+    config = """
+    "#{log_file}" {
+        daily
+        rotate 7
+        compress
+        missingok
+        notifempty
+        copytruncate
+    }
+    """
+
+    File.write!(config_path, config)
+
+    # Write logrotate service + timer units so daemon-reload picks them up in
+    # the same cycle as the main arbiter.service unit.
+    svc_path = Path.join(unit_dir(:user), @logrotate_service_name)
+    timer_path = Path.join(unit_dir(:user), @logrotate_timer_name)
+    write_unit(svc_path, logrotate_service_contents(config_path, state_file))
+    write_unit(timer_path, logrotate_timer_contents())
+
+    {config_path, state_file}
+  end
+
+  defp logrotate_service_contents(config_path, state_file) do
+    """
+    [Unit]
+    Description=Rotate Arbiter log file
+
+    [Service]
+    Type=oneshot
+    ExecStart=logrotate --state #{state_file} #{config_path}
+    """
+  end
+
+  defp logrotate_timer_contents do
+    """
+    [Unit]
+    Description=Daily rotation of Arbiter log file
+
+    [Timer]
+    OnCalendar=daily
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+    """
+  end
+
+  # Enable the daily logrotate timer for user installs. Non-fatal if logrotate
+  # is missing — the log file still works, just won't auto-rotate.
+  defp enable_logrotate_timer do
+    case systemctl(:user, ["enable", "--now", @logrotate_timer_name]) do
+      {_out, 0} ->
+        :ok
+
+      {out, code} ->
+        Start.log_text(
+          "warning: could not enable #{@logrotate_timer_name} (exit #{code}): #{String.trim(out)}"
+        )
+    end
   end
 
   # ---- secret capture ----------------------------------------------------
@@ -256,6 +335,13 @@ defmodule ArbiterCli.Cmd.InstallService do
     # `disable --now` both stops and de-links the unit. Tolerate a non-zero
     # exit (already disabled / never installed) so uninstall is idempotent.
     disabled? = disable_now(scope)
+
+    if scope == :user do
+      systemctl(:user, ["disable", "--now", @logrotate_timer_name])
+      remove_unit(Path.join(unit_dir(:user), @logrotate_timer_name))
+      remove_unit(Path.join(unit_dir(:user), @logrotate_service_name))
+    end
+
     removed? = remove_unit(path)
     daemon_reload(scope)
 
@@ -283,6 +369,18 @@ defmodule ArbiterCli.Cmd.InstallService do
         ""
       end
 
+    # User installs write to a persistent file so logs survive reboots and are
+    # readable without sudo or systemd-journal membership. System installs keep
+    # journald (they have root and /var/log/journal is typically persistent).
+    log_directives =
+      if scope == :user do
+        log_file = Path.join([arbiter_home, "log", "arbiter.log"])
+
+        "StandardOutput=append:#{log_file}\nStandardError=append:#{log_file}\n"
+      else
+        ""
+      end
+
     """
     [Unit]
     Description=Arbiter stack (Postgres + Phoenix)
@@ -293,7 +391,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     WorkingDirectory=#{arbiter_home}
     EnvironmentFile=-#{Path.join(arbiter_home, "arbiter.env")}
     #{release_environment_lines()}
-    ExecStart=#{release_bin} start
+    #{log_directives}ExecStart=#{release_bin} start
     Restart=on-failure
     RestartSec=10
 
@@ -463,32 +561,40 @@ defmodule ArbiterCli.Cmd.InstallService do
 
   # ---- output ------------------------------------------------------------
 
-  defp emit_installed(:json, scope, path, root, linger, secrets) do
+  defp emit_installed(:json, scope, path, root, linger, secrets, log_paths) do
     {env_path, captured} =
       case secrets do
         {:written, p, keys} -> {p, keys}
         {:none, p} -> {p, []}
       end
 
-    IO.puts(
-      Jason.encode!(%{
-        action: "install",
-        scope: to_string(scope),
-        unit: @unit_name,
-        unit_path: path,
-        root: root,
-        linger: to_string(linger),
-        env_file: env_path,
-        secrets_captured: captured,
-        status_cmd: status_cmd(scope),
-        logs_cmd: logs_cmd(scope),
-        base_url: Client.base_url(),
-        ok: true
-      })
-    )
+    base = %{
+      action: "install",
+      scope: to_string(scope),
+      unit: @unit_name,
+      unit_path: path,
+      root: root,
+      linger: to_string(linger),
+      env_file: env_path,
+      secrets_captured: captured,
+      status_cmd: status_cmd(scope),
+      logs_cmd: logs_cmd(scope),
+      base_url: Client.base_url(),
+      ok: true
+    }
+
+    base =
+      if log_paths do
+        {config_path, state_file} = log_paths
+        Map.merge(base, %{logrotate_timer: @logrotate_timer_name, logrotate_config: config_path, logrotate_state: state_file})
+      else
+        base
+      end
+
+    IO.puts(Jason.encode!(base))
   end
 
-  defp emit_installed(:text, scope, path, _root, linger, secrets) do
+  defp emit_installed(:text, scope, path, arbiter_home, linger, secrets, log_paths) do
     IO.puts("Installed #{@unit_name} (#{scope} scope).")
     IO.puts("  unit:   #{path}")
     IO.puts("  starts: #{Client.base_url()} at boot")
@@ -498,6 +604,16 @@ defmodule ArbiterCli.Cmd.InstallService do
     IO.puts("Check it with:")
     IO.puts("  #{status_cmd(scope)}")
     IO.puts("  #{logs_cmd(scope)}")
+
+    if log_paths do
+      {config_path, state_file} = log_paths
+      IO.puts("")
+      IO.puts("Logs are written to #{Path.join([arbiter_home, "log", "arbiter.log"])}.")
+      IO.puts("A daily systemd timer (#{@logrotate_timer_name}) rotates logs automatically.")
+      IO.puts("Rotate manually with:")
+      IO.puts("  logrotate --state #{state_file} #{config_path}")
+    end
+
     IO.puts("")
 
     IO.puts(
@@ -553,6 +669,12 @@ defmodule ArbiterCli.Cmd.InstallService do
   # Scope-aware inspection commands echoed in the success output.
   defp status_cmd(:user), do: "systemctl --user status #{@unit_name}"
   defp status_cmd(:system), do: "systemctl status #{@unit_name}"
-  defp logs_cmd(:user), do: "journalctl --user -u #{@unit_name} -f"
+  # User services write to a file (no journald permissions needed); system
+  # installs have root so journalctl works directly.
+  defp logs_cmd(:user) do
+    log_file = Path.join([arbiter_home_path(), "log", "arbiter.log"])
+    "tail -f #{log_file}"
+  end
+
   defp logs_cmd(:system), do: "journalctl -u #{@unit_name} -f"
 end
