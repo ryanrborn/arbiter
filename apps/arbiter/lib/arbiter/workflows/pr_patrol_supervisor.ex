@@ -1,26 +1,45 @@
 defmodule Arbiter.Workflows.PRPatrolSupervisor do
   @moduledoc """
-  DynamicSupervisor for PRPatrol processes — one per workspace configured for
-  GitHub merges.
+  DynamicSupervisor for PRPatrol processes — one per (workspace, repo) pair
+  configured for GitHub merges.
 
-  Patrols are registered under `Arbiter.Workflows.PRPatrolRegistry` keyed by
-  `workspace_id`, so duplicate starts collapse to `{:error, {:already_started,
-  pid}}` and lookups via `whereis/1` are O(1).
+  Single-repo workspaces (those with `config["merge"]["config"]["repo"]` set)
+  get exactly one PRPatrol, registered under their `workspace_id`.
+
+  Multi-repo workspaces (no `repo` pinned in the merge config — only an
+  `owner`) get one PRPatrol per repo, registered under
+  `"workspace_id:owner/repo"`. The repo list is derived from the workspace's
+  `repo_paths`/`rig_paths` map: each locally-checked-out rig's `origin` remote
+  is resolved to an `"owner/repo"` slug via `RepoResolver`, the same mechanism
+  the worker dispatch path uses. This covers the leotech workspace shape, whose
+  rigs are separate `leo-technologies-llc/*` repos that must each be patrolled
+  independently — without this, leotech (a jira-tracker + github-merger
+  workspace) got no patrol at all and Copilot review comments went unaddressed.
+
+  Patrols are registered under `Arbiter.Workflows.PRPatrolRegistry`. Duplicate
+  starts collapse to `{:error, {:already_started, pid}}`.
 
   At application boot, `start_for_existing_workspaces/0` enumerates every
-  workspace and starts a PRPatrol for each with a valid GitHub merge config.
-  New workspaces start a patrol via the
+  workspace and starts patrols for those with a GitHub merge config. New
+  workspaces start their patrol(s) via the
   `Arbiter.Tasks.Workspace.Changes.StartPRPatrol` after_action hook.
 
   Both auto-start paths are gated by the `:arbiter, :auto_start_refineries`
   config flag — disabled in `test`, enabled everywhere else.
 
   Poll interval is read from `:arbiter, :pr_patrol_interval_ms` (default 60s).
+
+  ## Observable signals
+
+  A `Logger.info` line is emitted for every patrol started or skipped, so
+  operators can confirm which workspaces are covered without querying the
+  `PRPatrolRegistry` directly.
   """
 
   require Logger
 
-  alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
+  alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Workflows.PRPatrol
 
   @registry Arbiter.Workflows.PRPatrolRegistry
@@ -36,32 +55,78 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
   end
 
   @doc """
-  Start a PRPatrol for a workspace if its merge adapter implements `list_open/0`.
-  Returns `:skip` when the adapter doesn't support listing open MRs, or when no
-  repo string can be derived from workspace config (needed to dispatch follow-up
-  workers). Idempotent: returns the existing pid via `{:error, {:already_started,
-  pid}}` if one is already running for the workspace.
+  Start a PRPatrol for each repo configured in the workspace's GitHub merge
+  config. Returns `:skip` when the adapter doesn't support `list_open/0` or
+  when no repos can be derived from the workspace config.
+
+  Single-repo workspaces (`config["merge"]["config"]["repo"]` is set) start
+  one patrol registered under `workspace_id`. Multi-repo workspaces (repo
+  derived per-rig from `repo_paths`/`rig_paths`) start one patrol per repo,
+  each registered under `"workspace_id:owner/repo"`.
+
+  Idempotent: a duplicate start for an already-running patrol returns
+  `{:error, {:already_started, pid}}`.
+
+  Emits a `Logger.info` line for each patrol started (or skipped), providing
+  an observable signal that the boot wiring is working without needing to query
+  the `PRPatrolRegistry` directly.
   """
   @spec start_patrol(Workspace.t(), keyword()) :: DynamicSupervisor.on_start_child() | :skip
   def start_patrol(%Workspace{} = workspace, opts \\ []) do
     adapter = resolve_adapter(workspace)
+    repos = patrol_repos(workspace)
 
-    with true <- not is_nil(adapter) and function_exported?(adapter, :list_open, 0),
-         repo when is_binary(repo) <- patrol_repo(workspace) do
-      child_opts =
-        opts
-        |> Keyword.put(:repo, repo)
-        |> Keyword.put(:workspace_id, workspace.id)
-        |> Keyword.put_new(:interval_ms, patrol_interval_ms())
-        |> Keyword.put(:name, via(workspace.id))
+    cond do
+      is_nil(adapter) or not function_exported?(adapter, :list_open, 0) ->
+        Logger.info(
+          "PRPatrolSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
+            "merge adapter #{inspect(adapter)} does not support list_open/0"
+        )
 
-      DynamicSupervisor.start_child(__MODULE__, {PRPatrol, child_opts})
-    else
-      _ -> :skip
+        :skip
+
+      repos == [] ->
+        Logger.info(
+          "PRPatrolSupervisor: skip workspace #{workspace.id} (#{workspace.name}) — " <>
+            "no repos resolvable (set merge.config.repo, or a repo_paths/rig_paths " <>
+            "map whose rigs have a github origin remote)"
+        )
+
+        :skip
+
+      true ->
+        results =
+          Enum.map(repos, fn repo ->
+            registry_key = if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
+
+            child_opts =
+              opts
+              |> Keyword.put(:repo, repo)
+              |> Keyword.put(:workspace_id, workspace.id)
+              |> Keyword.put_new(:interval_ms, patrol_interval_ms())
+              |> Keyword.put(:name, via(registry_key))
+
+            result = DynamicSupervisor.start_child(__MODULE__, {PRPatrol, child_opts})
+
+            Logger.info(
+              "PRPatrolSupervisor: patrol #{repo} workspace #{workspace.id} (#{workspace.name}): #{inspect(result)}"
+            )
+
+            result
+          end)
+
+        List.first(results, :skip)
     end
   end
 
-  @doc "Return the pid of the PRPatrol serving `workspace_id`, or `nil`."
+  @doc """
+  Return the pid of the PRPatrol registered under `workspace_id`, or `nil`.
+
+  Works for single-repo workspaces (registered under their `workspace_id`).
+  For multi-repo workspaces, each patrol is registered under
+  `"workspace_id:owner/repo"` — use `Registry.select/2` on
+  `Arbiter.Workflows.PRPatrolRegistry` to enumerate all patrols for a workspace.
+  """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(workspace_id) when is_binary(workspace_id) do
     case Registry.lookup(@registry, workspace_id) do
@@ -131,12 +196,18 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
     ArgumentError -> nil
   end
 
-  # Derive a repo identifier string for follow-up worker dispatch. Returns nil
-  # when the workspace config doesn't carry enough info to derive one.
+  # Derive the list of "owner/repo" strings to patrol for this workspace.
+  # Returns an empty list when no repos can be resolved.
   #
-  # GitHub: "owner/repo" from merge config. Other adapters: extend here as their
-  # patrol support lands.
-  defp patrol_repo(%Workspace{} = workspace) do
+  # GitHub supports two shapes:
+  #   - Single-repo: merge.config.repo is set → one patrol against owner/repo.
+  #   - Multi-repo: no repo pinned in the merge config → one patrol per rig,
+  #     with each rig's "owner/repo" derived from its `origin` remote. The rig
+  #     list comes from the workspace's repo_paths/rig_paths map — the same
+  #     source the worker dispatch path resolves worktrees from. Used by
+  #     workspaces like leotech, whose rigs are distinct leo-technologies-llc/*
+  #     repos.
+  defp patrol_repos(%Workspace{} = workspace) do
     config = workspace.config || %{}
 
     case get_in(config, ["merge", "strategy"]) do
@@ -144,15 +215,47 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
         owner = get_in(config, ["merge", "config", "owner"])
         repo = get_in(config, ["merge", "config", "repo"])
 
-        if is_binary(owner) and byte_size(owner) > 0 and
-             is_binary(repo) and byte_size(repo) > 0 do
-          "#{owner}/#{repo}"
+        if is_binary(owner) and owner != "" and is_binary(repo) and repo != "" do
+          ["#{owner}/#{repo}"]
         else
-          nil
+          repos_from_rig_paths(config)
         end
 
       _ ->
-        nil
+        []
+    end
+  end
+
+  # Resolve every locally-checked-out rig's `origin` remote into an
+  # "owner/repo" slug. Best-effort: a rig whose path is missing, isn't a git
+  # checkout, or whose remote can't be parsed is logged and skipped. Reads the
+  # canonical `repo_paths` map, falling back to the legacy `rig_paths` key.
+  defp repos_from_rig_paths(config) do
+    case Map.get(config, "repo_paths") || Map.get(config, "rig_paths") do
+      rig_map when is_map(rig_map) ->
+        rig_map
+        |> Map.values()
+        |> Enum.map(&RepoConfig.repo_path_from_config/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.flat_map(fn path ->
+          case RepoResolver.from_remote(path) do
+            {:ok, {owner, repo}} ->
+              ["#{owner}/#{repo}"]
+
+            {:error, err} ->
+              Logger.info(
+                "PRPatrolSupervisor: could not derive repo for rig path #{path} " <>
+                  "(skipping): #{inspect(err)}"
+              )
+
+              []
+          end
+        end)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      _ ->
+        []
     end
   end
 
