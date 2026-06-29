@@ -262,7 +262,14 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   # Resolve the merge adapter for a workspace, or nil on unknown strategy.
   defp resolve_adapter(workspace) do
-    Mergers.for_workspace(workspace)
+    adapter = Mergers.for_workspace(workspace)
+    # Load the adapter before `start_patrol/2`'s `function_exported?/3` guard
+    # inspects it: `function_exported?/3` reports false for a not-yet-loaded
+    # module without triggering a load, so under interactive code loading
+    # (`mix test`) the guard could spuriously skip a perfectly valid patrol.
+    # See bd-1hn1qw.
+    Code.ensure_loaded(adapter)
+    adapter
   rescue
     ArgumentError -> nil
   end

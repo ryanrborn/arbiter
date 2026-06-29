@@ -50,17 +50,18 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   defp start_patrol(ws, opts \\ []) do
     name = String.to_atom("PRPatrol_#{System.unique_integer([:positive])}")
 
-    {:ok, pid} =
-      PRPatrol.start_link(
-        Keyword.merge(
-          [
-            repo: "owner/repo",
-            workspace_id: ws.id,
-            interval_ms: 60_000,
-            name: name
-          ],
-          opts
-        )
+    pid =
+      start_supervised!(
+        {PRPatrol,
+         Keyword.merge(
+           [
+             repo: "owner/repo",
+             workspace_id: ws.id,
+             interval_ms: 60_000,
+             name: name
+           ],
+           opts
+         )}
       )
 
     # Let the GenServer process see this test process's Req.Test stub.
@@ -399,12 +400,15 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       name = String.to_atom("PRPatrol_multirepo_#{System.unique_integer([:positive])}")
 
-      {:ok, pid} =
-        PRPatrol.start_link(
-          repo: "owner/explicit-repo",
-          workspace_id: multi_ws.id,
-          interval_ms: 60_000,
-          name: name
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           [
+             repo: "owner/explicit-repo",
+             workspace_id: multi_ws.id,
+             interval_ms: 60_000,
+             name: name
+           ]}
         )
 
       Req.Test.allow(@stub_name, self(), pid)
@@ -468,6 +472,40 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     test "PR by a non-allowlisted author → skipped (no task), despite CHANGES_REQUESTED",
          %{scoped: ws} do
       pulls_stub(71, "someone-else")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
+    end
+
+    # Fail-closed: an allowlist IS configured but the PR carries no resolvable
+    # author (the `/pulls` payload has no `user` field, so author → nil). The PR
+    # must be skipped even though it is otherwise actionable (CHANGES_REQUESTED),
+    # because we cannot attribute it to an allowed author (bd-eos7xe / #603).
+    test "allowlist set but author unresolvable (nil) → skipped (no task)", %{scoped: ws} do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              # No `user` key → author resolves to nil.
+              %{"number" => 73, "title" => "t73", "html_url" => "https://gh/pr/73"}
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/73/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/73/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
 
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)

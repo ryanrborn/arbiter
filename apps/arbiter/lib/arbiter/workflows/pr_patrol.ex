@@ -160,7 +160,19 @@ defmodule Arbiter.Workflows.PRPatrol do
   end
 
   defp resolve_adapter(workspace) do
-    Mergers.for_workspace(workspace)
+    adapter = Mergers.for_workspace(workspace)
+
+    # Force the adapter module to load before any `function_exported?/3` guard
+    # inspects it (`:list_open` in `do_tick/1`, `:list_open_review_threads` in
+    # `open_review_thread_count/2`). `function_exported?/3` returns false for a
+    # module that has not been loaded yet and does NOT trigger loading — so under
+    # interactive code loading (as in `mix test`) the guard would spuriously fail
+    # whenever no prior call had loaded the adapter, no-op the whole tick, and
+    # dispatch nothing. Releases run in embedded mode (all modules preloaded),
+    # which masks this, but the guard must not depend on prior load order.
+    # See bd-1hn1qw.
+    Code.ensure_loaded(adapter)
+    adapter
   rescue
     ArgumentError -> nil
   end
