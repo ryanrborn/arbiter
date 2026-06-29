@@ -31,6 +31,14 @@ defmodule Arbiter.Worker.Worktree do
 
   @default_root "/home/rborn/dev/arbiter-worktrees"
 
+  # App directories that must recompile fresh in every worktree — never copied
+  # from the source repo's _build (bd-cwov25: no cross-branch contamination).
+  @app_dirs ~w(arbiter arbiter_web arbiter_cli)
+
+  # Mix envs that acolytes actually use. `test` is the minimum; `dev` is
+  # included because some dispatched workers compile in dev mode.
+  @seed_envs ~w(test dev)
+
   @typedoc "Absolute path to a git repository or worktree."
   @type path :: String.t()
 
@@ -92,6 +100,7 @@ defmodule Arbiter.Worker.Worktree do
                  ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
                  cd: repo_path
                ) do
+          :ok = seed_compiled_deps(repo_path, path)
           {:ok, path}
         end
     end
@@ -180,8 +189,12 @@ defmodule Arbiter.Worker.Worktree do
         File.mkdir_p!(Path.dirname(path))
 
         case run_git(["worktree", "add", path, branch_name], cd: repo_path) do
-          {:ok, _stdout} -> {:ok, path}
-          {:error, _} = err -> err
+          {:ok, _stdout} ->
+            :ok = seed_compiled_deps(repo_path, path)
+            {:ok, path}
+
+          {:error, _} = err ->
+            err
         end
     end
   end
@@ -529,6 +542,70 @@ defmodule Arbiter.Worker.Worktree do
 
   defp strip_branch_ref("refs/heads/" <> name), do: name
   defp strip_branch_ref(other), do: other
+
+  @doc """
+  Seed the worktree's `_build/<env>/lib/` with pre-compiled dependencies from
+  `source_repo`, so acolytes can run `mix test` without a full dep recompile.
+
+  ## Why copy, not symlink
+
+  Symlinks into the source repo's `_build` are live write-through paths: a dep
+  recompile inside the worktree would write `.beam` files straight into the
+  running server's `_build`, corrupting live artifacts (bd-cwov25). Copying
+  gives the worktree full ownership of its deps; the source repo's `_build` is
+  never touched again.
+
+  ## Implementation
+
+  Uses `cp -a --reflink=auto` — a correct full copy on ext4, and automatically
+  a near-free CoW block-level copy on btrfs/xfs if the host ever migrates. The
+  copy is ~1-2s for ~70MB of deps per env, versus minutes for a full recompile.
+
+  ## Excluded dirs
+
+  `arbiter`, `arbiter_web`, `arbiter_cli` are skipped — they must compile fresh
+  per-branch in the worktree so cross-branch contamination is impossible
+  (bd-cwov25). All other compiled deps in `_build/<env>/lib/` are copied.
+
+  ## Envs seeded
+
+  Both `test` and `dev` envs are seeded (acolytes use `test`; some dispatched
+  workers compile in `dev`). A missing source env dir is silently skipped so
+  this function is safe to call on a repo that has never been compiled.
+
+  Best-effort: failures are swallowed so a `_build` copy issue never blocks
+  worktree provisioning.
+  """
+  @spec seed_compiled_deps(path(), path()) :: :ok
+  def seed_compiled_deps(source_repo, worktree_path)
+      when is_binary(source_repo) and is_binary(worktree_path) do
+    Enum.each(@seed_envs, fn env ->
+      source_lib = Path.join([source_repo, "_build", env, "lib"])
+      dest_lib = Path.join([worktree_path, "_build", env, "lib"])
+
+      if File.dir?(source_lib) do
+        File.mkdir_p!(dest_lib)
+
+        source_lib
+        |> File.ls!()
+        |> Enum.reject(&(&1 in @app_dirs))
+        |> Enum.each(fn dep ->
+          source_dep = Path.join(source_lib, dep)
+          dest_dep = Path.join(dest_lib, dep)
+
+          unless File.exists?(dest_dep) do
+            System.cmd("cp", ["-a", "--reflink=auto", source_dep, dest_dep],
+              stderr_to_stdout: true
+            )
+          end
+        end)
+      end
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   # ---- internals ----------------------------------------------------------
 

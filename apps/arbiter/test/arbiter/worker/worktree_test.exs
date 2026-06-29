@@ -323,6 +323,109 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
   end
 
+  describe "seed_compiled_deps/2" do
+    test "copies dep dirs from source _build/test/lib into the worktree", %{
+      repo: repo
+    } do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-basic", "main")
+
+      # Plant a fake compiled dep in the source repo.
+      dep_src = Path.join([repo, "_build", "test", "lib", "jason"])
+      ebin_src = Path.join(dep_src, "ebin")
+      File.mkdir_p!(ebin_src)
+      File.write!(Path.join(ebin_src, "jason.beam"), "fake beam")
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      dep_dst = Path.join([wt, "_build", "test", "lib", "jason"])
+      ebin_dst = Path.join(dep_dst, "ebin")
+      assert File.dir?(dep_dst)
+      assert File.exists?(Path.join(ebin_dst, "jason.beam"))
+    end
+
+    test "excludes app dirs (arbiter, arbiter_web, arbiter_cli) from the copy", %{
+      repo: repo
+    } do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-exclude", "main")
+
+      for app <- ~w(arbiter arbiter_web arbiter_cli) do
+        dir = Path.join([repo, "_build", "test", "lib", app])
+        File.mkdir_p!(dir)
+      end
+
+      dep_dir = Path.join([repo, "_build", "test", "lib", "plug"])
+      File.mkdir_p!(dep_dir)
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      lib = Path.join([wt, "_build", "test", "lib"])
+      assert File.dir?(Path.join(lib, "plug")), "dep 'plug' should be copied"
+
+      for app <- ~w(arbiter arbiter_web arbiter_cli) do
+        refute File.exists?(Path.join(lib, app)), "app dir '#{app}' must NOT be copied"
+      end
+    end
+
+    test "seeds both test and dev envs when both exist in source", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-envs", "main")
+
+      for env <- ~w(test dev) do
+        File.mkdir_p!(Path.join([repo, "_build", env, "lib", "ecto"]))
+      end
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      assert File.dir?(Path.join([wt, "_build", "test", "lib", "ecto"]))
+      assert File.dir?(Path.join([wt, "_build", "dev", "lib", "ecto"]))
+    end
+
+    test "is a no-op when the source repo has no _build dir", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-no-build", "main")
+
+      refute File.dir?(Path.join(repo, "_build"))
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      refute File.dir?(Path.join(wt, "_build"))
+    end
+
+    test "skips a dep that is already present in the worktree", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-skip-existing", "main")
+
+      ebin_src = Path.join([repo, "_build", "test", "lib", "telemetry", "ebin"])
+      File.mkdir_p!(ebin_src)
+      File.write!(Path.join(ebin_src, "telemetry.beam"), "source version")
+
+      ebin_dst = Path.join([wt, "_build", "test", "lib", "telemetry", "ebin"])
+      File.mkdir_p!(ebin_dst)
+      File.write!(Path.join(ebin_dst, "telemetry.beam"), "pre-existing version")
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      # The pre-existing version in the worktree must not be overwritten.
+      assert File.read!(Path.join(ebin_dst, "telemetry.beam")) == "pre-existing version"
+    end
+
+    test "create/3 seeds compiled deps from the source repo into the fresh worktree", %{
+      repo: repo
+    } do
+      dep_src = Path.join([repo, "_build", "test", "lib", "phoenix"])
+      File.mkdir_p!(dep_src)
+      File.write!(Path.join(dep_src, "phoenix.app"), "[{application, phoenix}].")
+
+      assert {:ok, wt} = Worktree.create(repo, "feature/seed-on-create", "main")
+
+      dep_dst = Path.join([wt, "_build", "test", "lib", "phoenix"])
+      assert File.dir?(dep_dst), "compiled deps must be seeded by create/3"
+      assert File.exists?(Path.join(dep_dst, "phoenix.app"))
+
+      # App dirs must not be present.
+      for app <- ~w(arbiter arbiter_web arbiter_cli) do
+        refute File.exists?(Path.join([wt, "_build", "test", "lib", app]))
+      end
+    end
+  end
+
   # Commit `content` to `file` in `path` and return :ok.
   defp commit(path, file, content, msg) do
     File.write!(Path.join(path, file), content)
