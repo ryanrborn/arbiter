@@ -24,6 +24,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
     * If `"review_gate"` is present, it must be a map.
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
+    * If `"conductor"` is present, it must be a map.
+    * If `"conductor.max_concurrent"` is present, it must be a positive integer.
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -50,6 +52,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_agent_block("review_agent", Map.get(config, "review_agent"))
     |> validate_routing(Map.get(config, "routing"))
     |> validate_review_gate(Map.get(config, "review_gate"))
+    |> validate_conductor(Map.get(config, "conductor"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -271,5 +274,39 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_review_gate(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "review_gate must be a map")
+  end
+
+  defp validate_conductor(changeset, nil), do: changeset
+
+  defp validate_conductor(changeset, conductor) when is_map(conductor) do
+    case Map.get(conductor, "max_concurrent") do
+      nil ->
+        changeset
+
+      n when is_integer(n) and n > 0 ->
+        changeset
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 ->
+            changeset
+
+          _ ->
+            Changeset.add_error(changeset,
+              field: :config,
+              message: "conductor.max_concurrent must be a positive integer; got: #{inspect(s)}"
+            )
+        end
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "conductor.max_concurrent must be a positive integer; got: #{inspect(other)}"
+        )
+    end
+  end
+
+  defp validate_conductor(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "conductor must be a map")
   end
 end
