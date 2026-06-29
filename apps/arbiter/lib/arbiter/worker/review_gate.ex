@@ -389,27 +389,47 @@ defmodule Arbiter.Worker.ReviewGate do
       {:ok, head_sha} ->
         state = %{state | head_sha: head_sha}
 
-        case launch_acolyte(
-               state,
-               state.review_id,
-               :reviewer,
-               review_prompt(state),
-               state.command
-             ) do
-          {:ok, state} ->
-            {:noreply, state}
-
+        # bd-31bh37: guard against an unexpectedly-empty diff range. If
+        # base_sha == head_sha the reviewer would diff a commit against itself
+        # (empty output) and bogusly conclude "no work". This can happen when
+        # origin/<target> has already incorporated the branch's commits (e.g. the
+        # branch was merged into target before the review gate ran), making the
+        # merge-base equal to the branch HEAD. Treat this as an escalation rather
+        # than spawning a reviewer that will falsely reject. This is a safety net
+        # on top of sync_from_origin; the primary fix is fetching the pushed tip.
+        case empty_diff_guard(state) do
           {:error, reason} ->
             Logger.warning(
-              "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
+              "ReviewGate: empty diff range detected for task=#{state.task_id}: #{reason}"
             )
 
-            report(
-              state,
-              {:request_changes, "ReviewGate could not spawn a reviewer: #{inspect(reason)}"}
-            )
-
+            report(state, {:request_changes, reason})
             {:stop, :normal, %{state | reported?: true}}
+
+          :ok ->
+            case launch_acolyte(
+                   state,
+                   state.review_id,
+                   :reviewer,
+                   review_prompt(state),
+                   state.command
+                 ) do
+              {:ok, state} ->
+                {:noreply, state}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "ReviewGate: failed to spawn reviewer for task=#{state.task_id}: #{inspect(reason)}"
+                )
+
+                report(
+                  state,
+                  {:request_changes,
+                   "ReviewGate could not spawn a reviewer: #{inspect(reason)}"}
+                )
+
+                {:stop, :normal, %{state | reported?: true}}
+            end
         end
     end
   end
@@ -440,6 +460,24 @@ defmodule Arbiter.Worker.ReviewGate do
        when is_binary(wt) do
     case Arbiter.Worker.Worktree.current_branch(wt) do
       {:ok, ^branch} ->
+        # Fetch the task branch from origin FIRST so the local worktree reflects
+        # the commits the implementer pushed (bd-31bh37). Without this step, a
+        # commit pushed from a different git context (e.g. the main repo checkout
+        # rather than the per-task worktree) would not be visible locally, making
+        # the diff appear empty even though origin has the work.
+        case Arbiter.Worker.Worktree.sync_from_origin(wt, branch) do
+          {:ok, result} when result in [:up_to_date, :synced] ->
+            Logger.info(
+              "ReviewGate: branch `#{branch}` sync_from_origin=#{result} for task=#{state.task_id}"
+            )
+
+          {:error, sync_reason} ->
+            Logger.warning(
+              "ReviewGate: could not sync branch `#{branch}` from origin for " <>
+                "task=#{state.task_id} (proceeding): #{inspect(sync_reason)}"
+            )
+        end
+
         case Arbiter.Worker.Worktree.update_from_target(wt, target) do
           {:ok, result} ->
             Logger.info(
@@ -1102,6 +1140,26 @@ defmodule Arbiter.Worker.ReviewGate do
   end
 
   defp reviewer_commit_check(_state), do: {:ok, nil}
+
+  # bd-31bh37: guard against spawning a reviewer over an empty diff range.
+  # If base_sha == head_sha then `git diff base_sha..HEAD` is empty — the
+  # reviewer would see no changes and falsely conclude "no work was done". This
+  # happens when origin/<target> has already incorporated the task's commits
+  # (making the merge-base equal to HEAD) and sync_from_origin didn't advance
+  # the branch beyond that merge-base. Escalate loudly rather than letting a
+  # reviewer produce a bogus REQUEST_CHANGES.
+  # Skipped when either SHA is nil (no worktree, or git unavailable) — those
+  # cases have no diff at all and are handled upstream by reviewer_commit_check.
+  defp empty_diff_guard(%{head_sha: head, base_sha: base})
+       when is_binary(head) and is_binary(base) and head == base do
+    {:error,
+     "ReviewGate: diff range `#{base}..HEAD` is empty — HEAD and merge-base are the same " <>
+       "commit (`#{head}`). The branch's commits may have already been incorporated into the " <>
+       "target branch. The reviewer would see an empty diff and bogusly conclude 'no work'. " <>
+       "Escalating for Admiral review rather than running a reviewer over an empty diff."}
+  end
+
+  defp empty_diff_guard(_state), do: :ok
 
   # Return the short HEAD SHA for the worktree at `path`, or nil on any error.
   defp current_head_sha_in(path) when is_binary(path) do
