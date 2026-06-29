@@ -85,7 +85,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync)
+  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create)
 
   @raw_tools [
     %{
@@ -643,6 +643,159 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.usage_summarize/2
+    },
+
+    # ---- C7: graph CRUD + lifecycle -----------------------------------------
+    %{
+      name: "graph_create",
+      tiers: @coordinator,
+      description:
+        "Create a Graph in the workspace. `name` is required; optional `description`. " <>
+          "A Graph is an execution unit: a named set of directives run together.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{"type" => "string", "description" => "Graph name (required)."},
+          "description" => %{"type" => "string", "description" => "Markdown summary (optional)."}
+        },
+        "required" => ["name"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_create/2
+    },
+    %{
+      name: "graph_add_directive",
+      tiers: @coordinator,
+      description:
+        "Add a directive (Issue) to a Graph as a member. " <>
+          "Directives must be in the same workspace as the graph.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
+          "issue_id" => %{"type" => "string", "description" => "Directive (task) id (required)."}
+        },
+        "required" => ["graph_id", "issue_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_add_directive/2
+    },
+    %{
+      name: "graph_remove_directive",
+      tiers: @coordinator,
+      description:
+        "Remove a directive (Issue) from a Graph. Idempotent — returns `removed: 0` " <>
+          "when the directive is not a member.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
+          "issue_id" => %{"type" => "string", "description" => "Directive (task) id (required)."}
+        },
+        "required" => ["graph_id", "issue_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_remove_directive/2
+    },
+    %{
+      name: "graph_add_edge",
+      tiers: @coordinator,
+      description:
+        "Add a dependency edge between two directives in a Graph. " <>
+          "`type` must be one of `depends_on`, `blocks`, or `conflicts_with`. " <>
+          "`depends_on` and `blocks` gate execution order; `conflicts_with` prevents " <>
+          "co-dispatch (symmetric mutex, non-gating). Both directives must be in the " <>
+          "graph's workspace.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
+          "from_issue_id" => %{
+            "type" => "string",
+            "description" => "The dependent directive (required)."
+          },
+          "to_issue_id" => %{
+            "type" => "string",
+            "description" => "The dependency target (required)."
+          },
+          "type" => %{
+            "type" => "string",
+            "enum" => ["depends_on", "blocks", "conflicts_with"],
+            "description" => "Edge type (required)."
+          },
+          "notes" => %{"type" => "string", "description" => "Markdown context (optional)."}
+        },
+        "required" => ["graph_id", "from_issue_id", "to_issue_id", "type"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_add_edge/2
+    },
+    %{
+      name: "graph_start",
+      tiers: @coordinator,
+      description:
+        "Start a Graph: validate acyclicity, transition `:draft → :running`, and start " <>
+          "the Conductor which dispatches ready directives. Rejects cyclic graphs with the " <>
+          "named cycle. The graph must be in `:draft` state.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
+        },
+        "required" => ["graph_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_start/2
+    },
+    %{
+      name: "graph_pause",
+      tiers: @coordinator,
+      description:
+        "Pause a running Graph: transition `:running → :paused` and stop the Conductor. " <>
+          "Workers already dispatched continue to completion; no new dispatches occur " <>
+          "while paused. Resume with `graph_resume`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
+        },
+        "required" => ["graph_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_pause/2
+    },
+    %{
+      name: "graph_resume",
+      tiers: @coordinator,
+      description:
+        "Resume a paused Graph: transition `:paused → :running` and restart the Conductor " <>
+          "to continue dispatching ready directives. The graph must be in `:paused` state.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
+        },
+        "required" => ["graph_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_resume/2
+    },
+    %{
+      name: "graph_status",
+      tiers: @coordinator,
+      description:
+        "Return the run_state and running/ready/blocked/paused/failed/closed breakdown " <>
+          "of a Graph's member directives. `paused` and `failed` counts come from the " <>
+          "live Conductor (C5 failure handling) and are 0 when no Conductor is running.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "graph_id" => %{"type" => "string", "description" => "Graph id (required)."}
+        },
+        "required" => ["graph_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.graph_status/2
     },
 
     # ---- C5: queue resume ---------------------------------------------------
