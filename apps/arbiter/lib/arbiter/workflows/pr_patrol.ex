@@ -161,7 +161,8 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
     t_type = tracker_type(adapter)
 
-    with reason when is_binary(reason) <- actionable_reason(adapter, mr_ref),
+    with true <- author_allowed?(mr, state.workspace),
+         reason when is_binary(reason) <- actionable_reason(adapter, mr_ref),
          false <- deduped?(pr_number, t_type) do
       task = create_follow_up(mr, state, t_type, reason)
       _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
@@ -170,6 +171,22 @@ defmodule Arbiter.Workflows.PRPatrol do
       _ -> :noop
     end
   end
+
+  # When the workspace sets `config["pr_patrol"]["author_logins"]`, only patrol
+  # PRs authored by one of those logins — so a workspace can scope PRPatrol to
+  # its operator's own PRs instead of every open PR in the repo. An empty/unset
+  # allowlist patrols all PRs (the backward-compatible default). When an
+  # allowlist IS set but the MR carries no resolvable author, the PR is skipped
+  # (fail-closed: better to under-patrol than to file follow-ups we can't
+  # attribute to an allowed author).
+  defp author_allowed?(mr, %Workspace{} = workspace) do
+    case Workspace.pr_patrol_author_logins(workspace) do
+      [] -> true
+      logins -> Map.get(mr, :author) in logins
+    end
+  end
+
+  defp author_allowed?(_mr, _workspace), do: true
 
   # The trigger reason this PR is actionable for (a human-readable string folded
   # into the follow-up task), or nil when nothing needs attention. CHANGES_REQUESTED

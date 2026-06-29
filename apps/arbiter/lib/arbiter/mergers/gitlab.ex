@@ -363,7 +363,8 @@ defmodule Arbiter.Mergers.Gitlab do
             ref: ref_for(iid),
             number: iid,
             title: mr["title"] || "",
-            url: mr["web_url"] || ""
+            url: mr["web_url"] || "",
+            author: get_in(mr, ["author", "username"])
           }
         end)
 
