@@ -43,10 +43,15 @@ defmodule Arbiter.Trackers.Shortcut.Config do
     closed: "Done"
   }
 
+  # Default difficulty bucket thresholds. Active only when the workspace sets
+  # `difficulty.buckets` in the tracker config.
+  @default_difficulty_buckets [{1, 0}, {3, 1}, {5, 2}, {8, 3}]
+
   @type config :: %{
           token: String.t(),
           workflow_id: integer() | nil,
-          status_map: %{atom() => String.t()}
+          status_map: %{atom() => String.t()},
+          estimate_buckets: [{non_neg_integer(), 0..4}] | nil
         }
 
   @doc """
@@ -102,7 +107,8 @@ defmodule Arbiter.Trackers.Shortcut.Config do
        %{
          token: token,
          workflow_id: workflow_id(raw),
-         status_map: status_map(raw)
+         status_map: status_map(raw),
+         estimate_buckets: estimate_buckets(raw)
        }}
     end
   end
@@ -162,5 +168,36 @@ defmodule Arbiter.Trackers.Shortcut.Config do
     Enum.into(@default_status_map, %{}, fn {atom_key, default} ->
       {atom_key, Map.get(user, Atom.to_string(atom_key), default)}
     end)
+  end
+
+  # estimate_buckets: [{max_pts, difficulty}] sorted ascending, or nil (off).
+  # Enabled by setting `difficulty.buckets` in the workspace tracker config.
+  # Shortcut stories have a numeric `estimate` field; without configured buckets
+  # the feature is off (nil) — default.
+  defp estimate_buckets(raw) do
+    case get_in(raw, ["difficulty", "buckets"]) do
+      buckets when is_list(buckets) and length(buckets) > 0 ->
+        parse_buckets(buckets) || @default_difficulty_buckets
+
+      _ ->
+        nil
+    end
+  end
+
+  defp parse_buckets(buckets) do
+    parsed =
+      Enum.flat_map(buckets, fn
+        [max, diff]
+        when (is_integer(max) or is_float(max)) and is_integer(diff) and diff >= 0 and diff <= 4 ->
+          [{round(max), diff}]
+
+        _ ->
+          []
+      end)
+
+    case Enum.sort_by(parsed, fn {max, _} -> max end) do
+      [] -> nil
+      sorted -> sorted
+    end
   end
 end

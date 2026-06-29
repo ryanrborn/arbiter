@@ -70,12 +70,17 @@ defmodule Arbiter.Trackers.Linear.Config do
 
   @default_base_url "https://api.linear.app/graphql"
 
+  # Default difficulty bucket thresholds (same as Jira). Active only when the
+  # workspace sets `difficulty.buckets` in the tracker config.
+  @default_difficulty_buckets [{1, 0}, {3, 1}, {5, 2}, {8, 3}]
+
   @type config :: %{
           base_url: String.t(),
           token: String.t(),
           team_id: String.t() | nil,
           org_url_key: String.t() | nil,
-          status_map: %{atom() => String.t() | nil}
+          status_map: %{atom() => String.t() | nil},
+          estimate_buckets: [{non_neg_integer(), 0..4}] | nil
         }
 
   @doc """
@@ -133,7 +138,8 @@ defmodule Arbiter.Trackers.Linear.Config do
          token: token,
          team_id: stringy(Map.get(raw, "team_id")),
          org_url_key: stringy(Map.get(raw, "org_url_key")),
-         status_map: status_map(raw)
+         status_map: status_map(raw),
+         estimate_buckets: estimate_buckets(raw)
        }}
     end
   end
@@ -189,4 +195,34 @@ defmodule Arbiter.Trackers.Linear.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v) and v != "", do: v
   defp stringy(_), do: nil
+
+  # estimate_buckets: [{max_pts, difficulty}] sorted ascending, or nil (off).
+  # Enabled by setting `difficulty.buckets` in the workspace tracker config.
+  # When `difficulty` is absent the feature is off (nil) — default.
+  defp estimate_buckets(raw) do
+    case get_in(raw, ["difficulty", "buckets"]) do
+      buckets when is_list(buckets) and length(buckets) > 0 ->
+        parse_buckets(buckets) || @default_difficulty_buckets
+
+      _ ->
+        nil
+    end
+  end
+
+  defp parse_buckets(buckets) do
+    parsed =
+      Enum.flat_map(buckets, fn
+        [max, diff]
+        when (is_integer(max) or is_float(max)) and is_integer(diff) and diff >= 0 and diff <= 4 ->
+          [{round(max), diff}]
+
+        _ ->
+          []
+      end)
+
+    case Enum.sort_by(parsed, fn {max, _} -> max end) do
+      [] -> nil
+      sorted -> sorted
+    end
+  end
 end

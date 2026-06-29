@@ -1049,4 +1049,63 @@ defmodule Arbiter.Trackers.GitHubTest do
       assert {:error, %Error{kind: :config_missing}} = GitHub.add_comment(@ref, "body")
     end
   end
+
+  # ---- extract_priority/1 ----------------------------------------------------
+
+  describe "extract_priority/1" do
+    test "parses 'priority: 0' label as P0 — 0 is the highest priority" do
+      issue = %{"labels" => [%{"name" => "priority: 0"}]}
+      assert {:ok, 0} = GitHub.extract_priority(issue)
+    end
+
+    test "parses 'priority: 4' label as P4 — 4 is the lowest priority" do
+      issue = %{"labels" => [%{"name" => "priority: 4"}]}
+      assert {:ok, 4} = GitHub.extract_priority(issue)
+    end
+
+    test "round-trips with create/1 label format — 'priority: N'" do
+      # create/1 emits "priority: N" labels; extract_priority/1 parses the same format
+      for n <- 0..4 do
+        issue = %{"labels" => [%{"name" => "priority: #{n}"}]}
+        assert {:ok, ^n} = GitHub.extract_priority(issue)
+      end
+    end
+
+    test "returns nil when no priority label is present" do
+      issue = %{"labels" => [%{"name" => "bug"}, %{"name" => "enhancement"}]}
+      assert nil == GitHub.extract_priority(issue)
+    end
+
+    test "returns nil for out-of-range values" do
+      assert nil == GitHub.extract_priority(%{"labels" => [%{"name" => "priority: 5"}]})
+      assert nil == GitHub.extract_priority(%{"labels" => [%{"name" => "priority: -1"}]})
+    end
+
+    test "returns nil when labels key is absent" do
+      assert nil == GitHub.extract_priority(%{})
+    end
+  end
+
+  # ---- extract_difficulty/1 --------------------------------------------------
+
+  describe "extract_difficulty/1" do
+    test "parses 'difficulty: 0' label as D0 — 0 is trivial" do
+      issue = %{"labels" => [%{"name" => "difficulty: 0"}]}
+      assert {:ok, 0} = GitHub.extract_difficulty(issue)
+    end
+
+    test "parses 'difficulty: 4' label as D4 — 4 is extreme" do
+      issue = %{"labels" => [%{"name" => "difficulty: 4"}]}
+      assert {:ok, 4} = GitHub.extract_difficulty(issue)
+    end
+
+    test "returns nil when no difficulty label is present" do
+      issue = %{"labels" => [%{"name" => "priority: 1"}]}
+      assert nil == GitHub.extract_difficulty(issue)
+    end
+
+    test "returns nil when labels key is absent" do
+      assert nil == GitHub.extract_difficulty(%{})
+    end
+  end
 end
