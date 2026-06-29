@@ -53,15 +53,16 @@ defmodule Arbiter.Tasks.DependencyTest do
       assert dep.created_by == "coordinator"
     end
 
-    test "accepts each of the 5 type enums", %{a: a, b: b, c: c} do
-      # Five distinct edges so the unique index doesn't collide. We rotate
+    test "accepts each of the 6 type enums", %{a: a, b: b, c: c} do
+      # Six distinct edges so the unique index doesn't collide. We rotate
       # endpoints/types so every combination is unique on (from, to, type).
       types_and_endpoints = [
         {:blocks, a.id, b.id},
         {:depends_on, a.id, c.id},
         {:relates_to, b.id, c.id},
         {:discovered_from, b.id, a.id},
-        {:parent_of, c.id, a.id}
+        {:parent_of, c.id, a.id},
+        {:conflicts_with, c.id, b.id}
       ]
 
       for {type, from_id, to_id} <- types_and_endpoints do
@@ -162,9 +163,9 @@ defmodule Arbiter.Tasks.DependencyTest do
   end
 
   describe "helpers" do
-    test "types/0 returns all 5 type atoms" do
+    test "types/0 returns all 6 type atoms including :conflicts_with" do
       assert Dependency.types() ==
-               ~w(blocks depends_on relates_to discovered_from parent_of)a
+               ~w(blocks depends_on relates_to discovered_from parent_of conflicts_with)a
     end
   end
 
@@ -255,6 +256,42 @@ defmodule Arbiter.Tasks.DependencyTest do
           type: :relates_to
         })
 
+      ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
+      assert MapSet.member?(ready_ids, a.id)
+      assert MapSet.member?(ready_ids, b.id)
+    end
+
+    test ":conflicts_with does NOT gate readiness (non-gating, symmetric mutex edge)", %{a: a, b: b} do
+      # A conflicts_with B: both should remain ready — conflicts_with expresses
+      # "don't run concurrently" (Conductor concern), not "B must close first".
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: a.id,
+          to_issue_id: b.id,
+          type: :conflicts_with
+        })
+
+      ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
+      assert MapSet.member?(ready_ids, a.id), "a must be ready despite conflicts_with edge"
+      assert MapSet.member?(ready_ids, b.id), "b must be ready despite conflicts_with edge"
+    end
+
+    test ":conflicts_with symmetric: both directions can be queried independently", %{a: a, b: b} do
+      # Store only one directed edge (A → B). Both sides remain ready — neither
+      # direction gates readiness. Symmetry is a semantic property documented in
+      # the moduledoc; the Conductor will query both directions when checking.
+      {:ok, dep} =
+        Ash.create(Dependency, %{
+          from_issue_id: a.id,
+          to_issue_id: b.id,
+          type: :conflicts_with
+        })
+
+      assert dep.type == :conflicts_with
+      assert dep.from_issue_id == a.id
+      assert dep.to_issue_id == b.id
+
+      # Neither issue is blocked
       ready_ids = Issue.ready() |> Enum.map(& &1.id) |> MapSet.new()
       assert MapSet.member?(ready_ids, a.id)
       assert MapSet.member?(ready_ids, b.id)
