@@ -1,23 +1,26 @@
 defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   @moduledoc """
-  Regression tests for bd-4ji58d, bd-btcyn6, bd-ddtbhb, and bd-bs3z04.
+  Regression tests for bd-4ji58d, bd-btcyn6, bd-ddtbhb, bd-bs3z04, and
+  bd-4u7a1m.
 
   When a coordinator dispatches a reviewer via `worker_review` / `arb worker
   review`, the resulting worker is tagged `review_only: true` and has no
   branch/worktree.
 
-  After bd-4ji58d + bd-ddtbhb + bd-bs3z04:
+  After bd-4u7a1m (hosted-forge Watchdog path):
 
-    * APPROVE → reviewer worker completes normally (review already posted to
-      the forge). The Driver closes the task. The reviewer also signals
-      MergeQueue via {:worker_done, task_id} if the task has a pr_ref, so
-      the workspace's auto-merge policy can merge the approved PR.
-      For :direct workspaces (no PR workflow), the MergeQueue handles the
-      signal by closing the task directly without calling the forge merge API.
+    * APPROVE on a hosted-forge workspace (GitHub/GitLab) with a pr_ref →
+      reviewer parks at :awaiting_review, spawns a Watchdog against the
+      existing PR. The Watchdog drives the merge and calls Worker.complete
+      only after the PR lands on main. The Driver then closes the task.
+      The task must NOT reach :closed while the PR is still open.
+    * APPROVE on a :direct workspace (no hosted forge) → reviewer completes
+      normally, Driver closes the task, MergeQueue receives the signal and
+      closes the task without calling the forge merge API (bd-ddtbhb, bd-bs3z04).
     * REQUEST_CHANGES → reviewer worker fails (not completes) so the Driver
       does NOT close the task; it stays :in_progress for a fix-pass.
     * No verdict → same as REQUEST_CHANGES (fail, task stays :in_progress).
-    * pr_ref absent → MergeQueue signal is skipped; Driver still closes task.
+    * pr_ref absent → complete directly; Driver closes task.
 
   The full ReviewGate merge path (fleet-authored work: enter_review_gate →
   merge_branch with force_merge: true) is a separate path and still merges on
@@ -69,6 +72,19 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
         name: "reviewer-ws-#{System.unique_integer([:positive])}",
         prefix: "rv",
         config: %{}
+      })
+
+    ws
+  end
+
+  # A workspace with GitHub strategy and auto_merge enabled — triggers the
+  # bd-4u7a1m hosted-forge Watchdog path in trigger_watchdog_on_approval.
+  defp new_github_workspace do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "gh-ws-#{System.unique_integer([:positive])}",
+        prefix: "gh",
+        config: %{"merge" => %{"strategy" => "github", "auto_merge" => true}}
       })
 
     ws
@@ -543,6 +559,107 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       # :direct strategy never calls the forge merge API.
       assert StubMerger.merge_count("pr-400") == 0
+    end
+  end
+
+  # ---- bd-4u7a1m regression: hosted-forge Watchdog path ----------------------
+  #
+  # APPROVE on a GitHub/GitLab workspace with a pr_ref must NOT call complete_now
+  # immediately. Instead the worker parks at :awaiting_review while a Watchdog
+  # polls the forge and merges the PR, then calls Worker.complete. The Driver only
+  # closes the task after the merge lands — preventing the premature close that
+  # left bd-3u1au5 closed with PR #591 open.
+
+  describe "APPROVE on hosted-forge workspace spawns Watchdog (bd-4u7a1m)" do
+    test "worker parks at :awaiting_review, NOT :completed, while Watchdog waits for merge" do
+      # Regression for bd-4u7a1m. The previous implementation called complete_now
+      # before signaling MergeQueue, racing the Driver to close the task. Verify
+      # the worker stays :awaiting_review (not :completed) while the Watchdog polls.
+      ws = new_github_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-501"}, action: :update)
+
+      pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          # Large delays so the Watchdog does not fire during this assertion.
+          watchdog_initial_delay_ms: 5_000_000,
+          watchdog_interval_ms: 5_000_000
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :awaiting_review end)
+
+      assert Worker.state(pid).status == :awaiting_review
+
+      # Task must NOT be :closed while the PR is still open.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :in_progress
+    end
+
+    test "Watchdog merges PR then Worker.complete fires, Driver closes task" do
+      # End-to-end acceptance for bd-4u7a1m. Watchdog polls StubMerger, which
+      # returns :merged on the first poll (via_review_gate treats :pending as
+      # :approved, then force_merge drives the auto-merge). Worker completes,
+      # Driver closes the task as :closed.
+      ws = new_github_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-500"}, action: :update)
+
+      # StubMerger.get default: {status: :open, approved: false} — Watchdog sees
+      # :pending → effective_outcome(via_review_gate: true) → :approved →
+      # auto_merge(force_merge) → StubMerger.merge("pr-500") → :ok → complete.
+      worker_pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      {:ok, driver_pid} =
+        Arbiter.Worker.Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: "dummy-#{task.id}",
+          machine_pid: self(),
+          claude_driven: true,
+          interval_ms: 5,
+          max_ticks: 400
+        )
+
+      on_exit(fn -> if Process.alive?(driver_pid), do: GenServer.stop(driver_pid, :normal) end)
+
+      # Monitor before sending so we never miss the :DOWN.
+      ref = Process.monitor(driver_pid)
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Watchdog must drive a merge and Worker completes; Driver then closes the task.
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 5_000
+
+      assert StubMerger.merge_count("pr-500") >= 1
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :closed
+    end
+
+    test "no Watchdog spawned and complete_now used when task has no pr_ref (github workspace)" do
+      # Even on a GitHub workspace, when no pr_ref is recorded there is nothing
+      # to merge — complete directly so the Driver closes the task.
+      ws = new_github_workspace()
+      task = new_task(ws)
+
+      pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "reviewed"], %{
+          merger_workspace_override: ws
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+
+      assert Worker.state(pid).status == :completed
     end
   end
 end
