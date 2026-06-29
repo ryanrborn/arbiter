@@ -80,13 +80,14 @@ defmodule ArbiterCli.Main do
 
   ## Global flags
 
-      --json     Emit machine-readable JSON (default is human-readable text)
-      -h, --help Show usage
+      --json               Emit machine-readable JSON (default is human-readable text)
+      -w, --workspace <n>  Target workspace by name or id; overrides ARB_WORKSPACE
+      -h, --help           Show usage
 
   ## Env
 
       ARB_HOST       Phoenix base URL (default http://127.0.0.1:4848)
-      ARB_WORKSPACE  Workspace name to use (default "default")
+      ARB_WORKSPACE  Workspace name to use (default "default"); overridden by -w / --workspace
   """
 
   @version "0.1.0"
@@ -120,6 +121,11 @@ defmodule ArbiterCli.Main do
     # Start :req's transitive applications. The escript bundles them but does
     # not auto-start. Without this, Req.get crashes with :finch not started.
     {:ok, _} = Application.ensure_all_started(:req)
+
+    # Strip -w / --workspace from the full argv before splitting into cmd/rest,
+    # so the flag works at any position (including before the subcommand).
+    {workspace, argv} = ArbiterCli.Workspace.take_flag(argv)
+    if workspace, do: System.put_env("ARB_WORKSPACE", workspace)
 
     case argv do
       [] -> usage_and_exit(0)
