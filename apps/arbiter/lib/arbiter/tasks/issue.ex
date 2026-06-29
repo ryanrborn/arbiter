@@ -85,6 +85,7 @@ defmodule Arbiter.Tasks.Issue do
         :assignee,
         :tracker_type,
         :tracker_ref,
+        :source_pr,
         :target_branch,
         :workspace_id
       ]
@@ -127,6 +128,7 @@ defmodule Arbiter.Tasks.Issue do
         :assignee,
         :tracker_type,
         :tracker_ref,
+        :source_pr,
         :pr_ref,
         :pr_body,
         :target_branch
@@ -363,6 +365,20 @@ defmodule Arbiter.Tasks.Issue do
       constraints max_length: 255, trim?: true
 
       description "PR/MR number opened for this task (e.g. \"123\"). Set by the merger when a PR is opened; distinct from tracker_ref which holds the originating issue ref."
+    end
+
+    attribute :source_pr, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description """
+      The PR/MR number this task was filed *in response to* (e.g. \"591\").
+      Set by PRPatrol on a follow-up task so a second follow-up isn't filed for
+      the same PR. Distinct from `tracker_ref` (the lifecycle write-back target,
+      which a PRPatrol follow-up deliberately leaves unset / `tracker_type: :none`
+      so it never tries to transition a merged PR) and from `pr_ref` (the PR this
+      task's own work opens).
+      """
     end
 
     attribute :pr_body, :string do
