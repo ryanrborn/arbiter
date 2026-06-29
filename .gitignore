@@ -36,3 +36,8 @@ MORNING-BRIEF.md
 
 # Arbiter run artifacts
 .arbiter/
+
+# Compiled Erlang/Elixir beam artifacts — mix test can compile these into the
+# worktree root (e.g. Elixir.Arbiter.Worker.Worktree.beam). They are never
+# part of the canonical repo and must not trip the commit gate (bd-3gpeoz).
+*.beam
