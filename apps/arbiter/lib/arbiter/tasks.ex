@@ -17,6 +17,10 @@ defmodule Arbiter.Tasks do
       its children are done (the `auto_close` flag).
     * `Arbiter.Tasks.Dependency` — gte-003 — task-to-task edges (blocks, depends_on,
       parent_of).
+    * `Arbiter.Tasks.Graph` — bd-3bbgqi — execution unit grouping directives for
+      coordinated execution. Orthogonal to epics. Run states: draft|running|paused|drained.
+    * `Arbiter.Tasks.GraphMember` — bd-3bbgqi — join resource linking a Graph to its
+      member Issues (directives). Reuses Dependency edges for ordering.
   """
 
   use Ash.Domain
@@ -28,5 +32,7 @@ defmodule Arbiter.Tasks do
     # diff + actor; queryable via Arbiter.Tasks.Issue.Version.
     resource Arbiter.Tasks.Issue.Version
     resource Arbiter.Tasks.Dependency
+    resource Arbiter.Tasks.Graph
+    resource Arbiter.Tasks.GraphMember
   end
 end
