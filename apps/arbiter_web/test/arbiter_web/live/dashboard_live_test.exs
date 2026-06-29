@@ -203,6 +203,46 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "no-such-repo"
       assert html =~ "(unconfigured)"
     end
+
+    test "does not show (unconfigured) for a worker whose repo matches a rig's git remote",
+         %{conn: conn, ws: ws} do
+      # Regression for bd-342xlj: PRPatrol workers carry "owner/repo" as their
+      # repo field, but configured rigs are keyed by short alias. Set up a
+      # temp git repo whose remote is "git@github.com:test-org/remote-rig.git",
+      # configure it as alias "remote-alias", and start a worker with
+      # repo "test-org/remote-rig". The panel should NOT show "(unconfigured)".
+      tmp_dir = System.tmp_dir!() |> Path.join("bd-342xlj-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp_dir)
+
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      System.cmd("git", ["init"], cd: tmp_dir, stderr_to_stdout: true)
+
+      System.cmd("git", ["remote", "add", "origin", "git@github.com:test-org/remote-rig.git"],
+        cd: tmp_dir,
+        stderr_to_stdout: true
+      )
+
+      prior = Application.get_env(:arbiter, :repo_paths)
+
+      Application.put_env(:arbiter, :repo_paths, %{"remote-alias" => tmp_dir})
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, :repo_paths, prior),
+          else: Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "remote-patrol", workspace_id: ws.id})
+
+      {:ok, _pid} =
+        Worker.start(task_id: task.id, repo: "test-org/remote-rig", workspace_id: ws.id)
+
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "remote-alias"
+      assert html =~ tmp_dir
+      refute html =~ "test-org/remote-rig"
+    end
   end
 
   describe "active workers workspace column" do
