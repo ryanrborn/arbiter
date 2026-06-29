@@ -4,11 +4,14 @@ defmodule Arbiter.Workflows.Conductor do
   `Arbiter.Tasks.Graph` to completion: it kicks the graph off, then keeps the
   ready set flowing into `Arbiter.Worker.Dispatch` as work closes.
 
-  This is C3 of #482 — the *core* drain loop + acyclicity validation. The real
-  resource/quota cap (C4), failure handling (C5), and crash-safety / restart
-  (C6) are deliberately separate children; this module keeps a fixed
-  `max_concurrent` placeholder and a `:temporary` restart so those land cleanly
-  on top.
+  This is C4 of #482 — effective concurrency cap + swappable quota gate. The
+  cap each drain cycle is:
+
+      effective_cap = min(workspace_max_concurrent, system_max_concurrent, quota_headroom)
+
+  where `quota_headroom` comes from the pluggable `Arbiter.Workflows.QuotaGate`
+  behaviour (`:unlimited` when quota is healthy, `0` to hold all dispatch).
+  Failure handling (C5) and crash-safety / restart (C6) are separate children.
 
   ## Kickoff
 
@@ -38,9 +41,19 @@ defmodule Arbiter.Workflows.Conductor do
     already `:in_progress`, or if a conflicting peer was already selected
     earlier in the same drain pass. `:conflicts_with` is symmetric, so the edge
     is honored regardless of which direction it was stored in.
-  * **Concurrency** — a fixed `max_concurrent` caps how many members may be
-    `:in_progress` at once. Available slots = `max_concurrent` minus the members
-    currently `:in_progress`. This is the C4 placeholder.
+  * **Concurrency** — the effective cap per drain cycle is
+    `min(workspace_max_concurrent, system_max_concurrent, quota_headroom)`.
+    Available slots = effective cap minus the members currently `:in_progress`.
+
+  ## Quota gate
+
+  Quota is consulted once per drain cycle via the `Arbiter.Workflows.QuotaGate`
+  behaviour. The default implementation (`QuotaGate.Default`) reads the latest
+  captured Anthropic quota snapshot from the DB and holds dispatch when
+  `status_5h` is not "allowed" or `utilization_5h` exceeds the configured
+  ceiling (default 0.85). A smarter throttle (#464) can replace it by passing
+  `:quota_gate` at kickoff or via application config — the Conductor is
+  unchanged.
 
   ## Dispatch
 
@@ -62,8 +75,15 @@ defmodule Arbiter.Workflows.Conductor do
     * `:graph_id` (string, required) — the graph this Conductor drives.
     * `:name` — process name (default `__MODULE__`); the supervisor forces a
       `{:via, Registry, …}` tuple keyed by `graph_id`.
-    * `:max_concurrent` — fixed concurrency cap (default from
-      `:arbiter, :conductor_max_concurrent`, else `4`).
+    * `:workspace_max_concurrent` — per-workspace concurrency cap (default:
+      resolved from workspace `config["conductor"]["max_concurrent"]`, else the
+      system max). Alias `:max_concurrent` accepted for backwards compatibility.
+    * `:system_max_concurrent` — install-wide concurrency ceiling; no workspace
+      can dispatch more than this many members at once. Default from
+      `:arbiter, :conductor_system_max_concurrent`, else `16`.
+    * `:quota_gate` — module implementing `Arbiter.Workflows.QuotaGate` (default
+      from `:arbiter, :conductor_quota_gate`, else
+      `Arbiter.Workflows.QuotaGate.Default`).
     * `:dispatcher` — module implementing `dispatch/2` (default from
       `:arbiter, :conductor_dispatcher`, else `Arbiter.Worker.Dispatch`).
     * `:dispatch_depth` — recursion depth minted into dispatched workers'
@@ -79,18 +99,21 @@ defmodule Arbiter.Workflows.Conductor do
   alias Arbiter.Tasks.Graph
   alias Arbiter.Tasks.GraphMember
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.ConductorSupervisor
 
   @topic "tasks"
   @gating_types [:depends_on, :blocks]
-  @default_max_concurrent 4
+  @default_system_max 16
 
   defmodule State do
     @moduledoc false
     defstruct [
       :graph_id,
       :workspace_id,
-      :max_concurrent,
+      :workspace_max_concurrent,
+      :system_max_concurrent,
+      :quota_gate,
       :dispatcher,
       :dispatch_depth,
       member_ids: MapSet.new(),
@@ -113,7 +136,8 @@ defmodule Arbiter.Workflows.Conductor do
       list of member issue ids forming the offending loop (closed walk).
     * `{:error, {:transition_failed, reason}}` — the FSM transition was rejected.
 
-  `opts` are forwarded to `start_link/1` (`:max_concurrent`, `:dispatcher`, …).
+  `opts` are forwarded to `start_link/1` (`:workspace_max_concurrent`,
+  `:system_max_concurrent`, `:quota_gate`, `:dispatcher`, …).
   """
   @spec kickoff(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def kickoff(graph_id, opts \\ []) when is_binary(graph_id) do
@@ -188,12 +212,17 @@ defmodule Arbiter.Workflows.Conductor do
         _ -> Keyword.get(opts, :workspace_id)
       end
 
+    system_max = resolve_system_max(opts)
+    workspace_max = resolve_workspace_max(opts, workspace_id, system_max)
+
     :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, @topic)
 
     state = %State{
       graph_id: graph_id,
       workspace_id: workspace_id,
-      max_concurrent: Keyword.get(opts, :max_concurrent, default_max_concurrent()),
+      workspace_max_concurrent: workspace_max,
+      system_max_concurrent: system_max,
+      quota_gate: resolve_quota_gate(opts),
       dispatcher: Keyword.get(opts, :dispatcher, default_dispatcher()),
       dispatch_depth: Keyword.get(opts, :dispatch_depth, 0),
       member_ids: MapSet.new(member_issue_ids(graph_id))
@@ -263,6 +292,84 @@ defmodule Arbiter.Workflows.Conductor do
     end
   end
 
+  # ---- cap resolution -----------------------------------------------------
+
+  defp resolve_system_max(opts) do
+    Keyword.get(
+      opts,
+      :system_max_concurrent,
+      Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
+    )
+  end
+
+  # Workspace max: explicit opt wins (either key), then workspace config, then
+  # system max. The `:max_concurrent` key is accepted as a backwards-compat
+  # alias for `:workspace_max_concurrent`.
+  defp resolve_workspace_max(opts, workspace_id, system_max) do
+    explicit =
+      Keyword.get(opts, :workspace_max_concurrent) || Keyword.get(opts, :max_concurrent)
+
+    case explicit do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        workspace_config_max(workspace_id) || system_max
+    end
+  end
+
+  defp workspace_config_max(nil), do: nil
+
+  defp workspace_config_max(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, ws} -> Workspace.max_concurrent(ws)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp resolve_quota_gate(opts) do
+    Keyword.get(
+      opts,
+      :quota_gate,
+      Application.get_env(
+        :arbiter,
+        :conductor_quota_gate,
+        Arbiter.Workflows.QuotaGate.Default
+      )
+    )
+  end
+
+  # Effective cap this drain cycle: min of the two hardware caps, then further
+  # bounded by the quota headroom returned by the gate. Returns 0 when the gate
+  # holds all dispatch.
+  defp effective_cap(%State{
+         workspace_max_concurrent: w_max,
+         system_max_concurrent: s_max,
+         quota_gate: gate,
+         workspace_id: ws_id
+       }) do
+    base = min(w_max, s_max)
+
+    case safe_quota_headroom(gate, ws_id) do
+      :unlimited -> base
+      n -> min(base, n)
+    end
+  end
+
+  defp safe_quota_headroom(gate, workspace_id) do
+    gate.quota_headroom(workspace_id)
+  rescue
+    e ->
+      Logger.warning("QuotaGate.quota_headroom/1 raised: #{Exception.message(e)}; allowing")
+      :unlimited
+  catch
+    :exit, reason ->
+      Logger.warning("QuotaGate.quota_headroom/1 exited: #{inspect(reason)}; allowing")
+      :unlimited
+  end
+
   # ---- drain loop ---------------------------------------------------------
 
   # Recompute the ready set within the graph and dispatch up to the available
@@ -294,7 +401,8 @@ defmodule Arbiter.Workflows.Conductor do
       active_ids =
         for issue <- member_issues, issue.status == :in_progress, into: MapSet.new(), do: issue.id
 
-      slots = max(0, state.max_concurrent - MapSet.size(active_ids))
+      cap = effective_cap(state)
+      slots = max(0, cap - MapSet.size(active_ids))
 
       ready =
         [workspace_id: state.workspace_id]
@@ -497,15 +605,12 @@ defmodule Arbiter.Workflows.Conductor do
     %{
       graph_id: state.graph_id,
       workspace_id: state.workspace_id,
-      max_concurrent: state.max_concurrent,
+      workspace_max_concurrent: state.workspace_max_concurrent,
+      system_max_concurrent: state.system_max_concurrent,
       dispatch_depth: state.dispatch_depth,
       member_ids: state.member_ids,
       drained?: state.drained?
     }
-  end
-
-  defp default_max_concurrent do
-    Application.get_env(:arbiter, :conductor_max_concurrent, @default_max_concurrent)
   end
 
   defp default_dispatcher do

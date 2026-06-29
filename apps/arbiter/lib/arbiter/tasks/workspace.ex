@@ -384,6 +384,33 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  Per-workspace Conductor concurrency cap from `config["conductor"]["max_concurrent"]`.
+
+  When set, the Conductor uses `min(workspace_cap, system_cap, quota_headroom)`
+  as the effective concurrency limit for this workspace's graphs. Returns `nil`
+  when not configured, in which case the system-wide cap applies uncapped.
+
+  Accepts a positive integer or the stringified integer that round-trips
+  through JSON config.
+  """
+  @spec max_concurrent(t()) :: pos_integer() | nil
+  def max_concurrent(workspace) do
+    case get_in(workspace.config || %{}, ["conductor", "max_concurrent"]) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
   Optional workspace cap on the ReviewGate's revise-and-rediscuss round count,
   from `config["review_gate"]["max_rounds"]`.
 
