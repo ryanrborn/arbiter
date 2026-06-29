@@ -24,11 +24,14 @@ if [ -f "$marker" ]; then
   else
     echo "VERDICT: REQUEST_CHANGES"
     echo "arb done"
+    echo "⚙ claude session success · 95.2s · \$0.8231"
   fi
 else
-  # First pass: a verdict with no findings at all.
+  # First pass: a verdict with no findings at all, plus the real session-stats
+  # footer that the harness appends (bd-3n1j8m regression).
   : > "$marker"
   echo "VERDICT: REQUEST_CHANGES"
   echo "arb done"
+  echo "⚙ claude session success · 183.5s · \$1.1489"
 fi
 exit 0
