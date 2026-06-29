@@ -1544,19 +1544,88 @@ defmodule Arbiter.Worker do
   end
 
   # APPROVE path for a coordinator-dispatched review_only worker. The reviewer
-  # has already posted the forge-level review approval. Complete the worker so
-  # the Driver closes the task, and also signal MergeQueue to adopt and merge
-  # the PR according to the workspace's auto-merge policy. (bd-ddtbhb, bd-bs3z04)
+  # has already posted the forge-level review approval.
+  #
+  # For hosted-forge workspaces (GitHub/GitLab): park at :awaiting_review and
+  # spawn a Watchdog against the existing PR ref. The Watchdog polls the forge
+  # and calls Worker.complete only after the PR is actually merged — preventing
+  # the Driver from closing the task before the code lands on main. (bd-4u7a1m)
+  #
+  # For :direct workspaces or when no pr_ref is recorded: complete_now so the
+  # Driver closes the task. For :direct with a pr_ref, also signal MergeQueue.
+  # (bd-ddtbhb, bd-bs3z04)
   defp trigger_watchdog_on_approval(%State{} = state) do
-    new_state = complete_now(state, :claude_done)
-    maybe_enqueue_approved_pr(new_state)
+    case fetch_task_pr_ref(state.task_id) do
+      {:ok, pr_ref} ->
+        opts = merge_opts_from_meta(state.meta, %{via_review_gate: true, force_merge: true})
+
+        case resolve_merger(state, opts) do
+          {:ok, adapter, workspace} ->
+            if hosted_forge_workspace?(workspace) do
+              adopt_pr_and_spawn_watchdog(state, pr_ref, adapter, workspace, opts)
+            else
+              new_state = complete_now(state, :claude_done)
+              maybe_enqueue_approved_pr(new_state)
+              new_state
+            end
+
+          {:error, _} ->
+            new_state = complete_now(state, :claude_done)
+            maybe_enqueue_approved_pr(new_state)
+            new_state
+        end
+
+      {:error, _} ->
+        complete_now(state, :claude_done)
+    end
+  end
+
+  # bd-4u7a1m: Park at :awaiting_review and spawn a Watchdog against an
+  # already-open PR when a coordinator reviewer approves on a hosted forge.
+  # Mirrors do_open_mr's Watchdog path but skips the adapter.open call since
+  # the PR already exists. The Watchdog calls Worker.complete(:merged) once
+  # the merge lands, so the Driver closes the task only after the code is
+  # actually on main.
+  defp adopt_pr_and_spawn_watchdog(%State{} = state, pr_ref, adapter, workspace, opts) do
+    merger_url = safe_link_for(adapter, pr_ref)
+
+    new_state = %State{
+      state
+      | status: :awaiting_review,
+        mr_ref: pr_ref,
+        merger_url: merger_url,
+        merger_adapter: adapter,
+        step_started_at: DateTime.utc_now()
+    }
+
+    watchdog_ok? =
+      try do
+        start_watchdog(new_state, workspace, opts) == :ok
+      rescue
+        e ->
+          Logger.warning(
+            "Worker: review_only Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
+          )
+
+          false
+      catch
+        :exit, reason ->
+          Logger.warning(
+            "Worker: review_only Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
+          )
+
+          false
+      end
+
+    unless watchdog_ok?, do: escalate_watchdog_failure(new_state)
+
     new_state
   end
 
   # Broadcast {:worker_done, task_id} to the workspace MergeQueue when the
-  # coordinator reviewer approves a task that already has a PR open. This lets
-  # the workspace's auto-merge policy drive the merge now that the forge-level
-  # approval has been submitted. Skipped when workspace_id is nil or no pr_ref.
+  # coordinator reviewer approves a task that already has a PR open. Used for
+  # :direct workspaces where the Watchdog path is not taken. Skipped when
+  # workspace_id is nil or no pr_ref.
   defp maybe_enqueue_approved_pr(%State{workspace_id: ws_id, task_id: task_id})
        when is_binary(ws_id) do
     with {:ok, _pr_ref} <- fetch_task_pr_ref(task_id) do
@@ -3098,6 +3167,15 @@ defmodule Arbiter.Worker do
         false
     end
   end
+
+  # True when workspace is a real Workspace struct with a hosted-forge strategy
+  # (GitHub or GitLab). Unlike hosted_forge_merger?/2 this does NOT treat a
+  # test-injected :adapter override as hosted — it checks only the workspace
+  # strategy, so :direct workspaces with a stub adapter remain :direct.
+  defp hosted_forge_workspace?(%Arbiter.Tasks.Workspace{} = ws),
+    do: Arbiter.Tasks.Workspace.merger_strategy(ws) in [:github, :gitlab]
+
+  defp hosted_forge_workspace?(_), do: false
 
   # bd-13thk9: push the worktree branch to `origin` before opening a PR on a
   # hosted forge. GitHub/GitLab return 422 "field head invalid" when the head
