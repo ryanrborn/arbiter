@@ -2897,68 +2897,83 @@ defmodule Arbiter.Worker do
         Arbiter.Mergers.prepare(workspace)
         open_opts = build_open_opts(state, opts)
 
-        case safe_open(adapter, branch, title, description, open_opts) do
-          {:ok, mr_ref} ->
-            merger_url = safe_link_for(adapter, mr_ref)
-
-            # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
-            # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
-            # later receives the {:worker_done, task_id} broadcast. Without
-            # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
-            # through to open_mr_for/3, fails opening a second PR on the
-            # already-merged branch, and the task is never auto-closed.
-            record_pr_ref_on_task(state, mr_ref)
-            sync_tracker_pr_opened(state, mr_ref, merger_url)
-
-            new_state = %State{
-              state
-              | status: :awaiting_review,
-                mr_ref: mr_ref,
-                merger_url: merger_url,
-                merger_adapter: adapter,
-                step_started_at: DateTime.utc_now(),
-                meta:
-                  state.meta
-                  |> Map.put(:mr_ref, mr_ref)
-                  |> Map.put(:merger_url, merger_url)
-            }
-
-            # Guard: MR already exists on the forge. Watchdog startup failure must
-            # NOT prevent the worker from parking at :awaiting_review — the MR
-            # is real and must not be discarded. If the Watchdog can't start for
-            # any reason, escalate to the Admiral so the MR is not silently
-            # orphaned while the worker parks indefinitely.
-            watchdog_ok? =
-              try do
-                start_watchdog(new_state, workspace, opts) == :ok
-              rescue
-                e ->
-                  Logger.warning(
-                    "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
-                  )
-
-                  false
-              catch
-                :exit, reason ->
-                  Logger.warning(
-                    "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
-                  )
-
-                  false
-              end
-
-            unless watchdog_ok? do
-              escalate_watchdog_failure(new_state)
-            end
-
-            {:ok, mr_ref, new_state}
-
-          {:error, reason} ->
+        # bd-13thk9: push the worktree branch to origin BEFORE asking a hosted
+        # forge (GitHub/GitLab) to open a PR. GitHub returns 422 "field head
+        # invalid" when the PR head ref does not exist remotely. A push failure
+        # is surfaced loudly rather than proceeding to a doomed PR-open.
+        case push_for_hosted_pr(state, workspace, opts) do
+          {:error, push_reason} ->
             Logger.warning(
-              "Worker.open_mr: adapter open failed for task=#{state.task_id}: #{inspect(reason)}"
+              "Worker.open_mr: push failed before PR open for task=#{state.task_id}: " <>
+                "#{inspect(push_reason)} — aborting (would 422)"
             )
 
-            {:error, reason, state}
+            {:error, {:push_failed, push_reason}, state}
+
+          :ok ->
+            case safe_open(adapter, branch, title, description, open_opts) do
+              {:ok, mr_ref} ->
+                merger_url = safe_link_for(adapter, mr_ref)
+
+                # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
+                # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
+                # later receives the {:worker_done, task_id} broadcast. Without
+                # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
+                # through to open_mr_for/3, fails opening a second PR on the
+                # already-merged branch, and the task is never auto-closed.
+                record_pr_ref_on_task(state, mr_ref)
+                sync_tracker_pr_opened(state, mr_ref, merger_url)
+
+                new_state = %State{
+                  state
+                  | status: :awaiting_review,
+                    mr_ref: mr_ref,
+                    merger_url: merger_url,
+                    merger_adapter: adapter,
+                    step_started_at: DateTime.utc_now(),
+                    meta:
+                      state.meta
+                      |> Map.put(:mr_ref, mr_ref)
+                      |> Map.put(:merger_url, merger_url)
+                }
+
+                # Guard: MR already exists on the forge. Watchdog startup failure must
+                # NOT prevent the worker from parking at :awaiting_review — the MR
+                # is real and must not be discarded. If the Watchdog can't start for
+                # any reason, escalate to the Admiral so the MR is not silently
+                # orphaned while the worker parks indefinitely.
+                watchdog_ok? =
+                  try do
+                    start_watchdog(new_state, workspace, opts) == :ok
+                  rescue
+                    e ->
+                      Logger.warning(
+                        "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
+                      )
+
+                      false
+                  catch
+                    :exit, reason ->
+                      Logger.warning(
+                        "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
+                      )
+
+                      false
+                  end
+
+                unless watchdog_ok? do
+                  escalate_watchdog_failure(new_state)
+                end
+
+                {:ok, mr_ref, new_state}
+
+              {:error, reason} ->
+                Logger.warning(
+                  "Worker.open_mr: adapter open failed for task=#{state.task_id}: #{inspect(reason)}"
+                )
+
+                {:error, reason, state}
+            end
         end
 
       {:error, reason} ->
@@ -3018,6 +3033,53 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # bd-13thk9: push the worktree branch to `origin` before opening a PR on a
+  # hosted forge. GitHub/GitLab return 422 "field head invalid" when the head
+  # ref does not exist remotely. The Direct strategy merges locally, so it does
+  # not need the branch on origin and is skipped.
+  #
+  # Returns `:ok` when the push succeeds (or is not needed), and
+  # `{:error, {:push_failed, reason}}` when it fails, so callers can surface the
+  # failure loudly rather than proceeding to a doomed PR-open.
+  defp push_for_hosted_pr(%State{meta: meta, task_id: task_id}, workspace, opts) do
+    worktree = meta && Map.get(meta, :worktree_path)
+
+    cond do
+      not hosted_forge_merger?(workspace, opts) ->
+        # Direct strategy: `open/4` runs `git merge --no-ff` locally.
+        # No remote branch required.
+        :ok
+
+      not (is_binary(worktree) and File.dir?(worktree)) ->
+        # No local worktree to push from (e.g. coordinator-dispatched ad-hoc run
+        # or test without a provisioned worktree). Log so the operator knows
+        # why the PR-open may fail if the branch is missing on origin.
+        Logger.info(
+          "Worker: push_for_hosted_pr skipped for task=#{task_id} (no worktree on disk); " <>
+            "PR-open may fail if branch is not on origin"
+        )
+
+        :ok
+
+      true ->
+        Logger.info(
+          "Worker: pushing worktree branch to origin before PR open for task=#{task_id}"
+        )
+
+        case Arbiter.Worker.Worktree.push(worktree, set_upstream: true) do
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker: git push to origin failed for task=#{task_id}: #{inspect(reason)}"
+            )
+
+            {:error, {:push_failed, reason}}
+        end
+    end
+  end
+
   # Open the PR via the adapter and record it on the task, but do NOT park the
   # worker or start the Watchdog — that all happens later on APPROVE. Records
   # pr_ref so the MergeQueue adopts this PR rather than opening a duplicate.
@@ -3027,20 +3089,35 @@ defmodule Arbiter.Worker do
     description = build_pr_body(state.task_id, Map.get(state.meta, :worktree_path))
     open_opts = build_open_opts(state, opts)
 
-    case safe_open(adapter, branch, title, description, open_opts) do
-      {:ok, mr_ref} ->
-        merger_url = safe_link_for(adapter, mr_ref)
-        record_pr_ref_on_task(state, mr_ref)
-        sync_tracker_pr_opened(state, mr_ref, merger_url)
-        {:ok, mr_ref}
-
-      {:error, reason} ->
+    # bd-13thk9: push before the pre-review PR open too. A failure falls back
+    # gracefully (branch-diff review) so the review gate still runs; but it is
+    # logged at warning so the operator can diagnose why the reviewer saw a
+    # branch diff instead of the real PR.
+    case push_for_hosted_pr(state, workspace, opts) do
+      {:error, push_reason} ->
         Logger.warning(
-          "Worker: pre-review PR open failed for task=#{state.task_id}: #{inspect(reason)} " <>
-            "— falling back to branch-diff review"
+          "Worker: push failed before pre-review PR open for task=#{state.task_id}: " <>
+            "#{inspect(push_reason)} — falling back to branch-diff review"
         )
 
         :none
+
+      :ok ->
+        case safe_open(adapter, branch, title, description, open_opts) do
+          {:ok, mr_ref} ->
+            merger_url = safe_link_for(adapter, mr_ref)
+            record_pr_ref_on_task(state, mr_ref)
+            sync_tracker_pr_opened(state, mr_ref, merger_url)
+            {:ok, mr_ref}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Worker: pre-review PR open failed for task=#{state.task_id}: #{inspect(reason)} " <>
+                "— falling back to branch-diff review"
+            )
+
+            :none
+        end
     end
   end
 
