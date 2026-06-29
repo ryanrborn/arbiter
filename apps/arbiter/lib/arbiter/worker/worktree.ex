@@ -430,6 +430,69 @@ defmodule Arbiter.Worker.Worktree do
   end
 
   @doc """
+  Fetch the task branch from origin and fast-forward the local checkout if it
+  is behind the remote tip.
+
+  Call this BEFORE computing the merge-base or head_sha so the ReviewGate
+  always sees the commits the implementer pushed, even when the local worktree
+  was somehow left behind (e.g. commits made in a different git context and
+  pushed directly to `origin/<branch>` without updating the local ref).
+
+  Returns:
+
+    * `{:ok, :up_to_date}` — local HEAD already matches `origin/<branch>`.
+    * `{:ok, :synced}` — local branch fast-forwarded to `origin/<branch>`.
+    * `{:error, reason}` — fetch failed, the remote ref does not exist, or the
+      local branch has diverged from the remote (not a fast-forward). Callers
+      should treat this as fail-open and proceed; the merge-base diff still
+      isolates the branch's own changes if origin/<branch> is unreachable.
+  """
+  @spec sync_from_origin(path(), String.t()) ::
+          {:ok, :up_to_date | :synced} | {:error, error_reason()}
+  def sync_from_origin(path, branch)
+      when is_binary(path) and is_binary(branch) do
+    with :ok <- ensure_origin_remote(path),
+         :ok <- fetch_origin_branch(path, branch),
+         :ok <- ensure_origin_ref(path, branch) do
+      ref = "origin/" <> branch
+
+      case run_git(["merge-base", "--is-ancestor", "HEAD", ref], cd: path) do
+        {:ok, _} ->
+          # HEAD is an ancestor of origin/<branch> — local is at or behind remote.
+          # Check if HEAD == remote tip (already up to date) or behind (need ff).
+          case run_git(["rev-parse", "HEAD"], cd: path) do
+            {:ok, local_sha} ->
+              case run_git(["rev-parse", ref], cd: path) do
+                {:ok, remote_sha} when local_sha == remote_sha ->
+                  {:ok, :up_to_date}
+
+                {:ok, _remote_sha} ->
+                  # Local is behind remote — fast-forward.
+                  case run_git(["merge", "--ff-only", ref], cd: path) do
+                    {:ok, _} -> {:ok, :synced}
+                    {:error, _} = err -> err
+                  end
+
+                {:error, _} = err ->
+                  err
+              end
+
+            {:error, _} = err ->
+              err
+          end
+
+        {:error, _} ->
+          # HEAD is NOT an ancestor of origin/<branch> — branches have diverged
+          # or origin/<branch> is a different line. Do not force-reset; fail so
+          # the caller can proceed without the sync (fail-open at call site).
+          {:error,
+           {:git_failed,
+            "local branch `#{branch}` has diverged from origin/#{branch}; cannot fast-forward"}}
+      end
+    end
+  end
+
+  @doc """
   Return the SHA of the merge-base (fork point) between the worktree's HEAD and
   `target_branch`, preferring the fetched `origin/<target>` ref and falling
   back to the local `<target>` ref.
