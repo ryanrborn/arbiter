@@ -467,6 +467,86 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
+    test "sync_from_origin fast-forwards the worktree to the latest pushed commit before review (bd-31bh37 regression)",
+         %{repo: repo, ws: ws, tmp: tmp} do
+      # Simulate the scenario: the per-task worktree has SOME commits (so the
+      # Worker commit gate passes) but is BEHIND origin — e.g. the implementer
+      # added a second commit from a different session and pushed it, but the
+      # local worktree was not updated. Without the fix, the reviewer sees a
+      # stale diff (only commit1, missing commit2). With the fix, sync_from_origin
+      # fast-forwards the worktree to the pushed tip (commit2) before computing
+      # SHAs, so the reviewer sees the full set of changes and the correct HEAD
+      # ends up in the merged main.
+      task = new_task(ws)
+      branch = "feature/sync-test"
+
+      # 1. Create the branch with commit1 and push it. Then checkout main so
+      #    the branch is free for `git worktree add`.
+      {_, 0} = git(["checkout", "-q", "-b", branch], repo)
+      File.write!(Path.join(repo, "step1.txt"), "first commit\n")
+      {_, 0} = git(["add", "step1.txt"], repo)
+      {_, 0} = git(["commit", "-q", "-m", "step 1"], repo)
+      {commit1_sha, 0} = git(["rev-parse", "HEAD"], repo)
+      commit1_sha = String.trim(commit1_sha)
+      {_, 0} = git(["push", "-q", "origin", branch], repo)
+      {_, 0} = git(["checkout", "-q", "main"], repo)
+
+      # 2. Create a per-task worktree at commit1. repo is on main so the branch
+      #    is not locked and git worktree add succeeds.
+      wt_path = Path.join(tmp, "task-worktree")
+      {_, 0} = git(["worktree", "add", "-q", wt_path, branch], repo)
+
+      # 3. From the worktree, add commit2 and push it to origin — simulating a
+      #    second commit pushed from a different session. Then reset the worktree
+      #    back to commit1 so local lags origin (local = 1 ahead of main; origin
+      #    = 2 ahead of main). The Worker commit gate sees 1 commit → passes.
+      File.write!(Path.join(wt_path, "step2.txt"), "second commit\n")
+      {_, 0} = System.cmd("git", ["-C", wt_path, "add", "step2.txt"])
+      {_, 0} = System.cmd("git", ["-C", wt_path, "commit", "-q", "-m", "step 2"])
+      {commit2_sha, 0} = System.cmd("git", ["-C", wt_path, "rev-parse", "HEAD"])
+      commit2_sha = String.trim(commit2_sha)
+      {_, 0} = System.cmd("git", ["-C", wt_path, "push", "-q", "origin", branch])
+      {_, 0} = System.cmd("git", ["-C", wt_path, "reset", "-q", "--hard", commit1_sha])
+
+      # At this point: wt_path branch ref = commit1 (1 ahead of main);
+      # origin/feature/sync-test = commit2 (2 ahead of main).
+      # sync_from_origin must advance wt_path to commit2 before computing
+      # head_sha so the merged main ends up at the correct tip.
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: wt_path,
+        review_command: [@reviewer, "APPROVE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 1
+
+      # sync_from_origin fast-forwarded the worktree to commit2 before review;
+      # the merged main must include commit2 (not just commit1).
+      {main_log, 0} = git(["log", "--format=%H", "main"], repo)
+      commits = String.split(main_log, "\n", trim: true)
+
+      assert commit2_sha in commits,
+             "expected commit2 (#{commit2_sha}) reachable from main after merge"
+
+      assert commit1_sha in commits,
+             "expected commit1 (#{commit1_sha}) reachable from main after merge"
+    end
+
     test "review_agent.config.model is passed as `--model` when no command override is given",
          %{repo: repo, tmp: tmp} do
       # Build a `claude` shim on PATH that writes its argv to a file. Without
