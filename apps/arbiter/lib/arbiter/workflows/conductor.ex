@@ -269,12 +269,21 @@ defmodule Arbiter.Workflows.Conductor do
 
     result =
       Enum.find_value(conductors, :not_found, fn {_graph_id, pid} ->
-        snap = GenServer.call(pid, :state)
+        # `list_conductors/0` is a best-effort Registry snapshot; a conductor
+        # can terminate between the listing and this call. Guard the call so a
+        # dying conductor is skipped (the scan continues) rather than letting
+        # the `:exit` propagate out of `resume_task/1` — which `action_fallback`
+        # (it only matches `{:error, _}`, not exits) would surface as a 500.
+        try do
+          snap = GenServer.call(pid, :state)
 
-        if MapSet.member?(snap.failed_ids, task_id) do
-          {:found, pid}
-        else
-          nil
+          if MapSet.member?(snap.failed_ids, task_id) do
+            {:found, pid}
+          else
+            nil
+          end
+        catch
+          :exit, _ -> nil
         end
       end)
 
