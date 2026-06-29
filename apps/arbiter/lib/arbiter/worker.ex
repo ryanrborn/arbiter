@@ -190,6 +190,19 @@ defmodule Arbiter.Worker do
   # Overridable for tests via `config :arbiter, :worker_exit_grace_ms`.
   @exit_grace_ms 500
 
+  # bd-4g0fsh: backoff before an auto-resume of a recoverable stop (transient
+  # gateway 5xx, or a clean exit-0 without `arb done`). A recoverable stop is
+  # re-spawned (bounded by `:resume_cap`) rather than failed — but NOT instantly:
+  # a transient 502 from the proxy/upstream needs a beat to clear before a retry
+  # has any chance of succeeding, so an immediate respawn would just re-hit the
+  # same blip and burn an attempt. Exponential per attempt, capped, with a
+  # category-specific base — a gateway blip warrants a longer initial wait than a
+  # model that merely narrated-and-stopped (no infra to recover). attempt is the
+  # 0-based count of resumes already made for this run.
+  @resume_backoff_base_ms %{gateway_error: 2_000, exited_without_done: 1_000}
+  @resume_backoff_default_base_ms 1_000
+  @resume_backoff_max_ms 30_000
+
   # ---- public API ---------------------------------------------------------
 
   @doc """
@@ -1089,6 +1102,29 @@ defmodule Arbiter.Worker do
     {:noreply, state}
   end
 
+  # bd-4g0fsh: a scheduled auto-resume of a recoverable stop fires after its
+  # backoff. Re-spawn the session in place; if the respawn can't be built (no
+  # pristine spawn args / no `--print` slot / port open failure), fall through to
+  # fail_stopped with the original session so the escalation still carries the
+  # real cause. Guarded on a live status so a resume scheduled before a
+  # terminal transition (e.g. a late `arb done`) is dropped.
+  def handle_info(
+        {:__resume_continuation__, session_id, fingerprint, session},
+        %State{status: status} = state
+      )
+      when status in @live_statuses do
+    case respawn_with_resume(state, session_id, fingerprint) do
+      {:ok, new_state} -> {:noreply, new_state}
+      {:error, _why} -> {:noreply, fail_stopped(state, session)}
+    end
+  end
+
+  def handle_info({:__resume_continuation__, _session_id, _fp, _session}, %State{} = state) do
+    # The run reached a terminal/review state during the backoff window — the
+    # scheduled resume is stale. Drop it.
+    {:noreply, state}
+  end
+
   def handle_info({:__claude_session_done__, _line}, %State{status: status} = state)
       when status not in [:completed, :failed, :awaiting_review_gate, :awaiting_review] do
     # "arb done" detected. The guard accepts most non-terminal statuses
@@ -1925,11 +1961,14 @@ defmodule Arbiter.Worker do
   # session is live, and the run never signalled `arb done`. Rather than failing
   # and discarding the (preserved) worktree, re-spawn the SAME Claude session via
   # `claude --print --resume <session_id> "<continue>"` so it picks up where it
-  # left off (verified to preserve context headlessly under --print). Bounded two
-  # ways so a stuck agent can't loop forever:
-  #   * a hard attempt cap (`:resume_cap`, default 3), and
+  # left off (verified to preserve context headlessly under --print). Bounded
+  # three ways so a stuck agent can't loop forever:
+  #   * a hard attempt cap (`:resume_cap`, default 3),
   #   * a no-progress guard: if a resumed session exits having changed nothing in
-  #     the worktree (same fingerprint as when it started), stop and fail.
+  #     the worktree (same fingerprint as when it started), stop and fail, and
+  #   * (bd-4g0fsh) a backoff between attempts (`resume_backoff_ms/2`): the
+  #     respawn is scheduled, not inline, so a transient blip has a beat to clear
+  #     before the retry — an instant respawn would just re-hit it.
   # `:exited_without_done` and `:gateway_error` are auto-resumed; auth/credit/
   # rate/crash/kill fall straight through to fail_stopped.
   # gateway_error: the local proxy got a transient 502/503 from Anthropic; the
@@ -1952,10 +1991,25 @@ defmodule Arbiter.Worker do
 
     case resume_decision(reason.category, session_id, attempts, cap, prev_fp, cur_fp) do
       :resume ->
-        case respawn_with_resume(state, session_id, cur_fp) do
-          {:ok, new_state} -> new_state
-          {:error, _why} -> fail_stopped(state, session)
-        end
+        # bd-4g0fsh: don't respawn inline — a transient gateway blip needs a beat
+        # to clear. Hold at :resuming (a live status, but with no open port) and
+        # schedule the respawn after a bounded backoff. The session that just
+        # exited rides along so the deferred handler can fail cleanly if the
+        # respawn itself can't be built.
+        backoff = resume_backoff_ms(reason.category, attempts)
+
+        Logger.info(
+          "Worker: bd-4g0fsh scheduling resume task=#{state.task_id} " <>
+            "(#{reason.category}, attempt #{attempts + 1}/#{cap}, backoff #{backoff}ms)"
+        )
+
+        Process.send_after(
+          self(),
+          {:__resume_continuation__, session_id, cur_fp, session},
+          backoff
+        )
+
+        %State{state | status: :resuming}
 
       {:fail, why} ->
         if why in [:cap_exhausted, :no_progress] do
@@ -2046,6 +2100,18 @@ defmodule Arbiter.Worker do
   defp resume_cap(meta) do
     (meta && Map.get(meta, :resume_cap)) ||
       Application.get_env(:arbiter, :worker_resume_cap, 3)
+  end
+
+  # bd-4g0fsh: backoff (ms) before the `attempt`-th auto-resume of a recoverable
+  # stop. Pure: exponential in `attempt` (0-based), with a category-specific base
+  # and a hard ceiling so the bounded retry budget can never wait absurdly long.
+  # A gateway blip gets a longer initial wait than a clean exit-without-done,
+  # which has no infra to recover from.
+  @doc false
+  @spec resume_backoff_ms(atom(), non_neg_integer()) :: non_neg_integer()
+  def resume_backoff_ms(category, attempt) when is_integer(attempt) and attempt >= 0 do
+    base = Map.get(@resume_backoff_base_ms, category, @resume_backoff_default_base_ms)
+    min(base * Integer.pow(2, attempt), @resume_backoff_max_ms)
   end
 
   # Insert `--resume <session_id>` immediately after `--print` and swap the
