@@ -147,8 +147,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
 
       [task] = tasks_for_repo()
-      assert task.tracker_type == :github
-      assert task.tracker_ref == "42"
+      # tracker_type is :none so dispatch never tries to transition the merged
+      # PR; the source PR is linked via source_pr instead (bd-ci2jl2). The
+      # follow-up is a reviewable type so dispatch provisions a fresh worktree.
+      assert task.tracker_type == :none
+      assert task.source_pr == "42"
+      assert task.issue_type == :feature
       assert task.title =~ "PR #42"
       assert task.workspace_id == ws.id
 
@@ -212,7 +216,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
 
       [task] = tasks_for_repo()
-      assert task.tracker_ref == "50"
+      assert task.source_pr == "50"
       assert task.title =~ "PR #50"
       assert task.description =~ "unresolved review thread"
       assert is_pid(Worker.whereis(task.id))
@@ -293,8 +297,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       {:ok, old} =
         Ash.create(Issue, %{
           title: "old PR follow-up",
-          tracker_type: :github,
-          tracker_ref: "44",
+          tracker_type: :none,
+          source_pr: "44",
           workspace_id: ws.id
         })
 
@@ -409,7 +413,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       tasks = tasks_for_repo()
       assert length(tasks) == 1
       [task] = tasks
-      assert task.tracker_ref == "60"
+      assert task.source_pr == "60"
       assert task.title =~ "PR #60"
       assert task.workspace_id == multi_ws.id
       assert is_pid(Worker.whereis(task.id))
@@ -458,7 +462,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
 
       assert [task] = tasks_for_repo()
-      assert task.tracker_ref == "70"
+      assert task.source_pr == "70"
     end
 
     test "PR by a non-allowlisted author → skipped (no task), despite CHANGES_REQUESTED",
@@ -480,7 +484,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       :ok = PRPatrol.tick(name)
 
       assert [task] = tasks_for_repo()
-      assert task.tracker_ref == "72"
+      assert task.source_pr == "72"
     end
   end
 
@@ -518,9 +522,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end)
   end
 
+  # PRPatrol follow-ups link their source PR via `source_pr` (and carry
+  # `tracker_type: :none`, so they never sync lifecycle onto a merged PR —
+  # bd-ci2jl2). Select them by the presence of `source_pr`.
   defp tasks_for_repo do
     Issue
-    |> Ash.Query.filter(tracker_type == :github)
+    |> Ash.Query.filter(not is_nil(source_pr))
     |> Ash.read!()
   end
 end

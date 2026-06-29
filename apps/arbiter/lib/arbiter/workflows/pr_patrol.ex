@@ -31,10 +31,17 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   ## Dedup
 
-  Each follow-up task is tagged with `tracker_type: :github, tracker_ref:
-  to_string(pr_number)`. Before dispatching, PRPatrol queries `Issue` for
-  open tasks with that combination — if one exists, the PR has already been
-  handled this cycle.
+  Each follow-up task records the PR it was filed against in the dedicated
+  `source_pr` field (`to_string(pr_number)`), scoped to the patrol's workspace.
+  Before dispatching, PRPatrol queries `Issue` for open tasks with that
+  combination — if one exists, the PR has already been handled this cycle.
+
+  `source_pr` is deliberately NOT `tracker_ref`: `tracker_ref` is the field
+  `Arbiter.Trackers.Sync` treats as a writable tracker item to push task
+  lifecycle status onto, and a PR number is not a workable tracker issue —
+  transitioning a *merged PR* on dispatch fails with `Validation Failed` and
+  escalates (bd-ci2jl2). A follow-up therefore carries `tracker_type: :none`
+  (no lifecycle write-back) and links its source PR via `source_pr` instead.
 
   ## Lifecycle
 
@@ -159,12 +166,10 @@ defmodule Arbiter.Workflows.PRPatrol do
   end
 
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
-    t_type = tracker_type(adapter)
-
     with true <- author_allowed?(mr, state.workspace),
          reason when is_binary(reason) <- actionable_reason(adapter, mr_ref),
-         false <- deduped?(pr_number, t_type) do
-      task = create_follow_up(mr, state, t_type, reason)
+         false <- deduped?(pr_number, state.workspace_id) do
+      task = create_follow_up(mr, state, reason)
       _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
     else
@@ -228,16 +233,16 @@ defmodule Arbiter.Workflows.PRPatrol do
     end
   end
 
-  defp deduped?(pr_number, t_type) do
+  defp deduped?(pr_number, workspace_id) do
     ref = to_string(pr_number)
 
     Issue
-    |> Ash.Query.filter(tracker_type == ^t_type and tracker_ref == ^ref and status != :closed)
+    |> Ash.Query.filter(source_pr == ^ref and workspace_id == ^workspace_id and status != :closed)
     |> Ash.read!()
     |> Enum.any?()
   end
 
-  defp create_follow_up(%{number: number, title: title, url: url}, state, t_type, reason) do
+  defp create_follow_up(%{number: number, title: title, url: url}, state, reason) do
     issue_title = "PR ##{number}: #{title} needs follow-up"
 
     description =
@@ -253,30 +258,25 @@ defmodule Arbiter.Workflows.PRPatrol do
       Ash.create(Issue, %{
         title: issue_title,
         description: description,
-        issue_type: :task,
+        # A reviewable type (NOT :task): a follow-up addresses PR review
+        # feedback with a real code change, so it must take the normal
+        # worktree → commit → review → PR path. `:task` would skip worktree
+        # provisioning (dispatch.ex) and dispatch would 500 with
+        # :missing_worktree (bd-ci2jl2). The fresh worktree is cut from the
+        # repo's default branch, which is correct for a follow-up to a PR
+        # whose own branch was cleaned up on merge.
+        issue_type: :feature,
         priority: 2,
-        tracker_type: t_type,
-        tracker_ref: to_string(number),
+        # No tracker lifecycle write-back: a PR number is not a workable
+        # tracker issue (transitioning a merged PR on dispatch fails with
+        # Validation Failed). The source PR is linked via `source_pr` for
+        # dedup instead — see the module's Dedup section (bd-ci2jl2).
+        tracker_type: :none,
+        source_pr: to_string(number),
         workspace_id: state.workspace_id
       })
 
     task
-  end
-
-  # Derive the tracker_type atom from the merger registry (single source of
-  # truth) and raise on an unregistered adapter, so a new forge adapter can
-  # never silently fall through to :github — which would corrupt dedup and
-  # trigger duplicate-task storms once it implements list_open/0.
-  defp tracker_type(adapter) do
-    Arbiter.Mergers.adapters()
-    |> Enum.find_value(fn {type, module} -> if module == adapter, do: type end)
-    |> case do
-      nil ->
-        raise(ArgumentError, "tracker_type/1: unregistered merger adapter #{inspect(adapter)}")
-
-      type ->
-        type
-    end
   end
 
   defp schedule_next(state) do

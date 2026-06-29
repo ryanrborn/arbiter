@@ -436,6 +436,52 @@ defmodule Arbiter.Worker.DispatchTest do
       assert is_port(result.claude_port)
     end
 
+    # bd-ci2jl2: a PRPatrol follow-up used to be undispatchable. It carried
+    # `issue_type: :task` (→ no worktree provisioned → start_claude 500'd with
+    # :missing_worktree) and stored the merged PR number in `tracker_ref` (→ the
+    # :in_progress transition tried to write lifecycle status onto a merged PR
+    # and escalated `Validation Failed`). The follow-up is now a reviewable type
+    # with `tracker_type: :none` + the PR linked via `source_pr`, so dispatch
+    # provisions a FRESH worktree and never touches a tracker.
+    test "PRPatrol follow-up shape dispatches with a fresh worktree and no tracker write-back",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "followup")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "followup-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"fu/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "PR #591: needs follow-up",
+          issue_type: :feature,
+          tracker_type: :none,
+          source_pr: "591",
+          workspace_id: ws.id
+        })
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "fu/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sleep", "2"]
+        )
+
+      # Fresh worktree provisioned (the bug returned {:error, :missing_worktree}).
+      assert is_binary(result.worktree_path)
+      assert is_port(result.claude_port)
+      # Transition to :in_progress succeeded without a tracker sync attempt.
+      assert result.task.status == :in_progress
+      assert result.task.tracker_type == :none
+      assert result.task.source_pr == "591"
+    end
+
     # Counterpart: a normal work dispatch DOES get the MCP config — but only ever
     # inside its own isolated worktree, never the repo.
     test "work dispatch writes .mcp.json into its isolated worktree (not the repo)",
