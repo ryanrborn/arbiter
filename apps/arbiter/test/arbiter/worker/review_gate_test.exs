@@ -35,6 +35,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @empty_findings Path.expand("../../fixtures/review_empty_findings.sh", __DIR__)
   @rounds Path.expand("../../fixtures/review_rounds.sh", __DIR__)
   @rounds_empty_mid Path.expand("../../fixtures/review_rounds_empty_mid.sh", __DIR__)
+  @rounds_empty_last Path.expand("../../fixtures/review_rounds_empty_last.sh", __DIR__)
   @retry_reset Path.expand("../../fixtures/review_retry_reset.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
 
@@ -825,6 +826,59 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl1")),
              "expected a round-1 implementer run"
+    end
+
+    # bd-b0x3jy / bd-40v3w1: the default task difficulty uses 3 review rounds.
+    # An empty-findings REQUEST_CHANGES in round 3 (the last allowed round) must
+    # NOT consume that round — the fix (bd-79goxj) extends max_rounds to 4 so
+    # the re-prompt's real findings still reach an implementer, and a round-4
+    # reviewer can then approve → merge. Without the fix: handle_reject sees
+    # round(3) >= max_rounds(3) and escalates; the Admiral gets an unresolved
+    # task even though the work was sound.
+    test "empty-findings in the LAST round of a 3-round gate does not consume that round",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            # 3-round cap: default difficulty. Rounds 1 and 2 reject with real
+            # findings; round 3 (last) gives an empty verdict → reprompt fires
+            # → re-prompt gives real findings → max_rounds extends to 4 so
+            # enter_revise runs → implementer addresses findings → round-4
+            # reviewer approves → merge.
+            review_rounds: 3,
+            worktree_path: repo,
+            review_command: [@rounds_empty_last, "APPROVE"],
+            revise_command: [@revise],
+            review_timeout_ms: 14_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 16_000)
+      # Merge proves round 3's empty verdict was re-prompted (not treated as a
+      # final round-3 cap hit) and that the implementer got to revise.
+      assert merge_commit_count(repo) == 1
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == review_id <> "#impl3")),
+             "expected a round-3 implementer run (empty-findings re-prompt reached implementer)"
     end
   end
 
