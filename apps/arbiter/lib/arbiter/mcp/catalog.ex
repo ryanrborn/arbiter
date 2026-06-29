@@ -43,6 +43,7 @@ defmodule Arbiter.MCP.Catalog do
   | `tracker_sync` | coordinator | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
   | `workspace_list` | coordinator | `Ash.read(Workspace)` (summary fields) |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
+  | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   """
 
   alias Arbiter.MCP.Scope
@@ -642,6 +643,29 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.usage_summarize/2
+    },
+
+    # ---- C5: queue resume ---------------------------------------------------
+    %{
+      name: "queue_resume",
+      tiers: @coordinator,
+      description:
+        "Resume a paused graph branch by re-dispatching the failed task that blocked it " <>
+          "(C5 of #482). Searches all running Conductors for one that has `task_id` in its " <>
+          "failed set and re-dispatches it, unblocking the downstream branch. " <>
+          "Use after receiving a conductor failure escalation in the Admiral inbox.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "The failed task ID to re-dispatch (required)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.queue_resume/2
     }
   ]
 
