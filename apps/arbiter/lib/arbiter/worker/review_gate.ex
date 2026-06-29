@@ -631,7 +631,12 @@ defmodule Arbiter.Worker.ReviewGate do
       # Drop the matched `VERDICT:` line itself (always first in `findings`).
       |> Enum.drop(1)
       |> Enum.reject(fn line ->
-        String.trim(line) == "" or Regex.match?(~r/\barb done\b/, line)
+        String.trim(line) == "" or
+          Regex.match?(~r/\barb done\b/, line) or
+          # Strip synthesized session-stats footers appended by the harness
+          # (e.g. "⚙ claude session success · 183.5s · $1.1489") — both the
+          # Claude and Gemini agent variants use the ⚙ glyph as a prefix.
+          Regex.match?(~r/^\s*⚙/, line)
       end)
       |> Enum.join("\n")
       |> String.trim()
