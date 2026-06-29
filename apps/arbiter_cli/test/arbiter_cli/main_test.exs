@@ -14,6 +14,109 @@ defmodule ArbiterCli.MainTest do
     end
   end
 
+  describe "global --workspace / -w flag" do
+    setup do
+      prev = System.get_env("ARB_WORKSPACE")
+
+      on_exit(fn ->
+        if prev,
+          do: System.put_env("ARB_WORKSPACE", prev),
+          else: System.delete_env("ARB_WORKSPACE")
+      end)
+
+      :ok
+    end
+
+    test "-w <name> before the subcommand sets ARB_WORKSPACE and dispatches correctly" do
+      stub_routes([
+        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-1", "name" => "myws", "prefix" => "xx"}
+            ]
+          }, 200}}
+      ])
+
+      {_out, _err, code} = capture(fn -> Main.main(["-w", "myws", "issue", "list"]) end)
+      assert code == 0
+      assert System.get_env("ARB_WORKSPACE") == "myws"
+    end
+
+    test "--workspace <name> before the subcommand works" do
+      stub_routes([
+        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-1", "name" => "myws", "prefix" => "xx"}
+            ]
+          }, 200}}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Main.main(["--workspace", "myws", "issue", "list"]) end)
+
+      assert code == 0
+      assert System.get_env("ARB_WORKSPACE") == "myws"
+    end
+
+    test "flag takes precedence over ARB_WORKSPACE env" do
+      System.put_env("ARB_WORKSPACE", "default")
+
+      stub_routes([
+        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-default", "name" => "default", "prefix" => "bd"},
+              %{"id" => "ws-other", "name" => "other", "prefix" => "xx"}
+            ]
+          }, 200}}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Main.main(["-w", "other", "issue", "list"]) end)
+
+      assert code == 0
+      assert System.get_env("ARB_WORKSPACE") == "other"
+    end
+
+    test "-w after the resource also works" do
+      stub_routes([
+        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
+        {{"get", "/api/workspaces"},
+         {%{
+            "data" => [
+              %{"id" => "ws-1", "name" => "myws", "prefix" => "xx"}
+            ]
+          }, 200}}
+      ])
+
+      {_out, _err, code} =
+        capture(fn -> Main.main(["issue", "list", "-w", "myws"]) end)
+
+      assert code == 0
+      assert System.get_env("ARB_WORKSPACE") == "myws"
+    end
+
+    test "unknown workspace name fails with a clear error" do
+      # Use --tracker to force workspace resolution (list without --tracker fetches
+      # issues first and never resolves the workspace unless needed).
+      stub_routes([
+        {{"get", "/api/issues"}, {%{"data" => []}, 200}},
+        {{"get", "/api/workspaces"},
+         {%{"data" => [%{"id" => "ws-1", "name" => "realws", "prefix" => "bd"}]}, 200}}
+      ])
+
+      {_out, err, code} =
+        capture(fn -> Main.main(["-w", "unknown-name", "issue", "list", "--tracker"]) end)
+
+      assert code != 0
+      assert err =~ "unknown-name"
+    end
+  end
+
   describe "legacy flat commands" do
     test "arb list runs arb issue list and prints a migration note" do
       stub_get("/api/issues", @issues)
