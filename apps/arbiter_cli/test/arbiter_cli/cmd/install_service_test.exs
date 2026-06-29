@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       # Guidance: unit path + how to check status/logs + linger.
       assert out =~ unit
       assert out =~ "systemctl --user status arbiter.service"
-      assert out =~ "journalctl --user -u arbiter.service"
+      assert out =~ "tail -f ~/.arbiter/log/arbiter.log"
       assert out =~ "linger"
     end
 
@@ -102,6 +102,46 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       assert payload["scope"] == "user"
       assert payload["ok"] == true
       assert payload["unit_path"] == Path.join(dir, "arbiter.service")
+    end
+
+    test "unit routes stdout/stderr to a file so logs survive reboots and need no journald group",
+         %{unit_dir: dir, arbiter_home: arbiter_home} do
+      record_cmds()
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+      contents = File.read!(Path.join(dir, "arbiter.service"))
+      expected_log = Path.join([arbiter_home, "log", "arbiter.log"])
+      assert contents =~ "StandardOutput=append:#{expected_log}"
+      assert contents =~ "StandardError=append:#{expected_log}"
+    end
+
+    test "creates the log directory and writes a logrotate config", %{arbiter_home: arbiter_home} do
+      record_cmds()
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+      log_dir = Path.join(arbiter_home, "log")
+      assert File.dir?(log_dir)
+
+      logrotate_conf = Path.join(log_dir, "logrotate.conf")
+      assert File.exists?(logrotate_conf)
+      conf_contents = File.read!(logrotate_conf)
+      assert conf_contents =~ "arbiter.log"
+      assert conf_contents =~ "copytruncate"
+      assert conf_contents =~ "rotate 7"
+    end
+
+    test "output includes the log file path and rotation command", %{arbiter_home: arbiter_home} do
+      record_cmds()
+
+      {out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+      assert out =~ Path.join([arbiter_home, "log", "arbiter.log"])
+      assert out =~ "logrotate"
     end
 
     test "is idempotent — running twice succeeds and rewrites the unit" do
@@ -280,6 +320,18 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
       assert contents =~ "Restart=on-failure"
       assert contents =~ "RestartSec=10"
+    end
+
+    test "user unit routes output to a file so logs survive reboots without journald group" do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"
+      assert contents =~ "StandardError=append:/home/user/.arbiter/log/arbiter.log"
+    end
+
+    test "system unit omits file-based log directives (journald is fine with root)" do
+      contents = InstallService.unit_contents(:system, "/home/user/.arbiter")
+      refute contents =~ "StandardOutput="
+      refute contents =~ "StandardError="
     end
   end
 end
