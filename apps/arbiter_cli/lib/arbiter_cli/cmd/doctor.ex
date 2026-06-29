@@ -189,16 +189,30 @@ defmodule ArbiterCli.Cmd.Doctor do
               fatal: false
             }
 
-          true ->
-            sha_note =
-              if server_sha == "unknown",
-                do: "server is a release build",
-                else: "server @ #{server_sha}"
-
+          server_sha == "unknown" and cli_vsn == server_vsn ->
             %Result{
               name: "version",
               status: :ok,
-              detail: "#{cli_vsn} @ #{cli_sha} (#{sha_note})",
+              detail: "#{cli_vsn} @ #{cli_sha} (release build — versions match)",
+              fatal: false
+            }
+
+          server_sha == "unknown" ->
+            %Result{
+              name: "version",
+              status: :fail,
+              detail: "CLI #{cli_vsn} / server release #{server_vsn}",
+              hint:
+                "Redeploy the server to #{cli_vsn} or reinstall the CLI to match the deployed release.",
+              fatal: false
+            }
+
+          true ->
+            %Result{
+              name: "version",
+              status: :fail,
+              detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
+              hint: "Rebuild the escript and/or redeploy the server.",
               fatal: false
             }
         end

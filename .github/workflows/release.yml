@@ -70,6 +70,17 @@ jobs:
           mix local.hex --force
           mix local.rebar --force
 
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "name=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
       - name: Get production dependencies
         run: |
           MIX_ENV=prod mix deps.get --only prod
@@ -95,15 +106,6 @@ jobs:
       - name: Build arb escript
         run: |
           cd apps/arbiter_cli && MIX_ENV=prod mix escript.build
-
-      - name: Determine tag name
-        id: tag
-        run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Package and checksum release
         run: |
