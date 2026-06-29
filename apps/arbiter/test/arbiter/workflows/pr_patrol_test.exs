@@ -429,7 +429,94 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — author allowlist (pr_patrol.author_logins)" do
+    setup do
+      {:ok, scoped} =
+        Ash.create(Workspace, %{
+          name: "pp-scoped-#{System.unique_integer([:positive])}",
+          prefix: "pps#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            },
+            "pr_patrol" => %{"author_logins" => ["me-login"]}
+          }
+        })
+
+      {:ok, scoped: scoped}
+    end
+
+    test "PR by an allowlisted author → task created", %{scoped: ws} do
+      pulls_stub(70, "me-login")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.tracker_ref == "70"
+    end
+
+    test "PR by a non-allowlisted author → skipped (no task), despite CHANGES_REQUESTED",
+         %{scoped: ws} do
+      pulls_stub(71, "someone-else")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert tasks_for_repo() == []
+    end
+
+    # Back-compat: a workspace with no allowlist patrols all authors. Uses the
+    # default `ws` from the outer setup (github merge config, no `pr_patrol` key).
+    test "no allowlist configured → PR by any author is patrolled", %{ws: ws} do
+      pulls_stub(72, "anyone-at-all")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.tracker_ref == "72"
+    end
+  end
+
   # ---- helpers ----
+
+  # Stub the `/pulls` list (carrying `user.login` so PRPatrol can resolve the
+  # MR author) plus a CHANGES_REQUESTED review for `number`, so the only
+  # variable under test is the author gate.
+  defp pulls_stub(number, author_login) do
+    stub(fn conn ->
+      cond do
+        conn.request_path == "/repos/owner/repo/pulls" ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json([
+            %{
+              "number" => number,
+              "title" => "t#{number}",
+              "html_url" => "https://gh/pr/#{number}",
+              "user" => %{"login" => author_login}
+            }
+          ])
+
+        conn.request_path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+        conn.request_path == "/repos/owner/repo/pulls/#{number}/comments" ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+        true ->
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+      end
+    end)
+  end
 
   defp tasks_for_repo do
     Issue

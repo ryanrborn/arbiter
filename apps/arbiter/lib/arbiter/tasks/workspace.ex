@@ -411,6 +411,23 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  The PRPatrol author allowlist, from `config["pr_patrol"]["author_logins"]`.
+
+  When set to a non-empty list of forge logins, PRPatrol files follow-ups only
+  for open PRs authored by one of those logins — so a workspace can patrol just
+  its operator's own PRs rather than every open PR in the repo. Returns `[]`
+  when unset / empty / malformed, which PRPatrol treats as "patrol all open PRs"
+  (the backward-compatible default).
+  """
+  @spec pr_patrol_author_logins(t()) :: [String.t()]
+  def pr_patrol_author_logins(workspace) do
+    (workspace.config || %{})
+    |> get_in(["pr_patrol", "author_logins"])
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+  end
+
+  @doc """
   Optional workspace cap on the ReviewGate's revise-and-rediscuss round count,
   from `config["review_gate"]["max_rounds"]`.
 
