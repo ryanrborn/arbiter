@@ -733,6 +733,44 @@ defmodule Arbiter.MCP.Tools do
     {:ok, %{workspaces: workspaces, count: length(workspaces)}}
   end
 
+  # ---- queue_resume -------------------------------------------------------
+
+  @doc """
+  Resume a paused graph branch by re-dispatching the failed task that blocked
+  it (C5 of #482). Coordinator only.
+
+  Searches all running Conductors for one that has `task_id` in its failed
+  set and calls `Conductor.resume/2` on it. On success the task is
+  re-dispatched and its downstream branch is unpaused.
+
+  Returns `%{resumed: true, task_id: task_id}` on success, or an error if no
+  conductor holds the task as failed.
+  """
+  @spec queue_resume(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def queue_resume(%Scope{} = _scope, args) do
+    with {:ok, task_id} <- require_string(args, "task_id") do
+      case Arbiter.Workflows.Conductor.resume_task(task_id) do
+        :ok ->
+          {:ok, %{resumed: true, task_id: task_id}}
+
+        {:error, :not_found} ->
+          {:error, {:not_found, "task #{task_id} is not in any running conductor's failed set"}}
+
+        {:error, :not_member} ->
+          {:error, {:not_found, "task #{task_id} is not a member of a running graph"}}
+
+        {:error, :not_failed} ->
+          {:error, {:invalid, "task #{task_id} has not failed — nothing to resume"}}
+
+        {:error, :dispatch_failed} ->
+          {:error, {:invalid, "dispatch of #{task_id} failed — check worker logs"}}
+
+        {:error, reason} ->
+          {:error, {:invalid, "resume failed: #{inspect(reason)}"}}
+      end
+    end
+  end
+
   # ---- shared resolution / fetch -----------------------------------------
 
   # Resolve + authorize the target task id for this scope from the named arg

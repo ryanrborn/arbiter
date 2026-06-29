@@ -81,6 +81,21 @@ defmodule Arbiter.Workflows.ConductorTest do
     pid
   end
 
+  alias Arbiter.Messages.Message
+
+  # Broadcast a worker_failed event on the workspace's events topic, simulating
+  # what `Arbiter.Worker.broadcast_worker_failed/1` does in production.
+  defp simulate_failure(issue, ws) do
+    Arbiter.Events.broadcast(ws.id, "worker_failed", %{task_id: issue.id})
+    # Allow the Conductor's handle_info to process before assertions.
+    Process.sleep(50)
+  end
+
+  # Drain the Admiral inbox for a workspace and return unread escalations.
+  defp admiral_inbox(ws) do
+    Message.inbox("admiral", workspace_id: ws.id)
+  end
+
   # ---- acyclicity validation ----------------------------------------------
 
   describe "validate_acyclic/1" do
@@ -514,6 +529,264 @@ defmodule Arbiter.Workflows.ConductorTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
       assert Ash.get!(Graph, g.id).run_state == :drained
       assert ConductorSupervisor.whereis(g.id) == nil
+    end
+  end
+
+  # ---- C5: failure handling -----------------------------------------------
+
+  describe "failure pauses downstream branch" do
+    test "a failed member pauses only its downstream; independent branches continue",
+         %{ws: ws} do
+      # Graph: a → b (b depends on a), c (independent)
+      a = issue(ws)
+      b = issue(ws)
+      c = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      add_member(g, c)
+      dep(b, a, :depends_on)
+
+      pid = kickoff(g, max_concurrent: 10)
+
+      # Initial drain dispatches a and c (b is blocked by a).
+      dispatched_ids =
+        for _ <- 1..2, do: (assert_receive({:dispatched, id, _}); id)
+
+      assert MapSet.new(dispatched_ids) == MapSet.new([a.id, c.id])
+      refute_receive {:dispatched, _, _}, 50
+
+      # Simulate a's worker failing.
+      simulate_failure(a, ws)
+
+      snap = Conductor.state(pid)
+      assert MapSet.member?(snap.failed_ids, a.id)
+      assert MapSet.member?(snap.paused_ids, b.id)
+      refute MapSet.member?(snap.paused_ids, c.id)
+
+      # Closing c triggers a drain — b must NOT be dispatched (paused).
+      close(c)
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "state snapshot includes failed_ids and paused_ids", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      dep(b, a, :depends_on)
+
+      pid = kickoff(g)
+
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      simulate_failure(a, ws)
+
+      snap = Conductor.state(pid)
+      assert MapSet.member?(snap.failed_ids, a.id)
+      assert MapSet.member?(snap.paused_ids, b.id)
+    end
+
+    test "transitively downstream nodes are all paused", %{ws: ws} do
+      # a → b → c (linear chain)
+      a = issue(ws)
+      b = issue(ws)
+      c = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      add_member(g, c)
+      dep(b, a, :depends_on)
+      dep(c, b, :depends_on)
+
+      pid = kickoff(g)
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      simulate_failure(a, ws)
+
+      snap = Conductor.state(pid)
+      assert MapSet.member?(snap.failed_ids, a.id)
+      assert MapSet.member?(snap.paused_ids, b.id)
+      assert MapSet.member?(snap.paused_ids, c.id)
+    end
+
+    test "graph stays running (not drained) while failed members remain", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g)
+      assert_receive {:dispatched, _dispatched_id, _}
+
+      simulate_failure(a, ws)
+
+      # Graph should still be :running, not :drained.
+      assert Ash.get!(Graph, g.id).run_state == :running
+    end
+  end
+
+  # ---- C5: Admiral inbox escalation ----------------------------------------
+
+  describe "Admiral inbox escalation on failure" do
+    test "a failed member posts an :escalation to the Admiral inbox", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      dep(b, a, :depends_on)
+
+      kickoff(g)
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      # Ensure inbox is empty before failure.
+      assert admiral_inbox(ws) == []
+
+      simulate_failure(a, ws)
+
+      escalations = admiral_inbox(ws)
+      assert length(escalations) >= 1
+
+      escalation = Enum.find(escalations, &(&1.directive_ref == a.id))
+      assert escalation != nil
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "admiral"
+      assert escalation.directive_ref == a.id
+      # The body should mention how to resume.
+      assert String.contains?(escalation.body, "queue resume")
+    end
+
+    test "escalation mentions paused downstream tasks", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      dep(b, a, :depends_on)
+
+      kickoff(g)
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      simulate_failure(a, ws)
+
+      [escalation | _] = admiral_inbox(ws)
+      assert String.contains?(escalation.body, b.id)
+    end
+  end
+
+  # ---- C5: resume ----------------------------------------------------------
+
+  describe "resume continues the drain" do
+    test "resume/2 re-dispatches the failed task and unpauses downstream", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      dep(b, a, :depends_on)
+
+      pid = kickoff(g)
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      simulate_failure(a, ws)
+      snap = Conductor.state(pid)
+      assert MapSet.member?(snap.failed_ids, a.id)
+      assert MapSet.member?(snap.paused_ids, b.id)
+
+      # Resume clears the failed state and re-dispatches a.
+      assert :ok = Conductor.resume(pid, a.id)
+
+      assert_receive {:dispatched, redispatched_id, _}
+      assert redispatched_id == a.id
+
+      snap2 = Conductor.state(pid)
+      refute MapSet.member?(snap2.failed_ids, a.id)
+      refute MapSet.member?(snap2.paused_ids, b.id)
+    end
+
+    test "after resume, closing the re-dispatched task unblocks downstream", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      dep(b, a, :depends_on)
+
+      pid = kickoff(g)
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      simulate_failure(a, ws)
+      :ok = Conductor.resume(pid, a.id)
+
+      # Consume the re-dispatch of a.
+      assert_receive {:dispatched, redispatched_id, _}
+      assert redispatched_id == a.id
+
+      # Close a — b should now become ready and be dispatched.
+      close(a)
+      assert_receive {:dispatched, b_dispatched_id, _}
+      assert b_dispatched_id == b.id
+    end
+
+    test "resume returns :not_failed for a task that has not failed", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      pid = kickoff(g)
+      assert_receive {:dispatched, _, _}
+
+      assert {:error, :not_failed} = Conductor.resume(pid, a.id)
+    end
+
+    test "resume returns :not_member for a task outside the graph", %{ws: ws} do
+      a = issue(ws)
+      outsider = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      pid = kickoff(g)
+      assert_receive {:dispatched, _, _}
+
+      assert {:error, :not_member} = Conductor.resume(pid, outsider.id)
+    end
+
+    test "resume_task/1 finds the conductor automatically", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+      dep(b, a, :depends_on)
+
+      kickoff(g)
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+
+      simulate_failure(a, ws)
+
+      assert :ok = Conductor.resume_task(a.id)
+      assert_receive {:dispatched, redispatched_id, _}
+      assert redispatched_id == a.id
+    end
+
+    test "resume_task/1 returns :not_found when no conductor has the task failed", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g)
+      assert_receive {:dispatched, _, _}
+
+      # a has not failed — not_found because no conductor has it in failed_ids.
+      assert {:error, :not_found} = Conductor.resume_task(a.id)
     end
   end
 end

@@ -60,6 +60,8 @@ defmodule ArbiterCli.Main do
       arb usage events    [--task <task-id>] [--workspace <id>] [--step work|review]
                                   [--since ...] [--limit N]
 
+      arb queue resume    <task-id>
+
       arb quota           [--workspace <id|name>] [--json]
 
       arb install cli     [--json]
@@ -211,6 +213,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("workspace", args), do: ArbiterCli.Cmd.Workspace.run(args)
   defp dispatch_known("message", args), do: ArbiterCli.Cmd.Message.run(args)
   defp dispatch_known("usage", args), do: ArbiterCli.Cmd.Usage.run(args)
+  defp dispatch_known("queue", args), do: ArbiterCli.Cmd.Queue.run(args)
   defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
