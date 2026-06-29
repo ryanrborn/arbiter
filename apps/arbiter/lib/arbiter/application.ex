@@ -5,6 +5,7 @@ defmodule Arbiter.Application do
 
   use Application
 
+  alias Arbiter.Workflows.ConductorReconciler
   alias Arbiter.Workflows.MergeQueueSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
 
@@ -89,6 +90,10 @@ defmodule Arbiter.Application do
   #   * reconcile_open_prs: find :in_progress tasks with a pr_ref but no live
   #     worker — the server was killed between `arb done` and the Watchdog being
   #     established. Escalates each to Admiral. bd-crqku8.
+  #   * conductor_reconcile: restart a Conductor for each graph whose run_state
+  #     is :running but has no live Conductor — crash-safe boot recovery (C6,
+  #     bd-81iaxo). Runs after the worker-run reconcile sweep so orphaned runs
+  #     are already marked :failed before the drain re-reads member statuses.
   #   * merge_queue: eagerly start one MergeQueue per existing workspace once the
   #     tree is up, so a cold boot misses no `:worker_done` events.
   #
@@ -111,6 +116,15 @@ defmodule Arbiter.Application do
            Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
          end},
         id: :reconcile_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task,
+         fn ->
+           primary? = Arbiter.SingleInstance.primary?()
+           ConductorReconciler.reconcile_running_graphs(primary?: primary?)
+         end},
+        id: :conductor_reconcile_boot_task,
         restart: :temporary
       ),
       Supervisor.child_spec(
