@@ -19,8 +19,19 @@ defmodule Arbiter.Tasks.Dependency do
     `{child_closed, child_total}` progress over its `:parent_of` children and,
     when its `auto_close` flag is set, closes once they are all done. See
     `Arbiter.Tasks.Issue.Calcs` and `Arbiter.Tasks.Issue.maybe_auto_close/1`.
+  * `:conflicts_with` — mutual-exclusion edge. Expresses "do not run these two
+    issues concurrently". **Symmetric**: A conflicts_with B implies B
+    conflicts_with A (both directions carry the same meaning). **Non-gating**:
+    it does NOT affect `Issue.ready/0` — a conflicting peer being open does not
+    prevent an issue from becoming ready. The Conductor (C3) consumes this edge
+    at dispatch time to avoid co-dispatching two conflicting directives.
 
-  Only `:blocks` and `:depends_on` gate readiness; the others are informational.
+  ## Gating vs non-gating edges
+
+  Only `:blocks` and `:depends_on` gate readiness (i.e. appear in
+  `Issue.ready/0`). All other edge types — `:relates_to`, `:discovered_from`,
+  `:parent_of`, and `:conflicts_with` — are non-gating: they carry semantic
+  meaning but do not prevent an issue from being picked up.
 
   ## Constraints
 
@@ -44,7 +55,7 @@ defmodule Arbiter.Tasks.Dependency do
     domain: Arbiter.Tasks,
     data_layer: AshSqlite.DataLayer
 
-  @types ~w(blocks depends_on relates_to discovered_from parent_of)a
+  @types ~w(blocks depends_on relates_to discovered_from parent_of conflicts_with)a
 
   sqlite do
     table "dependencies"
@@ -95,7 +106,9 @@ defmodule Arbiter.Tasks.Dependency do
 
       description """
       Edge type. Only `:blocks` and `:depends_on` gate readiness; the rest are
-      informational. See module doc for full semantics.
+      non-gating. `:conflicts_with` is symmetric mutual-exclusion (consumed by
+      the Conductor at dispatch time, not at readiness evaluation). See module
+      doc for full semantics.
       """
     end
 
