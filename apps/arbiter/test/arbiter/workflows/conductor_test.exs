@@ -290,14 +290,15 @@ defmodule Arbiter.Workflows.ConductorTest do
     end
   end
 
-  # ---- fixed max_concurrent cap --------------------------------------------
+  # ---- effective cap (workspace × system × quota) -------------------------
 
-  describe "max_concurrent cap" do
-    test "dispatches no more than max_concurrent in a pass", %{ws: ws} do
+  describe "effective concurrency cap" do
+    test "dispatches no more than workspace_max_concurrent in a pass", %{ws: ws} do
       issues = for _ <- 1..3, do: issue(ws)
       g = graph(ws)
       Enum.each(issues, &add_member(g, &1))
 
+      # :max_concurrent is a backwards-compat alias for :workspace_max_concurrent.
       kickoff(g, max_concurrent: 2)
 
       assert_receive {:dispatched, id1, _}
@@ -307,6 +308,189 @@ defmodule Arbiter.Workflows.ConductorTest do
       ids = MapSet.new([id1, id2])
       assert MapSet.size(ids) == 2
       assert MapSet.subset?(ids, MapSet.new(Enum.map(issues, & &1.id)))
+    end
+
+    test "system_max_concurrent caps when smaller than workspace max", %{ws: ws} do
+      issues = for _ <- 1..4, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      # workspace allows 4, but system allows only 2 → effective cap = 2
+      kickoff(g, workspace_max_concurrent: 4, system_max_concurrent: 2)
+
+      assert_receive {:dispatched, _id1, _}
+      assert_receive {:dispatched, _id2, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "workspace_max_concurrent caps when smaller than system max", %{ws: ws} do
+      issues = for _ <- 1..4, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      # system allows 10, workspace allows only 1 → effective cap = 1
+      kickoff(g, workspace_max_concurrent: 1, system_max_concurrent: 10)
+
+      assert_receive {:dispatched, _id, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "workspace config max_concurrent is read at init", %{ws: ws} do
+      # Set max_concurrent in the workspace config JSON blob.
+      {:ok, ws} =
+        Ash.update(ws, %{config: Map.put(ws.config, "conductor", %{"max_concurrent" => 1})})
+
+      issues = for _ <- 1..3, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      # No explicit opt — resolved from workspace config (1), system max = 16
+      kickoff(g)
+
+      assert_receive {:dispatched, _id, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+  end
+
+  # ---- quota gate ----------------------------------------------------------
+
+  describe "quota gate" do
+    # A gate that always holds — used to assert no dispatch happens.
+    defmodule HoldGate do
+      @behaviour Arbiter.Workflows.QuotaGate
+      @impl true
+      def quota_headroom(_workspace_id), do: 0
+    end
+
+    # A gate that returns a fixed partial headroom — used to assert the min
+    # formula correctly limits slots when quota < workspace cap.
+    defmodule PartialGate do
+      @behaviour Arbiter.Workflows.QuotaGate
+      @impl true
+      def quota_headroom(_workspace_id), do: 1
+    end
+
+    # A gate that always allows — baseline for "quota imposes no restriction".
+    defmodule UnlimitedGate do
+      @behaviour Arbiter.Workflows.QuotaGate
+      @impl true
+      def quota_headroom(_workspace_id), do: :unlimited
+    end
+
+    test "quota hold (headroom = 0) prevents all dispatch", %{ws: ws} do
+      a = issue(ws)
+      b = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+      add_member(g, b)
+
+      kickoff(g, quota_gate: HoldGate, workspace_max_concurrent: 5)
+
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "quota hold does not transition graph to :drained", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g, quota_gate: HoldGate)
+
+      refute_receive {:dispatched, _, _}, 100
+      assert Ash.get!(Graph, g.id).run_state == :running
+    end
+
+    test "partial headroom caps dispatch below the workspace max", %{ws: ws} do
+      issues = for _ <- 1..3, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      # workspace_max = 3, quota headroom = 1 → effective cap = min(3, 1) = 1
+      kickoff(g, quota_gate: PartialGate, workspace_max_concurrent: 3)
+
+      assert_receive {:dispatched, _id, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "unlimited quota gate imposes no extra restriction", %{ws: ws} do
+      issues = for _ <- 1..3, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      kickoff(g, quota_gate: UnlimitedGate, workspace_max_concurrent: 3)
+
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      assert_receive {:dispatched, _, _}
+      refute_receive {:dispatched, _, _}, 50
+    end
+
+    test "Default gate allows dispatch when no quota snapshot exists", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      # No Quota row for this workspace → Default returns :unlimited → dispatch proceeds
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+    end
+
+    test "Default gate holds when status_5h is not allowed", %{ws: ws} do
+      {:ok, _quota} =
+        Ash.create(Arbiter.Quota.AnthropicQuota, %{
+          workspace_id: ws.id,
+          utilization_5h: 0.50,
+          status_5h: "restricted",
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "Default gate holds when utilization_5h exceeds ceiling", %{ws: ws} do
+      {:ok, _quota} =
+        Ash.create(Arbiter.Quota.AnthropicQuota, %{
+          workspace_id: ws.id,
+          utilization_5h: 0.90,
+          status_5h: "allowed",
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      # Default ceiling is 0.85; 0.90 > 0.85 → hold
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "Default gate allows dispatch when utilization_5h is below ceiling", %{ws: ws} do
+      {:ok, _quota} =
+        Ash.create(Arbiter.Quota.AnthropicQuota, %{
+          workspace_id: ws.id,
+          utilization_5h: 0.70,
+          status_5h: "allowed",
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
     end
   end
 
