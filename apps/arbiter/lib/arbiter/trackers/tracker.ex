@@ -178,6 +178,45 @@ defmodule Arbiter.Trackers.Tracker do
   @callback extract_description(map()) :: String.t()
 
   @doc """
+  Extracts the Arbiter priority (0..4, where 0 = P0 / highest) from a raw
+  issue map returned by `fetch/1`.
+
+  Returns `{:ok, priority}` on a successful mapping, or `nil` when the
+  tracker has no priority signal, the value is unmapped, or it represents an
+  explicit "no priority" sentinel (e.g. Linear's `priority: 0`). Returning
+  `nil` lets the schema default (P2) take effect.
+
+  **Scale direction**: 0 = highest priority, 4 = lowest. Do NOT share the
+  mapping logic with `extract_difficulty/1` — the two scales run in opposite
+  directions.
+
+  Optional — adapters without a priority signal simply don't implement it,
+  and `Claim.create_task/4` skips the field so the schema default holds.
+  """
+  @callback extract_priority(map()) :: {:ok, 0..4} | nil
+
+  @doc """
+  Extracts the Arbiter difficulty (0..4, where 0 = D0 / trivial) from a raw
+  issue map returned by `fetch/1`, derived from the tracker's
+  estimate/story-points field via configurable buckets.
+
+  Returns `{:ok, difficulty}` when a usable estimate is present and the
+  difficulty feature is configured; returns `nil` when unavailable, not
+  configured, or the estimate is absent. Returning `nil` preserves the
+  schema's nil difficulty (routing treats nil as D2).
+
+  **Scale direction**: 0 = easiest, 4 = hardest. Higher story-point values
+  map to higher difficulty numbers — opposite of priority. Do NOT share the
+  mapping logic with `extract_priority/1`.
+
+  Best-effort and config-gated — enabled only when a workspace explicitly
+  configures the estimate field and/or bucketing. Off by default.
+
+  Optional — adapters without an estimate signal simply don't implement it.
+  """
+  @callback extract_difficulty(map()) :: {:ok, 0..4} | nil
+
+  @doc """
   Attach a remote link (e.g. the implementing PR/MR) to the tracked item.
 
   `title` is the human label shown on the ticket; `url` is the link target.
@@ -269,5 +308,7 @@ defmodule Arbiter.Trackers.Tracker do
                       check_prior_claim: 1,
                       signal_claim: 3,
                       gating_fields: 2,
-                      search_by_title: 1
+                      search_by_title: 1,
+                      extract_priority: 1,
+                      extract_difficulty: 1
 end

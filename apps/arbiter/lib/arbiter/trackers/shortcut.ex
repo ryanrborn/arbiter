@@ -388,6 +388,26 @@ defmodule Arbiter.Trackers.Shortcut do
   def extract_description(%{"description" => desc}) when is_binary(desc), do: desc
   def extract_description(_), do: ""
 
+  # Shortcut has no native priority field in its standard schema. Returns nil
+  # so the claim path preserves the schema default (P2). Workspaces that
+  # encode priority via a custom field or label can override this behaviour by
+  # implementing a custom adapter — the best-effort documented limitation.
+  @impl true
+  def extract_priority(_), do: nil
+
+  # Shortcut stories expose an `estimate` integer when story-point estimation
+  # is enabled for the workflow. Difficulty extraction is off by default; it
+  # activates when the workspace sets `difficulty.buckets` in the tracker config.
+  @impl true
+  def extract_difficulty(raw_issue) do
+    with {:ok, %{estimate_buckets: buckets}} when not is_nil(buckets) <- Config.resolve(),
+         pts when is_number(pts) <- Map.get(raw_issue, "estimate") do
+      {:ok, points_to_difficulty(buckets, pts)}
+    else
+      _ -> nil
+    end
+  end
+
   # ---- Public helpers ------------------------------------------------------
 
   @doc """
@@ -702,6 +722,13 @@ defmodule Arbiter.Trackers.Shortcut do
       [plug: {Req.Test, @stub_name}]
     else
       []
+    end
+  end
+
+  defp points_to_difficulty(buckets, pts) do
+    case Enum.find(buckets, fn {max, _} -> pts <= max end) do
+      {_, d} -> d
+      nil -> 4
     end
   end
 end

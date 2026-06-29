@@ -504,4 +504,77 @@ defmodule Arbiter.Trackers.LinearTest do
       assert {:error, %Error{kind: :validation_failed}} = Linear.create(%{description: "no title"})
     end
   end
+
+  # ---- extract_priority/1 ----------------------------------------------------
+
+  describe "extract_priority/1" do
+    test "Urgent (1) maps to P0 — 0 is the highest priority" do
+      assert {:ok, 0} = Linear.extract_priority(%{"priority" => 1})
+    end
+
+    test "High (2) maps to P1" do
+      assert {:ok, 1} = Linear.extract_priority(%{"priority" => 2})
+    end
+
+    test "Medium (3) maps to P2" do
+      assert {:ok, 2} = Linear.extract_priority(%{"priority" => 3})
+    end
+
+    test "Low (4) maps to P3" do
+      assert {:ok, 3} = Linear.extract_priority(%{"priority" => 4})
+    end
+
+    test "None (0) returns nil — not P0; Linear has no Low equivalent so 0 means unset" do
+      assert nil == Linear.extract_priority(%{"priority" => 0})
+    end
+
+    test "missing priority key returns nil" do
+      assert nil == Linear.extract_priority(%{})
+    end
+  end
+
+  # ---- extract_difficulty/1 --------------------------------------------------
+
+  describe "extract_difficulty/1" do
+    test "returns nil when no estimate_buckets configured" do
+      # Linear difficulty is opt-in; no config means nil
+      Config.put_active(%{"credentials_ref" => "test-token"})
+
+      try do
+        assert nil == Linear.extract_difficulty(%{"estimate" => 5})
+      after
+        Config.clear()
+      end
+    end
+
+    test "maps estimate points to difficulty buckets — 0 is trivial, 4 is extreme" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "difficulty" => %{"buckets" => [[1, 0], [3, 1], [5, 2], [8, 3]]}
+      })
+
+      try do
+        assert {:ok, 0} = Linear.extract_difficulty(%{"estimate" => 1})
+        assert {:ok, 1} = Linear.extract_difficulty(%{"estimate" => 3})
+        assert {:ok, 2} = Linear.extract_difficulty(%{"estimate" => 5})
+        assert {:ok, 3} = Linear.extract_difficulty(%{"estimate" => 8})
+        assert {:ok, 4} = Linear.extract_difficulty(%{"estimate" => 13})
+      after
+        Config.clear()
+      end
+    end
+
+    test "returns nil when estimate field is absent" do
+      Config.put_active(%{
+        "credentials_ref" => "test-token",
+        "difficulty" => %{"buckets" => [[1, 0], [3, 1], [5, 2], [8, 3]]}
+      })
+
+      try do
+        assert nil == Linear.extract_difficulty(%{})
+      after
+        Config.clear()
+      end
+    end
+  end
 end

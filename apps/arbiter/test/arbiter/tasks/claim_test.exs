@@ -407,6 +407,15 @@ defmodule Arbiter.Tasks.ClaimTest do
 
           {"GET", "/rest/api/3/issue/TEST-43"} ->
             Req.Test.json(conn, jira_issue_payload())
+
+          {"GET", "/rest/api/3/issue/TEST-43/comment"} ->
+            Req.Test.json(conn, %{"comments" => []})
+
+          {"POST", "/rest/api/3/issue/TEST-43/comment"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/rest/api/3/issue/TEST-43/assignee"} ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
         end
       end)
 
@@ -446,6 +455,10 @@ defmodule Arbiter.Tasks.ClaimTest do
         case {conn.method, conn.request_path} do
           {"GET", "/rest/api/3/myself"} -> Req.Test.json(conn, %{"accountId" => @jira_account_id})
           {"GET", _} -> Req.Test.json(conn, jira_issue_payload())
+          {"POST", "/rest/api/3/issue/TEST-43/comment"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+          {"PUT", "/rest/api/3/issue/TEST-43/assignee"} ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
         end
       end)
 
@@ -580,6 +593,15 @@ defmodule Arbiter.Tasks.ClaimTest do
 
           {"GET", "/rest/api/3/issue/TEST-43"} ->
             Req.Test.json(conn, jira_issue_payload())
+
+          {"GET", "/rest/api/3/issue/TEST-43/comment"} ->
+            Req.Test.json(conn, %{"comments" => []})
+
+          {"POST", "/rest/api/3/issue/TEST-43/comment"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/rest/api/3/issue/TEST-43/assignee"} ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
         end
       end)
 
@@ -590,6 +612,143 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert [{:created, task}] = results
       assert task.tracker_type == :jira
       assert task.tracker_ref == "TEST-43"
+    end
+  end
+
+  describe "claim/3 — priority and difficulty wiring" do
+    test "GitHub: priority label populates task.priority; 0 is the highest priority",
+         %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(%{"labels" => [%{"name" => "priority: 0"}]}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.priority == 0
+    end
+
+    test "GitHub: no priority label preserves schema default (priority 2)", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload(%{"labels" => [%{"name" => "bug"}]}))
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.priority == 2
+    end
+
+    test "GitHub: difficulty label populates task.difficulty; 0 is trivial", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(
+              conn,
+              issue_payload(%{"labels" => [%{"name" => "priority: 1"}, %{"name" => "difficulty: 0"}]})
+            )
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert task.priority == 1
+      assert task.difficulty == 0
+    end
+
+    test "GitHub: no difficulty label leaves task.difficulty nil", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
+            Req.Test.json(conn, issue_payload())
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            Req.Test.json(conn, [])
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/comments"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"POST", "/repos/ryanrborn/arbiter/issues/43/assignees"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "43")
+      assert is_nil(task.difficulty)
+    end
+
+    test "Jira: Highest priority maps to P0 — priority 0 is highest", %{jira_ws: ws} do
+      payload =
+        jira_issue_payload(%{
+          "fields" => %{
+            "summary" => "Wire up the thing",
+            "assignee" => %{"accountId" => @jira_account_id},
+            "status" => %{"statusCategory" => %{"key" => "new"}},
+            "priority" => %{"name" => "Highest"}
+          }
+        })
+
+      stub_jira(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", "/rest/api/3/issue/TEST-43"} ->
+            Req.Test.json(conn, payload)
+
+          {"GET", "/rest/api/3/issue/TEST-43/comment"} ->
+            Req.Test.json(conn, %{"comments" => []})
+
+          {"POST", "/rest/api/3/issue/TEST-43/comment"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
+          {"PUT", "/rest/api/3/issue/TEST-43/assignee"} ->
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, :created, task} = Claim.claim(ws, "TEST-43")
+      assert task.priority == 0
     end
   end
 
