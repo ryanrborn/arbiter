@@ -83,12 +83,15 @@ defmodule Arbiter.Mergers.Merger do
     * `:number` — the MR/PR number.
     * `:title` — the MR/PR title.
     * `:url` — a human-clickable URL for the MR/PR.
+    * `:author` — the forge login that opened the MR/PR (best-effort; may be
+      `nil` when the adapter can't resolve it).
   """
   @type open_mr :: %{
           required(:ref) => mr_ref(),
           required(:number) => pos_integer(),
           required(:title) => String.t(),
-          required(:url) => String.t()
+          required(:url) => String.t(),
+          optional(:author) => String.t() | nil
         }
 
   @typedoc """

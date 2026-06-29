@@ -381,7 +381,8 @@ defmodule Arbiter.Mergers.Github do
             ref: build_mr_ref(:embedded, owner, repo, number),
             number: number,
             title: pr["title"] || "",
-            url: pr["html_url"] || ""
+            url: pr["html_url"] || "",
+            author: get_in(pr, ["user", "login"])
           }
         end)
 
