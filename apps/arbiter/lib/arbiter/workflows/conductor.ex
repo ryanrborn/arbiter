@@ -8,12 +8,39 @@ defmodule Arbiter.Workflows.Conductor do
 
       effective_cap = min(workspace_max_concurrent, system_max_concurrent, quota_headroom)
 
-  C5 (this child) adds failure handling: when a member's worker fails, the
-  Conductor pauses that node's downstream branch and escalates to the Admiral
-  inbox. Independent branches keep running. The Admiral can resume via the
-  `queue_resume` MCP tool or `arb queue resume <task_id>`.
+  C5 adds failure handling: when a member's worker fails, the Conductor pauses
+  that node's downstream branch and escalates to the Admiral inbox. Independent
+  branches keep running. The Admiral can resume via the `queue_resume` MCP tool
+  or `arb queue resume <task_id>`.
 
-  Crash-safety / restart (C6) is a separate child.
+  ## Crash-safe boot recovery (C6)
+
+  All Conductor state is **derived from the DB** — graph scope (`GraphMember`),
+  gating/conflict edges (`Dependency`), and member statuses (`Issue`) — never
+  held only in memory. Nothing is lost when the node dies: the next boot
+  reconstructs the in-flight picture by reading those rows.
+
+  The boot entry point lives in `Arbiter.Workflows.ConductorReconciler`
+  (`reconcile_running_graphs/1`, wired in `Arbiter.Application`, mirroring the
+  `Workers.Reconciler` boot Task). For every graph still in `:running` it
+  re-spawns a supervised Conductor (idempotent via the Registry), whose `init`
+  rebuilds the member set from the DB and whose `:initial_drain` resumes the
+  drain exactly where the crash left off. The sweep is gated on
+  `Arbiter.SingleInstance.primary?/0`, so a second instance booting against the
+  same DB starts no Conductors and cannot double-dispatch the primary's work.
+
+  Two layers keep the resumed drain from re-dispatching work that was already in
+  flight or completed at crash time:
+
+    * **Status exclusion** — `Issue.ready/0` returns only `:open` issues, so a
+      member that was `:in_progress` (mid-run) or `:closed` (just-completed) at
+      crash time is never re-dispatched. Gated branches stay gated, so no ready
+      work is lost either.
+    * **Live-worker exclusion** — the drain additionally never dispatches a task
+      that already has a live worker registered under `Arbiter.Worker.Registry`
+      (belt-and-suspenders beyond the status check — closes the window where a
+      worker is alive but its `:in_progress` write hasn't yet landed; injectable
+      via `:worker_live?` for tests).
 
   ## Kickoff
 
@@ -90,6 +117,10 @@ defmodule Arbiter.Workflows.Conductor do
       `:arbiter, :conductor_dispatcher`, else `Arbiter.Worker.Dispatch`).
     * `:dispatch_depth` — recursion depth minted into dispatched workers'
       scopes (default `0`).
+    * `:worker_live?` — 1-arity fun `task_id -> boolean` deciding whether a task
+      already has a live worker (default checks `Arbiter.Worker.Registry`). A
+      task reported live is never dispatched — the C6 belt-and-suspenders against
+      re-dispatching work that survived (or partially survived) a restart.
   """
 
   use GenServer
@@ -120,6 +151,9 @@ defmodule Arbiter.Workflows.Conductor do
       :quota_gate,
       :dispatcher,
       :dispatch_depth,
+      # C6: liveness predicate `task_id -> boolean` — a task with a live worker
+      # is never (re-)dispatched. Injectable for tests.
+      :worker_live?,
       member_ids: MapSet.new(),
       # C5: members whose worker has failed
       failed_ids: MapSet.new(),
@@ -286,6 +320,7 @@ defmodule Arbiter.Workflows.Conductor do
       quota_gate: resolve_quota_gate(opts),
       dispatcher: Keyword.get(opts, :dispatcher, default_dispatcher()),
       dispatch_depth: Keyword.get(opts, :dispatch_depth, 0),
+      worker_live?: Keyword.get(opts, :worker_live?, &default_worker_live?/1),
       member_ids: MapSet.new(member_issue_ids(graph_id))
     }
 
@@ -507,6 +542,10 @@ defmodule Arbiter.Workflows.Conductor do
         |> Enum.filter(&MapSet.member?(member_set, &1.id))
         # C5: don't dispatch tasks whose branch is paused by a failed upstream
         |> Enum.reject(&MapSet.member?(state.paused_ids, &1.id))
+        # C6: never (re-)dispatch a task that already has a live worker — guards
+        # the boot window where a worker survived (or partially survived) a crash
+        # and a non-primary/duplicate boot.
+        |> Enum.reject(&worker_in_flight?(state, &1.id))
         |> Enum.sort_by(&{&1.priority, &1.id})
 
       conflicts = conflict_adjacency(member_ids)
@@ -718,6 +757,20 @@ defmodule Arbiter.Workflows.Conductor do
   defp default_dispatcher do
     Application.get_env(:arbiter, :conductor_dispatcher, Arbiter.Worker.Dispatch)
   end
+
+  # C6: a task is "in flight" if a worker GenServer is registered for it. On a
+  # fresh boot the registry is empty (so recovery dispatches freely); mid-life,
+  # or on a duplicate boot racing the primary, this prevents double-dispatch of
+  # a task whose worker is already alive.
+  defp worker_in_flight?(%State{worker_live?: live?}, task_id) when is_function(live?, 1) do
+    live?.(task_id)
+  rescue
+    e ->
+      Logger.warning("Conductor: worker_live? check raised: #{Exception.message(e)}; assuming idle")
+      false
+  end
+
+  defp default_worker_live?(task_id), do: not is_nil(Arbiter.Worker.whereis(task_id))
 
   # ---- C5: failure handling -----------------------------------------------
 
