@@ -29,6 +29,26 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   Poll interval is read from `:arbiter, :pr_patrol_interval_ms` (default 60s).
 
+  ## Registry-key scheme and 1↔N transitions
+
+  The registry key scheme depends on how many repos resolve for a workspace at
+  call time. If a workspace's resolvable-repo count crosses 1↔N between
+  restarts (a rig added or removed, or a previously-unreachable remote starts
+  resolving), `start_patrol/2` automatically stops any stale patrol registered
+  under the old scheme before starting new ones under the new scheme. This
+  reconciliation prevents a ghost patrol from running under the wrong key after
+  the repo count changes.
+
+  ## Multi-repo workspace create-time deferral
+
+  When a new multi-repo workspace is created, the `StartPRPatrol` after_action
+  hook calls `start_patrol/2` immediately. If the workspace's rigs are not yet
+  checked out at that point, `repos_from_rig_paths/1` returns `[]` and the call
+  returns `:skip` — the patrol is deferred to the next application boot via
+  `start_for_existing_workspaces/0`. This is intentional: a freshly created
+  multi-repo workspace has no rigs on disk yet, so there is nothing to patrol.
+  The boot-time enumeration catches it once the rigs are present.
+
   ## Observable signals
 
   A `Logger.info` line is emitted for every patrol started or skipped, so
@@ -95,6 +115,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
         :skip
 
       true ->
+        reconcile_stale_registrations(workspace.id, repos)
+
         results =
           Enum.map(repos, fn repo ->
             registry_key = if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
@@ -124,8 +146,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   Works for single-repo workspaces (registered under their `workspace_id`).
   For multi-repo workspaces, each patrol is registered under
-  `"workspace_id:owner/repo"` — use `Registry.select/2` on
-  `Arbiter.Workflows.PRPatrolRegistry` to enumerate all patrols for a workspace.
+  `"workspace_id:owner/repo"` — use `whereis_all/1` to enumerate all patrols
+  for a workspace regardless of naming scheme.
   """
   @spec whereis(String.t()) :: pid() | nil
   def whereis(workspace_id) when is_binary(workspace_id) do
@@ -133,6 +155,21 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
       [{pid, _}] -> pid
       _ -> nil
     end
+  end
+
+  @doc """
+  Return all `{registry_key, pid}` pairs for a workspace, covering both
+  single-repo patrols (registered under `workspace_id`) and multi-repo patrols
+  (registered under `"workspace_id:owner/repo"`). Returns an empty list when no
+  patrols are running for the workspace.
+  """
+  @spec whereis_all(String.t()) :: [{String.t(), pid()}]
+  def whereis_all(workspace_id) when is_binary(workspace_id) do
+    @registry
+    |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.filter(fn {key, _pid} ->
+      key == workspace_id or String.starts_with?(key, workspace_id <> ":")
+    end)
   end
 
   @doc false
@@ -187,6 +224,40 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
       Logger.warning("PRPatrolSupervisor: enumeration crashed at boot: #{Exception.message(e)}")
 
       :ok
+  end
+
+  # Stop any patrols registered under the opposite naming scheme for this
+  # workspace. Called before starting new patrols so that a 1→N or N→1
+  # transition in resolvable-repo count doesn't leave a ghost patrol running
+  # under the old registry key.
+  defp reconcile_stale_registrations(workspace_id, repos) do
+    if length(repos) == 1 do
+      # Moving to (or staying at) single-repo: terminate any composite-keyed patrols
+      @registry
+      |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+      |> Enum.each(fn {key, pid} ->
+        if String.starts_with?(key, workspace_id <> ":") do
+          Logger.info(
+            "PRPatrolSupervisor: stopping stale patrol #{key} (registry scheme changed to single-repo)"
+          )
+
+          DynamicSupervisor.terminate_child(__MODULE__, pid)
+        end
+      end)
+    else
+      # Moving to (or staying at) multi-repo: terminate any bare-key patrol
+      case Registry.lookup(@registry, workspace_id) do
+        [{pid, _}] ->
+          Logger.info(
+            "PRPatrolSupervisor: stopping stale patrol #{workspace_id} (registry scheme changed to multi-repo)"
+          )
+
+          DynamicSupervisor.terminate_child(__MODULE__, pid)
+
+        _ ->
+          :ok
+      end
+    end
   end
 
   # Resolve the merge adapter for a workspace, or nil on unknown strategy.
