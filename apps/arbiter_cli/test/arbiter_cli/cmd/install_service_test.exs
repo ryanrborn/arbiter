@@ -87,7 +87,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       # Guidance: unit path + how to check status/logs + linger.
       assert out =~ unit
       assert out =~ "systemctl --user status arbiter.service"
-      assert out =~ "tail -f ~/.arbiter/log/arbiter.log"
+      assert out =~ "tail -f #{Path.join([arbiter_home, "log", "arbiter.log"])}"
       assert out =~ "linger"
     end
 
