@@ -227,6 +227,39 @@ defmodule Arbiter.Worker.WorktreeTest do
       File.write!(Path.join(path, "lib_real.ex"), "defmodule X do end\n")
       assert {:ok, true} = Worktree.has_uncommitted?(path)
     end
+
+    # Regression for bd-3gpeoz: `mix test` can compile `.beam` files into the
+    # worktree root (e.g. `Elixir.Arbiter.Worker.Worktree.beam`). These are
+    # build artifacts and are covered by `*.beam` in `.gitignore`. A worktree
+    # with committed work + ONLY a gitignored `.beam` artifact must read as clean.
+    test "ignores gitignored .beam build artifacts at the worktree root", %{repo: repo} do
+      # Add *.beam to .gitignore in the source repo and commit it (mirrors the
+      # real repo where `.gitignore` includes `*.beam`).
+      File.write!(Path.join(repo, ".gitignore"), "*.beam\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", ".gitignore"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "add *.beam to gitignore"])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      {:ok, path} = Worktree.create(repo, "feature/beam-artifact", "main")
+
+      # Make a commit to be ahead of base (matches the real scenario where the
+      # worker pushed their implementation and then mix test compiled artifacts).
+      File.write!(Path.join(path, "work.ex"), "defmodule Work do end\n")
+      {_, 0} = System.cmd("git", ["-C", path, "add", "work.ex"])
+      {_, 0} = System.cmd("git", ["-C", path, "commit", "-q", "-m", "add work"])
+
+      # Worktree is clean before adding artifacts.
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      # A leaked .beam file (as produced by `mix test`) must be disregarded
+      # because it is covered by `*.beam` in `.gitignore`.
+      File.write!(Path.join(path, "Elixir.Arbiter.Worker.Worktree.beam"), <<>>)
+      assert {:ok, false} = Worktree.has_uncommitted?(path)
+
+      # A genuine untracked source file still counts as dirty.
+      File.write!(Path.join(path, "lib_real.ex"), "defmodule X do end\n")
+      assert {:ok, true} = Worktree.has_uncommitted?(path)
+    end
   end
 
   describe "cleanup/1" do
