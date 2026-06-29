@@ -553,7 +553,12 @@ defmodule Arbiter.Workflows.ConductorTest do
 
       # Initial drain dispatches a and c (b is blocked by a).
       dispatched_ids =
-        for _ <- 1..2, do: (assert_receive({:dispatched, id, _}); id)
+        for _ <- 1..2,
+            do:
+              (
+                assert_receive({:dispatched, id, _})
+                id
+              )
 
       assert MapSet.new(dispatched_ids) == MapSet.new([a.id, c.id])
       refute_receive {:dispatched, _, _}, 50
@@ -788,6 +793,40 @@ defmodule Arbiter.Workflows.ConductorTest do
       assert_receive {:dispatched, _, _}
 
       # a has not failed — not_found because no conductor has it in failed_ids.
+      assert {:error, :not_found} = Conductor.resume_task(a.id)
+    end
+
+    test "resume_task/1 skips a conductor that exits mid-scan", %{ws: ws} do
+      # A live, normal conductor that does NOT hold the task as failed.
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g)
+      assert_receive {:dispatched, _, _}
+
+      # A "ghost" conductor registered in the same registry that exits when its
+      # state is queried — simulating a conductor that terminates between
+      # `list_conductors/0`'s Registry snapshot and the `GenServer.call(:state)`.
+      test_pid = self()
+      ghost_key = "ghost-#{System.unique_integer([:positive])}"
+
+      spawn(fn ->
+        {:ok, _} = Registry.register(Arbiter.Workflows.ConductorRegistry, ghost_key, nil)
+        send(test_pid, :ghost_ready)
+
+        receive do
+          {:"$gen_call", _from, :state} -> exit(:boom)
+        after
+          5_000 -> :ok
+        end
+      end)
+
+      assert_receive :ghost_ready
+
+      # No conductor holds `a` as failed, so the scan must visit every
+      # conductor — including the ghost. The per-iteration `catch :exit` skips
+      # the dying conductor instead of letting the exit crash resume_task/1.
       assert {:error, :not_found} = Conductor.resume_task(a.id)
     end
   end
