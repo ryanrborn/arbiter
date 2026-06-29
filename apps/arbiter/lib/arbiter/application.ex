@@ -57,7 +57,12 @@ defmodule Arbiter.Application do
       {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
       MergeQueueSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
-      PRPatrolSupervisor
+      PRPatrolSupervisor,
+      # One Conductor per running Graph, started on demand by
+      # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
+      # Conductor once kicked off). The Registry keys them by graph_id.
+      {Registry, keys: :unique, name: Arbiter.Workflows.ConductorRegistry},
+      Arbiter.Workflows.ConductorSupervisor
     ] ++ boot_tasks(auto_start?)
   end
 
