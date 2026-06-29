@@ -221,6 +221,8 @@ defmodule Arbiter.Workflows.ConductorTest do
       assert dispatched_id == a.id
       # Operator-equivalent root dispatch depth.
       assert opts[:depth] == 0
+      # Must dispatch a real agent, not the dry bookkeeping path.
+      assert opts[:start_claude] == true
       assert Ash.get!(Graph, g.id).run_state == :running
     end
   end

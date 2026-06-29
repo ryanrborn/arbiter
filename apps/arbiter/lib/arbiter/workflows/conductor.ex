@@ -597,7 +597,7 @@ defmodule Arbiter.Workflows.Conductor do
 
       :error
     else
-      case safe_dispatch(state.dispatcher, task_id, depth: depth) do
+      case safe_dispatch(state.dispatcher, task_id, depth: depth, start_claude: true) do
         {:ok, _result} ->
           :ok
 
