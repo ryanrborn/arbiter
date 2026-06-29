@@ -789,4 +789,48 @@ defmodule Arbiter.Workflows.ConductorTest do
       assert {:error, :not_found} = Conductor.resume_task(a.id)
     end
   end
+
+  # ---- C6: live-worker exclusion (no double-dispatch across a restart) ------
+
+  describe "live-worker exclusion" do
+    test "a ready task with a live worker is NOT dispatched", %{ws: ws} do
+      # Simulates the boot/restart window where a worker is already alive for a
+      # task whose Issue is still :open — the drain must not re-dispatch it.
+      claimed = issue(ws)
+      free = issue(ws)
+      g = graph(ws)
+      add_member(g, claimed)
+      add_member(g, free)
+
+      # `claimed` is reported as having a live worker; `free` is idle.
+      kickoff(g, worker_live?: fn id -> id == claimed.id end)
+
+      # Only the un-claimed task is dispatched.
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == free.id
+      refute_receive {:dispatched, _, _}, 50
+    end
+
+    test "once the live worker clears, the task is dispatched on the next drain", %{ws: ws} do
+      # Flip liveness off after the first drain to prove the guard is dynamic and
+      # the previously-claimed task isn't lost — it dispatches once idle.
+      {:ok, agent} = Agent.start_link(fn -> true end)
+      on_exit(fn -> if Process.alive?(agent), do: Agent.stop(agent) end)
+
+      claimed = issue(ws)
+      g = graph(ws)
+      add_member(g, claimed)
+
+      pid = kickoff(g, worker_live?: fn _id -> Agent.get(agent, & &1) end)
+
+      # First drain: worker is "live" → nothing dispatched.
+      refute_receive {:dispatched, _, _}, 50
+
+      # Worker clears; a manual drain now dispatches the task.
+      Agent.update(agent, fn _ -> false end)
+      assert [dispatched_id] = Conductor.drain(pid)
+      assert dispatched_id == claimed.id
+      assert_receive {:dispatched, ^dispatched_id, _}
+    end
+  end
 end
