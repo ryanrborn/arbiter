@@ -534,9 +534,19 @@ defmodule ArbiterWeb.DashboardLive do
     paths_by_repo = collect_repo_paths(workspaces)
     workers_by_repo = group_workers_by_repo()
 
+    # Build alias => remote_key map so worker repos keyed by "owner/repo"
+    # (e.g. PRPatrol workers) can be matched back to their configured rig alias.
+    alias_to_remote =
+      Map.new(paths_by_repo, fn {alias, %{path: path}} ->
+        {alias, rig_remote_key(path)}
+      end)
+
+    remote_to_alias =
+      for {a, rk} <- alias_to_remote, rk != nil, into: %{}, do: {rk, a}
+
     rigs =
       paths_by_repo
-      |> Map.merge(repos_from_workers(workers_by_repo, paths_by_repo))
+      |> Map.merge(repos_from_workers(workers_by_repo, paths_by_repo, remote_to_alias))
       |> Enum.map(fn {name, entry} ->
         path = entry.path
 
@@ -546,11 +556,17 @@ defmodule ArbiterWeb.DashboardLive do
             p when is_binary(p) -> safe_worktree_count(p)
           end
 
+        remote_key = Map.get(alias_to_remote, name)
+
+        worker_count =
+          Map.get(workers_by_repo, name, 0) +
+            if(remote_key, do: Map.get(workers_by_repo, remote_key, 0), else: 0)
+
         %{
           name: name,
           path: path,
           source: entry.source,
-          workers: Map.get(workers_by_repo, name, 0),
+          workers: worker_count,
           worktrees: worktree_count
         }
       end)
@@ -603,11 +619,26 @@ defmodule ArbiterWeb.DashboardLive do
   # A worker can be running against a repo name that isn't in any
   # `repo_paths` config (default-repo "unknown", a typo, or an inherited
   # legacy value). Surface those as well so the operator can see them.
-  defp repos_from_workers(workers_by_repo, configured) do
+  #
+  # Workers whose repo is a full "owner/repo" slug (e.g. PRPatrol) are matched
+  # via remote_to_alias so they don't appear as "(unconfigured)" when the rig
+  # is configured under a short alias.
+  defp repos_from_workers(workers_by_repo, configured, remote_to_alias) do
     workers_by_repo
     |> Map.keys()
-    |> Enum.reject(&Map.has_key?(configured, &1))
+    |> Enum.reject(fn name ->
+      Map.has_key?(configured, name) or Map.has_key?(remote_to_alias, name)
+    end)
     |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)
+  end
+
+  defp rig_remote_key(nil), do: nil
+
+  defp rig_remote_key(path) when is_binary(path) do
+    case Arbiter.Mergers.Github.RepoResolver.from_remote(path) do
+      {:ok, {owner, repo}} -> "#{owner}/#{repo}"
+      _ -> nil
+    end
   end
 
   defp safe_worktree_count(path) do
