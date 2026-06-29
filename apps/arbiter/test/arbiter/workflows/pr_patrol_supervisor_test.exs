@@ -185,4 +185,112 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert PRPatrolSupervisor.whereis("ws-nope-#{System.unique_integer([:positive])}") == nil
     end
   end
+
+  describe "whereis_all/1" do
+    test "returns empty list for an unknown workspace" do
+      assert PRPatrolSupervisor.whereis_all("ws-nope-#{System.unique_integer([:positive])}") == []
+    end
+
+    test "returns the pid for a single-repo workspace" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wa-single-#{System.unique_integer([:positive])}",
+          prefix: "wa#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert {:ok, pid} = start(ws)
+      assert PRPatrolSupervisor.whereis_all(ws.id) == [{ws.id, pid}]
+    end
+
+    test "returns all pids for a multi-repo workspace" do
+      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "wa-multi-#{System.unique_integer([:positive])}",
+          prefix: "wm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "leo-technologies-llc"}
+            },
+            "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
+          }
+        })
+
+      assert {:ok, _} = start(ws)
+      pairs = PRPatrolSupervisor.whereis_all(ws.id)
+      assert length(pairs) == 2
+      keys = Enum.map(pairs, fn {k, _} -> k end) |> Enum.sort()
+
+      assert keys == Enum.sort([
+               "#{ws.id}:leo-technologies-llc/verus_server",
+               "#{ws.id}:leo-technologies-llc/verus_web"
+             ])
+    end
+  end
+
+  describe "start_patrol/2 — stale registration reconciliation" do
+    test "N→1: stops the old composite-keyed patrols when repo count drops to one" do
+      rig_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      rig_b = git_repo_with_origin("https://github.com/acme/beta.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "recon-n1-#{System.unique_integer([:positive])}",
+          prefix: "rn#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme"}},
+            "repo_paths" => %{"alpha" => rig_a, "beta" => rig_b}
+          }
+        })
+
+      # Start with two repos — registered under composite keys
+      assert {:ok, _} = start(ws)
+      assert length(keys_for_workspace(ws.id)) == 2
+
+      # Simulate dropping to one rig (rebuild workspace with single repo_paths entry)
+      single_repo_ws = %{ws | config: Map.put(ws.config, "repo_paths", %{"alpha" => rig_a})}
+
+      assert {:ok, _} = PRPatrolSupervisor.start_patrol(single_repo_ws, interval_ms: 600_000)
+
+      # After reconciliation, only the single bare-key patrol remains
+      assert keys_for_workspace(ws.id) == [ws.id]
+    end
+
+    test "1→N: stops the old bare-keyed patrol when repo count grows to more than one" do
+      rig_a = git_repo_with_origin("git@github.com:acme/alpha.git")
+      rig_b = git_repo_with_origin("https://github.com/acme/beta.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "recon-1n-#{System.unique_integer([:positive])}",
+          prefix: "ro#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "acme"}},
+            "repo_paths" => %{"alpha" => rig_a}
+          }
+        })
+
+      # Start with one repo — registered under bare key
+      assert {:ok, _} = start(ws)
+      assert keys_for_workspace(ws.id) == [ws.id]
+
+      # Simulate gaining a second rig
+      two_repo_ws = %{ws | config: Map.put(ws.config, "repo_paths", %{"alpha" => rig_a, "beta" => rig_b})}
+
+      assert {:ok, _} = PRPatrolSupervisor.start_patrol(two_repo_ws, interval_ms: 600_000)
+
+      # After reconciliation, bare key is gone; only composite keys remain
+      assert keys_for_workspace(ws.id) ==
+               Enum.sort(["#{ws.id}:acme/alpha", "#{ws.id}:acme/beta"])
+    end
+  end
 end
