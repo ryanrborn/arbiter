@@ -13,11 +13,17 @@ defmodule ArbiterCli.Version do
   @version_file Path.join([__DIR__, "../../../../VERSION"])
   @external_resource @version_file
 
-  @app_version (case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
-                       stderr_to_stdout: true
-                     ) do
-                  {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
-                  _ -> File.read!(@version_file) |> String.trim()
+  @app_version (case System.get_env("RELEASE_VERSION") do
+                  v when is_binary(v) and byte_size(v) > 0 ->
+                    v |> String.trim() |> String.trim_leading("v")
+
+                  _ ->
+                    case System.cmd("git", ["describe", "--tags", "--abbrev=0"],
+                           stderr_to_stdout: true
+                         ) do
+                      {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
+                      _ -> File.read!(@version_file) |> String.trim()
+                    end
                 end)
 
   # ── git-ref tracking (forces recompile on git pull) ──────────────────────
