@@ -146,17 +146,31 @@ defmodule Arbiter.Tasks.Claim do
   end
 
   defp create_task(workspace, type, ref, issue_map, adapter) do
-    attrs = %{
-      title: adapter.extract_title(issue_map),
-      description: adapter.extract_description(issue_map),
-      tracker_type: type,
-      tracker_ref: ref,
-      workspace_id: workspace.id
-    }
+    attrs =
+      %{
+        title: adapter.extract_title(issue_map),
+        description: adapter.extract_description(issue_map),
+        tracker_type: type,
+        tracker_ref: ref,
+        workspace_id: workspace.id
+      }
+      |> maybe_put_extracted(:priority, adapter, :extract_priority, issue_map)
+      |> maybe_put_extracted(:difficulty, adapter, :extract_difficulty, issue_map)
 
     case Ash.create(Issue, attrs) do
       {:ok, task} -> {:ok, :created, task}
       {:error, err} -> {:error, err}
+    end
+  end
+
+  defp maybe_put_extracted(attrs, field, adapter, callback, issue_map) do
+    if function_exported?(adapter, callback, 1) do
+      case apply(adapter, callback, [issue_map]) do
+        {:ok, value} -> Map.put(attrs, field, value)
+        nil -> attrs
+      end
+    else
+      attrs
     end
   end
 

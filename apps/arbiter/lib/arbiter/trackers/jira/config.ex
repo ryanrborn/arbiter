@@ -125,6 +125,22 @@ defmodule Arbiter.Trackers.Jira.Config do
     deployment_notes: "customfield_10185"
   }
 
+  # Priority name → Arbiter priority integer (0 = highest, 4 = lowest).
+  # Configurable via workspace `tracker.config.priority_map`. Jira's standard
+  # priority names; workspaces using custom names override them per-entry.
+  @default_priority_map %{
+    "Highest" => 0,
+    "High" => 1,
+    "Medium" => 2,
+    "Low" => 3,
+    "Lowest" => 4
+  }
+
+  # Default difficulty bucket thresholds: [{max_pts, difficulty}] sorted
+  # ascending. Used when `difficulty.field_id` is configured but no custom
+  # buckets are supplied. pts ≤ 1 → D0, ≤ 3 → D1, ≤ 5 → D2, ≤ 8 → D3, > 8 → D4.
+  @default_difficulty_buckets [{1, 0}, {3, 1}, {5, 2}, {8, 3}]
+
   @type transition_edge :: %{required(String.t()) => String.t()}
 
   @type config :: %{
@@ -134,7 +150,10 @@ defmodule Arbiter.Trackers.Jira.Config do
           token: String.t(),
           status_map: %{atom() => String.t()},
           transition_graph: %{String.t() => [transition_edge()]},
-          field_ids: %{atom() => String.t()}
+          field_ids: %{atom() => String.t()},
+          priority_map: %{String.t() => 0..4},
+          story_points_field: String.t() | nil,
+          difficulty_buckets: [{non_neg_integer(), 0..4}] | nil
         }
 
   @doc """
@@ -196,7 +215,10 @@ defmodule Arbiter.Trackers.Jira.Config do
          token: token,
          status_map: status_map(raw),
          transition_graph: transition_graph(raw),
-         field_ids: field_ids(raw)
+         field_ids: field_ids(raw),
+         priority_map: priority_map(raw),
+         story_points_field: story_points_field(raw),
+         difficulty_buckets: difficulty_buckets(raw)
        }}
     end
   end
@@ -320,4 +342,72 @@ defmodule Arbiter.Trackers.Jira.Config do
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v), do: v
   defp stringy(_), do: nil
+
+  # priority_map: workspace-configurable name → Arbiter priority integer.
+  # String keys (Jira priority names); workspace overrides win per-entry.
+  defp priority_map(raw) do
+    user = Map.get(raw, "priority_map") || %{}
+
+    base =
+      Enum.into(@default_priority_map, %{}, fn {name, default} ->
+        case Map.fetch(user, name) do
+          {:ok, v} when is_integer(v) and v >= 0 and v <= 4 -> {name, v}
+          _ -> {name, default}
+        end
+      end)
+
+    extras =
+      for {k, v} <- user,
+          is_binary(k),
+          is_integer(v) and v >= 0 and v <= 4,
+          not Map.has_key?(@default_priority_map, k),
+          into: %{} do
+        {k, v}
+      end
+
+    Map.merge(base, extras)
+  end
+
+  # story_points_field: Jira custom-field ID for story points (e.g.
+  # "customfield_10016"). Read from `difficulty.field_id` in config. When nil,
+  # difficulty extraction is disabled.
+  defp story_points_field(raw) do
+    get_in(raw, ["difficulty", "field_id"]) |> stringy()
+  end
+
+  # difficulty_buckets: [{max_pts, difficulty}] sorted ascending, or nil (off).
+  # When a workspace sets `difficulty.field_id` but omits `difficulty.buckets`,
+  # the default bucketing applies.
+  defp difficulty_buckets(raw) do
+    field_id = story_points_field(raw)
+
+    if is_nil(field_id) do
+      nil
+    else
+      case get_in(raw, ["difficulty", "buckets"]) do
+        buckets when is_list(buckets) and length(buckets) > 0 ->
+          parse_buckets(buckets) || @default_difficulty_buckets
+
+        _ ->
+          @default_difficulty_buckets
+      end
+    end
+  end
+
+  defp parse_buckets(buckets) do
+    parsed =
+      Enum.flat_map(buckets, fn
+        [max, diff]
+        when (is_integer(max) or is_float(max)) and is_integer(diff) and diff >= 0 and diff <= 4 ->
+          [{round(max), diff}]
+
+        _ ->
+          []
+      end)
+
+    case Enum.sort_by(parsed, fn {max, _} -> max end) do
+      [] -> nil
+      sorted -> sorted
+    end
+  end
 end

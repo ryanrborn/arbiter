@@ -427,6 +427,34 @@ defmodule Arbiter.Trackers.Jira do
 
   def extract_description(_), do: ""
 
+  @impl true
+  def extract_priority(%{"fields" => %{"priority" => %{"name" => name}}})
+      when is_binary(name) do
+    case Config.resolve() do
+      {:ok, %{priority_map: pmap}} ->
+        case Map.fetch(pmap, name) do
+          {:ok, p} -> {:ok, p}
+          :error -> nil
+        end
+
+      {:error, _} ->
+        nil
+    end
+  end
+
+  def extract_priority(_), do: nil
+
+  @impl true
+  def extract_difficulty(raw_issue) do
+    with {:ok, %{story_points_field: field_id, difficulty_buckets: buckets}}
+         when not is_nil(field_id) and not is_nil(buckets) <- Config.resolve(),
+         pts when is_number(pts) <- get_in(raw_issue, ["fields", field_id]) do
+      {:ok, points_to_difficulty(buckets, pts)}
+    else
+      _ -> nil
+    end
+  end
+
   # Jira v3 returns `description` as an ADF document (a map); legacy/v2
   # payloads or plain-text fields come through as a string. We flatten ADF
   # to plain text (block boundaries become blank lines) — good enough for
@@ -1035,4 +1063,14 @@ defmodule Arbiter.Trackers.Jira do
   defp normalize_title(title), do: title |> String.downcase() |> String.trim()
 
   defp issue_key?(s), do: Regex.match?(~r/^[A-Z][A-Z0-9_]*-\d+$/, s)
+
+  # Map story-points to a difficulty integer (0..4) using sorted bucket
+  # thresholds. Each {max_pts, difficulty} pair means: if pts <= max_pts,
+  # return that difficulty. Falls back to D4 when pts exceeds all thresholds.
+  defp points_to_difficulty(buckets, pts) do
+    case Enum.find(buckets, fn {max, _} -> pts <= max end) do
+      {_, d} -> d
+      nil -> 4
+    end
+  end
 end

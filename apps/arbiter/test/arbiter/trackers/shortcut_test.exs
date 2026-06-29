@@ -858,6 +858,46 @@ defmodule Arbiter.Trackers.ShortcutTest do
     end
   end
 
+  # ---- extract_priority/1 ----------------------------------------------------
+
+  describe "extract_priority/1" do
+    test "always returns nil — Shortcut has no native priority field" do
+      assert nil == Shortcut.extract_priority(%{"name" => "Some Story", "estimate" => 5})
+      assert nil == Shortcut.extract_priority(%{})
+    end
+  end
+
+  # ---- extract_difficulty/1 --------------------------------------------------
+
+  describe "extract_difficulty/1" do
+    test "returns nil when no estimate_buckets configured" do
+      # default setup has no difficulty config
+      assert nil == Shortcut.extract_difficulty(%{"estimate" => 5})
+    end
+
+    test "maps estimate to difficulty buckets — 0 is trivial, 4 is extreme" do
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "difficulty" => %{"buckets" => [[1, 0], [3, 1], [5, 2], [8, 3]]}
+      })
+
+      assert {:ok, 0} = Shortcut.extract_difficulty(%{"estimate" => 1})
+      assert {:ok, 1} = Shortcut.extract_difficulty(%{"estimate" => 3})
+      assert {:ok, 2} = Shortcut.extract_difficulty(%{"estimate" => 5})
+      assert {:ok, 3} = Shortcut.extract_difficulty(%{"estimate" => 8})
+      assert {:ok, 4} = Shortcut.extract_difficulty(%{"estimate" => 13})
+    end
+
+    test "returns nil when estimate field is absent" do
+      Config.put_active(%{
+        "credentials_ref" => "env:#{@env_var}",
+        "difficulty" => %{"buckets" => [[1, 0], [3, 1], [5, 2], [8, 3]]}
+      })
+
+      assert nil == Shortcut.extract_difficulty(%{})
+    end
+  end
+
   describe "with_workspace/2" do
     test "scopes config to the block and restores afterwards" do
       Config.clear()

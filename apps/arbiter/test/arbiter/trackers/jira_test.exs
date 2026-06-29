@@ -1115,6 +1115,117 @@ defmodule Arbiter.Trackers.JiraTest do
     end
   end
 
+  # ---- extract_priority/1 ----------------------------------------------------
+
+  describe "extract_priority/1" do
+    test "Highest maps to P0 — 0 is the highest priority" do
+      assert {:ok, 0} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Highest"}}})
+    end
+
+    test "High maps to P1" do
+      assert {:ok, 1} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "High"}}})
+    end
+
+    test "Medium maps to P2" do
+      assert {:ok, 2} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Medium"}}})
+    end
+
+    test "Low maps to P3" do
+      assert {:ok, 3} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Low"}}})
+    end
+
+    test "Lowest maps to P4 — 4 is the lowest priority" do
+      assert {:ok, 4} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Lowest"}}})
+    end
+
+    test "unknown priority name returns nil" do
+      assert nil ==
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Custom"}}})
+    end
+
+    test "missing priority field returns nil" do
+      assert nil == Jira.extract_priority(%{"fields" => %{}})
+    end
+
+    test "custom priority_map adds new names and can override default entries" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        # "Critical" and "Minor" are non-standard names added on top of defaults.
+        # "High" is overridden from P1 to P0.
+        "priority_map" => %{"Critical" => 0, "Minor" => 4, "High" => 0}
+      })
+
+      # New custom names are recognized
+      assert {:ok, 0} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Critical"}}})
+
+      assert {:ok, 4} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Minor"}}})
+
+      # Default entries without overrides are still present
+      assert {:ok, 0} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Highest"}}})
+
+      # Overridden default: High remapped to P0 (same as Highest)
+      assert {:ok, 0} =
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "High"}}})
+
+      # Truly unknown names still return nil
+      assert nil ==
+               Jira.extract_priority(%{"fields" => %{"priority" => %{"name" => "Unknown"}}})
+    end
+  end
+
+  # ---- extract_difficulty/1 --------------------------------------------------
+
+  describe "extract_difficulty/1" do
+    test "returns nil when no story_points_field is configured" do
+      # default setup has no difficulty config
+      assert nil == Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 3}})
+    end
+
+    test "maps story points to difficulty buckets — 0 is trivial, 4 is extreme" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "difficulty" => %{"field_id" => "customfield_10016"}
+      })
+
+      # 1 point → D0 (trivial)
+      assert {:ok, 0} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 1}})
+      # 3 points → D1
+      assert {:ok, 1} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 3}})
+      # 5 points → D2
+      assert {:ok, 2} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 5}})
+      # 8 points → D3
+      assert {:ok, 3} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 8}})
+      # >8 points → D4 (extreme)
+      assert {:ok, 4} = Jira.extract_difficulty(%{"fields" => %{"customfield_10016" => 13}})
+    end
+
+    test "returns nil when configured field is absent from the issue" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "difficulty" => %{"field_id" => "customfield_10016"}
+      })
+
+      assert nil == Jira.extract_difficulty(%{"fields" => %{}})
+    end
+  end
+
   defp adf_content_text(nil), do: ""
 
   defp adf_content_text(nodes) when is_list(nodes) do

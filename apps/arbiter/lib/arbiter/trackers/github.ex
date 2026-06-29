@@ -316,6 +316,51 @@ defmodule Arbiter.Trackers.GitHub do
   def extract_description(%{"body" => body}) when is_binary(body), do: body
   def extract_description(_), do: ""
 
+  # Parse "priority: N" label written by GitHub.create/1 for round-trip stability.
+  @impl true
+  def extract_priority(issue_map) do
+    issue_map
+    |> label_names()
+    |> Enum.find_value(fn
+      "priority: " <> rest ->
+        case Integer.parse(rest) do
+          {n, ""} when n >= 0 and n <= 4 -> {:ok, n}
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  # Parse "difficulty: N" label — no outbound create uses this label today,
+  # but the inbound path honours it if someone adds it manually.
+  @impl true
+  def extract_difficulty(issue_map) do
+    issue_map
+    |> label_names()
+    |> Enum.find_value(fn
+      "difficulty: " <> rest ->
+        case Integer.parse(rest) do
+          {n, ""} when n >= 0 and n <= 4 -> {:ok, n}
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp label_names(%{"labels" => labels}) when is_list(labels) do
+    Enum.flat_map(labels, fn
+      %{"name" => name} when is_binary(name) -> [name]
+      name when is_binary(name) -> [name]
+      _ -> []
+    end)
+  end
+
+  defp label_names(_), do: []
+
   @ownership_marker "Arbiter installation:"
 
   @impl true
@@ -446,6 +491,7 @@ defmodule Arbiter.Trackers.GitHub do
   Returns `{:ok, []}` when no matches are found. API errors return
   `{:error, %Error{}}`.
   """
+  @impl true
   @spec search_by_title(String.t()) :: {:ok, [map()]} | {:error, Error.t()}
   def search_by_title(title) when is_binary(title) do
     with {:ok, cfg} <- Config.resolve() do

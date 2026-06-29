@@ -312,6 +312,27 @@ defmodule Arbiter.Trackers.Linear do
   def extract_description(%{"description" => desc}) when is_binary(desc), do: desc
   def extract_description(_), do: ""
 
+  # Linear priority integers: 0=No priority (unset), 1=Urgent, 2=High,
+  # 3=Medium, 4=Low. Map to Arbiter P0..P3; 0 (None) → nil (use default P2).
+  # Note: Linear 4 (Low) maps to Arbiter P3, not P4 — Linear has no "Lowest".
+  @impl true
+  def extract_priority(%{"priority" => 1}), do: {:ok, 0}
+  def extract_priority(%{"priority" => 2}), do: {:ok, 1}
+  def extract_priority(%{"priority" => 3}), do: {:ok, 2}
+  def extract_priority(%{"priority" => 4}), do: {:ok, 3}
+  def extract_priority(%{"priority" => 0}), do: nil
+  def extract_priority(_), do: nil
+
+  @impl true
+  def extract_difficulty(raw_issue) do
+    with {:ok, %{estimate_buckets: buckets}} when not is_nil(buckets) <- Config.resolve(),
+         pts when is_number(pts) <- Map.get(raw_issue, "estimate") do
+      {:ok, points_to_difficulty(buckets, pts)}
+    else
+      _ -> nil
+    end
+  end
+
   @ownership_marker "Arbiter installation:"
 
   @impl true
@@ -658,6 +679,8 @@ defmodule Arbiter.Trackers.Linear do
         identifier
         title
         description
+        priority
+        estimate
         url
         state {
           id
@@ -1031,6 +1054,13 @@ defmodule Arbiter.Trackers.Linear do
       [plug: {Req.Test, @stub_name}]
     else
       []
+    end
+  end
+
+  defp points_to_difficulty(buckets, pts) do
+    case Enum.find(buckets, fn {max, _} -> pts <= max end) do
+      {_, d} -> d
+      nil -> 4
     end
   end
 end
