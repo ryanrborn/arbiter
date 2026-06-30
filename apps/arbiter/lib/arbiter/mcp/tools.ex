@@ -62,7 +62,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, id} <- resolve_task_id(scope, args),
          {:ok, issue} <- fetch_task(scope, args, id) do
       loaded = load_progress(issue)
-      {:ok, if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))}
+      result = if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))
+      {:ok, if(full, do: Map.delete(result, :pr_body), else: result)}
     end
   end
 
@@ -1588,6 +1589,7 @@ defmodule Arbiter.MCP.Tools do
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
       pr_ref: i.pr_ref,
+      pr_body: i.pr_body,
       target_branch: i.target_branch,
       workspace_id: i.workspace_id,
       closed_at: iso(i.closed_at),
