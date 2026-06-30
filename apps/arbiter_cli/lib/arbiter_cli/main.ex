@@ -75,6 +75,10 @@ defmodule ArbiterCli.Main do
       arb prime                Mission briefing — run at the start of a session
       arb where                Resolve the active workspace / paths
       arb init [path] [--force]
+      arb self-update          [--version vX.Y.Z] [--json] [--force]
+                               download and atomically replace ~/.local/bin/arb
+                               from the latest GitHub Release (or --version).
+                               alias: arb upgrade
       arb version
       arb help
 
@@ -229,6 +233,8 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("where", args), do: ArbiterCli.Cmd.Where.run(args)
   defp dispatch_known("init", args), do: ArbiterCli.Cmd.Init.run(args)
   defp dispatch_known("version", args), do: ArbiterCli.Cmd.Version.run(args)
+  defp dispatch_known("self-update", args), do: ArbiterCli.Cmd.SelfUpdate.run(args)
+  defp dispatch_known("upgrade", args), do: ArbiterCli.Cmd.SelfUpdate.run(args)
   defp dispatch_known("help", _args), do: usage_and_exit(0)
 
   defp help(_), do: usage_and_exit(0)
