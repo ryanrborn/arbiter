@@ -868,6 +868,113 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
   end
 
+  describe ":merged tracker lifecycle (bd-blwx2u)" do
+    @jira_env_mq "GTE_MQ_MERGED_JIRA_TOKEN"
+    @ws_github_jira_merged %{
+      "merge" => %{
+        "strategy" => "github",
+        "config" => %{
+          "owner" => "octo",
+          "repo" => "widget",
+          "credentials_ref" => @token
+        }
+      },
+      "tracker" => %{
+        "type" => "jira",
+        "config" => %{
+          "host" => "leotechnologies.atlassian.net",
+          "project_key" => "VR",
+          "credentials_ref" => "env:#{@jira_env_mq}",
+          "email" => "tester@example.com",
+          "status_map" => %{"merged" => "Code Complete"}
+        }
+      }
+    }
+
+    setup do
+      System.put_env(@jira_env_mq, "test-jira-token")
+      on_exit(fn -> System.delete_env(@jira_env_mq) end)
+      :ok
+    end
+
+    @tag workspace_config: @ws_github_jira_merged
+    test "close_task_and_finalize fires :merged lifecycle on the Jira tracker", %{
+      workspace: ws
+    } do
+      test_pid = self()
+      pr_number = 92
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "jira-merged",
+          tracker_type: :jira,
+          tracker_ref: "VR-99999",
+          skip_upstream_create: true,
+          workspace_id: ws.id
+        })
+
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(
+              pr_payload(%{
+                "number" => pr_number,
+                "state" => "closed",
+                "merged" => true,
+                "merged_at" => "2026-06-29T10:00:00Z",
+                "mergeStateStatus" => "UNKNOWN"
+              })
+            )
+
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "PUT" ->
+            send(test_pid, :unexpected_merge_call)
+            conn |> Plug.Conn.put_status(405) |> Req.Test.json(%{"message" => "already merged"})
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        cond do
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{"id" => "333", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+              ]
+            })
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:jira_transition, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      {pid, name} = start_merge_queue(ws)
+      Req.Test.allow(Arbiter.Trackers.Jira.HTTP, self(), pid)
+
+      :ok = MergeQueue.enqueue(name, task.id)
+      :ok = MergeQueue.tick(name)
+
+      refute_received :unexpected_merge_call
+
+      assert_receive {:jira_transition, %{"transition" => %{"id" => "333"}}}, 1_000
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert reloaded.status == :closed
+    end
+  end
+
   describe "merge_method mapping" do
     @tag workspace_config: @ws_github_squash
     test "merge_method=squash → adapter sends squash", %{workspace: ws, task: task} do

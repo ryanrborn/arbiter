@@ -225,4 +225,120 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       assert escalation.body =~ task.id
     end
   end
+
+  describe ":merged tracker lifecycle (bd-blwx2u)" do
+    @jira_env_wd "GTE_WD_MERGED_JIRA_TOKEN"
+
+    defp jira_workspace do
+      {:ok, ws} =
+        Ash.create(Arbiter.Tasks.Workspace, %{
+          name: "wd-jira-ws-#{System.unique_integer([:positive])}",
+          prefix: "wj",
+          config: %{
+            "tracker" => %{
+              "type" => "jira",
+              "config" => %{
+                "host" => "leotechnologies.atlassian.net",
+                "project_key" => "VR",
+                "credentials_ref" => "env:#{@jira_env_wd}",
+                "email" => "tester@example.com",
+                "status_map" => %{"merged" => "Code Complete"}
+              }
+            }
+          }
+        })
+
+      ws
+    end
+
+    setup do
+      System.put_env(@jira_env_wd, "test-jira-token")
+      on_exit(fn -> System.delete_env(@jira_env_wd) end)
+      :ok
+    end
+
+    test "Watchdog fires :merged tracker lifecycle when the watched MR is merged" do
+      test_pid = self()
+      ws = jira_workspace()
+
+      {:ok, task} =
+        Ash.create(Arbiter.Tasks.Issue, %{
+          title: "watchdog-merged-tracker",
+          tracker_type: :jira,
+          tracker_ref: "VR-77777",
+          skip_upstream_create: true,
+          workspace_id: ws.id
+        })
+
+      pid = running_worker(task, ws)
+      StubMerger.queue_get("!mrgd1", [%{status: :merged}])
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        cond do
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{"id" => "444", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+              ]
+            })
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:jira_transition, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      wpid = start_watchdog(pid, task.id, ws, "!mrgd1", [])
+      Req.Test.allow(Arbiter.Trackers.Jira.HTTP, self(), wpid)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+
+      assert_receive {:jira_transition, %{"transition" => %{"id" => "444"}}}, 1_000
+    end
+
+    test "Watchdog fires :merged tracker lifecycle on auto-merge path" do
+      test_pid = self()
+      ws = jira_workspace()
+
+      {:ok, task} =
+        Ash.create(Arbiter.Tasks.Issue, %{
+          title: "watchdog-automerged-tracker",
+          tracker_type: :jira,
+          tracker_ref: "VR-77778",
+          skip_upstream_create: true,
+          workspace_id: ws.id
+        })
+
+      pid = running_worker(task, ws)
+      StubMerger.queue_get("!mrgd2", [%{status: :open, approved: true}])
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        cond do
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{"id" => "445", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+              ]
+            })
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:jira_transition, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      wpid = start_watchdog(pid, task.id, ws, "!mrgd2", auto_merge: true)
+      Req.Test.allow(Arbiter.Trackers.Jira.HTTP, self(), wpid)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+
+      assert_receive {:jira_transition, %{"transition" => %{"id" => "445"}}}, 1_000
+    end
+  end
 end

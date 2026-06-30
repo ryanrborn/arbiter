@@ -432,6 +432,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   defp apply_outcome(:merged, _result, state) do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
+    sync_tracker_merged(state)
     safe(fn -> Worker.complete(state.worker_pid, :merged) end)
     {:stop, :normal, %{state | merge_fail_count: 0, merge_stall_notified: false}}
   end
@@ -449,6 +450,7 @@ defmodule Arbiter.Worker.Watchdog do
           "Worker.Watchdog: auto-merged approved MR #{state.mr_ref} for task=#{state.task_id}"
         )
 
+        sync_tracker_merged(state)
         safe(fn -> Worker.complete(state.worker_pid, :merged) end)
         {:stop, :normal, state}
 
@@ -512,6 +514,23 @@ defmodule Arbiter.Worker.Watchdog do
     e ->
       Logger.debug(
         "Worker.Watchdog: pending-merge tracker sync raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  # Fire the merged tracker hook. Best-effort + loud-on-failure inside
+  # `Arbiter.Trackers.Sync`; an unreadable task just skips.
+  defp sync_tracker_merged(state) do
+    with {:ok, task} <- Ash.get(Arbiter.Tasks.Issue, state.task_id) do
+      Arbiter.Trackers.Sync.lifecycle(task, :merged)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.debug(
+        "Worker.Watchdog: merged tracker sync raised for task=#{state.task_id}: #{Exception.message(e)}"
       )
 
       :ok

@@ -1073,6 +1073,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp close_task_and_finalize(state, item) do
     case Ash.get(Issue, item.task_id) do
       {:ok, task} ->
+        Arbiter.Trackers.Sync.lifecycle(task, :merged)
+
         case Ash.update(task, %{close_upstream: true}, action: :close) do
           {:ok, _closed} ->
             broadcast_merge_queue_event(state, {:task_closed_by_merge_queue, item.task_id})
