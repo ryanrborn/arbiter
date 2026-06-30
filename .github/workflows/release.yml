@@ -113,6 +113,7 @@ jobs:
           TARBALL="arbiter-${TAG}-linux.tar.gz"
           tar -czf "${TARBALL}" -C _build/prod/rel/arbiter .
           sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+          sha256sum apps/arbiter_cli/arb > arb.sha256
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
 
       - name: Publish GitHub Release
@@ -124,5 +125,6 @@ jobs:
             ${{ env.TARBALL }}
             ${{ env.TARBALL }}.sha256
             apps/arbiter_cli/arb
+            arb.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
