@@ -61,6 +61,9 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
       issue.tracker_type == :none -> :ok
       blank?(issue.tracker_ref) -> :ok
       action_name == :close and not close_upstream -> :ok
+      # bd-6xaaam: review-only tasks must never mutate a tracker issue they
+      # don't own (no status transition on in_progress or close).
+      issue.review_only == true -> :ok
       true -> sync(issue)
     end
   end

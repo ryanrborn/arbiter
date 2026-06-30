@@ -278,26 +278,37 @@ defmodule Arbiter.Worker.Driver do
   end
 
   defp should_close_upstream_for_task(task_id, worker_state) do
-    # Pass close_upstream: true if either:
-    # 1. there's an mr_ref (existing logic), OR
-    # 2. the task has a tracker_ref (need to sync upstream on close)
-    case should_close_upstream(worker_state) do
-      true ->
-        true
+    # bd-6xaaam: review-only workers never transition a tracker issue they
+    # don't own — even if the task has a tracker_ref. The flag is stamped on
+    # the Issue by Dispatch when review: true, and echoed in worker meta.
+    if review_only_worker?(worker_state) do
+      false
+    else
+      # Pass close_upstream: true if either:
+      # 1. there's an mr_ref (existing logic), OR
+      # 2. the task has a tracker_ref (need to sync upstream on close)
+      case should_close_upstream(worker_state) do
+        true ->
+          true
 
-      false ->
-        # Check if the task has a tracker_ref that needs syncing
-        case Ash.get(Issue, task_id) do
-          {:ok, task} ->
-            has_tracker_ref?(task)
+        false ->
+          # Check if the task has a tracker_ref that needs syncing
+          case Ash.get(Issue, task_id) do
+            {:ok, task} ->
+              has_tracker_ref?(task)
 
-          :error ->
-            false
-        end
+            :error ->
+              false
+          end
+      end
     end
   rescue
     _ -> false
   end
+
+  defp review_only_worker?(%{meta: %{review_only: true}}), do: true
+  defp review_only_worker?(%{meta: %{"review_only" => true}}), do: true
+  defp review_only_worker?(_), do: false
 
   defp has_tracker_ref?(%Issue{tracker_ref: ref, tracker_type: type})
        when is_binary(ref) and ref != "" and type != :none do
