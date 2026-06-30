@@ -261,7 +261,10 @@ defmodule Arbiter.Tasks.DependencyTest do
       assert MapSet.member?(ready_ids, b.id)
     end
 
-    test ":conflicts_with does NOT gate readiness (non-gating, symmetric mutex edge)", %{a: a, b: b} do
+    test ":conflicts_with does NOT gate readiness (non-gating, symmetric mutex edge)", %{
+      a: a,
+      b: b
+    } do
       # A conflicts_with B: both should remain ready — conflicts_with expresses
       # "don't run concurrently" (Conductor concern), not "B must close first".
       {:ok, _} =

@@ -123,9 +123,15 @@ defmodule Arbiter.Workflows.MergedPRFinalizerSupervisor do
       {:ok, workspaces} ->
         Enum.each(workspaces, fn ws ->
           case start_finalizer(ws) do
-            {:ok, _pid} -> :ok
-            {:error, {:already_started, _pid}} -> :ok
-            :skip -> :ok
+            {:ok, _pid} ->
+              :ok
+
+            {:error, {:already_started, _pid}} ->
+              :ok
+
+            :skip ->
+              :ok
+
             {:error, reason} ->
               Logger.warning(
                 "MergedPRFinalizerSupervisor: failed to start finalizer for workspace #{ws.id}: " <>

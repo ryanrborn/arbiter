@@ -40,7 +40,9 @@ defmodule ArbiterCli.Cmd.Queue do
         if mode == :json do
           IO.puts(Jason.encode!(body))
         else
-          IO.puts("Resumed: #{task_id} re-dispatched. The downstream branch will continue once it completes.")
+          IO.puts(
+            "Resumed: #{task_id} re-dispatched. The downstream branch will continue once it completes."
+          )
         end
 
       {:error, %Client.Error{kind: :http, status: 404}} ->

@@ -468,10 +468,15 @@ defmodule Arbiter.Tasks.ClaimTest do
     test "is idempotent for Jira claims", %{jira_ws: ws} do
       stub_jira(fn conn ->
         case {conn.method, conn.request_path} do
-          {"GET", "/rest/api/3/myself"} -> Req.Test.json(conn, %{"accountId" => @jira_account_id})
-          {"GET", _} -> Req.Test.json(conn, jira_issue_payload())
+          {"GET", "/rest/api/3/myself"} ->
+            Req.Test.json(conn, %{"accountId" => @jira_account_id})
+
+          {"GET", _} ->
+            Req.Test.json(conn, jira_issue_payload())
+
           {"POST", "/rest/api/3/issue/TEST-43/comment"} ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{})
+
           {"PUT", "/rest/api/3/issue/TEST-43/assignee"} ->
             conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
         end
@@ -689,7 +694,9 @@ defmodule Arbiter.Tasks.ClaimTest do
           {"GET", "/repos/ryanrborn/arbiter/issues/43"} ->
             Req.Test.json(
               conn,
-              issue_payload(%{"labels" => [%{"name" => "priority: 1"}, %{"name" => "difficulty: 0"}]})
+              issue_payload(%{
+                "labels" => [%{"name" => "priority: 1"}, %{"name" => "difficulty: 0"}]
+              })
             )
 
           {"GET", "/repos/ryanrborn/arbiter/issues/43/comments"} ->

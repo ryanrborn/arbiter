@@ -83,9 +83,7 @@ defmodule Arbiter.Workflows.ConductorReconciler do
       Enum.count(graphs, fn graph ->
         case ConductorSupervisor.start_conductor(graph.id, conductor_opts) do
           {:ok, _pid} ->
-            Logger.info(
-              "ConductorReconciler: started Conductor for running graph #{graph.id}"
-            )
+            Logger.info("ConductorReconciler: started Conductor for running graph #{graph.id}")
 
             true
 

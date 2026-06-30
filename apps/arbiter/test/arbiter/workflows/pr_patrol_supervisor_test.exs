@@ -31,7 +31,12 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
     dir = Path.join(System.tmp_dir!(), "prpatrol-rig-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     {_, 0} = System.cmd("git", ["-C", dir, "init", "-q"], stderr_to_stdout: true)
-    {_, 0} = System.cmd("git", ["-C", dir, "remote", "add", "origin", remote_url], stderr_to_stdout: true)
+
+    {_, 0} =
+      System.cmd("git", ["-C", dir, "remote", "add", "origin", remote_url],
+        stderr_to_stdout: true
+      )
+
     on_exit(fn -> File.rm_rf(dir) end)
     dir
   end
@@ -90,7 +95,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
         })
 
       assert {:ok, pid} = start(ws)
-      assert {:error, {:already_started, ^pid}} = PRPatrolSupervisor.start_patrol(ws, interval_ms: 600_000)
+
+      assert {:error, {:already_started, ^pid}} =
+               PRPatrolSupervisor.start_patrol(ws, interval_ms: 600_000)
     end
   end
 
@@ -108,7 +115,10 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           config: %{
             "merge" => %{
               "strategy" => "github",
-              "config" => %{"owner" => "leo-technologies-llc", "credentials_ref" => "env:GITHUB_TOKEN"}
+              "config" => %{
+                "owner" => "leo-technologies-llc",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
             },
             "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
           }
@@ -230,10 +240,11 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert length(pairs) == 2
       keys = Enum.map(pairs, fn {k, _} -> k end) |> Enum.sort()
 
-      assert keys == Enum.sort([
-               "#{ws.id}:leo-technologies-llc/verus_server",
-               "#{ws.id}:leo-technologies-llc/verus_web"
-             ])
+      assert keys ==
+               Enum.sort([
+                 "#{ws.id}:leo-technologies-llc/verus_server",
+                 "#{ws.id}:leo-technologies-llc/verus_web"
+               ])
     end
   end
 
@@ -284,7 +295,10 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
       assert keys_for_workspace(ws.id) == [ws.id]
 
       # Simulate gaining a second rig
-      two_repo_ws = %{ws | config: Map.put(ws.config, "repo_paths", %{"alpha" => rig_a, "beta" => rig_b})}
+      two_repo_ws = %{
+        ws
+        | config: Map.put(ws.config, "repo_paths", %{"alpha" => rig_a, "beta" => rig_b})
+      }
 
       assert {:ok, _} = PRPatrolSupervisor.start_patrol(two_repo_ws, interval_ms: 600_000)
 
