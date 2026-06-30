@@ -63,7 +63,15 @@ defmodule Arbiter.MCP.Tools do
          {:ok, issue} <- fetch_task(scope, args, id) do
       loaded = load_progress(issue)
       result = if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))
-      {:ok, if(full, do: Map.delete(result, :pr_body), else: result)}
+      # Strip pr_body from coordinator full-view (bandwidth; coordinators don't
+      # need the body they didn't write). Worker full-view retains it so the
+      # worker can verify its own authored body (bd-53xrmi).
+      result =
+        if full and scope.tier == :coordinator,
+          do: Map.delete(result, :pr_body),
+          else: result
+
+      {:ok, result}
     end
   end
 
