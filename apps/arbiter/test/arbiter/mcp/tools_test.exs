@@ -128,7 +128,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert Map.has_key?(data, :notes)
       assert Map.has_key?(data, :qa_notes)
       assert Map.has_key?(data, :deployment_notes)
-      assert Map.has_key?(data, :pr_body)
+      refute Map.has_key?(data, :pr_body)
       assert Map.has_key?(data, :auto_close)
       assert Map.has_key?(data, :created_at)
       assert Map.has_key?(data, :updated_at)

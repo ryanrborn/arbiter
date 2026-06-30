@@ -62,7 +62,8 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, id} <- resolve_task_id(scope, args),
          {:ok, issue} <- fetch_task(scope, args, id) do
       loaded = load_progress(issue)
-      {:ok, if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))}
+      result = if(full, do: serialize_task(loaded), else: serialize_task_slim(loaded))
+      {:ok, if(full, do: Map.delete(result, :pr_body), else: result)}
     end
   end
 
