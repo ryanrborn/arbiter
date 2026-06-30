@@ -57,6 +57,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Trackers
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.BranchNamer
@@ -973,7 +974,13 @@ defmodule Arbiter.Worker.Dispatch do
           agent_opts_from_choice(choice) ++
             [security: policy] ++ anthropic_proxy_opts(adapter, workspace)
 
-        prompt = prompt_for_task(task, Keyword.put(opts, :worktree_path, worktree_path))
+        tracker_context = fetch_tracker_context(task, workspace)
+
+        prompt =
+          opts
+          |> Keyword.put(:worktree_path, worktree_path)
+          |> Keyword.put(:tracker_context, tracker_context)
+          |> then(&prompt_for_task(task, &1))
 
         provider = Atom.to_string(choice.type)
 
@@ -1200,7 +1207,7 @@ defmodule Arbiter.Worker.Dispatch do
   @doc false
   def prompt_for_task(%Issue{} = task, opts) do
     cond do
-      Keyword.get(opts, :review, false) == true -> review_prompt(task)
+      Keyword.get(opts, :review, false) == true -> review_prompt(task, opts)
       task.issue_type == :task -> task_prompt(task)
       true -> work_prompt(task, opts)
     end
@@ -1532,7 +1539,7 @@ defmodule Arbiter.Worker.Dispatch do
     """
   end
 
-  defp review_prompt(%Issue{} = task) do
+  defp review_prompt(%Issue{} = task, opts) do
     tracker_line =
       case task.pr_ref do
         pr when is_binary(pr) and pr != "" ->
@@ -1548,6 +1555,24 @@ defmodule Arbiter.Worker.Dispatch do
           end
       end
 
+    tracker_context_section =
+      case Keyword.get(opts, :tracker_context) do
+        %{ref: ref, type: type, title: title, description: desc}
+        when is_binary(ref) and ref != "" ->
+          context_body = [title && "Title: #{title}", desc] |> Enum.filter(& &1) |> Enum.join("\n\n")
+
+          """
+
+          --- Tracker context (read-only, #{type}:#{ref}) ---
+          #{context_body}
+          --- End tracker context ---
+
+          """
+
+        _ ->
+          ""
+      end
+
     """
     You are a reviewer worker. Review the pull/merge request linked to task
     #{task.id} and post a verdict. You are not the author; do not modify the
@@ -1560,7 +1585,7 @@ defmodule Arbiter.Worker.Dispatch do
 
     Acceptance:
     #{task.acceptance || "(none)"}
-
+    #{tracker_context_section}
     #{tracker_line}Your current directory is the repo's local checkout. There is
     no per-task branch and no worktree was provisioned — this is a review-only
     directive.
@@ -1597,6 +1622,48 @@ defmodule Arbiter.Worker.Dispatch do
         arb done
     """
   end
+
+  # Fetch acceptance-criteria context from a tracker issue referenced by
+  # `tracker_context_type` + `tracker_context_ref` on the task. Read-only:
+  # no assignment check, no write-back, no claim. Returns a map with
+  # `:ref`, `:type`, `:title`, `:description` on success, or `nil` when the
+  # task has no context ref or the fetch fails (failures are logged and
+  # swallowed — context is best-effort).
+  defp fetch_tracker_context(
+         %Issue{tracker_context_type: type, tracker_context_ref: ref} = _task,
+         workspace
+       )
+       when type not in [nil, :none] and is_binary(ref) and ref != "" do
+    adapter = Trackers.for_type(type)
+
+    Trackers.with_workspace(type, workspace, fn ->
+      case adapter.fetch(ref) do
+        {:ok, raw} ->
+          %{
+            ref: ref,
+            type: type,
+            title: adapter.extract_title(raw),
+            description: adapter.extract_description(raw)
+          }
+
+        {:error, reason} ->
+          require Logger
+
+          Logger.warning(
+            "Dispatch: failed to fetch tracker context #{type}:#{ref}: #{inspect(reason)}"
+          )
+
+          nil
+      end
+    end)
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Dispatch: error fetching tracker context: #{Exception.message(e)}")
+      nil
+  end
+
+  defp fetch_tracker_context(_task, _workspace), do: nil
 
   defp maybe_start_driver(
          %Issue{id: id},
