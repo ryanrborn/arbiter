@@ -968,7 +968,11 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       refute_received :unexpected_merge_call
 
+      # Code Complete (id 333) transition must fire exactly once
       assert_receive {:jira_transition, %{"transition" => %{"id" => "333"}}}, 1_000
+
+      # No second Jira transition (Done / :closed overshoot) should follow
+      refute_receive {:jira_transition, _}, 200
 
       reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed

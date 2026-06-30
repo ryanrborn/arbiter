@@ -1075,7 +1075,14 @@ defmodule Arbiter.Workflows.MergeQueue do
       {:ok, task} ->
         Arbiter.Trackers.Sync.lifecycle(task, :merged)
 
-        case Ash.update(task, %{close_upstream: true}, action: :close) do
+        # Jira's :merged lifecycle already moved the upstream issue to "Code
+        # Complete". Passing close_upstream: true here would trigger a second
+        # SyncTracker pass (:closed → "Done") and overshoot past Code Complete.
+        # For all other tracker types (github, linear, none, …) the standard
+        # upstream-close is correct and should remain.
+        close_upstream = task.tracker_type != :jira
+
+        case Ash.update(task, %{close_upstream: close_upstream}, action: :close) do
           {:ok, _closed} ->
             broadcast_merge_queue_event(state, {:task_closed_by_merge_queue, item.task_id})
 
