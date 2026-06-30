@@ -7,6 +7,7 @@ defmodule Arbiter.Application do
 
   alias Arbiter.Workflows.ConductorReconciler
   alias Arbiter.Workflows.MergeQueueSupervisor
+  alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
 
   @impl true
@@ -59,6 +60,8 @@ defmodule Arbiter.Application do
       MergeQueueSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
       PRPatrolSupervisor,
+      {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
+      MergedPRFinalizerSupervisor,
       # One Conductor per running Graph, started on demand by
       # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
       # Conductor once kicked off). The Registry keys them by graph_id.
@@ -135,6 +138,11 @@ defmodule Arbiter.Application do
       Supervisor.child_spec(
         {Task, fn -> PRPatrolSupervisor.start_for_existing_workspaces() end},
         id: :pr_patrol_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task, fn -> MergedPRFinalizerSupervisor.start_for_existing_workspaces() end},
+        id: :merged_pr_finalizer_boot_task,
         restart: :temporary
       )
     ]
