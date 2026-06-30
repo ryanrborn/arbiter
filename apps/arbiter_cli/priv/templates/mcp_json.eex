@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "arbiter": {
+      "type": "http",
+      "url": "<%= @mcp_url %>",
+      "headers": {
+        "Authorization": "Bearer <%= @coordinator_token %>"
+      }
+    }
+  }
+}
