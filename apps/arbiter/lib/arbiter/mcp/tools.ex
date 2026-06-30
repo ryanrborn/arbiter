@@ -1663,7 +1663,7 @@ defmodule Arbiter.MCP.Tools do
   # is the slung worker's scope depth (parent + 1).
   defp serialize_dispatch(result, depth) do
     %{
-      task: serialize_task(result.task),
+      task: serialize_task_summary(result.task),
       worker: %{task_id: result.task.id, pid: inspect(result.worker_pid)},
       machine: %{id: result.machine_id, pid: inspect(result.machine_pid)},
       worktree_path: result.worktree_path,
