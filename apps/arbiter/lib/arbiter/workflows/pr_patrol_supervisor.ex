@@ -119,7 +119,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
         results =
           Enum.map(repos, fn repo ->
-            registry_key = if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
+            registry_key =
+              if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
 
             child_opts =
               opts

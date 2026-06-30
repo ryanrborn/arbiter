@@ -526,6 +526,43 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "config hot-reload — changes take effect without restart" do
+    test "adding author_logins after start blocks PRs by non-listed authors on next tick",
+         %{ws: ws} do
+      # First tick: no allowlist → PR by "anyone" fires a task.
+      pulls_stub(80, "anyone")
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert [task] = tasks_for_repo()
+      assert task.source_pr == "80"
+
+      # Close the task so dedup won't hide the second tick's behavior.
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      # Set author_logins restriction on the live workspace (simulates `arb config set`).
+      {:ok, _ws_updated} =
+        Ash.update(ws, %{patch: %{"pr_patrol" => %{"author_logins" => ["allowed-only"]}}},
+          action: :patch_config
+        )
+
+      # Stub a PR by a non-listed author — CHANGES_REQUESTED so it would
+      # normally dispatch, but the fresh allowlist should block it.
+      pulls_stub(81, "someone-else")
+
+      :ok = PRPatrol.tick(name)
+
+      # Only the closed task from tick 1 exists; no new open task was created.
+      open_tasks =
+        tasks_for_repo()
+        |> Enum.filter(&(&1.status != :closed))
+
+      assert open_tasks == [],
+             "expected no open tasks after allowlist applied, got: #{inspect(open_tasks)}"
+    end
+  end
+
   # ---- helpers ----
 
   # Stub the `/pulls` list (carrying `user.login` so PRPatrol can resolve the
