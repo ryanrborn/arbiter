@@ -653,7 +653,10 @@ defmodule Arbiter.MCP.Tools do
               end
 
             _ ->
-              nil
+              case fetch_workspace(task.workspace_id) do
+                {:ok, ws} -> Trackers.workspace_type(ws)
+                _ -> nil
+              end
           end
 
         attrs =

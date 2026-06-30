@@ -1633,7 +1633,7 @@ defmodule Arbiter.Worker.Dispatch do
          %Issue{tracker_context_type: type, tracker_context_ref: ref} = _task,
          workspace
        )
-       when is_atom(type) and type != :none and is_binary(ref) and ref != "" do
+       when type not in [nil, :none] and is_binary(ref) and ref != "" do
     adapter = Trackers.for_type(type)
 
     Trackers.with_workspace(type, workspace, fn ->
