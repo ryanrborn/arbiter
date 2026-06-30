@@ -60,6 +60,7 @@ defmodule ArbiterCli.Cmd.Init do
   @notes_readme Path.join(@templates_dir, "notes_README.md.eex")
   @agents_local Path.join(@templates_dir, "AGENTS.local.md.eex")
   @gitignore Path.join(@templates_dir, "gitignore.eex")
+  @mcp_json Path.join(@templates_dir, "mcp_json.eex")
 
   @external_resource @agents_md
   @external_resource @operator_guide
@@ -67,12 +68,14 @@ defmodule ArbiterCli.Cmd.Init do
   @external_resource @notes_readme
   @external_resource @agents_local
   @external_resource @gitignore
+  @external_resource @mcp_json
 
   EEx.function_from_file(:defp, :render_agents_md, @agents_md, [:assigns])
   EEx.function_from_file(:defp, :render_operator_guide, @operator_guide, [:assigns])
   EEx.function_from_file(:defp, :render_memory_md, @memory_md, [:assigns])
   EEx.function_from_file(:defp, :render_notes_readme, @notes_readme, [:assigns])
   EEx.function_from_file(:defp, :render_agents_local, @agents_local, [:assigns])
+  EEx.function_from_file(:defp, :render_mcp_json, @mcp_json, [:assigns])
 
   # The .gitignore template takes no runtime values — embed it verbatim at
   # compile time rather than running it through EEx with an unused binding.
@@ -103,6 +106,7 @@ defmodule ArbiterCli.Cmd.Init do
           {"ARBITER_OPERATOR.md", render_operator_guide(assigns)},
           {"AGENTS.local.md", render_agents_local(assigns)},
           {".gitignore", render_gitignore(assigns)},
+          {".mcp.json", render_mcp_json(assigns)},
           {"memory/MEMORY.md", render_memory_md(assigns)},
           {"notes/README.md", render_notes_readme(assigns)}
         ]
@@ -140,6 +144,8 @@ defmodule ArbiterCli.Cmd.Init do
 
   defp build_assigns do
     {domain_name, domain_prefix} = resolve_domain()
+    base_url = Client.base_url()
+    mcp_url = base_url <> "/mcp"
 
     %{
       coordinator: "coordinator",
@@ -160,11 +166,25 @@ defmodule ArbiterCli.Cmd.Init do
       repo_plural: "repos",
       workspace: "workspace",
       workspace_cap: "Workspace",
-      host: Client.base_url(),
+      host: base_url,
       domain_name: domain_name,
       domain_prefix: domain_prefix,
-      install_path: install_hint()
+      install_path: install_hint(),
+      mcp_url: mcp_url,
+      coordinator_token: mint_coordinator_token()
     }
+  end
+
+  # Mint a long-lived coordinator-tier scope token for the MCP config.
+  # Returns the token string on success, or a placeholder on failure (server
+  # unreachable at init time). The operator can re-run `arb init --force` once
+  # the server is up to replace the placeholder with a real token.
+  defp mint_coordinator_token do
+    # 30-day TTL — same as the CLI default for coordinator tokens.
+    case Client.post("/api/mcp/tokens", %{"ttl" => 2_592_000}) do
+      {:ok, %{"token" => token}} -> token
+      _ -> "REPLACE_WITH_COORDINATOR_TOKEN"
+    end
   end
 
   defp resolve_domain do

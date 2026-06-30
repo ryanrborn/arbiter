@@ -1,2 +1,4 @@
 # Personal overlay — never commit (local identity, persona, machine paths).
 AGENTS.local.md
+# MCP config — contains a coordinator-tier scope token; never commit.
+.mcp.json
