@@ -49,9 +49,7 @@ defmodule Arbiter.Worker.PushBeforePRTest do
       System.cmd("git", ["-C", wt, "config", "user.name", "Test"], stderr_to_stdout: true)
 
     {_, 0} =
-      System.cmd("git", ["-C", wt, "config", "commit.gpgsign", "false"],
-        stderr_to_stdout: true
-      )
+      System.cmd("git", ["-C", wt, "config", "commit.gpgsign", "false"], stderr_to_stdout: true)
 
     File.write!(Path.join(wt, "work.txt"), "done\n")
     {_, 0} = System.cmd("git", ["-C", wt, "add", "work.txt"], stderr_to_stdout: true)

@@ -949,7 +949,11 @@ defmodule Arbiter.Workflows.MergeQueueTest do
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "transitions" => [
-                %{"id" => "333", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+                %{
+                  "id" => "333",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
               ]
             })
 

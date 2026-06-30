@@ -775,7 +775,10 @@ defmodule Arbiter.Workflows.Conductor do
     live?.(task_id)
   rescue
     e ->
-      Logger.warning("Conductor: worker_live? check raised: #{Exception.message(e)}; assuming idle")
+      Logger.warning(
+        "Conductor: worker_live? check raised: #{Exception.message(e)}; assuming idle"
+      )
+
       false
   end
 
@@ -790,9 +793,10 @@ defmodule Arbiter.Workflows.Conductor do
     downstream = compute_downstream(failed_id, edges)
     downstream_only = MapSet.delete(downstream, failed_id)
 
-    new_state = %{state |
-      failed_ids: MapSet.put(state.failed_ids, failed_id),
-      paused_ids: MapSet.union(state.paused_ids, downstream)
+    new_state = %{
+      state
+      | failed_ids: MapSet.put(state.failed_ids, failed_id),
+        paused_ids: MapSet.union(state.paused_ids, downstream)
     }
 
     post_failure_escalation(failed_id, downstream_only, new_state)
@@ -801,12 +805,16 @@ defmodule Arbiter.Workflows.Conductor do
   end
 
   # Post an addressed :escalation mailbox message to the Admiral.
-  defp post_failure_escalation(failed_id, paused_ids, %State{workspace_id: ws_id, graph_id: graph_id})
+  defp post_failure_escalation(failed_id, paused_ids, %State{
+         workspace_id: ws_id,
+         graph_id: graph_id
+       })
        when is_binary(ws_id) do
     paused_count = MapSet.size(paused_ids)
     paused_list = paused_ids |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
 
-    subject = "#{failed_id} failed in graph #{graph_id} — #{paused_count} downstream task(s) paused"
+    subject =
+      "#{failed_id} failed in graph #{graph_id} — #{paused_count} downstream task(s) paused"
 
     body =
       [
@@ -832,7 +840,10 @@ defmodule Arbiter.Workflows.Conductor do
     :ok
   rescue
     e ->
-      Logger.debug("Conductor[#{graph_id}]: failure escalation swallowed: #{Exception.message(e)}")
+      Logger.debug(
+        "Conductor[#{graph_id}]: failure escalation swallowed: #{Exception.message(e)}"
+      )
+
       :ok
   end
 

@@ -85,9 +85,13 @@ defmodule ArbiterCli.Cmd.ServerTest do
 
         case {cmd, args} do
           # No systemd unit installed — fall back to the SIGTERM+sh path.
-          {"systemctl", ["--user", "cat", "arbiter.service"]} -> {"", 1}
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"", 1}
+
           # Nothing listening on the port (already down).
-          {"lsof", _} -> {"", 1}
+          {"lsof", _} ->
+            {"", 1}
+
           # Starting Phoenix — flip the API to green.
           {"sh", _} ->
             stub_get("/api/workspaces", @green)
@@ -111,8 +115,11 @@ defmodule ArbiterCli.Cmd.ServerTest do
     test "--json emits restarted: true" do
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         case {cmd, args} do
-          {"systemctl", ["--user", "cat", "arbiter.service"]} -> {"", 1}
-          {"lsof", _} -> {"", 1}
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"", 1}
+
+          {"lsof", _} ->
+            {"", 1}
 
           {"sh", _} ->
             stub_get("/api/workspaces", @green)
@@ -154,8 +161,11 @@ defmodule ArbiterCli.Cmd.ServerTest do
 
       Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
         case {cmd, args} do
-          {"systemctl", ["--user", "cat", "arbiter.service"]} -> {"", 1}
-          {"lsof", _} -> {"", 1}
+          {"systemctl", ["--user", "cat", "arbiter.service"]} ->
+            {"", 1}
+
+          {"lsof", _} ->
+            {"", 1}
 
           {"sh", _} ->
             stub_get("/api/workspaces", @green)

@@ -141,13 +141,21 @@ defmodule Arbiter.Workflows.PRPatrol do
   # ---- tick logic ----
 
   defp do_tick(state) do
+    # Re-fetch the workspace on every tick so config changes (author_logins,
+    # merge settings, etc.) take effect immediately without a GenServer restart.
+    workspace =
+      case Ash.get(Workspace, state.workspace_id) do
+        {:ok, ws} -> ws
+        _ -> nil
+      end
+
     result =
-      with %Workspace{} <- state.workspace,
-           adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
+      with %Workspace{} <- workspace,
+           adapter when not is_nil(adapter) <- resolve_adapter(workspace),
            true <- function_exported?(adapter, :list_open, 0),
-           :ok <- Mergers.prepare_with_repo(state.workspace, state.repo),
+           :ok <- Mergers.prepare_with_repo(workspace, state.repo),
            {:ok, mrs} <- adapter.list_open() do
-        Enum.each(mrs, &maybe_dispatch(&1, state, adapter))
+        Enum.each(mrs, &maybe_dispatch(&1, %{state | workspace: workspace}, adapter))
         :ok
       else
         # On any failure (missing workspace, unsupported adapter, API error),
@@ -156,7 +164,7 @@ defmodule Arbiter.Workflows.PRPatrol do
       end
 
     _ = result
-    %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now()}
+    %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now(), workspace: workspace}
   end
 
   defp resolve_adapter(workspace) do

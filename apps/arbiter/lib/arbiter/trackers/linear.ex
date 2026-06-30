@@ -580,8 +580,9 @@ defmodule Arbiter.Trackers.Linear do
          %Error{
            kind: :config_missing,
            status: nil,
-           message: "team_id not set in Linear config. " <>
-             "Set workspace.config[\"tracker\"][\"config\"][\"team_id\"].",
+           message:
+             "team_id not set in Linear config. " <>
+               "Set workspace.config[\"tracker\"][\"config\"][\"team_id\"].",
            raw: nil
          }}
 

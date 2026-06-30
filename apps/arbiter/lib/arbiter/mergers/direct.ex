@@ -332,7 +332,8 @@ defmodule Arbiter.Mergers.Direct do
     if conflicts == [] do
       {:error, {:git_failed, output}}
     else
-      {:error, {:rebase_conflict, %{branch: branch, base: base, files: conflicts, output: output}}}
+      {:error,
+       {:rebase_conflict, %{branch: branch, base: base, files: conflicts, output: output}}}
     end
   end
 
