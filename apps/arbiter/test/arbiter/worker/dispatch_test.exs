@@ -1684,6 +1684,48 @@ defmodule Arbiter.Worker.DispatchTest do
       refute prompt =~ "github:93"
     end
 
+    test "review prompt includes pre-fetched tracker_context block when provided (bd-2eo4cg)",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "review coworker PR",
+          workspace_id: ws.id,
+          tracker_type: :none,
+          tracker_context_type: :jira,
+          tracker_context_ref: "VR-18004"
+        })
+
+      # Simulate a pre-fetched tracker context (normally done in build_agent_session_opts).
+      context = %{
+        ref: "VR-18004",
+        type: :jira,
+        title: "Some Jira ticket",
+        description: "## Acceptance\n- feature works\n- tests pass"
+      }
+
+      prompt = Arbiter.Worker.Dispatch.prompt_for_task(task, review: true, tracker_context: context)
+
+      assert prompt =~ "Tracker context (read-only, jira:VR-18004)"
+      assert prompt =~ "Some Jira ticket"
+      assert prompt =~ "feature works"
+      # The task has no tracker_ref, so no "Tracker ref (PR/MR to review)" line
+      refute prompt =~ "Tracker ref (PR/MR to review)"
+    end
+
+    test "review prompt omits tracker context block when no context is pre-fetched (bd-2eo4cg)",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "review without context",
+          workspace_id: ws.id,
+          tracker_type: :none
+        })
+
+      prompt = Arbiter.Worker.Dispatch.prompt_for_task(task, review: true)
+
+      refute prompt =~ "Tracker context (read-only"
+    end
+
     test "review with start_claude: true uses the repo path as cwd when no worktree",
          %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "review w/ claude", workspace_id: ws.id})

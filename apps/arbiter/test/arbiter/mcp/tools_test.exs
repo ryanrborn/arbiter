@@ -314,6 +314,22 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert msg =~ "issue_type"
     end
+
+    test "accepts tracker_context_type and tracker_context_ref (bd-2eo4cg)", ctx do
+      assert {:ok, data} =
+               Tools.task_create(ctx.coordinator, %{
+                 "title" => "review context task",
+                 "tracker_type" => "none",
+                 "tracker_context_type" => "jira",
+                 "tracker_context_ref" => "VR-18004"
+               })
+
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.tracker_context_type == :jira
+      assert reloaded.tracker_context_ref == "VR-18004"
+      # tracker_type stays none — context ref is read-only and never claimed
+      assert reloaded.tracker_type == :none
+    end
   end
 
   describe "task_update/2" do
@@ -921,6 +937,47 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.worker_resume(ctx.coordinator, %{"task_id" => task.id, "repo" => "test/repo"})
 
       assert msg =~ "worktree" or msg =~ "repo"
+    end
+
+    test "worker_review persists tracker_context_ref/type on task without claiming (bd-2eo4cg)",
+         ctx do
+      # A task with no tracker_ref — the review is for a coworker's ticket.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "review for coworker PR",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none
+        })
+
+      # worker_review with tracker_context_ref should set the fields without dispatch failing.
+      # It will fail with a no-worktree/no-repo error (expected in the test env) but AFTER
+      # persisting the tracker context on the task — that's what we verify.
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "tracker_context_ref" => "VR-18004",
+          "tracker_context_type" => "jira",
+          "with_claude" => false
+        })
+
+      # The tracker context must be persisted on the task regardless of dispatch outcome.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.tracker_context_ref == "VR-18004"
+      assert reloaded.tracker_context_type == :jira
+      # tracker_type must remain :none — no claim, no write-back.
+      assert reloaded.tracker_type == :none
+    end
+
+    test "task_show includes tracker_context_ref and tracker_context_type in full view (bd-2eo4cg)",
+         ctx do
+      {:ok, task} =
+        Ash.update(ctx.task, %{tracker_context_type: :jira, tracker_context_ref: "VR-18004"},
+          action: :update
+        )
+
+      {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => task.id, "full" => true})
+      assert full.tracker_context_ref == "VR-18004"
+      assert full.tracker_context_type == "jira"
     end
   end
 

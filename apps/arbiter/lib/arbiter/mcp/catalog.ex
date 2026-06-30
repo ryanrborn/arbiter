@@ -257,6 +257,21 @@ defmodule Arbiter.MCP.Catalog do
             "description" => "none | jira | shortcut | linear | github."
           },
           "tracker_ref" => %{"type" => "string"},
+          "tracker_context_type" => %{
+            "type" => "string",
+            "description" =>
+              "Tracker type for a context-only reference (e.g. \"jira\"). Paired with " <>
+                "`tracker_context_ref`. No claim semantics; the referenced ticket is fetched " <>
+                "read-only at review dispatch to supply the reviewer with acceptance criteria. " <>
+                "Safe to use on coworker-owned tickets."
+          },
+          "tracker_context_ref" => %{
+            "type" => "string",
+            "description" =>
+              "Tracker issue ref for read-only context (e.g. \"VR-18004\"). The ticket's " <>
+                "description is fetched at review dispatch and injected into the reviewer's " <>
+                "prompt. No assignment check, no write-back."
+          },
           "target_branch" => %{"type" => "string"}
         },
         "required" => ["title"],
@@ -291,6 +306,8 @@ defmodule Arbiter.MCP.Catalog do
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{"type" => "string"},
           "tracker_ref" => %{"type" => "string"},
+          "tracker_context_type" => %{"type" => "string"},
+          "tracker_context_ref" => %{"type" => "string"},
           "pr_ref" => %{"type" => "string"},
           "target_branch" => %{"type" => "string"}
         },
@@ -475,6 +492,19 @@ defmodule Arbiter.MCP.Catalog do
           "with_claude" => %{
             "type" => "boolean",
             "description" => "(task review) Spawn the reviewer agent (default true)."
+          },
+          "tracker_context_ref" => %{
+            "type" => "string",
+            "description" =>
+              "(task review) Tracker issue ref to fetch acceptance criteria from — read-only " <>
+                "context for the reviewer. No claim, no assignment check, no write-back. Safe " <>
+                "for coworker-owned tickets (e.g. \"VR-18004\")."
+          },
+          "tracker_context_type" => %{
+            "type" => "string",
+            "description" =>
+              "(task review) Tracker type for `tracker_context_ref` (e.g. \"jira\"). " <>
+                "Defaults to the workspace's tracker when omitted."
           }
         },
         "required" => [],
