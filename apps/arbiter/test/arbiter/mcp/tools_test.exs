@@ -244,21 +244,22 @@ defmodule Arbiter.MCP.ToolsTest do
                  "deployment_notes" => "None"
                })
 
-      assert data.qa_notes == "verify the login flow"
-      assert data.deployment_notes == "None"
+      assert data.id == ctx.task.id
+      assert data.status == "open"
 
-      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.qa_notes == "verify the login flow"
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.qa_notes == "verify the login flow"
+      assert full.deployment_notes == "None"
     end
 
     test "a worker records pr_body on its own task (bd-53xrmi)", ctx do
       body = "## Summary\nWorker-authored.\n\n## Test plan\n- [x] mix test"
 
       assert {:ok, data} = Tools.task_update_progress(ctx.worker, %{"pr_body" => body})
-      assert data.pr_body == body
+      assert data.id == ctx.task.id
 
-      {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
-      assert reloaded.pr_body == body
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.pr_body == body
     end
 
     test "ignores non-progress fields (cannot flip status)", ctx do
@@ -266,7 +267,9 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.task_update_progress(ctx.worker, %{"notes" => "wip", "status" => "closed"})
 
       assert data.status == "open"
-      assert data.notes == "wip"
+
+      {:ok, full} = Tools.task_show(ctx.worker, %{"full" => true})
+      assert full.notes == "wip"
     end
 
     test "requires at least one progress field", ctx do
@@ -296,7 +299,6 @@ defmodule Arbiter.MCP.ToolsTest do
       assert data.priority == 1
       assert data.issue_type == "bug"
       assert data.status == "open"
-      assert data.workspace_id == ctx.ws.id
 
       {:ok, reloaded} = Ash.get(Issue, data.id)
       assert reloaded.workspace_id == ctx.ws.id
@@ -427,12 +429,15 @@ defmodule Arbiter.MCP.ToolsTest do
                })
 
       assert parent.issue_type == "epic"
-      assert parent.auto_close == true
 
-      assert {:ok, updated} =
+      {:ok, created} = Tools.task_show(ctx.coordinator, %{"id" => parent.id, "full" => true})
+      assert created.auto_close == true
+
+      assert {:ok, _updated} =
                Tools.task_update(ctx.coordinator, %{"id" => parent.id, "auto_close" => false})
 
-      assert updated.auto_close == false
+      {:ok, updated_full} = Tools.task_show(ctx.coordinator, %{"id" => parent.id, "full" => true})
+      assert updated_full.auto_close == false
     end
 
     test "attaching a child with a parent_of edge auto-closes the parent when done", ctx do
@@ -505,7 +510,9 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:ok, data} = Tools.task_reopen(ctx.coordinator, %{"id" => ctx.task.id})
       assert data.status == "open"
-      assert is_nil(data.closed_at)
+
+      {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => ctx.task.id, "full" => true})
+      assert is_nil(full.closed_at)
 
       {:ok, reloaded} = Ash.get(Issue, ctx.task.id)
       assert reloaded.status == :open
@@ -972,7 +979,8 @@ defmodule Arbiter.MCP.ToolsTest do
                  "workspace" => ctx.other_ws.name
                })
 
-      assert data.workspace_id == ctx.other_ws.id
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.other_ws.id
     end
 
     test "creates a task in the workspace named by the `workspace` param (by id)", ctx do
@@ -982,7 +990,8 @@ defmodule Arbiter.MCP.ToolsTest do
                  "workspace" => ctx.other_ws.id
                })
 
-      assert data.workspace_id == ctx.other_ws.id
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.other_ws.id
     end
 
     test "an unknown `workspace` ref is a not-found tool error", ctx do
@@ -1036,7 +1045,8 @@ defmodule Arbiter.MCP.ToolsTest do
       agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
       assert {:ok, data} = Tools.task_create(agnostic, %{"title" => "lands in the only ws"})
-      assert data.workspace_id == ctx.ws.id
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == ctx.ws.id
     end
 
     test "a coordinator falls back to the workspace named \"default\" when several exist" do
@@ -1045,7 +1055,8 @@ defmodule Arbiter.MCP.ToolsTest do
       agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
       assert {:ok, data} = Tools.task_create(agnostic, %{"title" => "to default"})
-      assert data.workspace_id == default.id
+      {:ok, reloaded} = Ash.get(Issue, data.id)
+      assert reloaded.workspace_id == default.id
     end
   end
 

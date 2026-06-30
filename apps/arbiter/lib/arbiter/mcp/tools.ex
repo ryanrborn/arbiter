@@ -192,7 +192,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, issue} <- fetch_task(scope, args, id),
          {:ok, attrs} <- progress_attrs(args) do
       case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, serialize_task(updated)}
+        {:ok, updated} -> {:ok, serialize_task_summary(updated)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
@@ -220,7 +220,7 @@ defmodule Arbiter.MCP.Tools do
       attrs = attrs |> Map.put("title", title) |> Map.put("workspace_id", ws_id)
 
       case Ash.create(Issue, attrs) do
-        {:ok, issue} -> {:ok, serialize_task(issue)}
+        {:ok, issue} -> {:ok, serialize_task_summary(issue)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
@@ -241,7 +241,7 @@ defmodule Arbiter.MCP.Tools do
          {:ok, attrs} <- collect_attrs(args, task_update_spec()),
          :ok <- require_some(attrs, "provide at least one field to update") do
       case Ash.update(issue, attrs, action: :update) do
-        {:ok, updated} -> {:ok, serialize_task(updated)}
+        {:ok, updated} -> {:ok, serialize_task_summary(updated)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
@@ -264,7 +264,7 @@ defmodule Arbiter.MCP.Tools do
         |> maybe_put(:reason, fetch_string(args, "reason"))
 
       case Ash.update(issue, attrs, action: :close) do
-        {:ok, closed} -> {:ok, serialize_task(closed)}
+        {:ok, closed} -> {:ok, serialize_task_summary(closed)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
@@ -284,7 +284,7 @@ defmodule Arbiter.MCP.Tools do
     with {:ok, id} <- resolve_task_id(scope, args),
          {:ok, issue} <- fetch_task(scope, args, id) do
       case Ash.update(issue, %{}, action: :reopen) do
-        {:ok, reopened} -> {:ok, serialize_task(reopened)}
+        {:ok, reopened} -> {:ok, serialize_task_summary(reopened)}
         {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
       end
     end
