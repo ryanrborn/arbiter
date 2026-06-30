@@ -85,6 +85,8 @@ defmodule Arbiter.Tasks.Issue do
         :assignee,
         :tracker_type,
         :tracker_ref,
+        :tracker_context_type,
+        :tracker_context_ref,
         :source_pr,
         :target_branch,
         :workspace_id
@@ -128,6 +130,8 @@ defmodule Arbiter.Tasks.Issue do
         :assignee,
         :tracker_type,
         :tracker_ref,
+        :tracker_context_type,
+        :tracker_context_ref,
         :source_pr,
         :pr_ref,
         :pr_body,
@@ -359,6 +363,32 @@ defmodule Arbiter.Tasks.Issue do
       public? true
       constraints max_length: 255, trim?: true
       description "External tracker's ID for this task (e.g. \"VR-17585\" for Jira)."
+    end
+
+    attribute :tracker_context_type, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: @tracker_types
+
+      description """
+      Tracker type for a context-only reference on a review task (e.g. `:jira`).
+      Paired with `tracker_context_ref`. No claim semantics and never synced back
+      to the tracker — used only to fetch acceptance criteria at dispatch time to
+      give the reviewer the ticket's intent. Safe to use on coworker-owned tickets.
+      """
+    end
+
+    attribute :tracker_context_ref, :string do
+      allow_nil? true
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description """
+      Tracker issue ref for context-only use on a review task (e.g. \"VR-18004\").
+      Paired with `tracker_context_type`. The referenced ticket's description is
+      fetched at dispatch and injected into the reviewer's prompt. No assignment
+      check, no write-back (no status transition, no assignee change).
+      """
     end
 
     attribute :pr_ref, :string do

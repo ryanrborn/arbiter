@@ -612,7 +612,8 @@ defmodule Arbiter.MCP.Tools do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id) do
+         {:ok, task} <- fetch_task(scope, args, task_id),
+         {:ok, _task} <- maybe_set_tracker_context(task, args) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -623,6 +624,41 @@ defmodule Arbiter.MCP.Tools do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
+    end
+  end
+
+  # If `tracker_context_ref` is provided in args, persist it (and optionally
+  # `tracker_context_type`) on the task before dispatch so the review prompt
+  # can fetch the ticket's acceptance criteria. When `tracker_context_type` is
+  # omitted, the workspace's default tracker type is used as the fallback —
+  # the most common case (reviewee and reviewer share the same tracker).
+  defp maybe_set_tracker_context(task, args) do
+    case fetch_string(args, "tracker_context_ref") do
+      ref when is_binary(ref) and ref != "" ->
+        context_type =
+          case fetch_string(args, "tracker_context_type") do
+            t when is_binary(t) and t != "" ->
+              try do
+                String.to_existing_atom(t)
+              rescue
+                ArgumentError -> nil
+              end
+
+            _ ->
+              nil
+          end
+
+        attrs =
+          %{"tracker_context_ref" => ref}
+          |> then(fn m -> if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m end)
+
+        case Ash.update(task, attrs, action: :update) do
+          {:ok, updated} -> {:ok, updated}
+          {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
+        end
+
+      _ ->
+        {:ok, task}
     end
   end
 
@@ -1504,6 +1540,8 @@ defmodule Arbiter.MCP.Tools do
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"assignee", :string},
       {"tracker_ref", :string},
+      {"tracker_context_type", {:enum, Issue.tracker_types()}},
+      {"tracker_context_ref", :string},
       {"target_branch", :string}
     ]
   end
@@ -1524,6 +1562,8 @@ defmodule Arbiter.MCP.Tools do
       {"tracker_type", {:enum, Issue.tracker_types()}},
       {"assignee", :string},
       {"tracker_ref", :string},
+      {"tracker_context_type", {:enum, Issue.tracker_types()}},
+      {"tracker_context_ref", :string},
       {"pr_ref", :string},
       {"target_branch", :string}
     ]
@@ -1779,6 +1819,8 @@ defmodule Arbiter.MCP.Tools do
       assignee: i.assignee,
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
+      tracker_context_type: to_str(i.tracker_context_type),
+      tracker_context_ref: i.tracker_context_ref,
       pr_ref: i.pr_ref,
       pr_body: i.pr_body,
       target_branch: i.target_branch,
