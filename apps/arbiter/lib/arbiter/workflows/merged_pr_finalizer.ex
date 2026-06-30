@@ -190,9 +190,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         Logger.info("MergedPRFinalizer: closed task=#{task.id}")
 
       {:error, reason} ->
-        Logger.warning(
-          "MergedPRFinalizer: failed to close task=#{task.id}: #{inspect(reason)}"
-        )
+        Logger.warning("MergedPRFinalizer: failed to close task=#{task.id}: #{inspect(reason)}")
     end
 
     :ok

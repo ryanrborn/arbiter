@@ -586,7 +586,12 @@ defmodule ArbiterCli.Cmd.InstallService do
     base =
       if log_paths do
         {config_path, state_file} = log_paths
-        Map.merge(base, %{logrotate_timer: @logrotate_timer_name, logrotate_config: config_path, logrotate_state: state_file})
+
+        Map.merge(base, %{
+          logrotate_timer: @logrotate_timer_name,
+          logrotate_config: config_path,
+          logrotate_state: state_file
+        })
       else
         base
       end
