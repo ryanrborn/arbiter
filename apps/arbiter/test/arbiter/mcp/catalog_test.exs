@@ -9,18 +9,20 @@ defmodule Arbiter.MCP.CatalogTest do
 
   # The both-tier tools a worker may also reach.
   @both_tier ~w(task_show inbox_check task_update_progress workspace_show quota_get
-                message_send notify_list)
+                message_send notify_list workspace_config_get workspace_config_overview)
 
   # Coordinator-only tools; never visible to a worker.
   @coordinator_only ~w(task_ready task_create task_update task_close task_reopen dep_add dep_remove
                        worker_dispatch
                        worker_resume worker_review worker_stop worker_list task_list
-                       tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox)
+                       tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
+                       workspace_config_set workspace_config_unset)
 
   # Tools that call resolve_workspace_id and thus expose the optional `workspace` param.
   @workspace_resolving_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create
                                 worker_list task_list usage_summarize notify_list tracker_claim tracker_sync
-                                worker_review graph_create)
+                                worker_review graph_create workspace_config_get workspace_config_overview
+                                workspace_config_set workspace_config_unset)
 
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do
