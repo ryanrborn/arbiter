@@ -161,6 +161,41 @@ defmodule Arbiter.Trackers.SyncTest do
     end
   end
 
+  describe "lifecycle/3 :merged" do
+    test "transitions a merged ticket to Code Complete" do
+      test_pid = self()
+      ws = jira_workspace(%{"merged" => "Code Complete"})
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        cond do
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "222",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
+              ]
+            })
+
+          conn.method == "POST" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:transition, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+
+      assert_receive {:transition, %{"transition" => %{"id" => "222"}}}
+      assert escalations_for(ws.id) == []
+    end
+  end
+
   describe "loud failure -> escalation" do
     test "an unreachable mapped status raises an escalation instead of failing silently" do
       # in_progress -> "Nowhere" is unreachable: no direct transition and no
