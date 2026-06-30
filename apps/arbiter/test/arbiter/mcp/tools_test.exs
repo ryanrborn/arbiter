@@ -602,6 +602,248 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "workspace_config_get/2" do
+    test "returns the full config when no key is given", ctx do
+      {:ok, ws} =
+        Ash.update(ctx.ws, %{patch: %{"merge" => %{"auto_merge" => true}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_get(ctx.worker, %{})
+      assert data.workspace == ws.name
+      assert is_nil(data.key)
+      assert is_map(data.value)
+      assert get_in(data.value, ["merge", "auto_merge"]) == true
+      assert is_list(data.secret_keys)
+    end
+
+    test "returns a leaf value for a dotted key", ctx do
+      {:ok, _} =
+        Ash.update(ctx.ws, %{patch: %{"review" => %{"required" => true}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_get(ctx.worker, %{"key" => "review.required"})
+      assert data.key == "review.required"
+      assert data.value == true
+    end
+
+    test "returns a nested map for a non-leaf dotted key", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{patch: %{"review" => %{"required" => true, "rounds" => 2}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_get(ctx.worker, %{"key" => "review"})
+      assert data.value["required"] == true
+      assert data.value["rounds"] == 2
+    end
+
+    test "errors when a key is not found", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.workspace_config_get(ctx.worker, %{"key" => "nonexistent.key"})
+
+      assert msg =~ "nonexistent.key"
+    end
+
+    test "a coordinator can read another workspace by name", ctx do
+      {:ok, other_ws} =
+        Ash.create(Workspace, %{name: "cfg-get-other", prefix: "cgo"})
+
+      {:ok, _} =
+        Ash.update(other_ws, %{patch: %{"routing" => %{"policy" => "round_robin"}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil}
+
+      assert {:ok, data} =
+               Tools.workspace_config_get(agnostic, %{"workspace" => "cfg-get-other"})
+
+      assert data.workspace == "cfg-get-other"
+      assert is_map(data.value)
+    end
+  end
+
+  describe "workspace_config_overview/2" do
+    test "returns the grouped overview map with all expected sections", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{
+              "tracker" => %{"type" => "none"},
+              "merge" => %{"strategy" => "direct", "auto_merge" => false},
+              "routing" => %{"policy" => "static"}
+            },
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+
+      assert data.workspace.id == ctx.ws.id
+      assert data.workspace.name == ctx.ws.name
+      assert data.workspace.prefix == "mcp"
+      assert is_map(data.tracker)
+      assert is_map(data.merge)
+      assert is_map(data.agent)
+      assert is_map(data.review_agent)
+      assert is_map(data.routing)
+      assert is_map(data.review)
+      assert is_map(data.review_gate)
+      assert is_list(data.standing_orders)
+      assert is_list(data.secret_keys)
+    end
+
+    test "a worker can call overview on its own workspace", ctx do
+      assert {:ok, data} = Tools.workspace_config_overview(ctx.worker, %{})
+      assert data.workspace.id == ctx.ws.id
+    end
+  end
+
+  describe "workspace_config_set/2" do
+    test "sets a scalar leaf and preserves siblings", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => false}},
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "merge.auto_merge",
+                 "value" => true
+               })
+
+      assert get_in(data.config, ["merge", "auto_merge"]) == true
+      # sibling preserved
+      assert get_in(data.config, ["merge", "strategy"]) == "direct"
+      assert is_map(data.workspace)
+      assert is_list(data.secret_keys)
+    end
+
+    test "sets a nested object, deep-merging into existing config", ctx do
+      {:ok, _} =
+        Ash.update(ctx.ws, %{patch: %{"routing" => %{"policy" => "static"}}, unset_paths: []},
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "routing.policy",
+                 "value" => "round_robin"
+               })
+
+      assert get_in(data.config, ["routing", "policy"]) == "round_robin"
+    end
+
+    test "requires a key argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{"value" => "x"})
+
+      assert msg =~ "key"
+    end
+
+    test "requires a value argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{"key" => "merge.auto_merge"})
+
+      assert msg =~ "value"
+    end
+
+    test "blocks secret key prefix", ctx do
+      assert {:error, {:unauthorized, msg}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "secrets.my_token",
+                 "value" => "tok_1234"
+               })
+
+      assert msg =~ "secrets"
+    end
+
+    test "blocks credentials key prefix", ctx do
+      assert {:error, {:unauthorized, _}} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "credentials.api_key",
+                 "value" => "x"
+               })
+    end
+  end
+
+  describe "workspace_config_unset/2" do
+    test "removes a key and preserves siblings", ctx do
+      {:ok, _} =
+        Ash.update(
+          ctx.ws,
+          %{
+            patch: %{"merge" => %{"strategy" => "direct", "auto_merge" => true}},
+            unset_paths: []
+          },
+          action: :patch_config
+        )
+
+      assert {:ok, data} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "merge.auto_merge"})
+
+      refute Map.has_key?(data.config["merge"] || %{}, "auto_merge")
+      # sibling preserved
+      assert get_in(data.config, ["merge", "strategy"]) == "direct"
+    end
+
+    test "errors if the key does not exist", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "nonexistent.key"})
+
+      assert msg =~ "nonexistent.key"
+    end
+
+    test "blocks secret key prefix", ctx do
+      assert {:error, {:unauthorized, _}} =
+               Tools.workspace_config_unset(ctx.coordinator, %{"key" => "secret.foo"})
+    end
+
+    test "requires a key argument", ctx do
+      assert {:error, {:invalid, _}} = Tools.workspace_config_unset(ctx.coordinator, %{})
+    end
+  end
+
+  describe "workspace config tools — catalog visibility" do
+    test "workspace_config_get and workspace_config_overview are visible to workers", ctx do
+      visible_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+      assert "workspace_config_get" in visible_names
+      assert "workspace_config_overview" in visible_names
+    end
+
+    test "workspace_config_set and workspace_config_unset are coordinator-only", ctx do
+      coord_names = Catalog.visible(ctx.coordinator) |> Enum.map(& &1.name)
+      worker_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+
+      assert "workspace_config_set" in coord_names
+      assert "workspace_config_unset" in coord_names
+      refute "workspace_config_set" in worker_names
+      refute "workspace_config_unset" in worker_names
+    end
+
+    test "all four config tools advertise the optional workspace field", _ctx do
+      tools = Catalog.all()
+
+      for name <- ~w(workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset) do
+        tool = Enum.find(tools, &(&1.name == name))
+        assert tool != nil, "tool #{name} not found in catalog"
+        assert Map.has_key?(tool.input_schema["properties"], "workspace"),
+               "#{name} missing workspace field"
+      end
+    end
+  end
+
   describe "worker_resume/2 + worker_review/2 (dispatch-recursion guardrail, §4.3)" do
     test "resume refuses a coordinator scope without can_dispatch", ctx do
       no_dispatch = %{ctx.coordinator | can_dispatch: false}

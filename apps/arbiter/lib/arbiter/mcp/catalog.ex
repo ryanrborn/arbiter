@@ -42,6 +42,10 @@ defmodule Arbiter.MCP.Catalog do
   | `tracker_claim` | coordinator | `Arbiter.Tasks.Claim.claim/3` |
   | `tracker_sync` | coordinator | `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2` |
   | `workspace_list` | coordinator | `Ash.read(Workspace)` (summary fields) |
+  | `workspace_config_get` | worker, coordinator | `Ash.get(Workspace, id)` → read `config` / dotted key |
+  | `workspace_config_overview` | worker, coordinator | `Ash.get(Workspace, id)` → grouped config summary |
+  | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
+  | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   """
@@ -85,7 +89,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create)
+  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset)
 
   @raw_tools [
     %{
@@ -622,6 +626,83 @@ defmodule Arbiter.MCP.Catalog do
           "`workspace_show` for the bound workspace.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.workspace_list/2
+    },
+    %{
+      name: "workspace_config_get",
+      tiers: @both,
+      description:
+        "Read a dotted.key (e.g. \"merge.auto_merge\") or the full config for a named workspace. " <>
+          "Secret *values* are never returned — only `secret_keys` (the names of configured secrets) " <>
+          "and any `credentials_ref` pointers already embedded in the config JSON. " <>
+          "Returns `{workspace, key, value, secret_keys}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "key" => %{
+            "type" => "string",
+            "description" =>
+              "Dotted config key to read (e.g. \"merge.auto_merge\"). Omit to return the full config."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.workspace_config_get/2
+    },
+    %{
+      name: "workspace_config_overview",
+      tiers: @both,
+      description:
+        "A human-readable grouped summary of the workspace config: tracker, merge, agent, " <>
+          "review_agent, routing, review, review_gate, standing_orders, and the names of configured " <>
+          "secrets (values never exposed). Mirrors `arb config overview`. " <>
+          "Returns `{workspace, tracker, merge, agent, …, secret_keys}`.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.workspace_config_overview/2
+    },
+    %{
+      name: "workspace_config_set",
+      tiers: @coordinator,
+      description:
+        "Set a single dotted.key to a value via the deep-merge config endpoint, preserving all " <>
+          "sibling keys. Secret / credential key prefixes are blocked — use `arb workspace secret` " <>
+          "for secrets. Returns `{workspace, config, secret_keys}` after the merge so the caller " <>
+          "can confirm the result.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "key" => %{
+            "type" => "string",
+            "description" => "Dotted config key to set (e.g. \"merge.auto_merge\"). Required."
+          },
+          "value" => %{
+            "description" =>
+              "Value to assign. Accepts any JSON type: boolean, integer, string, object, array, or null."
+          }
+        },
+        "required" => ["key", "value"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.workspace_config_set/2
+    },
+    %{
+      name: "workspace_config_unset",
+      tiers: @coordinator,
+      description:
+        "Remove a single dotted.key from the config via the deep-merge endpoint, preserving all " <>
+          "sibling keys. Errors if the key does not exist. Secret / credential key prefixes are " <>
+          "blocked. Returns `{workspace, config, secret_keys}` after the removal.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "key" => %{
+            "type" => "string",
+            "description" => "Dotted config key to remove (e.g. \"agent.config.vernacular\"). Required."
+          }
+        },
+        "required" => ["key"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.workspace_config_unset/2
     },
     %{
       name: "usage_summarize",
