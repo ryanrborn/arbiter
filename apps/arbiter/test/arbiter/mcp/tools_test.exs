@@ -648,7 +648,7 @@ defmodule Arbiter.MCP.ToolsTest do
       assert msg =~ "nonexistent.key"
     end
 
-    test "a coordinator can read another workspace by name", ctx do
+    test "a coordinator can read another workspace by name", _ctx do
       {:ok, other_ws} =
         Ash.create(Workspace, %{name: "cfg-get-other", prefix: "cgo"})
 
