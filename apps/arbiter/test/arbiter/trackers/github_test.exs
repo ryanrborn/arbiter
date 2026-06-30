@@ -222,6 +222,46 @@ defmodule Arbiter.Trackers.GitHubTest do
 
       assert {:error, %Error{kind: :not_found}} = GitHub.transition(@ref, :closed)
     end
+
+    test "to :closed is a no-op when the issue is already closed (idempotent)" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "closed",
+              "labels" => [%{"name" => "bug"}]
+            })
+
+          "PATCH" ->
+            flunk("must not PATCH when issue is already closed")
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :closed)
+    end
+
+    test "to :in_progress is a no-op when already open with the in-progress label" do
+      stub(fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 42,
+              "state" => "open",
+              "labels" => [%{"name" => "in progress"}, %{"name" => "bug"}]
+            })
+
+          "PATCH" ->
+            flunk("must not PATCH when issue is already in the target state")
+        end
+      end)
+
+      assert :ok = GitHub.transition(@ref, :in_progress)
+    end
   end
 
   describe "update_fields/2" do

@@ -79,13 +79,17 @@ defmodule Arbiter.Trackers.GitHub do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, %{state: state, label: label}} <- map_status(cfg, status),
          {:ok, issue} <- request(cfg, :get, issue_path(cfg, ref), []) |> handle_json() do
-      payload = %{
-        "state" => state,
-        "labels" => next_labels(cfg, issue, label)
-      }
+      if already_in_state?(issue, state, label) do
+        :ok
+      else
+        payload = %{
+          "state" => state,
+          "labels" => next_labels(cfg, issue, label)
+        }
 
-      request(cfg, :patch, issue_path(cfg, ref), json: payload)
-      |> expect_ok()
+        request(cfg, :patch, issue_path(cfg, ref), json: payload)
+        |> expect_ok()
+      end
     end
   end
 
@@ -736,6 +740,16 @@ defmodule Arbiter.Trackers.GitHub do
            raw: nil
          }}
     end
+  end
+
+  # Returns true when the issue is already in the desired target state and
+  # has the correct label (or no label is needed). Skipping the PATCH in
+  # this case prevents redundant API calls — e.g. when two concurrent close
+  # actions race through GuardStatus and both trigger SyncTracker, the second
+  # PATCH to an already-closed issue would otherwise 422.
+  defp already_in_state?(issue, target_state, target_label) do
+    issue["state"] == target_state and
+      (target_label == nil or target_label in current_label_names(issue))
   end
 
   # Labels the adapter owns: every label named in the status_map. On a
