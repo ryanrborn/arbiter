@@ -286,6 +286,7 @@ defmodule Arbiter.Trackers.LinearTest do
     setup do
       Application.put_env(:arbiter, :linear_http_stub, true)
       Config.put_active(%{"credentials_ref" => "test-token"})
+
       on_exit(fn ->
         Application.delete_env(:arbiter, :linear_http_stub)
         Config.clear()
@@ -340,6 +341,7 @@ defmodule Arbiter.Trackers.LinearTest do
     setup do
       Application.put_env(:arbiter, :linear_http_stub, true)
       Config.put_active(%{"credentials_ref" => "test-token"})
+
       on_exit(fn ->
         Application.delete_env(:arbiter, :linear_http_stub)
         Config.clear()
@@ -350,7 +352,11 @@ defmodule Arbiter.Trackers.LinearTest do
       Req.Test.stub(Arbiter.Trackers.Linear.HTTP, fn conn ->
         Req.Test.json(conn, %{
           "data" => %{
-            "viewer" => %{"id" => "user-uuid-42", "name" => "Alice", "email" => "alice@example.com"}
+            "viewer" => %{
+              "id" => "user-uuid-42",
+              "name" => "Alice",
+              "email" => "alice@example.com"
+            }
           }
         })
       end)
@@ -363,6 +369,7 @@ defmodule Arbiter.Trackers.LinearTest do
     setup do
       Application.put_env(:arbiter, :linear_http_stub, true)
       Config.put_active(%{"credentials_ref" => "test-token"})
+
       on_exit(fn ->
         Application.delete_env(:arbiter, :linear_http_stub)
         Config.clear()
@@ -413,6 +420,7 @@ defmodule Arbiter.Trackers.LinearTest do
     setup do
       Application.put_env(:arbiter, :linear_http_stub, true)
       Config.put_active(%{"credentials_ref" => "test-token"})
+
       on_exit(fn ->
         Application.delete_env(:arbiter, :linear_http_stub)
         Config.clear()
@@ -459,6 +467,7 @@ defmodule Arbiter.Trackers.LinearTest do
     setup do
       Application.put_env(:arbiter, :linear_http_stub, true)
       Config.put_active(%{"credentials_ref" => "test-token", "team_id" => "team-uuid-1"})
+
       on_exit(fn ->
         Application.delete_env(:arbiter, :linear_http_stub)
         Config.clear()
@@ -501,7 +510,8 @@ defmodule Arbiter.Trackers.LinearTest do
     end
 
     test "returns validation_failed when title missing" do
-      assert {:error, %Error{kind: :validation_failed}} = Linear.create(%{description: "no title"})
+      assert {:error, %Error{kind: :validation_failed}} =
+               Linear.create(%{description: "no title"})
     end
   end
 

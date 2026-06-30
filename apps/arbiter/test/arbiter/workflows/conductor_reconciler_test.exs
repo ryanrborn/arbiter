@@ -37,7 +37,9 @@ defmodule Arbiter.Workflows.ConductorReconcilerTest do
   end
 
   defp issue(ws) do
-    {:ok, i} = Ash.create(Issue, %{title: "i-#{System.unique_integer([:positive])}", workspace_id: ws.id})
+    {:ok, i} =
+      Ash.create(Issue, %{title: "i-#{System.unique_integer([:positive])}", workspace_id: ws.id})
+
     i
   end
 
@@ -160,11 +162,12 @@ defmodule Arbiter.Workflows.ConductorReconcilerTest do
       add_member(g, a)
       add_member(g, b)
 
-      {:ok, _} = Ash.create(Arbiter.Tasks.Dependency, %{
-        from_issue_id: b.id,
-        to_issue_id: a.id,
-        type: :depends_on
-      })
+      {:ok, _} =
+        Ash.create(Arbiter.Tasks.Dependency, %{
+          from_issue_id: b.id,
+          to_issue_id: a.id,
+          type: :depends_on
+        })
 
       # Kickoff: initial drain dispatches a (b is blocked).
       pid = kickoff(g, max_concurrent: 10)
@@ -250,7 +253,12 @@ defmodule Arbiter.Workflows.ConductorReconcilerTest do
       assert ConductorSupervisor.whereis(g2.id) != nil
 
       dispatched_ids =
-        for _ <- 1..2, do: (assert_receive({:dispatched, id, _}); id)
+        for _ <- 1..2,
+            do:
+              (
+                assert_receive({:dispatched, id, _})
+                id
+              )
 
       assert MapSet.new(dispatched_ids) == MapSet.new([a1.id, a2.id])
 

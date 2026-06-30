@@ -35,7 +35,10 @@ defmodule ArbiterCli.Cmd.SelfUpdateTest do
       "tag_name" => tag,
       "assets" => [
         %{"name" => "arb", "browser_download_url" => "https://dl.test/dl/#{tag}/arb"},
-        %{"name" => "arb.sha256", "browser_download_url" => "https://dl.test/dl/#{tag}/arb.sha256"}
+        %{
+          "name" => "arb.sha256",
+          "browser_download_url" => "https://dl.test/dl/#{tag}/arb.sha256"
+        }
       ]
     }
   end
@@ -50,16 +53,18 @@ defmodule ArbiterCli.Cmd.SelfUpdateTest do
 
     stub_routes([
       {{"get", api_path}, {release_json(tag), 200}},
-      {{"get", "/dl/#{tag}/arb"}, fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("application/octet-stream")
-        |> Plug.Conn.send_resp(200, arb_bytes)
-      end},
-      {{"get", "/dl/#{tag}/arb.sha256"}, fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("text/plain")
-        |> Plug.Conn.send_resp(200, sha_text)
-      end}
+      {{"get", "/dl/#{tag}/arb"},
+       fn conn ->
+         conn
+         |> Plug.Conn.put_resp_content_type("application/octet-stream")
+         |> Plug.Conn.send_resp(200, arb_bytes)
+       end},
+      {{"get", "/dl/#{tag}/arb.sha256"},
+       fn conn ->
+         conn
+         |> Plug.Conn.put_resp_content_type("text/plain")
+         |> Plug.Conn.send_resp(200, sha_text)
+       end}
     ])
   end
 
@@ -160,7 +165,9 @@ defmodule ArbiterCli.Cmd.SelfUpdateTest do
       assert out =~ "Already on #{tag}"
     end
 
-    test "--force reinstalls even when already on the target version", %{install_path: install_path} do
+    test "--force reinstalls even when already on the target version", %{
+      install_path: install_path
+    } do
       current = ArbiterCli.Version.app_version()
       tag = "v#{current}"
       arb_bytes = "new arb bytes"

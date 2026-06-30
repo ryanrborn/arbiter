@@ -280,7 +280,11 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "transitions" => [
-                %{"id" => "444", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+                %{
+                  "id" => "444",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
               ]
             })
 
@@ -322,7 +326,11 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "transitions" => [
-                %{"id" => "445", "name" => "Approved and merged", "to" => %{"name" => "Code Complete"}}
+                %{
+                  "id" => "445",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
               ]
             })
 
