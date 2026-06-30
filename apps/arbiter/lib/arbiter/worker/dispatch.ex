@@ -111,7 +111,7 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- ensure_not_awaiting_review(task_id),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
          :ok <- maybe_preflight(task, opts),
-         {:ok, task} <- transition_to_in_progress(task),
+         {:ok, task} <- transition_to_in_progress(task, opts),
          {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
          {:ok, worker_pid} <- start_worker(task, worktree_path, opts),
          {:ok, claude_port} <-
@@ -433,10 +433,19 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  defp transition_to_in_progress(%Issue{status: :in_progress} = task), do: {:ok, task}
+  defp transition_to_in_progress(%Issue{status: :in_progress} = task, _opts), do: {:ok, task}
 
-  defp transition_to_in_progress(%Issue{} = task) do
-    case Ash.update(task, %{status: :in_progress}) do
+  defp transition_to_in_progress(%Issue{} = task, opts) do
+    # bd-6xaaam: stamp review_only: true so SyncTracker/SyncFields skip
+    # write-back for the in_progress transition and any later field update.
+    attrs =
+      if Keyword.get(opts, :review, false) do
+        %{status: :in_progress, review_only: true}
+      else
+        %{status: :in_progress}
+      end
+
+    case Ash.update(task, attrs) do
       {:ok, updated} -> {:ok, updated}
       {:error, e} -> {:error, {:transition_failed, e}}
     end

@@ -188,13 +188,30 @@ defmodule Arbiter.Tasks.Claim do
     end
   end
 
-  defp check_assignment(_adapter, _issue_map, _current_user_id, true), do: :ok
+  # bd-6xaaam: `force: true` may bypass the "not yet assigned to viewer" check
+  # (e.g. claiming an unassigned issue), but it must NEVER silently reassign an
+  # issue that is already owned by a different user. Doing so would overwrite a
+  # colleague's assignment — exactly the incident that triggered this fix.
+  defp check_assignment(adapter, issue_map, current_user_id, force) do
+    assignees = adapter.assignees(issue_map)
 
-  defp check_assignment(adapter, issue_map, current_user_id, false) do
-    if current_user_id in adapter.assignees(issue_map) do
-      :ok
-    else
-      {:error, {:not_assigned, current_user_id}}
+    cond do
+      current_user_id in assignees ->
+        # Already assigned to the workspace user — always OK.
+        :ok
+
+      Enum.empty?(assignees) and force ->
+        # Unassigned issue: force lets the caller claim without prior assignment.
+        :ok
+
+      not Enum.empty?(assignees) ->
+        # Assigned to SOMEONE ELSE — refuse regardless of force to avoid
+        # silently taking over a colleague's ticket.
+        {:error, {:not_assigned, current_user_id}}
+
+      true ->
+        # Unassigned but no force.
+        {:error, {:not_assigned, current_user_id}}
     end
   end
 
