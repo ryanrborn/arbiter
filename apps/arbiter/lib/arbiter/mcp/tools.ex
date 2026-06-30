@@ -1588,7 +1588,6 @@ defmodule Arbiter.MCP.Tools do
       tracker_type: to_str(i.tracker_type),
       tracker_ref: i.tracker_ref,
       pr_ref: i.pr_ref,
-      pr_body: i.pr_body,
       target_branch: i.target_branch,
       workspace_id: i.workspace_id,
       closed_at: iso(i.closed_at),
