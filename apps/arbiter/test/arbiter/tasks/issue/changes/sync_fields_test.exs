@@ -210,6 +210,33 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncFieldsTest do
     end
   end
 
+  describe "review_only: true suppresses description sync (bd-6xaaam)" do
+    test "does NOT PATCH the upstream issue when review_only is true and description changes" do
+      patch_stub(self())
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "review-only task",
+          description: "original brief",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      # Set review_only: true and change the description in the same update.
+      assert {:ok, updated} =
+               Ash.update(issue, %{review_only: true, description: "internal review brief"},
+                 action: :update
+               )
+
+      assert updated.description == "internal review brief"
+      assert updated.review_only == true
+
+      refute_receive {:patch, _, _}
+    end
+  end
+
   describe "sync failure is best-effort" do
     test "a tracker error does not break the local update" do
       Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->

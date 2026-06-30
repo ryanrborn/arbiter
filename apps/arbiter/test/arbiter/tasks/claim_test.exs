@@ -221,6 +221,21 @@ defmodule Arbiter.Tasks.ClaimTest do
       assert {:ok, :created, _task} = Claim.claim(ws, "43", force: true)
     end
 
+    # bd-6xaaam: force: true must never silently reassign a colleague's ticket.
+    test "force: true is refused when the issue is assigned to someone else", %{github_ws: ws} do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", _} ->
+            Req.Test.json(conn, issue_payload(%{"assignees" => [%{"login" => "alec-kustanovich"}]}))
+        end
+      end)
+
+      assert {:error, {:not_assigned, @viewer}} = Claim.claim(ws, "43", force: true)
+    end
+
     test "accepts decorated refs like '#43' and 'gh-43' and a full URL", %{github_ws: ws} do
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do

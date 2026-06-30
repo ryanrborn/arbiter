@@ -561,6 +561,49 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
     end
   end
 
+  describe "review_only: true suppresses all tracker mutations (bd-6xaaam)" do
+    test "does NOT sync the in_progress transition when review_only is true" do
+      forwarding_stub()
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "review-only task",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      # Stamp review_only: true and transition to in_progress in the same update.
+      assert {:ok, updated} = Ash.update(issue, %{review_only: true, status: :in_progress})
+      assert updated.status == :in_progress
+      assert updated.review_only == true
+
+      refute_receive {:github, :patch, _, _}
+    end
+
+    test "does NOT sync the close transition when review_only is true, even with close_upstream: true" do
+      forwarding_stub()
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "review-only task",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      # Stamp review_only without changing status so SyncTracker skips on equality.
+      {:ok, issue} = Ash.update(issue, %{review_only: true})
+
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
+      assert closed.status == :closed
+
+      refute_receive {:github, :patch, _, _}
+    end
+  end
+
   describe "config isolation" do
     test "prepare/2 uses the task's workspace config, not a stale process config" do
       # Seed a *different* workspace config in the process dict; the sync must

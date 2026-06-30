@@ -51,6 +51,10 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncFields do
 
   defp maybe_sync(%{tracker_ref: ref}, _changed) when is_nil(ref) or ref == "", do: :ok
 
+  # bd-6xaaam: review-only tasks must never overwrite the upstream description.
+  # The review brief lives only in the arbiter task, not in the tracker issue.
+  defp maybe_sync(%{review_only: true}, _changed), do: :ok
+
   defp maybe_sync(issue, changed) do
     Trackers.prepare(issue, load_workspace(issue.workspace_id))
 

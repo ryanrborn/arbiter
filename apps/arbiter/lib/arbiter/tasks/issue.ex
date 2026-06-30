@@ -131,7 +131,8 @@ defmodule Arbiter.Tasks.Issue do
         :source_pr,
         :pr_ref,
         :pr_body,
-        :target_branch
+        :target_branch,
+        :review_only
       ]
 
       require_atomic? false
@@ -407,6 +408,20 @@ defmodule Arbiter.Tasks.Issue do
 
     attribute :closed_at, :utc_datetime_usec do
       public? true
+    end
+
+    attribute :review_only, :boolean do
+      allow_nil? true
+      public? true
+      default false
+
+      description """
+      When true, this task was dispatched as a review-only directive (via
+      `worker_review`). Review-only tasks must never mutate a linked tracker
+      issue they don't own: no reassignment, no description sync, no status
+      transition. SyncTracker, SyncFields, and the Driver's close-upstream
+      logic all check this flag and skip any write-back when it is set.
+      """
     end
 
     create_timestamp :created_at
