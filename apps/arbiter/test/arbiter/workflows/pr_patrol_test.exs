@@ -292,6 +292,52 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert length(tasks_for_repo()) == 1
     end
 
+    # Regression for bd-5g6rw4: legacy follow-ups recorded the PR via
+    # tracker_type: :github + tracker_ref: <pr#> before source_pr existed.
+    # deduped?/1 must recognise them so the patrol does not file a duplicate.
+    test "dedup: legacy follow-up (tracker_type: :github, tracker_ref) prevents re-dispatch",
+         %{ws: ws} do
+      {:ok, _legacy} =
+        Ash.create(Issue, %{
+          title: "old-format follow-up for PR #45",
+          tracker_type: :github,
+          tracker_ref: "45",
+          workspace_id: ws.id
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 45, "title" => "legacy dedup", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/45/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/45/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      # Only the pre-existing legacy bead; no new follow-up was filed.
+      all_tasks =
+        Issue
+        |> Ash.Query.filter(workspace_id == ^ws.id)
+        |> Ash.read!()
+
+      assert length(all_tasks) == 1
+      assert hd(all_tasks).tracker_ref == "45"
+    end
+
     test "closed follow-up task does not block re-dispatch on a new CHANGES_REQUESTED",
          %{ws: ws} do
       # Task exists but is closed → dedup must not skip the dispatch.
