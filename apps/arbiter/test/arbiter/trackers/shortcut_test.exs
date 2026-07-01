@@ -294,20 +294,25 @@ defmodule Arbiter.Trackers.ShortcutTest do
   end
 
   describe "add_remote_link/3" do
-    test "POSTs an external link with the url and description" do
+    test "GETs the story, appends the url to external_links, and PUTs it back" do
       stub(fn conn ->
-        assert conn.method == "POST"
-        assert conn.request_path == "/api/v3/stories/#{@ref}/external_links"
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/stories/#{@ref}"} ->
+            Req.Test.json(conn, %{"id" => 1234, "external_links" => ["https://existing.example"]})
 
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        decoded = Jason.decode!(body)
+          {"PUT", "/api/v3/stories/#{@ref}"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
 
-        assert decoded["url"] == "https://github.com/example/pr/42"
-        assert decoded["description"] == "PR 42 (task bd-12345)"
+            assert decoded["external_links"] == [
+                     "https://existing.example",
+                     "https://github.com/example/pr/42"
+                   ]
 
-        conn
-        |> Plug.Conn.put_status(201)
-        |> Req.Test.json(%{"id" => "link-1", "url" => "https://github.com/example/pr/42"})
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234})
+        end
       end)
 
       assert :ok =
@@ -318,7 +323,50 @@ defmodule Arbiter.Trackers.ShortcutTest do
                )
     end
 
-    test "404: returns {:error, %Error{kind: :not_found}}" do
+    test "does not duplicate a url already present in external_links" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/stories/#{@ref}"} ->
+            Req.Test.json(conn, %{
+              "id" => 1234,
+              "external_links" => ["https://github.com/example/pr/42"]
+            })
+
+          {"PUT", "/api/v3/stories/#{@ref}"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["external_links"] == ["https://github.com/example/pr/42"]
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234})
+        end
+      end)
+
+      assert :ok = Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42")
+    end
+
+    test "handles a story with no existing external_links" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v3/stories/#{@ref}"} ->
+            Req.Test.json(conn, %{"id" => 1234})
+
+          {"PUT", "/api/v3/stories/#{@ref}"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            decoded = Jason.decode!(body)
+            assert decoded["external_links"] == ["https://github.com/example/pr/42"]
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"id" => 1234})
+        end
+      end)
+
+      assert :ok = Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42")
+    end
+
+    test "404 on the GET returns {:error, %Error{kind: :not_found}}" do
       stub(fn conn ->
         conn
         |> Plug.Conn.put_status(404)
@@ -329,11 +377,17 @@ defmodule Arbiter.Trackers.ShortcutTest do
                Shortcut.add_remote_link(@ref, "https://github.com/example/pr/42", "PR 42")
     end
 
-    test "401: returns {:error, %Error{kind: :unauthenticated}}" do
+    test "401 on the PUT returns {:error, %Error{kind: :unauthenticated}}" do
       stub(fn conn ->
-        conn
-        |> Plug.Conn.put_status(401)
-        |> Req.Test.json(%{"message" => "Unauthorized"})
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, %{"id" => 1234, "external_links" => []})
+
+          "PUT" ->
+            conn
+            |> Plug.Conn.put_status(401)
+            |> Req.Test.json(%{"message" => "Unauthorized"})
+        end
       end)
 
       assert {:error, %Error{kind: :unauthenticated, status: 401}} =
