@@ -16,7 +16,7 @@ defmodule Arbiter.Repo.Migrations.CreateExternalReviewRecords do
 
   def up do
     create table(:external_review_records, primary_key: false) do
-      add :id, :binary_id, primary_key: true, null: false
+      add :id, :uuid, primary_key: true, null: false
       add :pr_ref, :string, null: false
       add :pr, :string
       add :workspace_id, :string

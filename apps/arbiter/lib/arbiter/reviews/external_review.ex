@@ -141,6 +141,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       case run_workflow(prepared, opts) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
+          write_usage_event(record, prepared, result)
           {:ok, result}
 
         {:error, _} = err ->
@@ -262,6 +263,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       case run_workflow(prepared, opts) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
+          write_usage_event(record, prepared, result)
 
           Logger.info(
             "ExternalReview: #{result.strategy} #{result.mr_ref} → #{result.verdict} " <>
@@ -301,6 +303,9 @@ defmodule Arbiter.Reviews.ExternalReview do
       findings: length(Map.get(final, :findings) || []),
       findings_list: Map.get(final, :findings) || [],
       review_path: Map.get(final, :review_path),
+      # Structured usage from the check runner (model, cost, tokens) — populated
+      # when the default Claude invoker ran; nil when a stub runner was used.
+      check_usage: Map.get(final, :check_usage),
       # The id of the review_only engagement created (or adopted) for this PR,
       # or nil when follow-up was off / disabled.
       engagement: engagement && engagement.id,
@@ -651,6 +656,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     finding_count = Map.get(result, :findings)
     verdict = Map.get(result, :verdict)
     engagement_id = Map.get(result, :engagement)
+    usage = Map.get(result, :check_usage) || %{}
 
     attrs = %{
       status: status,
@@ -658,7 +664,11 @@ defmodule Arbiter.Reviews.ExternalReview do
       finding_count: finding_count,
       findings_summary: findings_summary(findings_list),
       engagement_id: engagement_id && to_string(engagement_id),
-      completed_at: DateTime.utc_now()
+      completed_at: DateTime.utc_now(),
+      model: Map.get(usage, :model),
+      cost_usd: Map.get(usage, :cost_usd),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out)
     }
 
     case Ash.update(record, attrs, action: :complete) do
@@ -689,6 +699,65 @@ defmodule Arbiter.Reviews.ExternalReview do
   end
 
   defp findings_summary(_), do: nil
+
+  # ---- usage ledger ---------------------------------------------------------
+  #
+  # Write a Usage.Event row so external reviews appear in the usage ledger
+  # alongside worker-driven reviews. Best-effort: failure here never surfaces.
+  # The `task_id` field (allow_nil? false in the schema) carries the review
+  # record id prefixed with "ext:" so ledger queries can distinguish these rows.
+
+  defp write_usage_event(record, prepared, result) do
+    usage = Map.get(result, :check_usage) || %{}
+    model = Map.get(usage, :model)
+
+    task_id =
+      cond do
+        record && record.id -> "ext:#{record.id}"
+        true -> "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
+      end
+
+    attrs = %{
+      task_id: task_id,
+      workspace_id: prepared.workspace && to_string(prepared.workspace.id),
+      step: :review,
+      model: model,
+      provider: provider_for(model),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out),
+      cost_usd: Map.get(usage, :cost_usd),
+      duration_ms: Map.get(usage, :duration_ms),
+      session_id: Map.get(usage, :session_id),
+      occurred_at: DateTime.utc_now()
+    }
+
+    case Ash.create(Arbiter.Usage.Event, attrs) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "ExternalReview: usage event write failed for #{prepared.mr_ref}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp provider_for(nil), do: nil
+
+  defp provider_for(model) when is_binary(model) do
+    cond do
+      String.starts_with?(model, "claude") -> "claude"
+      String.starts_with?(model, "gemini") -> "gemini"
+      String.contains?(model, "gpt") -> "openai"
+      true -> "other"
+    end
+  end
+
+  defp provider_for(_), do: nil
 
   # ---- workspace resolution ------------------------------------------------
   #

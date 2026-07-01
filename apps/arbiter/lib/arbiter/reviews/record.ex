@@ -25,9 +25,9 @@ defmodule Arbiter.Reviews.Record do
                           running / on failure).
     * `findings_summary`— a short human-readable summary of the findings,
                           truncated at ~500 chars.
-    * `model`           — model identifier used for the review (nil when not
-                          captured — `claude --print` doesn't return structured
-                          usage).
+    * `model`           — model identifier used for the review (nil when a
+                          stub check runner was injected and no real Claude
+                          session ran).
     * `cost_usd`        — total USD cost (nil when not captured).
     * `tokens_in` / `tokens_out` — token counts (nil when not captured).
     * `dispatched_by`   — optional free-form string identifying the caller:
@@ -39,9 +39,9 @@ defmodule Arbiter.Reviews.Record do
 
   ## Graceful degradation
 
-  All cost/model/token fields are optional. A review that doesn't return
-  structured usage still writes a row with nil for those fields — the attempt
-  is always visible.
+  All cost/model/token fields are optional. A review using a stub check runner
+  (tests, custom runners) writes a row with nil for those fields — the attempt
+  is always visible. The default Claude invoker populates all four fields.
   """
 
   use Ash.Resource,
