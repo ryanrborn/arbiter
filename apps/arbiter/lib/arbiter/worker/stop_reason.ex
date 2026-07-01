@@ -41,6 +41,12 @@ defmodule Arbiter.Worker.StopReason do
       emitted `arb done`. It quit early without completing the task.
     * `:stalled` — no exit at all; the subprocess is alive but produced no
       output within the watchdog window (caller passes `exit_status: nil`).
+    * `:missing_worktree` — the worker signalled `arb done` on a reviewable
+      code directive but no per-task branch/worktree was ever provisioned, so
+      there is nothing to integrate (bd-7pe74i). Not a subprocess-exit
+      classification — synthesized by the completion path to refuse closing a
+      bead that produced no deliverable. Remediation: investigate why
+      provisioning was skipped, then re-dispatch.
 
   ## Provider-agnostic signatures
 
@@ -62,6 +68,7 @@ defmodule Arbiter.Worker.StopReason do
           | :crashed
           | :exited_without_done
           | :stalled
+          | :missing_worktree
 
   @type t :: %__MODULE__{
           category: category(),
@@ -244,6 +251,7 @@ defmodule Arbiter.Worker.StopReason do
         :crashed -> "crashed"
         :exited_without_done -> "exited without completing"
         :stalled -> "stalled (no output)"
+        :missing_worktree -> "no worktree provisioned (nothing to integrate)"
       end
 
     case reason.exit_status do
