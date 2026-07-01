@@ -33,6 +33,21 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   merged PRs. This module works the orthogonal path: it queries open **arbiter
   tasks** that have their own `pr_ref`, and finalizes exactly those.
 
+  In addition, this module sweeps PRPatrol follow-up tasks that were never
+  assigned their own `pr_ref` but whose **source PR** has since merged. Two
+  formats are handled:
+
+    * Modern: `source_pr` field set (added by bd-ci2jl2, `tracker_type: :none`).
+    * Legacy: `tracker_type: :github`, `tracker_ref` is a bare PR number,
+      `source_pr` nil (pre-bd-ci2jl2 format).
+
+  **Critical guard:** these tasks are closed local-only — `Sync.lifecycle` is
+  NOT invoked. For modern follow-ups `tracker_type: :none` would already
+  short-circuit it, but for legacy tasks with `tracker_type: :github` the
+  `tracker_ref` is a merged-PR number, and transitioning a merged PR returns
+  `Validation Failed` (bd-ci2jl2 hazard). Closing via `close_upstream: false`
+  (the default) avoids any upstream write-back.
+
   ## Idempotency
 
   `Sync.lifecycle/2` is best-effort and logs quietly on a benign non-transition
@@ -135,8 +150,12 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
            adapter when not is_nil(adapter) <- resolve_adapter(state.workspace),
            true <- function_exported?(adapter, :get, 1),
            :ok <- Mergers.prepare_with_repo(state.workspace, state.repo),
-           {:ok, tasks} <- open_tasks_with_pr_ref(state.workspace_id) do
-        Enum.each(tasks, &maybe_finalize(&1, adapter))
+           {:ok, pr_ref_tasks} <- open_tasks_with_pr_ref(state.workspace_id),
+           {:ok, follow_up_tasks} <- open_follow_up_tasks(state.workspace_id),
+           {:ok, legacy_tasks} <- open_legacy_pr_tracker_tasks(state.workspace_id) do
+        Enum.each(pr_ref_tasks, &maybe_finalize(&1, adapter))
+        Enum.each(follow_up_tasks, &maybe_finalize_follow_up(&1, adapter))
+        Enum.each(legacy_tasks, &maybe_finalize_follow_up(&1, adapter))
         :ok
       else
         _ -> :noop
@@ -155,16 +174,43 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   end
 
   defp open_tasks_with_pr_ref(workspace_id) do
-    result =
-      Issue
-      |> Ash.Query.filter(
-        workspace_id == ^workspace_id and
-          not is_nil(pr_ref) and
-          status != :closed
-      )
-      |> Ash.read()
+    Issue
+    |> Ash.Query.filter(
+      workspace_id == ^workspace_id and
+        not is_nil(pr_ref) and
+        status != :closed
+    )
+    |> Ash.read()
+  end
 
-    result
+  # Modern PRPatrol follow-ups: source_pr set, tracker_type: :none (bd-ci2jl2).
+  defp open_follow_up_tasks(workspace_id) do
+    Issue
+    |> Ash.Query.filter(
+      workspace_id == ^workspace_id and
+        not is_nil(source_pr) and
+        status != :closed
+    )
+    |> Ash.read()
+  end
+
+  # Legacy PRPatrol follow-ups: pre-bd-ci2jl2 format used tracker_type: :github
+  # and stored the source PR number in tracker_ref. We only sweep tasks that
+  # have no source_pr (already handled above) and no pr_ref (handled by the
+  # pr_ref pass). The adapter.get call is the safety net: if tracker_ref is
+  # not a PR number (e.g. a real GitHub issue ref) the GitHub API returns 404
+  # and we skip it harmlessly.
+  defp open_legacy_pr_tracker_tasks(workspace_id) do
+    Issue
+    |> Ash.Query.filter(
+      workspace_id == ^workspace_id and
+        tracker_type == :github and
+        not is_nil(tracker_ref) and
+        is_nil(source_pr) and
+        is_nil(pr_ref) and
+        status != :closed
+    )
+    |> Ash.read()
   end
 
   defp maybe_finalize(%Issue{pr_ref: pr_ref} = task, adapter) do
@@ -198,6 +244,48 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     e ->
       Logger.warning(
         "MergedPRFinalizer: error finalizing task=#{task.id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  # Determines the source PR ref for a follow-up task (modern: source_pr,
+  # legacy: tracker_ref) and closes the task local-only if the source PR merged.
+  defp maybe_finalize_follow_up(%Issue{source_pr: source_pr, tracker_ref: tracker_ref} = task, adapter) do
+    ref = source_pr || tracker_ref
+
+    with {:ok, %{status: :merged}} <- adapter.get(ref) do
+      finalize_follow_up(task, ref)
+    else
+      _ -> :noop
+    end
+  end
+
+  # Closes a PRPatrol follow-up task local-only: no Sync.lifecycle, no
+  # close_upstream. The source PR is a merged PR number — calling Sync.lifecycle
+  # on it would attempt a tracker transition on a merged PR and fail with
+  # Validation Failed (bd-ci2jl2 hazard).
+  defp finalize_follow_up(%Issue{} = task, source_ref) do
+    Logger.info(
+      "MergedPRFinalizer: source PR #{source_ref} merged — closing follow-up task=#{task.id} " <>
+        "(tracker=#{task.tracker_type} source_pr=#{task.source_pr} tracker_ref=#{task.tracker_ref})"
+    )
+
+    case Ash.update(task, %{}, action: :close) do
+      {:ok, _} ->
+        Logger.info("MergedPRFinalizer: closed follow-up task=#{task.id}")
+
+      {:error, reason} ->
+        Logger.warning(
+          "MergedPRFinalizer: failed to close follow-up task=#{task.id}: #{inspect(reason)}"
+        )
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "MergedPRFinalizer: error closing follow-up task=#{task.id}: #{Exception.message(e)}"
       )
 
       :ok
