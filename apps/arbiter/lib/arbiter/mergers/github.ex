@@ -292,12 +292,39 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
-  def get_diff(mr_ref, _opts) when is_binary(mr_ref) do
+  def get_diff(mr_ref, opts) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
-      request_diff(cfg, "/repos/#{owner}/#{repo}/pulls/#{number}")
+      case diff_range(opts) do
+        {base, head} ->
+          # A bounded diff since a prior SHA — ReviewPatrol's "new-diff-only"
+          # re-review (bd-f3fg22) diffs the commits pushed SINCE `last_reviewed_sha`
+          # rather than the whole PR. GitHub's compare endpoint returns exactly
+          # `base..head` in the same unified-diff media type as the PR diff.
+          request_diff(cfg, "/repos/#{owner}/#{repo}/compare/#{base}...#{head}")
+
+        nil ->
+          request_diff(cfg, "/repos/#{owner}/#{repo}/pulls/#{number}")
+      end
     end
   end
+
+  # Extract a `{base, head}` compare range from the caller's opts, or nil to fall
+  # back to the whole-PR diff. Both endpoints must be non-empty binaries; a
+  # missing/blank head or base means "no bounded range requested". Keys are read
+  # both as atoms (the ReviewPatrol call site) and strings (defensive).
+  defp diff_range(opts) when is_map(opts) do
+    base = opts[:base] || opts["base"]
+    head = opts[:head] || opts["head"]
+
+    if is_binary(base) and base != "" and is_binary(head) and head != "" do
+      {base, head}
+    else
+      nil
+    end
+  end
+
+  defp diff_range(_opts), do: nil
 
   @impl true
   def post_inline_comment(mr_ref, finding, opts)
