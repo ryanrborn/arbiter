@@ -256,8 +256,16 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp deduped?(pr_number, workspace_id) do
     ref = to_string(pr_number)
 
+    # Match either the current format (source_pr) or the legacy format that used
+    # tracker_type: :github + tracker_ref: <pr#> before source_pr was introduced.
+    # Without the legacy arm, old-format follow-ups are invisible to dedup and a
+    # duplicate gets filed on the next patrol tick (bd-5g6rw4).
     Issue
-    |> Ash.Query.filter(source_pr == ^ref and workspace_id == ^workspace_id and status != :closed)
+    |> Ash.Query.filter(
+      workspace_id == ^workspace_id and
+        status != :closed and
+        (source_pr == ^ref or (tracker_type == :github and tracker_ref == ^ref))
+    )
     |> Ash.read!()
     |> Enum.any?()
   end
