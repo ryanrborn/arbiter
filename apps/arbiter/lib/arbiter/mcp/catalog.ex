@@ -605,6 +605,31 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.worker_list/2
     },
     %{
+      name: "external_review_list",
+      tiers: @coordinator,
+      description:
+        "List recent ExternalReview audit records for the workspace (bd-31fh9e). Returns in-flight " <>
+          "and completed external PR reviews in reverse-chronological order. Each record carries the " <>
+          "PR ref, verdict, finding count, model, cost, dispatched-by, and timestamps. Optional " <>
+          "`limit` (default 20, max 200) and `status` filter (`running` | `completed` | `failed`).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "limit" => %{
+            "type" => "integer",
+            "description" => "Max records to return (default 20, max 200)."
+          },
+          "status" => %{
+            "type" => "string",
+            "enum" => ["running", "completed", "failed"],
+            "description" => "Filter by review status. Omit for all."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.external_review_list/2
+    },
+    %{
       name: "task_list",
       tiers: @coordinator,
       description:
