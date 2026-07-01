@@ -9,6 +9,7 @@ defmodule Arbiter.Application do
   alias Arbiter.Workflows.MergeQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
+  alias Arbiter.Workflows.ReviewPatrolSupervisor
 
   @impl true
   def start(_type, _args) do
@@ -60,6 +61,8 @@ defmodule Arbiter.Application do
       MergeQueueSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
       PRPatrolSupervisor,
+      {Registry, keys: :unique, name: Arbiter.Workflows.ReviewPatrolRegistry},
+      ReviewPatrolSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
       MergedPRFinalizerSupervisor,
       # One Conductor per running Graph, started on demand by
@@ -138,6 +141,11 @@ defmodule Arbiter.Application do
       Supervisor.child_spec(
         {Task, fn -> PRPatrolSupervisor.start_for_existing_workspaces() end},
         id: :pr_patrol_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task, fn -> ReviewPatrolSupervisor.start_for_existing_workspaces() end},
+        id: :review_patrol_boot_task,
         restart: :temporary
       ),
       Supervisor.child_spec(
