@@ -88,10 +88,16 @@ jobs:
       - name: Install asset build tools
         run: |
           MIX_ENV=prod mix cmd --app arbiter_web mix assets.setup
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+          MIX_ENV: prod
 
       - name: Compile (prod)
         run: |
           MIX_ENV=prod mix compile
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+          MIX_ENV: prod
 
       - name: Build and digest web assets
         run: |
@@ -101,11 +107,15 @@ jobs:
         run: |
           MIX_ENV=prod mix release arbiter
         env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
           MIX_ENV: prod
 
       - name: Build arb escript
         run: |
           cd apps/arbiter_cli && MIX_ENV=prod mix escript.build
+        env:
+          RELEASE_VERSION: ${{ steps.tag.outputs.name }}
+          MIX_ENV: prod
 
       - name: Package and checksum release
         run: |
