@@ -93,6 +93,22 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
   @ws_direct %{"merge" => %{"strategy" => "direct"}}
 
+  # Multi-GitLab-project workspace (bd-c9vb0r): "tonic" uses the workspace
+  # default project, "tonic_device" overrides to a different project_id.
+  @ws_gitlab_repos %{
+    "merge" => %{
+      "strategy" => "gitlab",
+      "config" => %{
+        "host" => "gitlab.com",
+        "project_id" => 111,
+        "credentials_ref" => "test-gitlab-token",
+        "repos" => %{
+          "tonic_device" => %{"project_id" => 222}
+        }
+      }
+    }
+  }
+
   # ---- setup helpers ------------------------------------------------------
 
   setup tags do
@@ -130,14 +146,17 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       |> Keyword.merge(opts)
 
     {:ok, pid} = MergeQueue.start_link(full_opts)
-    # Allow the merge_queue process to use the Mergers.Github Req.Test stub.
+    # Allow the merge_queue process to use the Mergers Req.Test stubs.
     Req.Test.allow(Arbiter.Mergers.Github.HTTP, self(), pid)
+    Req.Test.allow(Arbiter.Mergers.Gitlab.HTTP, self(), pid)
     # Allow it to use the Ecto sandbox connection too.
     Ecto.Adapters.SQL.Sandbox.allow(Arbiter.Repo, self(), pid)
     {pid, name}
   end
 
   defp stub(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
+
+  defp gitlab_stub(fun), do: Req.Test.stub(Arbiter.Mergers.Gitlab.HTTP, fun)
 
   # Raw GitHub PR payload for the GET /pulls/{N} endpoint.
   defp pr_payload(overrides) do
@@ -1281,6 +1300,58 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       task_id = task.id
       assert_receive {:task_closed_by_merge_queue, ^task_id}, 500
+    end
+  end
+
+  describe "enqueue/2 per-repo GitLab project resolution (bd-c9vb0r)" do
+    @tag workspace_config: @ws_gitlab_repos
+    test "a task worked in the overridden repo opens its MR against the overridden project",
+         %{workspace: ws, task: task} do
+      :ok = record_run(task, "tonic_device")
+      test_pid = self()
+
+      gitlab_stub(fn conn ->
+        send(test_pid, {:mr_project, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"iid" => 1, "web_url" => "https://gitlab.com/x/-/merge_requests/1"})
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      assert_receive {:mr_project, path}
+      assert path == "/api/v4/projects/222/merge_requests"
+    end
+
+    test "a task worked in a repo with no override uses the workspace-default project" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ws-#{System.unique_integer([:positive])}",
+          prefix: "rt#{System.unique_integer([:positive])}",
+          config: @ws_gitlab_repos
+        })
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "merge me", description: "body", workspace_id: ws.id})
+
+      :ok = record_run(task, "tonic")
+      test_pid = self()
+
+      gitlab_stub(fn conn ->
+        send(test_pid, {:mr_project, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"iid" => 2, "web_url" => "https://gitlab.com/x/-/merge_requests/2"})
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      assert_receive {:mr_project, path}
+      assert path == "/api/v4/projects/111/merge_requests"
     end
   end
 end

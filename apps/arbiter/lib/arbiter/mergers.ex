@@ -113,17 +113,26 @@ defmodule Arbiter.Mergers do
   end
 
   @doc """
-  Like `prepare/1`, but also overrides the per-process `owner`/`repo` from an
-  explicit `"owner/repo"` slug.
+  Like `prepare/1`, but also overrides the per-process merger config with a
+  repo-specific one, using `repo` (the workspace's `repo_paths` key, e.g.
+  `"tonic_device"`) to look up the override.
 
-  Used by `Arbiter.Workflows.PRPatrol` so each per-repo patrol instance seeds
-  `list_open/0` with the correct repo, even when the workspace's merge config
-  omits `repo` (multi-repo workspace shape where repo is derived per-rig from
-  the rig's git remote at open time).
+  For `:github`, overrides `owner`/`repo` from an explicit `"owner/repo"`
+  slug — used by `Arbiter.Workflows.PRPatrol` so each per-repo patrol
+  instance seeds `list_open/0` with the correct repo, even when the
+  workspace's merge config omits `repo` (multi-repo workspace shape where
+  repo is derived per-rig from the rig's git remote at open time).
 
-  Callers that run in single-repo workspaces or already have the repo set in
-  the workspace config can still use `prepare/1` — or pass `nil` as `repo` to
-  this function, which falls back to `prepare/1` with no override.
+  For `:gitlab`, overrides `project_id` (and any other merge-config key) from
+  `config["merge"]["config"]["repos"][repo]` — used when a workspace's repos
+  map to different GitLab projects (see `Arbiter.Mergers.Gitlab.Config`
+  moduledoc), so the right project is targeted instead of the
+  workspace-wide default.
+
+  Callers that run in single-repo / single-GitLab-project workspaces or
+  already have the repo set in the workspace config can still use
+  `prepare/1` — or pass `nil` as `repo` to this function, which falls back
+  to `prepare/1` with no override.
   """
   @spec prepare_with_repo(Workspace.t() | nil, String.t() | nil) :: :ok
   def prepare_with_repo(workspace, nil), do: prepare(workspace)
@@ -132,8 +141,10 @@ defmodule Arbiter.Mergers do
   def prepare_with_repo(%Workspace{} = workspace, repo) when is_binary(repo) and repo != "" do
     :ok = prepare(workspace)
 
-    if Workspace.merger_strategy(workspace) == :github do
-      Arbiter.Mergers.Github.Config.override_repo(repo)
+    case Workspace.merger_strategy(workspace) do
+      :github -> Arbiter.Mergers.Github.Config.override_repo(repo)
+      :gitlab -> Arbiter.Mergers.Gitlab.Config.override_repo(workspace, repo)
+      _ -> :ok
     end
 
     :ok
