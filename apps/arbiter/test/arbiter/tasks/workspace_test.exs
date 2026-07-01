@@ -467,6 +467,67 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "review_automation config validation" do
+    test "accepts a valid review_automation block with default and auto_authors" do
+      config = %{
+        "review_automation" => %{
+          "default" => "flag",
+          "auto_authors" => ["alice", "bob"]
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "ra-valid1", config: config})
+      assert ws.config["review_automation"]["default"] == "flag"
+    end
+
+    test "accepts review_automation with default auto" do
+      config = %{"review_automation" => %{"default" => "auto"}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-valid2", config: config})
+    end
+
+    test "accepts review_automation with empty auto_authors list" do
+      config = %{"review_automation" => %{"default" => "flag", "auto_authors" => []}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-valid3", config: config})
+    end
+
+    test "rejects review_automation.default with invalid value" do
+      config = %{"review_automation" => %{"default" => "always"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad1", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.default must be one of")
+    end
+
+    test "rejects review_automation.auto_authors when not a list" do
+      config = %{"review_automation" => %{"auto_authors" => "alice"}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad2", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.auto_authors must be a list")
+    end
+
+    test "rejects review_automation.auto_authors containing non-strings" do
+      config = %{"review_automation" => %{"auto_authors" => ["alice", 42]}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad3", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.auto_authors must be a list")
+    end
+
+    test "rejects review_automation when it is not a map" do
+      config = %{"review_automation" => "auto"}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad4", config: config})
+      assert err |> Exception.message() |> String.contains?("review_automation must be a map")
+    end
+  end
+
   describe "watch_pipeline?/1" do
     test "true when config[merge][watch_pipeline] is boolean true" do
       ws = %Workspace{config: %{"merge" => %{"watch_pipeline" => true}}}

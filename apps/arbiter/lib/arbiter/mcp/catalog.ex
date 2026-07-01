@@ -505,6 +505,20 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "(task review) Tracker type for `tracker_context_ref` (e.g. \"jira\"). " <>
                 "Defaults to the workspace's tracker when omitted."
+          },
+          "automation" => %{
+            "type" => "string",
+            "enum" => ["auto", "flag"],
+            "description" =>
+              "(task review) Override the workspace review_automation policy: \"auto\" to " <>
+                "re-review automatically on new commits, \"flag\" to surface new commits as a flag. " <>
+                "When omitted, the mode is resolved from the workspace policy using `pr_author`."
+          },
+          "pr_author" => %{
+            "type" => "string",
+            "description" =>
+              "(task review) Login of the PR author, used to resolve the workspace " <>
+                "review_automation policy (auto_authors list). Ignored when `automation` is set."
           }
         },
         "required" => [],
@@ -726,7 +740,8 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "key" => %{
             "type" => "string",
-            "description" => "Dotted config key to remove (e.g. \"agent.config.vernacular\"). Required."
+            "description" =>
+              "Dotted config key to remove (e.g. \"agent.config.vernacular\"). Required."
           }
         },
         "required" => ["key"],

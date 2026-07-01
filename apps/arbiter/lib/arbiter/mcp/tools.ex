@@ -42,6 +42,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Trackers
   alias Arbiter.Usage
   alias Arbiter.Workflows.Conductor
@@ -621,7 +622,8 @@ defmodule Arbiter.MCP.Tools do
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
          {:ok, task} <- fetch_task(scope, args, task_id),
-         {:ok, _task} <- maybe_set_tracker_context(task, args) do
+         {:ok, task} <- maybe_set_tracker_context(task, args),
+         {:ok, _} <- persist_review_automation(task, scope, args) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -633,6 +635,50 @@ defmodule Arbiter.MCP.Tools do
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
     end
+  end
+
+  # Resolve and persist the review_automation mode on the engagement task.
+  #
+  # Resolution order (most-specific wins):
+  #   1. An explicit `automation` arg passed to `worker_review` — hard override.
+  #   2. The workspace's `review_automation` policy — auto_authors list, then default.
+  #   3. No config → :flag (conservative: never auto-post unless explicitly trusted).
+  #
+  # The result is written to `task.review_automation` so the ReviewPatrol poller
+  # can read it from the task without re-loading workspace config on each cycle.
+  defp persist_review_automation(task, scope, args) do
+    mode = resolve_review_automation_mode(scope, args)
+
+    case Ash.update(task, %{review_automation: mode}) do
+      {:ok, updated} -> {:ok, updated}
+      {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
+    end
+  end
+
+  defp resolve_review_automation_mode(scope, args) do
+    case fetch_string(args, "automation") do
+      "auto" ->
+        :auto
+
+      "flag" ->
+        :flag
+
+      _ ->
+        pr_author = fetch_string(args, "pr_author")
+        ws_config = load_workspace_config(scope.workspace_id)
+        ReviewAutomation.resolve(ws_config, pr_author)
+    end
+  end
+
+  defp load_workspace_config(nil), do: nil
+
+  defp load_workspace_config(ws_id) do
+    case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
+      {:ok, %{config: config}} -> config
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   # If `tracker_context_ref` is provided in args, persist it (and optionally
@@ -661,7 +707,9 @@ defmodule Arbiter.MCP.Tools do
 
         attrs =
           %{"tracker_context_ref" => ref}
-          |> then(fn m -> if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m end)
+          |> then(fn m ->
+            if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m
+          end)
 
         case Ash.update(task, attrs, action: :update) do
           {:ok, updated} -> {:ok, updated}
