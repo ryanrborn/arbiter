@@ -222,8 +222,11 @@ defmodule Arbiter.Reviews.ExternalReview do
       {:ok, final} ->
         # After the verdict posts, adopt the PR into ReviewPatrol by opening a
         # review_only engagement (Option A). Best-effort: a failure here never
-        # fails the review itself — the verdict is already on the PR.
-        engagement = maybe_create_engagement(prepared, opts)
+        # fails the review itself — the verdict is already on the PR. The
+        # first-pass findings seed the engagement's `posted_findings` so
+        # ReviewPatrol's relevance gate (re-review only when a new commit touches
+        # a previously-flagged file) has something to match against.
+        engagement = maybe_create_engagement(prepared, opts, Map.get(final, :findings) || [])
         {:ok, result(prepared, final, engagement)}
 
       {:error, _} = err ->
@@ -302,9 +305,9 @@ defmodule Arbiter.Reviews.ExternalReview do
   # adopts the PR. Returns %{id, created} on create, %{id, created: false} when
   # an open engagement already existed (dedup), or nil when follow-up is off /
   # anything goes wrong (best-effort — never fails the review).
-  defp maybe_create_engagement(prepared, opts) do
+  defp maybe_create_engagement(prepared, opts, findings) do
     if follow_up?(prepared, opts) do
-      create_engagement(prepared, opts)
+      create_engagement(prepared, opts, findings)
     else
       nil
     end
@@ -328,7 +331,11 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp review_patrol_active?(_workspace), do: false
 
-  defp create_engagement(%{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared, opts) do
+  defp create_engagement(
+         %{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared,
+         opts,
+         findings
+       ) do
     case existing_engagement(mr_ref, ws_id) do
       %Issue{} = existing ->
         # Dedup: an open review_only engagement already tracks this PR.
@@ -338,8 +345,19 @@ defmodule Arbiter.Reviews.ExternalReview do
 
         %{id: existing.id, created: false}
 
+      :error ->
+        # The dedup read itself failed. Fail closed: an open engagement *may*
+        # exist and we can't tell, so skip creation rather than risk a duplicate
+        # (the exact thing the dedup guards against). A later dispatch retries.
+        Logger.warning(
+          "ExternalReview: dedup read failed for #{mr_ref}; skipping engagement creation " <>
+            "to avoid a possible duplicate"
+        )
+
+        nil
+
       nil ->
-        do_create_engagement(prepared, opts)
+        do_create_engagement(prepared, opts, findings)
     end
   rescue
     e ->
@@ -351,11 +369,13 @@ defmodule Arbiter.Reviews.ExternalReview do
       nil
   end
 
-  defp create_engagement(_prepared, _opts), do: nil
+  defp create_engagement(_prepared, _opts, _findings), do: nil
 
   # An OPEN review_only engagement already linked to this PR in this workspace,
-  # or nil. Mirrors ReviewPatrol's own engagement predicate (review_only +
-  # source_pr + not closed), scoped to the workspace.
+  # or nil when none exists. Mirrors ReviewPatrol's own engagement predicate
+  # (review_only + source_pr + not closed), scoped to the workspace. Returns the
+  # `:error` sentinel when the read itself fails — the caller fails closed and
+  # skips creation, so a transient DB blip can't spawn a duplicate engagement.
   defp existing_engagement(mr_ref, ws_id) do
     Issue
     |> Ash.Query.filter(
@@ -365,17 +385,17 @@ defmodule Arbiter.Reviews.ExternalReview do
     |> Ash.read!()
     |> List.first()
   rescue
-    _ -> nil
+    _ -> :error
   end
 
-  defp do_create_engagement(%{adapter: adapter, mr_ref: mr_ref} = prepared, opts) do
+  defp do_create_engagement(%{adapter: adapter, mr_ref: mr_ref} = prepared, opts, findings) do
     # Baseline captured at review time: PR head SHA (so only later commits
     # trigger a re-review) + the PR author (for automation-mode resolution).
     {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
     watermark = fetch_comment_watermark(adapter, mr_ref)
     mode = resolve_automation(opts, prepared.workspace, pr_author)
 
-    case create_engagement_issue(prepared, opts, mode, head_sha, watermark) do
+    case create_engagement_issue(prepared, opts, mode, head_sha, watermark, findings) do
       {:ok, issue} ->
         Logger.info(
           "ExternalReview: opened review engagement #{issue.id} for #{mr_ref} " <>
@@ -404,7 +424,8 @@ defmodule Arbiter.Reviews.ExternalReview do
          opts,
          mode,
          head_sha,
-         watermark
+         watermark,
+         findings
        ) do
     attrs =
       %{
@@ -417,13 +438,34 @@ defmodule Arbiter.Reviews.ExternalReview do
         workspace_id: ws_id,
         review_only: true,
         review_automation: mode,
-        skip_upstream_create: true
+        skip_upstream_create: true,
+        # Seed the relevance baseline from the first-pass findings so a later
+        # commit touching a flagged file triggers a re-review. An approve /
+        # zero-finding review leaves this empty (correctly quiet).
+        posted_findings: normalize_findings(findings)
       }
       |> maybe_put(:last_reviewed_sha, head_sha)
       |> maybe_put(:last_seen_comment_id, watermark)
       |> put_tracker_context(opts, prepared.workspace)
 
     Ash.create(Issue, attrs)
+  end
+
+  # Map fresh (atom-keyed) check findings into the string-keyed shape
+  # ReviewPatrol persists and reads (`stored_finding/1` / `stored_field/2` in
+  # `Arbiter.Workflows.ReviewPatrol`), so its relevance gate and dedup can match
+  # them against re-review findings.
+  defp normalize_findings(findings) do
+    findings
+    |> List.wrap()
+    |> Enum.map(fn f ->
+      %{
+        "file" => f[:file] || f["file"],
+        "line" => f[:line] || f["line"],
+        "message" => f[:message] || f["message"],
+        "severity" => to_string(f[:severity] || f["severity"] || "")
+      }
+    end)
   end
 
   defp engagement_title(mr_ref), do: "Review engagement: #{mr_ref}"

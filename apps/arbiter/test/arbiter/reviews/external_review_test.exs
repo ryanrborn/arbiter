@@ -231,6 +231,31 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       # Tracker-inert + non-reviewable (no worktree/branch).
       assert engagement.tracker_type == :none
       assert engagement.issue_type == :task
+      # First-pass findings seed the relevance baseline, string-keyed to match
+      # what ReviewPatrol persists/reads — so a later commit touching x.ex
+      # triggers a re-review.
+      assert [finding] = engagement.posted_findings
+      assert finding["file"] == "x.ex"
+      assert finding["line"] == 1
+      assert finding["message"] == "boom"
+      assert finding["severity"] == "error"
+    end
+
+    test "an approve / zero-finding review seeds no posted_findings" do
+      ws = github_ws("er-approve")
+      stub_full_review(head_sha: "sha-head-1", author: "coworker", max_comment_id: 500)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: fn _diff, _state -> {:ok, []} end
+               )
+
+      engagement = Ash.get!(Issue, result.engagement)
+      # Empty is correct here — nothing flagged, so ReviewPatrol stays quiet.
+      assert engagement.posted_findings == []
     end
 
     test "without follow_up the flow is unchanged (no engagement)" do
