@@ -33,14 +33,41 @@ defmodule Arbiter.Reviews.ExternalReview do
       supervised background `Task`, returning a "dispatched" ack immediately.
       The findings + verdict land on the PR itself. This mirrors the
       fire-and-acknowledge semantics of `arb review`.
+
+  ## Follow-up engagement (Option A, bd-2ovun1)
+
+  A one-shot external review posts findings + a verdict and then forgets the PR
+  — nothing re-reviews new commits, handles author replies, or tracks the PR to
+  merge. Those lifecycle behaviours live in `Arbiter.Workflows.ReviewPatrol`,
+  which only acts on **engagements**: an `Issue` with `review_only == true` and a
+  `source_pr` set.
+
+  So when `follow_up` is set (default: on when the workspace has a ReviewPatrol
+  running), this module — **after the verdict posts** — creates exactly one such
+  engagement so ReviewPatrol adopts the PR on its next tick. The engagement:
+
+    * is `review_only` and `tracker_type: :none` → tracker-inert (no upstream
+      lifecycle write-back) and `issue_type: :task` → the non-reviewable type
+      that spawns **no worktree/branch**;
+    * records `source_pr` = the constructed `mr_ref` (what ReviewPatrol hands to
+      `adapter.get/1`), a baseline `last_reviewed_sha` (PR head at review time,
+      so only *later* commits trigger a re-review), a `last_seen_comment_id`
+      high-watermark (so only *new* author replies trigger), and the resolved
+      `review_automation` mode;
+    * carries `tracker_context_ref`/`tracker_context_type` when supplied.
+
+  Dedup: if an open `review_only` engagement already exists for
+  `(source_pr, workspace)`, no second one is created — a repeated `follow_up`
+  dispatch for the same PR is a no-op on the engagement.
   """
 
   require Logger
   require Ash.Query
 
   alias Arbiter.Mergers
-  alias Arbiter.Tasks.{RepoConfig, Workspace}
-  alias Arbiter.Workflows.CodeReview
+  alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
+  alias Arbiter.Worker.ReviewAutomation
+  alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
 
@@ -48,7 +75,19 @@ defmodule Arbiter.Reviews.ExternalReview do
           pr: String.t(),
           repo: String.t() | nil,
           workspace: String.t() | nil,
-          check_runner: (String.t(), map() -> {:ok, list()} | {:error, term()}) | nil
+          check_runner: (String.t(), map() -> {:ok, list()} | {:error, term()}) | nil,
+          # When true (or, when unset, when the workspace has a ReviewPatrol
+          # running), a `review_only` engagement is created after the verdict
+          # posts so ReviewPatrol adopts the PR (Option A, bd-2ovun1). When
+          # false, the review is a pure one-shot (legacy behaviour).
+          follow_up: boolean() | nil,
+          # Explicit engagement automation override; otherwise resolved from the
+          # workspace `review_automation` policy against the PR author.
+          automation: :auto | :flag | String.t() | nil,
+          # Read-only tracker context (e.g. the ticket the PR implements) carried
+          # onto the engagement for re-review intent (#638).
+          tracker_context_ref: String.t() | nil,
+          tracker_context_type: atom() | String.t() | nil
         ]
 
   @doc """
@@ -180,8 +219,15 @@ defmodule Arbiter.Reviews.ExternalReview do
       |> maybe_put_check_runner(opts)
 
     case Arbiter.Workflow.run(CodeReview, state) do
-      {:ok, final} -> {:ok, result(prepared, final)}
-      {:error, _} = err -> err
+      {:ok, final} ->
+        # After the verdict posts, adopt the PR into ReviewPatrol by opening a
+        # review_only engagement (Option A). Best-effort: a failure here never
+        # fails the review itself — the verdict is already on the PR.
+        engagement = maybe_create_engagement(prepared, opts)
+        {:ok, result(prepared, final, engagement)}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -225,7 +271,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     }
   end
 
-  defp result(prepared, final) do
+  defp result(prepared, final, engagement) do
     %{
       external: true,
       pr: prepared.pr,
@@ -234,7 +280,11 @@ defmodule Arbiter.Reviews.ExternalReview do
       link: prepared.link,
       verdict: Map.get(final, :verdict),
       findings: length(Map.get(final, :findings) || []),
-      review_path: Map.get(final, :review_path)
+      review_path: Map.get(final, :review_path),
+      # The id of the review_only engagement created (or adopted) for this PR,
+      # or nil when follow-up was off / disabled.
+      engagement: engagement && engagement.id,
+      engagement_created: (engagement && engagement.created) || false
     }
   end
 
@@ -244,6 +294,263 @@ defmodule Arbiter.Reviews.ExternalReview do
     _ -> ""
   catch
     :exit, _ -> ""
+  end
+
+  # ---- follow-up engagement (Option A, bd-2ovun1) --------------------------
+
+  # After the verdict posts, create a review_only engagement so ReviewPatrol
+  # adopts the PR. Returns %{id, created} on create, %{id, created: false} when
+  # an open engagement already existed (dedup), or nil when follow-up is off /
+  # anything goes wrong (best-effort — never fails the review).
+  defp maybe_create_engagement(prepared, opts) do
+    if follow_up?(prepared, opts) do
+      create_engagement(prepared, opts)
+    else
+      nil
+    end
+  end
+
+  # follow_up resolution: an explicit boolean wins; otherwise engage by default
+  # only when the workspace actually has a ReviewPatrol running (no point filing
+  # an engagement nothing will pick up).
+  defp follow_up?(prepared, opts) do
+    case Map.get(opts, :follow_up) do
+      v when is_boolean(v) -> v
+      _ -> review_patrol_active?(prepared.workspace)
+    end
+  end
+
+  defp review_patrol_active?(%Workspace{id: id}) when is_binary(id) do
+    ReviewPatrolSupervisor.whereis_all(id) != []
+  rescue
+    _ -> false
+  end
+
+  defp review_patrol_active?(_workspace), do: false
+
+  defp create_engagement(%{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared, opts) do
+    case existing_engagement(mr_ref, ws_id) do
+      %Issue{} = existing ->
+        # Dedup: an open review_only engagement already tracks this PR.
+        Logger.info(
+          "ExternalReview: engagement #{existing.id} already open for #{mr_ref}; not duplicating"
+        )
+
+        %{id: existing.id, created: false}
+
+      nil ->
+        do_create_engagement(prepared, opts)
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ExternalReview: engagement creation crashed for #{prepared.mr_ref}: " <>
+          Exception.message(e)
+      )
+
+      nil
+  end
+
+  defp create_engagement(_prepared, _opts), do: nil
+
+  # An OPEN review_only engagement already linked to this PR in this workspace,
+  # or nil. Mirrors ReviewPatrol's own engagement predicate (review_only +
+  # source_pr + not closed), scoped to the workspace.
+  defp existing_engagement(mr_ref, ws_id) do
+    Issue
+    |> Ash.Query.filter(
+      review_only == true and source_pr == ^mr_ref and status != :closed and
+        workspace_id == ^ws_id
+    )
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
+  end
+
+  defp do_create_engagement(%{adapter: adapter, mr_ref: mr_ref} = prepared, opts) do
+    # Baseline captured at review time: PR head SHA (so only later commits
+    # trigger a re-review) + the PR author (for automation-mode resolution).
+    {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
+    watermark = fetch_comment_watermark(adapter, mr_ref)
+    mode = resolve_automation(opts, prepared.workspace, pr_author)
+
+    case create_engagement_issue(prepared, opts, mode, head_sha, watermark) do
+      {:ok, issue} ->
+        Logger.info(
+          "ExternalReview: opened review engagement #{issue.id} for #{mr_ref} " <>
+            "(mode #{mode}, baseline #{head_sha || "-"}, cursor #{watermark || "-"})"
+        )
+
+        %{id: issue.id, created: true}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ExternalReview: failed to open engagement for #{mr_ref}: #{inspect(reason)}"
+        )
+
+        nil
+    end
+  end
+
+  # Create the engagement Issue in one atomic action. review_only + the
+  # ReviewPatrol baseline/cursor + automation mode are set at create time (the
+  # :create action accepts them — bd-2ovun1) so an engagement is never left
+  # half-formed. tracker_type: :none + skip_upstream_create keep it tracker-inert;
+  # issue_type: :task is the non-reviewable type so nothing ever provisions a
+  # worktree/branch for it.
+  defp create_engagement_issue(
+         %{mr_ref: mr_ref, workspace: %Workspace{id: ws_id}} = prepared,
+         opts,
+         mode,
+         head_sha,
+         watermark
+       ) do
+    attrs =
+      %{
+        title: engagement_title(mr_ref),
+        description: engagement_description(prepared),
+        issue_type: :task,
+        priority: 2,
+        tracker_type: :none,
+        source_pr: mr_ref,
+        workspace_id: ws_id,
+        review_only: true,
+        review_automation: mode,
+        skip_upstream_create: true
+      }
+      |> maybe_put(:last_reviewed_sha, head_sha)
+      |> maybe_put(:last_seen_comment_id, watermark)
+      |> put_tracker_context(opts, prepared.workspace)
+
+    Ash.create(Issue, attrs)
+  end
+
+  defp engagement_title(mr_ref), do: "Review engagement: #{mr_ref}"
+
+  defp engagement_description(%{pr: pr, mr_ref: mr_ref, link: link}) do
+    """
+    ReviewPatrol engagement for an external PR review (bd-2ovun1).
+
+    PR: #{pr} (#{mr_ref})
+    #{if is_binary(link) and link != "", do: "Link: #{link}\n", else: ""}\
+    Opened by ExternalReview after posting the first-pass verdict. ReviewPatrol
+    owns this task's lifecycle from here: new-commit re-review, author-reply
+    handling, and stop-on-merge. Tracker-inert, no worktree/branch.
+    """
+  end
+
+  # Carry read-only tracker context onto the engagement when supplied, defaulting
+  # the type to the workspace tracker (the common reviewee==reviewer-tracker case).
+  defp put_tracker_context(attrs, opts, workspace) do
+    case string_opt(opts, :tracker_context_ref) do
+      ref when is_binary(ref) and ref != "" ->
+        attrs
+        |> Map.put(:tracker_context_ref, ref)
+        |> maybe_put(:tracker_context_type, tracker_context_type(opts, workspace))
+
+      _ ->
+        attrs
+    end
+  end
+
+  defp tracker_context_type(opts, workspace) do
+    case Map.get(opts, :tracker_context_type) do
+      t when is_atom(t) and not is_nil(t) ->
+        t
+
+      t when is_binary(t) and t != "" ->
+        try do
+          String.to_existing_atom(t)
+        rescue
+          ArgumentError -> nil
+        end
+
+      _ ->
+        workspace_tracker_type(workspace)
+    end
+  end
+
+  defp workspace_tracker_type(%Workspace{} = ws), do: Arbiter.Trackers.workspace_type(ws)
+  defp workspace_tracker_type(_ws), do: nil
+
+  # Resolve the engagement's automation mode: an explicit override wins,
+  # otherwise the workspace review_automation policy against the actual PR author.
+  defp resolve_automation(opts, %Workspace{config: config}, pr_author) do
+    case Map.get(opts, :automation) do
+      m when m in [:auto, :flag] -> m
+      "auto" -> :auto
+      "flag" -> :flag
+      _ -> ReviewAutomation.resolve(config, pr_author)
+    end
+  end
+
+  defp resolve_automation(opts, _workspace, pr_author) do
+    case Map.get(opts, :automation) do
+      m when m in [:auto, :flag] -> m
+      "auto" -> :auto
+      "flag" -> :flag
+      _ -> ReviewAutomation.resolve(nil, pr_author)
+    end
+  end
+
+  # PR head SHA + author at review time, via the adapter's get/1. Best-effort:
+  # {nil, nil} when the adapter can't answer (the engagement still forms; the
+  # first ReviewPatrol tick records the head as a first sighting).
+  defp fetch_pr_baseline(adapter, mr_ref) do
+    if function_exported?(adapter, :get, 1) do
+      case safe_call(fn -> adapter.get(mr_ref) end) do
+        {:ok, %{} = pr} -> {Map.get(pr, :head_sha), Map.get(pr, :author)}
+        _ -> {nil, nil}
+      end
+    else
+      {nil, nil}
+    end
+  end
+
+  # Current high-watermark comment id across the PR's review threads, as a string
+  # (matching how ReviewPatrol stores/reads the cursor). nil when unavailable —
+  # ReviewPatrol then treats every author reply as new (conservative).
+  defp fetch_comment_watermark(adapter, mr_ref) do
+    if function_exported?(adapter, :list_open_review_threads, 1) do
+      case safe_call(fn -> adapter.list_open_review_threads(mr_ref) end) do
+        {:ok, threads} when is_list(threads) -> max_comment_id(threads)
+        _ -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp max_comment_id(threads) do
+    ids =
+      for thread <- threads,
+          comment <- Map.get(thread, :comments) || [],
+          is_integer(comment[:id]),
+          do: comment[:id]
+
+    case ids do
+      [] -> nil
+      _ -> ids |> Enum.max() |> Integer.to_string()
+    end
+  end
+
+  defp string_opt(opts, key) do
+    case Map.get(opts, key) do
+      v when is_binary(v) -> v
+      _ -> nil
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp safe_call(fun) do
+    fun.()
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
   end
 
   # ---- workspace resolution ------------------------------------------------

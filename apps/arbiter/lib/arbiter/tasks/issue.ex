@@ -89,7 +89,18 @@ defmodule Arbiter.Tasks.Issue do
         :tracker_context_ref,
         :source_pr,
         :target_branch,
-        :workspace_id
+        :workspace_id,
+        # ReviewPatrol engagement fields (bd-2ovun1): let a review_only
+        # engagement be created atomically with its baseline/cursor + automation
+        # mode, so ExternalReview doesn't have to create-then-update (which could
+        # leave a half-formed, un-deduplicatable engagement on a failure). All
+        # default to the non-engagement values, so normal task creation is
+        # unaffected.
+        :review_only,
+        :last_reviewed_sha,
+        :last_seen_comment_id,
+        :review_automation,
+        :posted_findings
       ]
 
       # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
