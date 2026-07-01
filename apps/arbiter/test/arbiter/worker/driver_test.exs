@@ -590,6 +590,44 @@ defmodule Arbiter.Worker.DriverTest do
     end
   end
 
+  describe "review_only long-lived engagement (bd-cw3w9p)" do
+    test "Driver exits without closing the task when worker is review_only and reaches :completed",
+         %{ws: ws} do
+      # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
+      # When the worker reaches :completed the Driver must stop but NOT call
+      # close_task — the task remains :in_progress for future review cycles.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "rp-open",
+          workspace_id: ws.id
+        })
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r", meta: %{review_only: true})
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true
+        )
+
+      :ok = Worker.advance(worker_pid, :running)
+      :ok = Worker.complete(worker_pid, :claude_done)
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :in_progress
+    end
+  end
+
   describe "Watchdog auto-close (Bd-191)" do
     test "closes task when worker completes with an mr_ref (Watchdog merge)", %{ws: ws} do
       {:ok, task} =

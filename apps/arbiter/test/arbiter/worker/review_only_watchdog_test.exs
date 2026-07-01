@@ -346,14 +346,17 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     end
   end
 
-  # ---- bd-do82bt regression: Driver closes task on review APPROVE (no pr_ref) ----
+  # ---- bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol) ----
+  # bd-do82bt fixed a bug where the Driver never closed review tasks at all.
+  # bd-cw3w9p changes the intended behavior: review_only tasks must NOT
+  # auto-close after their first verdict — they stay :in_progress so ReviewPatrol
+  # can keep engaging on subsequent commits. The Driver exits without closing.
 
-  describe "Driver closes task after review APPROVE with no pr_ref (bd-do82bt)" do
-    test "APPROVE + no pr_ref: Driver closes the task when worker reaches :completed" do
-      # Regression for bd-do82bt: review_opts/1 was unconditionally setting
-      # start_driver: false, so a completed review worker's task was never
-      # closed. Verify that with a Driver attached in claude_driven mode, a
-      # no-pr_ref APPROVE leads to task :closed.
+  describe "review_only task stays :in_progress after verdict (bd-cw3w9p)" do
+    test "APPROVE + no pr_ref: Driver exits without closing the task (long-lived engagement)" do
+      # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
+      # The Driver must NOT close the task when the worker completes — task stays
+      # :in_progress so ReviewPatrol can re-dispatch on the next commit.
       ws = new_workspace()
       task = new_task(ws)
 
@@ -363,8 +366,6 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
         Arbiter.Worker.Driver.start(
           task_id: task.id,
           worker_pid: worker_pid,
-          # In claude_driven mode the driver never ticks the machine; use the
-          # test process as a stand-in for the machine PID — it won't die.
           machine_id: "dummy-#{task.id}",
           machine_pid: self(),
           claude_driven: true,
@@ -376,12 +377,12 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
-      # Wait for the Driver to close the task.
+      # Driver exits normally (its job is done) but must NOT close the task.
       ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.status == :in_progress
     end
 
     test "REQUEST_CHANGES: Driver leaves the task :in_progress for a fix-pass" do
@@ -516,19 +517,17 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     end
   end
 
-  # ---- bd-ddtbhb / bd-bs3z04 acceptance: coordinator reviewer with pr_ref ----
-  # APPROVE signals MergeQueue (bd-bs3z04). For :direct-strategy workspaces the
-  # MergeQueue handles the signal by closing the task without calling merge/1,
-  # so the forge merge count stays 0. The Driver and MergeQueue both attempt the
-  # close; the second silently no-ops on an already-closed task.
+  # ---- bd-ddtbhb / bd-bs3z04 / bd-cw3w9p: coordinator reviewer with pr_ref ----
+  # bd-bs3z04 established that APPROVE with a pr_ref signals MergeQueue for direct
+  # workspaces. bd-cw3w9p supersedes that auto-close path: review_only tasks are
+  # long-lived engagements and must NOT be closed by the MergeQueue signal either.
+  # The forge merge count still stays 0 (bd-ddtbhb guarantee holds).
 
-  describe "APPROVE + pr_ref signals MergeQueue; direct workspace skips forge merge (bd-ddtbhb, bd-bs3z04)" do
-    test "APPROVE with pr_ref: task closed, PR not merged by forge (direct workspace)" do
-      # Acceptance test for bd-ddtbhb + bd-bs3z04. Workspace has no merge
-      # config (:direct strategy). MergeQueue receives the {:worker_done} signal,
-      # closes the task directly (no forge merge call), and the forge merge count
-      # stays 0. The Driver also closes the task on :completed; whichever lands
-      # first wins, the other silently no-ops.
+  describe "APPROVE + pr_ref: task stays open, PR not merged by forge (bd-ddtbhb, bd-cw3w9p)" do
+    test "APPROVE with pr_ref: task stays :in_progress, PR not merged (direct workspace)" do
+      # bd-cw3w9p: review_only tasks are long-lived ReviewPatrol engagements.
+      # After an APPROVE verdict, neither the Driver nor the MergeQueue should
+      # close the task. The forge merge count stays 0 (bd-ddtbhb still holds).
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-400"}, action: :update)
@@ -550,12 +549,12 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
-      # Driver must close the task.
+      # Driver exits normally but must NOT close the task.
       ref = Process.monitor(driver_pid)
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 3_000
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.status == :in_progress
 
       # :direct strategy never calls the forge merge API.
       assert StubMerger.merge_count("pr-400") == 0
@@ -598,11 +597,11 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert reloaded.status == :in_progress
     end
 
-    test "Watchdog merges PR then Worker.complete fires, Driver closes task" do
-      # End-to-end acceptance for bd-4u7a1m. Watchdog polls StubMerger, which
-      # returns :merged on the first poll (via_review_gate treats :pending as
-      # :approved, then force_merge drives the auto-merge). Worker completes,
-      # Driver closes the task as :closed.
+    test "Watchdog merges PR then Worker.complete fires, Driver exits without closing task (bd-cw3w9p)" do
+      # bd-cw3w9p: review_only tasks are long-lived engagements. Even after the
+      # Watchdog drives the PR merge and Worker.complete fires, the Driver must NOT
+      # close the task — it stays :in_progress for ReviewPatrol to manage.
+      # The Watchdog still drives the actual merge (bd-4u7a1m guarantee holds).
       ws = new_github_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-500"}, action: :update)
@@ -635,18 +634,18 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       send(worker_pid, {:__claude_session_done__, "arb done"})
 
-      # Watchdog must drive a merge and Worker completes; Driver then closes the task.
+      # Watchdog must drive a merge; Driver then exits. Task stays :in_progress.
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 5_000
 
       assert StubMerger.merge_count("pr-500") >= 1
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
-      assert reloaded.status == :closed
+      assert reloaded.status == :in_progress
     end
 
     test "no Watchdog spawned and complete_now used when task has no pr_ref (github workspace)" do
       # Even on a GitHub workspace, when no pr_ref is recorded there is nothing
-      # to merge — complete directly so the Driver closes the task.
+      # to merge — complete directly. Task stays :in_progress (bd-cw3w9p).
       ws = new_github_workspace()
       task = new_task(ws)
 
