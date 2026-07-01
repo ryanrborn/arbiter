@@ -22,6 +22,15 @@ defmodule Arbiter.Trackers.Sync do
   `:status_unmapped` / `:transition_not_found` / `:not_supported` — we skip
   quietly. A *mapped* status that can't be reached (`:no_transition_path`) or a
   real wire failure (auth, 5xx, network) is loud + escalation. See `loud?/1`.
+
+  ## Already-at-target-state recovery
+
+  A `:validation_failed` from the tracker is normally loud, but it can be a
+  benign race: e.g. GitHub auto-closes an issue via a `Closes #N` keyword
+  between Arbiter's pre-flight GET (which saw "open") and the subsequent PATCH.
+  `do_transition/2` re-fetches the upstream item after a `validation_failed` and
+  suppresses the escalation if the item is already at the desired state — the
+  transition was a no-op, not a real failure.
   """
 
   require Logger
@@ -100,6 +109,24 @@ defmodule Arbiter.Trackers.Sync do
       :ok ->
         :ok
 
+      {:error, %{kind: :validation_failed} = reason} ->
+        # A validation_failed can be a race: e.g. GitHub auto-closed the issue via a
+        # `Closes #N` keyword between our GET (which saw "open") and our PATCH. The
+        # tracker rejects the redundant transition, but the desired end-state is already
+        # reached. Re-fetch to confirm before escalating.
+        if already_at_target?(issue, event) do
+          Logger.debug(
+            "Trackers.Sync: #{event} for task=#{issue.id} " <>
+              "tracker=#{issue.tracker_type} ref=#{issue.tracker_ref} — " <>
+              "upstream already at target state (benign no-op)"
+          )
+
+          :ok
+        else
+          notify_failure(issue, event, reason)
+          {:error, reason}
+        end
+
       {:error, reason} ->
         if loud?(reason) do
           notify_failure(issue, event, reason)
@@ -114,6 +141,30 @@ defmodule Arbiter.Trackers.Sync do
         end
     end
   end
+
+  # Fetch the upstream item and check whether it's already at the desired state
+  # for `event`. Returns false on fetch failure so genuine unreachable-tracker
+  # errors still escalate.
+  defp already_at_target?(issue, event) do
+    case Trackers.fetch(issue) do
+      {:ok, raw} -> upstream_at_target?(issue.tracker_type, event, raw)
+      {:error, _} -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp upstream_at_target?(:github, :closed, %{"state" => "closed"}), do: true
+  defp upstream_at_target?(:gitlab, :closed, %{"state" => "closed"}), do: true
+
+  defp upstream_at_target?(:jira, :closed, raw) do
+    get_in(raw, ["fields", "status", "statusCategory", "key"]) == "done"
+  end
+
+  defp upstream_at_target?(:shortcut, :closed, %{"completed" => true}), do: true
+  defp upstream_at_target?(_, _, _), do: false
 
   # Push the bead's produced field values into the transition's gating fields
   # BEFORE the transition is attempted. The adapter (not this layer) decides
