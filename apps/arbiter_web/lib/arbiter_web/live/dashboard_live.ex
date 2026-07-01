@@ -102,7 +102,6 @@ defmodule ArbiterWeb.DashboardLive do
      |> assign(:escalation_label, "escalation")
      |> refresh_workspaces()
      |> subscribe_messages(live?)
-     |> refresh_notifications()
      |> refresh_admiral_inbox()
      |> refresh_rigs()
      |> refresh_workers()
@@ -139,7 +138,6 @@ defmodule ArbiterWeb.DashboardLive do
   def handle_info({:new_message, _message}, socket) do
     {:noreply,
      socket
-     |> refresh_notifications()
      |> refresh_admiral_inbox()
      |> refresh_escalations()}
   end
@@ -447,17 +445,6 @@ defmodule ArbiterWeb.DashboardLive do
     |> Enum.each(&Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(&1)))
 
     socket
-  end
-
-  defp refresh_notifications(socket) do
-    notifications =
-      try do
-        Message.recent_notifications(20)
-      rescue
-        _ -> []
-      end
-
-    assign(socket, :notifications, notifications)
   end
 
   # ---- admiral mailbox ----
@@ -865,12 +852,6 @@ defmodule ArbiterWeb.DashboardLive do
     end
   end
 
-  defp excerpt(nil), do: ""
-
-  defp excerpt(body) when is_binary(body) do
-    if String.length(body) > 80, do: String.slice(body, 0, 80) <> "…", else: body
-  end
-
   # A claude-driven worker — a streaming Claude subprocess does the real work
   # and its workflow Machine is never ticked, so current_step sits frozen. Show
   # the live activity derived from the stream instead. See bd-c919xj.
@@ -1267,6 +1248,102 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
+        <%!-- ── C3. External Reviews ────────────────────────────────── --%>
+        <%!-- Durable audit records for every `worker_review pr:` run.
+             In-flight reviews appear here immediately on dispatch; the
+             verdict + finding count fill in when the workflow finishes.
+             Full history: GET /api/external_reviews. --%>
+        <section id="external-reviews-section" class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <h2 class="text-lg font-semibold flex items-center gap-2">
+              <.icon name="hero-magnifying-glass-circle" class="size-5 text-secondary" />
+              External Reviews ({length(@external_reviews)})
+              <span class="text-sm font-normal text-base-content/50">
+                — dispatched PR reviews
+              </span>
+            </h2>
+
+            <div
+              :if={@external_reviews == []}
+              id="external-reviews-empty"
+              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
+            >
+              <.icon
+                name="hero-document-magnifying-glass"
+                class="size-8 mx-auto text-base-content/30"
+              />
+              <p class="mt-2 text-sm text-base-content/60">
+                No external reviews yet. Run <code class="text-xs">worker_review pr: &lt;url&gt;</code>
+                to review a colleague's PR — results appear here in real time.
+              </p>
+            </div>
+
+            <div :if={@external_reviews != []} class="overflow-x-auto">
+              <table class="table table-sm" id="external-reviews">
+                <thead>
+                  <tr class="text-base-content/60">
+                    <th>PR</th>
+                    <th>Status</th>
+                    <th>Verdict</th>
+                    <th>Findings</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    :for={r <- @external_reviews}
+                    class="hover:bg-base-300/40 transition-colors"
+                  >
+                    <td class="max-w-xs">
+                      <a
+                        :if={r.link && r.link != ""}
+                        href={r.link}
+                        target="_blank"
+                        rel="noopener"
+                        class="link link-secondary text-xs truncate block"
+                        title={r.pr_ref}
+                      >
+                        {r.pr || r.pr_ref}
+                      </a>
+                      <code :if={!r.link || r.link == ""} class="text-xs truncate block" title={r.pr_ref}>
+                        {r.pr || r.pr_ref}
+                      </code>
+                      <span class="badge badge-ghost badge-xs font-mono mt-0.5">
+                        {r.strategy || "?"}
+                      </span>
+                    </td>
+                    <td>
+                      <span class={[
+                        "badge badge-sm",
+                        external_review_status_class(r.status)
+                      ]}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        :if={r.verdict}
+                        class={["badge badge-sm", external_review_verdict_class(r.verdict)]}
+                      >
+                        {external_review_verdict_label(r.verdict)}
+                      </span>
+                      <span :if={!r.verdict} class="text-base-content/40 text-xs">—</span>
+                    </td>
+                    <td class="text-xs tabular-nums">
+                      {if r.finding_count, do: r.finding_count, else: "—"}
+                    </td>
+                    <td class="text-xs whitespace-nowrap">{format_ts(r.started_at)}</td>
+                    <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
+                      {humanize_duration(r.started_at, r.completed_at || @now)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <%!-- ── D. Admiral mailbox ───────────────────────────────────── --%>
         <%!-- Unread mailbox-family mail addressed to the coordinator
              ("admiral"): completions, failures, escalations, flags, info.
@@ -1362,63 +1439,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── E. Notifications feed ────────────────────────────────── --%>
-        <section class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-bell-alert" class="size-5 text-base-content/70" />
-              Notifications ({length(@notifications)})
-            </h2>
-
-            <div
-              :if={@notifications == []}
-              id="notifications-empty"
-              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
-            >
-              <.icon name="hero-bell-slash" class="size-8 mx-auto text-base-content/30" />
-              <p class="mt-2 text-sm text-base-content/60">
-                No notifications yet. {String.capitalize(@worker_label)} completions and
-                system events appear here in real time.
-              </p>
-            </div>
-
-            <ul
-              :if={@notifications != []}
-              id="notifications-feed"
-              class="flex flex-col gap-2 max-h-80 overflow-y-auto pr-1"
-            >
-              <li
-                :for={n <- @notifications}
-                class={[
-                  "flex items-start gap-3 rounded-box bg-base-100 border-l-4 px-3 py-2",
-                  kind_border_class(n.kind)
-                ]}
-              >
-                <span class={["badge badge-sm shrink-0 mt-0.5", kind_badge_class(n.kind)]}>
-                  {n.kind}
-                </span>
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-baseline gap-2">
-                    <span class="text-sm text-base-content/90 truncate">
-                      {n.subject || excerpt(n.body)}
-                    </span>
-                    <code :if={n.from_ref} class="text-xs text-base-content/50 shrink-0">
-                      {n.from_ref}
-                    </code>
-                  </div>
-                </div>
-                <span
-                  class="text-xs text-base-content/50 whitespace-nowrap shrink-0"
-                  title={format_ts(n.inserted_at)}
-                >
-                  {relative_time(n.inserted_at, @now)}
-                </span>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <%!-- ── F. Workspaces / Warships as compact cards ────────────── --%>
+        <%!-- ── E. Workspaces / Warships as compact cards ────────────── --%>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <section id="workspaces-section" class="card bg-base-200 border border-base-300 shadow-sm">
             <div class="card-body p-4 gap-4">
@@ -1500,7 +1521,7 @@ defmodule ArbiterWeb.DashboardLive do
           </section>
         </div>
 
-        <%!-- ── G. Completed workers ─────────────────────────────────── --%>
+        <%!-- ── F. Completed workers ─────────────────────────────────── --%>
         <section class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <div class="flex items-center justify-between">
@@ -1557,7 +1578,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── H. Merge queue ───────────────────────────────────────── --%>
+        <%!-- ── G. Merge queue ───────────────────────────────────────── --%>
         <section id="merge-queue-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <div class="flex items-center justify-between gap-2">
@@ -1651,7 +1672,7 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── I. ReviewGate (review gate) ────────────────────────────── --%>
+        <%!-- ── H. ReviewGate (review gate) ────────────────────────────── --%>
         <%!-- The review gate: a separate reviewer mind code-reviews each diff
              before it merges. Two surfaces — reviews in flight right now
              (authors parked at :awaiting_review_gate), and the durable record of
@@ -1780,102 +1801,6 @@ defmodule ArbiterWeb.DashboardLive do
                   </p>
                 </li>
               </ul>
-            </div>
-          </div>
-        </section>
-
-        <%!-- ── J. External Reviews ────────────────────────────────── --%>
-        <%!-- Durable audit records for every `worker_review pr:` run.
-             In-flight reviews appear here immediately on dispatch; the
-             verdict + finding count fill in when the workflow finishes.
-             Full history: GET /api/external_reviews. --%>
-        <section id="external-reviews-section" class="card bg-base-200 border border-base-300 shadow-sm">
-          <div class="card-body p-4 gap-4">
-            <h2 class="text-lg font-semibold flex items-center gap-2">
-              <.icon name="hero-magnifying-glass-circle" class="size-5 text-secondary" />
-              External Reviews ({length(@external_reviews)})
-              <span class="text-sm font-normal text-base-content/50">
-                — dispatched PR reviews
-              </span>
-            </h2>
-
-            <div
-              :if={@external_reviews == []}
-              id="external-reviews-empty"
-              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
-            >
-              <.icon
-                name="hero-document-magnifying-glass"
-                class="size-8 mx-auto text-base-content/30"
-              />
-              <p class="mt-2 text-sm text-base-content/60">
-                No external reviews yet. Run <code class="text-xs">worker_review pr: &lt;url&gt;</code>
-                to review a colleague's PR — results appear here in real time.
-              </p>
-            </div>
-
-            <div :if={@external_reviews != []} class="overflow-x-auto">
-              <table class="table table-sm" id="external-reviews">
-                <thead>
-                  <tr class="text-base-content/60">
-                    <th>PR</th>
-                    <th>Status</th>
-                    <th>Verdict</th>
-                    <th>Findings</th>
-                    <th>Started</th>
-                    <th>Duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    :for={r <- @external_reviews}
-                    class="hover:bg-base-300/40 transition-colors"
-                  >
-                    <td class="max-w-xs">
-                      <a
-                        :if={r.link && r.link != ""}
-                        href={r.link}
-                        target="_blank"
-                        rel="noopener"
-                        class="link link-secondary text-xs truncate block"
-                        title={r.pr_ref}
-                      >
-                        {r.pr || r.pr_ref}
-                      </a>
-                      <code :if={!r.link || r.link == ""} class="text-xs truncate block" title={r.pr_ref}>
-                        {r.pr || r.pr_ref}
-                      </code>
-                      <span class="badge badge-ghost badge-xs font-mono mt-0.5">
-                        {r.strategy || "?"}
-                      </span>
-                    </td>
-                    <td>
-                      <span class={[
-                        "badge badge-sm",
-                        external_review_status_class(r.status)
-                      ]}>
-                        {r.status}
-                      </span>
-                    </td>
-                    <td>
-                      <span
-                        :if={r.verdict}
-                        class={["badge badge-sm", external_review_verdict_class(r.verdict)]}
-                      >
-                        {external_review_verdict_label(r.verdict)}
-                      </span>
-                      <span :if={!r.verdict} class="text-base-content/40 text-xs">—</span>
-                    </td>
-                    <td class="text-xs tabular-nums">
-                      {if r.finding_count, do: r.finding_count, else: "—"}
-                    </td>
-                    <td class="text-xs whitespace-nowrap">{format_ts(r.started_at)}</td>
-                    <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
-                      {humanize_duration(r.started_at, r.completed_at || @now)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
             </div>
           </div>
         </section>
