@@ -117,25 +117,53 @@ defmodule Arbiter.Mergers.Merger do
         }
 
   @typedoc """
-  A single **unresolved** review thread / inline review discussion surfaced
-  by `list_open_review_threads/1` (bd-823q7e). Normalized across forges so the
+  A single comment inside a review thread, returned in `t:review_thread/0`'s
+  `:comments` list.
+
+    * `:id` — the forge's integer comment id (GitHub `databaseId`, GitLab note
+      id). Monotonically increasing within a thread — use as a cursor to find
+      replies newer than a known `last_seen_comment_id`.
+    * `:author` — the commenter's handle (best-effort; may be `nil`).
+    * `:body` — the comment text (best-effort; may be `nil`).
+  """
+  @type review_thread_comment :: %{
+          required(:id) => pos_integer() | nil,
+          optional(:author) => String.t() | nil,
+          optional(:body) => String.t() | nil
+        }
+
+  @typedoc """
+  A review thread / inline review discussion surfaced by
+  `list_open_review_threads/1` (bd-823q7e). Normalized across forges so the
   workflow layer never sees a GitHub GraphQL `reviewThread` or a GitLab
   discussion shape — only this provider-agnostic map.
 
     * `:id` — opaque thread/discussion id (a GitHub `reviewThread` node id, a
       GitLab discussion id). Stable enough to dedup/debounce on.
+    * `:resolved` — `true` when the thread is resolved; `false` otherwise.
+      `list_open_review_threads/1` returns only unresolved threads, so this
+      is always `false` in practice — it is included so the full thread shape
+      is self-describing when adapters surface richer data.
     * `:path` — the file the thread anchors to; `nil` for a file-level or
       MR-level (non-positional) thread.
     * `:line` — the line the thread anchors to; `nil` when unavailable.
-    * `:author` — the handle that opened the thread (best-effort; may be `nil`).
+    * `:author` — the handle that opened the thread (first comment's author;
+      best-effort; may be `nil`).
     * `:body` — the opening comment's text (best-effort; may be `nil`).
+    * `:comments` — all comments in the thread as a list of
+      `t:review_thread_comment/0`. Callers can use `:comments` to find replies
+      newer than a known `last_seen_comment_id` by filtering on `c.id > last_seen`.
+      May be `nil` when the adapter does not surface individual comment ids
+      (e.g. GitLab).
   """
   @type review_thread :: %{
           required(:id) => term(),
+          optional(:resolved) => boolean(),
           optional(:path) => String.t() | nil,
           optional(:line) => pos_integer() | nil,
           optional(:author) => String.t() | nil,
-          optional(:body) => String.t() | nil
+          optional(:body) => String.t() | nil,
+          optional(:comments) => [review_thread_comment()] | nil
         }
 
   @typedoc """
@@ -279,6 +307,29 @@ defmodule Arbiter.Mergers.Merger do
   @callback list_open_review_threads(mr_ref) :: {:ok, [review_thread()]} | {:error, term()}
 
   @doc """
+  Post a threaded reply to an existing review comment on `mr_ref`.
+
+  `comment_id` is the forge's integer comment id — the same integer surfaced as
+  `:id` in each `t:review_thread_comment/0` map returned by
+  `list_open_review_threads/1`. `body` is the reply text.
+
+  Returns `{:ok, comment_payload}` on success. Adapters with no thread-reply
+  surface (e.g. `Direct`, `GitLab`) return `{:error, :unsupported}` — callers
+  guard with `function_exported?/3` or check the error and fall back to a
+  top-level comment via `add_comment/2`.
+
+  Optional — adapters that don't implement in-thread replies simply don't
+  export it.
+  """
+  @callback reply_to_review_comment(
+              mr_ref,
+              comment_id :: pos_integer(),
+              body :: String.t(),
+              opts :: map()
+            ) ::
+              {:ok, term()} | {:error, term()}
+
+  @doc """
   Construct an `t:mr_ref/0` for an **existing, externally-authored** PR/MR from
   an operator-supplied identifier — a forge URL, an `owner/repo#n` slug, or a
   bare number/`#n` — so `arb review --pr <url|number>` can point a review-only
@@ -305,5 +356,6 @@ defmodule Arbiter.Mergers.Merger do
                       failing_check_logs: 1,
                       ref_for_pr: 2,
                       list_open: 0,
-                      list_open_review_threads: 1
+                      list_open_review_threads: 1,
+                      reply_to_review_comment: 4
 end

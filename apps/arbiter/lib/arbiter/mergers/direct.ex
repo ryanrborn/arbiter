@@ -48,6 +48,15 @@ defmodule Arbiter.Mergers.Direct do
       returning `:ok` (there is no MR to act on).
     * `link_for/1` — returns an empty string (no web UI).
 
+  ## Optional callbacks not implemented
+
+  `reply_to_review_comment/4` — `Direct` has no remote forge and no concept
+  of threaded review comments, so this optional callback is not exported.
+  Callers guard with `function_exported?/3` before calling it.
+
+  `list_open_review_threads/1` and `list_open/0` are also not implemented for
+  the same reason: there is no MR or forge thread surface.
+
   ## Review callbacks
 
   `Direct` has no MR to comment on and no forge UI to host a review. For

@@ -217,6 +217,9 @@ defmodule Arbiter.Test.StubMerger do
     {:ok, threads}
   end
 
+  @impl true
+  def reply_to_review_comment(_ref, _comment_id, _body, _opts), do: {:ok, %{}}
+
   # ---- internals ----------------------------------------------------------
 
   defp ensure_started do
