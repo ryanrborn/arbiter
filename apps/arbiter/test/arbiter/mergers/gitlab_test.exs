@@ -158,6 +158,43 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, @ref} = Gitlab.open("feature/x", "t", "d", %{})
     end
 
+    test "409 'already exists' (bd-dm2t5d): adopts the existing open MR" do
+      stub(fn conn ->
+        case conn.method do
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(409)
+            |> Req.Test.json(%{
+              "message" => [
+                "Another open merge request already exists for this source branch: !4"
+              ]
+            })
+
+          "GET" ->
+            assert conn.request_path == base_path()
+            assert conn.query_string =~ "state=opened"
+            assert conn.query_string =~ "source_branch="
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"iid" => @iid, "state" => "opened"}])
+        end
+      end)
+
+      assert {:ok, @ref} = Gitlab.open("feature/x", "t", "d", %{})
+    end
+
+    test "409 unrelated conflict: returns {:error, %Error{kind: :conflict}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(409)
+        |> Req.Test.json(%{"message" => "Resource is locked"})
+      end)
+
+      assert {:error, %Error{kind: :conflict, status: 409}} =
+               Gitlab.open("feature/x", "t", "d", %{})
+    end
+
     test "when repo_path is provided but branch doesn't exist: returns git_push_failed error" do
       # Use a branch name that likely doesn't exist on the remote
       bad_branch = "feature/nonexistent-branch-#{System.unique_integer()}"
