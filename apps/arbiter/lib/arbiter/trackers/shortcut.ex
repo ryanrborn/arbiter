@@ -106,16 +106,22 @@ defmodule Arbiter.Trackers.Shortcut do
     post_comment(ref, body)
   end
 
+  # Shortcut has no dedicated "create external link" endpoint (a POST to
+  # /stories/{id}/external_links 404s). `external_links` is a plain array of
+  # URL strings on the Story object itself, so attaching a link is a
+  # read-modify-write: fetch the story, append the URL if it isn't already
+  # present, then PUT the story back. `title` has no home in Shortcut's
+  # schema for this field (external_links holds bare URLs), so it's accepted
+  # for interface parity with other adapters but otherwise unused here.
   @impl true
   def add_remote_link(ref, url, title)
       when is_binary(ref) and is_binary(url) and is_binary(title) do
-    with {:ok, cfg} <- Config.resolve() do
-      payload = %{
-        "url" => url,
-        "description" => title
-      }
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, story} <- request(cfg, :get, "/stories/#{ref}", []) |> handle_json() do
+      current_links = story |> Map.get("external_links") |> List.wrap()
+      new_links = if url in current_links, do: current_links, else: current_links ++ [url]
 
-      case request(cfg, :post, "/stories/#{ref}/external_links", json: payload) do
+      case request(cfg, :put, "/stories/#{ref}", json: %{"external_links" => new_links}) do
         {:ok, %Req.Response{status: status_code}} when status_code in 200..299 ->
           :ok
 
