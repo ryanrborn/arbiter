@@ -192,6 +192,10 @@ defmodule Arbiter.Mergers.Github do
          # PR head commit SHA — ReviewPatrol records this into an engagement's
          # `last_reviewed_sha` so it can detect new commits on later ticks.
          head_sha: head_sha,
+         # The PR author's login — ReviewPatrol uses this to tell an author's
+         # reply on a review thread apart from another reviewer's comment
+         # (phase-2 author-reply handling, bd-8fg64x).
+         author: get_in(pr, ["user", "login"]),
          approved: approved,
          changes_requested: changes_requested,
          latest_review_id: latest_changes_requested_id(reviews),

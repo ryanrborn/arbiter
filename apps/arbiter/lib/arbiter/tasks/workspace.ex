@@ -430,6 +430,31 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  The fleet's own forge login for ReviewPatrol, from
+  `config["review_patrol"]["our_login"]`.
+
+  This is the reviewer identity ReviewPatrol posted its inline review comments
+  under. Phase-2 author-reply handling (bd-8fg64x) uses it to filter the PR's
+  review threads down to the ones WE participated in
+  (`Github.filter_to_our_threads/2`), so replies on another reviewer's thread
+  are ignored. Returns `nil` when unset/blank — ReviewPatrol then cannot tell
+  its own threads apart and conservatively skips author-reply handling.
+  """
+  @spec review_patrol_our_login(t()) :: String.t() | nil
+  def review_patrol_our_login(workspace) do
+    case get_in(workspace.config || %{}, ["review_patrol", "our_login"]) do
+      s when is_binary(s) ->
+        case String.trim(s) do
+          "" -> nil
+          trimmed -> trimmed
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
   Optional workspace cap on the ReviewGate's revise-and-rediscuss round count,
   from `config["review_gate"]["max_rounds"]`.
 

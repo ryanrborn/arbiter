@@ -70,6 +70,29 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   On a completed re-review we append the newly-posted findings to `posted_findings`
   and advance `last_reviewed_sha` to `head_sha` (and stamp `last_reviewed_at`).
 
+  ## Author-reply handling (bd-8fg64x)
+
+  When the head has NOT advanced (no new commits this tick), ReviewPatrol instead
+  looks for **author replies** on the review threads we own. Using task E's
+  reader (`list_open_review_threads/1` + `filter_to_our_threads/2`) it keeps only
+  the threads WE participated in — identified by the fleet's own login
+  (`config["review_patrol"]["our_login"]`) — and within those, the comments newer
+  than `last_seen_comment_id` authored by the PR author. Comments by other
+  reviewers (and our own) are ignored (decision 6).
+
+  A new author reply is handled by the engagement's `review_automation` mode:
+
+    * `:auto` — dispatch the distinct `ReviewReply` workflow (task F) to answer
+      in-thread. A *code-change* discussion (new commits pushed) is handled by
+      the re-review path above instead: the head-advanced branch runs first, so a
+      push defers to task D rather than getting an in-thread reply.
+
+    * `:flag` — post NOTHING to the PR; raise exactly ONE addressed coordinator
+      escalation (`to_ref: "admiral"`) with the PR link + reply snippet.
+
+  Either way we advance `last_seen_comment_id` past the handled reply so it is
+  processed (or escalated) exactly once, never per-tick.
+
   ## Hard invariant
 
   ReviewPatrol may only ever dispatch `review_only` sub-runs. It must NEVER call
@@ -93,7 +116,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   alias Arbiter.Agents
   alias Arbiter.Tasks.Issue
-  alias Arbiter.Workflows.CodeReview
+  alias Arbiter.Workflows.{CodeReview, ReviewReply}
   alias Arbiter.{Mergers, Tasks.Workspace}
   require Ash.Query
   require Logger
@@ -119,6 +142,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     last_terminated: [],
     last_rereviewed: [],
     last_flagged: [],
+    last_replied: [],
+    last_escalated: [],
     last_tick_at: nil
   ]
 
@@ -176,6 +201,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          last_terminated: state.last_terminated,
          last_rereviewed: state.last_rereviewed,
          last_flagged: state.last_flagged,
+         last_replied: state.last_replied,
+         last_escalated: state.last_escalated,
          last_tick_at: state.last_tick_at
        }, state}
 
@@ -218,6 +245,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         last_terminated: for({:terminated, id} <- outcomes, do: id),
         last_rereviewed: for({:rereviewed, id} <- outcomes, do: id),
         last_flagged: for({:flagged, id} <- outcomes, do: id),
+        last_replied: for({:replied, id} <- outcomes, do: id),
+        last_escalated: for({:escalated, id} <- outcomes, do: id),
         workspace: workspace
     }
   end
@@ -254,8 +283,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # Returns a tagged outcome for the tick's bookkeeping:
   #   {:terminated, id} — the source PR merged/closed and the engagement closed
   #   {:rereviewed, id} — a new-commit re-review was posted this tick
+  #   {:flagged, id}    — :flag mode surfaced new commits as a mailbox flag
+  #   {:replied, id}    — :auto mode dispatched a reply to an author reply
+  #   {:escalated, id}  — :flag mode escalated an author reply to the coordinator
   #   nil               — nothing actionable (first-sighting SHA record, no
-  #                        advance, guard suppressed, or an adapter error)
+  #                        advance, guard suppressed, no new replies, or an
+  #                        adapter error)
   defp process_engagement(%Issue{source_pr: source_pr} = engagement, adapter, workspace)
        when is_binary(source_pr) and source_pr != "" do
     case adapter.get(source_pr) do
@@ -284,8 +317,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp process_engagement(_engagement, _adapter, _workspace), do: nil
 
   # An open source PR. First sighting (last_reviewed_sha unset) → record the head
-  # SHA and stop. Otherwise, if the head advanced, consider a new-commit
-  # re-review under the spam guards; a head that hasn't moved is a no-op.
+  # SHA and stop. If the head advanced, consider a new-commit re-review under the
+  # spam guards (task D). Otherwise (head unchanged — no new commits this tick)
+  # check our review threads for author replies to answer / escalate (task G).
   defp handle_open_pr(%Issue{last_reviewed_sha: nil} = engagement, pr, _adapter, _workspace) do
     maybe_record_head_sha(engagement, pr)
     nil
@@ -298,10 +332,19 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          workspace
        )
        when is_binary(head) and head != "" and head != last do
+    # The head advanced — new commits were pushed. This is the "fresh code change
+    # discussion" case: defer to task D's re-review path rather than replying in
+    # a thread. Author replies (if any) are picked up on a later tick once the
+    # head settles (they remain newer than `last_seen_comment_id`).
     maybe_rereview(engagement, pr, adapter, workspace)
   end
 
-  defp handle_open_pr(_engagement, _pr, _adapter, _workspace), do: nil
+  # No new commits this tick (head unchanged, or head unknown/blank). Look for
+  # new author replies on the review threads we own and handle them per the
+  # engagement's automation mode.
+  defp handle_open_pr(%Issue{} = engagement, pr, adapter, workspace) do
+    maybe_handle_author_replies(engagement, pr, adapter, workspace)
+  end
 
   # Close the engagement's task. review_only == true, so SyncTracker skips every
   # tracker write (bd-6xaaam): terminating an engagement never touches the
@@ -536,6 +579,210 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         )
 
         :ok
+    end
+  end
+
+  # ---- author-reply handling (phase 2, bd-8fg64x) ------------------------
+
+  # Detect author replies newer than `last_seen_comment_id` on the review
+  # threads WE own, then act per automation mode:
+  #   :auto → dispatch the ReviewReply workflow (task F) to answer in-thread.
+  #   :flag → post NOTHING; raise ONE coordinator escalation.
+  # Either way, advance `last_seen_comment_id` past the handled reply so the
+  # same reply isn't processed (or re-escalated) on the next tick.
+  #
+  # Needs `our_login` (config["review_patrol"]["our_login"]) to know which
+  # threads are ours, and the PR author login (from the adapter's get/1) to tell
+  # an author's reply apart from another reviewer's comment (decision 6). When
+  # either is unavailable, we conservatively skip — never guessing.
+  defp maybe_handle_author_replies(%Issue{} = engagement, pr, adapter, workspace) do
+    with our_login when is_binary(our_login) and our_login != "" <- our_login(workspace),
+         pr_author when is_binary(pr_author) and pr_author != "" <- Map.get(pr, :author),
+         true <- function_exported?(adapter, :list_open_review_threads, 1),
+         {:ok, threads} when is_list(threads) <-
+           adapter.list_open_review_threads(engagement.source_pr) do
+      cursor = parse_comment_cursor(engagement.last_seen_comment_id)
+
+      replies =
+        threads
+        |> filter_our_threads(adapter, our_login)
+        |> new_author_replies(cursor, pr_author)
+
+      case replies do
+        [] -> nil
+        _ -> act_on_author_replies(engagement, replies, adapter, workspace)
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  # Handle the new author replies for one engagement. We reply to / escalate on
+  # the single most-recent reply (the current question) and advance the cursor
+  # past ALL new replies in this batch — so a burst of replies yields exactly one
+  # action and never re-fires.
+  defp act_on_author_replies(%Issue{} = engagement, replies, adapter, workspace) do
+    {thread, comment} = Enum.max_by(replies, fn {_t, c} -> c[:id] end)
+    max_id = replies |> Enum.map(fn {_t, c} -> c[:id] end) |> Enum.max()
+
+    outcome =
+      case automation_mode(engagement) do
+        :auto -> dispatch_reply(engagement, thread, comment, adapter, workspace)
+        :flag -> escalate_reply(engagement, thread, comment, adapter)
+      end
+
+    # Advance the high-watermark cursor whether we replied, escalated, or the
+    # dispatch failed: a failed reply is logged, and advancing keeps a broken
+    # reply from re-dispatching (or re-escalating) every tick.
+    advance_comment_cursor(engagement, max_id)
+    outcome
+  end
+
+  # :auto — dispatch the distinct ReviewReply workflow (task F). It composes and
+  # posts a threaded reply via the adapter; it runs review_only (no worktree, no
+  # tracker writes), so the hard invariant holds.
+  defp dispatch_reply(%Issue{} = engagement, thread, comment, adapter, workspace) do
+    state = %{
+      adapter: adapter,
+      mr_ref: engagement.source_pr,
+      thread: thread,
+      comment_id: comment[:id],
+      workspace: workspace,
+      adapter_opts: %{}
+    }
+
+    case Arbiter.Workflow.run(ReviewReply, state) do
+      {:ok, _final} ->
+        Logger.info(
+          "ReviewPatrol: replied to author on engagement #{engagement.id} " <>
+            "(comment #{comment[:id]})"
+        )
+
+        {:replied, engagement.id}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewPatrol: reply workflow failed for engagement #{engagement.id}: " <>
+            inspect(reason)
+        )
+
+        nil
+    end
+  end
+
+  # :flag — post NOTHING to the PR. Raise ONE addressed coordinator escalation
+  # (to_ref "admiral") so a human decides whether to reply or re-review. The
+  # cursor advance in the caller dedupes: we escalate a given reply exactly once.
+  defp escalate_reply(%Issue{workspace_id: ws_id} = engagement, thread, comment, adapter)
+       when is_binary(ws_id) do
+    author = comment[:author] || "author"
+    link = safe_link(adapter, engagement.source_pr)
+
+    body =
+      [
+        "PR ##{engagement.source_pr} (author @#{author}) replied on a review thread we own — " <>
+          "needs a reply or re-review, awaiting direction.",
+        link && "Link: #{link}",
+        thread[:path] && "File: #{thread[:path]}",
+        "Reply: #{comment_snippet(comment)}",
+        "Automation mode is :flag, so ReviewPatrol posted NOTHING to the PR."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    _ =
+      safe(fn ->
+        Arbiter.Messages.Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          from_ref: engagement.id,
+          workspace_id: ws_id,
+          directive_ref: engagement.id,
+          subject: "PR ##{engagement.source_pr} (author @#{author}) replied — awaiting direction",
+          body: body
+        })
+      end)
+
+    {:escalated, engagement.id}
+  end
+
+  defp escalate_reply(%Issue{} = engagement, _thread, _comment, _adapter),
+    do: {:escalated, engagement.id}
+
+  # Keep only the threads we participated in, via task E's `filter_to_our_threads/2`
+  # when the adapter exports it (Github). Fall back to the same participation test
+  # inline for adapters that don't (so the gate degrades safely, never widens).
+  defp filter_our_threads(threads, adapter, our_login) do
+    if function_exported?(adapter, :filter_to_our_threads, 2) do
+      adapter.filter_to_our_threads(threads, our_login)
+    else
+      Enum.filter(threads, fn t ->
+        t[:author] == our_login or
+          Enum.any?(Map.get(t, :comments) || [], &(&1[:author] == our_login))
+      end)
+    end
+  end
+
+  # The {thread, comment} pairs whose comment is (a) newer than the cursor and
+  # (b) authored by the PR author. Comments by us or by other reviewers are
+  # dropped — only the author's own replies count (decision 6).
+  defp new_author_replies(threads, cursor, pr_author) do
+    for thread <- threads,
+        comment <- Map.get(thread, :comments) || [],
+        is_integer(comment[:id]),
+        comment[:id] > cursor,
+        comment[:author] == pr_author do
+      {thread, comment}
+    end
+  end
+
+  # `last_seen_comment_id` is stored as a string (JSON-friendly); comment ids are
+  # integers (GitHub databaseId). nil / unparseable → 0 (treat everything as new).
+  defp parse_comment_cursor(nil), do: 0
+  defp parse_comment_cursor(n) when is_integer(n), do: n
+
+  defp parse_comment_cursor(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, _rest} -> n
+      :error -> 0
+    end
+  end
+
+  defp parse_comment_cursor(_), do: 0
+
+  defp advance_comment_cursor(%Issue{} = engagement, max_id) when is_integer(max_id) do
+    update_engagement(engagement, %{last_seen_comment_id: Integer.to_string(max_id)})
+  end
+
+  defp advance_comment_cursor(_engagement, _max_id), do: :ok
+
+  defp our_login(%Workspace{} = workspace), do: Workspace.review_patrol_our_login(workspace)
+  defp our_login(_workspace), do: nil
+
+  # Best-effort human-facing PR link for the escalation body; nil if the adapter
+  # can't build one.
+  defp safe_link(adapter, source_pr) do
+    if function_exported?(adapter, :link_for, 1) do
+      case safe(fn -> adapter.link_for(source_pr) end) do
+        url when is_binary(url) and url != "" -> url
+        _ -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  @snippet_limit 280
+  defp comment_snippet(%{} = comment) do
+    case comment[:body] do
+      body when is_binary(body) and body != "" ->
+        trimmed = String.trim(body)
+        if String.length(trimmed) > @snippet_limit,
+          do: String.slice(trimmed, 0, @snippet_limit) <> "…",
+          else: trimmed
+
+      _ ->
+        "(no text)"
     end
   end
 

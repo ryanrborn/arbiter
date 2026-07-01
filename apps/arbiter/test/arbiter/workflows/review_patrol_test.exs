@@ -22,7 +22,10 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
               "repo" => "repo",
               "credentials_ref" => "env:GITHUB_TOKEN"
             }
-          }
+          },
+          # The fleet's own reviewer login — phase-2 author-reply handling uses
+          # this to keep only the review threads we participated in.
+          "review_patrol" => %{"our_login" => "botreviewer"}
         }
       })
 
@@ -502,6 +505,381 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         |> Ash.read!()
 
       assert length(flags) == 1
+    end
+  end
+
+  describe "tick/1 — author-reply handling (bd-8fg64x)" do
+    # A GraphQL review-thread node: id/path plus a list of {comment_id, author, body}.
+    defp thread_node(id, path, comments) do
+      %{
+        "id" => id,
+        "isResolved" => false,
+        "path" => path,
+        "line" => 1,
+        "comments" => %{
+          "nodes" =>
+            Enum.map(comments, fn {cid, author, body} ->
+              %{"databaseId" => cid, "body" => body, "author" => %{"login" => author}}
+            end)
+        }
+      }
+    end
+
+    # Stub the author-reply conversation for an OPEN PR whose head has NOT moved
+    # (so the tick takes the reply branch, not the re-review branch):
+    #   adapter.get   → GET /pulls/:n (carries "user".login = pr_author) + /reviews
+    #   thread reader → POST /graphql (returns `thread_nodes`)
+    #   auto reply    → POST /pulls/:n/comments/:cid/replies (forwarded to test)
+    # Any unexpected PR write (inline comment / verdict) hits the catch-all and
+    # would surface as a failed assertion.
+    defp reply_stub(number, head, pr_author, thread_nodes) do
+      test_pid = self()
+
+      stub(fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "POST" and path == "/graphql" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{"reviewThreads" => %{"nodes" => thread_nodes}}
+                }
+              }
+            })
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => number,
+              "state" => "open",
+              "head" => %{"sha" => head},
+              "html_url" => "https://github.com/owner/repo/pull/#{number}",
+              "user" => %{"login" => pr_author}
+            })
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and
+              Regex.match?(~r{^/repos/owner/repo/pulls/#{number}/comments/\d+/replies$}, path) ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:reply_posted, path, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 9001})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:inline_comment, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:submit_review, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            # check-runs (pipeline → nil = settled) and anything else.
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unhandled #{path}"})
+        end
+      end)
+    end
+
+    # Bypass the real Claude CLI in the ReviewReply workflow.
+    defp stub_reply_composer(body) do
+      Application.put_env(:arbiter, :review_reply_composer, fn _ctx, _state -> {:ok, body} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :review_reply_composer) end)
+    end
+
+    test "auto: an author reply on our thread dispatches the reply workflow", %{ws: ws} do
+      # Head unchanged (== last_reviewed_sha) → reply branch, not re-review.
+      eng =
+        engagement(ws, 500, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "600"
+        })
+
+      stub_reply_composer("Thanks — that addresses my note.")
+
+      # Our thread: we opened comment 600 (old); the PR author replied at 601 (new).
+      nodes = [
+        thread_node("RT1", "lib/a.ex", [
+          {600, "botreviewer", "please rename this"},
+          {601, "prauthor", "renamed it, does this work?"}
+        ])
+      ]
+
+      reply_stub(500, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # A threaded reply was posted to the author's comment; no verdict/inline.
+      assert_receive {:reply_posted, path, body}
+      assert path == "/repos/owner/repo/pulls/500/comments/601/replies"
+      assert body["body"] == "Thanks — that addresses my note."
+      refute_receive {:submit_review, _}
+
+      # Cursor advanced past the handled reply; bookkeeping recorded the reply.
+      assert reload(eng).last_seen_comment_id == "601"
+      assert ReviewPatrol.state(name).last_replied == [eng.id]
+    end
+
+    test "flag: an author reply raises ONE coordinator escalation and posts nothing", %{ws: ws} do
+      eng =
+        engagement(ws, 501, %{
+          review_automation: :flag,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "700"
+        })
+
+      nodes = [
+        thread_node("RT1", "lib/b.ex", [
+          {700, "botreviewer", "consider extracting this"},
+          {701, "prauthor", "why? seems fine to me"}
+        ])
+      ]
+
+      reply_stub(501, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # NOTHING posted to the PR.
+      refute_receive {:reply_posted, _, _}
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      # Exactly one addressed escalation to the coordinator.
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and kind == :escalation)
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+      [esc] = escalations
+      assert esc.to_ref == "admiral"
+      assert esc.body =~ "prauthor"
+      assert esc.body =~ "why? seems fine to me"
+
+      # Cursor advanced so the same reply is not re-escalated.
+      assert reload(eng).last_seen_comment_id == "701"
+      assert ReviewPatrol.state(name).last_escalated == [eng.id]
+    end
+
+    test "flag: re-ticking does NOT re-escalate the same reply (cursor idempotency)", %{ws: ws} do
+      eng =
+        engagement(ws, 502, %{
+          review_automation: :flag,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "800"
+        })
+
+      nodes = [
+        thread_node("RT1", "lib/c.ex", [
+          {800, "botreviewer", "nit"},
+          {801, "prauthor", "fixed"}
+        ])
+      ]
+
+      reply_stub(502, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+
+      assert :ok = ReviewPatrol.tick(name)
+      assert reload(eng).last_seen_comment_id == "801"
+
+      # Second tick: the reply (801) is no longer newer than the cursor (801).
+      assert :ok = ReviewPatrol.tick(name)
+      assert reload(eng).last_seen_comment_id == "801"
+      assert ReviewPatrol.state(name).last_escalated == []
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and kind == :escalation)
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+    end
+
+    test "another reviewer's comment on our thread is ignored", %{ws: ws} do
+      eng =
+        engagement(ws, 503, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "900"
+        })
+
+      stub_reply_composer("should not be sent")
+
+      # New comments 901 (other reviewer) — but NO author reply. 900 is ours (old).
+      nodes = [
+        thread_node("RT1", "lib/d.ex", [
+          {900, "botreviewer", "our opening note"},
+          {901, "copilot", "another reviewer chiming in"}
+        ])
+      ]
+
+      reply_stub(503, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # No reply dispatched — the only new comment is from another reviewer.
+      refute_receive {:reply_posted, _, _}
+      # Cursor untouched: nothing of ours was handled.
+      assert reload(eng).last_seen_comment_id == "900"
+      assert ReviewPatrol.state(name).last_replied == []
+    end
+
+    test "a reply on a thread we do NOT own is ignored", %{ws: ws} do
+      eng =
+        engagement(ws, 504, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "1000"
+        })
+
+      stub_reply_composer("should not be sent")
+
+      # A thread opened and carried entirely by another reviewer — we never
+      # participated, so the author's reply there is not our concern.
+      nodes = [
+        thread_node("RT_other", "lib/e.ex", [
+          {1001, "copilot", "other reviewer's thread"},
+          {1002, "prauthor", "author replying to the other reviewer"}
+        ])
+      ]
+
+      reply_stub(504, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:reply_posted, _, _}
+      assert reload(eng).last_seen_comment_id == "1000"
+      assert ReviewPatrol.state(name).last_replied == []
+    end
+
+    test "no author-reply handling when our_login is unconfigured", %{ws: _ws} do
+      {:ok, ws_no_login} =
+        Ash.create(Workspace, %{
+          name: "rp-nologin-#{System.unique_integer([:positive])}",
+          prefix: "rn#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      eng =
+        engagement(ws_no_login, 505, %{
+          review_automation: :auto,
+          last_reviewed_sha: "samesha",
+          last_seen_comment_id: "1100"
+        })
+
+      stub_reply_composer("should not be sent")
+
+      nodes = [
+        thread_node("RT1", "lib/f.ex", [
+          {1100, "botreviewer", "note"},
+          {1101, "prauthor", "reply"}
+        ])
+      ]
+
+      reply_stub(505, "samesha", "prauthor", nodes)
+
+      {_pid, name} = start_patrol(ws_no_login)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Without our_login we cannot identify our threads → conservatively skip.
+      refute_receive {:reply_posted, _, _}
+      assert reload(eng).last_seen_comment_id == "1100"
+    end
+
+    test "a code-change push defers to the re-review path (no in-thread reply)", %{ws: ws} do
+      # Head ADVANCED (oldsha → newsha): the tick takes the re-review branch and
+      # never reaches author-reply handling, even though an author reply exists.
+      eng =
+        engagement(ws, 506, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          last_seen_comment_id: "1200",
+          posted_findings: [finding("lib/g.ex", 5, "prior issue")]
+        })
+
+      stub_reply_composer("should not be sent as a reply")
+
+      # The re-review's new diff touches a previously-flagged file → re-review fires.
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/g.ex", "line" => 9, "message" => "new bug"}
+      ])
+
+      diff = "diff --git a/lib/g.ex b/lib/g.ex\n--- a/lib/g.ex\n+++ b/lib/g.ex\n@@ -1 +1 @@\n+x\n"
+
+      test_pid = self()
+
+      stub(fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.starts_with?(path, "/repos/owner/repo/compare/") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, diff)
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/506" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => 506,
+              "state" => "open",
+              "head" => %{"sha" => "newsha"},
+              "html_url" => "x",
+              "user" => %{"login" => "prauthor"}
+            })
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/506/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and
+              Regex.match?(~r{/comments/\d+/replies$}, path) ->
+            send(test_pid, {:reply_posted, path})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/506/comments" ->
+            send(test_pid, {:inline_comment, :posted})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/506/reviews" ->
+            send(test_pid, {:submit_review, :posted})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unhandled #{path}"})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Re-review path ran (inline comment + verdict); NO in-thread reply, and the
+      # comment cursor is untouched (the reply is deferred to a later tick).
+      assert_receive {:submit_review, _}
+      refute_receive {:reply_posted, _}
+      assert reload(eng).last_seen_comment_id == "1200"
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
     end
   end
 
