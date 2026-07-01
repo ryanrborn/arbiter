@@ -147,7 +147,10 @@ defmodule Arbiter.Workers.ReconcilerTest do
     end
   end
 
-  test "escalates an :in_progress task with a pr_ref and no live worker to Admiral" do
+  # An open-PR bead whose workspace has no patrol coverage (a bare test
+  # workspace has no hosted-forge merger configured) can't be auto-watched, so
+  # the default re-watch fails and the reconciler escalates as the fallback.
+  test "escalates an open-PR task whose workspace has no patrol coverage (fallback)" do
     ws = create_workspace()
 
     issue =
@@ -156,7 +159,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
         pr_ref: "#{System.unique_integer([:positive])}"
       })
 
-    assert {:ok, 1} = Reconciler.reconcile_open_pr_tasks()
+    assert {:ok, %{rewatched: 0, escalated: 1}} = Reconciler.reconcile_open_pr_tasks()
 
     mail = Message.inbox("admiral", workspace_id: ws.id)
     assert length(mail) >= 1
@@ -168,7 +171,48 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert escalation.subject =~ "stuck"
   end
 
-  test "does not escalate an :in_progress task with a pr_ref when a live worker is running" do
+  test "re-watches an open-PR (awaiting_review) bead via the patrol layer instead of escalating" do
+    ws = create_workspace()
+
+    issue =
+      create_issue(ws.id, %{
+        status: :in_progress,
+        pr_ref: "#{System.unique_integer([:positive])}"
+      })
+
+    test_pid = self()
+
+    rewatch = fn %Issue{} = i ->
+      send(test_pid, {:rewatched, i.id})
+      :ok
+    end
+
+    assert {:ok, %{rewatched: 1, escalated: 0}} =
+             Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
+
+    assert_received {:rewatched, task_id}
+    assert task_id == issue.id
+
+    # Re-watched, NOT escalated — no mail lands in Admiral's inbox.
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "re-watches a review-only engagement (no pr_ref) via the patrol layer" do
+    ws = create_workspace()
+    issue = create_issue(ws.id, %{status: :in_progress})
+    {:ok, issue} = Ash.update(issue, %{review_only: true})
+
+    test_pid = self()
+    rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end
+
+    assert {:ok, %{rewatched: 1, escalated: 0}} =
+             Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
+
+    assert_received {:rewatched, task_id}
+    assert task_id == issue.id
+  end
+
+  test "does not touch an open-PR task when a live worker is running (worker_live? guard)" do
     ws = create_workspace()
 
     issue =
@@ -181,30 +225,35 @@ defmodule Arbiter.Workers.ReconcilerTest do
     {:ok, pid} = Worker.start(task_id: issue.id, repo: "arbiter", workspace_id: ws.id)
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
 
-    assert {:ok, 0} = Reconciler.reconcile_open_pr_tasks()
+    test_pid = self()
+    rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end
 
+    assert {:ok, %{rewatched: 0, escalated: 0}} =
+             Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
+
+    refute_received {:rewatched, _}
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  test "does not escalate an :in_progress task with no pr_ref" do
+  test "open-PR sweep leaves a bead with no pr_ref alone (that is the resume sweep's job)" do
     ws = create_workspace()
     _issue = create_issue(ws.id, %{status: :in_progress})
 
-    assert {:ok, 0} = Reconciler.reconcile_open_pr_tasks()
+    assert {:ok, %{rewatched: 0, escalated: 0}} = Reconciler.reconcile_open_pr_tasks()
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  test "does not escalate a :closed or :open task even if it somehow has a pr_ref" do
+  test "open-PR sweep ignores a :closed or :open task even if it somehow has a pr_ref" do
     ws = create_workspace()
     _issue = create_issue(ws.id, %{pr_ref: "99"})
 
-    assert {:ok, 0} = Reconciler.reconcile_open_pr_tasks()
+    assert {:ok, %{rewatched: 0, escalated: 0}} = Reconciler.reconcile_open_pr_tasks()
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
-  test "skips when primary?: false" do
+  test "open-PR sweep skips when primary?: false" do
     ws = create_workspace()
 
     _issue =
@@ -216,5 +265,126 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert {:ok, :skipped} = Reconciler.reconcile_open_pr_tasks(primary?: false)
 
     assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  # ---- reconcile_resumable_tasks (:running/revising resume) --------------
+
+  test "resumes a mid-flight (:running) bead with no pr_ref via the resume path" do
+    ws = create_workspace()
+    issue = create_issue(ws.id, %{status: :in_progress})
+
+    test_pid = self()
+
+    resume = fn %Issue{} = i ->
+      send(test_pid, {:resumed, i.id})
+      {:ok, %{task_id: i.id}}
+    end
+
+    assert {:ok, %{resumed: 1, escalated: 0}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    assert_received {:resumed, task_id}
+    assert task_id == issue.id
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "escalates a mid-flight bead that cannot be safely resumed (no outpost)" do
+    ws = create_workspace()
+    issue = create_issue(ws.id, %{status: :in_progress})
+
+    # Simulate Dispatch.resume/2 refusing because the worktree was cleaned up.
+    resume = fn %Issue{} -> {:error, :no_outpost} end
+
+    assert {:ok, %{resumed: 0, escalated: 1}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    mail = Message.inbox("admiral", workspace_id: ws.id)
+    escalation = Enum.find(mail, &(&1.directive_ref == issue.id))
+    assert escalation != nil
+    assert escalation.kind == :escalation
+    assert escalation.subject =~ "cannot be safely resumed"
+  end
+
+  test "resume sweep respects the worker_live? guard (never resumes a live bead)" do
+    ws = create_workspace()
+    issue = create_issue(ws.id, %{status: :in_progress})
+
+    {:ok, pid} = Worker.start(task_id: issue.id, repo: "arbiter", workspace_id: ws.id)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    test_pid = self()
+    resume = fn %Issue{id: id} -> send(test_pid, {:resumed, id}) && {:ok, id} end
+
+    assert {:ok, %{resumed: 0, escalated: 0}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    refute_received {:resumed, _}
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "resume sweep does not touch open-PR or review-only beads" do
+    ws = create_workspace()
+
+    _open_pr =
+      create_issue(ws.id, %{status: :in_progress, pr_ref: "#{System.unique_integer([:positive])}"})
+
+    review = create_issue(ws.id, %{status: :in_progress})
+    {:ok, _} = Ash.update(review, %{review_only: true})
+
+    resume = fn %Issue{} -> flunk("resume must not be called for open-PR/review-only beads") end
+
+    assert {:ok, %{resumed: 0, escalated: 0}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
+  end
+
+  test "resume sweep skips when primary?: false" do
+    ws = create_workspace()
+    _issue = create_issue(ws.id, %{status: :in_progress})
+
+    resume = fn %Issue{} -> flunk("must not resume on a non-primary boot") end
+
+    assert {:ok, :skipped} =
+             Reconciler.reconcile_resumable_tasks(primary?: false, resume_fun: resume)
+  end
+
+  # ---- acceptance regression: restart-with-in-flight-work ----------------
+
+  test "restart with in-flight work: awaiting_review bead re-watched, un-resumable bead escalated" do
+    ws = create_workspace()
+
+    # One awaiting_review bead: in_progress with an open PR of its own.
+    watched =
+      create_issue(ws.id, %{
+        status: :in_progress,
+        pr_ref: "#{System.unique_integer([:positive])}"
+      })
+
+    # One mid-flight bead whose worktree is gone → cannot be safely resumed.
+    unresumable = create_issue(ws.id, %{status: :in_progress})
+
+    test_pid = self()
+    rewatch = fn %Issue{id: id} -> send(test_pid, {:rewatched, id}) && :ok end
+    resume = fn %Issue{} -> {:error, :no_outpost} end
+
+    # Boot ordering: open-PR sweep first (re-watch), then resume sweep.
+    assert {:ok, %{rewatched: 1, escalated: 0}} =
+             Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
+
+    assert {:ok, %{resumed: 0, escalated: 1}} =
+             Reconciler.reconcile_resumable_tasks(resume_fun: resume)
+
+    # The awaiting_review bead was re-watched, not escalated.
+    assert_received {:rewatched, watched_id}
+    assert watched_id == watched.id
+
+    mail = Message.inbox("admiral", workspace_id: ws.id)
+
+    # Only the un-resumable bead escalated.
+    assert Enum.find(mail, &(&1.directive_ref == watched.id)) == nil
+    escalation = Enum.find(mail, &(&1.directive_ref == unresumable.id))
+    assert escalation != nil
+    assert escalation.kind == :escalation
   end
 end
