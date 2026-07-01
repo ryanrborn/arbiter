@@ -184,11 +184,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   end
 
   # Modern PRPatrol follow-ups: source_pr set, tracker_type: :none (bd-ci2jl2).
+  # Excludes tasks that already have their own PR opened (pr_ref set) — those
+  # are owned by the pr_ref pass. Also excludes ReviewPatrol engagements
+  # (review_only: true) which share the source_pr field but must never be
+  # closed by this sweep (disjointness invariant, see review_patrol.ex:270).
   defp open_follow_up_tasks(workspace_id) do
     Issue
     |> Ash.Query.filter(
       workspace_id == ^workspace_id and
         not is_nil(source_pr) and
+        is_nil(pr_ref) and
+        review_only != true and
         status != :closed
     )
     |> Ash.read()
@@ -251,7 +257,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
 
   # Determines the source PR ref for a follow-up task (modern: source_pr,
   # legacy: tracker_ref) and closes the task local-only if the source PR merged.
-  defp maybe_finalize_follow_up(%Issue{source_pr: source_pr, tracker_ref: tracker_ref} = task, adapter) do
+  defp maybe_finalize_follow_up(
+         %Issue{source_pr: source_pr, tracker_ref: tracker_ref} = task,
+         adapter
+       ) do
     ref = source_pr || tracker_ref
 
     with {:ok, %{status: :merged}} <- adapter.get(ref) do

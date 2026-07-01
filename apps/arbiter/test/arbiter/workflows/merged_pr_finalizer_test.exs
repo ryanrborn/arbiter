@@ -374,6 +374,65 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert follow_up_closed.status == :closed
       assert pr_ref_closed.status == :closed
     end
+
+    test "source_pr follow-up with pr_ref set is excluded (handled by pr_ref pass)", %{ws: ws} do
+      # When a follow-up has its own PR opened (pr_ref set), the source_pr sweep
+      # must not close it — the pr_ref pass owns finalization for these tasks.
+      task = create_follow_up_task(ws, 510)
+      {:ok, task} = Ash.update(task, %{pr_ref: "511"}, action: :update)
+
+      # Stub source PR 510 as merged but follow-up's own PR 511 as open.
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls/510" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 510, "merged" => true, "state" => "closed"})
+
+          conn.request_path == "/repos/owner/repo/pulls/510/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.request_path == "/repos/owner/repo/pulls/511" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 511, "merged" => false, "state" => "open"})
+
+          conn.request_path == "/repos/owner/repo/pulls/511/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, task.id)
+      # pr_ref=511 is open → task stays open; source_pr sweep skipped this task
+      assert refreshed.status != :closed
+    end
+
+    test "review_only engagement with source_pr set is excluded", %{ws: ws} do
+      # ReviewPatrol engagements share the source_pr field with follow-ups but
+      # must never be closed by the MergedPRFinalizer sweep (disjointness invariant).
+      {:ok, engagement} =
+        Ash.create(Issue, %{
+          title: "review engagement for PR #512",
+          workspace_id: ws.id,
+          tracker_type: :none,
+          source_pr: "512",
+          review_only: true
+        })
+
+      stub(pr_get_stub(512, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      {:ok, refreshed} = Ash.get(Issue, engagement.id)
+      assert refreshed.status != :closed
+    end
   end
 
   describe "tick/1 — PRPatrol follow-ups (legacy tracker_ref format)" do
@@ -399,7 +458,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       assert refreshed.status != :closed
     end
 
-    test "404 for tracker_ref → task left open, no crash (safety net for real issue refs)", %{ws: ws} do
+    test "404 for tracker_ref → task left open, no crash (safety net for real issue refs)", %{
+      ws: ws
+    } do
       task = create_legacy_follow_up_task(ws, 602)
 
       stub(fn conn ->
