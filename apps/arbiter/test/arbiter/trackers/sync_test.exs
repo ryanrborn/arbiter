@@ -373,4 +373,138 @@ defmodule Arbiter.Trackers.SyncTest do
       refute summons.body =~ "status_map"
     end
   end
+
+  # ---- Regression: benign already-at-target-state recovery (bd-5hi4u4) ------
+  #
+  # When a fleet PR merges with `Closes #N`, GitHub auto-closes the issue.
+  # Arbiter's bead-close then fires `transition_event(issue, :closed)`, which
+  # GETs the issue (finds it open due to a race), attempts a PATCH, and GitHub
+  # rejects it with 422 "Validation Failed" because the issue was just closed.
+  # The fix: re-fetch after a validation_failed — if the item is already at the
+  # desired state, treat the whole transition as a success (no escalation).
+
+  @github_ref "673"
+  @github_env "GTE_TRACKER_SYNC_GITHUB_TOKEN"
+
+  defp github_workspace do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "gh-ws-#{System.unique_integer([:positive])}",
+        prefix: "gh",
+        config: %{
+          "tracker" => %{
+            "type" => "github",
+            "config" => %{
+              "owner" => "ryanrborn",
+              "repo" => "arbiter",
+              "credentials_ref" => "env:#{@github_env}"
+            }
+          }
+        }
+      })
+
+    ws
+  end
+
+  defp github_issue(ws) do
+    {:ok, issue} =
+      Ash.create(Issue, %{
+        title: "tracked",
+        tracker_type: :github,
+        tracker_ref: @github_ref,
+        skip_upstream_create: true,
+        workspace_id: ws.id
+      })
+
+    issue
+  end
+
+  describe "already-at-target-state recovery (bd-5hi4u4)" do
+    setup do
+      System.put_env(@github_env, "test-github-token")
+      on_exit(fn -> System.delete_env(@github_env) end)
+      :ok
+    end
+
+    test "PATCH→422 followed by already-closed GET: no escalation (Closes #N race)" do
+      # Simulates the `Closes #N` race: our GET sees the issue as open (before
+      # GitHub processes the keyword), the PATCH is rejected 422 because GitHub
+      # auto-closed it, but the recovery GET confirms it is now closed.
+      # Expected: no escalation — the desired state was already reached.
+      {:ok, call_count} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> catch_exit(Agent.stop(call_count)) end)
+
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            n = Agent.get_and_update(call_count, fn n -> {n, n + 1} end)
+            # First GET (pre-flight in transition/2): issue appears open.
+            # Second GET (recovery in already_at_target?): issue is now closed.
+            state = if n == 0, do: "open", else: "closed"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 673, "state" => state, "labels" => []})
+
+          "PATCH" ->
+            # GitHub rejects: issue was just auto-closed between our GET and PATCH.
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed", "errors" => []})
+        end
+      end)
+
+      ws = github_workspace()
+      issue = github_issue(ws)
+
+      # lifecycle/3 always returns :ok (best-effort); verify via escalation count.
+      assert :ok = Sync.lifecycle(issue, :closed)
+      assert escalations_for(ws.id) == []
+    end
+
+    test "PATCH→422 with issue still open: escalation fires (genuine failure)" do
+      # The PATCH is rejected AND the recovery GET confirms the issue is still
+      # open → this is a real sync failure, not a benign race.
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 673, "state" => "open", "labels" => []})
+
+          "PATCH" ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed", "errors" => []})
+        end
+      end)
+
+      ws = github_workspace()
+      issue = github_issue(ws)
+
+      assert :ok = Sync.lifecycle(issue, :closed)
+
+      escalations = escalations_for(ws.id)
+      assert length(escalations) == 1
+    end
+
+    test "tracker unreachable (5xx): escalation fires, no spurious no-op" do
+      # A server error before even reaching the PATCH is a genuine failure.
+      # The already_at_target? recovery only fires for validation_failed, not 5xx,
+      # so the escalation must still be raised.
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal Server Error"})
+      end)
+
+      ws = github_workspace()
+      issue = github_issue(ws)
+
+      assert :ok = Sync.lifecycle(issue, :closed)
+
+      escalations = escalations_for(ws.id)
+      assert length(escalations) == 1
+    end
+  end
 end
