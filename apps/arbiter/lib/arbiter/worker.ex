@@ -1405,10 +1405,32 @@ defmodule Arbiter.Worker do
   defp on_claude_done_reviewable(%State{} = state, meta) do
     case mergeable_branch(meta) do
       nil ->
-        if review_only?(meta) do
-          route_reviewer_completion(state)
-        else
-          complete_now(state, :claude_done)
+        cond do
+          review_only?(meta) ->
+            route_reviewer_completion(state)
+
+          # bd-7pe74i: a reviewable code directive (bug/feature/chore/epic/
+          # decision) is dispatched WITH a per-task worktree — Dispatch only
+          # skips provisioning for `:task` types. Reaching `arb done` with no
+          # mergeable branch therefore means the worktree was never provisioned
+          # (repo mapping missing, an explicit `provision_worktree: false`, or a
+          # dispatch-time race): the worker produced nothing to integrate.
+          #
+          # Completing here is the silent-task-loss bug: complete_now/2
+          # broadcasts {:worker_done}, the workspace MergeQueue enqueues the
+          # task, and on the :direct strategy `do_enqueue` closes the bead as
+          # :done on enqueue (no PR, no commit). The bead reaches :closed via a
+          # worker with zero deliverable — violating the invariant that a bead
+          # only closes on a real completion or an explicit close. Refuse: fail
+          # + escalate and leave the bead open for re-dispatch.
+          reviewable_code_type?(meta) ->
+            fail_missing_worktree(state)
+
+          # Ad-hoc / unconfigured runs carry no `:issue_type` in meta (they were
+          # started directly, not via Dispatch, so there was never a worktree to
+          # provision and nothing to lose). Keep the legacy direct-complete.
+          true ->
+            complete_now(state, :claude_done)
         end
 
       branch ->
@@ -1435,6 +1457,60 @@ defmodule Arbiter.Worker do
           end
         end
     end
+  end
+
+  # bd-7pe74i: a reviewable code directive that Dispatch provisions a worktree
+  # for. Dispatch stamps `:issue_type` into meta and only skips worktree
+  # provisioning for `:task` types (see Dispatch.maybe_provision_worktree/2), so
+  # any non-`:task` type is expected to carry a per-task branch by completion.
+  # An ad-hoc worker started outside Dispatch has no `:issue_type` in meta and is
+  # NOT treated as a code directive here (nothing was ever provisioned for it).
+  defp reviewable_code_type?(meta) do
+    case meta && Map.get(meta, :issue_type) do
+      nil -> false
+      :task -> false
+      "task" -> false
+      _ -> true
+    end
+  end
+
+  # bd-7pe74i: the worker signalled done on a code directive but no worktree was
+  # ever provisioned, so there is no branch to integrate and no deliverable. Do
+  # NOT complete (which would broadcast {:worker_done} and let the MergeQueue
+  # close the bead) — fail the worker and raise an addressed Admiral escalation,
+  # exactly like a stopped-subprocess failure. The bead stays open: the Driver's
+  # :failed path leaves the task :in_progress, and no {:worker_done} is ever
+  # broadcast, so the bead is never silently closed.
+  defp fail_missing_worktree(%State{} = state) do
+    reason = %Arbiter.Worker.StopReason{
+      category: :missing_worktree,
+      summary:
+        "worker signalled `arb done` but no per-task branch/worktree was provisioned — " <>
+          "there is nothing to integrate, so the directive produced no deliverable",
+      remediation:
+        "Do NOT treat this as complete: the bead is left open, NOT closed. Investigate why " <>
+          "worktree provisioning was skipped (repo mapping missing, `provision_worktree: false`, " <>
+          "or a dispatch-time race under a concurrency window), then re-dispatch the task.",
+      exit_status: nil,
+      signal: nil
+    }
+
+    Logger.warning(
+      "Worker: task=#{state.task_id} signalled done with no mergeable branch " <>
+        "(worktree never provisioned) — refusing to close; failing + escalating (bd-7pe74i)"
+    )
+
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.AdmiralNotifier.acolyte_stopped(snapshot(new_state), reason)
+    broadcast_lifecycle(:updated, new_state)
+    broadcast_worker_failed(new_state)
+    new_state
   end
 
   defp route_completion(%State{meta: meta} = state, branch) do
