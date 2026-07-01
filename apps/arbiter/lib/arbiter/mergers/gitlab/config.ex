@@ -34,6 +34,30 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   `credentials_ref` is the same small DSL the tracker adapters use:
   `"env:NAME"` looks up `System.get_env/1`; a bare string is treated as a
   literal token (discouraged outside of tests).
+
+  ## Per-repo overrides (multi-project workspaces)
+
+  A workspace with several repos that map to *different* GitLab projects
+  (e.g. `emricare/tonic` and `emricare/tonic_device`) can't be served by the
+  single flat `config["merge"]["config"]` shape above — that resolves to one
+  `project_id` for the whole workspace, so every repo but one gets the wrong
+  project. Such workspaces add a `"repos"` map, keyed by the same repo name
+  used in `config["repo_paths"]`:
+
+      %{
+        "host" => "gitlab.com",
+        "project_id" => 111,               # default / single-repo fallback
+        "credentials_ref" => "env:GITLAB_TOKEN",
+        "repos" => %{
+          "tonic_device" => %{"project_id" => 222}
+        }
+      }
+
+  Callers with a resolved repo name call `override_repo/2` (via
+  `Arbiter.Mergers.prepare_with_repo/2`) after `put_active/1` to merge the
+  repo's override over the workspace default. A repo override may set any of
+  the top-level keys (`project_id`, `host`, `credentials_ref`, …); unset keys
+  fall back to the workspace default.
   """
 
   alias Arbiter.Agents.CredentialsRef
@@ -86,6 +110,35 @@ defmodule Arbiter.Mergers.Gitlab.Config do
   def clear do
     Process.delete(@pdict_key)
     :ok
+  end
+
+  @doc """
+  Merge a per-repo GitLab config override over the current process's active
+  config.
+
+  Looks up `workspace.config["merge"]["config"]["repos"][repo]` and, if
+  present, merges it over the config already seeded by `put_active/1` — so a
+  multi-GitLab-project workspace (see moduledoc) resolves the right
+  `project_id` for the repo actually being merged instead of the
+  workspace-wide default.
+
+  No-op when `repo` is nil/blank or the workspace has no override for it;
+  `put_active/1`'s config is used unchanged.
+  """
+  @spec override_repo(Workspace.t(), String.t() | nil) :: :ok
+  def override_repo(_workspace, repo) when repo in [nil, ""], do: :ok
+
+  def override_repo(%Workspace{config: config} = workspace, repo) when is_binary(repo) do
+    case get_in(config || %{}, ["merge", "config", "repos", repo]) do
+      %{} = override when map_size(override) > 0 ->
+        active = Process.get(@pdict_key) || %{}
+        embedded = CredentialsRef.embed_secrets(override, Workspace.secrets_map(workspace))
+        Process.put(@pdict_key, Map.merge(active, embedded))
+        :ok
+
+      _ ->
+        :ok
+    end
   end
 
   @doc """

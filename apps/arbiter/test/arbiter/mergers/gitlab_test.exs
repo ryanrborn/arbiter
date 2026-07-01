@@ -722,6 +722,85 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
+  # override_repo/2 — per-repo GitLab project overrides for multi-project
+  # workspaces (bd-c9vb0r).
+  describe "override_repo/2" do
+    defp workspace_with_repos(repos) do
+      %Arbiter.Tasks.Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "gitlab",
+            "config" => %{
+              "host" => @host,
+              "project_id" => @project,
+              "credentials_ref" => "env:#{@env_var}",
+              "repos" => repos
+            }
+          }
+        }
+      }
+    end
+
+    test "merges a matching repo override's project_id over the active config" do
+      ws = workspace_with_repos(%{"tonic_device" => %{"project_id" => 999}})
+
+      assert :ok = Config.override_repo(ws, "tonic_device")
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == "999"
+      assert cfg.host == @host
+    end
+
+    test "leaves the active config unchanged when the repo has no override" do
+      ws = workspace_with_repos(%{"tonic_device" => %{"project_id" => 999}})
+
+      assert :ok = Config.override_repo(ws, "tonic")
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == to_string(@project)
+    end
+
+    test "leaves the active config unchanged when the workspace has no repos map" do
+      ws = %Arbiter.Tasks.Workspace{
+        config: %{"merge" => %{"strategy" => "gitlab", "config" => %{}}}
+      }
+
+      assert :ok = Config.override_repo(ws, "tonic_device")
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == to_string(@project)
+    end
+
+    test "is a no-op for a nil repo" do
+      ws = workspace_with_repos(%{"tonic_device" => %{"project_id" => 999}})
+
+      assert :ok = Config.override_repo(ws, nil)
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == to_string(@project)
+    end
+
+    test "is a no-op for a blank repo" do
+      ws = workspace_with_repos(%{"tonic_device" => %{"project_id" => 999}})
+
+      assert :ok = Config.override_repo(ws, "")
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == to_string(@project)
+    end
+
+    test "an overridden credentials_ref resolves its own token" do
+      other_env = "GTE_GITLAB_TEST_TOKEN_OTHER"
+      System.put_env(other_env, "other-repo-token")
+      on_exit(fn -> System.delete_env(other_env) end)
+
+      ws =
+        workspace_with_repos(%{
+          "tonic_device" => %{"project_id" => 999, "credentials_ref" => "env:#{other_env}"}
+        })
+
+      assert :ok = Config.override_repo(ws, "tonic_device")
+      assert {:ok, cfg} = Config.resolve()
+      assert cfg.project_id == "999"
+      assert cfg.token == "other-repo-token"
+    end
+  end
+
   # ref_for_pr/2 — construct an mr_ref for an external MR (bd-d4ealy).
   describe "ref_for_pr/2" do
     test "parses an MR URL into a !iid ref" do

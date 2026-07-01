@@ -115,4 +115,79 @@ defmodule Arbiter.MergersTest do
       assert Mergers.Github.Config.active_repo_slug() == nil
     end
   end
+
+  describe "prepare_with_repo/2" do
+    test "is a no-op for a nil workspace" do
+      assert Mergers.prepare_with_repo(nil, "tonic_device") == :ok
+    end
+
+    test "falls back to prepare/1 when repo is nil" do
+      ws = %Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "gitlab",
+            "config" => %{
+              "host" => "gitlab.example.com",
+              "project_id" => "42",
+              "credentials_ref" => "env:#{@gitlab_env}"
+            }
+          }
+        }
+      }
+
+      assert Mergers.prepare_with_repo(ws, nil) == :ok
+      assert {:ok, cfg} = Mergers.Gitlab.Config.resolve()
+      assert cfg.project_id == "42"
+    end
+
+    test "seeds Gitlab.Config and applies the repo's project_id override (bd-c9vb0r)" do
+      ws = %Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "gitlab",
+            "config" => %{
+              "host" => "gitlab.example.com",
+              "project_id" => "emricare/tonic",
+              "credentials_ref" => "env:#{@gitlab_env}",
+              "repos" => %{
+                "tonic_device" => %{"project_id" => "emricare/tonic_device"}
+              }
+            }
+          }
+        }
+      }
+
+      assert Mergers.prepare_with_repo(ws, "tonic_device") == :ok
+      assert {:ok, cfg} = Mergers.Gitlab.Config.resolve()
+      assert cfg.project_id == "emricare/tonic_device"
+
+      # A repo with no override keeps the workspace default.
+      assert Mergers.prepare_with_repo(ws, "tonic") == :ok
+      assert {:ok, cfg} = Mergers.Gitlab.Config.resolve()
+      assert cfg.project_id == "emricare/tonic"
+    end
+
+    test "seeds Github.Config and applies the repo override" do
+      ws = %Workspace{
+        config: %{
+          "merge" => %{
+            "strategy" => "github",
+            "config" => %{
+              "credentials_ref" => "env:#{@github_env}"
+            }
+          }
+        }
+      }
+
+      assert Mergers.prepare_with_repo(ws, "acme/widgets") == :ok
+      assert {:ok, cfg} = Mergers.Github.Config.resolve()
+      assert cfg.owner == "acme"
+      assert cfg.repo == "widgets"
+    end
+
+    test "is a no-op for a :direct-strategy workspace" do
+      ws = %Workspace{config: %{"merge" => %{"strategy" => "direct"}}}
+      assert Mergers.prepare_with_repo(ws, "tonic_device") == :ok
+    end
+  end
 end

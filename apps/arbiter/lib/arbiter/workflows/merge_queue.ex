@@ -243,6 +243,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           status: status(),
           strategy: String.t(),
           base: String.t() | nil,
+          repo: String.t() | nil,
           priority: non_neg_integer(),
           opened_at: DateTime.t() | nil,
           last_polled_at: DateTime.t() | nil,
@@ -257,6 +258,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     @moduledoc false
     defstruct [
       :workspace_id,
+      :workspace,
       :adapter,
       :base,
       :poll_interval_ms,
@@ -346,6 +348,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     state = %State{
       workspace_id: workspace_id,
+      workspace: workspace,
       adapter: adapter,
       base: Keyword.get(opts, :base),
       poll_interval_ms: poll_interval_ms,
@@ -422,10 +425,12 @@ defmodule Arbiter.Workflows.MergeQueue do
         {:ok, task} = Ash.load(task, [:workspace])
 
         # Re-seed the adapter's per-process config from the latest workspace
-        # state, then resolve the adapter module.
-        Mergers.prepare(task.workspace)
+        # state — including a per-repo override for multi-GitLab-project
+        # workspaces (bd-c9vb0r) — then resolve the adapter module.
+        repo = resolve_task_repo(task)
+        Mergers.prepare_with_repo(task.workspace, repo)
         adapter = Mergers.for_workspace(task.workspace)
-        state = %{state | adapter: adapter}
+        state = %{state | adapter: adapter, workspace: task.workspace}
 
         strategy = Atom.to_string(Workspace.merger_strategy(task.workspace))
 
@@ -449,10 +454,10 @@ defmodule Arbiter.Workflows.MergeQueue do
             # `adapter.open` again — that would create a DUPLICATE for the same
             # branch. The resumed worker's work lands on the same branch the MR
             # already tracks.
-            adopt_existing_mr(state, task, strategy)
+            adopt_existing_mr(state, task, strategy, repo)
 
           true ->
-            open_mr_for(state, task, strategy)
+            open_mr_for(state, task, strategy, repo)
         end
 
       {:error, _} = err ->
@@ -468,7 +473,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   # Adopt a task's already-open MR into the merge queue without opening a new
   # one (bd-auma3z no-duplicate guard). Slots it in at `:awaiting_approval`
   # so the normal poll loop drives it the rest of the way.
-  defp adopt_existing_mr(state, task, strategy) do
+  defp adopt_existing_mr(state, task, strategy, repo) do
     mr_ref = existing_mr_ref(task)
 
     Logger.info(
@@ -481,6 +486,7 @@ defmodule Arbiter.Workflows.MergeQueue do
         mr_ref: mr_ref,
         status: :awaiting_approval,
         base: resolve_base(state, task),
+        repo: repo,
         priority: task_priority(task),
         opened_at: DateTime.utc_now()
       )
@@ -523,7 +529,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     _ -> nil
   end
 
-  defp open_mr_for(state, task, strategy) do
+  defp open_mr_for(state, task, strategy, repo) do
     base = resolve_base(state, task)
 
     branch = strategy_for(task.workspace, "merge", "branch_prefix", "") <> task.id
@@ -540,6 +546,7 @@ defmodule Arbiter.Workflows.MergeQueue do
           mr_ref: mr_ref,
           status: :awaiting_approval,
           base: base,
+          repo: repo,
           priority: task_priority(task),
           opened_at: DateTime.utc_now()
         )
@@ -671,6 +678,13 @@ defmodule Arbiter.Workflows.MergeQueue do
   end
 
   defp poll_item(state, item) do
+    # Multi-GitLab-project workspaces (bd-c9vb0r): the queue's process dict
+    # holds one active merger config at a time, but a single poll cycle walks
+    # items from potentially different repos/projects. Re-seed the per-repo
+    # override immediately before each adapter call so it always targets the
+    # project the item's task actually merges into.
+    Mergers.prepare_with_repo(state.workspace, item.repo)
+
     case state.adapter.get(item.mr_ref) do
       {:ok, mr_state} ->
         advance_status(state, item, mr_state)
@@ -1056,6 +1070,8 @@ defmodule Arbiter.Workflows.MergeQueue do
   defp item_branch_label(%{task_id: task_id}), do: "task=" <> task_id
 
   defp try_merge(state, item) do
+    Mergers.prepare_with_repo(state.workspace, item.repo)
+
     case state.adapter.merge(item.mr_ref) do
       :ok ->
         item = %{item | status: :merging}
@@ -1108,6 +1124,7 @@ defmodule Arbiter.Workflows.MergeQueue do
       status: :opening,
       strategy: strategy,
       base: nil,
+      repo: nil,
       # Task priority (0 = P0 highest … 4 = P4 lowest), captured at enqueue so
       # the serialized merge admission can order the queue without reloading the
       # task. Defaults to P2 for items that predate the field / lack a task.
