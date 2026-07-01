@@ -169,15 +169,19 @@ is `"github"` and that has a resolvable repo (either `merge.config.repo` set, or
 a `rig_paths` map whose rigs have a GitHub `origin` remote). No separate
 configuration key is required.
 
-To set the patrol interval (default: 60 s):
+To set the patrol interval (default: 60 s), set the `:review_patrol_interval_ms`
+application env before boot — for example in `config/runtime.exs`:
 
-```bash
-arb config set review_patrol.interval_ms 120000   # 2 minutes
+```elixir
+config :arbiter, review_patrol_interval_ms: 120_000   # 2 minutes
 ```
 
-Requires a server restart to take effect (the interval is read at GenServer init;
-changing it live requires `Arbiter.Workflows.ReviewPatrolSupervisor.start_patrol/2`
-with the new opts).
+Or pass it as a release environment variable if your deployment uses
+`Config.Provider`. The value is read once at `ReviewPatrolSupervisor` init, so
+a server restart is required for the change to take effect.
+
+> **Note:** `arb config set` writes to the workspace config (runtime deep-merge)
+> and is **not** read by the patrol interval logic. Use the application env above.
 
 ### Configuring the fleet login (author-reply handling)
 
@@ -198,11 +202,15 @@ is in the workspace's `auto_authors` list:
 
 ```bash
 # Authors who get automatic re-reviews and threaded replies
-arb config set review_patrol.auto_authors '["alice","bob"]'
+arb config set review_automation.auto_authors '["alice","bob"]'
+
+# Default stance for authors NOT in the list: "auto" or "flag" (default: "flag")
+arb config set review_automation.default "flag"
 ```
 
-Authors not in the list default to `:flag` mode (coordinator escalation only,
-no automatic posting).
+Authors in `auto_authors` get `:auto` mode (automatic re-reviews and threaded
+replies). Authors not in the list fall back to `review_automation.default`
+(`:flag` mode when unset — coordinator escalation only, no automatic posting).
 
 To override the debounce window (default 5 min):
 
