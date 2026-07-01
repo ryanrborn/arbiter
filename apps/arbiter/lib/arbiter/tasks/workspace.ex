@@ -93,6 +93,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergeQueue, []}
       change {Arbiter.Tasks.Workspace.Changes.StartPRPatrol, []}
+      change {Arbiter.Tasks.Workspace.Changes.StartReviewPatrol, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergedPRFinalizer, []}
     end
 
