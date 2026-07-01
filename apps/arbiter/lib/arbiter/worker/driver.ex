@@ -146,7 +146,13 @@ defmodule Arbiter.Worker.Driver do
     # in the same window the Driver's tick budget expires (bd-d1jp4r).
     case safe_worker_state(state.worker_pid) do
       %{status: :completed} = worker_state ->
-        close_task(state.task_id, should_close_upstream_for_task(state.task_id, worker_state))
+        # bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol).
+        # The Driver must NOT auto-close them — they stay :in_progress so
+        # ReviewPatrol can keep engaging on subsequent commits.
+        unless live_review_engagement?(worker_state) do
+          close_task(state.task_id, should_close_upstream_for_task(state.task_id, worker_state))
+        end
+
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
@@ -173,8 +179,14 @@ defmodule Arbiter.Worker.Driver do
   def handle_info(:check_worker, state) do
     case safe_worker_state(state.worker_pid) do
       %{status: :completed} = worker_state ->
-        close_upstream = should_close_upstream_for_task(state.task_id, worker_state)
-        close_task(state.task_id, close_upstream)
+        # bd-cw3w9p: review_only tasks are long-lived engagements (ReviewPatrol).
+        # The Driver must NOT auto-close them — they stay :in_progress so
+        # ReviewPatrol can keep engaging on subsequent commits.
+        unless live_review_engagement?(worker_state) do
+          close_upstream = should_close_upstream_for_task(state.task_id, worker_state)
+          close_task(state.task_id, close_upstream)
+        end
+
         maybe_cleanup_worktree(state)
         {:stop, :normal, state}
 
@@ -309,6 +321,11 @@ defmodule Arbiter.Worker.Driver do
   defp review_only_worker?(%{meta: %{review_only: true}}), do: true
   defp review_only_worker?(%{meta: %{"review_only" => true}}), do: true
   defp review_only_worker?(_), do: false
+
+  # bd-cw3w9p: a "live review engagement" is a review_only task kept open so
+  # ReviewPatrol can keep engaging on subsequent commits. The Driver must never
+  # auto-close these — ReviewPatrol drives closure when appropriate.
+  defp live_review_engagement?(worker_state), do: review_only_worker?(worker_state)
 
   defp has_tracker_ref?(%Issue{tracker_ref: ref, tracker_type: type})
        when is_binary(ref) and ref != "" and type != :none do
