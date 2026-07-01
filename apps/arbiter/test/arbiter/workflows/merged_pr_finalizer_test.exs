@@ -421,9 +421,10 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
           title: "review engagement for PR #512",
           workspace_id: ws.id,
           tracker_type: :none,
-          source_pr: "512",
-          review_only: true
+          source_pr: "512"
         })
+
+      {:ok, engagement} = Ash.update(engagement, %{review_only: true}, action: :update)
 
       stub(pr_get_stub(512, :merged))
 
