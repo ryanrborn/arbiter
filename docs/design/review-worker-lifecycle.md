@@ -197,8 +197,13 @@ Without this, author-reply handling is conservatively skipped.
 ### Configuring automation mode per workspace
 
 `review_automation` controls the default stance for new engagements in the
-workspace. It is set at engagement-dispatch time based on whether the PR author
-is in the workspace's `auto_authors` list:
+workspace. Resolution order (most-specific wins):
+
+1. **Per-dispatch override** — the `automation` argument to `worker_review` always wins.
+2. **Per-repo override** — `review_automation.repo_overrides[rig_name]` hard-gates a
+   specific repo regardless of PR author.
+3. **Author list** — if the PR author is in `auto_authors`, the mode is `:auto`.
+4. **Default** — `review_automation.default` (`:flag` when unset).
 
 ```bash
 # Authors who get automatic re-reviews and threaded replies
@@ -206,11 +211,35 @@ arb config set review_automation.auto_authors '["alice","bob"]'
 
 # Default stance for authors NOT in the list: "auto" or "flag" (default: "flag")
 arb config set review_automation.default "flag"
+
+# Hard-flag a specific repo regardless of author (e.g. infra repos)
+arb config set review_automation.repo_overrides '{"atlas": "flag"}'
 ```
 
 Authors in `auto_authors` get `:auto` mode (automatic re-reviews and threaded
 replies). Authors not in the list fall back to `review_automation.default`
 (`:flag` mode when unset — coordinator escalation only, no automatic posting).
+
+**Per-repo overrides** (`repo_overrides`) take precedence over the author list.
+Setting `atlas: "flag"` ensures atlas PRs are always human-gated, even when
+the PR author is in `auto_authors`. The key is the rig name as defined in
+`merge.config.repo_paths` (or `rig_paths`).
+
+Example: a workspace with backend engineers trusted for auto-review but atlas
+always requiring a human sign-off:
+
+```json
+"review_automation": {
+  "default": "flag",
+  "auto_authors": ["alice", "bob"],
+  "repo_overrides": {
+    "atlas": "flag"
+  }
+}
+```
+
+With this config: an atlas PR by alice resolves to `:flag`; a backend PR by
+alice resolves to `:auto`.
 
 To override the debounce window (default 5 min):
 

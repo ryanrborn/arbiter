@@ -526,6 +526,44 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad4", config: config})
       assert err |> Exception.message() |> String.contains?("review_automation must be a map")
     end
+
+    test "accepts review_automation.repo_overrides with valid values" do
+      config = %{
+        "review_automation" => %{
+          "default" => "flag",
+          "auto_authors" => ["alice"],
+          "repo_overrides" => %{"atlas" => "flag", "fast_lane" => "auto"}
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "ra-or-valid1", config: config})
+      assert ws.config["review_automation"]["repo_overrides"]["atlas"] == "flag"
+    end
+
+    test "accepts empty review_automation.repo_overrides map" do
+      config = %{"review_automation" => %{"repo_overrides" => %{}}}
+      assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-or-valid2", config: config})
+    end
+
+    test "rejects review_automation.repo_overrides with invalid mode value" do
+      config = %{"review_automation" => %{"repo_overrides" => %{"atlas" => "always"}}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-or-bad1", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.repo_overrides values must each be")
+    end
+
+    test "rejects review_automation.repo_overrides when not a map" do
+      config = %{"review_automation" => %{"repo_overrides" => ["atlas"]}}
+
+      assert {:error, err} = Ash.create(Workspace, %{name: "ra-or-bad2", config: config})
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.repo_overrides must be a map")
+    end
   end
 
   describe "watch_pipeline?/1" do
