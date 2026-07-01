@@ -1387,6 +1387,13 @@ defmodule Arbiter.Worker.DispatchTest do
           skip_upstream_create: true
         })
 
+      # Verify the adapter can be resolved and loaded independently of run order.
+      # completion_notes_step/1 uses Code.ensure_loaded? so the check succeeds even
+      # when the module hasn't been touched earlier in the test suite (bd-6aqgok).
+      adapter = Arbiter.Trackers.for_task(task)
+      assert Code.ensure_loaded?(adapter), "adapter #{inspect(adapter)} must be loadable"
+      assert function_exported?(adapter, :gating_fields, 2), "jira adapter must export gating_fields/2"
+
       prompt = Dispatch.prompt_for_task(task, [])
 
       # Notes persist via the MCP tool, never the arb escript (bd-53xrmi).

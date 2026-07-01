@@ -1521,7 +1521,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp completion_notes_step(%Issue{} = issue) do
     adapter = Trackers.for_task(issue)
 
-    if function_exported?(adapter, :gating_fields, 2) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :gating_fields, 2) do
       """
 
       This task is backed by an external tracker ticket. Before you finish, you

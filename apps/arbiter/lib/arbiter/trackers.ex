@@ -188,7 +188,7 @@ defmodule Arbiter.Trackers do
       not is_binary(ref) or ref == "" ->
         {:ok, []}
 
-      function_exported?(adapter, :gating_fields, 2) ->
+      Code.ensure_loaded?(adapter) and function_exported?(adapter, :gating_fields, 2) ->
         adapter.gating_fields(ref, status)
 
       true ->
