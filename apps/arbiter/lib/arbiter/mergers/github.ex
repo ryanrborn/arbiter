@@ -189,6 +189,9 @@ defmodule Arbiter.Mergers.Github do
        %{
          ref: mr_ref,
          status: status,
+         # PR head commit SHA — ReviewPatrol records this into an engagement's
+         # `last_reviewed_sha` so it can detect new commits on later ticks.
+         head_sha: head_sha,
          approved: approved,
          changes_requested: changes_requested,
          latest_review_id: latest_changes_requested_id(reviews),

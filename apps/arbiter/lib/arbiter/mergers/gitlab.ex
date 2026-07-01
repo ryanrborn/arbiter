@@ -133,6 +133,9 @@ defmodule Arbiter.Mergers.Gitlab do
            %{
              ref: ref_for(iid),
              status: status,
+             # MR head commit SHA — ReviewPatrol records this into an
+             # engagement's `last_reviewed_sha` to detect new commits later.
+             head_sha: Map.get(body, "sha"),
              approved: approved?(body),
              changes_requested: false,
              latest_review_id: nil,
