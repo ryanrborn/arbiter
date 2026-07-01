@@ -723,15 +723,27 @@ defmodule Arbiter.MCP.Tools do
 
   # External PR review: same dispatch gating (it spawns a reviewer), but resolves
   # the MR provider from the (scope-bound or named) workspace rather than a task.
+  #
+  # `follow_up` (Option A, bd-2ovun1) makes the review adopt the PR into
+  # ReviewPatrol by opening a review_only engagement after the verdict posts.
+  # When the arg is omitted, ExternalReview engages by default only if the
+  # workspace has a ReviewPatrol running. `automation` / `tracker_context_*`
+  # mirror the task-review path and are carried onto that engagement.
   defp worker_review_external(%Scope{} = scope, args, pr) do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
-         {:ok, ws_ref} <- authorized_workspace(scope, args) do
-      opts = [
-        pr: pr,
-        repo: fetch_string(args, "repo"),
-        workspace: ws_ref
-      ]
+         {:ok, ws_ref} <- authorized_workspace(scope, args),
+         {:ok, follow_up} <- fetch_optional_bool(args, "follow_up") do
+      opts =
+        [
+          pr: pr,
+          repo: fetch_string(args, "repo"),
+          workspace: ws_ref,
+          automation: fetch_string(args, "automation"),
+          tracker_context_ref: fetch_string(args, "tracker_context_ref"),
+          tracker_context_type: fetch_string(args, "tracker_context_type")
+        ]
+        |> maybe_put_kw(:follow_up, follow_up)
 
       case Arbiter.Reviews.ExternalReview.dispatch(opts) do
         {:ok, ack} ->
@@ -1555,6 +1567,18 @@ defmodule Arbiter.MCP.Tools do
   defp fetch_bool(args, key, default) do
     case Map.get(args, key) do
       nil -> {:ok, default}
+      v when is_boolean(v) -> {:ok, v}
+      "true" -> {:ok, true}
+      "false" -> {:ok, false}
+      _ -> {:error, {:invalid, "`#{key}` must be a boolean"}}
+    end
+  end
+
+  # Tri-state bool: `{:ok, nil}` when the key is absent (so the callee can apply
+  # its own default), `{:ok, true|false}` when present, error on a bad value.
+  defp fetch_optional_bool(args, key) do
+    case Map.get(args, key) do
+      nil -> {:ok, nil}
       v when is_boolean(v) -> {:ok, v}
       "true" -> {:ok, true}
       "false" -> {:ok, false}

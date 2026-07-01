@@ -464,7 +464,10 @@ defmodule Arbiter.MCP.Catalog do
           "`can_dispatch` coordinator token and is depth-limited. Pass `task_id` to review the PR/MR " <>
           "linked to a task (claude-driven; `with_claude: false` skips the agent), or `pr` (URL or " <>
           "number, + optional `repo`/`workspace`) to review an external / non-arbiter PR through the " <>
-          "MR adapter — findings + a verdict are posted to the PR, no task or branch required.",
+          "MR adapter — findings + a verdict are posted to the PR, no task or branch required. For a " <>
+          "`pr` review, `follow_up` opens a review_only ReviewPatrol engagement after the verdict so " <>
+          "the PR is re-reviewed on new commits and its replies handled (defaults on when the " <>
+          "workspace has ReviewPatrol running).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -496,23 +499,33 @@ defmodule Arbiter.MCP.Catalog do
           "tracker_context_ref" => %{
             "type" => "string",
             "description" =>
-              "(task review) Tracker issue ref to fetch acceptance criteria from — read-only " <>
+              "Tracker issue ref to fetch acceptance criteria from — read-only " <>
                 "context for the reviewer. No claim, no assignment check, no write-back. Safe " <>
-                "for coworker-owned tickets (e.g. \"VR-18004\")."
+                "for coworker-owned tickets (e.g. \"VR-18004\"). On a `pr` review with `follow_up`, " <>
+                "it is also carried onto the engagement for re-review intent."
           },
           "tracker_context_type" => %{
             "type" => "string",
             "description" =>
-              "(task review) Tracker type for `tracker_context_ref` (e.g. \"jira\"). " <>
+              "Tracker type for `tracker_context_ref` (e.g. \"jira\"). " <>
                 "Defaults to the workspace's tracker when omitted."
+          },
+          "follow_up" => %{
+            "type" => "boolean",
+            "description" =>
+              "(`pr` only) Open a review_only ReviewPatrol engagement after the verdict posts so " <>
+                "the PR is re-reviewed on new commits, its author replies are handled, and it is " <>
+                "tracked to merge. Dedups on an already-open engagement for the same PR. When " <>
+                "omitted, defaults to on iff the workspace has a ReviewPatrol running."
           },
           "automation" => %{
             "type" => "string",
             "enum" => ["auto", "flag"],
             "description" =>
-              "(task review) Override the workspace review_automation policy: \"auto\" to " <>
+              "Override the workspace review_automation policy: \"auto\" to " <>
                 "re-review automatically on new commits, \"flag\" to surface new commits as a flag. " <>
-                "When omitted, the mode is resolved from the workspace policy using `pr_author`."
+                "When omitted, the mode is resolved from the workspace policy using the PR author " <>
+                "(the actual author for a `pr` review; `pr_author` for a task review)."
           },
           "pr_author" => %{
             "type" => "string",
