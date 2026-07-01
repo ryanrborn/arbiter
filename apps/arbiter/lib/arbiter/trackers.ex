@@ -9,7 +9,7 @@ defmodule Arbiter.Trackers do
 
   ## Resolution rule
 
-  `issue.tracker_type` is an atom in `[:none, :jira, :shortcut, :linear, :github]`. It is
+  `issue.tracker_type` is an atom in `[:none, :jira, :shortcut, :linear, :github, :gitlab]`. It is
   populated by `Arbiter.Tasks.Issue.Changes.InheritTrackerType` from the
   workspace's `config["tracker"]["type"]` at create-time, unless explicitly
   overridden by the caller.
@@ -20,7 +20,7 @@ defmodule Arbiter.Trackers do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Messages.Message
-  alias Arbiter.Trackers.{GitHub, Jira, Linear, None, Shortcut, Tracker}
+  alias Arbiter.Trackers.{Gitlab, GitHub, Jira, Linear, None, Shortcut, Tracker}
 
   @type adapter :: module()
 
@@ -29,6 +29,7 @@ defmodule Arbiter.Trackers do
     jira: Jira,
     shortcut: Shortcut,
     github: GitHub,
+    gitlab: Gitlab,
     linear: Linear
   }
 
@@ -81,6 +82,7 @@ defmodule Arbiter.Trackers do
   def prepare(%Issue{tracker_type: type}, workspace) do
     case type do
       :github -> GitHub.Config.put_active(workspace)
+      :gitlab -> Gitlab.Config.put_active(workspace)
       :jira -> Jira.Config.put_active(workspace)
       :shortcut -> Shortcut.Config.put_active(workspace)
       :linear -> Linear.Config.put_active(workspace)
@@ -361,6 +363,7 @@ defmodule Arbiter.Trackers do
   end
 
   defp do_with_workspace(:github, workspace, fun), do: GitHub.with_workspace(workspace, fun)
+  defp do_with_workspace(:gitlab, workspace, fun), do: Gitlab.with_workspace(workspace, fun)
   defp do_with_workspace(:jira, workspace, fun), do: Jira.with_workspace(workspace, fun)
   defp do_with_workspace(:shortcut, workspace, fun), do: Shortcut.with_workspace(workspace, fun)
   defp do_with_workspace(:linear, workspace, fun), do: Linear.with_workspace(workspace, fun)
