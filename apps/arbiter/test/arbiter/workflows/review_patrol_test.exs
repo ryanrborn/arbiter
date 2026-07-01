@@ -288,6 +288,223 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
     end
   end
 
+  describe "tick/1 — new-commit re-review (bd-f3fg22)" do
+    # A prior finding we'd have posted on the first review, stored on the
+    # engagement so the relevance gate + de-dupe have something to compare against.
+    defp finding(file, line, message, severity \\ "error") do
+      %{"file" => file, "line" => line, "message" => message, "severity" => severity}
+    end
+
+    # Bypass the real Claude reviewer: CodeReview.Checks reads this invoker and
+    # parses its JSON into findings. The dedupe wrapper in ReviewPatrol then filters.
+    defp put_invoker(findings) do
+      json = Jason.encode!(%{"findings" => findings})
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state -> {:ok, json} end)
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+    end
+
+    # Stub the whole re-review conversation for an OPEN PR at `head`:
+    #   adapter.get   → GET /pulls/:n  (+ /reviews, + check-runs → 500 = CI settled)
+    #   new-diff-only → GET /compare/base...head  (served with `diff`)
+    #   posting       → POST /pulls/:n/comments  and  POST /pulls/:n/reviews
+    # Forge writes are forwarded to the test process so we can assert on them.
+    defp rereview_stub(number, head, diff) do
+      test_pid = self()
+
+      stub(fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.starts_with?(path, "/repos/owner/repo/compare/") ->
+            send(test_pid, {:compare, path})
+
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, diff)
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => number,
+              "state" => "open",
+              "head" => %{"sha" => head},
+              "html_url" => "x"
+            })
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:inline_comment, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:submit_review, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "unhandled #{path}"})
+        end
+      end)
+    end
+
+    test "a push touching a previously-flagged file triggers exactly one re-review", %{ws: ws} do
+      eng =
+        engagement(ws, 400, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      # The new commit surfaces a DIFFERENT finding in the flagged file.
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      rereview_stub(400, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # New-diff-only: the compare endpoint (not the whole-PR diff) was hit.
+      assert_receive {:compare, path}
+      assert path =~ "oldsha...newsha"
+
+      # Exactly one inline comment + one review submitted.
+      assert_receive {:inline_comment, comment}
+      assert comment["path"] == "lib/a.ex"
+      assert comment["line"] == 10
+      assert_receive {:submit_review, _review}
+
+      reloaded = reload(eng)
+      # last_reviewed_sha advanced after posting; the new finding was appended.
+      assert reloaded.last_reviewed_sha == "newsha"
+      assert length(reloaded.posted_findings) == 2
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+    end
+
+    test "a push touching only unrelated files does NOT trigger a re-review", %{ws: ws} do
+      eng =
+        engagement(ws, 401, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      # The new commit touches lib/other.ex — a file we never flagged.
+      diff =
+        "diff --git a/lib/other.ex b/lib/other.ex\n--- a/lib/other.ex\n+++ b/lib/other.ex\n@@ -1 +1 @@\n+y\n"
+
+      rereview_stub(401, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Relevance gate: diff fetched, but nothing posted and the SHA is untouched.
+      assert_receive {:compare, _path}
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      assert reload(eng).last_reviewed_sha == "oldsha"
+      assert ReviewPatrol.state(name).last_rereviewed == []
+    end
+
+    test "debounce: a re-review inside the window is suppressed", %{ws: ws} do
+      eng =
+        engagement(ws, 402, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          # Reviewed just now → inside the default 5-minute debounce window.
+          last_reviewed_at: DateTime.truncate(DateTime.utc_now(), :second),
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      rereview_stub(402, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Debounce short-circuits before any diff fetch or posting.
+      refute_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "oldsha"
+      assert ReviewPatrol.state(name).last_rereviewed == []
+    end
+
+    test "an unchanged finding (same file/line/message) is not re-posted", %{ws: ws} do
+      eng =
+        engagement(ws, 403, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 10, "same bug")]
+        })
+
+      # The re-review surfaces the IDENTICAL finding we already posted.
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "same bug"}
+      ])
+
+      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      rereview_stub(403, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # The duplicate is filtered out before posting: no inline comment.
+      refute_receive {:inline_comment, _}
+      # A verdict is still submitted (a clean re-review with nothing new).
+      assert_receive {:submit_review, review}
+      assert review["event"] == "APPROVE"
+
+      reloaded = reload(eng)
+      # SHA advances after the (empty) re-review; no duplicate appended.
+      assert reloaded.last_reviewed_sha == "newsha"
+      assert length(reloaded.posted_findings) == 1
+    end
+
+    test "flag mode surfaces a flag instead of re-reviewing", %{ws: ws} do
+      eng =
+        engagement(ws, 404, %{
+          review_automation: :flag,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      rereview_stub(404, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # No review posted — but the cursor advances so the same commits aren't
+      # re-flagged, and the engagement is recorded as flagged this tick.
+      refute_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_flagged == [eng.id]
+
+      flags =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and kind == :flag)
+        |> Ash.read!()
+
+      assert length(flags) == 1
+    end
+  end
+
   describe "tick/1 — error handling" do
     test "adapter get failure → bumps tick counter, does not crash", %{ws: ws} do
       _eng = engagement(ws, 105)

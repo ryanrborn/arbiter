@@ -101,6 +101,16 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
       path ->
         args = ["--print", prompt, "--output-format", "text"]
 
+        # Honor the active model slot when one is seeded in the process dict.
+        # ReviewPatrol seeds `:review_agent` via `Agents.prepare(ws, :review_agent)`
+        # before running a re-review, so re-reviews can run on a cheaper model than
+        # the first pass (bd-f3fg22); mirrors `ReviewReply.default_compose/2`.
+        args =
+          case Arbiter.Agents.Claude.Config.active_model() do
+            model when is_binary(model) and model != "" -> args ++ ["--model", model]
+            _ -> args
+          end
+
         case System.cmd(path, args, stderr_to_stdout: true) do
           {output, 0} -> {:ok, output}
           {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}

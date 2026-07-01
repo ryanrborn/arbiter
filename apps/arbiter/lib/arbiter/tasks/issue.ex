@@ -139,7 +139,9 @@ defmodule Arbiter.Tasks.Issue do
         :review_only,
         :last_reviewed_sha,
         :last_seen_comment_id,
-        :review_automation
+        :review_automation,
+        :last_reviewed_at,
+        :posted_findings
       ]
 
       require_atomic? false
@@ -462,6 +464,7 @@ defmodule Arbiter.Tasks.Issue do
     attribute :last_reviewed_sha, :string do
       allow_nil? true
       public? true
+
       description "PR head SHA at our last posted review. Set by ReviewPatrol after each review cycle."
     end
 
@@ -481,6 +484,32 @@ defmodule Arbiter.Tasks.Issue do
         :auto — re-review automatically on new commits.
         :flag — surface new commits as a flag rather than re-reviewing.
       Nullable; the effective default is resolved from workspace policy (task B).
+      """
+    end
+
+    attribute :last_reviewed_at, :utc_datetime do
+      allow_nil? true
+      public? true
+
+      description """
+      Timestamp of our last posted re-review. ReviewPatrol's debounce cursor
+      (bd-f3fg22): a new-commit re-review is suppressed while now - last_reviewed_at
+      is inside the configured debounce window, so a burst of pushes yields at most
+      one re-review per window.
+      """
+    end
+
+    attribute :posted_findings, {:array, :map} do
+      allow_nil? true
+      public? true
+      default []
+
+      description """
+      The findings ReviewPatrol has already posted on this engagement's PR — each a
+      map with "file", "line", "message", and "severity" (bd-f3fg22). Two uses on a
+      new-commit re-review: the relevance gate (only re-review when the new diff
+      touches a file we previously flagged) and unchanged-finding de-dupe (never
+      re-post a finding whose file/line/message we already posted).
       """
     end
 
