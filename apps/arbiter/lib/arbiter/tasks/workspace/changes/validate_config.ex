@@ -29,6 +29,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"review_automation"` is present, it must be a map.
     * If `"review_automation.default"` is present, it must be `"auto"` or `"flag"`.
     * If `"review_automation.auto_authors"` is present, it must be a list of strings.
+    * If `"review_automation.repo_overrides"` is present, it must be a map where
+      every value is `"auto"` or `"flag"`.
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -358,6 +360,32 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           Changeset.add_error(cs,
             field: :config,
             message: "review_automation.auto_authors must be a list of strings"
+          )
+      end
+    end)
+    |> then(fn cs ->
+      case Map.get(block, "repo_overrides") do
+        nil ->
+          cs
+
+        overrides when is_map(overrides) ->
+          invalid = Enum.reject(overrides, fn {_k, v} -> v in @valid_automation_modes end)
+
+          if invalid == [] do
+            cs
+          else
+            Changeset.add_error(cs,
+              field: :config,
+              message:
+                "review_automation.repo_overrides values must each be one of " <>
+                  "#{Enum.join(@valid_automation_modes, ", ")}"
+            )
+          end
+
+        _ ->
+          Changeset.add_error(cs,
+            field: :config,
+            message: "review_automation.repo_overrides must be a map"
           )
       end
     end)
