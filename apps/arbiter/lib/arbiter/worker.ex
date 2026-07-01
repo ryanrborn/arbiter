@@ -3036,7 +3036,7 @@ defmodule Arbiter.Worker do
   defp do_open_mr(%State{} = state, branch, title, description, opts) do
     case resolve_merger(state, opts) do
       {:ok, adapter, workspace} ->
-        Arbiter.Mergers.prepare(workspace)
+        Arbiter.Mergers.prepare_with_repo(workspace, state.repo)
         open_opts = build_open_opts(state, opts)
 
         # bd-13thk9: push the worktree branch to origin BEFORE asking a hosted
@@ -3235,7 +3235,7 @@ defmodule Arbiter.Worker do
   # worker or start the Watchdog — that all happens later on APPROVE. Records
   # pr_ref so the MergeQueue adopts this PR rather than opening a duplicate.
   defp open_pr_without_merge(%State{} = state, adapter, workspace, branch, opts) do
-    Arbiter.Mergers.prepare(workspace)
+    Arbiter.Mergers.prepare_with_repo(workspace, state.repo)
     title = pr_title_for(state.task_id, state.meta)
     description = build_pr_body(state.task_id, Map.get(state.meta, :worktree_path))
     open_opts = build_open_opts(state, opts)
@@ -3424,6 +3424,7 @@ defmodule Arbiter.Worker do
         mr_ref: state.mr_ref,
         adapter: state.merger_adapter,
         workspace: workspace,
+        repo: state.repo,
         auto_merge: auto_merge,
         via_review_gate: via_review_gate
       ]

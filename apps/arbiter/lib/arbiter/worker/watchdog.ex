@@ -68,7 +68,10 @@ defmodule Arbiter.Worker.Watchdog do
 
   Hosted-forge adapters (GitLab) resolve host/project/token from the process
   dictionary. The Watchdog runs in its own process, so it seeds that config via
-  `Arbiter.Mergers.prepare/1` in `init/1` (a no-op for `Direct`).
+  `Arbiter.Mergers.prepare_with_repo/2` in `init/1` (a no-op for `Direct`). The
+  optional `:repo` opt lets a multi-GitLab-project workspace (see
+  `Arbiter.Mergers.Gitlab.Config` moduledoc) resolve the project the watched
+  MR actually lives in, instead of the workspace-wide default.
   """
 
   use GenServer
@@ -291,7 +294,7 @@ defmodule Arbiter.Worker.Watchdog do
 
       true ->
         workspace = Keyword.get(opts, :workspace)
-        Mergers.prepare(workspace)
+        Mergers.prepare_with_repo(workspace, Keyword.get(opts, :repo))
 
         via_review_gate = Keyword.get(opts, :via_review_gate, false)
         # A ReviewGate-approved MR has no pending hosted-forge approval to wait
