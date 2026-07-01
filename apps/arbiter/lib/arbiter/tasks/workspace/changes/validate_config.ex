@@ -26,6 +26,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
     * If `"conductor"` is present, it must be a map.
     * If `"conductor.max_concurrent"` is present, it must be a positive integer.
+    * If `"review_automation"` is present, it must be a map.
+    * If `"review_automation.default"` is present, it must be `"auto"` or `"flag"`.
+    * If `"review_automation.auto_authors"` is present, it must be a list of strings.
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -53,6 +56,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_routing(Map.get(config, "routing"))
     |> validate_review_gate(Map.get(config, "review_gate"))
     |> validate_conductor(Map.get(config, "conductor"))
+    |> validate_review_automation(Map.get(config, "review_automation"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -308,5 +312,58 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_conductor(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "conductor must be a map")
+  end
+
+  @valid_automation_modes ~w[auto flag]
+
+  defp validate_review_automation(changeset, nil), do: changeset
+
+  defp validate_review_automation(changeset, block) when is_map(block) do
+    changeset
+    |> then(fn cs ->
+      case Map.get(block, "default") do
+        nil ->
+          cs
+
+        mode ->
+          if mode in @valid_automation_modes do
+            cs
+          else
+            Changeset.add_error(cs,
+              field: :config,
+              message:
+                "review_automation.default must be one of #{Enum.join(@valid_automation_modes, ", ")}; got: #{inspect(mode)}"
+            )
+          end
+      end
+    end)
+    |> then(fn cs ->
+      case Map.get(block, "auto_authors") do
+        nil ->
+          cs
+
+        list when is_list(list) ->
+          invalid = Enum.reject(list, &is_binary/1)
+
+          if invalid == [] do
+            cs
+          else
+            Changeset.add_error(cs,
+              field: :config,
+              message: "review_automation.auto_authors must be a list of strings"
+            )
+          end
+
+        _ ->
+          Changeset.add_error(cs,
+            field: :config,
+            message: "review_automation.auto_authors must be a list of strings"
+          )
+      end
+    end)
+  end
+
+  defp validate_review_automation(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "review_automation must be a map")
   end
 end

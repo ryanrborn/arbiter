@@ -669,7 +669,9 @@ defmodule Arbiter.MCP.ToolsTest do
         Ash.create(Workspace, %{name: "cfg-get-other", prefix: "cgo"})
 
       {:ok, _} =
-        Ash.update(other_ws, %{patch: %{"routing" => %{"policy" => "round_robin"}}, unset_paths: []},
+        Ash.update(
+          other_ws,
+          %{patch: %{"routing" => %{"policy" => "round_robin"}}, unset_paths: []},
           action: :patch_config
         )
 
@@ -851,9 +853,11 @@ defmodule Arbiter.MCP.ToolsTest do
     test "all four config tools advertise the optional workspace field", _ctx do
       tools = Catalog.all()
 
-      for name <- ~w(workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset) do
+      for name <-
+            ~w(workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset) do
         tool = Enum.find(tools, &(&1.name == name))
         assert tool != nil, "tool #{name} not found in catalog"
+
         assert Map.has_key?(tool.input_schema["properties"], "workspace"),
                "#{name} missing workspace field"
       end
@@ -978,6 +982,88 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, full} = Tools.task_show(ctx.coordinator, %{"id" => task.id, "full" => true})
       assert full.tracker_context_ref == "VR-18004"
       assert full.tracker_context_type == "jira"
+    end
+
+    test "worker_review persists :flag mode when no workspace review_automation config (bd-577w96)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review mode default", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :flag
+    end
+
+    test "worker_review: explicit automation override wins over policy (bd-577w96)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review mode override", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "automation" => "auto",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :auto
+    end
+
+    test "worker_review: author in auto_authors resolves to :auto (bd-577w96)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-tools-ws",
+          prefix: "rat",
+          config: %{
+            "review_automation" => %{
+              "default" => "flag",
+              "auto_authors" => ["trusted-dev"]
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "review auto author", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "pr_author" => "trusted-dev",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :auto
+    end
+
+    test "worker_review: author not in auto_authors falls back to default :flag (bd-577w96)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-tools-ws2",
+          prefix: "ra2",
+          config: %{
+            "review_automation" => %{
+              "default" => "flag",
+              "auto_authors" => ["trusted-dev"]
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "review flag author", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "pr_author" => "untrusted-dev",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :flag
     end
   end
 
