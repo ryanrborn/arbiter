@@ -70,7 +70,7 @@ defmodule Arbiter.Mergers.Github do
 
   require Logger
 
-  alias Arbiter.Mergers.Github.{Config, Error, RepoResolver}
+  alias Arbiter.Mergers.{Merger, Github.Config, Github.Error, Github.RepoResolver}
 
   @stub_name Arbiter.Mergers.Github.HTTP
 
@@ -81,11 +81,12 @@ defmodule Arbiter.Mergers.Github do
   # How much of each failing check's output to keep in the fix-pass briefing.
   @log_tail_limit 4_000
 
-  # GraphQL query for a PR's review threads + their resolution state. REST has
-  # no `isResolved` field, so unresolved-thread detection (bd-823q7e) goes
-  # through GraphQL. `first: 100` covers all but pathological PRs; we don't
-  # paginate (PRPatrol only needs "are there any open threads", and the
-  # follow-up worker re-reads the PR itself).
+  # GraphQL query for a PR's review threads with their full comment history.
+  # REST has no `isResolved` field, so unresolved-thread detection (bd-823q7e)
+  # goes through GraphQL. `databaseId` is the integer comment id used as a
+  # high-watermark cursor (find replies newer than `last_seen_comment_id`).
+  # `first: 100` on both threads and comments covers all but pathological PRs;
+  # we don't paginate (PRPatrol's follow-up worker re-reads as needed).
   @review_threads_query """
   query($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
@@ -96,8 +97,9 @@ defmodule Arbiter.Mergers.Github do
             isResolved
             path
             line
-            comments(first: 1) {
+            comments(first: 100) {
               nodes {
+                databaseId
                 body
                 author { login }
               }
@@ -413,6 +415,23 @@ defmodule Arbiter.Mergers.Github do
   end
 
   @impl true
+  def reply_to_review_comment(mr_ref, comment_id, body, _opts)
+      when is_binary(mr_ref) and is_integer(comment_id) and comment_id > 0 and is_binary(body) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref) do
+      payload = %{"body" => body}
+
+      request(
+        cfg,
+        :post,
+        "/repos/#{owner}/#{repo}/pulls/#{number}/comments/#{comment_id}/replies",
+        json: payload
+      )
+      |> handle_json()
+    end
+  end
+
+  @impl true
   def ref_for_pr(pr, opts) when is_binary(pr) and is_map(opts) do
     pr = String.trim(pr)
 
@@ -501,6 +520,26 @@ defmodule Arbiter.Mergers.Github do
   defp derive_owner_repo(_opts), do: :none
 
   # ---- Public helpers ------------------------------------------------------
+
+  @doc """
+  Filter `threads` to only the ones where `our_login` participated — either
+  by authoring the opening comment or by posting any reply in the thread.
+  Used by ReviewPatrol to ignore threads started and carried entirely by other
+  reviewers when multiple reviewers are active on the same PR.
+
+  Threads returned by `list_open_review_threads/1` carry a `:comments` list;
+  this helper operates on that shape. Threads without a `:comments` key are
+  matched solely on `:author`.
+  """
+  @spec filter_to_our_threads([Merger.review_thread()], String.t()) ::
+          [Merger.review_thread()]
+  def filter_to_our_threads(threads, our_login)
+      when is_list(threads) and is_binary(our_login) do
+    Enum.filter(threads, fn thread ->
+      thread[:author] == our_login or
+        Enum.any?(Map.get(thread, :comments, []), fn c -> c[:author] == our_login end)
+    end)
+  end
 
   @doc """
   Convenience: set the active workspace for the current process and run
@@ -965,19 +1004,31 @@ defmodule Arbiter.Mergers.Github do
   end
 
   defp normalize_review_thread(node) do
-    comment =
+    comment_nodes =
       node
       |> get_in(["comments", "nodes"])
       |> List.wrap()
-      |> List.first()
-      |> Kernel.||(%{})
+      |> Enum.reject(&is_nil/1)
+
+    first_comment = List.first(comment_nodes) || %{}
+
+    comments =
+      Enum.map(comment_nodes, fn c ->
+        %{
+          id: Map.get(c, "databaseId"),
+          author: get_in(c, ["author", "login"]),
+          body: Map.get(c, "body")
+        }
+      end)
 
     %{
       id: Map.get(node, "id"),
+      resolved: Map.get(node, "isResolved") == true,
       path: Map.get(node, "path"),
       line: Map.get(node, "line"),
-      author: get_in(comment, ["author", "login"]),
-      body: Map.get(comment, "body")
+      author: get_in(first_comment, ["author", "login"]),
+      body: Map.get(first_comment, "body"),
+      comments: comments
     }
   end
 

@@ -725,6 +725,7 @@ defmodule Arbiter.Mergers.GithubTest do
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         decoded = Jason.decode!(body)
         assert decoded["query"] =~ "reviewThreads"
+        assert decoded["query"] =~ "databaseId"
         assert decoded["variables"] == %{"owner" => "octo", "repo" => "widget", "number" => 42}
 
         conn
@@ -742,7 +743,11 @@ defmodule Arbiter.Mergers.GithubTest do
                       "line" => 12,
                       "comments" => %{
                         "nodes" => [
-                          %{"body" => "consider renaming", "author" => %{"login" => "copilot"}}
+                          %{
+                            "databaseId" => 101,
+                            "body" => "consider renaming",
+                            "author" => %{"login" => "copilot"}
+                          }
                         ]
                       }
                     },
@@ -752,7 +757,9 @@ defmodule Arbiter.Mergers.GithubTest do
                       "path" => "lib/bar.ex",
                       "line" => 3,
                       "comments" => %{
-                        "nodes" => [%{"body" => "done", "author" => %{"login" => "x"}}]
+                        "nodes" => [
+                          %{"databaseId" => 99, "body" => "done", "author" => %{"login" => "x"}}
+                        ]
                       }
                     }
                   ]
@@ -765,10 +772,63 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:ok, [thread]} = Github.list_open_review_threads(@ref)
       assert thread.id == "RT_open"
+      assert thread.resolved == false
       assert thread.path == "lib/foo.ex"
       assert thread.line == 12
       assert thread.author == "copilot"
       assert thread.body == "consider renaming"
+      assert [%{id: 101, author: "copilot", body: "consider renaming"}] = thread.comments
+    end
+
+    test "returns full comment list with ids and authors for each thread" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => %{
+            "repository" => %{
+              "pullRequest" => %{
+                "reviewThreads" => %{
+                  "nodes" => [
+                    %{
+                      "id" => "RT_multi",
+                      "isResolved" => false,
+                      "path" => "lib/server.ex",
+                      "line" => 5,
+                      "comments" => %{
+                        "nodes" => [
+                          %{
+                            "databaseId" => 200,
+                            "body" => "opening comment",
+                            "author" => %{"login" => "bot"}
+                          },
+                          %{
+                            "databaseId" => 201,
+                            "body" => "reply from human",
+                            "author" => %{"login" => "alice"}
+                          },
+                          %{
+                            "databaseId" => 202,
+                            "body" => "bot follow-up",
+                            "author" => %{"login" => "bot"}
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        })
+      end)
+
+      assert {:ok, [thread]} = Github.list_open_review_threads(@ref)
+      assert thread.author == "bot"
+      assert thread.body == "opening comment"
+      assert length(thread.comments) == 3
+      assert Enum.map(thread.comments, & &1.id) == [200, 201, 202]
+      assert Enum.map(thread.comments, & &1.author) == ["bot", "alice", "bot"]
     end
 
     test "no review threads → {:ok, []}" do
@@ -794,6 +854,114 @@ defmodule Arbiter.Mergers.GithubTest do
 
       assert {:error, %Error{message: "Could not resolve to a Repository"}} =
                Github.list_open_review_threads(@ref)
+    end
+  end
+
+  describe "reply_to_review_comment/4" do
+    test "POSTs a reply to the given comment id and returns {:ok, comment_payload}" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/repos/octo/widget/pulls/42/comments/101/replies"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body) == %{"body" => "Thanks, fixed!"}
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"id" => 202, "body" => "Thanks, fixed!"})
+      end)
+
+      assert {:ok, %{"id" => 202}} = Github.reply_to_review_comment(@ref, 101, "Thanks, fixed!", %{})
+    end
+
+    test "works with an embedded owner/repo ref" do
+      stub(fn conn ->
+        assert conn.request_path ==
+                 "/repos/leo-technologies-llc/verus_server/pulls/7/comments/55/replies"
+
+        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 56})
+      end)
+
+      assert {:ok, _} =
+               Github.reply_to_review_comment(
+                 "leo-technologies-llc/verus_server#7",
+                 55,
+                 "LGTM",
+                 %{}
+               )
+    end
+
+    test "404 on the comment returns {:error, %Error{kind: :not_found}}" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+      end)
+
+      assert {:error, %Error{kind: :not_found, status: 404}} =
+               Github.reply_to_review_comment(@ref, 999, "oops", %{})
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} =
+               Github.reply_to_review_comment(@ref, 1, "hi", %{})
+    end
+  end
+
+  describe "filter_to_our_threads/2" do
+    defp make_thread(id, author, comment_authors) do
+      comments = Enum.map(comment_authors, fn a -> %{id: :rand.uniform(9999), author: a, body: ""} end)
+      %{id: id, author: author, body: "x", resolved: false, comments: comments}
+    end
+
+    test "keeps threads where our_login authored the opening comment" do
+      threads = [
+        make_thread("T1", "bot", ["bot", "alice"]),
+        make_thread("T2", "alice", ["alice"]),
+        make_thread("T3", "carol", ["carol"])
+      ]
+
+      result = Github.filter_to_our_threads(threads, "bot")
+      assert Enum.map(result, & &1.id) == ["T1"]
+    end
+
+    test "keeps threads where our_login replied even if someone else opened" do
+      threads = [
+        make_thread("T1", "alice", ["alice", "bot"]),
+        make_thread("T2", "carol", ["carol", "dave"])
+      ]
+
+      result = Github.filter_to_our_threads(threads, "bot")
+      assert Enum.map(result, & &1.id) == ["T1"]
+    end
+
+    test "returns empty list when no threads belong to our_login" do
+      threads = [
+        make_thread("T1", "alice", ["alice"]),
+        make_thread("T2", "carol", ["carol", "dave"])
+      ]
+
+      assert [] = Github.filter_to_our_threads(threads, "bot")
+    end
+
+    test "returns all matching threads when our_login appears in multiple" do
+      threads = [
+        make_thread("T1", "bot", ["bot"]),
+        make_thread("T2", "alice", ["alice", "bot"]),
+        make_thread("T3", "carol", ["carol"])
+      ]
+
+      result = Github.filter_to_our_threads(threads, "bot")
+      assert Enum.map(result, & &1.id) == ["T1", "T2"]
+    end
+
+    test "handles threads with no comments key (author-only match)" do
+      threads = [
+        %{id: "T1", author: "bot", body: "x"},
+        %{id: "T2", author: "alice", body: "y"}
+      ]
+
+      result = Github.filter_to_our_threads(threads, "bot")
+      assert Enum.map(result, & &1.id) == ["T1"]
     end
   end
 
