@@ -669,7 +669,9 @@ defmodule Arbiter.MCP.ToolsTest do
         Ash.create(Workspace, %{name: "cfg-get-other", prefix: "cgo"})
 
       {:ok, _} =
-        Ash.update(other_ws, %{patch: %{"routing" => %{"policy" => "round_robin"}}, unset_paths: []},
+        Ash.update(
+          other_ws,
+          %{patch: %{"routing" => %{"policy" => "round_robin"}}, unset_paths: []},
           action: :patch_config
         )
 
@@ -851,9 +853,11 @@ defmodule Arbiter.MCP.ToolsTest do
     test "all four config tools advertise the optional workspace field", _ctx do
       tools = Catalog.all()
 
-      for name <- ~w(workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset) do
+      for name <-
+            ~w(workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset) do
         tool = Enum.find(tools, &(&1.name == name))
         assert tool != nil, "tool #{name} not found in catalog"
+
         assert Map.has_key?(tool.input_schema["properties"], "workspace"),
                "#{name} missing workspace field"
       end

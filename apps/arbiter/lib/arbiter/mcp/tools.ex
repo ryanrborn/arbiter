@@ -707,7 +707,9 @@ defmodule Arbiter.MCP.Tools do
 
         attrs =
           %{"tracker_context_ref" => ref}
-          |> then(fn m -> if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m end)
+          |> then(fn m ->
+            if context_type, do: Map.put(m, "tracker_context_type", context_type), else: m
+          end)
 
         case Ash.update(task, attrs, action: :update) do
           {:ok, updated} -> {:ok, updated}

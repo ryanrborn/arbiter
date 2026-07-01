@@ -740,7 +740,8 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "key" => %{
             "type" => "string",
-            "description" => "Dotted config key to remove (e.g. \"agent.config.vernacular\"). Required."
+            "description" =>
+              "Dotted config key to remove (e.g. \"agent.config.vernacular\"). Required."
           }
         },
         "required" => ["key"],

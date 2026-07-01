@@ -33,6 +33,7 @@ defmodule Arbiter.Worker.ReviewAutomation do
   end
 
   defp resolve_from_block(nil, _author), do: :flag
+
   defp resolve_from_block(%{} = block, author) when is_binary(author) and author != "" do
     auto_authors = Map.get(block, "auto_authors") || []
     if author in auto_authors, do: :auto, else: default_from(block)

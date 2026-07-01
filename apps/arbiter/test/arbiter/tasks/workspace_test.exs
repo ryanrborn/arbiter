@@ -494,21 +494,30 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       config = %{"review_automation" => %{"default" => "always"}}
 
       assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad1", config: config})
-      assert err |> Exception.message() |> String.contains?("review_automation.default must be one of")
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.default must be one of")
     end
 
     test "rejects review_automation.auto_authors when not a list" do
       config = %{"review_automation" => %{"auto_authors" => "alice"}}
 
       assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad2", config: config})
-      assert err |> Exception.message() |> String.contains?("review_automation.auto_authors must be a list")
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.auto_authors must be a list")
     end
 
     test "rejects review_automation.auto_authors containing non-strings" do
       config = %{"review_automation" => %{"auto_authors" => ["alice", 42]}}
 
       assert {:error, err} = Ash.create(Workspace, %{name: "ra-bad3", config: config})
-      assert err |> Exception.message() |> String.contains?("review_automation.auto_authors must be a list")
+
+      assert err
+             |> Exception.message()
+             |> String.contains?("review_automation.auto_authors must be a list")
     end
 
     test "rejects review_automation when it is not a map" do
