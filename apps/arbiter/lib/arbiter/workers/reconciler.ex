@@ -34,9 +34,14 @@ defmodule Arbiter.Workers.Reconciler do
   require Logger
 
   alias Arbiter.Tasks.Issue
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Run
+  alias Arbiter.Workflows.MergedPRFinalizerSupervisor
+  alias Arbiter.Workflows.PRPatrolSupervisor
+  alias Arbiter.Workflows.ReviewPatrolSupervisor
 
   # The failure_reason stamped onto reconciled orphans. Distinct, greppable,
   # and human-legible on the dashboard's "Completed Workers" view.
@@ -93,48 +98,86 @@ defmodule Arbiter.Workers.Reconciler do
   end
 
   @doc """
-  Find `:in_progress` Issues with a `pr_ref` but no live worker, and escalate
-  each to Admiral as an addressed `:escalation` mailbox message.
+  Re-establish monitoring for orphaned `:in_progress` Issues whose worker died
+  on a restart but whose PR is still open (or which are review-only engagements),
+  instead of merely escalating them.
 
-  This covers the specific failure mode where the server is killed between the
-  implementer finishing (`arb done` → PR opened, `pr_ref` written to the Issue)
-  and the ReviewGate/Watchdog hand-off being established. After a reboot the worker
-  process no longer exists, so the Watchdog that would merge the PR was never
-  spawned. The Issue is stuck `:in_progress` with an open PR and no driver.
+  After a reboot the ephemeral worker/Watchdog that was following the PR no longer
+  exists, so a bead parked in awaiting_review loses its active watcher: merge
+  detection and review-feedback follow-up are dropped until a human notices. The
+  patrol layer (`PRPatrol` + `MergedPRFinalizer`, or `ReviewPatrol` for review-only
+  engagements) is exactly the durable, restart-surviving watcher for these beads.
+  This sweep hands each orphaned open-PR bead back to that layer explicitly so:
 
-  Returns `{:ok, count}` or `{:error, reason}`.
+    * `MergedPRFinalizer` finalizes the task when the PR merges (keys on `pr_ref`), and
+    * `PRPatrol` re-drives review-feedback (CHANGES_REQUESTED / unresolved threads).
+
+  Escalation is kept only as the fallback: a bead whose workspace has no patrol
+  coverage (e.g. no hosted-forge merger configured) can't be auto-watched, so it
+  still lands in Admiral's mailbox rather than being silently dropped.
+
+  Respects the `worker_live?` guard (C6): a bead that still has a live worker is
+  left untouched — no duplicate watcher is established.
+
+  Returns `{:ok, %{rewatched: non_neg_integer(), escalated: non_neg_integer()}}`,
+  `{:ok, :skipped}` when not the primary instance, or `{:error, reason}`.
 
   ## Options
 
     * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
       When `false`, skips and returns `{:ok, :skipped}`.
+    * `:rewatch_fun` — 1-arity fun `(Issue.t() -> :ok | {:error, term()})` used to
+      re-establish patrol coverage for a bead. Defaults to `&default_rewatch/1`
+      (starts the real patrol supervisors for the bead's workspace). Injectable so
+      tests can drive the re-watch/escalate branches without booting patrols.
   """
   @spec reconcile_open_pr_tasks(keyword()) ::
-          {:ok, non_neg_integer() | :skipped} | {:error, term()}
+          {:ok, %{rewatched: non_neg_integer(), escalated: non_neg_integer()} | :skipped}
+          | {:error, term()}
   def reconcile_open_pr_tasks(opts \\ []) do
     if Keyword.get(opts, :primary?, true) do
-      do_reconcile_open_pr_tasks()
+      do_reconcile_open_pr_tasks(Keyword.get(opts, :rewatch_fun, &default_rewatch/1))
     else
       {:ok, :skipped}
     end
   end
 
-  defp do_reconcile_open_pr_tasks do
+  defp do_reconcile_open_pr_tasks(rewatch_fun) do
     stuck =
       Issue
-      |> Ash.Query.filter(status == :in_progress and not is_nil(pr_ref))
+      |> Ash.Query.filter(status == :in_progress)
       |> Ash.read!()
       |> Enum.reject(&live_worker_for_issue?/1)
+      |> Enum.filter(&rewatchable?/1)
 
-    escalated = Enum.count(stuck, &escalate_stuck_issue/1)
+    {rewatched, escalated} =
+      Enum.reduce(stuck, {0, 0}, fn issue, {rw, esc} ->
+        case rewatch_fun.(issue) do
+          :ok ->
+            Logger.info(
+              "Workers.Reconciler: re-established patrol watching for in_progress task " <>
+                "#{issue.id} (PR #{issue.pr_ref}) — handed to patrol layer, not escalated"
+            )
 
-    if escalated > 0 do
-      Logger.warning(
-        "Workers.Reconciler: found #{escalated} in_progress task(s) with open PR but no live worker — escalated to Admiral"
+            {rw + 1, esc}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Workers.Reconciler: could not re-watch task #{issue.id} (PR #{issue.pr_ref}): " <>
+                "#{inspect(reason)} — escalating"
+            )
+
+            if escalate_stuck_issue(issue, :open_pr), do: {rw, esc + 1}, else: {rw, esc}
+        end
+      end)
+
+    if rewatched + escalated > 0 do
+      Logger.info(
+        "Workers.Reconciler: open-PR sweep — re-watched #{rewatched}, escalated #{escalated}"
       )
     end
 
-    {:ok, escalated}
+    {:ok, %{rewatched: rewatched, escalated: escalated}}
   rescue
     e ->
       Logger.warning("Workers.Reconciler: open-PR task sweep failed: #{Exception.message(e)}")
@@ -142,16 +185,149 @@ defmodule Arbiter.Workers.Reconciler do
       {:error, e}
   end
 
+  @doc """
+  Resume orphaned `:in_progress` Issues that were mid-flight (a `:running` /
+  revising worker killed by the restart) but have **no** open PR yet — via the
+  existing `bd-auma3z` resume path (`Arbiter.Worker.Dispatch.resume/2`), which
+  re-attaches a fresh agent to the task's *preserved* worktree.
+
+  Resume is delegated to `Dispatch.resume/2`, which already enforces the safety
+  guards this sweep requires: it refuses a closed task, refuses when a worker is
+  still active for the task (the `worker_live?` / C6 guard — no duplicate worker),
+  and refuses (`{:error, :no_outpost}`) when the worktree was cleaned up. Any bead
+  that cannot be safely resumed falls back to an escalation rather than being
+  dropped.
+
+  Open-PR / awaiting_review beads are intentionally **not** handled here — they
+  belong to the patrol layer via `reconcile_open_pr_tasks/1`; resuming them would
+  spawn a redundant worker to redo already-shipped work.
+
+  Returns `{:ok, %{resumed: non_neg_integer(), escalated: non_neg_integer()}}`,
+  `{:ok, :skipped}` when not the primary instance, or `{:error, reason}`.
+
+  ## Options
+
+    * `:primary?` — same single-instance gate as `reconcile_orphaned_runs/1`.
+    * `:resume_fun` — 1-arity fun `(Issue.t() -> {:ok, term()} | {:error, term()})`
+      used to resume a bead. Defaults to `&default_resume/1` (the real
+      `Dispatch.resume/2`). Injectable so tests can exercise the resume/escalate
+      branches without spawning a real worker.
+  """
+  @spec reconcile_resumable_tasks(keyword()) ::
+          {:ok, %{resumed: non_neg_integer(), escalated: non_neg_integer()} | :skipped}
+          | {:error, term()}
+  def reconcile_resumable_tasks(opts \\ []) do
+    if Keyword.get(opts, :primary?, true) do
+      do_reconcile_resumable_tasks(Keyword.get(opts, :resume_fun, &default_resume/1))
+    else
+      {:ok, :skipped}
+    end
+  end
+
+  defp do_reconcile_resumable_tasks(resume_fun) do
+    stuck =
+      Issue
+      |> Ash.Query.filter(status == :in_progress and is_nil(pr_ref))
+      |> Ash.read!()
+      |> Enum.reject(&live_worker_for_issue?/1)
+      |> Enum.reject(&review_only?/1)
+
+    {resumed, escalated} =
+      Enum.reduce(stuck, {0, 0}, fn issue, {res, esc} ->
+        case resume_fun.(issue) do
+          {:ok, _result} ->
+            Logger.info(
+              "Workers.Reconciler: resumed mid-flight task #{issue.id} from its preserved worktree"
+            )
+
+            {res + 1, esc}
+
+          {:error, reason} ->
+            Logger.warning(
+              "Workers.Reconciler: cannot safely resume task #{issue.id} " <>
+                "(#{inspect(reason)}) — escalating"
+            )
+
+            if escalate_stuck_issue(issue, {:unresumable, reason}),
+              do: {res, esc + 1},
+              else: {res, esc}
+        end
+      end)
+
+    if resumed + escalated > 0 do
+      Logger.info(
+        "Workers.Reconciler: resume sweep — resumed #{resumed}, escalated #{escalated}"
+      )
+    end
+
+    {:ok, %{resumed: resumed, escalated: escalated}}
+  rescue
+    e ->
+      Logger.warning("Workers.Reconciler: resumable task sweep failed: #{Exception.message(e)}")
+
+      {:error, e}
+  end
+
+  # An orphaned in_progress bead is re-watchable (belongs to the patrol layer)
+  # when it has an open PR of its own (pr_ref) or is a review-only engagement
+  # (driven by ReviewPatrol via source_pr).
+  defp rewatchable?(%Issue{} = issue), do: not is_nil(issue.pr_ref) or review_only?(issue)
+
+  defp review_only?(%Issue{review_only: true}), do: true
+  defp review_only?(%Issue{}), do: false
+
   defp live_worker_for_issue?(%Issue{id: task_id}), do: not is_nil(Worker.whereis(task_id))
 
-  defp escalate_stuck_issue(%Issue{id: task_id, pr_ref: pr_ref, workspace_id: workspace_id}) do
-    subject = "#{task_id} stuck — PR ##{pr_ref} open but no live worker"
+  # Default re-watch: hand the bead back to the durable patrol layer for its
+  # workspace. Review-only engagements go to ReviewPatrol; author-side open-PR
+  # beads go to PRPatrol (review-feedback follow-up) + MergedPRFinalizer (merge
+  # finalization). All supervisor starts are idempotent — an already-running
+  # patrol reports `{:error, {:already_started, _}}`, which we treat as covered.
+  # Returns `:ok` when at least one relevant patrol is established, otherwise
+  # `{:error, reason}` so the caller escalates as the fallback.
+  defp default_rewatch(%Issue{workspace_id: workspace_id} = issue) do
+    case load_workspace(workspace_id) do
+      {:ok, %Workspace{} = workspace} ->
+        results =
+          if review_only?(issue) do
+            [ReviewPatrolSupervisor.start_patrol(workspace)]
+          else
+            [
+              PRPatrolSupervisor.start_patrol(workspace),
+              MergedPRFinalizerSupervisor.start_finalizer(workspace)
+            ]
+          end
 
-    body =
-      "Task #{task_id} has an open PR (#{pr_ref}) but no live worker to drive the merge.\n" <>
-        "The server was likely restarted between `arb done` and the Watchdog being established.\n" <>
-        "Action: verify the PR is ready to merge, then run `arb issue dispatch #{task_id}` to re-drive " <>
-        "or manually merge and close the task."
+        if Enum.any?(results, &patrol_established?/1),
+          do: :ok,
+          else: {:error, {:no_patrol_coverage, results}}
+
+      {:error, reason} ->
+        {:error, {:workspace_unavailable, reason}}
+    end
+  end
+
+  defp load_workspace(nil), do: {:error, :no_workspace}
+
+  defp load_workspace(workspace_id) when is_binary(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, workspace} -> {:ok, workspace}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A patrol is considered established either when we just started it or when it
+  # was already running (idempotent start). `:skip` (no repos / unsupported
+  # adapter) and any other error mean the workspace can't be watched.
+  defp patrol_established?({:ok, _pid}), do: true
+  defp patrol_established?({:error, {:already_started, _pid}}), do: true
+  defp patrol_established?(_), do: false
+
+  defp default_resume(%Issue{id: task_id}), do: Dispatch.resume(task_id)
+
+  defp escalate_stuck_issue(%Issue{} = issue, reason) do
+    %Issue{id: task_id, pr_ref: pr_ref, workspace_id: workspace_id} = issue
+    {subject, body} = escalation_copy(task_id, pr_ref, reason)
 
     Message.send_mail(%{
       kind: :escalation,
@@ -167,10 +343,34 @@ defmodule Arbiter.Workers.Reconciler do
   rescue
     e ->
       Logger.warning(
-        "Workers.Reconciler: failed to escalate stuck task #{task_id}: #{Exception.message(e)}"
+        "Workers.Reconciler: failed to escalate stuck task #{issue.id}: #{Exception.message(e)}"
       )
 
       false
+  end
+
+  defp escalation_copy(task_id, pr_ref, :open_pr) do
+    subject = "#{task_id} stuck — PR ##{pr_ref} open but no live worker or patrol coverage"
+
+    body =
+      "Task #{task_id} has an open PR (#{pr_ref}) but no live worker, and its workspace has " <>
+        "no patrol coverage to re-establish monitoring automatically.\n" <>
+        "Action: verify the PR is ready to merge, then run `arb issue dispatch #{task_id}` to re-drive " <>
+        "or manually merge and close the task."
+
+    {subject, body}
+  end
+
+  defp escalation_copy(task_id, _pr_ref, {:unresumable, reason}) do
+    subject = "#{task_id} stuck — mid-flight worker lost and cannot be safely resumed"
+
+    body =
+      "Task #{task_id} was in_progress with no live worker after a restart, and could not be " <>
+        "auto-resumed (#{inspect(reason)} — e.g. the worktree was cleaned up or the repo is " <>
+        "unresolvable).\n" <>
+        "Action: inspect the task state, then run `arb issue dispatch #{task_id}` to re-drive from scratch."
+
+    {subject, body}
   end
 
   # A run is live iff a worker GenServer is registered for its task_id. After a

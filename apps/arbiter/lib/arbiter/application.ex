@@ -120,6 +120,7 @@ defmodule Arbiter.Application do
            primary? = Arbiter.SingleInstance.primary?()
            Arbiter.Workers.Reconciler.reconcile_orphaned_runs(primary?: primary?)
            Arbiter.Workers.Reconciler.reconcile_open_pr_tasks(primary?: primary?)
+           Arbiter.Workers.Reconciler.reconcile_resumable_tasks(primary?: primary?)
          end},
         id: :reconcile_boot_task,
         restart: :temporary
