@@ -506,5 +506,48 @@ defmodule Arbiter.Trackers.SyncTest do
       escalations = escalations_for(ws.id)
       assert length(escalations) == 1
     end
+
+    test "jira: POST transition→422 followed by already-Done GET: no escalation" do
+      # The Jira analogue of the GitHub race: the close transition POSTs, Jira
+      # rejects it (400/422 — the issue is already in a Done status so the
+      # transition is invalid), and the recovery GET confirms the issue's
+      # statusCategory is already "done". Expected: benign no-op, no escalation.
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            # A direct transition to Done is advertised (single-hop fast path).
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{"id" => "31", "name" => "Done", "to" => %{"name" => "Done"}}
+              ]
+            })
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            # Jira rejects the redundant transition.
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{"errorMessages" => ["Transition is not valid."], "errors" => %{}})
+
+          conn.method == "GET" ->
+            # Recovery fetch (already_at_target?): the issue is already Done.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "key" => @ref,
+              "fields" => %{"status" => %{"statusCategory" => %{"key" => "done"}}}
+            })
+        end
+      end)
+
+      ws = jira_workspace(%{"closed" => "Done"})
+      issue = jira_issue(ws)
+
+      assert :ok = Sync.lifecycle(issue, :closed)
+      assert escalations_for(ws.id) == []
+    end
   end
 end
