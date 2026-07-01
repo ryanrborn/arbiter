@@ -53,8 +53,10 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
   # Stub that forwards each request to the test process so we can assert on the
   # method + decoded body, and answers GET (current issue) / PATCH (the write).
-  # GET returns state=closed so verify_and_close sees a closed issue and skips
-  # the follow-up retry on the happy path.
+  # GET returns state=open so already_in_state? does not short-circuit and the
+  # PATCH fires. After PATCH, verify_and_close makes another GET — it also sees
+  # "open" which triggers a follow-up PATCH. Tests that use this stub and call
+  # close_upstream: true should expect ≥ 1 PATCH (not exactly 1).
   defp forwarding_stub do
     test_pid = self()
 
@@ -65,7 +67,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
           conn
           |> Plug.Conn.put_status(200)
-          |> Req.Test.json(%{"number" => 36, "state" => "closed", "labels" => []})
+          |> Req.Test.json(%{"number" => 36, "state" => "open", "labels" => []})
 
         "PATCH" ->
           {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -164,10 +166,11 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       assert_receive {:github, :patch, ^path, %{"state" => "closed"}}
     end
 
-    test "does NOT fire a follow-up close when the issue is already closed" do
+    test "does NOT fire any PATCH when the issue is already closed upstream" do
       test_pid = self()
 
-      # GET returns closed, so verify short-circuits.
+      # GET returns closed; already_in_state? skips the PATCH entirely, and
+      # verify_and_close also short-circuits — no PATCH fires at all.
       Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
         case conn.method do
           "GET" ->
@@ -199,8 +202,8 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       assert closed.status == :closed
 
       path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
-      # Exactly one PATCH (the initial transition); no follow-up.
-      assert_receive {:github, :patch, ^path, %{"state" => "closed"}}
+      # No PATCHes: already_in_state? catches the pre-flight GET ("closed") and
+      # skips both the initial transition and the verify_and_close follow-up.
       refute_receive {:github, :patch, ^path, _}
     end
   end
