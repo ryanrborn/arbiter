@@ -801,6 +801,72 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- external_review_list -----------------------------------------------
+
+  @doc """
+  List recent ExternalReview audit records for the scope's workspace (bd-31fh9e).
+  Coordinator only. Returns records newest-first. Optional `limit` (default 20,
+  max 200) and `status` filter.
+  """
+  @spec external_review_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def external_review_list(%Scope{} = scope, args) do
+    require Ash.Query
+    alias Arbiter.Reviews.Record, as: ExternalReviewRecord
+
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args),
+         {:ok, limit} <- parse_bounded_limit(args, "limit", 20, 200),
+         {:ok, status} <- optional_enum(args, "status", ExternalReviewRecord.statuses()) do
+      records =
+        ExternalReviewRecord
+        |> Ash.Query.filter(workspace_id == ^ws_id)
+        |> then(fn q ->
+          if status, do: Ash.Query.filter(q, status == ^status), else: q
+        end)
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(limit)
+        |> Ash.read!()
+        |> Enum.map(&serialize_external_review/1)
+
+      {:ok, %{external_reviews: records, count: length(records)}}
+    end
+  rescue
+    e -> {:error, {:internal, "external_review_list failed: #{Exception.message(e)}"}}
+  end
+
+  defp serialize_external_review(%Arbiter.Reviews.Record{} = r) do
+    %{
+      id: r.id,
+      pr_ref: r.pr_ref,
+      pr: r.pr,
+      workspace_id: r.workspace_id,
+      strategy: r.strategy,
+      link: r.link,
+      status: r.status,
+      verdict: r.verdict,
+      finding_count: r.finding_count,
+      findings_summary: r.findings_summary,
+      model: r.model,
+      cost_usd: r.cost_usd,
+      tokens_in: r.tokens_in,
+      tokens_out: r.tokens_out,
+      dispatched_by: r.dispatched_by,
+      engagement_id: r.engagement_id,
+      started_at: iso_dt(r.started_at),
+      completed_at: iso_dt(r.completed_at)
+    }
+  end
+
+  defp parse_bounded_limit(args, key, default, max) do
+    case Map.get(args, key) do
+      nil -> {:ok, default}
+      n when is_integer(n) and n > 0 -> {:ok, min(n, max)}
+      _ -> {:error, {:invalid, "#{key} must be a positive integer (max #{max})"}}
+    end
+  end
+
+  defp iso_dt(nil), do: nil
+  defp iso_dt(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
   # ---- task_list ----------------------------------------------------------
 
   @doc """
