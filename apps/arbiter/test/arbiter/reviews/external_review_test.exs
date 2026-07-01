@@ -3,8 +3,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   # registry and the per-process active-config dictionary.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Reviews.ExternalReview
+  alias Arbiter.Reviews.{ExternalReview, Record}
   alias Arbiter.Tasks.{Issue, Workspace}
+  require Ash.Query
 
   @env_var "EXTERNAL_REVIEW_GH_TOKEN"
 
@@ -321,6 +322,97 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "review/1 — audit record persistence (bd-31fh9e)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "review/1 persists a :completed record with the verdict and finding count" do
+      ws = github_ws("er-rec-1")
+      stub_full_review(head_sha: "sha-rec1", author: "dev", max_comment_id: 1)
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      # Exactly one record for this pr_ref in this workspace.
+      records = records_for(ws.id, "octo/widget#42")
+      assert length(records) == 1
+      [rec] = records
+
+      assert rec.status == :completed
+      assert rec.verdict == :request_changes
+      assert rec.finding_count == 1
+      assert rec.workspace_id == ws.id
+      assert rec.strategy == "github"
+      assert is_binary(rec.link)
+      assert %DateTime{} = rec.started_at
+      assert %DateTime{} = rec.completed_at
+      assert DateTime.compare(rec.started_at, rec.completed_at) in [:lt, :eq]
+      # findings_summary should capture the finding.
+      assert String.contains?(rec.findings_summary || "", "x.ex")
+    end
+
+    test "review/1 with no findings persists a :completed :approve record" do
+      ws = github_ws("er-rec-2")
+      stub_full_review(head_sha: "sha-rec2", author: "dev", max_comment_id: 1)
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: fn _diff, _state -> {:ok, []} end
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.status == :completed
+      assert rec.verdict == :approve
+      assert rec.finding_count == 0
+      assert is_nil(rec.findings_summary)
+    end
+
+    test "dispatched_by is stored when supplied in opts" do
+      ws = github_ws("er-rec-3")
+      stub_full_review(head_sha: "sha-rec3", author: "dev", max_comment_id: 1)
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 dispatched_by: "mcp",
+                 check_runner: fn _diff, _state -> {:ok, []} end
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.dispatched_by == "mcp"
+    end
+
+    test "engagement_id is stored when a follow-up engagement is created" do
+      ws = github_ws("er-rec-4")
+      stub_full_review(head_sha: "sha-rec4", author: "dev", max_comment_id: 1)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert result.engagement_created == true
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.engagement_id == result.engagement
+    end
+  end
+
   # A check runner that always reports one finding (so a request_changes verdict
   # posts a comment + a review, matching the real review path).
   defp one_finding do
@@ -330,13 +422,17 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   end
 
   defp engagements_for(ws_id, mr_ref) do
-    require Ash.Query
-
     Issue
     |> Ash.Query.filter(
       review_only == true and source_pr == ^mr_ref and status != :closed and
         workspace_id == ^ws_id
     )
+    |> Ash.read!()
+  end
+
+  defp records_for(ws_id, pr_ref) do
+    Record
+    |> Ash.Query.filter(workspace_id == ^ws_id and pr_ref == ^pr_ref)
     |> Ash.read!()
   end
 

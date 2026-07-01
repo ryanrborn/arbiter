@@ -77,6 +77,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         invoke_reviewer(build_prompt(diff, state), state)
         |> case do
           {:ok, raw} -> {:ok, parse_findings(raw)}
+          {:ok, raw, usage} -> {:ok, parse_findings(raw), usage}
           {:error, _} = err -> err
         end
     end
@@ -90,16 +91,16 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   # Default invoker shells out to `claude --print <prompt> --output-format
-  # text`. We're deliberately not streaming here — a one-shot synchronous
-  # call is the right shape for "give me JSON back" use cases. The real
-  # streaming session lives in `Arbiter.Worker.ClaudeSession`.
+  # stream-json --verbose`. Using stream-json lets us extract structured usage
+  # data (model, tokens, cost) from the `init` and `result` events, so external
+  # reviews can be attributed in the usage ledger.
   defp default_invoke(prompt, _state) do
     case System.find_executable("claude") do
       nil ->
         {:error, {:executable_not_found, "claude"}}
 
       path ->
-        args = ["--print", prompt, "--output-format", "text"]
+        args = ["--print", prompt, "--output-format", "stream-json", "--verbose"]
 
         # Honor the active model slot when one is seeded in the process dict.
         # ReviewPatrol seeds `:review_agent` via `Agents.prepare(ws, :review_agent)`
@@ -112,13 +113,49 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
           end
 
         case System.cmd(path, args, stderr_to_stdout: true) do
-          {output, 0} -> {:ok, output}
+          {output, 0} -> extract_text_and_usage(output)
           {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
         end
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   end
+
+  # Parse a stream-json JSONL output into a text result + structured usage map.
+  # The `system/init` event carries model + session_id; the terminal `result`
+  # event carries the full text reply plus token counts, cost, and duration.
+  # Any line that doesn't parse as JSON (non-Claude output, test scripts) is
+  # skipped — graceful degradation applies: we always return {:ok, text, usage}.
+  defp extract_text_and_usage(output) do
+    {text, usage} =
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.reduce({"", %{}}, fn line, {txt, usg} ->
+        case Jason.decode(line) do
+          {:ok, %{"type" => "system", "subtype" => "init"} = e} ->
+            usg = if e["model"], do: Map.put(usg, :model, e["model"]), else: usg
+            usg = if e["session_id"], do: Map.put(usg, :session_id, e["session_id"]), else: usg
+            {txt, usg}
+
+          {:ok, %{"type" => "result"} = e} ->
+            raw = e["usage"] || %{}
+            txt = e["result"] || txt
+            usg = absorb_number(usg, :tokens_in, raw["input_tokens"])
+            usg = absorb_number(usg, :tokens_out, raw["output_tokens"])
+            usg = absorb_number(usg, :cost_usd, e["total_cost_usd"])
+            usg = absorb_number(usg, :duration_ms, e["duration_ms"])
+            {txt, usg}
+
+          _ ->
+            {txt, usg}
+        end
+      end)
+
+    {:ok, text, usage}
+  end
+
+  defp absorb_number(map, _key, n) when not is_number(n), do: map
+  defp absorb_number(map, key, n), do: Map.put(map, key, n)
 
   defp build_prompt(diff, state) do
     task_line =

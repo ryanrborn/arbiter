@@ -177,6 +177,9 @@ defmodule Arbiter.Workflows.CodeReview do
       {:ok, findings} when is_list(findings) ->
         {:ok, Map.put(state, :findings, findings)}
 
+      {:ok, findings, usage} when is_list(findings) ->
+        {:ok, state |> Map.put(:findings, findings) |> Map.put(:check_usage, usage)}
+
       {:error, _} = err ->
         err
 

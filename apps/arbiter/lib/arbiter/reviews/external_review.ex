@@ -65,6 +65,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   require Ash.Query
 
   alias Arbiter.Mergers
+  alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
@@ -136,7 +137,17 @@ defmodule Arbiter.Reviews.ExternalReview do
     opts = Map.new(opts)
 
     with {:ok, prepared} <- prepare(opts) do
-      run_workflow(prepared, opts)
+      record = create_review_record(prepared, opts)
+      case run_workflow(prepared, opts) do
+        {:ok, result} ->
+          complete_review_record(record, :completed, result)
+          write_usage_event(record, prepared, result)
+          {:ok, result}
+
+        {:error, _} = err ->
+          complete_review_record(record, :failed, %{})
+          err
+      end
     end
   end
 
@@ -153,8 +164,9 @@ defmodule Arbiter.Reviews.ExternalReview do
     opts = Map.new(opts)
 
     with {:ok, prepared} <- prepare(opts) do
-      start_async(prepared, opts)
-      {:ok, ack(prepared)}
+      record = create_review_record(prepared, opts)
+      start_async(prepared, opts, record)
+      {:ok, ack(prepared, record)}
     end
   end
 
@@ -246,16 +258,21 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
-  defp start_async(prepared, opts) do
+  defp start_async(prepared, opts, record) do
     Task.Supervisor.start_child(@task_supervisor, fn ->
       case run_workflow(prepared, opts) do
         {:ok, result} ->
+          complete_review_record(record, :completed, result)
+          write_usage_event(record, prepared, result)
+
           Logger.info(
             "ExternalReview: #{result.strategy} #{result.mr_ref} → #{result.verdict} " <>
               "(#{result.findings} finding(s)) #{result.link}"
           )
 
         {:error, reason} ->
+          complete_review_record(record, :failed, %{})
+
           Logger.warning(
             "ExternalReview: #{prepared.strategy} #{prepared.mr_ref} failed: #{inspect(reason)}"
           )
@@ -263,14 +280,15 @@ defmodule Arbiter.Reviews.ExternalReview do
     end)
   end
 
-  defp ack(prepared) do
+  defp ack(prepared, record) do
     %{
       external: true,
       status: "dispatched",
       pr: prepared.pr,
       mr_ref: prepared.mr_ref,
       strategy: prepared.strategy,
-      link: prepared.link
+      link: prepared.link,
+      review_record_id: record && record.id
     }
   end
 
@@ -283,7 +301,11 @@ defmodule Arbiter.Reviews.ExternalReview do
       link: prepared.link,
       verdict: Map.get(final, :verdict),
       findings: length(Map.get(final, :findings) || []),
+      findings_list: Map.get(final, :findings) || [],
       review_path: Map.get(final, :review_path),
+      # Structured usage from the check runner (model, cost, tokens) — populated
+      # when the default Claude invoker ran; nil when a stub runner was used.
+      check_usage: Map.get(final, :check_usage),
       # The id of the review_only engagement created (or adopted) for this PR,
       # or nil when follow-up was off / disabled.
       engagement: engagement && engagement.id,
@@ -594,6 +616,148 @@ defmodule Arbiter.Reviews.ExternalReview do
   catch
     :exit, _ -> :error
   end
+
+  # ---- audit record persistence (bd-31fh9e) --------------------------------
+
+  # Insert a :running record immediately when a review is dispatched or started.
+  # Returns the record struct on success, nil on any error (best-effort — never
+  # fails the review itself). The record carries started_at so in-flight reviews
+  # are visible on the dashboard.
+  defp create_review_record(%{mr_ref: mr_ref, workspace: workspace} = prepared, opts) do
+    ws_id = workspace && workspace.id
+
+    attrs = %{
+      pr_ref: mr_ref,
+      pr: Map.get(prepared, :pr),
+      workspace_id: ws_id,
+      strategy: to_string(prepared.strategy),
+      link: prepared.link,
+      status: :running,
+      dispatched_by: string_opt(opts, :dispatched_by),
+      started_at: DateTime.utc_now()
+    }
+
+    case Ash.create(Record, attrs) do
+      {:ok, record} -> record
+      {:error, _} -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp create_review_record(_, _), do: nil
+
+  # Update the record to :completed or :failed once the workflow finishes.
+  # Best-effort — a failure here never surfaces to the caller.
+  defp complete_review_record(nil, _status, _result), do: :ok
+
+  defp complete_review_record(%Record{} = record, status, result) do
+    findings_list = Map.get(result, :findings_list) || []
+    finding_count = Map.get(result, :findings)
+    verdict = Map.get(result, :verdict)
+    engagement_id = Map.get(result, :engagement)
+    usage = Map.get(result, :check_usage) || %{}
+
+    attrs = %{
+      status: status,
+      verdict: verdict,
+      finding_count: finding_count,
+      findings_summary: findings_summary(findings_list),
+      engagement_id: engagement_id && to_string(engagement_id),
+      completed_at: DateTime.utc_now(),
+      model: Map.get(usage, :model),
+      cost_usd: Map.get(usage, :cost_usd),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out)
+    }
+
+    case Ash.update(record, attrs, action: :complete) do
+      {:ok, _} -> :ok
+      {:error, _} -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp findings_summary([]), do: nil
+
+  defp findings_summary(findings) when is_list(findings) do
+    lines =
+      findings
+      |> Enum.map(fn f ->
+        file = f[:file] || f["file"] || "?"
+        line = f[:line] || f["line"]
+        sev = f[:severity] || f["severity"] || "info"
+        msg = f[:message] || f["message"] || ""
+        loc = if line, do: "#{file}:#{line}", else: file
+        "[#{sev}] #{loc} — #{msg}"
+      end)
+      |> Enum.take(20)
+      |> Enum.join("\n")
+
+    if String.length(lines) > 500, do: String.slice(lines, 0, 497) <> "…", else: lines
+  end
+
+  defp findings_summary(_), do: nil
+
+  # ---- usage ledger ---------------------------------------------------------
+  #
+  # Write a Usage.Event row so external reviews appear in the usage ledger
+  # alongside worker-driven reviews. Best-effort: failure here never surfaces.
+  # The `task_id` field (allow_nil? false in the schema) carries the review
+  # record id prefixed with "ext:" so ledger queries can distinguish these rows.
+
+  defp write_usage_event(record, prepared, result) do
+    usage = Map.get(result, :check_usage) || %{}
+    model = Map.get(usage, :model)
+
+    task_id =
+      cond do
+        record && record.id -> "ext:#{record.id}"
+        true -> "ext:#{String.slice(prepared.mr_ref, 0, 250)}"
+      end
+
+    attrs = %{
+      task_id: task_id,
+      workspace_id: prepared.workspace && to_string(prepared.workspace.id),
+      step: :review,
+      model: model,
+      provider: provider_for(model),
+      tokens_in: Map.get(usage, :tokens_in),
+      tokens_out: Map.get(usage, :tokens_out),
+      cost_usd: Map.get(usage, :cost_usd),
+      duration_ms: Map.get(usage, :duration_ms),
+      session_id: Map.get(usage, :session_id),
+      occurred_at: DateTime.utc_now()
+    }
+
+    case Ash.create(Arbiter.Usage.Event, attrs) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "ExternalReview: usage event write failed for #{prepared.mr_ref}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp provider_for(nil), do: nil
+
+  defp provider_for(model) when is_binary(model) do
+    cond do
+      String.starts_with?(model, "claude") -> "claude"
+      String.starts_with?(model, "gemini") -> "gemini"
+      String.contains?(model, "gpt") -> "openai"
+      true -> "other"
+    end
+  end
+
+  defp provider_for(_), do: nil
 
   # ---- workspace resolution ------------------------------------------------
   #

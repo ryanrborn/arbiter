@@ -41,6 +41,7 @@ defmodule ArbiterWeb.DashboardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Reviews.Record, as: ExternalReviewRecord
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -70,6 +71,9 @@ defmodule ArbiterWeb.DashboardLive do
 
   # Number of escalations (ReviewGate verdicts) shown in the ReviewGate view.
   @recent_escalations_limit 10
+
+  # Number of external review records shown in the External Reviews panel.
+  @recent_external_reviews_limit 10
 
   @impl true
   def mount(_params, _session, socket) do
@@ -107,7 +111,8 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_pending_reviews()
      |> refresh_escalations()
      |> refresh_recent_tasks()
-     |> refresh_epics()}
+     |> refresh_epics()
+     |> refresh_external_reviews()}
   end
 
   @impl true
@@ -127,7 +132,8 @@ defmodule ArbiterWeb.DashboardLive do
      |> refresh_completed_runs()
      |> refresh_pending_reviews()
      |> refresh_workspaces()
-     |> refresh_rigs()}
+     |> refresh_rigs()
+     |> refresh_external_reviews()}
   end
 
   def handle_info({:new_message, _message}, socket) do
@@ -295,6 +301,22 @@ defmodule ArbiterWeb.DashboardLive do
       |> Enum.sort_by(& &1.since, {:asc, DateTime})
 
     assign(socket, :pending_reviews, pending)
+  end
+
+  # Recent ExternalReview audit records (bd-31fh9e): newest-first, fleet-wide.
+  # Includes :running rows so dispatched reviews are visible while in flight.
+  defp refresh_external_reviews(socket) do
+    records =
+      try do
+        ExternalReviewRecord
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(@recent_external_reviews_limit)
+        |> Ash.read!()
+      rescue
+        _ -> []
+      end
+
+    assign(socket, :external_reviews, records)
   end
 
   # Recent ReviewGate escalations: the durable record of non-approve verdicts
@@ -1761,6 +1783,102 @@ defmodule ArbiterWeb.DashboardLive do
             </div>
           </div>
         </section>
+
+        <%!-- ── J. External Reviews ────────────────────────────────── --%>
+        <%!-- Durable audit records for every `worker_review pr:` run.
+             In-flight reviews appear here immediately on dispatch; the
+             verdict + finding count fill in when the workflow finishes.
+             Full history: GET /api/external_reviews. --%>
+        <section id="external-reviews-section" class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-4">
+            <h2 class="text-lg font-semibold flex items-center gap-2">
+              <.icon name="hero-magnifying-glass-circle" class="size-5 text-secondary" />
+              External Reviews ({length(@external_reviews)})
+              <span class="text-sm font-normal text-base-content/50">
+                — dispatched PR reviews
+              </span>
+            </h2>
+
+            <div
+              :if={@external_reviews == []}
+              id="external-reviews-empty"
+              class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
+            >
+              <.icon
+                name="hero-document-magnifying-glass"
+                class="size-8 mx-auto text-base-content/30"
+              />
+              <p class="mt-2 text-sm text-base-content/60">
+                No external reviews yet. Run <code class="text-xs">worker_review pr: &lt;url&gt;</code>
+                to review a colleague's PR — results appear here in real time.
+              </p>
+            </div>
+
+            <div :if={@external_reviews != []} class="overflow-x-auto">
+              <table class="table table-sm" id="external-reviews">
+                <thead>
+                  <tr class="text-base-content/60">
+                    <th>PR</th>
+                    <th>Status</th>
+                    <th>Verdict</th>
+                    <th>Findings</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    :for={r <- @external_reviews}
+                    class="hover:bg-base-300/40 transition-colors"
+                  >
+                    <td class="max-w-xs">
+                      <a
+                        :if={r.link && r.link != ""}
+                        href={r.link}
+                        target="_blank"
+                        rel="noopener"
+                        class="link link-secondary text-xs truncate block"
+                        title={r.pr_ref}
+                      >
+                        {r.pr || r.pr_ref}
+                      </a>
+                      <code :if={!r.link || r.link == ""} class="text-xs truncate block" title={r.pr_ref}>
+                        {r.pr || r.pr_ref}
+                      </code>
+                      <span class="badge badge-ghost badge-xs font-mono mt-0.5">
+                        {r.strategy || "?"}
+                      </span>
+                    </td>
+                    <td>
+                      <span class={[
+                        "badge badge-sm",
+                        external_review_status_class(r.status)
+                      ]}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        :if={r.verdict}
+                        class={["badge badge-sm", external_review_verdict_class(r.verdict)]}
+                      >
+                        {external_review_verdict_label(r.verdict)}
+                      </span>
+                      <span :if={!r.verdict} class="text-base-content/40 text-xs">—</span>
+                    </td>
+                    <td class="text-xs tabular-nums">
+                      {if r.finding_count, do: r.finding_count, else: "—"}
+                    </td>
+                    <td class="text-xs whitespace-nowrap">{format_ts(r.started_at)}</td>
+                    <td class="text-xs text-right font-mono tabular-nums whitespace-nowrap">
+                      {humanize_duration(r.started_at, r.completed_at || @now)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
       </div>
     </Layouts.app>
     """
@@ -1785,6 +1903,20 @@ defmodule ArbiterWeb.DashboardLive do
   defp flow_bar_class(:done), do: "bg-success"
   defp flow_bar_class(:current), do: "bg-info"
   defp flow_bar_class(:todo), do: "bg-base-300"
+
+  # External review status badge (bd-31fh9e).
+  defp external_review_status_class(:running), do: "badge-info"
+  defp external_review_status_class(:completed), do: "badge-success"
+  defp external_review_status_class(:failed), do: "badge-error"
+  defp external_review_status_class(_), do: "badge-ghost"
+
+  defp external_review_verdict_class(:approve), do: "badge-success"
+  defp external_review_verdict_class(:request_changes), do: "badge-error"
+  defp external_review_verdict_class(_), do: "badge-ghost"
+
+  defp external_review_verdict_label(:approve), do: "Approve"
+  defp external_review_verdict_label(:request_changes), do: "Changes"
+  defp external_review_verdict_label(_), do: "—"
 
   # Left-accent border per notification kind, matching kind_badge_class/1.
   defp kind_border_class(:notification), do: "border-info"

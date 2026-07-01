@@ -99,6 +99,9 @@ defmodule ArbiterWeb.Router do
     get("/usage", UsageController, :summarize)
     get("/usage/events", UsageController, :events)
 
+    # External review audit records (bd-31fh9e)
+    get("/external_reviews", ExternalReviewController, :index)
+
     # Anthropic quota snapshot (captured by the local proxy)
     get("/quota", QuotaController, :show)
 
