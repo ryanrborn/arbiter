@@ -4,7 +4,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Reviews.ExternalReview
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
 
   @env_var "EXTERNAL_REVIEW_GH_TOKEN"
 
@@ -195,6 +195,237 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert {:ok, %{verdict: :approve}} =
                ExternalReview.review(pr: "octo/widget#1", check_runner: runner)
     end
+  end
+
+  describe "review/1 — follow-up engagement (Option A)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "follow_up: true creates one review_only engagement with a baseline" do
+      ws = github_ws("er-follow")
+      stub_full_review(head_sha: "sha-head-1", author: "coworker", max_comment_id: 500)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert result.engagement_created == true
+      assert is_binary(result.engagement)
+
+      engagement = Ash.get!(Issue, result.engagement)
+      assert engagement.review_only == true
+      assert engagement.source_pr == "octo/widget#42"
+      assert engagement.workspace_id == ws.id
+      # Baseline: PR head at review time + current comment high-watermark.
+      assert engagement.last_reviewed_sha == "sha-head-1"
+      assert engagement.last_seen_comment_id == "500"
+      # Resolved automation mode (no policy → conservative :flag).
+      assert engagement.review_automation == :flag
+      # Tracker-inert + non-reviewable (no worktree/branch).
+      assert engagement.tracker_type == :none
+      assert engagement.issue_type == :task
+      # First-pass findings seed the relevance baseline, string-keyed to match
+      # what ReviewPatrol persists/reads — so a later commit touching x.ex
+      # triggers a re-review.
+      assert [finding] = engagement.posted_findings
+      assert finding["file"] == "x.ex"
+      assert finding["line"] == 1
+      assert finding["message"] == "boom"
+      assert finding["severity"] == "error"
+    end
+
+    test "an approve / zero-finding review seeds no posted_findings" do
+      ws = github_ws("er-approve")
+      stub_full_review(head_sha: "sha-head-1", author: "coworker", max_comment_id: 500)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: fn _diff, _state -> {:ok, []} end
+               )
+
+      engagement = Ash.get!(Issue, result.engagement)
+      # Empty is correct here — nothing flagged, so ReviewPatrol stays quiet.
+      assert engagement.posted_findings == []
+    end
+
+    test "without follow_up the flow is unchanged (no engagement)" do
+      ws = github_ws("er-noeng")
+      stub_full_review(head_sha: "sha-x", author: "coworker", max_comment_id: 1)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 check_runner: one_finding()
+               )
+
+      assert result.engagement == nil
+      assert result.engagement_created == false
+      assert engagements_for(ws.id, "octo/widget#42") == []
+    end
+
+    test "a second follow_up dispatch for the same PR does not duplicate" do
+      ws = github_ws("er-dedup")
+      stub_full_review(head_sha: "sha-1", author: "coworker", max_comment_id: 10)
+
+      assert {:ok, first} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert first.engagement_created == true
+
+      assert {:ok, second} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      assert second.engagement_created == false
+      assert second.engagement == first.engagement
+      assert length(engagements_for(ws.id, "octo/widget#42")) == 1
+    end
+
+    test "explicit automation override + tracker_context are carried onto the engagement" do
+      ws = github_ws("er-auto")
+      stub_full_review(head_sha: "sha-1", author: "coworker", max_comment_id: 3)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: true,
+                 automation: "auto",
+                 tracker_context_ref: "VR-18004",
+                 check_runner: one_finding()
+               )
+
+      engagement = Ash.get!(Issue, result.engagement)
+      assert engagement.review_automation == :auto
+      assert engagement.tracker_context_ref == "VR-18004"
+    end
+  end
+
+  # A check runner that always reports one finding (so a request_changes verdict
+  # posts a comment + a review, matching the real review path).
+  defp one_finding do
+    fn _diff, _state ->
+      {:ok, [%{severity: :error, file: "x.ex", line: 1, message: "boom"}]}
+    end
+  end
+
+  defp engagements_for(ws_id, mr_ref) do
+    require Ash.Query
+
+    Issue
+    |> Ash.Query.filter(
+      review_only == true and source_pr == ^mr_ref and status != :closed and
+        workspace_id == ^ws_id
+    )
+    |> Ash.read!()
+  end
+
+  # Stub every GitHub endpoint the review + engagement baseline touch:
+  #   * diff GET (CodeReview reads the diff)
+  #   * JSON pull GET (baseline head sha + author)
+  #   * POST comments / POST reviews (the posted finding + verdict)
+  #   * GET reviews, GET check-runs (adapter.get/1 internals)
+  #   * POST /graphql (list_open_review_threads → comment high-watermark)
+  defp stub_full_review(opts) do
+    head_sha = Keyword.fetch!(opts, :head_sha)
+    author = Keyword.get(opts, :author, "coworker")
+    max_comment_id = Keyword.get(opts, :max_comment_id, 1)
+
+    Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+      path = conn.request_path
+      diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+      cond do
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "text/plain")
+          |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+boom\n")
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+          json(conn, %{
+            "number" => 42,
+            "state" => "open",
+            "head" => %{"sha" => head_sha},
+            "user" => %{"login" => author},
+            "html_url" => "https://github.com/octo/widget/pull/42"
+          })
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          json(conn, [])
+
+        conn.method == "GET" and path =~ ~r{/commits/.+/check-runs$} ->
+          json(conn, %{"check_runs" => []})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+          json(conn, %{"id" => 1})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          json(conn, %{"id" => 99})
+
+        conn.method == "POST" and path == "/graphql" ->
+          json(conn, %{
+            "data" => %{
+              "repository" => %{
+                "pullRequest" => %{
+                  "reviewThreads" => %{
+                    "nodes" => [
+                      %{
+                        "id" => "T1",
+                        "isResolved" => false,
+                        "path" => "x.ex",
+                        "line" => 1,
+                        "comments" => %{
+                          "nodes" => [
+                            %{
+                              "databaseId" => max_comment_id,
+                              "author" => %{"login" => author},
+                              "body" => "please look"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          })
+
+        true ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(
+            404,
+            Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
+          )
+      end
+    end)
+  end
+
+  defp json(conn, body) do
+    conn
+    |> Plug.Conn.put_resp_header("content-type", "application/json")
+    |> Plug.Conn.resp(200, Jason.encode!(body))
   end
 
   defp tmp_git_repo(origin_url) do
