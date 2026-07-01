@@ -1421,6 +1421,22 @@ defmodule Arbiter.Worker.DispatchTest do
 
       refute prompt =~ "qa_notes"
     end
+
+    test "github-tracked tasks (bd/default workspace) get no completion-notes step", %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "github work",
+          workspace_id: ws.id,
+          tracker_type: "github",
+          tracker_ref: "42",
+          skip_upstream_create: true
+        })
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      refute prompt =~ "qa_notes"
+      refute prompt =~ "backed by an external tracker"
+    end
   end
 
   describe "work prompt PR body authoring (bd-53xrmi)" do

@@ -1518,25 +1518,31 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp completion_notes_step(%Issue{tracker_ref: ref}) when ref in [nil, ""], do: ""
 
-  defp completion_notes_step(%Issue{}) do
-    """
+  defp completion_notes_step(%Issue{} = issue) do
+    adapter = Trackers.for_task(issue)
 
-    This task is backed by an external tracker ticket. Before you finish, you
-    MUST produce its completion notes and persist them on the task — the
-    tracker gates the ticket's forward transition until both are filled. Call
-    the `task_update_progress` MCP tool (available in this session) with these
-    arguments:
+    if function_exported?(adapter, :gating_fields, 2) do
+      """
 
-      * `qa_notes` — What QA should verify: the user-facing behaviour to
-        exercise, edge cases, and how to confirm the fix.
-      * `deployment_notes` — Rollout considerations: DB migrations, feature
-        flags, config/env changes, ordering, and any backout steps. Write
-        'None' only if there genuinely are none.
+      This task is backed by an external tracker ticket. Before you finish, you
+      MUST produce its completion notes and persist them on the task — the
+      tracker gates the ticket's forward transition until both are filled. Call
+      the `task_update_progress` MCP tool (available in this session) with these
+      arguments:
 
-    Use the MCP tool — do NOT shell out to the `arb` CLI for this. Base the
-    notes on the change you actually made. This is part of "done": do it before
-    printing `arb done`.
-    """
+        * `qa_notes` — What QA should verify: the user-facing behaviour to
+          exercise, edge cases, and how to confirm the fix.
+        * `deployment_notes` — Rollout considerations: DB migrations, feature
+          flags, config/env changes, ordering, and any backout steps. Write
+          'None' only if there genuinely are none.
+
+      Use the MCP tool — do NOT shell out to the `arb` CLI for this. Base the
+      notes on the change you actually made. This is part of "done": do it before
+      printing `arb done`.
+      """
+    else
+      ""
+    end
   end
 
   defp review_prompt(%Issue{} = task, opts) do
