@@ -1626,14 +1626,21 @@ defmodule Arbiter.Worker do
   # coordinator reviewer approves a task that already has a PR open. Used for
   # :direct workspaces where the Watchdog path is not taken. Skipped when
   # workspace_id is nil or no pr_ref.
-  defp maybe_enqueue_approved_pr(%State{workspace_id: ws_id, task_id: task_id})
+  #
+  # bd-cw3w9p: also skipped for review_only tasks — they are long-lived
+  # ReviewPatrol engagements that must stay :in_progress after the first verdict.
+  # Sending {:worker_done} here would let the MergeQueue auto-close a task that
+  # ReviewPatrol intends to keep open.
+  defp maybe_enqueue_approved_pr(%State{workspace_id: ws_id, task_id: task_id, meta: meta})
        when is_binary(ws_id) do
-    with {:ok, _pr_ref} <- fetch_task_pr_ref(task_id) do
-      Phoenix.PubSub.broadcast(
-        Arbiter.PubSub,
-        "worker:done:" <> ws_id,
-        {:worker_done, task_id}
-      )
+    unless review_only?(meta) do
+      with {:ok, _pr_ref} <- fetch_task_pr_ref(task_id) do
+        Phoenix.PubSub.broadcast(
+          Arbiter.PubSub,
+          "worker:done:" <> ws_id,
+          {:worker_done, task_id}
+        )
+      end
     end
 
     :ok

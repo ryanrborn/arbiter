@@ -136,7 +136,10 @@ defmodule Arbiter.Tasks.Issue do
         :pr_ref,
         :pr_body,
         :target_branch,
-        :review_only
+        :review_only,
+        :last_reviewed_sha,
+        :last_seen_comment_id,
+        :review_automation
       ]
 
       require_atomic? false
@@ -451,6 +454,33 @@ defmodule Arbiter.Tasks.Issue do
       issue they don't own: no reassignment, no description sync, no status
       transition. SyncTracker, SyncFields, and the Driver's close-upstream
       logic all check this flag and skip any write-back when it is set.
+      """
+    end
+
+    # ReviewPatrol engagement fields (bd-cw3w9p) —————————————————————————————
+
+    attribute :last_reviewed_sha, :string do
+      allow_nil? true
+      public? true
+      description "PR head SHA at our last posted review. Set by ReviewPatrol after each review cycle."
+    end
+
+    attribute :last_seen_comment_id, :string do
+      allow_nil? true
+      public? true
+      description "High-watermark cursor for author replies (ReviewPatrol Phase 2)."
+    end
+
+    attribute :review_automation, :atom do
+      allow_nil? true
+      public? true
+      constraints one_of: [:auto, :flag]
+
+      description """
+      Engagement automation mode for ReviewPatrol:
+        :auto — re-review automatically on new commits.
+        :flag — surface new commits as a flag rather than re-reviewing.
+      Nullable; the effective default is resolved from workspace policy (task B).
       """
     end
 
