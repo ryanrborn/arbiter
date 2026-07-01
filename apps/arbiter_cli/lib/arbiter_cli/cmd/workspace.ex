@@ -40,7 +40,7 @@ defmodule ArbiterCli.Cmd.Workspace do
   # Mirrors Arbiter.Tasks.Workspace.valid_tracker_types/0 and
   # valid_merger_strategies/0 for friendly client-side errors on `create`. The
   # server's ValidateConfig remains the source of truth.
-  @valid_tracker_types ~w(none jira shortcut linear github)
+  @valid_tracker_types ~w(none jira shortcut linear github gitlab)
   @valid_merger_strategies ~w(direct gitlab github)
 
   @switches [

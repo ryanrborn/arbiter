@@ -273,6 +273,20 @@ defmodule Arbiter.Worker.PRTemplateTest do
       assert out =~ "Closes #42"
     end
 
+    test ":gitlab tracker with bare numeric ref appends Closes #N" do
+      task = %Issue{
+        id: "x-1",
+        title: "Fix bug",
+        priority: 2,
+        issue_type: :bug,
+        tracker_type: :gitlab,
+        tracker_ref: "42"
+      }
+
+      out = PRTemplate.default_body(task)
+      assert out =~ "Closes #42"
+    end
+
     test ":github tracker with non-numeric ref does not append closing keyword" do
       task = %Issue{
         id: "x-1",

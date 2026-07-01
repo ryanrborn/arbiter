@@ -254,7 +254,7 @@ defmodule Arbiter.MCP.Catalog do
           "assignee" => %{"type" => "string"},
           "tracker_type" => %{
             "type" => "string",
-            "description" => "none | jira | shortcut | linear | github."
+            "description" => "none | jira | shortcut | linear | github | gitlab."
           },
           "tracker_ref" => %{"type" => "string"},
           "tracker_context_type" => %{
