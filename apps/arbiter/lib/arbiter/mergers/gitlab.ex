@@ -40,6 +40,14 @@ defmodule Arbiter.Mergers.Gitlab do
   GitLab states map as: `"opened" -> :open`, `"merged" -> :merged`,
   `"closed" | "locked" -> :closed`.
 
+  ## Optional callbacks not implemented
+
+  `reply_to_review_comment/4` — GitLab uses a discussion/note model and does
+  not expose a dedicated "reply to comment" endpoint that maps cleanly to
+  GitHub's `POST /pulls/:n/comments/:id/replies`. This optional callback is
+  not exported; callers guard with `function_exported?/3` and fall back to
+  `add_comment/2` when targeting a GitLab MR.
+
   ## Tests
 
   Wired up to `Req.Test`: when
