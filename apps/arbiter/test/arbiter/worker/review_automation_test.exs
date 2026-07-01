@@ -73,4 +73,63 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.resolve(nil, nil) == :flag
     end
   end
+
+  describe "resolve/3 — repo_overrides" do
+    @config %{
+      "review_automation" => %{
+        "default" => "flag",
+        "auto_authors" => ["alice"],
+        "repo_overrides" => %{
+          "atlas" => "flag",
+          "fast_lane" => "auto"
+        }
+      }
+    }
+
+    test "repo_override flag beats auto_authors membership" do
+      # alice is in auto_authors, but atlas is hard-flagged
+      assert ReviewAutomation.resolve(@config, "alice", "atlas") == :flag
+    end
+
+    test "repo_override auto beats non-member author + flag default" do
+      # charlie is not in auto_authors, but fast_lane is hard-auto
+      assert ReviewAutomation.resolve(@config, "charlie", "fast_lane") == :auto
+    end
+
+    test "repo_override auto beats nil author" do
+      assert ReviewAutomation.resolve(@config, nil, "fast_lane") == :auto
+    end
+
+    test "repo_override flag beats nil author" do
+      assert ReviewAutomation.resolve(@config, nil, "atlas") == :flag
+    end
+
+    test "author-in-auto_authors wins when no repo_override for that rig" do
+      # alice is in auto_authors; "backend" has no override
+      assert ReviewAutomation.resolve(@config, "alice", "backend") == :auto
+    end
+
+    test "default applies when no repo_override and author not in auto_authors" do
+      assert ReviewAutomation.resolve(@config, "charlie", "backend") == :flag
+    end
+
+    test "nil rig_name falls through to author resolution" do
+      assert ReviewAutomation.resolve(@config, "alice", nil) == :auto
+      assert ReviewAutomation.resolve(@config, "charlie", nil) == :flag
+    end
+
+    test "repo_override ignored when no repo_overrides key in block" do
+      config = %{"review_automation" => %{"default" => "flag", "auto_authors" => ["alice"]}}
+      assert ReviewAutomation.resolve(config, "alice", "atlas") == :auto
+      assert ReviewAutomation.resolve(config, "charlie", "atlas") == :flag
+    end
+
+    test "unknown rig falls through to author resolution" do
+      assert ReviewAutomation.resolve(@config, "alice", "unknown_repo") == :auto
+    end
+
+    test "returns :flag for nil config regardless of rig" do
+      assert ReviewAutomation.resolve(nil, "alice", "atlas") == :flag
+    end
+  end
 end

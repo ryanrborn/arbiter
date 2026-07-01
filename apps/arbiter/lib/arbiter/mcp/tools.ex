@@ -641,8 +641,9 @@ defmodule Arbiter.MCP.Tools do
   #
   # Resolution order (most-specific wins):
   #   1. An explicit `automation` arg passed to `worker_review` — hard override.
-  #   2. The workspace's `review_automation` policy — auto_authors list, then default.
-  #   3. No config → :flag (conservative: never auto-post unless explicitly trusted).
+  #   2. The workspace's `review_automation.repo_overrides[repo]` — per-repo hard gate.
+  #   3. The workspace's `review_automation.auto_authors` list, then `default`.
+  #   4. No config → :flag (conservative: never auto-post unless explicitly trusted).
   #
   # The result is written to `task.review_automation` so the ReviewPatrol poller
   # can read it from the task without re-loading workspace config on each cycle.
@@ -665,8 +666,9 @@ defmodule Arbiter.MCP.Tools do
 
       _ ->
         pr_author = fetch_string(args, "pr_author")
+        rig_name = fetch_string(args, "repo")
         ws_config = load_workspace_config(scope.workspace_id)
-        ReviewAutomation.resolve(ws_config, pr_author)
+        ReviewAutomation.resolve(ws_config, pr_author, rig_name)
     end
   end
 

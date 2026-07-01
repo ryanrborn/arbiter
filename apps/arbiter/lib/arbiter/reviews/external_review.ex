@@ -393,7 +393,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     # trigger a re-review) + the PR author (for automation-mode resolution).
     {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
     watermark = fetch_comment_watermark(adapter, mr_ref)
-    mode = resolve_automation(opts, prepared.workspace, pr_author)
+    mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(opts, :repo))
 
     case create_engagement_issue(prepared, opts, mode, head_sha, watermark, findings) do
       {:ok, issue} ->
@@ -518,16 +518,16 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   # Resolve the engagement's automation mode: an explicit override wins,
   # otherwise the workspace review_automation policy against the actual PR author.
-  defp resolve_automation(opts, %Workspace{config: config}, pr_author) do
+  defp resolve_automation(opts, %Workspace{config: config}, pr_author, rig_name) do
     case Map.get(opts, :automation) do
       m when m in [:auto, :flag] -> m
       "auto" -> :auto
       "flag" -> :flag
-      _ -> ReviewAutomation.resolve(config, pr_author)
+      _ -> ReviewAutomation.resolve(config, pr_author, rig_name)
     end
   end
 
-  defp resolve_automation(opts, _workspace, pr_author) do
+  defp resolve_automation(opts, _workspace, pr_author, _rig_name) do
     case Map.get(opts, :automation) do
       m when m in [:auto, :flag] -> m
       "auto" -> :auto
