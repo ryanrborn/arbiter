@@ -22,9 +22,9 @@ defmodule Arbiter.Worker.PRTemplate do
     * `{{tracker.link}}` — resolved via `Arbiter.Trackers.link_for/1`. Empty
       string for `Tracker.None`.
     * `{{tracker.ref}}` — `issue.tracker_ref` (e.g. `"VR-17585"` or `""`).
-    * `{{tracker.type}}` — `"jira" | "linear" | "github" | "none"`.
-    * `{{tracker.closes}}` — `"Closes #N"` for `:github` tasks with a bare
-      numeric `tracker_ref`; `""` (line-dropped) for all others.
+    * `{{tracker.type}}` — `"jira" | "shortcut" | "linear" | "github" | "gitlab" | "none"`.
+    * `{{tracker.closes}}` — `"Closes #N"` for `:github`/`:gitlab` tasks with a
+      bare numeric `tracker_ref`; `""` (line-dropped) for all others.
 
   Unknown placeholders are left in the output verbatim so templates can use
   `{{...}}` for non-substitution purposes if needed.
@@ -66,8 +66,8 @@ defmodule Arbiter.Worker.PRTemplate do
 
   Produces a clean description containing: title (as a Markdown heading),
   description (if present), tracker link (if present), and — for
-  `:github`-tracked tasks with a bare numeric `tracker_ref` — a
-  `Closes #N` keyword so GitHub auto-closes the issue on merge.
+  `:github`/`:gitlab`-tracked tasks with a bare numeric `tracker_ref` — a
+  `Closes #N` keyword so the provider auto-closes the issue on merge.
   """
   @spec default_body(Issue.t()) :: String.t()
   def default_body(%Issue{} = task) do
@@ -167,12 +167,13 @@ defmodule Arbiter.Worker.PRTemplate do
     }
   end
 
-  # Returns "Closes #N" for :github-tracked tasks whose tracker_ref is a bare
-  # integer string (e.g. "42"), so GitHub auto-closes the issue on merge.
-  # Returns "" for all other tracker types — Jira/Linear/etc. have no such
-  # native close keyword.
-  defp closing_keyword(%Issue{tracker_type: :github, tracker_ref: ref})
-       when is_binary(ref) do
+  # Returns "Closes #N" for :github/:gitlab-tracked tasks whose tracker_ref is a
+  # bare integer string (e.g. "42"), so the provider auto-closes the issue when
+  # the PR/MR merges to the default branch. Both GitHub and GitLab honour the
+  # `Closes #N` keyword in the PR/MR description. Returns "" for all other
+  # tracker types — Jira/Linear/etc. have no such native close keyword.
+  defp closing_keyword(%Issue{tracker_type: type, tracker_ref: ref})
+       when type in [:github, :gitlab] and is_binary(ref) do
     if Regex.match?(~r/^\d+$/, ref), do: "Closes ##{ref}", else: ""
   end
 

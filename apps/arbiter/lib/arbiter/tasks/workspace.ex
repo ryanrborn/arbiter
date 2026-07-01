@@ -1,7 +1,7 @@
 defmodule Arbiter.Tasks.Workspace do
   @moduledoc """
   A `Workspace` groups tasks and holds user-configurable settings: tracker
-  config (external system: none, jira, linear, github), merge strategy, agent
+  config (external system: none, jira, linear, github, gitlab), merge strategy, agent
   routing, and so on.
 
   These live in a single JSON `config` column. Missing keys fall back to a
@@ -17,7 +17,7 @@ defmodule Arbiter.Tasks.Workspace do
 
       %{
         "tracker" => %{
-          "type" => "jira",                    # one of: "none", "jira", "linear", "github"
+          "type" => "jira",                    # one of: "none", "jira", "shortcut", "linear", "github", "gitlab"
           "config" => %{
             "host" => "leotechnologies.atlassian.net",
             "project_key" => "VR",
@@ -48,7 +48,7 @@ defmodule Arbiter.Tasks.Workspace do
     data_layer: AshSqlite.DataLayer,
     extensions: [AshCloak]
 
-  @valid_tracker_types ~w(none jira shortcut linear github)
+  @valid_tracker_types ~w(none jira shortcut linear github gitlab)
   @valid_merger_strategies ~w(direct gitlab github)
 
   sqlite do
