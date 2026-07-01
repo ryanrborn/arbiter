@@ -103,11 +103,11 @@ defmodule Arbiter.Mergers.Gitlab do
              raw: body
            }}
 
-        {:ok, %Req.Response{status: 422, body: body}} ->
+        {:ok, %Req.Response{status: status, body: body}} when status in [409, 422] ->
           if duplicate_mr_error?(body) do
             adopt_existing_mr(cfg, branch, target_branch)
           else
-            {:error, http_error(422, body)}
+            {:error, http_error(status, body)}
           end
 
         {:ok, %Req.Response{status: status, body: body}} ->
@@ -489,10 +489,12 @@ defmodule Arbiter.Mergers.Gitlab do
 
   # ---- Internals: duplicate-MR adoption ------------------------------------
 
-  # GitLab returns 422 with a message list containing "another open merge
-  # request already exists for this source branch" when the worker created
-  # the MR itself (via `glab mr create`) before the merger fired. Match
-  # case-insensitively against the canonical substring.
+  # GitLab returns 422 or 409 (observed on gitlab.com; version-dependent) with
+  # a message list containing "another open merge request already exists for
+  # this source branch" when an MR for the branch already exists — e.g. the
+  # worker created it itself (via `glab mr create`), or an earlier attempt of
+  # a resumed session already opened it before failing on something else
+  # (bd-dm2t5d). Match case-insensitively against the canonical substring.
   defp duplicate_mr_error?(%{"message" => messages}) when is_list(messages) do
     Enum.any?(messages, fn
       msg when is_binary(msg) ->
