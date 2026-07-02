@@ -168,6 +168,10 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert File.ls!(dir) == []
     end
 
+    test "add_to_git_exclude/2 is a no-op (not an error) for a non-git directory", %{dir: dir} do
+      assert :ok = AgentConfig.add_to_git_exclude(dir, [".mcp.json"])
+    end
+
     test "adapter_for/1 resolves all registered providers" do
       assert AgentConfig.adapter_for(:claude) == Claude
       assert AgentConfig.adapter_for("claude") == Claude
@@ -180,6 +184,100 @@ defmodule Arbiter.MCP.AgentConfigTest do
     test "adapter_for/1 returns nil for unknown providers" do
       assert AgentConfig.adapter_for(:nonsense_provider_xyz) == nil
       assert AgentConfig.adapter_for(nil) == nil
+    end
+  end
+
+  # bd-9q966y: regression tests — injected agent-config must never be committable
+  # via `git add -A` on a contributor repo that does NOT have .mcp.json in its
+  # tracked .gitignore.
+  describe "git exclude regression (bd-9q966y)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "mcp-gitexcl-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+
+      # Build a minimal real git repo with NO .mcp.json in .gitignore
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", tmp])
+      {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.name", "Test"])
+      {_, 0} = System.cmd("git", ["-C", tmp, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(tmp, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", tmp, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", tmp, "commit", "-q", "-m", "initial"])
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      {:ok, repo: tmp}
+    end
+
+    test "write/3 for :claude adds .mcp.json to .git/info/exclude", %{repo: repo} do
+      assert :ok =
+               AgentConfig.write(:claude, repo,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-exclude-test"
+               )
+
+      # .mcp.json was written
+      assert File.exists?(Path.join(repo, ".mcp.json"))
+
+      # .git/info/exclude was populated with .mcp.json
+      exclude_content = File.read!(Path.join([repo, ".git", "info", "exclude"]))
+      assert exclude_content =~ ".mcp.json"
+    end
+
+    test "git add -A does NOT stage .mcp.json after write/3 for :claude", %{repo: repo} do
+      assert :ok =
+               AgentConfig.write(:claude, repo,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-add-test"
+               )
+
+      # `git add -A` should NOT stage .mcp.json (it's now in .git/info/exclude)
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "-A"])
+
+      {status_out, 0} =
+        System.cmd("git", ["-C", repo, "status", "--porcelain"], stderr_to_stdout: true)
+
+      refute status_out =~ ".mcp.json",
+             "expected .mcp.json to be excluded from git staging, got:\n#{status_out}"
+    end
+
+    test "write/3 for :gemini adds .gemini/ to .git/info/exclude", %{repo: repo} do
+      assert :ok =
+               AgentConfig.write(:gemini, repo,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-gemini-excl"
+               )
+
+      exclude_content = File.read!(Path.join([repo, ".git", "info", "exclude"]))
+      assert exclude_content =~ ".gemini/"
+
+      # git add -A should not stage .gemini/settings.json
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "-A"])
+
+      {status_out, 0} =
+        System.cmd("git", ["-C", repo, "status", "--porcelain"], stderr_to_stdout: true)
+
+      refute status_out =~ ".gemini",
+             "expected .gemini/ to be excluded from git staging, got:\n#{status_out}"
+    end
+
+    test "write/3 for :codex adds .codex/ to .git/info/exclude", %{repo: repo} do
+      assert :ok =
+               AgentConfig.write(:codex, repo,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-codex-excl"
+               )
+
+      exclude_content = File.read!(Path.join([repo, ".git", "info", "exclude"]))
+      assert exclude_content =~ ".codex/"
+    end
+
+    test "add_to_git_exclude/2 is idempotent — duplicate entries are not appended", %{repo: repo} do
+      AgentConfig.add_to_git_exclude(repo, [".mcp.json"])
+      AgentConfig.add_to_git_exclude(repo, [".mcp.json"])
+
+      exclude_content = File.read!(Path.join([repo, ".git", "info", "exclude"]))
+      count = exclude_content |> String.split(".mcp.json") |> length() |> Kernel.-(1)
+      assert count == 1, "expected .mcp.json to appear exactly once, got #{count} occurrences"
     end
   end
 end

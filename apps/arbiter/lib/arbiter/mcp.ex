@@ -21,19 +21,51 @@ defmodule Arbiter.MCP do
   ## Configuration
 
       config :arbiter, Arbiter.MCP,
-        enabled: true,           # master switch (default true)
-        inject_config: true,     # write a per-spawn .mcp.json into the worktree
+        enabled: true,              # master switch (default true)
+        inject_config: true,        # write a per-spawn .mcp.json into the worktree
         url: "http://127.0.0.1:4848/mcp",  # overrides the derived endpoint URL
-        secret: "…",             # overrides the endpoint secret_key_base for signing
-        max_age: 86_400,         # token TTL in seconds (default 24h)
-        max_depth: 3,            # dispatch-recursion depth cap (Phase 2 guardrail)
-        server_name: "arbiter"   # the mcpServers key in .mcp.json
+        secret: "…",                # overrides the endpoint secret_key_base for signing
+        max_age: 86_400,            # coordinator token TTL in seconds (default 24h)
+        worker_max_age: 14_400,     # worker token TTL in seconds (default 4h)
+        max_depth: 3,               # dispatch-recursion depth cap (Phase 2 guardrail)
+        server_name: "arbiter"      # the mcpServers key in .mcp.json
 
   All keys are optional; the defaults below stand in for a vanilla install.
+
+  ## Incident response — leaked scope token (bd-9q966y)
+
+  Scope tokens are **stateless signed blobs** (`Plug.Crypto.sign/4`). There is no
+  per-token revocation table. If a token is leaked (e.g., committed to VCS):
+
+  1. **Determine urgency.** Worker tokens are narrow: scoped to one task/workspace,
+     short-lived (`worker_max_age`, default 4 h). A leaked worker token that has
+     already expired is low-risk. Coordinator tokens are broader — treat a leaked
+     coordinator token as a higher-priority incident.
+
+  2. **Remove the secret from history.** Ensure the PR is squash-merged (not
+     a merge commit that preserves the token in history). If the token is already in
+     a merged commit, use `git filter-repo` (or contact GitHub support for a
+     sensitive-data removal) to excise the commit from the repo's history.
+
+  3. **Wait for expiry.** A leaked `:worker` token expires after `worker_max_age`
+     (default 4 h) from mint time. No action needed beyond history cleanup if the
+     window has passed or is acceptably short.
+
+  4. **Rotate `SECRET_KEY_BASE` only if warranted.** Rotating the secret key
+     immediately invalidates **ALL** tokens across the installation (workers, active
+     coordinator sessions, any cached tokens). Use this only if:
+       * The leaked token is a coordinator token with long TTL, OR
+       * The token was exposed on a public repo and the TTL window is unacceptably
+         long, OR
+       * You cannot determine how long the token was exposed.
+
+     After rotation, all active workers will lose their MCP connection and may
+     need to be re-dispatched.
   """
 
   @salt "arbiter.mcp.scope.v1"
   @default_max_age 86_400
+  @default_worker_max_age 14_400
   @default_max_depth 3
   @default_server_name "arbiter"
   @default_port 4848
@@ -55,9 +87,21 @@ defmodule Arbiter.MCP do
   @spec salt() :: String.t()
   def salt, do: @salt
 
-  @doc "Scope-token TTL in seconds (default 24h)."
+  @doc "Scope-token TTL in seconds (default 24h). Used for coordinator tokens."
   @spec max_age() :: pos_integer()
   def max_age, do: config(:max_age, @default_max_age)
+
+  @doc """
+  Scope-token TTL for **worker** spawns in seconds (default 4h).
+
+  Separate from `max_age/0` (coordinator TTL) so one-shot worker spawns carry a
+  shorter lease — shrinking the exposure window for a leaked `.mcp.json` without
+  affecting long-running coordinator sessions. Override via:
+
+      config :arbiter, Arbiter.MCP, worker_max_age: 7_200   # 2h
+  """
+  @spec worker_max_age() :: pos_integer()
+  def worker_max_age, do: config(:worker_max_age, @default_worker_max_age)
 
   @doc "The dispatch-recursion depth cap a coordinator token may reach (Phase 2)."
   @spec max_depth() :: non_neg_integer()

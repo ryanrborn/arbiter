@@ -56,4 +56,8 @@ defmodule Arbiter.MCP.AgentConfig.Claude do
   @doc "The config filename written into the worktree (`.mcp.json`)."
   @spec filename() :: String.t()
   def filename, do: @filename
+
+  @doc "Patterns to add to `.git/info/exclude` so `git add -A` never stages this file."
+  @spec gitignore_paths() :: [String.t()]
+  def gitignore_paths, do: [@filename]
 end
