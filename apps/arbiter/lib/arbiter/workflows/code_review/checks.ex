@@ -90,17 +90,26 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     invoker.(prompt, state)
   end
 
-  # Default invoker shells out to `claude --print <prompt> --output-format
-  # stream-json --verbose`. Using stream-json lets us extract structured usage
-  # data (model, tokens, cost) from the `init` and `result` events, so external
-  # reviews can be attributed in the usage ledger.
+  # Default invoker shells out to `claude --print --output-format stream-json
+  # --verbose` with the prompt delivered via stdin. Using stream-json lets us
+  # extract structured usage data (model, tokens, cost) from the `init` and
+  # `result` events, so external reviews can be attributed in the usage ledger.
+  #
+  # WHY stdin and not `--print <prompt>`:
+  # Linux enforces a per-argument size limit (MAX_ARG_STRLEN = 131 072 bytes).
+  # When a FE repo's unified diff is large (e.g. package-lock.json churn, many
+  # TS/JSX files), the built prompt routinely exceeds that limit. The kernel
+  # returns errno E2BIG (= 7), which Erlang surfaces as exit-code 7 with empty
+  # stdout — indistinguishable from a crashed process. Passing the prompt via a
+  # temp file + stdin redirect eliminates the per-argument ceiling entirely.
   defp default_invoke(prompt, _state) do
     case System.find_executable("claude") do
       nil ->
         {:error, {:executable_not_found, "claude"}}
 
       path ->
-        args = ["--print", prompt, "--output-format", "stream-json", "--verbose"]
+        # No prompt in args — delivered via stdin below.
+        args = ["--print", "--output-format", "stream-json", "--verbose"]
 
         # Honor the active model slot when one is seeded in the process dict.
         # ReviewPatrol seeds `:review_agent` via `Agents.prepare(ws, :review_agent)`
@@ -112,14 +121,67 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
             _ -> args
           end
 
-        case System.cmd(path, args, stderr_to_stdout: true) do
-          {output, 0} -> extract_text_and_usage(output)
-          {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
-        end
+        invoke_via_stdin(path, args, prompt)
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   end
+
+  # Write the prompt to a temporary file and invoke claude with its stdin
+  # redirected from that file via `sh -c`. This sidesteps both Linux's
+  # MAX_ARG_STRLEN per-argument limit AND the Erlang port's inability to
+  # half-close stdin while keeping stdout open for reading.
+  #
+  # Env isolation mirrors ClaudeSession: CLAUDE_CONFIG_DIR is pinned to the
+  # arbiter-managed acolyte config dir so the reviewer never inherits the
+  # operator's personal ~/.claude persona, MCP servers, or permission posture.
+  # Release-env vars (ROOTDIR/BINDIR/RELEASE_*) are stripped so a node repo's
+  # .nvmrc — if picked up by a shell hook — can't switch the Node runtime out
+  # from under the reviewer process.
+  defp invoke_via_stdin(path, args, prompt) do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "arb_review_#{System.unique_integer([:positive])}.txt"
+      )
+
+    try do
+      File.write!(tmp, prompt)
+
+      # Build the sh -c command: single-quote each component so spaces,
+      # $-variables, and backticks are treated literally.
+      shell =
+        Enum.map_join([path | args], " ", &sh_quote/1) <> " < " <> sh_quote(tmp)
+
+      env = build_invoke_env()
+      opts = [{:stderr_to_stdout, true}] ++ if(env == [], do: [], else: [{:env, env}])
+
+      case System.cmd("sh", ["-c", shell], opts) do
+        {output, 0} -> extract_text_and_usage(output)
+        {output, code} -> {:error, {:claude_failed, code, String.trim(output)}}
+      end
+    after
+      File.rm(tmp)
+    end
+  end
+
+  # Env pairs for the claude subprocess: release-var cleanup (converts false →
+  # nil for System.cmd compatibility) + isolated CLAUDE_CONFIG_DIR.
+  defp build_invoke_env do
+    release_clean =
+      Arbiter.Worker.ReleaseEnv.clean_pairs()
+      |> Enum.map(fn
+        {k, false} -> {k, nil}
+        pair -> pair
+      end)
+
+    config_dir = Arbiter.Agents.Claude.ConfigDir.env()
+    release_clean ++ config_dir
+  end
+
+  # POSIX single-quote escaping: wraps s in single quotes and escapes any
+  # embedded single quote as '\''. Safe for arbitrary printable characters.
+  defp sh_quote(s), do: "'" <> String.replace(s, "'", "'\\''") <> "'"
 
   # Parse a stream-json JSONL output into a text result + structured usage map.
   # The `system/init` event carries model + session_id; the terminal `result`
