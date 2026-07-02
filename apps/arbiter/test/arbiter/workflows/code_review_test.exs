@@ -956,6 +956,59 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
       assert {:error, :boom} = Checks.run("DIFF", %{mode: :local})
     end
+
+    # -- bd-dl49fo regression: large-diff E2BIG (MAX_ARG_STRLEN) fix ----------
+
+    test "root-cause doc: System.cmd with arg > MAX_ARG_STRLEN (131_072 B) exits 7" do
+      # Linux enforces a per-argument limit of 131_072 bytes (MAX_ARG_STRLEN).
+      # When exceeded, execve returns errno E2BIG = 7.  Erlang's System.cmd
+      # surfaces this as exit-code 7 with empty stdout — not an exception —
+      # which is exactly the {:claude_failed, 7, ""} pattern that broke
+      # external reviews on the verus-client (FE) rig.
+      big = String.duplicate("x", 131_072)
+      assert {"", 7} = System.cmd("echo", [big])
+    end
+
+    test "default invoker handles a prompt larger than MAX_ARG_STRLEN via stdin" do
+      # Arrange: install a tiny fake 'claude' binary that reads stdin and exits 0.
+      # Put its directory first in PATH so System.find_executable picks it up
+      # before the real claude.
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "fake_claude_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      fake = Path.join(tmp_dir, "claude")
+
+      # The script intentionally consumes stdin so the FD doesn't go unread.
+      File.write!(fake, "#!/bin/sh\ncat > /dev/null\n")
+      File.chmod!(fake, 0o755)
+
+      orig_path = System.get_env("PATH", "")
+
+      on_exit(fn ->
+        System.put_env("PATH", orig_path)
+        File.rm_rf(tmp_dir)
+        Application.delete_env(:arbiter, :code_review_invoker)
+      end)
+
+      System.put_env("PATH", "#{tmp_dir}:#{orig_path}")
+      Application.delete_env(:arbiter, :code_review_invoker)
+
+      # A diff larger than 131_072 bytes — typical of a large FE PR with
+      # TS/JS changes and package-lock.json churn.
+      large_diff =
+        "diff --git a/package-lock.json b/package-lock.json\n" <>
+          String.duplicate("+x\n", 50_000)
+
+      assert byte_size(large_diff) > 131_072
+
+      # Act: run without the invoker override so default_invoke → invoke_via_stdin fires.
+      result = Checks.run(large_diff, %{mode: :adapter, adapter: nil})
+
+      # Assert: must succeed — NOT {:error, {:claude_failed, 7, ""}}.
+      assert {:ok, findings, _usage} = result
+      assert findings == []
+    end
   end
 
   # =======================================================================
