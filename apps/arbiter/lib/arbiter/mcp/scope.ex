@@ -90,7 +90,7 @@ defmodule Arbiter.MCP.Scope do
       can_dispatch: false,
       depth: Keyword.get(opts, :depth, 0)
     }
-    |> MCP.mint(opts)
+    |> MCP.mint(Keyword.put_new(opts, :max_age, MCP.worker_max_age()))
   end
 
   @doc """
