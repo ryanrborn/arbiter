@@ -7,6 +7,9 @@
 # The directory Mix downloads your dependencies sources to.
 /deps/
 
+# Hex package manager cache — written into worktrees by mix deps.get.
+/.hex
+
 # Where 3rd-party dependencies like ExDoc output generated docs.
 /doc/
 
