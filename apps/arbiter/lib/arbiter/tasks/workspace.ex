@@ -92,6 +92,7 @@ defmodule Arbiter.Tasks.Workspace do
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergeQueue, []}
+      change {Arbiter.Tasks.Workspace.Changes.StartDispatchQueue, []}
       change {Arbiter.Tasks.Workspace.Changes.StartPRPatrol, []}
       change {Arbiter.Tasks.Workspace.Changes.StartReviewPatrol, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergedPRFinalizer, []}
@@ -451,6 +452,69 @@ defmodule Arbiter.Tasks.Workspace do
 
       _ ->
         nil
+    end
+  end
+
+  @doc """
+  The quota-exhaustion behaviour for this workspace (bd-7cd38f), as an atom.
+
+  Precedence: the per-workspace `config["quota"]["on_exhaustion"]` override wins,
+  then the global `:arbiter, :quota` `:on_exhaustion` app-env default, then the
+  hardcoded `:throttle`. Governs what `Arbiter.Quota.Gate` the dispatcher uses:
+
+    * `:throttle` — hold new dispatches near the cap in a draining queue.
+    * `:continue` — dispatch past the cap (paid overage), alert, never stop.
+
+  Accepts the strings `"throttle"` / `"continue"` (JSON config round-trip).
+  """
+  @spec quota_on_exhaustion(t() | nil) :: :throttle | :continue
+  def quota_on_exhaustion(workspace) do
+    case get_in((workspace && workspace.config) || %{}, ["quota", "on_exhaustion"]) do
+      "continue" -> :continue
+      "throttle" -> :throttle
+      :continue -> :continue
+      :throttle -> :throttle
+      _ -> global_quota_on_exhaustion()
+    end
+  end
+
+  defp global_quota_on_exhaustion do
+    case Application.get_env(:arbiter, :quota, [])[:on_exhaustion] do
+      :continue -> :continue
+      "continue" -> :continue
+      _ -> :throttle
+    end
+  end
+
+  @doc """
+  The overage-spend alert threshold (USD) for `:continue` mode (bd-7cd38f).
+
+  Precedence: the per-workspace `config["quota"]["overage_alert_usd"]` override
+  wins, then the global `:arbiter, :quota` `:overage_alert_usd` app-env default.
+  Returns `nil` when neither is set / positive, in which case no overage alert
+  fires. Accepts a positive number or its JSON string form.
+  """
+  @spec quota_overage_alert_usd(t() | nil) :: float() | nil
+  def quota_overage_alert_usd(workspace) do
+    case get_in((workspace && workspace.config) || %{}, ["quota", "overage_alert_usd"]) do
+      n when is_number(n) and n > 0 ->
+        n * 1.0
+
+      s when is_binary(s) ->
+        case Float.parse(s) do
+          {f, _} when f > 0 -> f
+          _ -> global_overage_alert_usd()
+        end
+
+      _ ->
+        global_overage_alert_usd()
+    end
+  end
+
+  defp global_overage_alert_usd do
+    case Application.get_env(:arbiter, :quota, [])[:overage_alert_usd] do
+      n when is_number(n) and n > 0 -> n * 1.0
+      _ -> nil
     end
   end
 

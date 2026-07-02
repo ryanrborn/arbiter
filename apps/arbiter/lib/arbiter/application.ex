@@ -6,6 +6,7 @@ defmodule Arbiter.Application do
   use Application
 
   alias Arbiter.Workflows.ConductorReconciler
+  alias Arbiter.Workflows.DispatchQueueSupervisor
   alias Arbiter.Workflows.MergeQueueSupervisor
   alias Arbiter.Workflows.MergedPRFinalizerSupervisor
   alias Arbiter.Workflows.PRPatrolSupervisor
@@ -65,6 +66,16 @@ defmodule Arbiter.Application do
       ReviewPatrolSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
       MergedPRFinalizerSupervisor,
+      # Per-workspace quota-aware dispatch queues (bd-7cd38f). Holds dispatches
+      # near the 5h cap and drains them as headroom frees; also carries the
+      # per-workspace overage-alert debounce state for :continue mode.
+      {Registry, keys: :unique, name: Arbiter.Workflows.DispatchQueueRegistry},
+      # Runs each drained dispatch off the DispatchQueue GenServer's process so a
+      # slow dispatch (repo resolution, preflight, worker spawn, DB writes)
+      # doesn't block the queue — and any concurrent hold/4 / record_overage/3 —
+      # for its duration (bd-7cd38f, reviewer round 1 finding 3).
+      {Task.Supervisor, name: Arbiter.Workflows.DispatchDrainSupervisor},
+      DispatchQueueSupervisor,
       # One Conductor per running Graph, started on demand by
       # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
       # Conductor once kicked off). The Registry keys them by graph_id.
@@ -152,6 +163,11 @@ defmodule Arbiter.Application do
       Supervisor.child_spec(
         {Task, fn -> MergedPRFinalizerSupervisor.start_for_existing_workspaces() end},
         id: :merged_pr_finalizer_boot_task,
+        restart: :temporary
+      ),
+      Supervisor.child_spec(
+        {Task, fn -> DispatchQueueSupervisor.start_for_existing_workspaces() end},
+        id: :dispatch_queue_boot_task,
         restart: :temporary
       )
     ]
