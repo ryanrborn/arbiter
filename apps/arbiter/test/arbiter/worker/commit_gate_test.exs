@@ -189,6 +189,25 @@ defmodule Arbiter.Worker.CommitGateTest do
 
       assert {:ok, :no_commits} = Worktree.completion_state(path, "main")
     end
+
+    test "reports :ready when committed work exists alongside untracked .hex and deps dirs (bd-acj2ck)",
+         %{repo: repo} do
+      # Regression test for bd-acj2ck: the commit gate was false-tripping on
+      # untracked `.hex` and `deps` dirs that accumulate in acolyte worktrees
+      # from `mix deps.get`. A worker with fully committed source should complete
+      # even when those artifact dirs are present.
+      path = provision_worktree(repo, "feature/hex-regression")
+      File.write!(Path.join(path, "real_work.txt"), "committed\n")
+      {_, 0} = git(["add", "real_work.txt"], path)
+      {_, 0} = git(["commit", "-q", "-m", "real work"], path)
+
+      # Simulate the leaked artifact dirs (untracked, not gitignored by the
+      # directory-only pattern when they are plain dirs rather than symlinks).
+      File.mkdir_p!(Path.join(path, ".hex/hex/registry"))
+      File.mkdir_p!(Path.join(path, "deps/some_dep"))
+
+      assert {:ok, :ready} = Worktree.completion_state(path, "main")
+    end
   end
 
   # ---- the gate itself ----------------------------------------------------

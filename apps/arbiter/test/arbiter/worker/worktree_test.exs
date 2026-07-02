@@ -550,4 +550,49 @@ defmodule Arbiter.Worker.WorktreeTest do
       refute "b.txt" in files
     end
   end
+
+  # bd-9q966y: belt-and-suspenders commit gate check for injected agent-config files.
+  describe "has_injected_config_in_commits?/2" do
+    test "returns false when no injected config files are in the diff", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/no-secret", "main")
+      :ok = commit(wt, "ok.ex", "defmodule X do end\n", "add module")
+
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
+
+    test "returns true when .mcp.json is in the committed diff", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/secret-mcp", "main")
+      :ok = commit(wt, "ok.ex", "defmodule OK do end\n", "add module")
+      # Explicitly stage and commit .mcp.json (bypassing .git/info/exclude)
+      :ok = commit(wt, ".mcp.json", ~s({"secret": "tok"}), "oops: commit token file")
+
+      assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
+
+    test "returns true when a .gemini/ file is in the committed diff", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/secret-gemini", "main")
+      File.mkdir_p!(Path.join(wt, ".gemini"))
+      :ok = commit(wt, ".gemini/settings.json", ~s({"token": "x"}), "oops: gemini config")
+
+      assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
+
+    test "returns true when a .codex/ file is in the committed diff", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/secret-codex", "main")
+      File.mkdir_p!(Path.join(wt, ".codex"))
+      :ok = commit(wt, ".codex/config.toml", ~s([mcp]\ntoken = "x"), "oops: codex config")
+
+      assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
+
+    test "fails open (false) when the git diff cannot be run", %{repo: repo} do
+      assert {:ok, false} =
+               Worktree.has_injected_config_in_commits?("/nonexistent/path/xyz", "main")
+
+      # Also fails open when base_ref doesn't exist
+      {:ok, wt} = Worktree.create(repo, "feature/no-base-ref", "main")
+      :ok = commit(wt, "ok.ex", "x\n", "initial")
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "nonexistent-branch")
+    end
+  end
 end

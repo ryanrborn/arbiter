@@ -94,6 +94,10 @@ defmodule Arbiter.MCP.AgentConfig.Gemini do
   @spec filename() :: String.t()
   def filename, do: @filename
 
+  @doc "Patterns to add to `.git/info/exclude` so `git add -A` never stages this directory."
+  @spec gitignore_paths() :: [String.t()]
+  def gitignore_paths, do: [@dirname <> "/"]
+
   # ---- Internals -----------------------------------------------------------
 
   # :worker (default) → the built-in worker tool list
