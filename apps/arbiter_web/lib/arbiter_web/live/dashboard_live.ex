@@ -72,8 +72,14 @@ defmodule ArbiterWeb.DashboardLive do
   # Number of escalations (ReviewGate verdicts) shown in the ReviewGate view.
   @recent_escalations_limit 10
 
-  # Number of external review records shown in the External Reviews panel.
-  @recent_external_reviews_limit 10
+  # Max records loaded for the Review History panel (in-memory sort + paginate).
+  @review_history_fetch_limit 200
+
+  # Page size for the Review History panel.
+  @review_history_page_size 6
+
+  # Interval (ms) between full pr_state refreshes on the Review History panel.
+  @review_history_refresh_interval_ms 60_000
 
   @impl true
   def mount(_params, _session, socket) do
@@ -85,12 +91,15 @@ defmodule ArbiterWeb.DashboardLive do
       # Drives live elapsed counters (active workers) and relative timestamps
       # (notifications). Only reassigns :now — no DB reads in the tick handler.
       :timer.send_interval(1000, self(), :tick)
+      # Periodic pr_state refresh for the Review History panel.
+      :timer.send_interval(@review_history_refresh_interval_ms, self(), :refresh_pr_states)
     end
 
     {:ok,
      socket
      |> assign(:now, DateTime.utc_now())
      |> assign(:live, live?)
+     |> assign(:review_history_page, 0)
      |> assign(:worker_label, "worker")
      |> assign(:repo_label, "repo")
      |> assign(:worktree_label, "worktree")
@@ -156,6 +165,11 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply, assign(socket, :now, DateTime.utc_now())}
   end
 
+  # Periodic 60s pr_state refresh for the Review History panel.
+  def handle_info(:refresh_pr_states, socket) do
+    {:noreply, refresh_external_reviews(socket, force_pr_state: true)}
+  end
+
   @impl true
   # Acknowledge one Admiral-mailbox message: stamp read_at, drop it from the
   # unread list. Mirrors `arb inbox read <id>` and the per-worker mailbox.
@@ -169,6 +183,18 @@ defmodule ArbiterWeb.DashboardLive do
   def handle_event("clear_admiral", _params, socket) do
     _ = Message.clear_read(@admiral_ref)
     {:noreply, refresh_admiral_inbox(socket)}
+  end
+
+  # Review History pagination.
+  def handle_event("review_history_prev", _params, socket) do
+    page = max(0, (socket.assigns[:review_history_page] || 0) - 1)
+    {:noreply, socket |> assign(:review_history_page, page) |> refresh_external_reviews()}
+  end
+
+  def handle_event("review_history_next", _params, socket) do
+    total_pages = socket.assigns[:review_history_pages] || 1
+    page = min(total_pages - 1, (socket.assigns[:review_history_page] || 0) + 1)
+    {:noreply, socket |> assign(:review_history_page, page) |> refresh_external_reviews()}
   end
 
   # ---- data ----
@@ -301,21 +327,134 @@ defmodule ArbiterWeb.DashboardLive do
     assign(socket, :pending_reviews, pending)
   end
 
-  # Recent ExternalReview audit records (bd-31fh9e): newest-first, fleet-wide.
-  # Includes :running rows so dispatched reviews are visible while in flight.
-  defp refresh_external_reviews(socket) do
-    records =
+  # Review History panel (bd-dsd67h): loads a bounded set of ExternalReview
+  # audit records, sorts them open-first then by started_at desc, paginates
+  # at @review_history_page_size, and lazily resolves pr_state for rows that
+  # don't have it yet.
+  #
+  # `force_pr_state: true` re-resolves pr_state even for rows that already
+  # have a value — used by the 60s periodic tick to catch PRs that transitioned
+  # (open → merged) since the last render.
+  defp refresh_external_reviews(socket, opts \\ []) do
+    force_pr_state = Keyword.get(opts, :force_pr_state, false)
+    page = socket.assigns[:review_history_page] || 0
+    workspaces_by_id = socket.assigns[:workspaces_by_id] || %{}
+
+    all_records =
       try do
         ExternalReviewRecord
         |> Ash.Query.sort(started_at: :desc)
-        |> Ash.Query.limit(@recent_external_reviews_limit)
+        |> Ash.Query.limit(@review_history_fetch_limit)
         |> Ash.read!()
       rescue
         _ -> []
       end
 
-    assign(socket, :external_reviews, records)
+    # Lazily resolve pr_state for records that need it (fire-and-forget).
+    records_needing_resolve =
+      if force_pr_state do
+        Enum.filter(all_records, &needs_pr_state_refresh?/1)
+      else
+        Enum.filter(all_records, &is_nil(&1.pr_state))
+      end
+
+    unless records_needing_resolve == [] do
+      spawn_pr_state_resolvers(records_needing_resolve, workspaces_by_id)
+    end
+
+    # Sort: open-PR reviews first, then merged/closed; newest started_at first
+    # within each group.
+    sorted =
+      Enum.sort_by(all_records, fn r ->
+        open_key = if r.pr_state == "open", do: 0, else: 1
+        neg_started = -DateTime.to_unix(r.started_at || DateTime.from_unix!(0), :microsecond)
+        {open_key, neg_started}
+      end)
+
+    total = length(sorted)
+    total_pages = max(1, ceil(total / @review_history_page_size))
+    safe_page = min(page, total_pages - 1)
+
+    page_records =
+      sorted
+      |> Enum.drop(safe_page * @review_history_page_size)
+      |> Enum.take(@review_history_page_size)
+
+    socket
+    |> assign(:external_reviews, page_records)
+    |> assign(:review_history_page, safe_page)
+    |> assign(:review_history_pages, total_pages)
+    |> assign(:review_history_total, total)
   end
+
+  # Records that should have their pr_state re-resolved: running reviews (may
+  # have finished) and open reviews (PR might have been merged/closed). Records
+  # that are completed/failed with a terminal pr_state (merged/closed) are left
+  # alone — the PR won't reopen.
+  defp needs_pr_state_refresh?(%{pr_state: nil}), do: true
+  defp needs_pr_state_refresh?(%{status: :running}), do: true
+  defp needs_pr_state_refresh?(%{pr_state: "open"}), do: true
+  defp needs_pr_state_refresh?(_), do: false
+
+  # Spawn one fire-and-forget task per record to resolve and persist pr_state.
+  # Each task is independent — a crash in one never affects the panel.
+  defp spawn_pr_state_resolvers(records, workspaces_by_id) do
+    Enum.each(records, fn record ->
+      Task.start(fn ->
+        try do
+          state = resolve_pr_state(record, workspaces_by_id)
+          Ash.update!(record, %{pr_state: state}, action: :update_pr_state)
+        rescue
+          _ -> :ok
+        end
+      end)
+    end)
+  end
+
+  # Resolve the live PR state for a single review record by calling the
+  # appropriate merge adapter. Returns "open" / "merged" / "closed" /
+  # "unknown". Never raises.
+  defp resolve_pr_state(record, workspaces_by_id) do
+    strategy = record.strategy
+    mr_ref = record.pr_ref
+    workspace = Map.get(workspaces_by_id, record.workspace_id)
+
+    cond do
+      strategy in [nil, "", "direct"] ->
+        "unknown"
+
+      is_nil(mr_ref) or mr_ref == "" ->
+        "unknown"
+
+      true ->
+        adapter = Arbiter.Mergers.for_strategy(String.to_atom(strategy))
+        result = call_adapter_get(adapter, workspace, mr_ref)
+
+        case result do
+          {:ok, %{status: :open}} -> "open"
+          {:ok, %{status: :merged}} -> "merged"
+          {:ok, %{status: :closed}} -> "closed"
+          _ -> "unknown"
+        end
+    end
+  rescue
+    _ -> "unknown"
+  end
+
+  # Call adapter.get/1 with the per-process config set up for the workspace.
+  defp call_adapter_get(Arbiter.Mergers.Github, workspace, mr_ref) when not is_nil(workspace) do
+    Arbiter.Mergers.Github.with_workspace(workspace, fn ->
+      Arbiter.Mergers.Github.get(mr_ref)
+    end)
+  end
+
+  defp call_adapter_get(Arbiter.Mergers.Gitlab, workspace, mr_ref) when not is_nil(workspace) do
+    Arbiter.Mergers.Gitlab.with_workspace(workspace, fn ->
+      Arbiter.Mergers.Gitlab.get(mr_ref)
+    end)
+  end
+
+  defp call_adapter_get(_adapter, _workspace, _mr_ref), do: {:error, :unsupported}
 
   # Recent ReviewGate escalations: the durable record of non-approve verdicts
   # (REQUEST_CHANGES / inconclusive), newest first, fleet-wide. Carries the
@@ -1248,23 +1387,22 @@ defmodule ArbiterWeb.DashboardLive do
           </div>
         </section>
 
-        <%!-- ── C3. External Reviews ────────────────────────────────── --%>
-        <%!-- Durable audit records for every `worker_review pr:` run.
-             In-flight reviews appear here immediately on dispatch; the
-             verdict + finding count fill in when the workflow finishes.
-             Full history: GET /api/external_reviews. --%>
+        <%!-- ── C3. Review History ──────────────────────────────────── --%>
+        <%!-- Durable audit log for every `worker_review pr:` run.
+             Open-PR reviews float to the top; merged/closed sink below.
+             Paginated at 6/page. Full history: GET /api/external_reviews. --%>
         <section id="external-reviews-section" class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-4">
             <h2 class="text-lg font-semibold flex items-center gap-2">
               <.icon name="hero-magnifying-glass-circle" class="size-5 text-secondary" />
-              External Reviews ({length(@external_reviews)})
+              Review History
               <span class="text-sm font-normal text-base-content/50">
-                — dispatched PR reviews
+                — dispatched PR reviews ({@review_history_total})
               </span>
             </h2>
 
             <div
-              :if={@external_reviews == []}
+              :if={@review_history_total == 0}
               id="external-reviews-empty"
               class="rounded-box bg-base-100/50 border border-dashed border-base-300 p-6 text-center"
             >
@@ -1273,16 +1411,17 @@ defmodule ArbiterWeb.DashboardLive do
                 class="size-8 mx-auto text-base-content/30"
               />
               <p class="mt-2 text-sm text-base-content/60">
-                No external reviews yet. Run <code class="text-xs">worker_review pr: &lt;url&gt;</code>
+                No review history yet. Run <code class="text-xs">worker_review pr: &lt;url&gt;</code>
                 to review a colleague's PR — results appear here in real time.
               </p>
             </div>
 
-            <div :if={@external_reviews != []} class="overflow-x-auto">
+            <div :if={@review_history_total > 0} class="overflow-x-auto">
               <table class="table table-sm" id="external-reviews">
                 <thead>
                   <tr class="text-base-content/60">
                     <th>PR</th>
+                    <th>PR State</th>
                     <th>Status</th>
                     <th>Verdict</th>
                     <th>Findings</th>
@@ -1314,6 +1453,11 @@ defmodule ArbiterWeb.DashboardLive do
                       </span>
                     </td>
                     <td>
+                      <span class={["badge badge-sm", pr_state_badge_class(r.pr_state)]}>
+                        {r.pr_state || "…"}
+                      </span>
+                    </td>
+                    <td>
                       <span class={[
                         "badge badge-sm",
                         external_review_status_class(r.status)
@@ -1340,6 +1484,30 @@ defmodule ArbiterWeb.DashboardLive do
                   </tr>
                 </tbody>
               </table>
+            </div>
+
+            <%!-- Pagination controls --%>
+            <div
+              :if={@review_history_pages > 1}
+              class="flex items-center justify-between gap-2 pt-1"
+            >
+              <button
+                phx-click="review_history_prev"
+                disabled={@review_history_page == 0}
+                class="btn btn-xs btn-ghost gap-1"
+              >
+                <.icon name="hero-chevron-left" class="size-3.5" /> Prev
+              </button>
+              <span class="text-xs text-base-content/50 tabular-nums">
+                page {@review_history_page + 1} / {@review_history_pages}
+              </span>
+              <button
+                phx-click="review_history_next"
+                disabled={@review_history_page >= @review_history_pages - 1}
+                class="btn btn-xs btn-ghost gap-1"
+              >
+                Next <.icon name="hero-chevron-right" class="size-3.5" />
+              </button>
             </div>
           </div>
         </section>
@@ -1828,6 +1996,12 @@ defmodule ArbiterWeb.DashboardLive do
   defp flow_bar_class(:done), do: "bg-success"
   defp flow_bar_class(:current), do: "bg-info"
   defp flow_bar_class(:todo), do: "bg-base-300"
+
+  # PR state badge for the Review History panel (bd-dsd67h).
+  defp pr_state_badge_class("open"), do: "badge-success"
+  defp pr_state_badge_class("merged"), do: "badge-primary"
+  defp pr_state_badge_class("closed"), do: "badge-ghost"
+  defp pr_state_badge_class(_), do: "badge-ghost"
 
   # External review status badge (bd-31fh9e).
   defp external_review_status_class(:running), do: "badge-info"

@@ -104,6 +104,10 @@ defmodule Arbiter.Reviews.Record do
         :completed_at
       ]
     end
+
+    update :update_pr_state do
+      accept [:pr_state]
+    end
   end
 
   attributes do
@@ -191,6 +195,12 @@ defmodule Arbiter.Reviews.Record do
       public? true
       constraints max_length: 255, trim?: true
       description "ReviewPatrol engagement created for this review, or nil."
+    end
+
+    attribute :pr_state, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+      description "Resolved PR state: open / merged / closed. Nil until first dashboard render resolves it."
     end
 
     attribute :started_at, :utc_datetime_usec do
