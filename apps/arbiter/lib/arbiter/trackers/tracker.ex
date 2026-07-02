@@ -102,11 +102,16 @@ defmodule Arbiter.Trackers.Tracker do
       escalates it by `:name`).
     * `:name` — the human-facing field label, used when escalating a missing
       required field (e.g. `"QA Testing Notes"`).
+    * `:value` — optional pre-resolved value the adapter supplies from workspace
+      config for fields that can't be sourced from the task bead (e.g. a Jira
+      fix-version name). When present and non-nil, the sync layer uses this
+      directly instead of looking up the task's produced value.
   """
   @type gating_field :: %{
           required(:id) => String.t(),
           required(:key) => atom() | nil,
-          required(:name) => String.t()
+          required(:name) => String.t(),
+          optional(:value) => term()
         }
 
   @typedoc "Normalized open-item summary used by `list_open/1`."
