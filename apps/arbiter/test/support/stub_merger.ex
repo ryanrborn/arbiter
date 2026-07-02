@@ -37,11 +37,25 @@ defmodule Arbiter.Test.StubMerger do
         update_branches: %{},
         update_branch_result: :ok,
         failing_checks: %{},
-        merge_result: :ok
+        merge_result: :ok,
+        inline_comments: [],
+        submitted_reviews: []
       }
     end)
 
     :ok
+  end
+
+  @doc "All inline comments posted via post_inline_comment/3 (newest first)."
+  def inline_comments do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :inline_comments, []) end)
+  end
+
+  @doc "All reviews submitted via submit_review/4 (newest first)."
+  def submitted_reviews do
+    ensure_started()
+    Agent.get(@name, fn s -> Map.get(s, :submitted_reviews, []) end)
   end
 
   @doc "Queue the sequence of `get/1` result maps returned for `ref`."
@@ -197,10 +211,30 @@ defmodule Arbiter.Test.StubMerger do
   def get_diff(_ref, _opts), do: {:ok, ""}
 
   @impl true
-  def post_inline_comment(_ref, _finding, _opts), do: {:ok, %{}}
+  def post_inline_comment(ref, finding, opts) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      update_in(s, [:inline_comments], fn cs ->
+        [%{ref: ref, finding: finding, opts: opts} | cs || []]
+      end)
+    end)
+
+    {:ok, %{id: 1}}
+  end
 
   @impl true
-  def submit_review(_ref, _verdict, _body, _opts), do: {:ok, %{}}
+  def submit_review(ref, verdict, body, opts) do
+    ensure_started()
+
+    Agent.update(@name, fn s ->
+      update_in(s, [:submitted_reviews], fn rs ->
+        [%{ref: ref, verdict: verdict, body: body, opts: opts} | rs || []]
+      end)
+    end)
+
+    {:ok, %{}}
+  end
 
   @impl true
   def list_review_feedback(ref) do
@@ -237,7 +271,9 @@ defmodule Arbiter.Test.StubMerger do
                    update_branches: %{},
                    update_branch_result: :ok,
                    failing_checks: %{},
-                   merge_result: :ok
+                   merge_result: :ok,
+                   inline_comments: [],
+                   submitted_reviews: []
                  }
                end,
                name: @name

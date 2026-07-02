@@ -1065,6 +1065,93 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.review_automation == :flag
     end
+
+    test "worker_review: report_only automation persists :report_only mode (bd-36qzgx)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review report_only", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "automation" => "report_only",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+
+    test "worker_review: the propose alias persists :report_only mode (bd-36qzgx)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "review propose", workspace_id: ctx.ws.id})
+
+      _result =
+        Tools.worker_review(ctx.coordinator, %{
+          "task_id" => task.id,
+          "automation" => "propose",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+
+    test "worker_review: an infra repo_override resolves to :report_only (bd-36qzgx)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-infra-ws",
+          prefix: "rai",
+          config: %{
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"atlas" => "report_only"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "infra review", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "repo" => "atlas",
+          "pr_author" => "anyone",
+          "with_claude" => false
+        })
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :report_only
+    end
+  end
+
+  describe "review_greenlight/2 (bd-36qzgx)" do
+    test "refuses a coordinator scope without can_dispatch", ctx do
+      no_dispatch = %{ctx.coordinator | can_dispatch: false}
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.review_greenlight(no_dispatch, %{"record_id" => "whatever"})
+    end
+
+    test "requires a record_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.review_greenlight(ctx.coordinator, %{})
+      assert msg =~ "record_id"
+    end
+
+    test "rejects a non-array, non-\"all\" select", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.review_greenlight(ctx.coordinator, %{
+                 "record_id" => "r1",
+                 "select" => "some"
+               })
+
+      assert msg =~ "select"
+    end
+
+    test "an unknown record_id is reported not-found", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.review_greenlight(ctx.coordinator, %{"record_id" => "no-such-record"})
+
+      assert msg =~ "no review record" or msg =~ "not"
+    end
   end
 
   describe "worker_stop/2" do

@@ -141,6 +141,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     ticks: 0,
     last_terminated: [],
     last_rereviewed: [],
+    last_reported: [],
     last_flagged: [],
     last_replied: [],
     last_escalated: [],
@@ -200,6 +201,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          ticks: state.ticks,
          last_terminated: state.last_terminated,
          last_rereviewed: state.last_rereviewed,
+         last_reported: state.last_reported,
          last_flagged: state.last_flagged,
          last_replied: state.last_replied,
          last_escalated: state.last_escalated,
@@ -244,6 +246,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         last_tick_at: DateTime.utc_now(),
         last_terminated: for({:terminated, id} <- outcomes, do: id),
         last_rereviewed: for({:rereviewed, id} <- outcomes, do: id),
+        last_reported: for({:reported, id} <- outcomes, do: id),
         last_flagged: for({:flagged, id} <- outcomes, do: id),
         last_replied: for({:replied, id} <- outcomes, do: id),
         last_escalated: for({:escalated, id} <- outcomes, do: id),
@@ -283,6 +286,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # Returns a tagged outcome for the tick's bookkeeping:
   #   {:terminated, id} — the source PR merged/closed and the engagement closed
   #   {:rereviewed, id} — a new-commit re-review was posted this tick
+  #   {:reported, id}   — :report_only mode re-reviewed and reported proposed
+  #                        comments to the coordinator (posted nothing)
   #   {:flagged, id}    — :flag mode surfaced new commits as a mailbox flag
   #   {:replied, id}    — :auto mode dispatched a reply to an author reply
   #   {:escalated, id}  — :flag mode escalated an author reply to the coordinator
@@ -453,6 +458,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp act_on_new_commits(engagement, head, adapter, workspace, opts) do
     case automation_mode(engagement) do
       :auto -> run_rereview(engagement, head, adapter, workspace, opts)
+      :report_only -> report_rereview(engagement, head, adapter, workspace, opts)
       :flag -> flag_new_commits(engagement, head, workspace)
     end
   end
@@ -501,6 +507,93 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         nil
     end
   end
+
+  # `:report_only` automation mode (bd-36qzgx): run the full re-review of the new
+  # diff but post NOTHING to the PR. Instead, surface the proposed comments +
+  # recommended verdict to the coordinator mailbox so a human can greenlight what
+  # posts. On success we persist the reported findings (so the relevance gate and
+  # dedupe track them) and advance `last_reviewed_sha`.
+  defp report_rereview(%Issue{} = engagement, head, adapter, workspace, opts) do
+    _reviewer = Agents.reviewer_for_workspace(workspace)
+    :ok = Agents.prepare(workspace, :review_agent)
+
+    prior_keys = prior_finding_keys(engagement.posted_findings)
+
+    state = %{
+      mode: :adapter,
+      adapter: adapter,
+      mr_ref: engagement.source_pr,
+      workspace: workspace,
+      adapter_opts: opts,
+      report_only: true,
+      check_runner: dedupe_runner(prior_keys)
+    }
+
+    case Arbiter.Workflow.run(CodeReview, state) do
+      {:ok, final} ->
+        findings = Map.get(final, :findings) || []
+        proposed = Map.get(final, :proposed_comments) || []
+        verdict = Map.get(final, :verdict)
+
+        report_to_coordinator(engagement, head, proposed, verdict)
+        persist_rereview(engagement, head, findings)
+
+        Logger.info(
+          "ReviewPatrol: report-only re-review of engagement #{engagement.id} on #{head} " <>
+            "(#{length(proposed)} proposed, posted 0)"
+        )
+
+        {:reported, engagement.id}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewPatrol: report-only re-review failed for engagement #{engagement.id}: " <>
+            inspect(reason)
+        )
+
+        nil
+    end
+  end
+
+  # Surface a report-only re-review's proposed comments to the coordinator.
+  # Best-effort — a mailbox hiccup never breaks the tick.
+  defp report_to_coordinator(%Issue{workspace_id: ws_id} = engagement, head, proposed, verdict)
+       when is_binary(ws_id) do
+    lines =
+      proposed
+      |> Enum.with_index()
+      |> Enum.map(fn {c, i} ->
+        file = c[:file] || c["file"] || "?"
+        line = c[:line] || c["line"]
+        loc = if line, do: "#{file}:#{line}", else: file
+        body = c[:body] || c["body"] || ""
+        "  [#{i}] #{loc}\n      #{body}"
+      end)
+      |> Enum.join("\n")
+
+    body =
+      "New commits (head #{head}) on PR #{engagement.source_pr} were re-reviewed in " <>
+        "report-only mode — NOTHING was posted. Recommended verdict: #{verdict}.\n\n" <>
+        "Proposed comments:\n" <> lines
+
+    _ =
+      safe(fn ->
+        Arbiter.Messages.Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          from_ref: engagement.id,
+          workspace_id: ws_id,
+          directive_ref: engagement.id,
+          subject:
+            "Report-only re-review: PR #{engagement.source_pr} — #{length(proposed)} proposed comment(s)",
+          body: body
+        })
+      end)
+
+    :ok
+  end
+
+  defp report_to_coordinator(_engagement, _head, _proposed, _verdict), do: :ok
 
   # `:flag` automation mode: surface the new commits as a durable mailbox flag
   # rather than re-reviewing, then advance the cursor so the same commits aren't
@@ -628,7 +721,10 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     outcome =
       case automation_mode(engagement) do
         :auto -> dispatch_reply(engagement, thread, comment, adapter, workspace)
-        :flag -> escalate_reply(engagement, thread, comment, adapter)
+        # report-only and flag both post NOTHING to the PR — escalate the reply
+        # to the coordinator and let a human decide (bd-36qzgx).
+        mode when mode in [:report_only, :flag] ->
+          escalate_reply(engagement, thread, comment, adapter)
       end
 
     # Advance the high-watermark cursor whether we replied, escalated, or the
@@ -792,7 +888,13 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # value is treated conservatively as `:flag` — matching `ReviewAutomation`'s
   # default — so ReviewPatrol never auto-posts against an engagement that was
   # never opted into automatic re-review.
+  #
+  #   :auto        — re-review AND post to the PR.
+  #   :report_only — re-review but post NOTHING; report proposed comments to the
+  #                  coordinator to greenlight (infra default, bd-36qzgx).
+  #   :flag        — do NOT review; surface new commits / replies as a flag.
   defp automation_mode(%Issue{review_automation: :auto}), do: :auto
+  defp automation_mode(%Issue{review_automation: :report_only}), do: :report_only
   defp automation_mode(_engagement), do: :flag
 
   # CI has "settled" when the head's pipeline is not actively running/pending, so

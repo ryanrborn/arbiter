@@ -51,6 +51,8 @@ defmodule Arbiter.Reviews.Record do
 
   @verdicts ~w(approve request_changes)a
   @statuses ~w(running completed failed)a
+  @modes ~w(auto report_only)a
+  @greenlight_statuses ~w(pending posted none)a
 
   sqlite do
     table "external_review_records"
@@ -76,9 +78,12 @@ defmodule Arbiter.Reviews.Record do
         :strategy,
         :link,
         :status,
+        :mode,
         :verdict,
         :finding_count,
         :findings_summary,
+        :proposed_comments,
+        :greenlight_status,
         :model,
         :cost_usd,
         :tokens_in,
@@ -91,11 +96,18 @@ defmodule Arbiter.Reviews.Record do
     end
 
     update :complete do
+      # Non-atomic: the atomic bulk-update path emits `ARRAY[?] IS DISTINCT FROM`
+      # for the `proposed_comments` array column, which SQLite cannot parse.
+      require_atomic? false
+
       accept [
         :status,
+        :mode,
         :verdict,
         :finding_count,
         :findings_summary,
+        :proposed_comments,
+        :greenlight_status,
         :model,
         :cost_usd,
         :tokens_in,
@@ -107,6 +119,13 @@ defmodule Arbiter.Reviews.Record do
 
     update :update_pr_state do
       accept [:pr_state]
+    end
+
+    # Record the outcome of a coordinator greenlight: which proposed comments
+    # were posted to the PR (bd-36qzgx). `greenlight_status` flips to :posted
+    # (or :none when the coordinator approved nothing).
+    update :greenlight do
+      accept [:greenlight_status, :verdict]
     end
   end
 
@@ -150,10 +169,51 @@ defmodule Arbiter.Reviews.Record do
       constraints one_of: @statuses
     end
 
+    attribute :mode, :atom do
+      public? true
+      default :auto
+      constraints one_of: @modes
+
+      description """
+      Review mode (bd-36qzgx):
+        :auto        — findings + verdict were posted to the PR directly.
+        :report_only — the review posted NOTHING; findings + proposed comments
+                       were surfaced to the coordinator to greenlight.
+      """
+    end
+
     attribute :verdict, :atom do
       public? true
       constraints one_of: @verdicts
-      description "approve or request_changes; nil while running or on failure."
+
+      description """
+      approve or request_changes; nil while running or on failure. For a
+      :report_only review this is the *recommended* verdict, not one submitted
+      to the PR.
+      """
+    end
+
+    attribute :proposed_comments, {:array, :map} do
+      public? true
+      default []
+
+      description """
+      For a :report_only review, the per-finding proposed inline comments — each
+      a map with "file", "line", "severity", "message", and "body" (the exact
+      comment text). The greenlight step posts the coordinator-approved subset.
+      Empty for :auto reviews (they post directly).
+      """
+    end
+
+    attribute :greenlight_status, :atom do
+      public? true
+      constraints one_of: @greenlight_statuses
+
+      description """
+      For a :report_only review: :pending until the coordinator greenlights,
+      :posted once the approved subset is posted, :none when the coordinator
+      approved nothing. Nil for :auto reviews.
+      """
     end
 
     attribute :finding_count, :integer do
@@ -223,4 +283,10 @@ defmodule Arbiter.Reviews.Record do
 
   @doc "All valid verdict atoms."
   def verdicts, do: @verdicts
+
+  @doc "All valid mode atoms."
+  def modes, do: @modes
+
+  @doc "All valid greenlight-status atoms."
+  def greenlight_statuses, do: @greenlight_statuses
 end

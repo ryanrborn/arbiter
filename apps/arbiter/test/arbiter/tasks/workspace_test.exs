@@ -545,6 +545,23 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert {:ok, _ws} = Ash.create(Workspace, %{name: "ra-or-valid2", config: config})
     end
 
+    test "accepts report_only / propose modes for default and repo_overrides (bd-36qzgx)" do
+      config = %{
+        "review_automation" => %{
+          "default" => "report_only",
+          "repo_overrides" => %{
+            "atlas" => "report_only",
+            "verus-infrastructure" => "propose",
+            "fast_lane" => "auto"
+          }
+        }
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "ra-or-report-only", config: config})
+      assert ws.config["review_automation"]["default"] == "report_only"
+      assert ws.config["review_automation"]["repo_overrides"]["atlas"] == "report_only"
+    end
+
     test "rejects review_automation.repo_overrides with invalid mode value" do
       config = %{"review_automation" => %{"repo_overrides" => %{"atlas" => "always"}}}
 

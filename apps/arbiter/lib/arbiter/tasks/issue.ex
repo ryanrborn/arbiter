@@ -498,12 +498,15 @@ defmodule Arbiter.Tasks.Issue do
     attribute :review_automation, :atom do
       allow_nil? true
       public? true
-      constraints one_of: [:auto, :flag]
+      constraints one_of: [:auto, :report_only, :flag]
 
       description """
       Engagement automation mode for ReviewPatrol:
-        :auto — re-review automatically on new commits.
-        :flag — surface new commits as a flag rather than re-reviewing.
+        :auto        — re-review automatically on new commits AND post to the PR.
+        :report_only — re-review on new commits but post NOTHING; report the
+                       proposed comments to the coordinator to greenlight (infra
+                       default, bd-36qzgx).
+        :flag        — surface new commits / replies as a flag; do not review.
       Nullable; the effective default is resolved from workspace policy (task B).
       """
     end

@@ -84,7 +84,12 @@ defmodule Arbiter.Reviews.ExternalReview do
           follow_up: boolean() | nil,
           # Explicit engagement automation override; otherwise resolved from the
           # workspace `review_automation` policy against the PR author.
-          automation: :auto | :flag | String.t() | nil,
+          automation: :auto | :report_only | :flag | String.t() | nil,
+          # Force report-only (propose) mode: run the full review but post NOTHING
+          # to the PR — surface findings + proposed comments to the coordinator to
+          # greenlight (bd-36qzgx). When unset, resolved from `automation` /
+          # workspace policy: a :report_only mode ⇒ report-only.
+          report_only: boolean() | nil,
           # Read-only tracker context (e.g. the ticket the PR implements) carried
           # onto the engagement for re-review intent (#638).
           tracker_context_ref: String.t() | nil,
@@ -137,11 +142,13 @@ defmodule Arbiter.Reviews.ExternalReview do
     opts = Map.new(opts)
 
     with {:ok, prepared} <- prepare(opts) do
+      opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
       case run_workflow(prepared, opts) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
           write_usage_event(record, prepared, result)
+          maybe_notify_coordinator(prepared, result, record)
           {:ok, result}
 
         {:error, _} = err ->
@@ -164,6 +171,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     opts = Map.new(opts)
 
     with {:ok, prepared} <- prepare(opts) do
+      opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
       start_async(prepared, opts, record)
       {:ok, ack(prepared, record)}
@@ -189,6 +197,161 @@ defmodule Arbiter.Reviews.ExternalReview do
     do: "#{inspect(mod)}: #{msg}"
 
   def describe_error(other), do: "external review failed: #{inspect(other)}"
+
+  @doc """
+  Greenlight step for a report-only review (bd-36qzgx): post the
+  coordinator-approved subset of a review's proposed comments to the PR — and
+  nothing else. Un-approved findings never post.
+
+  Opts:
+
+    * `record_id` (required) — the `Arbiter.Reviews.Record` id of the report-only
+      review whose `proposed_comments` to post.
+    * `select` — which proposed comments to approve: omit (or `"all"` / `:all`)
+      for every proposed comment, or a list of zero-based indices into the
+      review's `proposed_comments`. An empty list posts nothing (records
+      `greenlight_status: :none`).
+    * `post_verdict` — whether to also submit the recommended verdict as a
+      single review. Defaults to `true` when at least one comment is approved,
+      `false` when none are (so "approve nothing" is a true no-op on the PR).
+    * `repo` — optional local checkout (only needed by adapters that resolve
+      owner/repo from a bare PR number).
+
+  Returns `{:ok, %{mr_ref, posted, selected, verdict_posted, link}}`.
+  """
+  @spec greenlight(map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def greenlight(opts) do
+    opts = Map.new(opts)
+
+    with {:ok, record} <- fetch_record(opts),
+         {:ok, workspace} <- resolve_workspace(record.workspace_id),
+         adapter = Mergers.for_workspace(workspace),
+         strategy = Workspace.merger_strategy(workspace),
+         :ok <- ensure_supports_external(adapter, strategy),
+         repo_path = resolve_repo_path(workspace, Map.get(opts, :repo)),
+         :ok <- Mergers.prepare(workspace) do
+      do_greenlight(record, adapter, repo_path, opts)
+    end
+  end
+
+  defp do_greenlight(%Record{} = record, adapter, repo_path, opts) do
+    mr_ref = record.pr_ref
+    proposed = record.proposed_comments || []
+    selected = select_comments(proposed, opts)
+    adapter_opts = adapter_opts(repo_path)
+    post_verdict? = Map.get(opts, :post_verdict, selected != [])
+
+    with {:ok, posted} <- post_selected_comments(adapter, mr_ref, selected, adapter_opts),
+         {:ok, verdict_posted} <-
+           maybe_submit_verdict(adapter, mr_ref, record, post_verdict?, adapter_opts) do
+      mark_greenlit(record, selected)
+
+      Logger.info(
+        "ExternalReview.greenlight: #{mr_ref} posted #{length(posted)}/#{length(proposed)} " <>
+          "proposed comment(s)#{if verdict_posted, do: " + verdict", else: ""}"
+      )
+
+      {:ok,
+       %{
+         mr_ref: mr_ref,
+         posted: length(posted),
+         selected: length(selected),
+         proposed: length(proposed),
+         verdict_posted: verdict_posted,
+         verdict: record.verdict,
+         link: safe_link(adapter, mr_ref)
+       }}
+    end
+  end
+
+  # Load the report-only review record by id.
+  defp fetch_record(opts) do
+    case string_opt(opts, :record_id) || string_opt(opts, :review_record_id) do
+      id when is_binary(id) and id != "" ->
+        case Ash.get(Record, id) do
+          {:ok, %Record{} = rec} -> {:ok, rec}
+          _ -> {:error, {:not_found, "no review record #{id}"}}
+        end
+
+      _ ->
+        {:error, {:invalid, "greenlight requires a record_id"}}
+    end
+  rescue
+    _ -> {:error, {:not_found, "review record lookup failed"}}
+  end
+
+  # Which proposed comments the coordinator approved. Default = all; a list of
+  # zero-based indices selects a subset; an empty list posts nothing.
+  defp select_comments(proposed, opts) do
+    case Map.get(opts, :select) do
+      nil -> proposed
+      :all -> proposed
+      "all" -> proposed
+      idxs when is_list(idxs) -> idxs |> Enum.map(&Enum.at(proposed, &1)) |> Enum.reject(&is_nil/1)
+      _ -> proposed
+    end
+  end
+
+  defp post_selected_comments(adapter, mr_ref, selected, adapter_opts) do
+    Enum.reduce_while(selected, {:ok, []}, fn comment, {:ok, acc} ->
+      case safe_adapter_call(adapter, :post_inline_comment, [
+             mr_ref,
+             to_finding(comment),
+             adapter_opts
+           ]) do
+        {:ok, resp} -> {:cont, {:ok, [resp | acc]}}
+        :ok -> {:cont, {:ok, acc}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp maybe_submit_verdict(_adapter, _mr_ref, _record, false, _opts), do: {:ok, false}
+
+  defp maybe_submit_verdict(adapter, mr_ref, %Record{} = record, true, adapter_opts) do
+    verdict = record.verdict || :approve
+    finding_count = record.finding_count || 0
+
+    body =
+      "Greenlit review (#{finding_count} finding(s)) — recommendation: " <>
+        String.upcase(to_string(verdict)) <> "."
+
+    case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, adapter_opts]) do
+      {:ok, _} -> {:ok, true}
+      :ok -> {:ok, true}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Record the outcome: :posted when we posted at least one comment, :none when
+  # the coordinator approved nothing.
+  defp mark_greenlit(%Record{} = record, selected) do
+    status = if selected == [], do: :none, else: :posted
+
+    case Ash.update(record, %{greenlight_status: status}, action: :greenlight) do
+      {:ok, _} -> :ok
+      {:error, _} -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  # Rehydrate a string-keyed stored proposed comment into the atom-keyed finding
+  # shape the adapters' post_inline_comment/3 expects.
+  defp to_finding(%{} = c) do
+    %{
+      severity: severity_atom(c["severity"] || c[:severity]),
+      file: c["file"] || c[:file],
+      line: c["line"] || c[:line],
+      message: c["message"] || c[:message]
+    }
+  end
+
+  defp severity_atom(s) when s in [:error, :warning, :info], do: s
+  defp severity_atom("error"), do: :error
+  defp severity_atom("warning"), do: :warning
+  defp severity_atom("info"), do: :info
+  defp severity_atom(_), do: :info
 
   # ---- internals -----------------------------------------------------------
 
@@ -216,6 +379,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp run_workflow(prepared, opts) do
     %{adapter: adapter, mr_ref: mr_ref, workspace: workspace, repo_path: repo_path} = prepared
+    report_only = Map.get(opts, :report_only, false)
 
     state =
       %{
@@ -226,24 +390,157 @@ defmodule Arbiter.Reviews.ExternalReview do
         # (Mergers.prepare/1) at the start of every step — required when the
         # workflow runs in the async Task's process, not the caller's.
         workspace: workspace,
-        adapter_opts: adapter_opts(repo_path)
+        adapter_opts: adapter_opts(repo_path),
+        # report-only (propose): CodeReview reads the diff + computes findings /
+        # verdict but posts NOTHING; the proposed comments land in state.
+        report_only: report_only
       }
       |> maybe_put_check_runner(opts)
 
     case Arbiter.Workflow.run(CodeReview, state) do
       {:ok, final} ->
-        # After the verdict posts, adopt the PR into ReviewPatrol by opening a
-        # review_only engagement (Option A). Best-effort: a failure here never
-        # fails the review itself — the verdict is already on the PR. The
+        # After the verdict posts (or, for report-only, is computed), adopt the
+        # PR into ReviewPatrol by opening a review_only engagement (Option A).
+        # Best-effort: a failure here never fails the review itself. The
         # first-pass findings seed the engagement's `posted_findings` so
         # ReviewPatrol's relevance gate (re-review only when a new commit touches
         # a previously-flagged file) has something to match against.
         engagement = maybe_create_engagement(prepared, opts, Map.get(final, :findings) || [])
-        {:ok, result(prepared, final, engagement)}
+        {:ok, result(prepared, final, engagement, report_only)}
 
       {:error, _} = err ->
         err
     end
+  end
+
+  # Resolve whether this review runs report-only (post nothing, await greenlight).
+  # An explicit `report_only: true` or `automation: "report_only"|"propose"` wins;
+  # otherwise the workspace `review_automation` policy decides — a repo_override or
+  # default of `report_only` (e.g. infra repos atlas / verus-infrastructure) makes
+  # the review report-only. Author is not needed: the author-based path only ever
+  # yields :auto, never :report_only.
+  defp put_report_only(opts, prepared) do
+    Map.put(opts, :report_only, report_only_mode?(opts, prepared))
+  end
+
+  defp report_only_mode?(opts, prepared) do
+    cond do
+      Map.get(opts, :report_only) == true ->
+        true
+
+      true ->
+        case ReviewAutomation.normalize(Map.get(opts, :automation)) do
+          :report_only ->
+            true
+
+          mode when mode in [:auto, :flag] ->
+            false
+
+          nil ->
+            config = workspace_config(prepared.workspace)
+            ReviewAutomation.resolve(config, nil, Map.get(opts, :repo)) == :report_only
+        end
+    end
+  end
+
+  defp workspace_config(%Workspace{config: config}), do: config
+  defp workspace_config(_), do: nil
+
+  # ---- report-only coordinator notification (bd-36qzgx) --------------------
+
+  # After a report-only review completes, surface the findings + per-finding
+  # proposed comment text to the coordinator mailbox so a human can greenlight
+  # which comments actually post. Best-effort: a mailbox failure never fails the
+  # review. No-op for a normal (auto) review — that already posted to the PR.
+  defp maybe_notify_coordinator(prepared, %{report_only: true} = result, record) do
+    ws_id = prepared.workspace && prepared.workspace.id
+
+    if is_binary(ws_id) do
+      safe_call(fn ->
+        Arbiter.Messages.Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          from_ref: "external_review",
+          workspace_id: ws_id,
+          directive_ref: String.slice(prepared.mr_ref, 0, 255),
+          subject:
+            "Report-only review: #{prepared.mr_ref} — #{result.findings} proposed comment(s), " <>
+              "recommend #{result.verdict}",
+          body: render_report_body(prepared, result, record)
+        })
+      end)
+    end
+
+    :ok
+  end
+
+  defp maybe_notify_coordinator(_prepared, _result, _record), do: :ok
+
+  defp render_report_body(prepared, result, record) do
+    rec_id = record && record.id
+    proposed = Map.get(result, :proposed_comments) || []
+
+    comments =
+      case proposed do
+        [] ->
+          "(no findings — recommended verdict: #{result.verdict})"
+
+        list ->
+          list
+          |> Enum.with_index()
+          |> Enum.map(fn {c, i} ->
+            file = c[:file] || c["file"] || "?"
+            line = c[:line] || c["line"]
+            loc = if line, do: "#{file}:#{line}", else: file
+            body = c[:body] || c["body"] || ""
+            "  [#{i}] #{loc}\n      #{body}"
+          end)
+          |> Enum.join("\n")
+      end
+
+    """
+    Report-only review of #{prepared.pr} (#{prepared.mr_ref}).
+    #{if is_binary(result.link) and result.link != "", do: "Link: #{result.link}\n", else: ""}\
+    Recommended verdict: #{result.verdict}. Nothing was posted to the PR.
+
+    Proposed comments:
+    #{comments}
+
+    To post the approved subset, greenlight this review#{if rec_id, do: " (record #{rec_id})", else: ""}:
+      review_greenlight record_id=#{rec_id} select=all        # post all
+      review_greenlight record_id=#{rec_id} select=[0,2]      # post only #0 and #2
+      review_greenlight record_id=#{rec_id} select=[]         # approve nothing
+    """
+  end
+
+  # Persist the (string-keyed) proposed comments on the audit record for a
+  # report-only review so the greenlight step can post the approved subset.
+  defp maybe_put_proposed(attrs, false, _proposed), do: attrs
+
+  defp maybe_put_proposed(attrs, true, proposed) do
+    Map.put(attrs, :proposed_comments, stringify_proposed(proposed))
+  end
+
+  defp stringify_proposed(proposed) do
+    proposed
+    |> List.wrap()
+    |> Enum.map(fn c ->
+      %{
+        "file" => c[:file] || c["file"],
+        "line" => c[:line] || c["line"],
+        "severity" => to_string(c[:severity] || c["severity"] || ""),
+        "message" => c[:message] || c["message"],
+        "body" => c[:body] || c["body"]
+      }
+    end)
+  end
+
+  defp safe_adapter_call(adapter, fun, args) do
+    apply(adapter, fun, args)
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp adapter_opts(repo_path) when is_binary(repo_path), do: %{repo_path: repo_path}
@@ -264,10 +561,11 @@ defmodule Arbiter.Reviews.ExternalReview do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
           write_usage_event(record, prepared, result)
+          maybe_notify_coordinator(prepared, result, record)
 
           Logger.info(
             "ExternalReview: #{result.strategy} #{result.mr_ref} → #{result.verdict} " <>
-              "(#{result.findings} finding(s)) #{result.link}"
+              "(#{result.findings} finding(s), #{result.mode}) #{result.link}"
           )
 
         {:error, reason} ->
@@ -288,20 +586,27 @@ defmodule Arbiter.Reviews.ExternalReview do
       mr_ref: prepared.mr_ref,
       strategy: prepared.strategy,
       link: prepared.link,
-      review_record_id: record && record.id
+      review_record_id: record && record.id,
+      mode: record && record.mode
     }
   end
 
-  defp result(prepared, final, engagement) do
+  defp result(prepared, final, engagement, report_only) do
+    proposed = Map.get(final, :proposed_comments) || []
+
     %{
       external: true,
       pr: prepared.pr,
       mr_ref: prepared.mr_ref,
       strategy: prepared.strategy,
       link: prepared.link,
+      mode: if(report_only, do: :report_only, else: :auto),
+      report_only: report_only,
       verdict: Map.get(final, :verdict),
       findings: length(Map.get(final, :findings) || []),
       findings_list: Map.get(final, :findings) || [],
+      # Report-only: the per-finding proposed inline comments (posted nothing).
+      proposed_comments: proposed,
       review_path: Map.get(final, :review_path),
       # Structured usage from the check runner (model, cost, tokens) — populated
       # when the default Claude invoker ran; nil when a stub runner was used.
@@ -540,21 +845,20 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   # Resolve the engagement's automation mode: an explicit override wins,
   # otherwise the workspace review_automation policy against the actual PR author.
-  defp resolve_automation(opts, %Workspace{config: config}, pr_author, rig_name) do
-    case Map.get(opts, :automation) do
-      m when m in [:auto, :flag] -> m
-      "auto" -> :auto
-      "flag" -> :flag
-      _ -> ReviewAutomation.resolve(config, pr_author, rig_name)
-    end
-  end
+  # A report-only review always yields a :report_only engagement so re-reviews
+  # stay report-only.
+  defp resolve_automation(opts, workspace, pr_author, rig_name) do
+    config = workspace_config(workspace)
 
-  defp resolve_automation(opts, _workspace, pr_author, _rig_name) do
-    case Map.get(opts, :automation) do
-      m when m in [:auto, :flag] -> m
-      "auto" -> :auto
-      "flag" -> :flag
-      _ -> ReviewAutomation.resolve(nil, pr_author)
+    cond do
+      Map.get(opts, :report_only) == true ->
+        :report_only
+
+      mode = ReviewAutomation.normalize(Map.get(opts, :automation)) ->
+        mode
+
+      true ->
+        ReviewAutomation.resolve(config, pr_author, rig_name)
     end
   end
 
@@ -626,6 +930,8 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp create_review_record(%{mr_ref: mr_ref, workspace: workspace} = prepared, opts) do
     ws_id = workspace && workspace.id
 
+    report_only = Map.get(opts, :report_only, false)
+
     attrs = %{
       pr_ref: mr_ref,
       pr: Map.get(prepared, :pr),
@@ -633,6 +939,8 @@ defmodule Arbiter.Reviews.ExternalReview do
       strategy: to_string(prepared.strategy),
       link: prepared.link,
       status: :running,
+      mode: if(report_only, do: :report_only, else: :auto),
+      greenlight_status: if(report_only, do: :pending, else: nil),
       dispatched_by: string_opt(opts, :dispatched_by),
       started_at: DateTime.utc_now()
     }
@@ -657,6 +965,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     verdict = Map.get(result, :verdict)
     engagement_id = Map.get(result, :engagement)
     usage = Map.get(result, :check_usage) || %{}
+    report_only = Map.get(result, :report_only, false)
 
     attrs = %{
       status: status,
@@ -670,6 +979,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       tokens_in: Map.get(usage, :tokens_in),
       tokens_out: Map.get(usage, :tokens_out)
     }
+    |> maybe_put_proposed(report_only, Map.get(result, :proposed_comments) || [])
 
     case Ash.update(record, attrs, action: :complete) do
       {:ok, _} -> :ok

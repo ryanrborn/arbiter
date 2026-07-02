@@ -612,6 +612,100 @@ defmodule Arbiter.Workflows.CodeReviewTest do
   end
 
   # =======================================================================
+  # Report-only (propose) mode — bd-36qzgx
+  # =======================================================================
+
+  describe "report_only mode — file_findings + verdict post NOTHING" do
+    test "file_findings captures proposed comments and posts no inline comment" do
+      Process.register(self(), :code_review_test_pid)
+
+      try do
+        findings = [
+          %{severity: :error, file: "a.ex", line: 1, message: "bad"},
+          %{severity: :warning, file: "b.ex", line: 2, message: "meh"}
+        ]
+
+        state = %{
+          mode: :adapter,
+          adapter: Stubs.CommentSpy,
+          mr_ref: "#7",
+          report_only: true,
+          findings: findings
+        }
+
+        assert {:ok, %{proposed_comments: proposed}} =
+                 CodeReview.run_step(:file_findings, state)
+
+        # NOTHING posted — the CommentSpy would have sent a :posted message.
+        refute_received {:posted, _, _}
+
+        assert [
+                 %{file: "a.ex", line: 1, severity: :error, body: "**ERROR**: bad"},
+                 %{file: "b.ex", line: 2, severity: :warning, body: "**WARNING**: meh"}
+               ] = proposed
+      after
+        Process.unregister(:code_review_test_pid)
+      end
+    end
+
+    test "verdict computes the recommended verdict + summary but submits nothing" do
+      Process.register(self(), :verdict_test_pid)
+
+      try do
+        findings = [%{severity: :error, file: "a.ex", line: 1, message: "boom"}]
+
+        state = %{
+          mode: :adapter,
+          adapter: Stubs.VerdictSpy,
+          mr_ref: "#7",
+          report_only: true,
+          findings: findings
+        }
+
+        assert {:ok, result} = CodeReview.run_step(:verdict, state)
+        assert result.verdict == :request_changes
+        assert result.proposed_review_body =~ "Requesting changes"
+
+        # VerdictSpy would have sent {:submitted, ...} had submit_review been called.
+        refute_received {:submitted, _, _, _}
+      after
+        Process.unregister(:verdict_test_pid)
+      end
+    end
+
+    test "full workflow in report_only mode makes ZERO writes to the adapter" do
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "x.ex", line: 3, message: "leak"},
+           %{severity: :info, file: "y.ex", line: 9, message: "nit"}
+         ]}
+      end
+
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.queue_get("#42", [%{status: :open}])
+
+      initial = %{
+        mode: :adapter,
+        adapter: Arbiter.Test.StubMerger,
+        mr_ref: "#42",
+        report_only: true,
+        check_runner: runner
+      }
+
+      assert {:ok, final} = Arbiter.Workflow.run(CodeReview, initial)
+
+      assert final.verdict == :request_changes
+      assert length(final.proposed_comments) == 2
+      assert final.proposed_review_body =~ "Requesting changes"
+
+      # The hard invariant: nothing was posted / submitted.
+      assert Arbiter.Test.StubMerger.inline_comments() == []
+      assert Arbiter.Test.StubMerger.submitted_reviews() == []
+    end
+  end
+
+  # =======================================================================
   # End-to-end — :local
   # =======================================================================
 
