@@ -102,6 +102,32 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
     task
   end
 
+  # Register a dummy process as the live worker for `task_id`. The finalizer's
+  # live_worker?/1 uses Arbiter.Worker.whereis/1 (a lookup in Arbiter.Worker.Registry),
+  # so any pid registered under that Registry for the id makes the task "live".
+  defp register_live_worker(task_id) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        {:ok, _} = Registry.register(Arbiter.Worker.Registry, task_id, nil)
+        send(parent, :registered)
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    receive do
+      :registered -> :ok
+    after
+      1_000 -> flunk("dummy worker did not register")
+    end
+
+    on_exit(fn -> send(pid, :stop) end)
+    pid
+  end
+
   # Minimal GitHub PR GET stub — returns merged or open.
   defp pr_get_stub(number, status) do
     merged = status == :merged
@@ -208,6 +234,65 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       {:ok, refreshed} = Ash.get(Issue, task.id)
       assert refreshed.status == :closed
       assert MergedPRFinalizer.state(name).ticks == 2
+    end
+  end
+
+  describe "tick/1 — live-worker guard (bd-38l3px)" do
+    test "finalizing one merged/orphaned bead leaves an unrelated in_progress bead alive", %{
+      ws: ws
+    } do
+      # Bead A: an orphaned bead (no live worker) whose PR really merged — the
+      # finalizer's legitimate job: close it.
+      merged = create_task(ws, "700")
+      {:ok, _} = Ash.update(merged, %{status: :in_progress}, action: :update)
+
+      # Bead B: an unrelated in_progress bead being actively worked. It carries a
+      # STALE pr_ref (a merged PR from a prior, reopened run) — exactly the
+      # bd-38l3px silent-loss shape. Its live worker must protect it.
+      victim = create_task(ws, "701")
+      {:ok, _} = Ash.update(victim, %{status: :in_progress}, action: :update)
+      register_live_worker(victim.id)
+
+      # Both PRs report merged; only the orphaned one may be closed.
+      stub(fn conn ->
+        case Regex.run(~r{^/repos/owner/repo/pulls/(\d+)(/reviews)?$}, conn.request_path) do
+          [_, _number, "/reviews"] ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          [_, number] ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => String.to_integer(number),
+              "merged" => true,
+              "state" => "closed",
+              "html_url" => "https://github.com/owner/repo/pull/#{number}"
+            })
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{"message" => "Not Found"})
+        end
+      end)
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, merged.id).status == :closed
+      # The unrelated in_progress bead survives the concurrent finalize.
+      assert Ash.get!(Issue, victim.id).status == :in_progress
+    end
+
+    test "follow-up bead with a live worker is not closed on source-PR merge", %{ws: ws} do
+      task = create_follow_up_task(ws, 702)
+      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      register_live_worker(task.id)
+
+      stub(pr_get_stub(702, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).status == :in_progress
     end
   end
 

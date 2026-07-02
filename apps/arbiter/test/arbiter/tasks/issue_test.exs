@@ -214,6 +214,24 @@ defmodule Arbiter.Tasks.IssueTest do
       assert err |> Exception.message() |> String.contains?("must be :closed")
     end
 
+    test "clears stale pr_ref and source_pr so a fresh attempt starts clean (bd-38l3px)",
+         %{ws: ws} do
+      {:ok, issue} = Ash.create(Issue, %{title: "opened-a-pr", workspace_id: ws.id})
+      # A prior run opened a PR (pr_ref) / was a PRPatrol follow-up (source_pr).
+      {:ok, issue} =
+        Ash.update(issue, %{pr_ref: "owner/repo#123", source_pr: "123"}, action: :update)
+
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
+
+      # A reopened bead is a fresh attempt — its prior PR reference must not
+      # linger, or MergedPRFinalizer would re-detect that merged PR and re-close
+      # the bead every reopen cycle.
+      assert reopened.status == :open
+      assert reopened.pr_ref == nil
+      assert reopened.source_pr == nil
+    end
+
     test "cannot update fields on a closed issue via :update (status guard)", %{closed: closed} do
       # Can update non-status fields? per FSM, only status is guarded — title should be OK
       assert {:ok, _updated} = Ash.update(closed, %{title: "renamed but still closed"})

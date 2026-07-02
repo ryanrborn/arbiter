@@ -67,6 +67,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Trackers.Sync
+  alias Arbiter.Worker
   require Ash.Query
   require Logger
 
@@ -220,12 +221,24 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   end
 
   defp maybe_finalize(%Issue{pr_ref: pr_ref} = task, adapter) do
-    with {:ok, %{status: :merged}} <- adapter.get(pr_ref) do
-      finalize(task)
-    else
-      # PR is open, approved-but-not-merged, closed without merge, or API error
-      # (including 404 for a PR in a different repo). All are no-ops.
-      _ -> :noop
+    cond do
+      # bd-38l3px: this sweep exists to finalize tasks whose worker/Watchdog is
+      # GONE (see moduledoc). A task with a LIVE worker is being actively worked
+      # — its own worker + Watchdog own the terminal transition. Closing it from
+      # here would silently kill an in-flight bead whose `pr_ref` is stale (a
+      # merged PR from a PRIOR run that was reopened/re-dispatched). Leave it to
+      # its worker.
+      live_worker?(task) ->
+        skip_live_worker(task)
+
+      true ->
+        with {:ok, %{status: :merged}} <- adapter.get(pr_ref) do
+          finalize(task)
+        else
+          # PR is open, approved-but-not-merged, closed without merge, or API
+          # error (including 404 for a PR in a different repo). All are no-ops.
+          _ -> :noop
+        end
     end
   end
 
@@ -263,11 +276,41 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
        ) do
     ref = source_pr || tracker_ref
 
-    with {:ok, %{status: :merged}} <- adapter.get(ref) do
-      finalize_follow_up(task, ref)
-    else
-      _ -> :noop
+    cond do
+      # bd-38l3px: same live-worker guard as maybe_finalize/2 — never close a
+      # bead that a worker is actively driving.
+      live_worker?(task) ->
+        skip_live_worker(task)
+
+      true ->
+        with {:ok, %{status: :merged}} <- adapter.get(ref) do
+          finalize_follow_up(task, ref)
+        else
+          _ -> :noop
+        end
     end
+  end
+
+  # bd-38l3px: does the task have a live worker registered right now? The sweep
+  # is a fallback for orphaned tasks (worker/Watchdog gone) — a task with a live
+  # worker is left to that worker to finalize, so a stale `pr_ref`/`source_pr`
+  # from a prior run can never make this sweep close an in-flight bead.
+  defp live_worker?(%Issue{id: id}) when is_binary(id) do
+    is_pid(Worker.whereis(id))
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp live_worker?(_), do: false
+
+  defp skip_live_worker(%Issue{} = task) do
+    Logger.debug(
+      "MergedPRFinalizer: skipping task=#{task.id} — a live worker owns it (not an orphan)"
+    )
+
+    :noop
   end
 
   # Closes a PRPatrol follow-up task local-only: no Sync.lifecycle, no
