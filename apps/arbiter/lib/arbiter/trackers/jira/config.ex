@@ -117,12 +117,17 @@ defmodule Arbiter.Trackers.Jira.Config do
   # them via `tracker.config.field_ids`; the merge in `field_ids/1` lets the
   # workspace win. Keeping them here (rather than only in workspace config)
   # means the gate is correct out-of-the-box for the common case.
+  #
+  # `fix_version` → `"fixVersions"` is the built-in Jira field for fix versions.
+  # Including it here lets the gating machinery discover and satisfy the
+  # fix-version gate when workflows require it (see bd-1924hi).
   @default_field_ids %{
     title: "summary",
     description: "description",
     assignee: "assignee",
     qa_notes: "customfield_10184",
-    deployment_notes: "customfield_10185"
+    deployment_notes: "customfield_10185",
+    fix_version: "fixVersions"
   }
 
   # Priority name → Arbiter priority integer (0 = highest, 4 = lowest).
@@ -153,7 +158,8 @@ defmodule Arbiter.Trackers.Jira.Config do
           field_ids: %{atom() => String.t()},
           priority_map: %{String.t() => 0..4},
           story_points_field: String.t() | nil,
-          difficulty_buckets: [{non_neg_integer(), 0..4}] | nil
+          difficulty_buckets: [{non_neg_integer(), 0..4}] | nil,
+          fix_version_name: String.t() | nil
         }
 
   @doc """
@@ -218,7 +224,8 @@ defmodule Arbiter.Trackers.Jira.Config do
          field_ids: field_ids(raw),
          priority_map: priority_map(raw),
          story_points_field: story_points_field(raw),
-         difficulty_buckets: difficulty_buckets(raw)
+         difficulty_buckets: difficulty_buckets(raw),
+         fix_version_name: stringy(Map.get(raw, "fix_version_name"))
        }}
     end
   end

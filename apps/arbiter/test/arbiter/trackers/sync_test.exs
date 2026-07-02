@@ -550,4 +550,292 @@ defmodule Arbiter.Trackers.SyncTest do
       assert escalations_for(ws.id) == []
     end
   end
+
+  # ---- Regression: fix version gating (bd-1924hi) ---------------------------
+  #
+  # LeoTech's Jira VR workflow requires a fix version before certain transitions.
+  # Two sub-cases:
+  #   A. Jira reports fixVersions as a required field via expand=transitions.fields
+  #      → the gating machinery pre-resolves from workspace `fix_version_name` and
+  #      pushes it before the transition (no retry needed).
+  #   B. Jira does NOT report fixVersions in transitions.fields (workflow validator
+  #      gap) → post_transition 400 with "fix version" error message → retry with
+  #      fix_version_name from workspace config.
+  # In both cases: exactly ONE escalation when the config is absent; zero when set.
+
+  defp jira_workspace_with_fix_version(status_map, fix_version_name) do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "jira-fv-ws-#{System.unique_integer([:positive])}",
+        prefix: "jfv",
+        config: %{
+          "tracker" => %{
+            "type" => "jira",
+            "config" => %{
+              "host" => "leotechnologies.atlassian.net",
+              "project_key" => "VR",
+              "credentials_ref" => "env:#{@env}",
+              "email" => "tester@example.com",
+              "status_map" => status_map,
+              "fix_version_name" => fix_version_name
+            }
+          }
+        }
+      })
+
+    ws
+  end
+
+  describe "fix version gating via gating_fields (bd-1924hi case A)" do
+    # Jira reports fixVersions as required in expand=transitions.fields.
+
+    test "workspace has fix_version_name: sets fix version then transitions, no escalation" do
+      test_pid = self()
+      ws = jira_workspace_with_fix_version(%{"merged" => "Code Complete"}, "2026-Q3")
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "61",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"},
+                  # fixVersions is a required gating field on this transition.
+                  "fields" => %{
+                    "fixVersions" => %{"required" => true, "name" => "Fix Version"}
+                  }
+                }
+              ]
+            })
+
+          conn.method == "PUT" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:put_fields, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:transition, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+
+      # Fix version is pushed first…
+      assert_receive {:put_fields,
+                      %{"fields" => %{"fixVersions" => [%{"name" => "2026-Q3"}]}}}
+
+      # …then the transition fires.
+      assert_receive {:transition, %{"transition" => %{"id" => "61"}}}
+
+      # No escalation when the gate is satisfied.
+      assert escalations_for(ws.id) == []
+    end
+
+    test "workspace has no fix_version_name: escalates once naming Fix Version, no transition" do
+      test_pid = self()
+      # nil fix_version_name → not configured
+      ws = jira_workspace_with_fix_version(%{"merged" => "Code Complete"}, nil)
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        if conn.method == "GET" and String.ends_with?(path, "/transitions") do
+          conn
+          |> Plug.Conn.put_status(200)
+          |> Req.Test.json(%{
+            "transitions" => [
+              %{
+                "id" => "61",
+                "name" => "Approved and merged",
+                "to" => %{"name" => "Code Complete"},
+                "fields" => %{
+                  "fixVersions" => %{"required" => true, "name" => "Fix Version"}
+                }
+              }
+            ]
+          })
+        else
+          send(test_pid, {:unexpected_call, conn.method, conn.request_path})
+          conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+
+      # No PUT (no fields to push) and no POST (transition skipped).
+      refute_receive {:transition, _}
+
+      # Exactly ONE escalation naming the missing field.
+      escalations = escalations_for(ws.id)
+      assert length(escalations) == 1
+      [esc] = escalations
+      assert esc.body =~ "Fix Version"
+    end
+  end
+
+  describe "fix version workflow-validator retry (bd-1924hi case B)" do
+    # Jira does NOT report fixVersions in transitions.fields but rejects the
+    # transition with "A fix version must be assigned...".
+
+    test "workspace has fix_version_name: sets fix version and retries, no escalation" do
+      test_pid = self()
+      ws = jira_workspace_with_fix_version(%{"merged" => "Code Complete"}, "2026-Q3")
+      issue = jira_issue(ws)
+
+      {:ok, call_count} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> catch_exit(Agent.stop(call_count)) end)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            # No fixVersions in the fields — it's a workflow validator, not screen.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "61",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
+              ]
+            })
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            n = Agent.get_and_update(call_count, fn n -> {n, n + 1} end)
+
+            if n == 0 do
+              # First attempt: Jira rejects (workflow validator gap).
+              conn
+              |> Plug.Conn.put_status(400)
+              |> Req.Test.json(%{
+                "errorMessages" => [
+                  "A fix version must be assigned in order to transition the issue from this status."
+                ],
+                "errors" => %{}
+              })
+            else
+              # Second attempt (after fix version set): succeeds.
+              send(test_pid, :transition_retry)
+              conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+            end
+
+          conn.method == "PUT" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:put_fix_version, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+
+      # Fix version is pushed between the two transition attempts.
+      assert_receive {:put_fix_version,
+                      %{"fields" => %{"fixVersions" => [%{"name" => "2026-Q3"}]}}}
+
+      assert escalations_for(ws.id) == []
+    end
+
+    test "workspace has no fix_version_name: single escalation (no retry loop)" do
+      ws = jira_workspace_with_fix_version(%{"merged" => "Code Complete"}, nil)
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "61",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
+              ]
+            })
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{
+              "errorMessages" => [
+                "A fix version must be assigned in order to transition the issue from this status."
+              ],
+              "errors" => %{}
+            })
+
+          # Recovery: re-fetch to check if already at target (already_at_target?).
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "key" => @ref,
+              "fields" => %{"status" => %{"statusCategory" => %{"key" => "new"}}}
+            })
+        end
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+
+      # Exactly ONE escalation — not 14.
+      assert length(escalations_for(ws.id)) == 1
+    end
+  end
+
+  describe "escalation deduplication (bd-1924hi)" do
+    # A single merge can trigger lifecycle(:merged) from multiple callers
+    # (Watchdog, MergeQueue, MergedPRFinalizer). The dedup window ensures only
+    # ONE escalation lands per (task, event) per 5-minute window.
+
+    test "calling notify_failure twice for the same task+event raises only one escalation" do
+      ws = jira_workspace(%{"merged" => "Code Complete"})
+      issue = jira_issue(ws)
+
+      reason = %{
+        kind: :validation_failed,
+        message: "A fix version must be assigned",
+        status: 400,
+        raw: nil
+      }
+
+      Sync.notify_failure(issue, :merged, reason)
+      Sync.notify_failure(issue, :merged, reason)
+
+      # Only the first call fires the Admiral escalation.
+      assert length(escalations_for(ws.id)) == 1
+    end
+
+    test "calling notify_failure for different events raises separate escalations" do
+      ws = jira_workspace(%{"merged" => "Code Complete", "closed" => "Done"})
+      issue = jira_issue(ws)
+
+      reason = %{
+        kind: :validation_failed,
+        message: "A fix version must be assigned",
+        status: 400,
+        raw: nil
+      }
+
+      Sync.notify_failure(issue, :merged, reason)
+      Sync.notify_failure(issue, :closed, reason)
+
+      # Different events → two separate escalations are allowed.
+      assert length(escalations_for(ws.id)) == 2
+    end
+  end
 end
