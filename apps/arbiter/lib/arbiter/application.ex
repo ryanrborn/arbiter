@@ -70,6 +70,11 @@ defmodule Arbiter.Application do
       # near the 5h cap and drains them as headroom frees; also carries the
       # per-workspace overage-alert debounce state for :continue mode.
       {Registry, keys: :unique, name: Arbiter.Workflows.DispatchQueueRegistry},
+      # Runs each drained dispatch off the DispatchQueue GenServer's process so a
+      # slow dispatch (repo resolution, preflight, worker spawn, DB writes)
+      # doesn't block the queue — and any concurrent hold/4 / record_overage/3 —
+      # for its duration (bd-7cd38f, reviewer round 1 finding 3).
+      {Task.Supervisor, name: Arbiter.Workflows.DispatchDrainSupervisor},
       DispatchQueueSupervisor,
       # One Conductor per running Graph, started on demand by
       # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a

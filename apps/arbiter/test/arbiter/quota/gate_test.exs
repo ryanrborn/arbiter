@@ -204,6 +204,31 @@ defmodule Arbiter.Quota.GateTest do
 
       assert is_float(spend)
     end
+
+    test "tags overage when the 5h window is past-plan (status not allowed)" do
+      assert {:overage, spend} =
+               Gate.Continue.check(
+                 nil,
+                 quota(%{status_5h: "rejected", overage_status: nil}),
+                 ws(%{}),
+                 []
+               )
+
+      assert is_float(spend)
+    end
+
+    # Regression (reviewer round 1, finding 2): at/over the throttle threshold
+    # but still plan-allowed (status "allowed", not in_overage) is NOT genuine
+    # paid overage — it must allow WITHOUT tagging overage, so the overage
+    # ledger/alert doesn't fire before the account actually pays overage.
+    test "does not tag overage merely at the throttle threshold when still allowed" do
+      assert Gate.Continue.check(
+               nil,
+               quota(%{status_5h: "allowed", utilization_5h: 0.99, overage_status: nil}),
+               ws(%{}),
+               []
+             ) == :allow
+    end
   end
 
   defp restore_quota_env do

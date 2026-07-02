@@ -231,6 +231,21 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
   def handle_info(_msg, %State{} = state), do: {:noreply, state}
 
+  # A drained intent whose off-process dispatch failed comes back here so it is
+  # retried on a later drain trigger — no work is dropped (finding 3). Re-arm the
+  # reset timer since we may have gone from empty back to non-empty.
+  @impl true
+  def handle_cast({:requeue, item}, %State{} = state) do
+    state =
+      if already_held?(state, item.task_id) do
+        state
+      else
+        %{state | items: [item | state.items]}
+      end
+
+    {:noreply, schedule_reset_drain(state)}
+  end
+
   # ---- drain --------------------------------------------------------------
 
   defp drain_and_reschedule(state) do
@@ -252,27 +267,54 @@ defmodule Arbiter.Workflows.DispatchQueue do
     quota = safe_latest(state)
     gate = Arbiter.Quota.gate_for_workspace(state.workspace)
 
-    remaining =
+    # Partition (fast: a pure gate check per item) into those the gate still
+    # holds and those there is now headroom for. The gate check and quota read
+    # are cheap; the expensive part — the real dispatch of each drained intent —
+    # is handed off to a supervised Task below so it never runs inside (and
+    # blocks) this GenServer's message loop (finding 3).
+    {to_dispatch, keep} =
       state.items
       |> Enum.sort_by(&queue_order_key/1)
-      |> Enum.reduce([], fn item, keep ->
+      |> Enum.split_with(fn _item ->
         case gate.check(nil, quota, state.workspace, []) do
-          {:hold, _} ->
-            # Still at/over the cap — leave it queued.
-            [item | keep]
-
-          _allow_or_overage ->
-            # Headroom (or continue-mode): re-run the real dispatch, bypassing
-            # the gate so it doesn't re-enter the queue.
-            case safe_dispatch(state.dispatcher, item) do
-              {:ok, _} -> keep
-              _err -> [item | keep]
-            end
+          {:hold, _} -> false
+          _allow_or_overage -> true
         end
       end)
-      |> Enum.reverse()
 
-    %{state | items: remaining}
+    # Optimistically remove the to-dispatch intents now; the drain Task casts
+    # `{:requeue, item}` back for any that fail, so nothing is dropped.
+    _ = spawn_drain(state, to_dispatch)
+    %{state | items: keep}
+  end
+
+  # Dispatch the drained intents off-process, sequentially in the priority order
+  # already established by the caller, so headroom is consumed highest-priority
+  # first. Fire-and-forget under a supervisor; failures are re-queued via cast.
+  defp spawn_drain(_state, []), do: :ok
+
+  defp spawn_drain(%State{dispatcher: dispatcher}, items) do
+    queue = self()
+
+    start_drain_task(fn ->
+      Enum.each(items, fn item ->
+        case safe_dispatch(dispatcher, item) do
+          {:ok, _} -> :ok
+          _err -> GenServer.cast(queue, {:requeue, item})
+        end
+      end)
+    end)
+  end
+
+  # Prefer the app-supervised Task.Supervisor; fall back to an unsupervised
+  # process if it isn't running (e.g. a bare unit test), so drain still proceeds.
+  defp start_drain_task(fun) do
+    case Process.whereis(Arbiter.Workflows.DispatchDrainSupervisor) do
+      pid when is_pid(pid) -> Task.Supervisor.start_child(pid, fun)
+      _ -> {:ok, spawn(fun)}
+    end
+  rescue
+    _ -> {:ok, spawn(fun)}
   end
 
   defp safe_dispatch(dispatcher, %{task_id: task_id, opts: opts}) do

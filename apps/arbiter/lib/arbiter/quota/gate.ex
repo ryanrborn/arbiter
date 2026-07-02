@@ -97,15 +97,22 @@ defmodule Arbiter.Quota.Gate do
   end
 
   @doc """
-  Whether the snapshot indicates active paid overage — Anthropic's
-  `overage_status == "in_overage"`, or the 5h window is past-plan (not
-  `"allowed"`). Used by `Continue` to decide when to tag overage spend.
+  Whether the snapshot indicates *genuine paid overage* — Anthropic's
+  `overage_status == "in_overage"`, or the 5h window is past-plan
+  (`status_5h != "allowed"`). Used by `Continue` to decide when to tag overage
+  spend.
+
+  Deliberately does NOT key on the throttle threshold (`over_cap?/2`): crossing
+  `utilization_5h >= throttle_threshold` while still `status_5h == "allowed"`
+  means we are near the cap, not past the plan. Tagging overage there would
+  record overage spend — and fire the overage alert — before the account is
+  actually paying overage (reviewer round 1, finding 2).
   """
   @spec in_overage?(AnthropicQuota.t() | nil, Workspace.t() | nil) :: boolean()
   def in_overage?(nil, _workspace), do: false
 
-  def in_overage?(%AnthropicQuota{} = quota, workspace) do
-    quota.overage_status == "in_overage" or over_cap?(quota, workspace)
+  def in_overage?(%AnthropicQuota{} = quota, _workspace) do
+    quota.overage_status == "in_overage" or status_not_allowed?(quota.status_5h)
   end
 
   defp status_not_allowed?(status) when is_binary(status), do: status != "allowed"
