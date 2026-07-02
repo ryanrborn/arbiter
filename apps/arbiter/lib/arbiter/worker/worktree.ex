@@ -251,7 +251,7 @@ defmodule Arbiter.Worker.Worktree do
   # not written, an untracked instance must not false-fail the gate.
   # The commit gate separately checks `has_injected_config_in_commits?/2` to catch
   # the harder case where one of these files was explicitly staged and committed.
-  @ignored_artifact_paths ~w(deps deps/ _build _build/ .mcp.json .gemini/ .codex/)
+  @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/)
 
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
