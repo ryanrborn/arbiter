@@ -86,6 +86,30 @@ defmodule ArbiterWeb.UsageLive do
     |> assign(:rework_extra_cost, sum_extra_cost(rework_tasks))
     |> assign(:grand_cost, sum_cost(main_rollup))
     |> assign(:grand_tokens, sum_tokens(main_rollup))
+    |> assign_overage()
+  end
+
+  # Overage-spend indicator (bd-7cd38f): when the latest quota snapshot shows the
+  # default workspace is dispatching past the plan cap (`:continue` mode), surface
+  # the windowed overage spend so the paid-overage burn is visible on the
+  # dashboard. `0.0` / not-in-overage otherwise. Sourced from the same windowed
+  # `Usage.summarize/1` sum the gate uses for the alert threshold.
+  defp assign_overage(socket) do
+    quota = socket.assigns[:quota]
+    ws_id = socket.assigns[:_quota_workspace_id]
+
+    {spend, in_overage?} =
+      case {quota, ws_id} do
+        {%{overage_status: "in_overage"} = q, ws} when is_binary(ws) ->
+          {Arbiter.Quota.Overage.windowed_spend(%{id: ws}, q), true}
+
+        _ ->
+          {0.0, false}
+      end
+
+    socket
+    |> assign(:overage_spend, spend)
+    |> assign(:in_overage, in_overage?)
   end
 
   defp since_dt(nil), do: nil
@@ -224,6 +248,23 @@ defmodule ArbiterWeb.UsageLive do
         <p class="text-xs text-base-content/40 -mt-2">
           Data captured via local Anthropic proxy. Updates on each API request — not real-time.
         </p>
+
+        <%!-- ── Overage indicator (bd-7cd38f) ─────────────────────────── --%>
+        <div
+          :if={@in_overage}
+          id="overage-indicator"
+          class="alert alert-error/90 bg-error/10 border border-error/40 text-error-content"
+        >
+          <.icon name="hero-exclamation-triangle" class="size-5 text-error" />
+          <div>
+            <div class="font-semibold text-error">Paid overage active</div>
+            <div class="text-sm text-base-content/70">
+              Dispatching past the plan cap (<code class="text-xs">:continue</code> mode) — approximately
+              <span class="font-mono font-semibold text-error">{format_usd(@overage_spend)}</span>
+              spent this 5h window.
+            </div>
+          </div>
+        </div>
 
         <%!-- ── Controls ─────────────────────────────────────────────── --%>
         <div class="flex flex-wrap items-center gap-3">

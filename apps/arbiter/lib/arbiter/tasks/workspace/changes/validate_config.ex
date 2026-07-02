@@ -60,6 +60,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     |> validate_review_gate(Map.get(config, "review_gate"))
     |> validate_conductor(Map.get(config, "conductor"))
     |> validate_review_automation(Map.get(config, "review_automation"))
+    |> validate_quota(Map.get(config, "quota"))
   end
 
   defp validate_tracker(changeset, nil), do: changeset
@@ -396,5 +397,97 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
 
   defp validate_review_automation(changeset, _) do
     Changeset.add_error(changeset, field: :config, message: "review_automation must be a map")
+  end
+
+  # Quota-aware dispatch throttle config (bd-7cd38f):
+  #   * on_exhaustion ∈ {"throttle","continue"}
+  #   * overage_alert_usd a positive number (or its JSON string form)
+  #   * throttle_threshold a number in (0, 1]
+  @valid_quota_modes ~w[throttle continue]
+
+  defp validate_quota(changeset, nil), do: changeset
+
+  defp validate_quota(changeset, quota) when is_map(quota) do
+    changeset
+    |> then(fn cs ->
+      case Map.get(quota, "on_exhaustion") do
+        nil ->
+          cs
+
+        mode when mode in @valid_quota_modes ->
+          cs
+
+        other ->
+          Changeset.add_error(cs,
+            field: :config,
+            message:
+              "quota.on_exhaustion must be one of #{Enum.join(@valid_quota_modes, ", ")}; got: #{inspect(other)}"
+          )
+      end
+    end)
+    |> then(fn cs ->
+      validate_positive_number(cs, quota, "overage_alert_usd")
+    end)
+    |> then(fn cs ->
+      case Map.get(quota, "throttle_threshold") do
+        nil ->
+          cs
+
+        n when is_number(n) and n > 0 and n <= 1 ->
+          cs
+
+        s when is_binary(s) ->
+          case Float.parse(s) do
+            {f, ""} when f > 0 and f <= 1 ->
+              cs
+
+            _ ->
+              Changeset.add_error(cs,
+                field: :config,
+                message: "quota.throttle_threshold must be a number in (0, 1]; got: #{inspect(s)}"
+              )
+          end
+
+        other ->
+          Changeset.add_error(cs,
+            field: :config,
+            message: "quota.throttle_threshold must be a number in (0, 1]; got: #{inspect(other)}"
+          )
+      end
+    end)
+  end
+
+  defp validate_quota(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "quota must be a map")
+  end
+
+  # Shared validator for a strictly-positive numeric config value that may
+  # arrive as a number or its JSON string form.
+  defp validate_positive_number(changeset, block, key) do
+    case Map.get(block, key) do
+      nil ->
+        changeset
+
+      n when is_number(n) and n > 0 ->
+        changeset
+
+      s when is_binary(s) ->
+        case Float.parse(s) do
+          {f, ""} when f > 0 ->
+            changeset
+
+          _ ->
+            Changeset.add_error(changeset,
+              field: :config,
+              message: "quota.#{key} must be a positive number; got: #{inspect(s)}"
+            )
+        end
+
+      other ->
+        Changeset.add_error(changeset,
+          field: :config,
+          message: "quota.#{key} must be a positive number; got: #{inspect(other)}"
+        )
+    end
   end
 end

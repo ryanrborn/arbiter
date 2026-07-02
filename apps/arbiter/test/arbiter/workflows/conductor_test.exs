@@ -491,6 +491,31 @@ defmodule Arbiter.Workflows.ConductorTest do
       refute_receive {:dispatched, _, _}, 100
     end
 
+    # Regression (reviewer round 1, finding 1): a :continue-mode workspace must
+    # dispatch PAST the cap so the dispatch/2 quota seam records overage; the
+    # Conductor's cap-clamp must not hold it at the ceiling. Default returns
+    # :unlimited for :continue and defers the decision to dispatch/2.
+    test "Default gate defers (does not hold) for a :continue workspace over the cap", %{ws: ws} do
+      {:ok, ws} = Ash.update(ws, %{config: %{"quota" => %{"on_exhaustion" => "continue"}}})
+
+      {:ok, _quota} =
+        Ash.create(Arbiter.Quota.AnthropicQuota, %{
+          workspace_id: ws.id,
+          utilization_5h: 0.99,
+          status_5h: "rejected",
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        })
+
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g, quota_gate: Arbiter.Workflows.QuotaGate.Default)
+
+      assert_receive {:dispatched, dispatched_id, _}
+      assert dispatched_id == a.id
+    end
+
     test "Default gate allows dispatch when utilization_5h is below ceiling", %{ws: ws} do
       {:ok, _quota} =
         Ash.create(Arbiter.Quota.AnthropicQuota, %{

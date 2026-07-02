@@ -110,6 +110,7 @@ defmodule Arbiter.Worker.Dispatch do
     with {:ok, task} <- load_task(task_id),
          :ok <- ensure_not_closed(task),
          :ok <- ensure_not_awaiting_review(task_id),
+         :ok <- maybe_quota_gate(task, opts),
          {:ok, opts} <- maybe_resolve_repo_for_real_work(task, opts),
          :ok <- maybe_preflight(task, opts),
          {:ok, task} <- transition_to_in_progress(task, opts),
@@ -432,6 +433,80 @@ defmodule Arbiter.Worker.Dispatch do
           _ -> :ok
         end
     end
+  end
+
+  # Quota-aware dispatch gate (bd-7cd38f). The single choke point where the fleet
+  # dispatcher consults quota state before mutating any task/worktree/preflight
+  # state. Placed after ensure_not_awaiting_review and before
+  # maybe_resolve_repo_for_real_work so a HOLD costs nothing and covers every
+  # dispatch path at once.
+  #
+  #   * `:allow`       → dispatch proceeds (headroom, or fail-open).
+  #   * `{:hold, r}`   → enqueue the intent in the workspace's DispatchQueue and
+  #                      return `{:error, {:quota_held, task_id}}` WITHOUT
+  #                      transitioning the task — it drains later in priority
+  #                      order. If the queue can't be reached, fail open (allow)
+  #                      rather than drop the work.
+  #   * `{:overage, s}`→ dispatch proceeds past the cap (`:continue`); record the
+  #                      windowed overage spend + fire one alert per threshold
+  #                      crossing, then allow.
+  #
+  # Fail-open guards: skipped on the drain re-dispatch (`skip_quota_gate: true`),
+  # when the proxy is disabled (no quota data — e.g. test), and for a task with
+  # no workspace. A nil snapshot is handled inside each gate impl.
+  defp maybe_quota_gate(%Issue{} = task, opts) do
+    cond do
+      Keyword.get(opts, :skip_quota_gate, false) == true -> :ok
+      not Arbiter.Quota.proxy_enabled?() -> :ok
+      not is_binary(task.workspace_id) -> :ok
+      true -> run_quota_gate(task, opts)
+    end
+  end
+
+  defp run_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do
+    workspace = load_workspace(task)
+    gate = Arbiter.Quota.gate_for_workspace(workspace)
+    quota = safe_quota_latest(ws_id)
+
+    case gate.check(task, quota, workspace, opts) do
+      :allow ->
+        :ok
+
+      {:hold, reason} ->
+        case Arbiter.Workflows.DispatchQueue.hold(ws_id, task.id, opts, reason) do
+          :ok ->
+            {:error, {:quota_held, task.id}}
+
+          {:error, hold_err} ->
+            # The queue is unreachable — fail open so the work is not dropped.
+            require Logger
+
+            Logger.warning(
+              "Dispatch: quota gate held #{task.id} but enqueue failed " <>
+                "(#{inspect(hold_err)}); allowing dispatch to avoid dropping work"
+            )
+
+            :ok
+        end
+
+      {:overage, spend_usd} ->
+        _ = Arbiter.Workflows.DispatchQueue.record_overage(ws_id, task, spend_usd)
+        :ok
+    end
+  rescue
+    e ->
+      # A bug in the gate must never wedge dispatch — fail open.
+      require Logger
+      Logger.warning("Dispatch: quota gate crashed for #{task.id}: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp safe_quota_latest(ws_id) do
+    Arbiter.Quota.latest(ws_id, "claude")
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   defp transition_to_in_progress(%Issue{status: :in_progress} = task, _opts), do: {:ok, task}
@@ -1565,7 +1640,8 @@ defmodule Arbiter.Worker.Dispatch do
       case Keyword.get(opts, :tracker_context) do
         %{ref: ref, type: type, title: title, description: desc}
         when is_binary(ref) and ref != "" ->
-          context_body = [title && "Title: #{title}", desc] |> Enum.filter(& &1) |> Enum.join("\n\n")
+          context_body =
+            [title && "Title: #{title}", desc] |> Enum.filter(& &1) |> Enum.join("\n\n")
 
           """
 
