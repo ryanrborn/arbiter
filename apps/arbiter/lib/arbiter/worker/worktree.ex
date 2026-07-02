@@ -242,9 +242,16 @@ defmodule Arbiter.Worker.Worktree do
   # ignore patterns do NOT match a symlink, so `git status --porcelain` emits
   # `?? deps`. Counting that as "uncommitted" false-fails the commit gate on
   # genuinely-committed work — the inverse of the bug the gate exists to catch.
-  # See bd-dg0gs6 / #172. `.mcp.json` is the per-worktree MCP runtime config
-  # (see bd-2wwuuf); a leaked top-level instance also false-fails the gate.
-  @ignored_artifact_paths ~w(deps deps/ _build _build/ .mcp.json)
+  # See bd-dg0gs6 / #172.
+  #
+  # `.mcp.json` / `.gemini/` / `.codex/` are Arbiter-injected agent-config files
+  # (see bd-9q966y). They are now gitignored via `.git/info/exclude` (written by
+  # `Arbiter.MCP.AgentConfig.write/3`), so they should never appear in `git
+  # status` output. Keeping them here is belt-and-suspenders: if the exclude was
+  # not written, an untracked instance must not false-fail the gate.
+  # The commit gate separately checks `has_injected_config_in_commits?/2` to catch
+  # the harder case where one of these files was explicitly staged and committed.
+  @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/)
 
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
@@ -309,6 +316,43 @@ defmodule Arbiter.Worker.Worktree do
         # might be commits worth preserving.
         {:ok, true}
     end
+  end
+
+  # Arbiter-injected agent-config paths that must NEVER appear in a committed diff.
+  # These files carry per-spawn bearer tokens. Each entry is either a filename
+  # (exact match) or a directory prefix (ends with "/", matches any path within it).
+  @injected_config_patterns ~w(.mcp.json .gemini/ .codex/)
+
+  @doc """
+  Return `{:ok, true}` if the committed diff between `base_ref` and HEAD contains
+  any Arbiter-injected agent-config file (`.mcp.json`, `.gemini/`, `.codex/`),
+  else `{:ok, false}`.
+
+  These files carry per-spawn bearer tokens and must NEVER appear in commits. This
+  check is the commit-gate backstop (bd-9q966y) for the case where `.git/info/exclude`
+  protection was bypassed and the file was explicitly staged and committed. Fails
+  open on any git error so a transient hiccup does not strand a completion.
+  """
+  @spec has_injected_config_in_commits?(path(), String.t()) ::
+          {:ok, boolean()} | {:error, error_reason()}
+  def has_injected_config_in_commits?(path, base_ref \\ "main") when is_binary(path) do
+    case run_git(["diff", "--name-only", base_ref <> "..HEAD", "--"], cd: path) do
+      {:ok, output} ->
+        changed = String.split(output, "\n", trim: true)
+        found? = Enum.any?(changed, &injected_config_path?/1)
+        {:ok, found?}
+
+      {:error, _} ->
+        {:ok, false}
+    end
+  end
+
+  defp injected_config_path?(file) do
+    Enum.any?(@injected_config_patterns, fn pat ->
+      if String.ends_with?(pat, "/"),
+        do: String.starts_with?(file, pat) or file == String.trim_trailing(pat, "/"),
+        else: file == pat
+    end)
   end
 
   @typedoc """

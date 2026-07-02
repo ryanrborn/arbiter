@@ -118,4 +118,8 @@ defmodule Arbiter.MCP.AgentConfig.Codex do
   @doc "The config filename within the `.codex` directory (`config.toml`)."
   @spec filename() :: String.t()
   def filename, do: @filename
+
+  @doc "Patterns to add to `.git/info/exclude` so `git add -A` never stages this directory."
+  @spec gitignore_paths() :: [String.t()]
+  def gitignore_paths, do: [@dirname <> "/"]
 end
