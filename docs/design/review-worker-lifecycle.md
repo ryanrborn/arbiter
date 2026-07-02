@@ -24,7 +24,7 @@ A review engagement is an `Issue` record with:
 |---|---|
 | `review_only` | `true` — hard boundary keeping SyncTracker from writing the upstream ticket |
 | `source_pr` | The PR ref (e.g. `"42"` for the GitHub PR number) |
-| `review_automation` | `:auto` or `:flag` — controls re-review and reply behaviour |
+| `review_automation` | `:auto`, `:report_only`, or `:flag` — controls re-review and reply behaviour (see "Automation modes") |
 | `last_reviewed_sha` | The last commit SHA we reviewed; nil on first sighting |
 | `last_reviewed_at` | When the last re-review or first review fired |
 | `posted_findings` | JSON array of `{file, line, message, severity}` — the findings we posted |
@@ -42,6 +42,43 @@ immediately when `issue.review_only == true`, regardless of tracker type or
 tracker ref. Terminating a review engagement therefore fires **zero** tracker
 writes, even if the engagement carries a Jira `tracker_ref` for an issue owned
 by a colleague.
+
+---
+
+## Automation modes (`auto` vs `report_only` vs `flag`)
+
+Every engagement — and every one-shot external review — resolves to one of three
+automation modes. The mode decides **whether findings get posted to the PR** and
+**who greenlights them**:
+
+| Mode | Reviews? | Posts to PR? | Behaviour |
+|---|---|---|---|
+| `:auto` | yes | **yes** — inline comments + verdict | Fully autonomous review. Used for authors/repos the fleet is trusted to comment on directly (`auto_authors`, or a `repo_overrides` set to `auto`). |
+| `:report_only` (alias `propose`) | yes | **no** | Human-in-the-loop. The reviewer runs the full review — reads the diff, computes findings + a recommended verdict — but posts **nothing**. It surfaces the findings and the exact **per-finding proposed comment text** to the coordinator mailbox (and, for the first pass, onto the `ExternalReview` audit record). A coordinator then **greenlights** which comments actually post. This is the required default for infra repos (`atlas`, `verus-infrastructure`). |
+| `:flag` (alias `notify`) | **no** | no | Pure escalation. Do NOT review — just raise a mailbox flag/escalation so a human notices the new commits or reply and decides what to do. The "ping me, don't review" stance. |
+
+The distinction is deliberate: `report_only` **reviews and reports**, whereas
+`flag` **only pings** (it never reads the diff). Infra review is `report_only`,
+not `flag` — the earlier `flag`-for-infra wiring was corrected in bd-36qzgx.
+
+### Greenlighting a report-only review
+
+A report-only first-pass review persists its proposed comments on the
+`ExternalReview` record (`mode: :report_only`, `greenlight_status: :pending`) and
+mails them to `to_ref: "admiral"`. The coordinator posts the approved subset with
+the `review_greenlight` MCP tool (backed by
+`Arbiter.Reviews.ExternalReview.greenlight/1`):
+
+```
+review_greenlight record_id=<id> select=all        # post every proposed comment
+review_greenlight record_id=<id> select=[0,2]      # post only comments #0 and #2
+review_greenlight record_id=<id> select=[]         # approve nothing (true no-op)
+```
+
+Only the selected comments post; un-approved findings never reach the PR. When at
+least one comment is approved the recommended verdict is also submitted (override
+with `post_verdict`). The record's `greenlight_status` flips to `:posted` (or
+`:none` when nothing was approved).
 
 ---
 
@@ -84,7 +121,13 @@ On a passing re-review, ReviewPatrol:
 - Appends new findings to `posted_findings`.
 - Advances `last_reviewed_sha` to `head_sha` and stamps `last_reviewed_at`.
 
-If automation mode is `:flag`, no review is posted. Instead, ReviewPatrol sends
+If automation mode is `:report_only`, ReviewPatrol runs the full re-review
+(new-diff-only + dedupe, exactly as `:auto`) but posts **nothing** to the PR.
+Instead it sends an `:escalation` to `to_ref: "admiral"` carrying the proposed
+comment text, records the reported findings in `posted_findings` (so they aren't
+re-reported), and advances `last_reviewed_sha`.
+
+If automation mode is `:flag`, **no review runs at all**. ReviewPatrol sends
 a mailbox flag to the engagement (kind: `:flag`) and still advances the cursor so
 the same commits are not re-flagged on the next tick.
 
@@ -103,9 +146,11 @@ The automation mode governs the response:
 - **`:auto`** — dispatches `Arbiter.Workflows.ReviewReply` (task F) to compose
   and post a threaded reply. The reply is anchored to the specific comment in the
   original review thread, not a new PR comment.
-- **`:flag`** — posts NOTHING to the PR. Raises exactly one `:escalation` message
-  addressed to `to_ref: "admiral"` with the PR link, thread path, and a 280-char
-  body snippet. A human decides whether to reply or trigger a re-review.
+- **`:report_only` / `:flag`** — posts NOTHING to the PR. Raises exactly one
+  `:escalation` message addressed to `to_ref: "admiral"` with the PR link, thread
+  path, and a 280-char body snippet. A human decides whether to reply or trigger a
+  re-review. (Author replies are a conversation, not a diff, so `report_only`
+  escalates them rather than auto-drafting a reply.)
 
 Either way, `last_seen_comment_id` is advanced past the highest comment id in the
 handled batch, so the same reply is processed (or escalated) exactly once, never
@@ -132,14 +177,15 @@ tick
       │           debounced?  (yes → skip)
       │           relevant?   (no → skip)
       │           automation?
-      │             :auto → CodeReview sub-run (new-diff-only, dedupe)
-      │             :flag → send mailbox flag, advance cursor
+      │             :auto        → CodeReview sub-run (new-diff-only, dedupe), POST
+      │             :report_only → CodeReview sub-run, POST NOTHING → escalate proposed comments
+      │             :flag        → send mailbox flag (no review), advance cursor
       └─ no   →  new author replies on our threads?
                    none → nil (nothing to do this tick)
                    some →
                      automation?
-                       :auto → ReviewReply sub-run (in-thread)
-                       :flag → one :escalation to "admiral", advance cursor
+                       :auto                 → ReviewReply sub-run (in-thread)
+                       :report_only / :flag  → one :escalation to "admiral", advance cursor
 ```
 
 ---
@@ -199,21 +245,25 @@ Without this, author-reply handling is conservatively skipped.
 `review_automation` controls the default stance for new engagements in the
 workspace. Resolution order (most-specific wins):
 
-1. **Per-dispatch override** — the `automation` argument to `worker_review` always wins.
+1. **Per-dispatch override** — the `automation` argument to `worker_review` always wins
+   (`auto` | `report_only` / `propose` | `flag` / `notify`).
 2. **Per-repo override** — `review_automation.repo_overrides[rig_name]` hard-gates a
    specific repo regardless of PR author.
 3. **Author list** — if the PR author is in `auto_authors`, the mode is `:auto`.
 4. **Default** — `review_automation.default` (`:flag` when unset).
 
+The three accepted mode values are `auto`, `report_only` (alias `propose`), and
+`flag` (alias `notify`) — see "Automation modes" above for what each does.
+
 ```bash
-# Authors who get automatic re-reviews and threaded replies
+# Authors who get automatic re-reviews and threaded replies (auto: review + post)
 arb config set review_automation.auto_authors '["alice","bob"]'
 
-# Default stance for authors NOT in the list: "auto" or "flag" (default: "flag")
-arb config set review_automation.default "flag"
+# Default stance for authors NOT in the list: "auto" | "report_only" | "flag" (default: "flag")
+arb config set review_automation.default "report_only"
 
-# Hard-flag a specific repo regardless of author (e.g. infra repos)
-arb config set review_automation.repo_overrides '{"atlas": "flag"}'
+# Hard-gate specific repos regardless of author — infra is review-and-report-only
+arb config set review_automation.repo_overrides '{"atlas": "report_only", "verus-infrastructure": "report_only"}'
 ```
 
 Authors in `auto_authors` get `:auto` mode (automatic re-reviews and threaded
@@ -221,25 +271,28 @@ replies). Authors not in the list fall back to `review_automation.default`
 (`:flag` mode when unset — coordinator escalation only, no automatic posting).
 
 **Per-repo overrides** (`repo_overrides`) take precedence over the author list.
-Setting `atlas: "flag"` ensures atlas PRs are always human-gated, even when
-the PR author is in `auto_authors`. The key is the rig name as defined in
-`merge.config.repo_paths` (or `rig_paths`).
+Setting `atlas: "report_only"` ensures atlas PRs are always fully reviewed but
+never auto-posted — the findings + proposed comments go to the coordinator to
+greenlight — even when the PR author is in `auto_authors`. The key is the rig
+name as defined in `merge.config.repo_paths` (or `rig_paths`).
 
-Example: a workspace with backend engineers trusted for auto-review but atlas
-always requiring a human sign-off:
+Example: a workspace with backend engineers trusted for auto-review, while the
+infra repos are review-and-report-only (never auto-post):
 
 ```json
 "review_automation": {
   "default": "flag",
   "auto_authors": ["alice", "bob"],
   "repo_overrides": {
-    "atlas": "flag"
+    "atlas": "report_only",
+    "verus-infrastructure": "report_only"
   }
 }
 ```
 
-With this config: an atlas PR by alice resolves to `:flag`; a backend PR by
-alice resolves to `:auto`.
+With this config: an atlas PR by alice resolves to `:report_only` (reviewed,
+nothing posted, proposed comments await a coordinator greenlight); a backend PR
+by alice resolves to `:auto` (reviewed and posted).
 
 To override the debounce window (default 5 min):
 

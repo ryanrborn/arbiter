@@ -12,6 +12,18 @@ defmodule Arbiter.Workflows.CodeReview do
       review can run against an arbitrary PR/MR — including ones the fleet
       did not author — through the configured tracker.
 
+  ## Report-only (a.k.a. propose) reviews (bd-36qzgx)
+
+  When `report_only: true` is set on the state (adapter mode only), the workflow
+  runs the *full* review — read the diff, compute findings, compute the verdict —
+  but posts **NOTHING** to the PR. Instead of calling `post_inline_comment` /
+  `submit_review`, `:file_findings` captures the per-finding **proposed comment
+  text** under `:proposed_comments` and `:verdict` captures the *recommended*
+  verdict + summary under `:verdict` / `:proposed_review_body`. A caller
+  (`Arbiter.Reviews.ExternalReview`) then surfaces these to the coordinator, who
+  greenlights which comments actually post. This is the human-in-the-loop review
+  path required for infra repos.
+
   ## Steps
 
   1. `:load_pr`       — record branch / load PR metadata (no-op in `:adapter` mode)
@@ -38,6 +50,7 @@ defmodule Arbiter.Workflows.CodeReview do
         # Common:
         task: %{id: _, title: _},    # optional, included in the file/notes
         check_runner: fun | nil,     # 2-arity (diff, state) -> {:ok, findings}
+        report_only: boolean(),      # adapter mode: review but post nothing (bd-36qzgx)
 
         # Populated as steps run:
         branch: String.t() | nil,
@@ -197,6 +210,17 @@ defmodule Arbiter.Workflows.CodeReview do
     {:ok, Map.put(state, :review_path, LocalMode.review_path(wt, branch))}
   end
 
+  # Report-only: capture the per-finding proposed comment text and post NOTHING.
+  # This clause must precede the posting clause below.
+  def run_step(:file_findings, %{mode: :adapter, report_only: true} = state) do
+    proposed =
+      state
+      |> Map.get(:findings, [])
+      |> Enum.map(&proposed_comment/1)
+
+    {:ok, Map.put(state, :proposed_comments, proposed)}
+  end
+
   def run_step(:file_findings, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
       when is_atom(adapter) and is_binary(mr_ref) do
     prepare_adapter(state)
@@ -220,6 +244,19 @@ defmodule Arbiter.Workflows.CodeReview do
     path = Map.fetch!(state, :review_path)
     :ok = LocalMode.set_verdict(path, verdict)
     {:ok, Map.put(state, :verdict, verdict)}
+  end
+
+  # Report-only: compute the recommended verdict + summary and post NOTHING.
+  # This clause must precede the submitting clause below.
+  def run_step(:verdict, %{mode: :adapter, report_only: true} = state) do
+    findings = Map.get(state, :findings, [])
+    verdict = compute_verdict(findings)
+    body = verdict_summary(verdict, findings)
+
+    {:ok,
+     state
+     |> Map.put(:verdict, verdict)
+     |> Map.put(:proposed_review_body, body)}
   end
 
   def run_step(:verdict, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
@@ -255,6 +292,38 @@ defmodule Arbiter.Workflows.CodeReview do
       :approve
     end
   end
+
+  @doc """
+  Build the report-only "proposed comment" for a single finding: the finding's
+  `file` / `line` / `severity` / `message`, plus `body` — the exact inline
+  comment text that would be posted on the PR (mirrors the hosted adapters'
+  `post_inline_comment` body format). The greenlight step re-posts the selected
+  subset of these verbatim.
+  """
+  @spec proposed_comment(Checks.finding()) :: map()
+  def proposed_comment(%{} = finding) do
+    %{
+      file: finding[:file] || finding["file"],
+      line: finding[:line] || finding["line"],
+      severity: finding[:severity] || finding["severity"],
+      message: finding[:message] || finding["message"],
+      body: finding_comment_body(finding)
+    }
+  end
+
+  @doc "The inline-comment body text for a finding (`**SEVERITY**: message`)."
+  @spec finding_comment_body(map()) :: String.t()
+  def finding_comment_body(%{} = finding) do
+    sev = finding[:severity] || finding["severity"]
+    msg = finding[:message] || finding["message"] || ""
+    "**#{severity_label(sev)}**: #{msg}"
+  end
+
+  defp severity_label(:info), do: "INFO"
+  defp severity_label(:warning), do: "WARNING"
+  defp severity_label(:error), do: "ERROR"
+  defp severity_label(nil), do: "INFO"
+  defp severity_label(other), do: other |> to_string() |> String.upcase()
 
   defp verdict_summary(:approve, []), do: "Approved: no findings."
 

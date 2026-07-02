@@ -657,14 +657,11 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp resolve_review_automation_mode(scope, args) do
-    case fetch_string(args, "automation") do
-      "auto" ->
-        :auto
+    case ReviewAutomation.normalize(fetch_string(args, "automation")) do
+      mode when mode in [:auto, :report_only, :flag] ->
+        mode
 
-      "flag" ->
-        :flag
-
-      _ ->
+      nil ->
         pr_author = fetch_string(args, "pr_author")
         rig_name = fetch_string(args, "repo")
         ws_config = load_workspace_config(scope.workspace_id)
@@ -833,6 +830,55 @@ defmodule Arbiter.MCP.Tools do
     e -> {:error, {:internal, "external_review_list failed: #{Exception.message(e)}"}}
   end
 
+  # ---- review_greenlight --------------------------------------------------
+
+  @doc """
+  Greenlight a report-only review (bd-36qzgx): post the coordinator-approved
+  subset of a review's proposed comments to the PR — and nothing else.
+  Coordinator only. Backs onto `Arbiter.Reviews.ExternalReview.greenlight/1`.
+  """
+  @spec review_greenlight(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def review_greenlight(%Scope{} = scope, args) do
+    with :ok <- ensure_can_dispatch(scope),
+         {:ok, record_id} <- require_string(args, "record_id"),
+         {:ok, select} <- parse_select(args) do
+      opts =
+        [record_id: record_id, repo: fetch_string(args, "repo")]
+        |> maybe_put_kw(:select, select)
+        |> maybe_put_kw(:post_verdict, fetch_optional_bool!(args, "post_verdict"))
+
+      case Arbiter.Reviews.ExternalReview.greenlight(opts) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, {:invalid, Arbiter.Reviews.ExternalReview.describe_error(reason)}}
+      end
+    end
+  end
+
+  # `select` may be omitted (→ nil, meaning all), the string "all", or a JSON
+  # array of zero-based indices. Anything else is rejected.
+  defp parse_select(args) do
+    case Map.get(args, "select") do
+      nil -> {:ok, nil}
+      "all" -> {:ok, :all}
+      list when is_list(list) ->
+        if Enum.all?(list, &(is_integer(&1) and &1 >= 0)) do
+          {:ok, list}
+        else
+          {:error, {:invalid, "select must be \"all\" or a list of non-negative integers"}}
+        end
+
+      _ ->
+        {:error, {:invalid, "select must be \"all\" or a list of non-negative integers"}}
+    end
+  end
+
+  defp fetch_optional_bool!(args, key) do
+    case Map.get(args, key) do
+      b when is_boolean(b) -> b
+      _ -> nil
+    end
+  end
+
   defp serialize_external_review(%Arbiter.Reviews.Record{} = r) do
     %{
       id: r.id,
@@ -842,6 +888,9 @@ defmodule Arbiter.MCP.Tools do
       strategy: r.strategy,
       link: r.link,
       status: r.status,
+      mode: r.mode,
+      greenlight_status: r.greenlight_status,
+      proposed_count: length(r.proposed_comments || []),
       verdict: r.verdict,
       finding_count: r.finding_count,
       findings_summary: r.findings_summary,
