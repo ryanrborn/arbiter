@@ -334,6 +334,64 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def merge_blocked(_snapshot, _mr_ref, _reason), do: :ok
 
   @doc """
+  Escalate a quota-overage spend crossing to the Admiral (bd-7cd38f).
+
+  Fired by `Arbiter.Workflows.DispatchQueue` in `:continue` mode when the
+  workspace's windowed overage spend crosses a multiple of its
+  `overage_alert_usd` threshold. Same addressed `:escalation` **mailbox** shape
+  as `merge_blocked/3` so it lands in `arb inbox` as an actionable item — but
+  this is informational: dispatch does NOT stop, the operator decides whether to
+  switch back to `:throttle` or top up. Debounced upstream (one per crossing).
+
+  `snapshot` carries `:workspace_id` (and optionally `:task_id`); `spend_usd` is
+  the windowed overage spend; `threshold_usd` is the configured alert threshold.
+  Best-effort, returns `:ok`.
+  """
+  @spec overage_alert(map(), number(), number()) :: :ok
+  def overage_alert(%{workspace_id: ws_id} = snapshot, spend_usd, threshold_usd)
+      when is_binary(ws_id) and is_number(spend_usd) and is_number(threshold_usd) do
+    task_id = Map.get(snapshot, :task_id, "system")
+
+    subject =
+      "quota overage spend crossed $#{fmt_usd(threshold_usd)} — #{fmt_usd(spend_usd)} so far"
+
+    body =
+      [
+        "This workspace is dispatching past the Anthropic plan cap in `:continue` " <>
+          "mode and has now spent about $#{fmt_usd(spend_usd)} in paid overage this " <>
+          "5h window — crossing the $#{fmt_usd(threshold_usd)} alert threshold.",
+        "Dispatch has NOT stopped. This is an informational alert (cap + alert, " <>
+          "not auto-stop): switch this workspace to `:throttle`, raise " <>
+          "`quota.overage_alert_usd`, or let it ride — your call.",
+        "Workspace: #{ws_id}"
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: Map.get(snapshot, :task_id),
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.overage_alert/3 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def overage_alert(_snapshot, _spend, _threshold), do: :ok
+
+  defp fmt_usd(n) when is_number(n), do: :erlang.float_to_binary(n * 1.0, decimals: 2)
+
+  @doc """
   Escalate a blocked merge the Warden tried — and failed — to auto-resolve
   (#354, Phase 2a).
 

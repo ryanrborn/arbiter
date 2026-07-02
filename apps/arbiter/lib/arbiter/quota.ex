@@ -63,6 +63,35 @@ defmodule Arbiter.Quota do
 
   defp proxy_config, do: Application.get_env(:arbiter, :anthropic_proxy, [])
 
+  # ---- dispatch gate (bd-7cd38f) -----------------------------------------
+
+  @doc """
+  Resolve the `Arbiter.Quota.Gate` implementation for a workspace.
+
+  Precedence:
+
+    1. The `:arbiter, :quota` `:gate` app-env override — a hard module override
+       used as the kill switch and the test-injection seam. Set it to
+       `Arbiter.Quota.Gate.Continue` (or a stub) to bypass throttling entirely.
+    2. Otherwise the workspace's resolved `on_exhaustion` mode
+       (`Workspace.quota_on_exhaustion/1`, which itself layers per-workspace over
+       global over the hardcoded `:throttle`): `:continue` → `Gate.Continue`,
+       else `Gate.Throttle`.
+  """
+  @spec gate_for_workspace(Workspace.t() | nil) :: module()
+  def gate_for_workspace(workspace) do
+    case Application.get_env(:arbiter, :quota, [])[:gate] do
+      mod when is_atom(mod) and not is_nil(mod) ->
+        mod
+
+      _ ->
+        case Workspace.quota_on_exhaustion(workspace) do
+          :continue -> Arbiter.Quota.Gate.Continue
+          _ -> Arbiter.Quota.Gate.Throttle
+        end
+    end
+  end
+
   # ---- capture -----------------------------------------------------------
 
   @doc """

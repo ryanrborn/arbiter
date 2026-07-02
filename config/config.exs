@@ -67,6 +67,30 @@ config :arbiter, :anthropic_proxy,
   enabled: true,
   base_url: "http://127.0.0.1:4848/proxy/anthropic"
 
+# Quota-aware dispatch throttle (bd-7cd38f). Governs what the fleet dispatcher
+# does when the workspace nears / crosses the Anthropic 5h quota cap, consuming
+# the quota snapshots captured by the proxy above (bd-5boun6):
+#
+#   * on_exhaustion: :throttle (default) — near the cap, HOLD new dispatches in a
+#     per-workspace draining queue and drain them in priority order as headroom
+#     frees / the 5h window resets. Work is delayed, never dropped.
+#   * on_exhaustion: :continue — dispatch proceeds past the cap (paid API
+#     overage); overage spend is recorded and an alert fires once per
+#     `overage_alert_usd` crossing, but dispatch never auto-stops.
+#
+# `throttle_threshold` is the `utilization_5h` at/above which :throttle holds
+# (0.85 = Ryan's hand-enforced ceiling, between the dashboard's 0.7/0.9 bands).
+# `overage_alert_usd` is the global default alert threshold for :continue, below
+# a per-workspace `quota.overage_alert_usd` override.
+#
+# Per-workspace overrides live in `workspace.config["quota"]`; precedence is
+# per-workspace > this global default > the hardcoded `:throttle`. Set
+# `:gate` to a module to hard-override the gate (kill switch / tests).
+config :arbiter, :quota,
+  on_exhaustion: :throttle,
+  throttle_threshold: 0.85,
+  overage_alert_usd: 50.0
+
 # Finch receive_timeout for the proxy's upstream requests to api.anthropic.com,
 # in milliseconds. Because the proxy streams chunk-by-chunk, this is a
 # per-chunk idle timeout — a generous value buys time-to-first-token headroom
