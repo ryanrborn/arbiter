@@ -1769,10 +1769,26 @@ defmodule Arbiter.Worker do
       is_binary(worktree) and File.dir?(worktree) and
           worktree_on_branch?(worktree, expected) ->
         case Arbiter.Worker.Worktree.completion_state(worktree, target) do
-          {:ok, :ready} -> :ok
-          {:ok, :uncommitted} -> {:gate, :uncommitted}
-          {:ok, :no_commits} -> {:gate, :no_commits}
-          {:error, _} -> :ok
+          {:ok, :ready} ->
+            # bd-9q966y: belt-and-suspenders — even a "clean, committed" worktree
+            # must not carry injected agent-config files (.mcp.json / .gemini/ /
+            # .codex/) in its committed diff. These files contain per-spawn bearer
+            # tokens. Normally they are gitignored via .git/info/exclude (written
+            # by AgentConfig.write/3), but if that was bypassed this gate catches
+            # the slip. Fail open on git errors to avoid stranding valid completions.
+            case Arbiter.Worker.Worktree.has_injected_config_in_commits?(worktree, target) do
+              {:ok, true} -> {:gate, :secret_in_commit}
+              _ -> :ok
+            end
+
+          {:ok, :uncommitted} ->
+            {:gate, :uncommitted}
+
+          {:ok, :no_commits} ->
+            {:gate, :no_commits}
+
+          {:error, _} ->
+            :ok
         end
 
       true ->
@@ -1801,6 +1817,16 @@ defmodule Arbiter.Worker do
   # fail_now WITHOUT routing to the ReviewGate: a stale, empty `base..HEAD` diff
   # must not reach a reviewer who will report "no work" while the work is right
   # there in the worktree.
+  # bd-9q966y: an injected agent-config file (bearer-token bearing) ended up in the
+  # committed diff — hard-fail immediately without nudging. A nudge would tell the
+  # worker to "commit+push your work", which it already did (incorrectly including
+  # the secret). Removing the secret from history requires a `git rebase --onto` or
+  # `git filter-repo` operation that the worker cannot safely self-apply; the
+  # Admiral must intervene (squash-merge + rotate if necessary).
+  defp handle_commit_gate(state, _branch, :secret_in_commit) do
+    park_commit_gate(state, :secret_in_commit, :no_retry)
+  end
+
   defp handle_commit_gate(%State{meta: meta} = state, _branch, reason) do
     cap = (meta && Map.get(meta, :commit_nudge_cap)) || 1
     attempts = (meta && Map.get(meta, :commit_nudge_attempts)) || 0
@@ -2354,6 +2380,9 @@ defmodule Arbiter.Worker do
   defp commit_gate_failure_metadata(:no_commits),
     do: {:no_commits_at_completion, "Worker signalled done with no commits on branch"}
 
+  defp commit_gate_failure_metadata(:secret_in_commit),
+    do: {:secret_in_commit, "Worker committed an Arbiter-injected agent-config (bearer-token) file"}
+
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"
     target = (meta && Map.get(meta, :target_branch)) || "main"
@@ -2372,10 +2401,23 @@ defmodule Arbiter.Worker do
         :no_commits ->
           "branch `#{branch}` has zero commits ahead of `#{target}`. Either " <>
             "the worker did no work, or its edits landed elsewhere."
+
+        :secret_in_commit ->
+          "SECURITY: the committed diff (#{target}..HEAD on `#{branch}`) contains " <>
+            "an Arbiter-injected agent-config file (.mcp.json / .gemini/ / .codex/). " <>
+            "These files carry per-spawn bearer tokens and must NEVER appear in VCS. " <>
+            "Incident response: (1) ensure the PR is squash-merged so the token leaves " <>
+            "history; (2) let the 24 h TTL expire — no per-token revoke exists; " <>
+            "(3) rotate SECRET_KEY_BASE only if the token's scope warrants it (nuclear: " <>
+            "kills ALL tokens)."
       end
 
     detail_blurb =
       case why do
+        :no_retry ->
+          "Hard-refused without nudge — a secret-bearing file in the committed diff " <>
+            "cannot be fixed by re-running the worker."
+
         :cap_exhausted ->
           "Nudge cap reached: tried #{attempts}/#{cap} send-back attempt(s) and " <>
             "the worktree is still in the failed state."
