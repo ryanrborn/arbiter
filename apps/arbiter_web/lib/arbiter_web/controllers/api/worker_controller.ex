@@ -150,11 +150,16 @@ defmodule ArbiterWeb.Api.WorkerController do
   # immediately, then runs the CodeReview adapter workflow in the background and
   # acks with the resolved mr_ref + link. `repo`/`workspace` are optional.
   defp review_external(conn, params) do
-    opts = [
-      pr: params["pr"],
-      repo: params["repo"],
-      workspace: params["workspace"]
-    ]
+    opts =
+      [
+        pr: params["pr"],
+        repo: params["repo"],
+        workspace: params["workspace"],
+        # report_only (propose) / automation flow through to ExternalReview, which
+        # resolves whether the review posts to the PR or only reports (bd-36qzgx).
+        automation: params["automation"]
+      ]
+      |> maybe_put_report_only(params["report_only"])
 
     case ExternalReview.dispatch(opts) do
       {:ok, ack} ->
@@ -166,6 +171,10 @@ defmodule ArbiterWeb.Api.WorkerController do
         {:error, {:invalid_request, ExternalReview.describe_error(reason), %{pr: params["pr"]}}}
     end
   end
+
+  defp maybe_put_report_only(opts, true), do: Keyword.put(opts, :report_only, true)
+  defp maybe_put_report_only(opts, "true"), do: Keyword.put(opts, :report_only, true)
+  defp maybe_put_report_only(opts, _), do: opts
 
   @doc """
   Resume a stopped worker at the SESSION level (bd-1z7624, #472). Re-spawns the

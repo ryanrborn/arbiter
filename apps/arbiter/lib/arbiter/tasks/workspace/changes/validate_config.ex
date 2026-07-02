@@ -27,10 +27,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"conductor"` is present, it must be a map.
     * If `"conductor.max_concurrent"` is present, it must be a positive integer.
     * If `"review_automation"` is present, it must be a map.
-    * If `"review_automation.default"` is present, it must be `"auto"` or `"flag"`.
+    * If `"review_automation.default"` is present, it must be one of
+      `"auto"`, `"report_only"` (alias `"propose"`), or `"flag"` (alias `"notify"`).
     * If `"review_automation.auto_authors"` is present, it must be a list of strings.
     * If `"review_automation.repo_overrides"` is present, it must be a map where
-      every value is `"auto"` or `"flag"`.
+      every value is one of the modes above.
 
   Unknown keys are allowed (forward-compat) — including any legacy
   `"vernacular"` key, which is now ignored rather than validated.
@@ -316,7 +317,9 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     Changeset.add_error(changeset, field: :config, message: "conductor must be a map")
   end
 
-  @valid_automation_modes ~w[auto flag]
+  # "auto" (review + post), "report_only"/"propose" (review + report, await
+  # greenlight — infra default, bd-36qzgx), "flag"/"notify" (escalate, no review).
+  @valid_automation_modes ~w[auto report_only propose flag notify]
 
   defp validate_review_automation(changeset, nil), do: changeset
 

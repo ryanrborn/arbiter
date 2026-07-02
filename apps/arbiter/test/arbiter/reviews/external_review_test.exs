@@ -413,6 +413,182 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "review/1 — report_only (propose) mode (bd-36qzgx)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "reviews fully but makes ZERO writes to the PR, capturing proposed comments" do
+      ws = github_ws("er-ro-zero")
+      events = :ets.new(:ro_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-ro", author: "coworker")
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "x.ex", line: 1, message: "boom"},
+           %{severity: :warning, file: "y.ex", line: 2, message: "nit"}
+         ]}
+      end
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: runner
+               )
+
+      assert result.report_only == true
+      assert result.mode == :report_only
+      assert result.verdict == :request_changes
+      # Proposed comments captured, with rendered body text.
+      assert [c0, c1] = result.proposed_comments
+      assert c0.file == "x.ex" and c0.body == "**ERROR**: boom"
+      assert c1.file == "y.ex" and c1.body == "**WARNING**: nit"
+
+      # The hard invariant: nothing posted / submitted to the PR.
+      assert :ets.lookup(events, :comment) == []
+      assert :ets.lookup(events, :review) == []
+    end
+
+    test "persists a report_only record with proposed comments + pending greenlight" do
+      ws = github_ws("er-ro-rec")
+      events = :ets.new(:ro_rec_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-ro2", author: "coworker")
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.mode == :report_only
+      assert rec.greenlight_status == :pending
+      assert rec.verdict == :request_changes
+      assert [pc] = rec.proposed_comments
+      assert pc["file"] == "x.ex"
+      assert pc["body"] == "**ERROR**: boom"
+    end
+
+    test "notifies the coordinator mailbox with the proposed comments" do
+      ws = github_ws("er-ro-mail")
+      events = :ets.new(:ro_mail_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-ro3", author: "coworker")
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      msgs =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(to_ref == "admiral" and workspace_id == ^ws.id)
+        |> Ash.read!()
+
+      assert Enum.any?(msgs, fn m ->
+               m.subject =~ "Report-only review" and m.body =~ "**ERROR**: boom"
+             end)
+    end
+
+    test "greenlight posts exactly the selected subset and flips greenlight_status" do
+      ws = github_ws("er-gl-subset")
+      events = :ets.new(:gl_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-gl", author: "coworker")
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "a.ex", line: 1, message: "one"},
+           %{severity: :warning, file: "b.ex", line: 2, message: "two"},
+           %{severity: :info, file: "c.ex", line: 3, message: "three"}
+         ]}
+      end
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert :ets.lookup(events, :comment) == []
+
+      # Greenlight only comments #0 and #2.
+      assert {:ok, gl} = ExternalReview.greenlight(record_id: rec.id, select: [0, 2])
+      assert gl.posted == 2
+      assert gl.selected == 2
+
+      posted = :ets.lookup(events, :comment) |> Enum.map(fn {:comment, p} -> p["path"] end)
+      assert Enum.sort(posted) == ["a.ex", "c.ex"]
+      refute "b.ex" in posted
+
+      # A verdict review was also submitted (default when ≥1 comment approved).
+      assert [_] = :ets.lookup(events, :review)
+
+      reloaded = Ash.get!(Record, rec.id)
+      assert reloaded.greenlight_status == :posted
+    end
+
+    test "greenlight with an empty selection posts nothing (true no-op) and records :none" do
+      ws = github_ws("er-gl-none")
+      events = :ets.new(:gl_none_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-gln", author: "coworker")
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert {:ok, gl} = ExternalReview.greenlight(record_id: rec.id, select: [])
+      assert gl.posted == 0
+
+      assert :ets.lookup(events, :comment) == []
+      assert :ets.lookup(events, :review) == []
+
+      reloaded = Ash.get!(Record, rec.id)
+      assert reloaded.greenlight_status == :none
+    end
+
+    test "a report_only follow-up engagement is created in :report_only mode" do
+      ws = github_ws("er-ro-eng")
+      events = :ets.new(:ro_eng_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-eng", author: "coworker", max_comment_id: 7)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: true,
+                 check_runner: one_finding()
+               )
+
+      engagement = Ash.get!(Issue, result.engagement)
+      assert engagement.review_automation == :report_only
+    end
+  end
+
   # A check runner that always reports one finding (so a request_changes verdict
   # posts a comment + a review, matching the real review path).
   defp one_finding do
@@ -514,6 +690,86 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
             404,
             Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
           )
+      end
+    end)
+  end
+
+  # Like stub_full_review but records every POST comment / POST review into
+  # `events` so a report-only test can assert ZERO writes, and a greenlight test
+  # can assert exactly the approved subset posted.
+  defp stub_report_only(events, opts) do
+    head_sha = Keyword.fetch!(opts, :head_sha)
+    author = Keyword.get(opts, :author, "coworker")
+    max_comment_id = Keyword.get(opts, :max_comment_id, 1)
+
+    Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+      path = conn.request_path
+      diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+      cond do
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "text/plain")
+          |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+boom\n")
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+          json(conn, %{
+            "number" => 42,
+            "state" => "open",
+            "head" => %{"sha" => head_sha},
+            "user" => %{"login" => author},
+            "html_url" => "https://github.com/octo/widget/pull/42"
+          })
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          json(conn, [])
+
+        conn.method == "GET" and path =~ ~r{/commits/.+/check-runs$} ->
+          json(conn, %{"check_runs" => []})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          :ets.insert(events, {:comment, Jason.decode!(body)})
+          json(conn, %{"id" => :rand.uniform(100_000)})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          :ets.insert(events, {:review, Jason.decode!(body)})
+          json(conn, %{"id" => 99})
+
+        conn.method == "POST" and path == "/graphql" ->
+          json(conn, %{
+            "data" => %{
+              "repository" => %{
+                "pullRequest" => %{
+                  "reviewThreads" => %{
+                    "nodes" => [
+                      %{
+                        "id" => "T1",
+                        "isResolved" => false,
+                        "path" => "x.ex",
+                        "line" => 1,
+                        "comments" => %{
+                          "nodes" => [
+                            %{
+                              "databaseId" => max_comment_id,
+                              "author" => %{"login" => author},
+                              "body" => "please look"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          })
+
+        true ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"}))
       end
     end)
   end

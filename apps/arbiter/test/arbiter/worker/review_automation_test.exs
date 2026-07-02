@@ -132,4 +132,58 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.resolve(nil, "alice", "atlas") == :flag
     end
   end
+
+  describe "resolve — :report_only mode (bd-36qzgx)" do
+    test "a repo_override of report_only resolves to :report_only regardless of author" do
+      config = %{
+        "review_automation" => %{
+          "default" => "auto",
+          "auto_authors" => ["alice"],
+          "repo_overrides" => %{
+            "atlas" => "report_only",
+            "verus-infrastructure" => "report_only"
+          }
+        }
+      }
+
+      # Infra repos: never auto-post, even for a trusted (auto_authors) author.
+      assert ReviewAutomation.resolve(config, "alice", "atlas") == :report_only
+      assert ReviewAutomation.resolve(config, "coworker", "verus-infrastructure") == :report_only
+      assert ReviewAutomation.resolve(config, nil, "atlas") == :report_only
+    end
+
+    test "a default of report_only applies when no repo_override / author match" do
+      config = %{"review_automation" => %{"default" => "report_only"}}
+      assert ReviewAutomation.resolve(config, "charlie", "backend") == :report_only
+      assert ReviewAutomation.resolve(config, nil) == :report_only
+    end
+
+    test "the propose alias resolves to :report_only" do
+      config = %{
+        "review_automation" => %{
+          "default" => "flag",
+          "repo_overrides" => %{"atlas" => "propose"}
+        }
+      }
+
+      assert ReviewAutomation.resolve(config, "alice", "atlas") == :report_only
+    end
+  end
+
+  describe "normalize/1" do
+    test "recognizes the three modes and their aliases" do
+      assert ReviewAutomation.normalize("auto") == :auto
+      assert ReviewAutomation.normalize("report_only") == :report_only
+      assert ReviewAutomation.normalize("propose") == :report_only
+      assert ReviewAutomation.normalize("flag") == :flag
+      assert ReviewAutomation.normalize("notify") == :flag
+      assert ReviewAutomation.normalize(:report_only) == :report_only
+    end
+
+    test "returns nil for anything unrecognized" do
+      assert ReviewAutomation.normalize(nil) == nil
+      assert ReviewAutomation.normalize("nonsense") == nil
+      assert ReviewAutomation.normalize(42) == nil
+    end
+  end
 end

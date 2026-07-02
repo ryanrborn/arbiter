@@ -506,6 +506,50 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert length(flags) == 1
     end
+
+    test "report_only mode re-reviews but posts NOTHING, reporting to the coordinator",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 405, %{
+          review_automation: :report_only,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      # The new commit surfaces a fresh finding in the previously-flagged file.
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      rereview_stub(405, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # The diff was read (relevance gate passed) …
+      assert_receive {:compare, _path}
+      # … but NOTHING was posted to the PR.
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      # The proposed comments were reported to the coordinator mailbox.
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and to_ref == "admiral")
+        |> Ash.read!()
+
+      assert Enum.any?(escalations, fn m ->
+               m.subject =~ "Report-only re-review" and m.body =~ "**ERROR**: new bug"
+             end)
+
+      reloaded = reload(eng)
+      # SHA advanced + the reported finding tracked (so it isn't re-reported).
+      assert reloaded.last_reviewed_sha == "newsha"
+      assert length(reloaded.posted_findings) == 2
+      assert ReviewPatrol.state(name).last_reported == [eng.id]
+      assert ReviewPatrol.state(name).last_rereviewed == []
+    end
   end
 
   describe "tick/1 — author-reply handling (bd-8fg64x)" do

@@ -520,12 +520,14 @@ defmodule Arbiter.MCP.Catalog do
           },
           "automation" => %{
             "type" => "string",
-            "enum" => ["auto", "flag"],
+            "enum" => ["auto", "report_only", "propose", "flag", "notify"],
             "description" =>
-              "Override the workspace review_automation policy: \"auto\" to " <>
-                "re-review automatically on new commits, \"flag\" to surface new commits as a flag. " <>
-                "When omitted, the mode is resolved from the workspace policy using the PR author " <>
-                "(the actual author for a `pr` review; `pr_author` for a task review)."
+              "Override the workspace review_automation policy: \"auto\" = review AND post to the " <>
+                "PR; \"report_only\" (alias \"propose\") = review fully but post NOTHING — surface " <>
+                "findings + proposed comments to the coordinator to greenlight (infra default, " <>
+                "human-in-the-loop); \"flag\" (alias \"notify\") = do not review, just flag new " <>
+                "commits/replies. When omitted, the mode is resolved from the workspace policy using " <>
+                "the PR author (the actual author for a `pr` review; `pr_author` for a task review)."
           },
           "pr_author" => %{
             "type" => "string",
@@ -628,6 +630,47 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.external_review_list/2
+    },
+    %{
+      name: "review_greenlight",
+      tiers: @coordinator,
+      description:
+        "Greenlight a report-only (propose) review (bd-36qzgx): post the approved subset of a " <>
+          "review's proposed comments to the PR under the fleet's identity — and nothing else. " <>
+          "Requires a `can_dispatch` coordinator token. Pass `record_id` (from external_review_list; " <>
+          "the review's `mode` must be `report_only`). `select` chooses which proposed comments post: " <>
+          "omit or \"all\" for every comment, a list of zero-based indices for a subset, or [] to " <>
+          "approve nothing (a true no-op on the PR). `post_verdict` also submits the recommended " <>
+          "verdict (defaults on when ≥1 comment is approved).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "record_id" => %{
+            "type" => "string",
+            "description" => "ExternalReview record id of the report-only review to greenlight (required)."
+          },
+          "select" => %{
+            "oneOf" => [
+              %{"type" => "string", "enum" => ["all"]},
+              %{"type" => "array", "items" => %{"type" => "integer", "minimum" => 0}}
+            ],
+            "description" =>
+              "Which proposed comments to post: \"all\" (default), a list of zero-based indices, or [] for none."
+          },
+          "post_verdict" => %{
+            "type" => "boolean",
+            "description" =>
+              "Also submit the recommended verdict as a single review. Defaults on iff ≥1 comment is approved."
+          },
+          "repo" => %{
+            "type" => "string",
+            "description" => "Local checkout (only needed by adapters resolving owner/repo for a bare PR number)."
+          }
+        },
+        "required" => ["record_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.review_greenlight/2
     },
     %{
       name: "task_list",
