@@ -323,17 +323,39 @@ defmodule Arbiter.Trackers.Jira do
   # the required ones and reverse-map each id to its task-domain key (via
   # `field_ids`) so the sync layer can pull the bead's produced value; an id
   # with no task-domain mapping yields `key: nil` and is escalated by name.
+  #
+  # For fields that cannot be sourced from the task bead, the descriptor includes
+  # a pre-resolved `:value` from the workspace config. Currently only
+  # `fixVersions`: when the workspace has `fix_version_name` set, the value is
+  # pre-resolved as `[%{"name" => name}]` so the sync layer can push it before
+  # the transition without knowing Jira internals. A nil value falls back to the
+  # bead's produced value (or escalates as missing if neither is set).
   defp required_field_descriptors(cfg, %{"fields" => fields}) when is_map(fields) do
     reverse = Map.new(cfg.field_ids, fn {k, v} -> {v, k} end)
 
     fields
     |> Enum.filter(fn {_id, meta} -> is_map(meta) and meta["required"] == true end)
     |> Enum.map(fn {id, meta} ->
-      %{id: id, key: Map.get(reverse, id), name: field_label(meta, id)}
+      key = Map.get(reverse, id)
+      base = %{id: id, key: key, name: field_label(meta, id)}
+
+      case pre_resolve_field_value(cfg, id) do
+        nil -> base
+        value -> Map.put(base, :value, value)
+      end
     end)
   end
 
   defp required_field_descriptors(_cfg, _transition), do: []
+
+  # Pre-resolve field values from the workspace config for fields that cannot be
+  # sourced from the task bead directly. Only `fixVersions` is handled here;
+  # all other fields return nil (deferring to the bead's produced value).
+  defp pre_resolve_field_value(%{fix_version_name: name}, "fixVersions")
+       when is_binary(name) and name != "",
+       do: [%{"name" => name}]
+
+  defp pre_resolve_field_value(_cfg, _id), do: nil
 
   defp field_label(%{"name" => name}, _id) when is_binary(name) and name != "", do: name
   defp field_label(_meta, id), do: id
@@ -815,12 +837,56 @@ defmodule Arbiter.Trackers.Jira do
         :ok
 
       {:ok, %Req.Response{status: status_code, body: body}} ->
-        {:error, http_error(status_code, body)}
+        error = http_error(status_code, body)
+        maybe_retry_with_fix_version(cfg, ref, transition_id, error, body)
 
       {:error, exception} ->
         {:error, transport_error(exception)}
     end
   end
+
+  # When Jira rejects a transition with a fix-version validation error but did
+  # NOT surface `fixVersions` via `expand=transitions.fields` (a workflow-
+  # validator gap — some Jira instances enforce fix-version as a workflow
+  # condition, not as a screen field), retry once after setting the fix version
+  # from the workspace `fix_version_name` config.
+  # If the config isn't set or the error isn't fix-version related, return the
+  # original error unchanged.
+  defp maybe_retry_with_fix_version(cfg, ref, transition_id, original_error, body) do
+    with true <- fix_version_required_error?(body),
+         name when is_binary(name) and name != "" <- Map.get(cfg, :fix_version_name) do
+      set_fix_version_payload = %{"fields" => %{"fixVersions" => [%{"name" => name}]}}
+
+      case request(cfg, :put, "/issue/#{ref}", json: set_fix_version_payload) do
+        {:ok, %Req.Response{status: s}} when s in 200..299 ->
+          case request(cfg, :post, "/issue/#{ref}/transitions",
+                 json: %{"transition" => %{"id" => transition_id}}) do
+            {:ok, %Req.Response{status: s}} when s in 200..299 -> :ok
+            {:ok, %Req.Response{status: s, body: b}} -> {:error, http_error(s, b)}
+            {:error, e} -> {:error, transport_error(e)}
+          end
+
+        _ ->
+          {:error, original_error}
+      end
+    else
+      _ -> {:error, original_error}
+    end
+  end
+
+  defp fix_version_required_error?(body) when is_map(body) do
+    errors_map = Map.get(body, "errors") || %{}
+
+    messages =
+      List.wrap(Map.get(body, "errorMessages")) ++ Map.values(errors_map)
+
+    Enum.any?(messages, fn
+      msg when is_binary(msg) -> String.contains?(String.downcase(msg), "fix version")
+      _ -> false
+    end)
+  end
+
+  defp fix_version_required_error?(_), do: false
 
   # Returns {:ok, status_name, category_key} where category_key is the
   # statusCategory.key string (e.g. "done", "indeterminate", "new") or nil

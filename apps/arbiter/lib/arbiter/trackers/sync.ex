@@ -195,7 +195,7 @@ defmodule Arbiter.Trackers.Sync do
 
   defp push_resolved_fields(issue, fields) do
     {present, missing} =
-      Enum.split_with(fields, fn f -> not blank?(produced_value(issue, f.key)) end)
+      Enum.split_with(fields, fn f -> not blank?(field_value(issue, f)) end)
 
     cond do
       missing != [] ->
@@ -205,12 +205,23 @@ defmodule Arbiter.Trackers.Sync do
         :ok
 
       true ->
-        values = Map.new(present, fn f -> {f.key, produced_value(issue, f.key)} end)
+        values = Map.new(present, fn f -> {f.key, field_value(issue, f)} end)
 
         case Trackers.update_fields(issue, values) do
           :ok -> :ok
           {:error, reason} -> {:error, reason}
         end
+    end
+  end
+
+  # Returns the value to push for a gating field. Prefers the adapter's
+  # pre-resolved `:value` (e.g. a Jira fix-version name resolved from workspace
+  # config) over the bead's produced value, so adapters can inject config-driven
+  # scalars without coupling this layer to tracker internals.
+  defp field_value(issue, f) do
+    case Map.get(f, :value) do
+      v when not is_nil(v) -> v
+      _ -> produced_value(issue, f.key)
     end
   end
 
@@ -233,9 +244,24 @@ defmodule Arbiter.Trackers.Sync do
     }
   end
 
+  # ETS table for deduplicating tracker-sync escalations across processes.
+  # Entries are {task_id, event} → monotonic_ms. Initialized lazily on first use.
+  @failure_dedup_table :tracker_sync_failure_dedup
+  # One escalation per (task, event) per 5-minute window — covers concurrent
+  # callers (Watchdog + MergeQueue, MergedPRFinalizer ticks) firing on the same
+  # merge without spamming the Admiral mailbox.
+  @failure_dedup_ttl_ms 300_000
+
   @doc """
   Log loudly and raise an escalation for a tracker-sync failure. The
   single place a swallowed-error regression would have to get past.
+
+  Escalations are deduplicated: at most **one** escalation is raised per
+  `(task_id, event)` pair within a #{div(@failure_dedup_ttl_ms, 60_000)}-minute
+  window. Subsequent calls still log at `:error` level (for visibility) but
+  suppress the Admiral mailbox message, preventing escalation-spam when multiple
+  callers (Watchdog, MergeQueue, MergedPRFinalizer) fire the same failure in
+  quick succession on a single merge.
   """
   @spec notify_failure(Issue.t(), atom(), term()) :: :ok
   def notify_failure(%Issue{} = issue, event, reason) do
@@ -245,18 +271,54 @@ defmodule Arbiter.Trackers.Sync do
         log_hint(reason)
     )
 
-    AdmiralNotifier.tracker_sync_failed(
-      %{
-        task_id: issue.id,
-        workspace_id: issue.workspace_id,
-        tracker_type: issue.tracker_type,
-        tracker_ref: issue.tracker_ref
-      },
-      event,
-      reason
-    )
+    if failure_dedup_seen?(issue.id, event) do
+      Logger.debug(
+        "Trackers.Sync: suppressing duplicate escalation for task=#{issue.id} " <>
+          "event=#{event} (same failure already escalated within " <>
+          "#{div(@failure_dedup_ttl_ms, 1000)}s)"
+      )
+    else
+      failure_dedup_record(issue.id, event)
+
+      AdmiralNotifier.tracker_sync_failed(
+        %{
+          task_id: issue.id,
+          workspace_id: issue.workspace_id,
+          tracker_type: issue.tracker_type,
+          tracker_ref: issue.tracker_ref
+        },
+        event,
+        reason
+      )
+    end
 
     :ok
+  end
+
+  defp failure_dedup_seen?(task_id, event) do
+    now = System.monotonic_time(:millisecond)
+
+    case :ets.lookup(@failure_dedup_table, {task_id, event}) do
+      [{_, ts}] when now - ts < @failure_dedup_ttl_ms -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp failure_dedup_record(task_id, event) do
+    ensure_failure_dedup_table()
+    now = System.monotonic_time(:millisecond)
+    :ets.insert(@failure_dedup_table, {{task_id, event}, now})
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp ensure_failure_dedup_table do
+    :ets.new(@failure_dedup_table, [:set, :public, :named_table])
+  catch
+    :error, _ -> :ok
   end
 
   # ---- PR-open artifacts ---------------------------------------------------
