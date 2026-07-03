@@ -1310,6 +1310,149 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "worker_runs/2" do
+    test "lists every historical run for a task, newest first", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "runs target", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, old_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: older,
+          completed_at: older,
+          output_lines: ["stale"]
+        })
+
+      {:ok, new_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :failed,
+          started_at: newer,
+          completed_at: newer,
+          exit_code: 2,
+          failure_reason: "claude_crashed",
+          output_lines: ["a", "b", "boom"]
+        })
+
+      assert {:ok, %{runs: [first, second]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert first.id == new_run.id
+      assert first.status == "failed"
+      assert first.exit_code == 2
+      assert first.failure_reason == "claude_crashed"
+      refute Map.has_key?(first, :output_lines)
+
+      assert second.id == old_run.id
+      assert second.status == "completed"
+    end
+
+    test "returns an empty list when no runs are recorded", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no runs", workspace_id: ctx.ws.id})
+
+      assert {:ok, %{runs: []}} = Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "honors a bounded limit", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "many runs", workspace_id: ctx.ws.id})
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Ash.create(Arbiter.Workers.Run, %{
+            task_id: task.id,
+            repo: "arbiter",
+            workspace_id: ctx.ws.id,
+            status: :completed,
+            started_at: DateTime.add(DateTime.utc_now(), -i, :second)
+          })
+      end
+
+      assert {:ok, %{runs: runs}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id, "limit" => 2})
+
+      assert length(runs) == 2
+    end
+
+    test "cannot list runs for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wr-other", prefix: "wro"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
+  describe "worker_log/2" do
+    test "reads the full durable transcript for the task's most recent run", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "log target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(run.id)
+      Arbiter.Worker.OutputLog.append(handle, "line one")
+      Arbiter.Worker.OutputLog.append(handle, "line two")
+      Arbiter.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Arbiter.Worker.OutputLog.path_for(run.id)) end)
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.task_id == task.id
+      assert data.run_id == run.id
+      assert data.exists == true
+      assert data.line_count == 2
+      assert data.lines == ["line one", "line two"]
+    end
+
+    test "exists: false when the run row exists but no transcript was captured", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no transcript", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.run_id == run.id
+      assert data.exists == false
+      assert data.lines == []
+    end
+
+    test "not-found when the task has no run at all", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no run at all", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_log(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "cannot read the log for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-other", prefix: "wlo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_log(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
   describe "usage_summarize/2" do
     test "requires a valid `by` grouping", ctx do
       assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{})

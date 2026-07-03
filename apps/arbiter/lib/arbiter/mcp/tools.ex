@@ -879,6 +879,87 @@ defmodule Arbiter.MCP.Tools do
     _ -> nil
   end
 
+  # ---- worker_runs ----------------------------------------------------------
+
+  @doc """
+  List every historical `Arbiter.Workers.Run` recorded for a task, newest
+  first (`arb worker runs <task-id>`). Mirrors `GET /api/workers/history?task_id=`:
+  each entry is a run summary (no `output_lines` — fetch a single run's full
+  output via `worker_log` for the transcript). Optional `limit` (default 20,
+  max 200).
+  """
+  @spec worker_runs(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_runs(%Scope{} = scope, args) do
+    require Ash.Query
+
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id),
+         {:ok, limit} <- parse_bounded_limit(args, "limit", 20, 200) do
+      runs =
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(task_id == ^task_id)
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(limit)
+        |> Ash.read!()
+
+      {:ok, %{runs: Enum.map(runs, &serialize_worker_run_summary/1)}}
+    end
+  end
+
+  # ---- worker_log ------------------------------------------------------------
+
+  @doc """
+  Full, uncapped durable transcript of a task's most recent run (`arb worker
+  log <task-id>`) — the audit source of record, retaining every line however
+  long the run. `exists` distinguishes "no file yet / never captured" (false,
+  empty `lines`) from "captured but empty" (true, empty `lines`). Not-found
+  only when no run has ever been recorded for the task.
+  """
+  @spec worker_log(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_log(%Scope{} = scope, args) do
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id) do
+      case latest_run(task_id) do
+        %Arbiter.Workers.Run{} = run ->
+          {exists, lines} =
+            case Arbiter.Worker.OutputLog.read_lines(run.id) do
+              {:ok, lines} -> {true, lines}
+              {:error, _} -> {false, []}
+            end
+
+          {:ok,
+           %{
+             task_id: run.task_id,
+             run_id: run.id,
+             path: Arbiter.Worker.OutputLog.path_for(run.id),
+             exists: exists,
+             line_count: length(lines),
+             lines: lines
+           }}
+
+        nil ->
+          {:error, {:not_found, "no worker run found for task #{task_id}"}}
+      end
+    end
+  end
+
+  defp serialize_worker_run_summary(%Arbiter.Workers.Run{} = run) do
+    %{
+      id: run.id,
+      task_id: run.task_id,
+      task_title: run.task_title,
+      repo: run.repo,
+      workspace_id: run.workspace_id,
+      worker_type: to_str(run.worker_type),
+      status: to_str(run.status),
+      model: run.model,
+      started_at: iso(run.started_at),
+      completed_at: iso(run.completed_at),
+      exit_code: run.exit_code,
+      failure_reason: run.failure_reason
+    }
+  end
+
   # ---- external_review_list -----------------------------------------------
 
   @doc """
