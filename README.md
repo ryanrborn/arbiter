@@ -109,6 +109,38 @@ arb install service
 
 This installs the service, enables it via `loginctl enable-linger` for machine-boot startup, and starts the release. Manage it with `systemctl --user status arbiter.service` and view logs with `journalctl --user -u arbiter.service -f`. Secrets and PATH configuration live in `~/.arbiter/arbiter.env`. Uninstall with `arb install service --uninstall`.
 
+### Remote `arb` — access Arbiter over VPN
+
+By default, `arb` talks to a local server on `http://127.0.0.1:4848` (loopback). To point `arb` at a remote Arbiter server:
+
+1. **Set `ARB_HOST`** to your server's URL over VPN:
+
+   ```sh
+   export ARB_HOST="http://arbiter.internal.example.com"
+   # or export ARB_HOST="https://arbiter.example.com" for HTTPS
+   ```
+
+2. **Mint a token** on the server:
+
+   ```sh
+   arb mcp token mint --tier coordinator
+   ```
+
+3. **Export the token** on the client:
+
+   ```sh
+   export ARB_TOKEN="<token-from-step-2>"
+   ```
+
+4. **Verify the connection**:
+
+   ```sh
+   arb prime
+   ```
+
+- **Local loopback** (`ARB_HOST` unset or `http://127.0.0.1:4848`) requires no `ARB_TOKEN` — the server exempts localhost.
+- **Remote access** requires both `ARB_HOST` and `ARB_TOKEN`.
+
 ### Encryption key (`ARBITER_CLOAK_KEY`) — required
 
 Arbiter encrypts workspace secrets (tracker / merger credentials) at rest using
