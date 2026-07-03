@@ -38,9 +38,12 @@ defmodule ArbiterCli.Cmd.Update do
   With an **issue id**, `arb update` patches that issue's fields:
 
       arb update <id> [--priority N] [--append-notes text] [--status s]
-                      [--description d] [--assignee a]
+                      [--description d] [--assignee a] [--acceptance a]
                       [--qa-notes text] [--deployment-notes text]
                       [--pr-body text]
+
+  `--acceptance` sets the acceptance criteria field, which guides the worker
+  in implementing and testing the change.
 
   `--qa-notes` / `--deployment-notes` set the gated completion-notes fields
   a worker produces for tracker-backed work (QA Testing Notes / Deployment
@@ -82,6 +85,7 @@ defmodule ArbiterCli.Cmd.Update do
     difficulty: :integer,
     append_notes: :string,
     notes: :string,
+    acceptance: :string,
     qa_notes: :string,
     deployment_notes: :string,
     pr_body: :string,
@@ -578,6 +582,7 @@ defmodule ArbiterCli.Cmd.Update do
       |> put_if("priority", opts[:priority])
       |> put_if("difficulty", opts[:difficulty])
       |> put_if("notes", opts[:notes])
+      |> put_if("acceptance", opts[:acceptance])
       |> put_if("qa_notes", opts[:qa_notes])
       |> put_if("deployment_notes", opts[:deployment_notes])
       |> put_if("pr_body", opts[:pr_body])
