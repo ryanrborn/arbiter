@@ -8,11 +8,11 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
     * If `"tracker"` is present, it must be a map.
     * If `"tracker.type"` is present, it must be one of the values in
       `Arbiter.Tasks.Workspace.valid_tracker_types/0` (`"none"`, `"jira"`,
-      `"linear"`, `"github"`).
+      `"shortcut"`, `"linear"`, `"github"`, `"gitlab"`).
     * If `"tracker.config"` is present, it must be a map.
     * If `"merge"` is present, it must be a map.
     * If `"merge.strategy"` is present, it must be one of the values in
-      `Arbiter.Tasks.Workspace.valid_merger_strategies/0` (`"direct"`, `"github"`).
+      `Arbiter.Tasks.Workspace.valid_merger_strategies/0` (`"direct"`, `"gitlab"`, `"github"`).
     * If `"agent"` / `"review_agent"` is present, it must be a map.
     * If `"agent.type"` is present, it must be one of the values in
       `Arbiter.Agents.valid_agent_types/0` (`"claude"`, `"gemini"`), OR a
