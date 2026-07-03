@@ -367,6 +367,51 @@ defmodule Arbiter.Workflows.ConductorTest do
       assert_receive {:dispatched, _id, _}
       refute_receive {:dispatched, _, _}, 100
     end
+
+    test "runtime-set system max (Arbiter.Settings) is honored without an explicit opt", %{
+      ws: ws
+    } do
+      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(2)
+      on_exit(fn -> Arbiter.Settings.set_conductor_system_max_concurrent(nil) end)
+
+      issues = for _ <- 1..4, do: issue(ws)
+      g = graph(ws)
+      Enum.each(issues, &add_member(g, &1))
+
+      # No explicit opt — resolved live from Arbiter.Settings (2), workspace max = 4
+      kickoff(g, workspace_max_concurrent: 4)
+
+      assert_receive {:dispatched, _id1, _}
+      assert_receive {:dispatched, _id2, _}
+      refute_receive {:dispatched, _, _}, 100
+    end
+
+    test "a runtime system-max change is picked up by an already-running Conductor's next drain",
+         %{ws: ws} do
+      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(1)
+      on_exit(fn -> Arbiter.Settings.set_conductor_system_max_concurrent(nil) end)
+
+      a = issue(ws)
+      b = issue(ws)
+      c = issue(ws)
+      g = graph(ws)
+      Enum.each([a, b, c], &add_member(g, &1))
+
+      # No explicit opt — resolved live from Arbiter.Settings (1), workspace max = 4
+      kickoff(g, workspace_max_concurrent: 4)
+
+      assert_receive {:dispatched, first_id, _}
+      refute_receive {:dispatched, _, _}, 100
+
+      # Raise the ceiling at runtime — no restart.
+      {:ok, _} = Arbiter.Settings.set_conductor_system_max_concurrent(3)
+
+      first = Enum.find([a, b, c], &(&1.id == first_id))
+      close(first)
+
+      assert_receive {:dispatched, _id2, _}
+      assert_receive {:dispatched, _id3, _}
+    end
   end
 
   # ---- quota gate ----------------------------------------------------------
