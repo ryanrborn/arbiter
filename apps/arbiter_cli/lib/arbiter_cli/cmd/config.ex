@@ -6,6 +6,13 @@ defmodule ArbiterCli.Cmd.Config do
       arb config set      <dotted.key> <value> [--workspace W] [--force]
       arb config unset    <dotted.key>         [--workspace W] [--force]
       arb config overview                       [--workspace W] [--json]
+      arb config schema                         full config key reference
+
+  `schema` prints a comprehensive reference of every top-level config key
+  (tracker, merge, agent/review_agent, security, routing, review/review_gate,
+  review_automation, quota, conductor, standing_orders, repo_paths, pr_patrol,
+  review_patrol) with its sub-fields, valid enum values, and defaults — see
+  `ArbiterCli.ConfigSchema` for the full text (also appended below).
 
   `overview` prints a human-readable summary of the workspace's config grouped
   into sections (tracker, merge, agent, routing, review, standing orders)
@@ -60,6 +67,8 @@ defmodule ArbiterCli.Cmd.Config do
   def run(argv) do
     if Output.help?(argv) do
       IO.puts(@moduledoc)
+      IO.puts("")
+      IO.puts(ArbiterCli.ConfigSchema.render())
     else
       {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
       mode = if opts[:json], do: :json, else: :text
@@ -71,7 +80,8 @@ defmodule ArbiterCli.Cmd.Config do
         ["set" | rest] -> set(rest, workspace_opt, force, mode)
         ["unset" | rest] -> unset(rest, workspace_opt, force, mode)
         ["overview" | _] -> overview(workspace_opt, mode)
-        [] -> Output.die("config requires a subcommand: get, set, unset, or overview")
+        ["schema" | _] -> IO.puts(ArbiterCli.ConfigSchema.render())
+        [] -> Output.die("config requires a subcommand: get, set, unset, overview, or schema")
         [unknown | _] -> Output.die("unknown config subcommand: #{unknown}")
       end
     end

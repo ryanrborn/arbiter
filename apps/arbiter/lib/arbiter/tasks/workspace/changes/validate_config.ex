@@ -322,6 +322,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   # greenlight — infra default, bd-36qzgx), "flag"/"notify" (escalate, no review).
   @valid_automation_modes ~w[auto report_only propose flag notify]
 
+  @doc "Valid `review_automation.default` / `repo_overrides` value strings."
+  @spec valid_review_automation_modes() :: [String.t()]
+  def valid_review_automation_modes, do: @valid_automation_modes
+
   defp validate_review_automation(changeset, nil), do: changeset
 
   defp validate_review_automation(changeset, block) when is_map(block) do
@@ -404,6 +408,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   #   * overage_alert_usd a positive number (or its JSON string form)
   #   * throttle_threshold a number in (0, 1]
   @valid_quota_modes ~w[throttle continue]
+
+  @doc "Valid `quota.on_exhaustion` value strings."
+  @spec valid_quota_modes() :: [String.t()]
+  def valid_quota_modes, do: @valid_quota_modes
 
   defp validate_quota(changeset, nil), do: changeset
 
