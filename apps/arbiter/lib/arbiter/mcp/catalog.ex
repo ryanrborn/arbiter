@@ -574,7 +574,20 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "task_id" => %{"type" => "string", "description" => "Recipient task id (required)."},
           "body" => %{"type" => "string", "description" => "Message body (required)."},
-          "subject" => %{"type" => "string"}
+          "subject" => %{"type" => "string"},
+          "kind" => %{
+            "type" => "string",
+            "enum" => ["notification", "completion", "failure", "escalation", "info"],
+            "description" =>
+              "Message kind (notification|completion|failure|escalation|info). " <>
+                "Defaults to auto-derived kind based on scope (direction for coordinator, flag for worker)."
+          },
+          "directive_ref" => %{
+            "type" => "string",
+            "description" =>
+              "The directive (task) id this message concerns. Shown in brackets by `arb inbox`. " <>
+                "Defaults to the recipient task_id."
+          }
         },
         "required" => ["task_id", "body"],
         "additionalProperties" => false
