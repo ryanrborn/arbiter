@@ -207,6 +207,60 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "coordinator_inbox_peek/2" do
+    test "lists unread Admiral messages without marking them read", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
+
+      assert {:ok, %{messages: [msg], count: 1}} =
+               Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+
+      assert msg.body == "Escalation!"
+      assert msg.to_ref == "admiral"
+
+      # Second call still returns the message — it was not marked read.
+      assert {:ok, %{messages: [msg2], count: 1}} =
+               Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+
+      assert msg2.body == "Escalation!"
+    end
+
+    test "does not mutate unread count across calls", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
+
+      # First peek: both messages are there.
+      assert {:ok, %{count: 2}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+
+      # Second peek: still both — they were never marked read.
+      assert {:ok, %{count: 2}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+
+      # coordinator_inbox (mutating) marks them read; after that, peek is empty.
+      {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+    end
+
+    test "does not surface messages from another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-other", prefix: "cio"})
+
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "admiral", body: "foreign"})
+
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
+    end
+
+    test "worker tier is denied (catalog-level gating)", ctx do
+      assert {:rpc_error, -32_003, message} =
+               Catalog.call(ctx.worker, "coordinator_inbox_peek", %{})
+
+      assert message =~ "not permitted"
+    end
+  end
+
   describe "workspace_show/2" do
     test "returns the scope's own workspace config + resolved security posture", ctx do
       assert {:ok, data} = Tools.workspace_show(ctx.worker, %{})
