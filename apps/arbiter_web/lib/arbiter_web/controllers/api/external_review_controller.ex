@@ -100,8 +100,7 @@ defmodule ArbiterWeb.Api.ExternalReviewController do
     if raw in valid do
       {:ok, String.to_existing_atom(raw)}
     else
-      {:error,
-       {:invalid_request, "status must be one of: #{Enum.join(valid, ", ")}"}}
+      {:error, {:invalid_request, "status must be one of: #{Enum.join(valid, ", ")}"}}
     end
   rescue
     ArgumentError ->

@@ -344,14 +344,17 @@ defmodule Arbiter.Workflows.DispatchQueue do
       %{reset_5h_at: %DateTime{} = reset} ->
         delay = DateTime.diff(reset, DateTime.utc_now(), :millisecond)
 
-        cond do
-          delay <= 0 ->
-            send(self(), :drain_on_reset)
-            state
-
-          true ->
-            ref = Process.send_after(self(), :drain_on_reset, delay)
-            %{state | reset_timer_ref: ref}
+        if delay > 0 do
+          ref = Process.send_after(self(), :drain_on_reset, delay)
+          %{state | reset_timer_ref: ref}
+        else
+          # reset_5h_at is already in the past — the window has rolled. Do NOT
+          # re-arm against a past time or a held-items cycle becomes a hot loop.
+          # The staleness check in Gate.over_cap?/in_overage? now fails open for
+          # stale snapshots, so the next drain trigger (PubSub quota_updated or
+          # a new hold/4 call that re-reads the snapshot) will clear any queued
+          # items.
+          state
         end
 
       _ ->

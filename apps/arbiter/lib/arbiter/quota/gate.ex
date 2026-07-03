@@ -82,18 +82,51 @@ defmodule Arbiter.Quota.Gate do
   end
 
   @doc """
+  Whether the snapshot's 5h window has already elapsed and can no longer be
+  trusted for gate decisions. Returns `false` for `nil` (nil is handled as
+  fail-open by both `over_cap?/2` and `in_overage?/2`).
+
+  A snapshot is stale when either:
+    * `reset_5h_at` is set and lies in the past — the window has rolled, so
+      `utilization_5h` / `status_5h` no longer reflect the current window.
+    * `captured_at` is more than 5 hours ago — the snapshot is too old to
+      throttle on even if `reset_5h_at` is absent.
+  """
+  @spec stale?(AnthropicQuota.t() | nil) :: boolean()
+  def stale?(nil), do: false
+
+  def stale?(%AnthropicQuota{} = quota) do
+    now = DateTime.utc_now()
+
+    reset_elapsed =
+      match?(%DateTime{}, quota.reset_5h_at) and
+        DateTime.compare(quota.reset_5h_at, now) == :lt
+
+    too_old =
+      match?(%DateTime{}, quota.captured_at) and
+        DateTime.diff(now, quota.captured_at, :second) >= 18_000
+
+    reset_elapsed or too_old
+  end
+
+  @doc """
   Whether the snapshot indicates the workspace is at/over the 5h cap.
 
   True when the 5h status is anything other than `"allowed"` OR utilization has
   reached the configured threshold. A `nil` snapshot is never "over cap" (fail
-  open). Shared by both gate implementations.
+  open). A stale snapshot (5h window already elapsed) is treated as nil —
+  fail open. Shared by both gate implementations.
   """
   @spec over_cap?(AnthropicQuota.t() | nil, Workspace.t() | nil) :: boolean()
   def over_cap?(nil, _workspace), do: false
 
   def over_cap?(%AnthropicQuota{} = quota, workspace) do
-    status_not_allowed?(quota.status_5h) or
-      utilization_over?(quota.utilization_5h, threshold(workspace))
+    if stale?(quota) do
+      false
+    else
+      status_not_allowed?(quota.status_5h) or
+        utilization_over?(quota.utilization_5h, threshold(workspace))
+    end
   end
 
   @doc """
@@ -107,12 +140,18 @@ defmodule Arbiter.Quota.Gate do
   means we are near the cap, not past the plan. Tagging overage there would
   record overage spend — and fire the overage alert — before the account is
   actually paying overage (reviewer round 1, finding 2).
+
+  A stale snapshot (5h window already elapsed) is treated as nil — fail open.
   """
   @spec in_overage?(AnthropicQuota.t() | nil, Workspace.t() | nil) :: boolean()
   def in_overage?(nil, _workspace), do: false
 
   def in_overage?(%AnthropicQuota{} = quota, _workspace) do
-    quota.overage_status == "in_overage" or status_not_allowed?(quota.status_5h)
+    if stale?(quota) do
+      false
+    else
+      quota.overage_status == "in_overage" or status_not_allowed?(quota.status_5h)
+    end
   end
 
   defp status_not_allowed?(status) when is_binary(status), do: status != "allowed"

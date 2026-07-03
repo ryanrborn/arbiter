@@ -144,6 +144,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     with {:ok, prepared} <- prepare(opts) do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
+
       case run_workflow(prepared, opts) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
@@ -284,11 +285,20 @@ defmodule Arbiter.Reviews.ExternalReview do
   # zero-based indices selects a subset; an empty list posts nothing.
   defp select_comments(proposed, opts) do
     case Map.get(opts, :select) do
-      nil -> proposed
-      :all -> proposed
-      "all" -> proposed
-      idxs when is_list(idxs) -> idxs |> Enum.map(&Enum.at(proposed, &1)) |> Enum.reject(&is_nil/1)
-      _ -> proposed
+      nil ->
+        proposed
+
+      :all ->
+        proposed
+
+      "all" ->
+        proposed
+
+      idxs when is_list(idxs) ->
+        idxs |> Enum.map(&Enum.at(proposed, &1)) |> Enum.reject(&is_nil/1)
+
+      _ ->
+        proposed
     end
   end
 
@@ -967,19 +977,20 @@ defmodule Arbiter.Reviews.ExternalReview do
     usage = Map.get(result, :check_usage) || %{}
     report_only = Map.get(result, :report_only, false)
 
-    attrs = %{
-      status: status,
-      verdict: verdict,
-      finding_count: finding_count,
-      findings_summary: findings_summary(findings_list),
-      engagement_id: engagement_id && to_string(engagement_id),
-      completed_at: DateTime.utc_now(),
-      model: Map.get(usage, :model),
-      cost_usd: Map.get(usage, :cost_usd),
-      tokens_in: Map.get(usage, :tokens_in),
-      tokens_out: Map.get(usage, :tokens_out)
-    }
-    |> maybe_put_proposed(report_only, Map.get(result, :proposed_comments) || [])
+    attrs =
+      %{
+        status: status,
+        verdict: verdict,
+        finding_count: finding_count,
+        findings_summary: findings_summary(findings_list),
+        engagement_id: engagement_id && to_string(engagement_id),
+        completed_at: DateTime.utc_now(),
+        model: Map.get(usage, :model),
+        cost_usd: Map.get(usage, :cost_usd),
+        tokens_in: Map.get(usage, :tokens_in),
+        tokens_out: Map.get(usage, :tokens_out)
+      }
+      |> maybe_put_proposed(report_only, Map.get(result, :proposed_comments) || [])
 
     case Ash.update(record, attrs, action: :complete) do
       {:ok, _} -> :ok

@@ -1391,7 +1391,10 @@ defmodule ArbiterWeb.DashboardLive do
         <%!-- Durable audit log for every `worker_review pr:` run.
              Open-PR reviews float to the top; merged/closed sink below.
              Paginated at 6/page. Full history: GET /api/external_reviews. --%>
-        <section id="external-reviews-section" class="card bg-base-200 border border-base-300 shadow-sm">
+        <section
+          id="external-reviews-section"
+          class="card bg-base-200 border border-base-300 shadow-sm"
+        >
           <div class="card-body p-4 gap-4">
             <h2 class="text-lg font-semibold flex items-center gap-2">
               <.icon name="hero-magnifying-glass-circle" class="size-5 text-secondary" />
@@ -1445,7 +1448,11 @@ defmodule ArbiterWeb.DashboardLive do
                       >
                         {r.pr || r.pr_ref}
                       </a>
-                      <code :if={!r.link || r.link == ""} class="text-xs truncate block" title={r.pr_ref}>
+                      <code
+                        :if={!r.link || r.link == ""}
+                        class="text-xs truncate block"
+                        title={r.pr_ref}
+                      >
                         {r.pr || r.pr_ref}
                       </code>
                       <span class="badge badge-ghost badge-xs font-mono mt-0.5">

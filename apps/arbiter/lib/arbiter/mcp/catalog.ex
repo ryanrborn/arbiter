@@ -749,7 +749,8 @@ defmodule Arbiter.MCP.Catalog do
         "properties" => %{
           "record_id" => %{
             "type" => "string",
-            "description" => "ExternalReview record id of the report-only review to greenlight (required)."
+            "description" =>
+              "ExternalReview record id of the report-only review to greenlight (required)."
           },
           "select" => %{
             "oneOf" => [
@@ -766,7 +767,8 @@ defmodule Arbiter.MCP.Catalog do
           },
           "repo" => %{
             "type" => "string",
-            "description" => "Local checkout (only needed by adapters resolving owner/repo for a bare PR number)."
+            "description" =>
+              "Local checkout (only needed by adapters resolving owner/repo for a bare PR number)."
           }
         },
         "required" => ["record_id"],

@@ -343,7 +343,8 @@ defmodule Arbiter.MCP.Tools do
         {:ok, %{key: nil, value: settings, settings: settings}}
 
       key when key in @install_settings_keys ->
-        {:ok, %{key: key, value: Map.get(settings, String.to_existing_atom(key)), settings: settings}}
+        {:ok,
+         %{key: key, value: Map.get(settings, String.to_existing_atom(key)), settings: settings}}
 
       key ->
         {:error, {:not_found, "unknown installation setting: #{key}"}}
@@ -636,7 +637,8 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref, kind) when is_atom(kind) do
+  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref, kind)
+       when is_atom(kind) do
     %{
       kind: kind,
       workspace_id: ws_id,
@@ -1097,8 +1099,11 @@ defmodule Arbiter.MCP.Tools do
         |> maybe_put_kw(:post_verdict, fetch_optional_bool!(args, "post_verdict"))
 
       case Arbiter.Reviews.ExternalReview.greenlight(opts) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, {:invalid, Arbiter.Reviews.ExternalReview.describe_error(reason)}}
+        {:ok, result} ->
+          {:ok, result}
+
+        {:error, reason} ->
+          {:error, {:invalid, Arbiter.Reviews.ExternalReview.describe_error(reason)}}
       end
     end
   end
@@ -1107,8 +1112,12 @@ defmodule Arbiter.MCP.Tools do
   # array of zero-based indices. Anything else is rejected.
   defp parse_select(args) do
     case Map.get(args, "select") do
-      nil -> {:ok, nil}
-      "all" -> {:ok, :all}
+      nil ->
+        {:ok, nil}
+
+      "all" ->
+        {:ok, :all}
+
       list when is_list(list) ->
         if Enum.all?(list, &(is_integer(&1) and &1 >= 0)) do
           {:ok, list}

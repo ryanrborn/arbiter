@@ -720,7 +720,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     outcome =
       case automation_mode(engagement) do
-        :auto -> dispatch_reply(engagement, thread, comment, adapter, workspace)
+        :auto ->
+          dispatch_reply(engagement, thread, comment, adapter, workspace)
+
         # report-only and flag both post NOTHING to the PR — escalate the reply
         # to the coordinator and let a human decide (bd-36qzgx).
         mode when mode in [:report_only, :flag] ->
@@ -873,6 +875,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     case comment[:body] do
       body when is_binary(body) and body != "" ->
         trimmed = String.trim(body)
+
         if String.length(trimmed) > @snippet_limit,
           do: String.slice(trimmed, 0, @snippet_limit) <> "…",
           else: trimmed

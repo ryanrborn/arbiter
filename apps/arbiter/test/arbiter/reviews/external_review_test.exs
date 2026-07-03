@@ -769,7 +769,10 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         true ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "application/json")
-          |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"}))
+          |> Plug.Conn.resp(
+            404,
+            Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
+          )
       end
     end)
   end

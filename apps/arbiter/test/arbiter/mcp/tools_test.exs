@@ -956,7 +956,9 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, 5} = Arbiter.Settings.set_conductor_system_max_concurrent(5)
 
       assert {:ok, data} =
-               Tools.installation_config_get(ctx.worker, %{"key" => "conductor_system_max_concurrent"})
+               Tools.installation_config_get(ctx.worker, %{
+                 "key" => "conductor_system_max_concurrent"
+               })
 
       assert data.key == "conductor_system_max_concurrent"
       assert data.value == 5
@@ -1988,11 +1990,13 @@ defmodule Arbiter.MCP.ToolsTest do
     test "returns repos with expected fields", ctx do
       # Configure a repo in the workspace
       ws_config = ctx.ws.config || %{}
+
       repo_config = %{
         "repo_paths" => %{
           "test-repo" => "/tmp/test-repo"
         }
       }
+
       {:ok, _updated_ws} = Ash.update(ctx.ws, %{config: Map.merge(ws_config, repo_config)})
 
       assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
@@ -2015,18 +2019,22 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "returns not-found for unknown repo", ctx do
-      assert {:error, {:not_found, msg}} = Tools.repo_show(ctx.coordinator, %{"name" => "unknown-repo"})
+      assert {:error, {:not_found, msg}} =
+               Tools.repo_show(ctx.coordinator, %{"name" => "unknown-repo"})
+
       assert msg =~ "unknown-repo"
     end
 
     test "returns repo details for a configured repo", ctx do
       # Configure a repo in the workspace
       ws_config = ctx.ws.config || %{}
+
       repo_config = %{
         "repo_paths" => %{
           "test-repo" => "/tmp/test-repo"
         }
       }
+
       {:ok, _updated_ws} = Ash.update(ctx.ws, %{config: Map.merge(ws_config, repo_config)})
 
       assert {:ok, repo} = Tools.repo_show(ctx.coordinator, %{"name" => "test-repo"})

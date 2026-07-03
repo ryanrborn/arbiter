@@ -74,9 +74,7 @@ defmodule Arbiter.MCP.AgentConfig do
   # read-only info dir must never block a dispatch.
   @spec add_to_git_exclude(Path.t(), [String.t()]) :: :ok
   def add_to_git_exclude(worktree, paths) when is_binary(worktree) and is_list(paths) do
-    case System.cmd("git", ["-C", worktree, "rev-parse", "--git-dir"],
-           stderr_to_stdout: true
-         ) do
+    case System.cmd("git", ["-C", worktree, "rev-parse", "--git-dir"], stderr_to_stdout: true) do
       {raw, 0} ->
         git_dir = String.trim(raw)
 

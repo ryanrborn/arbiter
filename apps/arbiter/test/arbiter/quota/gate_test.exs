@@ -24,6 +24,45 @@ defmodule Arbiter.Quota.GateTest do
     |> struct(attrs)
   end
 
+  # A snapshot whose 5h window reset 1 hour ago (stale).
+  defp stale_quota(attrs) do
+    past = DateTime.utc_now() |> DateTime.add(-3600, :second)
+
+    %AnthropicQuota{
+      workspace_id: "ws-x",
+      provider: "claude",
+      captured_at: DateTime.utc_now(),
+      reset_5h_at: past
+    }
+    |> struct(attrs)
+  end
+
+  describe "Gate.stale?/1" do
+    test "nil is never stale (gate handles nil as fail-open)" do
+      refute Gate.stale?(nil)
+    end
+
+    test "snapshot with reset_5h_at in the past is stale" do
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second)
+      assert Gate.stale?(quota(%{reset_5h_at: past}))
+    end
+
+    test "snapshot with reset_5h_at in the future is not stale" do
+      future = DateTime.utc_now() |> DateTime.add(3600, :second)
+      refute Gate.stale?(quota(%{reset_5h_at: future}))
+    end
+
+    test "snapshot with no reset_5h_at but captured_at > 5h ago is stale" do
+      very_old = DateTime.utc_now() |> DateTime.add(-18_100, :second)
+      assert Gate.stale?(quota(%{captured_at: very_old, reset_5h_at: nil}))
+    end
+
+    test "fresh snapshot with both fields set is not stale" do
+      future = DateTime.utc_now() |> DateTime.add(3600, :second)
+      refute Gate.stale?(quota(%{reset_5h_at: future, utilization_5h: 0.95}))
+    end
+  end
+
   describe "Workspace.quota_on_exhaustion/1 precedence" do
     test "per-workspace override beats the global default" do
       # global default is :throttle (config.exs); workspace says continue
@@ -177,6 +216,28 @@ defmodule Arbiter.Quota.GateTest do
                  []
                )
     end
+
+    # Regression (bd-3mb41v): a stale snapshot (reset_5h_at in the past) must
+    # fail open even when status_5h / utilization would normally trigger a hold.
+    test "stale snapshot (reset_5h_at in the past) → :allow despite over-cap values" do
+      stale =
+        stale_quota(%{status_5h: "allowed_warning", utilization_5h: 0.94})
+
+      assert Gate.Throttle.check(nil, stale, ws(%{}), []) == :allow
+    end
+
+    test "fresh over-cap snapshot is still held (staleness fix does not break throttle)" do
+      future = DateTime.utc_now() |> DateTime.add(3600, :second)
+
+      fresh =
+        quota(%{
+          status_5h: "rejected",
+          utilization_5h: 0.99,
+          reset_5h_at: future
+        })
+
+      assert {:hold, _} = Gate.Throttle.check(nil, fresh, ws(%{}), [])
+    end
   end
 
   describe "Gate.Continue.check/4" do
@@ -215,6 +276,12 @@ defmodule Arbiter.Quota.GateTest do
                )
 
       assert is_float(spend)
+    end
+
+    # Regression (bd-3mb41v): a stale snapshot must fail open for Continue too.
+    test "stale snapshot (reset_5h_at in the past) → :allow, no overage tag" do
+      stale = stale_quota(%{status_5h: "rejected", overage_status: "in_overage"})
+      assert Gate.Continue.check(nil, stale, ws(%{}), []) == :allow
     end
 
     # Regression (reviewer round 1, finding 2): at/over the throttle threshold
