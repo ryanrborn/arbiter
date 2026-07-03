@@ -15,6 +15,9 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardStatus do
   * `:close` — current status must be `:open` or `:in_progress`. Cannot close an
     already-closed issue (silent no-op would mask bugs).
   * `:reopen` — current status must be `:closed`.
+  * `:sync_upstream_close` — current status must already be `:closed`. Makes no
+    local status/closed_at change; only pushes a close to the linked tracker
+    for a task that closed without `close_upstream: true` at the time.
   """
 
   use Ash.Resource.Change
@@ -80,6 +83,19 @@ defmodule Arbiter.Tasks.Issue.Changes.GuardStatus do
         Changeset.add_error(cs,
           field: :status,
           message: "Cannot close issue with status #{current}"
+        )
+    end
+  end
+
+  defp validate(cs, :sync_upstream_close, current) do
+    case current do
+      :closed ->
+        cs
+
+      _ ->
+        Changeset.add_error(cs,
+          field: :status,
+          message: "Cannot sync_upstream_close issue with status #{current} (must be :closed)"
         )
     end
   end

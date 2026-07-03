@@ -30,6 +30,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_update` | coordinator | `Ash.update(issue, …, action: :update)` |
   | `task_close` | coordinator | `Ash.update(issue, …, action: :close)` |
   | `task_reopen` | coordinator | `Ash.update(issue, …, action: :reopen)` |
+  | `task_sync_upstream_close` | coordinator | `Ash.update(issue, …, action: :sync_upstream_close)` |
   | `dep_add` | coordinator | `Ash.create(Dependency, …)` (use `parent_of` to attach a child) |
   | `dep_remove` | coordinator | `Ash.destroy(Dependency)` |
   | `worker_dispatch` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` |
@@ -372,6 +373,25 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.task_reopen/2
+    },
+    %{
+      name: "task_sync_upstream_close",
+      tiers: @coordinator,
+      description:
+        "Push a close to the linked tracker issue for a task that's already `:closed` locally " <>
+          "but was never synced upstream (e.g. it closed via auto-close rollup or a caller that " <>
+          "forgot `close_upstream: true`). Makes no local status change — the task must already " <>
+          "be `:closed` and carry a `tracker_ref`. Does not reopen, re-run StopWorker/" <>
+          "CleanupWorktree, or re-trigger the parent auto-close rollup.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "id" => %{"type" => "string", "description" => "Task id (required)."}
+        },
+        "required" => ["id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.task_sync_upstream_close/2
     },
     %{
       name: "dep_add",

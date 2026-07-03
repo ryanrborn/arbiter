@@ -511,6 +511,28 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- task_sync_upstream_close --------------------------------------------
+
+  @doc """
+  Push a close to the linked tracker for a task that's already `:closed`
+  locally but never synced upstream. Coordinator only. Backs onto the
+  `:sync_upstream_close` action, which requires the task to already be
+  `:closed` — a non-closed task is reported as an operational error — and
+  makes no local status/closed_at change or close-time side effect (no
+  StopWorker/CleanupWorktree/parent rollup).
+  """
+  @spec task_sync_upstream_close(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def task_sync_upstream_close(%Scope{} = scope, args) do
+    with {:ok, id} <- resolve_task_id(scope, args),
+         {:ok, issue} <- fetch_task(scope, args, id) do
+      case Ash.update(issue, %{}, action: :sync_upstream_close) do
+        {:ok, synced} -> {:ok, serialize_task_summary(synced)}
+        {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
+      end
+    end
+  end
+
   # ---- dep_add ------------------------------------------------------------
 
   @doc """

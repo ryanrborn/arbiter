@@ -9,6 +9,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
   """
   use Arbiter.DataCase, async: false
 
+  alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.GitHub.Config
@@ -604,6 +605,82 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       assert closed.status == :closed
 
       refute_receive {:github, :patch, _, _}
+    end
+  end
+
+  describe "auto-close rollup propagates close_upstream (bd-dqjd2f)" do
+    test "an auto_close parent with a tracker_ref closes its upstream issue when the last child closes" do
+      forwarding_stub()
+      ws = github_workspace()
+
+      {:ok, parent} =
+        Ash.create(Issue, %{
+          title: "auto-close epic",
+          auto_close: true,
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "child", tracker_type: :none, workspace_id: ws.id})
+
+      {:ok, _} =
+        Ash.create(Dependency, %{
+          from_issue_id: parent.id,
+          to_issue_id: child.id,
+          type: :parent_of
+        })
+
+      assert {:ok, _} = Ash.update(child, %{}, action: :close)
+
+      assert Ash.get!(Issue, parent.id).status == :closed
+
+      expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
+      assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
+    end
+  end
+
+  describe ":sync_upstream_close (bd-dqjd2f)" do
+    test "syncs an already-closed task's upstream issue without reopening it" do
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "closed-without-upstream-sync",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      # Close locally without syncing upstream (the default).
+      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      closed_at = closed.closed_at
+
+      forwarding_stub()
+
+      assert {:ok, synced} = Ash.update(closed, %{}, action: :sync_upstream_close)
+      assert synced.status == :closed
+      assert synced.closed_at == closed_at
+
+      expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
+      assert_receive {:github, :get, ^expected_path}
+      assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
+    end
+
+    test "rejects sync_upstream_close on a non-closed task" do
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "still-open",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      assert {:error, error} = Ash.update(issue, %{}, action: :sync_upstream_close)
+      assert Exception.message(error) =~ "must be :closed"
     end
   end
 
