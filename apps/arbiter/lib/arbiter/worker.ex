@@ -935,12 +935,26 @@ defmodule Arbiter.Worker do
       # rebuilds each `--resume` from pristine args + the latest session id, so a
       # polluted spawn would stack duplicate flags. One-shot: consumed below.
       {spawn_args, pristine_args} = resume_spawn_args(state, port_args)
+
+      # bd-11abk2: an oversized original prompt is delivered via a temp file
+      # (Arbiter.Agents.Claude.build_argv/3); if the bd-1z7624 session-resume
+      # injection above swapped it out for the short continue prompt, that
+      # temp file is now orphaned — nothing will ever open it — so reclaim it
+      # immediately rather than leaking it until the worker exits.
+      if spawn_args != pristine_args do
+        case Arbiter.Agents.Claude.prompt_tmpfile(pristine_args.argv) do
+          path when is_binary(path) -> File.rm(path)
+          nil -> :ok
+        end
+      end
+
       port = Arbiter.Worker.ClaudeSession.open_port(spawn_args)
       now = DateTime.utc_now()
 
       session =
         session_config
         |> Map.put(:port, port)
+        |> Map.put(:prompt_tmpfile, Arbiter.Agents.Claude.prompt_tmpfile(spawn_args.argv))
         |> Map.put(:output_lines, [])
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
@@ -1000,6 +1014,18 @@ defmodule Arbiter.Worker do
     end
   end
 
+  # bd-11abk2: unlink the stdin-delivery temp file (if this spawn used one —
+  # see Arbiter.Agents.Claude.build_argv/3) now that the port has exited and
+  # nothing can read it anymore. A missing/already-removed file is a no-op.
+  defp cleanup_prompt_tmpfile(session) do
+    case Map.get(session, :prompt_tmpfile) do
+      path when is_binary(path) -> File.rm(path)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
   # ---- Port message routing (Claude session I/O) -------------------------
 
   @impl true
@@ -1014,6 +1040,7 @@ defmodule Arbiter.Worker do
   def handle_info({port, {:exit_status, status}}, %State{} = state) when is_port(port) do
     case Map.fetch(state.claude_sessions, port) do
       {:ok, session} ->
+        cleanup_prompt_tmpfile(session)
         updated = Arbiter.Worker.ClaudeSession.handle_exit(session, status)
         sessions = Map.put(state.claude_sessions, port, updated)
         new_state = %State{state | claude_sessions: sessions}
@@ -1896,6 +1923,10 @@ defmodule Arbiter.Worker do
       session =
         session_config
         |> Map.put(:port, port)
+        # inject_nudge_argv/2 always leaves the prompt inline (a nudge is
+        # short), so this is always nil — kept for parity with the other two
+        # open-port sites rather than a real leak risk here.
+        |> Map.put(:prompt_tmpfile, Arbiter.Agents.Claude.prompt_tmpfile(new_args.argv))
         |> Map.put(:output_lines, [])
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
@@ -1935,29 +1966,17 @@ defmodule Arbiter.Worker do
     e -> {:error, {:port_open_failed, Exception.message(e)}}
   end
 
-  # Swap the prompt in a stashed argv. Real claude argv from
-  # `default_claude_argv/1` looks like:
-  #
-  #   ["sh", "-c", "exec \"$@\" < /dev/null", "sh", <claude>, "--print", <prompt>, ...]
-  #
-  # We locate `--print` and replace the following element. If no `--print` slot
-  # is present (test fixtures, custom commands) we accept the argv unchanged
-  # and rely on the fixture to honor a re-run; the cap then bounds how many
-  # times we try.
+  # Swap the prompt in a stashed argv via `Arbiter.Agents.Claude.splice_prompt/2`
+  # (handles both the ordinary inline-prompt shape and the bd-11abk2
+  # stdin/tmpfile shape a stashed dispatch argv may carry for an oversized
+  # original prompt). If no `--print` slot is present (test fixtures, custom
+  # commands) we accept the argv unchanged and rely on the fixture to honor a
+  # re-run; the cap then bounds how many times we try.
   defp inject_nudge_argv(%{argv: argv} = port_args, nudge) when is_list(argv) do
-    new_argv =
-      case Enum.find_index(argv, &(&1 == "--print")) do
-        nil ->
-          argv
-
-        idx when idx + 1 < length(argv) ->
-          List.replace_at(argv, idx + 1, nudge)
-
-        _ ->
-          argv
-      end
-
-    {:ok, %{port_args | argv: new_argv}}
+    case Arbiter.Agents.Claude.splice_prompt(argv, [nudge]) do
+      {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
+      {:error, :no_print_slot} -> {:ok, port_args}
+    end
   end
 
   defp inject_nudge_argv(_port_args, _nudge), do: {:error, :missing_argv}
@@ -2244,6 +2263,10 @@ defmodule Arbiter.Worker do
           done_regex: Arbiter.Worker.ClaudeSession.done_regex()
         }
         |> Map.put(:port, port)
+        # inject_resume_argv/3 always leaves the prompt inline (the continue
+        # prompt is short), so this is always nil — see the parity note in
+        # respawn_with_nudge/3.
+        |> Map.put(:prompt_tmpfile, Arbiter.Agents.Claude.prompt_tmpfile(new_args.argv))
         |> Map.put(:output_lines, [])
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
@@ -2292,24 +2315,21 @@ defmodule Arbiter.Worker do
     min(base * Integer.pow(2, attempt), @resume_backoff_max_ms)
   end
 
-  # Insert `--resume <session_id>` immediately after `--print` and swap the
-  # prompt that follows it (same argv shape as inject_nudge_argv/2). No `--print`
-  # slot (test fixtures / custom commands) → can't build a resume invocation, so
-  # the caller falls back to failing.
+  # Insert `--resume <session_id>` immediately after `--print` and swap in the
+  # (short, terse) continue prompt. Delegates the actual splice to
+  # `Arbiter.Agents.Claude.splice_prompt/2`, which understands both argv
+  # shapes `Arbiter.Agents.Claude.build_argv/3` can produce: the ordinary
+  # inline prompt (replaced) and the bd-11abk2 stdin/tmpfile delivery for
+  # oversized prompts (the tmpfile positional is dropped — the resume prompt
+  # is always small, so it goes back to plain inline delivery). No `--print`
+  # slot (test fixtures / custom commands) → can't build a resume invocation,
+  # so the caller falls back to failing.
   @doc false
   def inject_resume_argv(%{argv: argv} = port_args, session_id, prompt)
       when is_list(argv) and is_binary(session_id) do
-    case Enum.find_index(argv, &(&1 == "--print")) do
-      nil ->
-        {:error, :no_print_slot}
-
-      idx when idx + 1 < length(argv) ->
-        {before, [_old_prompt | after_prompt]} = Enum.split(argv, idx + 1)
-        new_argv = before ++ ["--resume", session_id, prompt] ++ after_prompt
-        {:ok, %{port_args | argv: new_argv}}
-
-      _ ->
-        {:error, :no_print_slot}
+    case Arbiter.Agents.Claude.splice_prompt(argv, ["--resume", session_id, prompt]) do
+      {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
+      {:error, _} = err -> err
     end
   end
 

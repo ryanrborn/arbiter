@@ -213,11 +213,14 @@ defmodule Arbiter.Worker.ClaudeSession do
   # `--print`) so the parent port sees per-turn events instead of a single
   # buffered blob at exit.
   #
-  # The whole thing is wrapped in `sh -c 'exec "$@" < /dev/null'` so the
-  # child's stdin is closed immediately — without this the CLI waits ~3s for
-  # piped stdin and prints a warning that pollutes the transcript. The claude
-  # path and prompt are passed as positional params ("$@"), never spliced into
-  # the command string, so there is no shell-injection surface.
+  # Delegates argv construction to `Arbiter.Agents.Claude.build_argv/3` (the
+  # `sh -c 'exec "$@" < /dev/null'` wrapper described there) so this
+  # workspace-less path gets the same bd-11abk2 E2BIG fix as the
+  # workspace-aware `Arbiter.Agents.Claude.default_argv/2` path: a prompt over
+  # MAX_ARG_STRLEN is delivered via a temp file + stdin instead of being
+  # spliced into argv. The claude path and prompt are passed as positional
+  # params, never spliced into the command string, so there is no
+  # shell-injection surface either way.
   defp default_claude_argv(prompt) do
     case resolve_claude() do
       {:ok, claude} ->
@@ -229,13 +232,12 @@ defmodule Arbiter.Worker.ClaudeSession do
         # which resolves a per-domain policy.
         policy = Arbiter.Agents.SecurityPolicy.default()
 
-        inner =
-          [claude, "--print", prompt] ++
-            Arbiter.Agents.Claude.Security.permission_argv(policy) ++
+        flags =
+          Arbiter.Agents.Claude.Security.permission_argv(policy) ++
             Arbiter.Agents.Claude.Security.settings_argv(policy) ++
             ["--output-format", "stream-json", "--verbose"]
 
-        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
+        Arbiter.Agents.Claude.build_argv(claude, prompt, flags)
 
       {:error, _} = err ->
         err

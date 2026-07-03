@@ -33,6 +33,15 @@ defmodule Arbiter.Worker.StopReason do
       succeed once connectivity recovers.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
+    * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
+      all — the child never ran, so it never got a chance to write anything.
+      The canonical cause (bd-11abk2) is `execve()` failing before the
+      process starts: exit 7 is Linux's E2BIG (a spliced argv element, almost
+      always the prompt, exceeded the per-argument `MAX_ARG_STRLEN` =
+      131 072-byte kernel limit). Distinct from `:crashed` because a crash
+      normally leaves *some* stderr; a truly empty capture plus a non-zero
+      status points at the exec step itself, not the agent's own logic —
+      the remediation is a harness/argv fix, not a task re-dispatch.
     * `:crashed` — non-zero exit with no recognized signature. The
       flag-rejection proof case (`unknown option --reasoning-effort` → immediate
       non-zero exit) lands here unless its stderr matches a more specific
@@ -65,6 +74,7 @@ defmodule Arbiter.Worker.StopReason do
           | :rate_limited
           | :gateway_error
           | :killed
+          | :spawn_exec_failed
           | :crashed
           | :exited_without_done
           | :stalled
@@ -211,6 +221,34 @@ defmodule Arbiter.Worker.StopReason do
           signal: signal
         }
 
+      exit_status == 7 and blank_output?(output_lines) ->
+        %__MODULE__{
+          category: :spawn_exec_failed,
+          summary:
+            "agent subprocess never started — exec() failed with E2BIG (exit 7): an argv " <>
+              "element exceeded Linux's 131 072-byte MAX_ARG_STRLEN limit, almost certainly " <>
+              "the prompt spliced directly into argv",
+          remediation:
+            "This is a harness bug, not a task failure — the prompt-building path must " <>
+              "deliver oversized prompts via stdin/temp file instead of argv. Re-dispatching " <>
+              "without a harness fix will crash identically every time.",
+          exit_status: exit_status,
+          signal: nil
+        }
+
+      exit_status not in [0, nil] and blank_output?(output_lines) ->
+        %__MODULE__{
+          category: :spawn_exec_failed,
+          summary:
+            "agent subprocess exited (code #{exit_status}) with zero captured output — the " <>
+              "process likely never ran (exec failure before the child started)",
+          remediation:
+            "Check for a bad CLI flag, missing/non-executable binary, or an oversized argv " <>
+              "element (MAX_ARG_STRLEN). Not a normal task crash — investigate the spawn path.",
+          exit_status: exit_status,
+          signal: nil
+        }
+
       exit_status == 0 ->
         %__MODULE__{
           category: :exited_without_done,
@@ -248,6 +286,7 @@ defmodule Arbiter.Worker.StopReason do
         :rate_limited -> "rate-limited"
         :gateway_error -> "gateway error (proxy/upstream)"
         :killed -> "killed by signal #{reason.signal}"
+        :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
         :exited_without_done -> "exited without completing"
         :stalled -> "stalled (no output)"
@@ -296,5 +335,14 @@ defmodule Arbiter.Worker.StopReason do
     output_lines
     |> Enum.take(-@tail_lines)
     |> Enum.join("\n")
+  end
+
+  # bd-11abk2: an exec() failure (bad argv, E2BIG, missing binary) happens
+  # before the child process runs, so it can produce no stdout/stderr at
+  # all — not even a blank line. Genuine crashes almost always leave *some*
+  # trace. `output_lines` may contain empty-string entries from the port's
+  # line-buffering, so trim before checking for emptiness.
+  defp blank_output?(output_lines) do
+    Enum.all?(output_lines, fn line -> is_binary(line) and String.trim(line) == "" end)
   end
 end

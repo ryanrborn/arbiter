@@ -185,6 +185,50 @@ defmodule Arbiter.Agents.ClaudeTest do
       assert "--settings" in argv
       refute "--permission-mode" in argv
     end
+
+    # -- bd-11abk2 regression: oversized prompt (MAX_ARG_STRLEN) fix ---------
+
+    test "a prompt over 131_072 bytes is delivered via stdin, not argv", %{stub: stub} do
+      big_prompt = String.duplicate("x", 131_073)
+
+      assert {:ok, argv} = Claude.default_argv(big_prompt, [])
+
+      # No argv element should carry the giant prompt.
+      refute Enum.any?(argv, &(is_binary(&1) and &1 == big_prompt))
+
+      assert ["sh", "-c", script, "sh", tmp, ^stub, "--print" | rest] = argv
+      assert script =~ "exec \"$@\""
+      assert File.exists?(tmp)
+      assert File.read!(tmp) == big_prompt
+      assert "--output-format" in rest
+
+      File.rm(tmp)
+    end
+
+    test "a prompt at or under 131_072 bytes stays inline (mode A unchanged)", %{stub: stub} do
+      exact_prompt = String.duplicate("x", 131_072)
+
+      assert {:ok, argv} = Claude.default_argv(exact_prompt, [])
+      assert ["sh", "-c", _exec, "sh", ^stub, "--print", ^exact_prompt | _rest] = argv
+    end
+  end
+
+  describe "build_argv/3 and the tmp-file helpers directly" do
+    test "prompt_tmpfile/1 extracts the temp path for stdin-mode argv" do
+      big = String.duplicate("x", 200_000)
+      assert {:ok, argv} = Claude.build_argv("/bin/claude", big, ["--verbose"])
+
+      tmp = Claude.prompt_tmpfile(argv)
+      assert is_binary(tmp)
+      assert File.read!(tmp) == big
+
+      File.rm(tmp)
+    end
+
+    test "prompt_tmpfile/1 returns nil for inline-mode argv" do
+      assert {:ok, argv} = Claude.build_argv("/bin/claude", "small prompt", ["--verbose"])
+      assert Claude.prompt_tmpfile(argv) == nil
+    end
   end
 
   # Pull the JSON document out of the `--settings <json>` argv pair.
