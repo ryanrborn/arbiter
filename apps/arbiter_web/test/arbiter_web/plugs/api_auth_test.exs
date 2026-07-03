@@ -14,6 +14,11 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
     %{conn | remote_ip: {0, 0, 0, 0, 0, 0, 0, 1}}
   end
 
+  defp loopback_ipv4_mapped_ipv6_conn(conn) do
+    # IPv4-mapped IPv6 loopback: ::ffff:127.0.0.1 = {0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001}
+    %{conn | remote_ip: {0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001}}
+  end
+
   defp non_loopback_conn(conn) do
     %{conn | remote_ip: {10, 0, 0, 1}}
   end
@@ -30,6 +35,11 @@ defmodule ArbiterWeb.Plugs.ApiAuthTest do
 
     test "IPv6 loopback passes without a token", %{conn: conn} do
       conn = conn |> loopback_ipv6_conn() |> get(@test_path)
+      assert conn.status == 200
+    end
+
+    test "IPv4-mapped IPv6 loopback (::ffff:127.0.0.1) passes without a token", %{conn: conn} do
+      conn = conn |> loopback_ipv4_mapped_ipv6_conn() |> get(@test_path)
       assert conn.status == 200
     end
 

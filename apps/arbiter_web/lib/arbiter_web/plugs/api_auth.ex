@@ -2,10 +2,11 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   @moduledoc """
   Loopback-exempt token authentication for the `/api` pipeline.
 
-  Requests from `127.0.0.1` or `::1` are allowed through without a token so
-  local `arb` CLI usage and same-box tooling are unaffected. All other origins
-  must present a valid `Authorization: Bearer <token>` using the same signed
-  MCP scope token mechanism used by the `/mcp` endpoint.
+  Requests from loopback addresses (`127.0.0.0/8`, `::1`, or IPv4-mapped IPv6
+  loopback `::ffff:127.x.x.x`) are allowed through without a token so local
+  `arb` CLI usage and same-box tooling are unaffected. All other origins must
+  present a valid `Authorization: Bearer <token>` using the same signed MCP
+  scope token mechanism used by the `/mcp` endpoint.
 
   Rejects unauthenticated non-loopback requests with HTTP 401 and a JSON error
   body matching the API error shape: `%{"error" => %{"message" => "..."}}`.
@@ -17,21 +18,38 @@ defmodule ArbiterWeb.Plugs.ApiAuth do
   @behaviour Plug
 
   import Plug.Conn
+  import Bitwise
 
   alias Arbiter.MCP.Scope
-
-  @loopback_ipv4 {127, 0, 0, 1}
-  @loopback_ipv6 {0, 0, 0, 0, 0, 0, 0, 1}
 
   @impl true
   def init(opts), do: opts
 
   @impl true
-  def call(%Plug.Conn{remote_ip: ip} = conn, _opts) when ip in [@loopback_ipv4, @loopback_ipv6] do
+  # IPv4 loopback 127.0.0.0/8
+  def call(%Plug.Conn{remote_ip: {127, _, _, _}} = conn, _opts) do
     conn
   end
 
+  # IPv6 loopback ::1
+  def call(%Plug.Conn{remote_ip: {0, 0, 0, 0, 0, 0, 0, 1}} = conn, _opts) do
+    conn
+  end
+
+  # IPv4-mapped IPv6 loopback ::ffff:127.x.x.x
+  def call(%Plug.Conn{remote_ip: {0, 0, 0, 0, 0, 0xffff, hi, _lo}} = conn, _opts) do
+    case hi >>> 8 do
+      127 -> conn
+      _ -> require_bearer(conn)
+    end
+  end
+
+  # Non-loopback addresses require a token
   def call(conn, _opts) do
+    require_bearer(conn)
+  end
+
+  defp require_bearer(conn) do
     case get_req_header(conn, "authorization") do
       ["Bearer " <> token] ->
         case Scope.from_token(String.trim(token)) do
