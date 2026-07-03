@@ -32,7 +32,8 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "task_id" => "bd-001",
             "status" => "running",
             "current_step" => "implement",
-            "repo" => "test/repo"
+            "repo" => "test/repo",
+            "workspace_id" => "ws-1"
           }
         ],
         [
@@ -204,7 +205,8 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "directive_ref" => "bd-abc",
             "subject" => "Worker needs direction",
             "body" => "please advise",
-            "inserted_at" => "2026-05-28T12:00:00.000000Z"
+            "inserted_at" => "2026-05-28T12:00:00.000000Z",
+            "workspace_id" => "ws-1"
           }
         ]
       )
