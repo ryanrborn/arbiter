@@ -137,6 +137,18 @@ opt into the interactive classifier (and accept the freeze risk), set
 }
 ```
 
+**⚠️ Deprecated paths — do not use in new configs:**
+
+The following paths are accepted for backward compatibility with old configs
+but **must not** be used in new work. Always use the canonical
+`agent.security.permissions.mode` path shown above:
+
+- `workspace.config["security"]["mode"]` — **deprecated**
+- `workspace.config["agent"]["config"]["security_mode"]` — **deprecated**
+
+These alternate paths exist only to avoid breaking old configs; no new
+workspace should rely on them.
+
 ### Per-repo override (multi-repo workspaces)
 
 A workspace whose repos need *different* postures — e.g. one repo runs stricter

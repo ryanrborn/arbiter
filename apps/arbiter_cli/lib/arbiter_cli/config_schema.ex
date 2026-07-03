@@ -82,8 +82,9 @@ defmodule ArbiterCli.ConfigSchema do
       security        map — see "security" below; layered under agent.security
                       (workspace-level override of the install-wide default)
 
-    security  (map, nested at agent.security — also readable at top-level
-               security.mode as a shorthand for permissions.mode)
+    security  (map, nested at agent.security)
+      CANONICAL PATH: agent.security.permissions.mode
+
       permissions.mode          one of: #{Enum.join(@security_modes, ", ")}  (default: bypass)
         bypass  — headless-safe default; skips the interactive permission
                   classifier so a --print run can never freeze on a prompt.
@@ -99,6 +100,10 @@ defmodule ArbiterCli.ConfigSchema do
       sandbox.enabled           bool                                     (default: true)
       sandbox.filesystem        one of: #{Enum.join(@sandbox_filesystems, ", ")}       (default: worktree)
       sandbox.network           bool — false cuts network-egress tools   (default: true)
+
+      DEPRECATED (backward compat only, do not use in new configs):
+        - top-level security.mode (use agent.security.permissions.mode instead)
+        - agent.config.security_mode (use agent.security.permissions.mode instead)
 
     routing  (map)
       policy    one of: #{Enum.join(@routing_policies, ", ")}   (default: static)
