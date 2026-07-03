@@ -53,6 +53,19 @@ defmodule Arbiter.Agents.Claude do
 
   @done_regex ~r/\barb done\b/
 
+  # Linux enforces MAX_ARG_STRLEN = 131_072 bytes as a *per-argument* limit on
+  # execve() (stricter than overall ARG_MAX). A prompt element that exceeds
+  # this makes exec() fail with E2BIG (errno 7) *before the child ever runs* —
+  # zero stdout, zero stderr, just an immediate exit(7). bd-11abk2: task.notes
+  # accumulates the full transcript of every review round with no cap, so a
+  # task with a couple of review rounds routinely exceeds this. Prompts over
+  # the limit are written to a temp file and piped in via stdin instead of
+  # being spliced into argv, mirroring the fix already applied to the
+  # code-review diff-checking path (bd-dl49fo,
+  # Arbiter.Workflows.CodeReview.Checks.invoke_via_stdin/3).
+  @max_prompt_argv_bytes 131_072
+  @prompt_tmp_prefix "arb_prompt_"
+
   @impl true
   def provider, do: "claude"
 
@@ -68,20 +81,114 @@ defmodule Arbiter.Agents.Claude do
       {:ok, claude} ->
         policy = security_policy(opts)
 
-        inner =
-          [claude, "--print", prompt] ++
-            model_flag(opts) ++
+        flags =
+          model_flag(opts) ++
             thinking_flag(opts) ++
             Security.permission_argv(policy) ++
             Security.settings_argv(policy) ++
             stream_flags()
 
-        {:ok, ["sh", "-c", ~s(exec "$@" < /dev/null), "sh" | inner]}
+        build_argv(claude, prompt, flags)
 
       {:error, _} = err ->
         err
     end
   end
+
+  # Build the `sh -c` wrapped streaming argv for a `claude --print` invocation.
+  # Shared by the workspace-aware path (`default_argv/2` above) and the bare
+  # `Arbiter.Worker.ClaudeSession.start/1` path so both get the E2BIG fix.
+  #
+  # Small prompts (the common case) are spliced into argv exactly as before —
+  # `sh -c 'exec "$@" < /dev/null' sh <claude> --print <prompt> <flags...>`.
+  #
+  # Prompts over MAX_ARG_STRLEN are written to a temp file and delivered via
+  # stdin instead: `sh -c 'f="$1"; shift; exec "$@" < "$f"' sh <tmpfile>
+  # <claude> --print <flags...>` (no prompt element in argv at all — `claude
+  # --print` with no positional prompt reads it from stdin). The temp file's
+  # path is recoverable from argv[4] by `prompt_tmpfile/1` (named with
+  # `@prompt_tmp_prefix` so that lookup can't misidentify an unrelated path)
+  # so the worker can unlink it once the spawned session's port exits.
+  @inline_prompt_script ~s(exec "$@" < /dev/null)
+  @stdin_prompt_script ~s(f="$1"; shift; exec "$@" < "$f")
+
+  @doc false
+  def build_argv(claude, prompt, flags)
+      when is_binary(claude) and is_binary(prompt) and is_list(flags) do
+    if byte_size(prompt) > @max_prompt_argv_bytes do
+      case write_prompt_tmpfile(prompt) do
+        {:ok, tmp} ->
+          {:ok, ["sh", "-c", @stdin_prompt_script, "sh", tmp, claude, "--print" | flags]}
+
+        {:error, reason} ->
+          {:error, {:prompt_tmpfile_failed, reason}}
+      end
+    else
+      {:ok, ["sh", "-c", @inline_prompt_script, "sh", claude, "--print", prompt | flags]}
+    end
+  end
+
+  defp write_prompt_tmpfile(prompt) do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        @prompt_tmp_prefix <> Integer.to_string(System.unique_integer([:positive])) <> ".txt"
+      )
+
+    case File.write(tmp, prompt) do
+      :ok -> {:ok, tmp}
+      {:error, _} = err -> err
+    end
+  end
+
+  # Extract the stdin-delivery temp file path from an argv built by
+  # `build_argv/3`, or `nil` when this argv used inline (mode A) delivery.
+  # Used by the worker to unlink the file once the spawned port exits.
+  @doc false
+  def prompt_tmpfile(argv) when is_list(argv) do
+    case Enum.at(argv, 4) do
+      path when is_binary(path) -> if tmpfile_path?(path), do: path, else: nil
+      _ -> nil
+    end
+  end
+
+  # Splice `insert` (a list of argv elements, e.g. a swapped-in nudge/resume
+  # prompt) right after the `--print` flag in `argv`, discarding whatever was
+  # there before — the old inline prompt (mode A) or nothing at all (mode B,
+  # stdin delivery, in which case the leading temp-file positional is also
+  # dropped so the rebuilt argv is a plain mode-A invocation). Returns
+  # `{:error, :no_print_slot}` when `argv` has no `--print` flag at all (test
+  # fixtures / custom commands).
+  @doc false
+  def splice_prompt(argv, insert) when is_list(argv) and is_list(insert) do
+    case Enum.find_index(argv, &(&1 == "--print")) do
+      nil ->
+        {:error, :no_print_slot}
+
+      idx ->
+        {head, [print | tail]} = Enum.split(argv, idx)
+
+        case pop_tmpfile_positional(head) do
+          {true, head} -> {:ok, head ++ [print] ++ insert ++ tail}
+          {false, head} -> {:ok, head ++ [print] ++ insert ++ drop_first(tail)}
+        end
+    end
+  end
+
+  defp pop_tmpfile_positional(head) do
+    case Enum.at(head, 4) do
+      path when is_binary(path) ->
+        if tmpfile_path?(path), do: {true, List.delete_at(head, 4)}, else: {false, head}
+
+      _ ->
+        {false, head}
+    end
+  end
+
+  defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
+
+  defp drop_first([_ | rest]), do: rest
+  defp drop_first([]), do: []
 
   # The resolved `Arbiter.Agents.SecurityPolicy` for this spawn. Threaded in by
   # the caller (Dispatch / ReviewGate resolve it from the workspace); falls back to

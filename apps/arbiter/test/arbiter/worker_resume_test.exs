@@ -33,7 +33,15 @@ defmodule Arbiter.Worker.ResumeTest do
     end
 
     test "does not resume non-resumable stop categories" do
-      for cat <- [:auth_expired, :credit_exhausted, :rate_limited, :crashed, :killed, :stalled] do
+      for cat <- [
+            :auth_expired,
+            :credit_exhausted,
+            :rate_limited,
+            :crashed,
+            :killed,
+            :stalled,
+            :spawn_exec_failed
+          ] do
         assert {:fail, :not_resumable_category} =
                  Worker.resume_decision(cat, "sid", 0, 3, nil, nil)
       end
@@ -120,6 +128,35 @@ defmodule Arbiter.Worker.ResumeTest do
 
     test "errors when argv is missing" do
       assert {:error, :missing_argv} = Worker.inject_resume_argv(%{}, "sid", "p")
+    end
+
+    # bd-11abk2: a pristine dispatch argv built in stdin mode (oversized
+    # original prompt, no prompt element in argv at all — see
+    # Arbiter.Agents.Claude.build_argv/3) must still resume correctly: the
+    # leading tmpfile positional is dropped and the short resume prompt is
+    # spliced in as a normal inline (mode A) argv.
+    test "swaps a stdin-mode (large-prompt) argv down to an inline resume argv" do
+      {:ok, stdin_argv} =
+        Arbiter.Agents.Claude.build_argv(
+          "/bin/claude",
+          String.duplicate("x", 200_000),
+          ["--output-format", "stream-json", "--verbose"]
+        )
+
+      tmp = Arbiter.Agents.Claude.prompt_tmpfile(stdin_argv)
+      assert is_binary(tmp)
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: stdin_argv}, "sess-xyz", "CONTINUE PROMPT")
+
+      idx = Enum.find_index(out, &(&1 == "--print"))
+      assert Enum.slice(out, idx, 4) == ["--print", "--resume", "sess-xyz", "CONTINUE PROMPT"]
+
+      # the tmpfile positional is gone — resumed argv is a plain inline invocation
+      refute tmp in out
+      assert "--output-format" in out and "stream-json" in out and "--verbose" in out
+
+      File.rm(tmp)
     end
   end
 end
