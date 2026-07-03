@@ -76,6 +76,13 @@ defmodule Arbiter.Application do
       # for its duration (bd-7cd38f, reviewer round 1 finding 3).
       {Task.Supervisor, name: Arbiter.Workflows.DispatchDrainSupervisor},
       DispatchQueueSupervisor,
+      # Periodic lightweight probe that keeps the Anthropic quota snapshot fresh
+      # when the fleet is idle (bd-jzg8t0). Issues a minimal `claude --print`
+      # round-trip through each workspace's proxy URL so the proxy captures fresh
+      # rate-limit headers and broadcasts a quota_updated event — draining any
+      # held DispatchQueue intents. Runs outside the QuotaGate (never throttled).
+      {Task.Supervisor, name: Arbiter.Quota.RefreshProbeSupervisor},
+      Arbiter.Quota.RefreshProbe,
       # One Conductor per running Graph, started on demand by
       # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
       # Conductor once kicked off). The Registry keys them by graph_id.

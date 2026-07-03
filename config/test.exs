@@ -68,3 +68,7 @@ config :phoenix, sort_verified_routes_query_params: true
 # Disable the CredentialWarden's periodic probes in test — there's no real agent
 # CLI to call, and we test the warden's logic via direct GenServer calls.
 config :arbiter, :credential_warden, enabled: false
+
+# Disable the quota refresh probe in test — there's no proxy or real Claude CLI;
+# tests that exercise probe logic inject a :probe_fun stub and enable explicitly.
+config :arbiter, :quota_refresh_probe, enabled: false
