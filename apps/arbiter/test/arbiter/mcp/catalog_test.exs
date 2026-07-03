@@ -12,7 +12,8 @@ defmodule Arbiter.MCP.CatalogTest do
                 message_send notify_list workspace_config_get workspace_config_overview)
 
   # Coordinator-only tools; never visible to a worker.
-  @coordinator_only ~w(task_ready task_create task_update task_close task_reopen dep_add dep_remove
+  @coordinator_only ~w(task_ready task_create task_update task_close task_reopen
+                       task_sync_upstream_close dep_add dep_remove
                        worker_dispatch
                        worker_resume worker_review worker_stop worker_list worker_show worker_runs
                        worker_log task_list
