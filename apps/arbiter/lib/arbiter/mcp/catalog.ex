@@ -37,6 +37,8 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
   | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
   | `worker_show` | coordinator | `Arbiter.Worker.whereis/1` + `Worker.state/1`, falls back to `Arbiter.Workers.Run` |
+  | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first |
+  | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for the task's most recent run |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
@@ -643,6 +645,54 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.worker_show/2
+    },
+    %{
+      name: "worker_runs",
+      tiers: @coordinator,
+      description:
+        "List every historical run recorded for a task, newest first (`arb worker runs " <>
+          "<task-id>`). Each entry is a run summary (no output lines — use `worker_log` for " <>
+          "the transcript): id, task_id, task_title, repo, workspace_id, worker_type, status, " <>
+          "model, started_at, completed_at, exit_code, failure_reason. Optional `limit` " <>
+          "(default 20, max 200).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Task whose run history to list (required)."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" => "Max runs to return (default 20, max 200)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.worker_runs/2
+    },
+    %{
+      name: "worker_log",
+      tiers: @coordinator,
+      description:
+        "Full, uncapped durable transcript of a task's most recent run (`arb worker log " <>
+          "<task-id>`) — the audit source of record, retaining every line however long the " <>
+          "run. `exists` distinguishes \"no file yet / never captured\" (false, empty `lines`) " <>
+          "from \"captured but empty\" (true, empty `lines`). Not-found only when no run has " <>
+          "ever been recorded for the task.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Task whose latest run's transcript to read (required)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.worker_log/2
     },
     %{
       name: "external_review_list",
