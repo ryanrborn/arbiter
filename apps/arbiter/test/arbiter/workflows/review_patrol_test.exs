@@ -626,7 +626,9 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
           true ->
             # check-runs (pipeline → nil = settled) and anything else.
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unhandled #{path}"})
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "unhandled #{path}"})
         end
       end)
     end
@@ -910,7 +912,9 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
             conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 99})
 
           true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unhandled #{path}"})
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "unhandled #{path}"})
         end
       end)
 

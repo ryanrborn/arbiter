@@ -630,8 +630,7 @@ defmodule Arbiter.Trackers.SyncTest do
       assert :ok = Sync.lifecycle(issue, :merged)
 
       # Fix version is pushed first…
-      assert_receive {:put_fields,
-                      %{"fields" => %{"fixVersions" => [%{"name" => "2026-Q3"}]}}}
+      assert_receive {:put_fields, %{"fields" => %{"fixVersions" => [%{"name" => "2026-Q3"}]}}}
 
       # …then the transition fires.
       assert_receive {:transition, %{"transition" => %{"id" => "61"}}}

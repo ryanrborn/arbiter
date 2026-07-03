@@ -860,7 +860,8 @@ defmodule Arbiter.Trackers.Jira do
       case request(cfg, :put, "/issue/#{ref}", json: set_fix_version_payload) do
         {:ok, %Req.Response{status: s}} when s in 200..299 ->
           case request(cfg, :post, "/issue/#{ref}/transitions",
-                 json: %{"transition" => %{"id" => transition_id}}) do
+                 json: %{"transition" => %{"id" => transition_id}}
+               ) do
             {:ok, %Req.Response{status: s}} when s in 200..299 -> :ok
             {:ok, %Req.Response{status: s, body: b}} -> {:error, http_error(s, b)}
             {:error, e} -> {:error, transport_error(e)}

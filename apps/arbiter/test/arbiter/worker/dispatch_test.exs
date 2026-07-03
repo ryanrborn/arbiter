@@ -1392,7 +1392,9 @@ defmodule Arbiter.Worker.DispatchTest do
       # when the module hasn't been touched earlier in the test suite (bd-6aqgok).
       adapter = Arbiter.Trackers.for_task(task)
       assert Code.ensure_loaded?(adapter), "adapter #{inspect(adapter)} must be loadable"
-      assert function_exported?(adapter, :gating_fields, 2), "jira adapter must export gating_fields/2"
+
+      assert function_exported?(adapter, :gating_fields, 2),
+             "jira adapter must export gating_fields/2"
 
       prompt = Dispatch.prompt_for_task(task, [])
 
@@ -1726,7 +1728,8 @@ defmodule Arbiter.Worker.DispatchTest do
         description: "## Acceptance\n- feature works\n- tests pass"
       }
 
-      prompt = Arbiter.Worker.Dispatch.prompt_for_task(task, review: true, tracker_context: context)
+      prompt =
+        Arbiter.Worker.Dispatch.prompt_for_task(task, review: true, tracker_context: context)
 
       assert prompt =~ "Tracker context (read-only, jira:VR-18004)"
       assert prompt =~ "Some Jira ticket"

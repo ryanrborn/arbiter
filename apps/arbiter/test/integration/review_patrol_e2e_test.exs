@@ -227,9 +227,14 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
 
       # ── Tick 2: head advanced → re-review (auto mode) ────────────────────
       {:ok, eng} =
-        Ash.update(reload(eng), %{review_automation: :auto, posted_findings: [finding("lib/auth.ex", 5, "prior")]}, action: :update)
+        Ash.update(
+          reload(eng),
+          %{review_automation: :auto, posted_findings: [finding("lib/auth.ex", 5, "prior")]},
+          action: :update
+        )
 
-      diff = "diff --git a/lib/auth.ex b/lib/auth.ex\n--- a/lib/auth.ex\n+++ b/lib/auth.ex\n@@ -40,3 +40,4 @@\n+y\n"
+      diff =
+        "diff --git a/lib/auth.ex b/lib/auth.ex\n--- a/lib/auth.ex\n+++ b/lib/auth.ex\n@@ -40,3 +40,4 @@\n+y\n"
 
       stub_merger(fn conn ->
         cond do
@@ -439,7 +444,9 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
       put_invoker([finding("lib/sec.ex", 20, "new issue")])
 
       test_pid = self()
-      diff = "diff --git a/lib/sec.ex b/lib/sec.ex\n--- a/lib/sec.ex\n+++ b/lib/sec.ex\n@@ -18,3 +18,4 @@\n+z\n"
+
+      diff =
+        "diff --git a/lib/sec.ex b/lib/sec.ex\n--- a/lib/sec.ex\n+++ b/lib/sec.ex\n@@ -18,3 +18,4 @@\n+z\n"
 
       stub_merger(fn conn ->
         cond do

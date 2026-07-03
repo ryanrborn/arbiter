@@ -26,6 +26,16 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
     end
   end
 
+  # Always errors so items are requeued after every drain attempt.
+  defmodule FailingDispatcher do
+    def dispatch(task_id, _opts) do
+      if pid = Application.get_env(:arbiter, :test_dispatch_pid),
+        do: send(pid, {:dispatch_attempt, task_id})
+
+      {:error, :always_fails}
+    end
+  end
+
   # Records overage alerts to the pid in app-env.
   defmodule RecordingNotifier do
     def overage_alert(snapshot, spend, threshold) do
@@ -205,6 +215,90 @@ defmodule Arbiter.Workflows.DispatchQueueTest do
 
       assert {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
       assert result.task.status == :in_progress
+    end
+  end
+
+  # Regression tests for bd-3mb41v — stale-snapshot expiry
+  describe "stale snapshot (reset_5h_at in the past)" do
+    test "dispatch proceeds even when stale snapshot shows over-cap utilization" do
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      task = make_task(ws)
+
+      # Snapshot whose 5h window reset 1 hour ago → stale.
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+
+      seed_quota(ws, %{
+        status_5h: "allowed_warning",
+        utilization_5h: 0.94,
+        reset_5h_at: past
+      })
+
+      # Gate must fail open and dispatch proceeds normally.
+      assert {:ok, result} = Dispatch.dispatch(task.id, repo: "r", start_driver: false)
+      assert result.task.status == :in_progress
+    end
+
+    test "fresh over-cap snapshot still holds (staleness fix does not break throttle)" do
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+      task = make_task(ws)
+
+      future = DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.truncate(:second)
+
+      seed_quota(ws, %{
+        status_5h: "rejected",
+        utilization_5h: 0.99,
+        reset_5h_at: future
+      })
+
+      assert {:error, {:quota_held, task_id}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert task_id == task.id
+      assert DispatchQueue.held?(ws.id, task.id)
+
+      if pid = DispatchQueueSupervisor.whereis(ws.id) do
+        on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      end
+    end
+
+    test "no :drain_on_reset busy-loop when held items remain after drain with past reset" do
+      Application.put_env(:arbiter, :test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :test_dispatch_pid) end)
+
+      ws = make_workspace(%{"quota" => %{"on_exhaustion" => "throttle"}})
+
+      # First seed a fresh over-cap snapshot so hold/4 arms a real future timer.
+      future = DateTime.utc_now() |> DateTime.add(5 * 3600, :second) |> DateTime.truncate(:second)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: future})
+
+      # Start queue with FailingDispatcher so any drain attempt leaves items held,
+      # and a RecordingDispatcher alias for later verification.
+      pid =
+        start_queue(ws,
+          dispatcher: FailingDispatcher,
+          auto_subscribe: false
+        )
+
+      task = make_task(ws)
+      assert {:error, {:quota_held, _}} = Dispatch.dispatch(task.id, start_driver: false)
+      assert DispatchQueue.held?(ws.id, task.id)
+
+      # Update snapshot to be stale (reset 1 hour ago).
+      past = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.truncate(:second)
+      seed_quota(ws, %{status_5h: "rejected", utilization_5h: 0.99, reset_5h_at: past})
+
+      # Force a drain. The gate now fails open (stale), so the dispatcher is
+      # called. FailingDispatcher errors → item is requeued. schedule_reset_drain
+      # must NOT send another :drain_on_reset since reset is in the past.
+      :ok = DispatchQueue.drain(pid)
+
+      # Give the queue and the drain task time to finish.
+      Process.sleep(100)
+
+      # No :drain_on_reset messages must be pending in the queue's mailbox.
+      {:messages, msgs} = Process.info(pid, :messages)
+      drain_msgs = Enum.filter(msgs, &(&1 == :drain_on_reset))
+
+      assert drain_msgs == [],
+             "Expected no pending :drain_on_reset, got #{length(drain_msgs)}"
     end
   end
 

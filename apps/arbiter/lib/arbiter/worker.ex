@@ -2381,7 +2381,8 @@ defmodule Arbiter.Worker do
     do: {:no_commits_at_completion, "Worker signalled done with no commits on branch"}
 
   defp commit_gate_failure_metadata(:secret_in_commit),
-    do: {:secret_in_commit, "Worker committed an Arbiter-injected agent-config (bearer-token) file"}
+    do:
+      {:secret_in_commit, "Worker committed an Arbiter-injected agent-config (bearer-token) file"}
 
   defp commit_gate_summary(%State{task_id: task_id, meta: meta}, reason, why) do
     branch = (meta && Map.get(meta, :branch)) || "(unknown)"

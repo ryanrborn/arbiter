@@ -48,6 +48,7 @@ defmodule Arbiter.Settings.Installation do
       public? true
       allow_nil? true
       constraints min: 1
+
       description "Install-wide Conductor concurrency ceiling; nil falls back to app env / default."
     end
 
