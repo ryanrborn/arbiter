@@ -20,7 +20,18 @@ You coordinate; the workers execute. Core loop:
 
 External comms (GitHub, Slack) stay in normal professional voice.
 
-## 2. Directive Intake — Claim & Create
+## 2. Operating Pitfalls — Quick Reference
+
+The six most-burned-by operating pitfalls. Check these first:
+
+- [ ] **Concurrency** — keep concurrent tasks FILE-DISJOINT. Tasks that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. The auto-conflict-resolver helps, but do not rely on it. Serialize those tasks.
+- [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`rig_paths`, tracker, merge config, vernacular).
+- [ ] **Deploy** — before restarting the server, check for active workers (`arb prime` or `arb worker list`). **Restarting the server KILLS all in-flight workers and abandons their work.**
+- [ ] **Freshness** — keep repos current. Workers branch from the repo's base branch. A stale repo means stale, possibly regressed state for every new worker.
+- [ ] **Verify** — a worker can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
+- [ ] **ReviewGate** — read the full implementer↔reviewer transcript before deciding. Do not assume the worst on a stalled exchange; do not rubber-stamp because a round ran. **Decide for yourself.**
+
+## 3. Directive Intake — Claim & Create
 
 When taking in new directives locally via `arb claim` or `arb create`, **always
 set difficulty immediately after intake**. Both commands create tasks without
@@ -49,7 +60,7 @@ D3 Hard     — cross-cutting, non-obvious design, correctness-critical
 D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 ```
 
-## 3. File Issues Well
+## 4. File Issues Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
@@ -62,7 +73,7 @@ D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 Drop a one-line difficulty justification in the description so reviewers can
 sanity-check your call.
 
-## 4. Concurrency Discipline
+## 5. Concurrency Discipline
 
 Parallel workers are good. **Keep concurrent tasks FILE-DISJOINT.**
 
@@ -70,13 +81,13 @@ Tasks that touch the same file — especially the CLI verb list,
 command-alias map, or the router — **will collide at merge**. The
 auto-conflict-resolver helps, but do not rely on it. Serialize those tasks.
 
-## 5. Freshness
+## 6. Freshness
 
 Workers branch from the repo's base branch. A stale repo means stale, possibly
 regressed state for every new worker. Keep repos current; let provisioning
 fetch from origin.
 
-## 6. Config Safety
+## 7. Config Safety
 
 Workspace config is a single JSON map stored in the database.
 
@@ -86,7 +97,7 @@ vernacular).
 
 **Use `arb config get/set/unset` (deep-merge) only.**
 
-## 7. Deploy Safely
+## 8. Deploy Safely
 
 A real deploy = pull + run migrations + rebuild the CLI escript + restart the
 server.
@@ -98,7 +109,7 @@ Before restarting:
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
-## 8. Trust State, But Verify
+## 9. Trust State, But Verify
 
 - A worker can show "running" while its subprocess is dead — check the port or
   log, not just status.
@@ -108,7 +119,7 @@ Before restarting:
 - Close-on-merge can miss on out-of-band merges — close the issue manually if it
   stalls.
 
-## 9. Review Gate
+## 10. Review Gate
 
 The pre-merge review gate. After the round cap it escalates for **your**
 judgment.
@@ -117,12 +128,12 @@ Read the full implementer↔reviewer transcript before deciding. Do not assume
 the worst on a stalled exchange; do not rubber-stamp because a round ran.
 Decide for yourself.
 
-## 10. Watch Efficiently
+## 11. Watch Efficiently
 
 Use shell-poll monitors that wake only on real state changes. Avoid
 fixed-interval wakeups that burn tokens re-reading context on every tick.
 
-## 11. Provider-Agnostic
+## 12. Provider-Agnostic
 
 Never hardcode model names. Route via abstract tiers:
 
@@ -138,7 +149,7 @@ dispatch time.
 **Verify CLI flags against the installed agent CLI version** — a wrong flag
 crashes the worker at launch with no useful error.
 
-## 12. Review Capability
+## 13. Review Capability
 
 `arb review <id>` reviews the PR/MR linked to an Arbiter task: fetches the diff
 and posts findings + verdict. The PR author needs **no** Arbiter setup.
@@ -154,7 +165,7 @@ findings → submit a verdict, all on the PR. `--pr` accepts a forge URL, an
 owner/repo via the checkout's `origin` remote). The same is exposed over MCP as
 `worker_review` with a `pr` argument.
 
-## 13. Lanes & Merge Posture
+## 14. Lanes & Merge Posture
 
 Use **separate workspaces** for separate concerns (self-dev vs company repos).
 
@@ -163,7 +174,7 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 | Company / shared | OFF | A human merges |
 | Self-dev / experimental | ON | Safe to automate |
 
-## 14. Legacy aliases
+## 15. Legacy aliases
 
 Older docs and transcripts use themed names for generic concepts. The mapping,
 for reference:
@@ -185,7 +196,7 @@ for reference:
 | Directive | Task / issue |
 | Summons | Work prompt |
 
-## 15. Active Monitoring — Coordinator Inbox
+## 16. Active Monitoring — Coordinator Inbox
 
 The coordinator inbox is your command center for real-time coordination. Workers
 escalate here automatically when they hit blocking decisions; stand a background
