@@ -7,6 +7,9 @@ defmodule ArbiterCli.Client do
   Configuration:
 
     * `ARB_HOST` env var overrides the base URL (default `http://127.0.0.1:4848`)
+    * `ARB_TOKEN` env var sets a Bearer token for authentication. Required for
+      remote access (ARB_HOST pointing to a different server). Not needed for
+      local loopback access.
 
   Tests can override the Req adapter via `:req_options` in the process dict:
 
@@ -42,6 +45,12 @@ defmodule ArbiterCli.Client do
     System.get_env("ARB_HOST", @default_base)
   end
 
+  @spec token() :: String.t() | nil
+  def token do
+    System.get_env("ARB_TOKEN")
+  end
+
+
   @spec get(String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
   def get(path, params \\ []), do: request(:get, path, params: params)
 
@@ -57,13 +66,16 @@ defmodule ArbiterCli.Client do
   defp request(method, path, opts) do
     url = base_url() <> path
 
+    headers = auth_headers()
+
     req_opts =
       [
         method: method,
         url: url,
         receive_timeout: 10_000,
         connect_options: [timeout: 5_000],
-        retry: false
+        retry: false,
+        headers: headers
       ] ++ opts ++ test_opts()
 
     case Req.request(req_opts) do
@@ -99,6 +111,33 @@ defmodule ArbiterCli.Client do
       {:error, other} ->
         {:error, %Error{kind: :transport, message: inspect(other)}}
     end
+  end
+
+  defp auth_headers do
+    case token() do
+      nil -> []
+      t -> [{"authorization", "Bearer #{t}"}]
+    end
+  end
+
+  defp http_error(401, %{"error" => %{"message" => msg} = err}) do
+    %Error{
+      kind: :http,
+      status: 401,
+      body: err,
+      message: msg,
+      hint: "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
+    }
+  end
+
+  defp http_error(401, body) do
+    %Error{
+      kind: :http,
+      status: 401,
+      body: body,
+      message: "HTTP 401 (Unauthorized)",
+      hint: "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
+    }
   end
 
   defp http_error(status, %{"error" => %{"message" => msg} = err}) do
