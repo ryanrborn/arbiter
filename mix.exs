@@ -10,7 +10,7 @@ defmodule Arbiter.Umbrella.MixProject do
                        stderr_to_stdout: true
                      ) do
                   {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
-                  _ -> File.read!(Path.join(__DIR__, "VERSION")) |> String.trim()
+                  _ -> "0.0.0"
                 end
             end)
 
