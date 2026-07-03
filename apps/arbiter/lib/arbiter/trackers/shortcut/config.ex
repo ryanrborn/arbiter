@@ -83,6 +83,18 @@ defmodule Arbiter.Trackers.Shortcut.Config do
     :ok
   end
 
+  @doc """
+  Merge a per-repo tracker config override over the current process's active
+  config. Looks up `config["tracker"]["config"]["repos"][repo]` and, if present,
+  merges it over the config seeded by `put_active/1` — so a workspace whose
+  repos bind to different Shortcut projects targets the right one. No-op when
+  `repo` is nil/blank or the workspace declares no override for it. See
+  `Arbiter.Trackers.ConfigOverride`.
+  """
+  @spec override_repo(Workspace.t() | nil, String.t() | nil) :: :ok
+  def override_repo(workspace, repo),
+    do: Arbiter.Trackers.ConfigOverride.apply(@pdict_key, workspace, repo)
+
   @doc "Clear the per-process active config."
   @spec clear() :: :ok
   def clear do
