@@ -1237,6 +1237,79 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "worker_show/2" do
+    test "returns the live snapshot for a running worker", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "show-me", workspace_id: ctx.ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      :ok = Worker.report(pid, :output_lines, ["hello", "world"])
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "live"
+      assert snap.task_id == task.id
+      assert snap.repo == "test/repo"
+      assert snap.output_lines == ["hello", "world"]
+    end
+
+    test "falls back to the most recent historical run when no live worker exists", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "hist target", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, _old} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: older,
+          completed_at: older,
+          output_lines: ["stale"]
+        })
+
+      {:ok, _recent} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :failed,
+          started_at: newer,
+          completed_at: newer,
+          exit_code: 2,
+          failure_reason: "claude_crashed",
+          output_lines: ["a", "b", "boom"]
+        })
+
+      assert {:ok, snap} = Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+
+      assert snap.source == "history"
+      assert snap.status == "failed"
+      assert snap.exit_status == 2
+      assert snap.failure_reason == "claude_crashed"
+      assert snap.output_lines == ["a", "b", "boom"]
+    end
+
+    test "a task with neither a live worker nor any run is reported not-found", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no worker at all", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "cannot show a worker for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ws-other", prefix: "wso"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      {:ok, pid} = Worker.start(task_id: foreign.id, repo: "test/repo", workspace_id: other_ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(foreign.id, :normal) end)
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_show(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
   describe "usage_summarize/2" do
     test "requires a valid `by` grouping", ctx do
       assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{})

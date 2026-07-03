@@ -834,6 +834,51 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- worker_show --------------------------------------------------------
+
+  @doc """
+  Full snapshot for a single task's worker (`arb worker show <task-id>`).
+  When a worker is currently live, returns its in-memory state (status,
+  activity, recent output lines, etc). Otherwise falls back to the most
+  recent durable `Arbiter.Workers.Run` row so a finished/exited run stays
+  inspectable. Not-found only when neither a live worker nor any run has
+  ever been recorded for the task.
+  """
+  @spec worker_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_show(%Scope{} = scope, args) do
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, task_id) do
+      case Worker.whereis(task_id) do
+        nil ->
+          worker_show_historical(task_id)
+
+        pid ->
+          case Worker.state(pid) do
+            %{} = snap -> {:ok, serialize_worker_snapshot(Map.put(snap, :pid, pid))}
+            _ -> worker_show_historical(task_id)
+          end
+      end
+    end
+  end
+
+  defp worker_show_historical(task_id) do
+    case latest_run(task_id) do
+      %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_run(run)}
+      nil -> {:error, {:not_found, "no worker found for task #{task_id}"}}
+    end
+  end
+
+  defp latest_run(task_id) do
+    Arbiter.Workers.Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
+  end
+
   # ---- external_review_list -----------------------------------------------
 
   @doc """
@@ -2292,6 +2337,58 @@ defmodule Arbiter.MCP.Tools do
       cost_usd: cost_usd
     }
   end
+
+  defp serialize_worker_snapshot(snap) do
+    meta = Map.get(snap, :meta, %{}) || %{}
+
+    %{
+      source: "live",
+      task_id: snap.task_id,
+      workspace_id: snap.workspace_id,
+      repo: snap.repo,
+      current_step: snap.current_step,
+      claude_session: Map.get(meta, :claude_session, false),
+      activity: Map.get(meta, :activity),
+      status: to_str(snap.status),
+      started_at: iso(snap.started_at),
+      step_started_at: iso(Map.get(snap, :step_started_at)),
+      mr_ref: Map.get(snap, :mr_ref),
+      merger_url: Map.get(snap, :merger_url),
+      last_merger_status: Map.get(meta, :last_merger_status),
+      last_checked_at: iso(Map.get(meta, :last_checked_at)),
+      pid: inspect(snap.pid),
+      output_lines: Map.get(meta, :output_lines, []),
+      exit_status: Map.get(meta, :exit_status),
+      exited_at: iso(Map.get(meta, :exited_at)),
+      result: Map.get(meta, :result),
+      failure_reason: stringify_reason(Map.get(meta, :failure_reason))
+    }
+  end
+
+  defp serialize_worker_run(%Arbiter.Workers.Run{} = run) do
+    %{
+      source: "history",
+      task_id: run.task_id,
+      task_title: run.task_title,
+      workspace_id: run.workspace_id,
+      repo: run.repo,
+      worker_type: to_str(run.worker_type),
+      current_step: nil,
+      claude_session: false,
+      activity: nil,
+      status: to_str(run.status),
+      model: run.model,
+      started_at: iso(run.started_at),
+      completed_at: iso(run.completed_at),
+      exit_status: run.exit_code,
+      output_lines: run.output_lines || [],
+      failure_reason: run.failure_reason
+    }
+  end
+
+  defp stringify_reason(nil), do: nil
+  defp stringify_reason(v) when is_binary(v), do: v
+  defp stringify_reason(v), do: inspect(v)
 
   defp serialize_message(%Message{} = m) do
     %{
