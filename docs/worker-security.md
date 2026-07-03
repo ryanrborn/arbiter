@@ -137,6 +137,37 @@ opt into the interactive classifier (and accept the freeze risk), set
 }
 ```
 
+### Per-repo override (multi-repo workspaces)
+
+A workspace whose repos need *different* postures — e.g. one repo runs stricter
+or with network egress cut — adds a `"repos"` map under `agent.security`, keyed
+by the same repo name used in `config["repo_paths"]`. The repo block is layered
+over the workspace-wide posture for that repo only; every other repo resolves
+the workspace-wide default unchanged. No new config surface — it's the same
+generic `config` JSON (`arb config set` / `workspace_config_set`).
+
+```json
+{
+  "agent": {
+    "security": {
+      "permissions": { "mode": "auto", "deny": ["Bash(docker:*)"] },
+      "sandbox": { "network": true },
+      "repos": {
+        "device": {
+          "permissions": { "mode": "strict", "deny": ["Bash(curl:*)"] },
+          "sandbox": { "network": false }
+        }
+      }
+    }
+  }
+}
+```
+
+Here the `device` repo resolves `mode: strict`, `network: false`, and a deny
+list of *both* `Bash(docker:*)` (workspace) and `Bash(curl:*)` (repo) — deny
+unions across layers, scalars replace. The dispatch threads the resolved repo
+name (`Dispatch` `:repo` opt) into `SecurityPolicy.resolve/3`.
+
 ### Install-wide default
 
 Override the floor every domain inherits via application config (see
@@ -159,9 +190,10 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 ### Resolution precedence
 
 `base/0` → `:acolyte_security_policy` app env → `workspace.config["agent"]["security"]`
-→ per-dispatch override. `allow`/`deny` **union** across layers; `mode`,
-`safe_defaults`, and `sandbox` fields are **replaced** by the highest layer
-that sets them.
+→ `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
+is passed) → per-dispatch override. `allow`/`deny` **union** across layers;
+`mode`, `safe_defaults`, and `sandbox` fields are **replaced** by the highest
+layer that sets them.
 
 ## How the Claude adapter maps it
 

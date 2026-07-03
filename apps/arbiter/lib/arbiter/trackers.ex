@@ -92,6 +92,44 @@ defmodule Arbiter.Trackers do
     :ok
   end
 
+  @doc """
+  Like `prepare/2`, but also overlays a per-repo tracker config override for
+  `repo` (the workspace's `repo_paths` key) on top of the workspace-wide
+  binding.
+
+  Used where a multi-repo workspace binds different repos to different tracker
+  projects (e.g. two GitHub repos filing to different `owner/repo`, or two Jira
+  projects on one host). The override lives at
+  `workspace.config["tracker"]["config"]["repos"][repo]` and is resolved with
+  the same layered-precedence idiom as the merger per-repo overrides (see
+  `Arbiter.Mergers.prepare_with_repo/2`).
+
+  `nil`/blank `repo`, or a workspace with no override for it, falls back to
+  `prepare/2` unchanged — so single-repo / un-overridden workspaces behave
+  identically to today.
+  """
+  @spec prepare_with_repo(Issue.t(), Arbiter.Tasks.Workspace.t() | nil, String.t() | nil) :: :ok
+  def prepare_with_repo(%Issue{} = issue, workspace, repo) when repo in [nil, ""],
+    do: prepare(issue, workspace)
+
+  def prepare_with_repo(%Issue{} = issue, nil, _repo), do: prepare(issue, nil)
+
+  def prepare_with_repo(%Issue{tracker_type: type} = issue, workspace, repo)
+      when is_binary(repo) do
+    :ok = prepare(issue, workspace)
+
+    case type do
+      :github -> GitHub.Config.override_repo(workspace, repo)
+      :gitlab -> Gitlab.Config.override_repo(workspace, repo)
+      :jira -> Jira.Config.override_repo(workspace, repo)
+      :shortcut -> Shortcut.Config.override_repo(workspace, repo)
+      :linear -> Linear.Config.override_repo(workspace, repo)
+      _ -> :ok
+    end
+
+    :ok
+  end
+
   # ---- Delegating wrappers ----
   # Thin pass-throughs so callers don't need to manually resolve+invoke.
 
