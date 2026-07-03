@@ -52,6 +52,7 @@ defmodule Arbiter.MCP.Tools do
   require Logger
 
   @progress_fields ~w(notes qa_notes deployment_notes pr_body)
+  @message_kinds_mcp ~w(notification completion failure escalation info)a
 
   # ---- task_show ----------------------------------------------------------
 
@@ -564,16 +565,10 @@ defmodule Arbiter.MCP.Tools do
   defp validate_message_kind(nil), do: {:ok, nil}
 
   defp validate_message_kind(kind_str) when is_binary(kind_str) do
-    kind_atom = String.to_atom(kind_str)
-
-    if kind_atom in Message.kinds() do
-      {:ok, kind_atom}
-    else
-      {:error, {:invalid, "invalid kind #{inspect(kind_str)}"}}
+    case to_allowed_atom(kind_str, @message_kinds_mcp) do
+      {:ok, atom} -> {:ok, atom}
+      :error -> {:error, {:invalid, "invalid kind #{inspect(kind_str)}"}}
     end
-  rescue
-    ArgumentError ->
-      {:error, {:invalid, "invalid kind #{inspect(kind_str)}"}}
   end
 
   # ---- worker_dispatch ------------------------------------------------------
