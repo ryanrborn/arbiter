@@ -57,7 +57,8 @@ config :arbiter,
     Arbiter.Usage,
     Arbiter.Quota,
     Arbiter.Workflows,
-    Arbiter.Reviews
+    Arbiter.Reviews,
+    Arbiter.Settings
   ]
 
 # Local HTTP proxy that intercepts Claude CLI traffic to capture Anthropic's

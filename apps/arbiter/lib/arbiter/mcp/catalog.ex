@@ -49,6 +49,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_overview` | worker, coordinator | `Ash.get(Workspace, id)` → grouped config summary |
   | `workspace_config_set` | coordinator | `Ash.update(ws, …, action: :patch_config)` deep-merge |
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
+  | `installation_config_get` | worker, coordinator | `Arbiter.Settings.conductor_system_max_concurrent/0` |
+  | `installation_config_set` | coordinator | `Arbiter.Settings.set_conductor_system_max_concurrent/1` |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
@@ -917,6 +919,50 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.workspace_config_unset/2
+    },
+    %{
+      name: "installation_config_get",
+      tiers: @both,
+      description:
+        "Read an install-wide runtime setting (not workspace-scoped) — currently just " <>
+          "`conductor_system_max_concurrent`, the Conductor's system-wide concurrency ceiling. " <>
+          "Omit `key` to get the full settings map. Returns `{key, value, settings}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "key" => %{
+            "type" => "string",
+            "description" =>
+              "Setting name (e.g. \"conductor_system_max_concurrent\"). Omit for all settings."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.installation_config_get/2
+    },
+    %{
+      name: "installation_config_set",
+      tiers: @coordinator,
+      description:
+        "Set an install-wide runtime setting. Currently only `conductor_system_max_concurrent` " <>
+          "is settable — a positive integer, or `null` to clear the override and fall back to " <>
+          "the app-env/hardcoded default. Takes effect on the next Conductor drain cycle across " <>
+          "every running graph, no restart required. Returns `{key, value}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "key" => %{
+            "type" => "string",
+            "description" => "Setting name (e.g. \"conductor_system_max_concurrent\"). Required."
+          },
+          "value" => %{
+            "description" => "Positive integer, or null to clear the override."
+          }
+        },
+        "required" => ["key", "value"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.installation_config_set/2
     },
     %{
       name: "usage_summarize",

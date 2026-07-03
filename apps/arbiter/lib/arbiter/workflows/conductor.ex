@@ -108,8 +108,16 @@ defmodule Arbiter.Workflows.Conductor do
       resolved from workspace `config["conductor"]["max_concurrent"]`, else the
       system max). Alias `:max_concurrent` accepted for backwards compatibility.
     * `:system_max_concurrent` — install-wide concurrency ceiling; no workspace
-      can dispatch more than this many members at once. Default from
-      `:arbiter, :conductor_system_max_concurrent`, else `16`.
+      can dispatch more than this many members at once. When omitted (the
+      normal case), it is resolved **live on every drain cycle** — first the
+      runtime-settable `Arbiter.Settings.conductor_system_max_concurrent/0`
+      (bd-2ogep0: readable/writable via the `installation_config_get/set` MCP
+      tools with no redeploy), else the `:arbiter,
+      :conductor_system_max_concurrent` application env, else `16` — so a
+      change takes effect immediately for every running Conductor's next
+      drain pass and for any newly kicked-off graph, no restart required.
+      Passing this opt explicitly (e.g. in tests) pins the cap for that
+      Conductor's whole lifetime instead.
     * `:quota_gate` — module implementing `Arbiter.Workflows.QuotaGate` (default
       from `:arbiter, :conductor_quota_gate`, else
       `Arbiter.Workflows.QuotaGate.Default`).
@@ -148,6 +156,10 @@ defmodule Arbiter.Workflows.Conductor do
       :workspace_id,
       :workspace_max_concurrent,
       :system_max_concurrent,
+      # true when :system_max_concurrent was pinned via an explicit opt; when
+      # false, effective_cap/1 re-resolves the cap live every drain cycle
+      # instead of trusting this stale snapshot.
+      :system_max_explicit?,
       :quota_gate,
       :dispatcher,
       :dispatch_depth,
@@ -309,7 +321,7 @@ defmodule Arbiter.Workflows.Conductor do
         _ -> Keyword.get(opts, :workspace_id)
       end
 
-    system_max = resolve_system_max(opts)
+    {system_max, system_max_explicit?} = resolve_system_max(opts)
     workspace_max = resolve_workspace_max(opts, workspace_id, system_max)
 
     :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, @topic)
@@ -326,6 +338,7 @@ defmodule Arbiter.Workflows.Conductor do
       workspace_id: workspace_id,
       workspace_max_concurrent: workspace_max,
       system_max_concurrent: system_max,
+      system_max_explicit?: system_max_explicit?,
       quota_gate: resolve_quota_gate(opts),
       dispatcher: Keyword.get(opts, :dispatcher, default_dispatcher()),
       dispatch_depth: Keyword.get(opts, :dispatch_depth, 0),
@@ -435,12 +448,25 @@ defmodule Arbiter.Workflows.Conductor do
 
   # ---- cap resolution -----------------------------------------------------
 
+  # `{cap, explicit?}` — an explicit opt pins the cap for this Conductor's
+  # whole lifetime; otherwise the cap is left to be re-resolved live on every
+  # drain cycle (see `effective_cap/1`) so a runtime setting change takes
+  # effect without restarting an already-running Conductor.
   defp resolve_system_max(opts) do
-    Keyword.get(
-      opts,
-      :system_max_concurrent,
+    case Keyword.get(opts, :system_max_concurrent) do
+      n when is_integer(n) and n > 0 -> {n, true}
+      _ -> {live_system_max(), false}
+    end
+  end
+
+  # bd-2ogep0: the install-wide Conductor concurrency ceiling, resolved fresh
+  # each call — runtime-settable override (`Arbiter.Settings`), else the
+  # `:arbiter, :conductor_system_max_concurrent` app env, else the hardcoded
+  # default. Never raises: `Arbiter.Settings.conductor_system_max_concurrent/0`
+  # already swallows DB errors and returns `nil`.
+  defp live_system_max do
+    Arbiter.Settings.conductor_system_max_concurrent() ||
       Application.get_env(:arbiter, :conductor_system_max_concurrent, @default_system_max)
-    )
   end
 
   # Workspace max: explicit opt wins (either key), then workspace config, then
@@ -488,9 +514,11 @@ defmodule Arbiter.Workflows.Conductor do
   defp effective_cap(%State{
          workspace_max_concurrent: w_max,
          system_max_concurrent: s_max,
+         system_max_explicit?: explicit?,
          quota_gate: gate,
          workspace_id: ws_id
        }) do
+    s_max = if explicit?, do: s_max, else: live_system_max()
     base = min(w_max, s_max)
 
     case safe_quota_headroom(gate, ws_id) do
@@ -753,7 +781,8 @@ defmodule Arbiter.Workflows.Conductor do
       graph_id: state.graph_id,
       workspace_id: state.workspace_id,
       workspace_max_concurrent: state.workspace_max_concurrent,
-      system_max_concurrent: state.system_max_concurrent,
+      system_max_concurrent:
+        if(state.system_max_explicit?, do: state.system_max_concurrent, else: live_system_max()),
       dispatch_depth: state.dispatch_depth,
       member_ids: state.member_ids,
       # C5: failure state

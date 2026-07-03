@@ -885,6 +885,114 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "installation_config_get/2 + installation_config_set/2" do
+    setup do
+      on_exit(fn -> Arbiter.Settings.set_conductor_system_max_concurrent(nil) end)
+      :ok
+    end
+
+    test "returns the full settings map when no key is given (worker tier)", ctx do
+      assert {:ok, data} = Tools.installation_config_get(ctx.worker, %{})
+      assert is_nil(data.key)
+      assert data.value == %{conductor_system_max_concurrent: nil}
+      assert data.settings == %{conductor_system_max_concurrent: nil}
+    end
+
+    test "returns a leaf value for a known key", ctx do
+      {:ok, 5} = Arbiter.Settings.set_conductor_system_max_concurrent(5)
+
+      assert {:ok, data} =
+               Tools.installation_config_get(ctx.worker, %{"key" => "conductor_system_max_concurrent"})
+
+      assert data.key == "conductor_system_max_concurrent"
+      assert data.value == 5
+    end
+
+    test "errors for an unknown key", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.installation_config_get(ctx.worker, %{"key" => "nonexistent"})
+
+      assert msg =~ "nonexistent"
+    end
+
+    test "coordinator can set a positive integer value", ctx do
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => 3
+               })
+
+      assert data.key == "conductor_system_max_concurrent"
+      assert data.value == 3
+      assert Arbiter.Settings.conductor_system_max_concurrent() == 3
+    end
+
+    test "coordinator can clear the override with a null value", ctx do
+      {:ok, 3} = Arbiter.Settings.set_conductor_system_max_concurrent(3)
+
+      assert {:ok, data} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => nil
+               })
+
+      assert data.value == nil
+      assert Arbiter.Settings.conductor_system_max_concurrent() == nil
+    end
+
+    test "rejects an unknown key", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "nonexistent",
+                 "value" => 1
+               })
+
+      assert msg =~ "nonexistent"
+    end
+
+    test "rejects a non-positive-integer value", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent",
+                 "value" => 0
+               })
+
+      assert msg =~ "value"
+    end
+
+    test "requires a key argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{"value" => 1})
+
+      assert msg =~ "key"
+    end
+
+    test "requires a value argument", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.installation_config_set(ctx.coordinator, %{
+                 "key" => "conductor_system_max_concurrent"
+               })
+
+      assert msg =~ "value"
+    end
+  end
+
+  describe "installation config tools — catalog visibility" do
+    test "installation_config_get is visible to workers and coordinators", ctx do
+      worker_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+      coord_names = Catalog.visible(ctx.coordinator) |> Enum.map(& &1.name)
+      assert "installation_config_get" in worker_names
+      assert "installation_config_get" in coord_names
+    end
+
+    test "installation_config_set is coordinator-only", ctx do
+      worker_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
+      coord_names = Catalog.visible(ctx.coordinator) |> Enum.map(& &1.name)
+      assert "installation_config_set" in coord_names
+      refute "installation_config_set" in worker_names
+    end
+  end
+
   describe "workspace config tools — catalog visibility" do
     test "workspace_config_get and workspace_config_overview are visible to workers", ctx do
       visible_names = Catalog.visible(ctx.worker) |> Enum.map(& &1.name)
