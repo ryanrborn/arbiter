@@ -297,6 +297,68 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- installation_config_get --------------------------------------------
+
+  @install_settings_keys ~w(conductor_system_max_concurrent)
+
+  @doc """
+  Read an install-wide runtime setting (bd-2ogep0) — currently just
+  `conductor_system_max_concurrent`, the Conductor's system-wide concurrency
+  ceiling. Returns the full settings map when `key` is omitted. Available to
+  both tiers (read-only, no workspace scoping — this is installation-wide).
+  """
+  @spec installation_config_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def installation_config_get(%Scope{} = _scope, args) do
+    settings = %{
+      conductor_system_max_concurrent: Arbiter.Settings.conductor_system_max_concurrent()
+    }
+
+    case fetch_string(args, "key") do
+      nil ->
+        {:ok, %{key: nil, value: settings, settings: settings}}
+
+      key when key in @install_settings_keys ->
+        {:ok, %{key: key, value: Map.get(settings, String.to_existing_atom(key)), settings: settings}}
+
+      key ->
+        {:error, {:not_found, "unknown installation setting: #{key}"}}
+    end
+  end
+
+  # ---- installation_config_set --------------------------------------------
+
+  @doc """
+  Set an install-wide runtime setting (bd-2ogep0). Coordinator only (enforced
+  in `Arbiter.MCP.Catalog`). Currently only `conductor_system_max_concurrent`
+  is settable — a positive integer, or `null` to clear the override and fall
+  back to the `:arbiter, :conductor_system_max_concurrent` application env /
+  hardcoded default. Takes effect on the next Conductor drain cycle across
+  every running graph — no restart required.
+  """
+  @spec installation_config_set(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def installation_config_set(%Scope{} = _scope, args) do
+    with {:ok, key} <- require_string(args, "key"),
+         :ok <- validate_install_key(key),
+         {:ok, value} <- require_install_value(args) do
+      case Arbiter.Settings.set_conductor_system_max_concurrent(value) do
+        {:ok, updated} -> {:ok, %{key: key, value: updated}}
+        {:error, reason} -> {:error, {:invalid, inspect(reason)}}
+      end
+    end
+  end
+
+  defp validate_install_key(key) when key in @install_settings_keys, do: :ok
+  defp validate_install_key(key), do: {:error, {:invalid, "unknown installation setting: #{key}"}}
+
+  defp require_install_value(args) do
+    case Map.fetch(args, "value") do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
+      {:ok, _other} -> {:error, {:invalid, "value must be a positive integer or null"}}
+      :error -> {:error, {:invalid, "value is required"}}
+    end
+  end
+
   # ---- quota_get ----------------------------------------------------------
 
   @doc """
