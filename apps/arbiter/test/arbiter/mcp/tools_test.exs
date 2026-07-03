@@ -518,6 +518,58 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:invalid, _}} =
                Tools.message_send(ctx.coordinator, %{"task_id" => ctx.task.id})
     end
+
+    test "accepts optional kind parameter to override auto-derived kind", ctx do
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "escalation needed",
+                 "kind" => "escalation"
+               })
+
+      assert msg.kind == "escalation"
+      assert msg.from_ref == "coordinator"
+      assert msg.to_ref == ctx.task.id
+    end
+
+    test "accepts optional directive_ref parameter", ctx do
+      {:ok, other_task} = Ash.create(Issue, %{title: "other", workspace_id: ctx.ws.id})
+
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "issue with this task",
+                 "directive_ref" => other_task.id
+               })
+
+      assert msg.directive_ref == other_task.id
+    end
+
+    test "rejects invalid kind values", ctx do
+      assert {:error, {:invalid, msg}} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "message",
+                 "kind" => "invalid_kind"
+               })
+
+      assert String.contains?(msg, "invalid kind")
+    end
+
+    test "kind=escalation sent by coordinator produces escalation message", ctx do
+      assert {:ok, msg} =
+               Tools.message_send(ctx.coordinator, %{
+                 "task_id" => ctx.task.id,
+                 "body" => "review failed — needs escalation",
+                 "kind" => "escalation"
+               })
+
+      assert msg.kind == "escalation"
+
+      # Verify it's stored correctly in the database
+      {:ok, stored} = Ash.get(Message, msg.id)
+      assert stored.kind == :escalation
+    end
   end
 
   describe "task_reopen/2" do

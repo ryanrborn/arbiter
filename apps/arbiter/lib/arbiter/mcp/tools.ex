@@ -52,6 +52,7 @@ defmodule Arbiter.MCP.Tools do
   require Logger
 
   @progress_fields ~w(notes qa_notes deployment_notes pr_body)
+  @message_kinds_mcp ~w(notification completion failure escalation info)a
 
   # ---- task_show ----------------------------------------------------------
 
@@ -487,12 +488,14 @@ defmodule Arbiter.MCP.Tools do
   def message_send(%Scope{} = scope, args) do
     with {:ok, to_ref} <- require_string(args, "task_id"),
          {:ok, body} <- require_string(args, "body"),
-         {:ok, ws_id} <- message_workspace(scope, args, to_ref) do
+         {:ok, ws_id} <- message_workspace(scope, args, to_ref),
+         {:ok, kind} <- validate_message_kind(fetch_string(args, "kind")) do
       attrs =
         scope
-        |> message_envelope(ws_id, to_ref)
+        |> message_envelope(ws_id, to_ref, kind)
         |> Map.put(:body, body)
         |> maybe_put(:subject, fetch_string(args, "subject"))
+        |> maybe_put(:directive_ref, fetch_string(args, "directive_ref"))
 
       case Message.send_mail(attrs) do
         {:ok, message} -> {:ok, serialize_message(message)}
@@ -514,8 +517,9 @@ defmodule Arbiter.MCP.Tools do
 
   # The sender identity + kind are derived from the scope, never the client: a
   # coordinator directs (`from: "coordinator"`); a worker flags from its own
-  # bound task. Both are pinned to the resolved workspace.
-  defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref) do
+  # bound task. Both are pinned to the resolved workspace. When kind is
+  # explicitly provided, it overrides the auto-derived default.
+  defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref, nil) do
     %{
       kind: :direction,
       workspace_id: ws_id,
@@ -525,7 +529,17 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
-  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref) do
+  defp message_envelope(%Scope{tier: :coordinator}, ws_id, to_ref, kind) when is_atom(kind) do
+    %{
+      kind: kind,
+      workspace_id: ws_id,
+      from_ref: "coordinator",
+      to_ref: to_ref,
+      directive_ref: to_ref
+    }
+  end
+
+  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref, nil) do
     %{
       kind: :flag,
       workspace_id: ws_id,
@@ -533,6 +547,28 @@ defmodule Arbiter.MCP.Tools do
       to_ref: to_ref,
       directive_ref: to_ref
     }
+  end
+
+  defp message_envelope(%Scope{tier: :worker, task_id: task_id}, ws_id, to_ref, kind) when is_atom(kind) do
+    %{
+      kind: kind,
+      workspace_id: ws_id,
+      from_ref: task_id,
+      to_ref: to_ref,
+      directive_ref: to_ref
+    }
+  end
+
+  # Validate and convert message kind from string to atom. Returns {:ok, nil}
+  # if not specified (use auto-derived kind), or {:ok, atom} if valid, or
+  # {:error, {_, msg}} if invalid.
+  defp validate_message_kind(nil), do: {:ok, nil}
+
+  defp validate_message_kind(kind_str) when is_binary(kind_str) do
+    case to_allowed_atom(kind_str, @message_kinds_mcp) do
+      {:ok, atom} -> {:ok, atom}
+      :error -> {:error, {:invalid, "invalid kind #{inspect(kind_str)}"}}
+    end
   end
 
   # ---- worker_dispatch ------------------------------------------------------
