@@ -5,19 +5,17 @@ defmodule ArbiterCli.Cmd.Prime do
 
   Output (in order):
 
-    1. **Active workspace** — name, prefix, tracker config.
-    2. **Standing Orders** — the active domain's operating disciplines as a
-       checklist, sourced from `config.standing_orders`. Surfaced high so the
-       disciplines greet a fresh agent before the work list. Omitted entirely
-       when the domain carries no orders.
-    3. **Operating Pitfalls** — a concise digest of the most-burned-by
-       operating pitfalls (concurrency, config safety, deploy, freshness,
-       verify, review_gate). Always shown. Points to `ARBITER_OPERATOR.md`
-       for the full operator field guide.
-    4. **Admiral Inbox** — up to 5 most recent unread messages addressed to
+    1. **Admiral Inbox** — up to 5 most recent unread messages addressed to
        the Admiral. Omitted entirely when there are none.
-    5. **Active workers** — task_id, status, current_step, runtime.
-    6. **Ready tasks** — `Issue.ready/0` view (issues with all deps closed).
+    2. **Per-workspace blocks** (one per configured workspace, in server order):
+       a. Workspace header — name, prefix, id, tracker, security posture.
+       b. Standing Orders — the domain's operating disciplines, sourced from
+          `config.standing_orders`. Omitted when empty.
+       c. Active workers — task_id, status, current_step, runtime, scoped to
+          this workspace.
+       d. Ready tasks — `Issue.ready/0` view, scoped to this workspace.
+       e. Coordinator Inbox — unread messages for this workspace's coordinator.
+          Omitted when empty.
 
   ## Standing Orders are data, not code
 
@@ -33,9 +31,22 @@ defmodule ArbiterCli.Cmd.Prime do
     * Recent audit-log entries (no server-side endpoint yet).
     * Open epic / parent-task progress (no dedicated endpoint yet).
 
-  Those need REST endpoints landed before they can be surfaced here. v1
-  covers the highest-value subset: what's running, what's actionable,
-  and what vocabulary the session should use.
+  ## `--json` shape
+
+  Emits a JSON object with two keys:
+
+      {
+        "admiral_inbox": [...],
+        "workspaces": [
+          {
+            "workspace": {...},
+            "standing_orders": [...],
+            "workers": [...],
+            "ready": [...],
+            "coordinator_inbox": [...]
+          }
+        ]
+      }
 
   ## Flags
 
@@ -43,7 +54,7 @@ defmodule ArbiterCli.Cmd.Prime do
       labelled text sections.
   """
 
-  alias ArbiterCli.{Client, Output, Workspace}
+  alias ArbiterCli.{Client, Output}
 
   def run(argv) do
     if Output.help?(argv) do
@@ -61,14 +72,22 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp to_json(sections) do
     %{
-      workspace: unwrap(sections.workspace),
-      standing_orders: unwrap(sections.standing_orders),
       admiral_inbox: unwrap(sections.admiral_inbox),
-      workers: unwrap(sections.workers),
-      ready: unwrap(sections.ready),
-      field_guide_pitfalls: field_guide_pitfalls()
+      workspaces: Enum.map(sections.workspaces, &workspace_to_json/1)
     }
   end
+
+  defp workspace_to_json(%{} = ws_section) do
+    %{
+      workspace: ws_section.workspace,
+      standing_orders: unwrap(ws_section.standing_orders),
+      workers: unwrap(ws_section.workers),
+      ready: unwrap(ws_section.ready),
+      coordinator_inbox: unwrap(ws_section.coordinator_inbox)
+    }
+  end
+
+  defp workspace_to_json({:error, msg}), do: %{"error" => msg}
 
   defp unwrap({:ok, val}), do: val
   defp unwrap({:error, msg}), do: %{"error" => msg}
@@ -76,22 +95,44 @@ defmodule ArbiterCli.Cmd.Prime do
   # ---- gather ------------------------------------------------------------
 
   defp gather do
-    workspace = gather_workspace()
+    workspaces_result = gather_workspaces()
+
+    workspace_sections =
+      case workspaces_result do
+        {:ok, list} -> Enum.map(list, &gather_workspace_section/1)
+        {:error, _} = err -> [err]
+      end
 
     %{
-      workspace: workspace,
-      standing_orders: gather_standing_orders(workspace),
       admiral_inbox: gather_admiral_inbox(),
-      workers: gather_workers(),
-      ready: gather_ready(workspace)
+      workspaces: workspace_sections
+    }
+  end
+
+  defp gather_workspaces do
+    case Client.get("/api/workspaces") do
+      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, _} -> {:ok, []}
+      {:error, %Client.Error{} = err} -> {:error, err.message}
+    end
+  end
+
+  defp gather_workspace_section(ws) do
+    ws_id = ws["id"]
+
+    %{
+      workspace: ws,
+      standing_orders: gather_standing_orders(ws),
+      workers: gather_workers(ws_id),
+      ready: gather_ready(ws_id),
+      coordinator_inbox: gather_coordinator_inbox(ws_id)
     }
   end
 
   # Standing Orders are per-domain operating disciplines carried in workspace
-  # config (`config.standing_orders`). We already have the resolved workspace,
-  # so there's no extra API round-trip. Absent/empty/unresolved all collapse to
-  # `[]` so the section is cleanly omitted on installs without orders.
-  defp gather_standing_orders({:ok, %{"config" => %{"standing_orders" => orders}}})
+  # config (`config.standing_orders`). Already embedded in the workspace map,
+  # so there's no extra API round-trip.
+  defp gather_standing_orders(%{"config" => %{"standing_orders" => orders}})
        when is_list(orders),
        do: {:ok, orders}
 
@@ -107,31 +148,24 @@ defmodule ArbiterCli.Cmd.Prime do
     end
   end
 
-  defp gather_workspace do
-    case Workspace.resolve() do
-      {:ok, ws} -> {:ok, ws}
-      {:error, msg} -> {:error, msg}
-    end
-  end
-
-  defp gather_workers do
-    case Client.get("/api/workers") do
+  defp gather_workers(ws_id) do
+    case Client.get("/api/workers", workspace_id: ws_id) do
       {:ok, %{"data" => list}} -> {:ok, list}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
     end
   end
 
-  # Scope ready tasks to the active workspace when we know it, so prime
-  # doesn't drown the user in imported-from-other-workspaces noise.
-  defp gather_ready({:ok, %{"id" => ws_id}}) do
-    do_gather_ready(workspace_id: ws_id)
+  defp gather_ready(ws_id) do
+    case Client.get("/api/issues/ready", workspace_id: ws_id) do
+      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, _} -> {:ok, []}
+      {:error, %Client.Error{} = err} -> {:error, err.message}
+    end
   end
 
-  defp gather_ready(_), do: do_gather_ready([])
-
-  defp do_gather_ready(params) do
-    case Client.get("/api/issues/ready", params) do
+  defp gather_coordinator_inbox(ws_id) do
+    case Client.get("/api/messages", to_ref: "coordinator", workspace_id: ws_id, unread: "true") do
       {:ok, %{"data" => list}} -> {:ok, list}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
@@ -141,20 +175,38 @@ defmodule ArbiterCli.Cmd.Prime do
   # ---- render ------------------------------------------------------------
 
   defp emit_text(sections) do
-    emit_workspace_section(sections.workspace, "workspace")
-    IO.puts("")
-    maybe_emit_standing_orders_section(sections.standing_orders)
-    emit_field_guide_digest("issue", "worker", "repo")
-    IO.puts("")
     maybe_emit_admiral_inbox(sections.admiral_inbox)
-    emit_workers_section(sections.workers, "worker")
-    IO.puts("")
-    emit_ready_section(sections.ready, "issue")
+    Enum.each(sections.workspaces, &emit_workspace_block/1)
   end
 
-  # Omitted entirely when the domain carries no orders — installs without
-  # doctrine see no noise (same contract as the Admiral Inbox section). When
-  # present, the orders greet the agent high in the briefing as a checklist.
+  defp emit_workspace_block(%{} = ws_section) do
+    ws = ws_section.workspace
+    IO.puts("== Workspace: #{ws["name"]} (#{ws["prefix"]}) ==")
+    IO.puts("  name:    #{ws["name"]}")
+    IO.puts("  prefix:  #{ws["prefix"]}")
+    IO.puts("  id:      #{ws["id"]}")
+
+    tracker_type = get_in(ws, ["config", "tracker", "type"]) || "none"
+    IO.puts("  tracker: #{tracker_type}")
+
+    emit_security_posture(ws["security_posture"])
+    IO.puts("")
+
+    maybe_emit_standing_orders_section(ws_section.standing_orders)
+    emit_workers_section(ws_section.workers, "worker")
+    IO.puts("")
+    emit_ready_section(ws_section.ready, "issue")
+    IO.puts("")
+    maybe_emit_coordinator_inbox(ws_section.coordinator_inbox)
+  end
+
+  defp emit_workspace_block({:error, msg}) do
+    IO.puts("== Workspaces ==")
+    IO.puts("  (could not load: #{msg})")
+    IO.puts("")
+  end
+
+  # Omitted entirely when the domain carries no orders.
   defp maybe_emit_standing_orders_section({:ok, []}), do: :ok
 
   defp maybe_emit_standing_orders_section({:ok, orders}) do
@@ -176,8 +228,7 @@ defmodule ArbiterCli.Cmd.Prime do
   defp standing_order_line(order) when is_binary(order), do: "[ ] #{order}"
   defp standing_order_line(order), do: "[ ] #{inspect(order)}"
 
-  # Omitted entirely when there's no unread Admiral mail (or the lookup
-  # failed) — a clean briefing shows nothing rather than "(none)" noise.
+  # Omitted entirely when there's no unread Admiral mail.
   defp maybe_emit_admiral_inbox({:ok, []}), do: :ok
 
   defp maybe_emit_admiral_inbox({:ok, list}) do
@@ -191,6 +242,21 @@ defmodule ArbiterCli.Cmd.Prime do
   end
 
   defp maybe_emit_admiral_inbox(_), do: :ok
+
+  # Omitted entirely when there's no unread coordinator mail.
+  defp maybe_emit_coordinator_inbox({:ok, []}), do: :ok
+
+  defp maybe_emit_coordinator_inbox({:ok, list}) do
+    IO.puts("== Coordinator Inbox (#{length(list)} unread) ==")
+
+    list
+    |> Enum.take(5)
+    |> Enum.each(fn m -> IO.puts("  " <> inbox_line(m)) end)
+
+    IO.puts("")
+  end
+
+  defp maybe_emit_coordinator_inbox(_), do: :ok
 
   # `[bd-9bn4n9] failure    — Acolyte exited with code 1 (5m ago)`
   defp inbox_line(m) do
@@ -215,27 +281,9 @@ defmodule ArbiterCli.Cmd.Prime do
   defp humanize(s) when s < 86_400, do: "#{div(s, 3600)}h ago"
   defp humanize(s), do: "#{div(s, 86_400)}d ago"
 
-  defp emit_workspace_section({:ok, ws}, workspace) do
-    IO.puts("== Active #{workspace} ==")
-    IO.puts("  name:    #{ws["name"]}")
-    IO.puts("  prefix:  #{ws["prefix"]}")
-    IO.puts("  id:      #{ws["id"]}")
-
-    tracker_type = get_in(ws, ["config", "tracker", "type"]) || "none"
-    IO.puts("  tracker: #{tracker_type}")
-
-    emit_security_posture(ws["security_posture"])
-  end
-
-  defp emit_workspace_section({:error, msg}, workspace) do
-    IO.puts("== Active #{workspace} ==")
-    IO.puts("  (could not resolve: #{msg})")
-  end
-
   # The resolved worker security posture (server-computed; see
-  # ArbiterWeb.Api.WorkspaceJSON). Surfaced so a fresh Admiral session sees, up
-  # front, what a worker spawned in this domain may and may not do — the
-  # permission mode, the sandbox stance, and how many deny rules are in force.
+  # ArbiterWeb.Api.WorkspaceJSON). Surfaced so a fresh Admiral session sees,
+  # up front, what a worker spawned in this domain may and may not do.
   defp emit_security_posture(%{} = posture) do
     sandbox = posture["sandbox"] || %{}
     deny = List.wrap(posture["deny"])
@@ -259,30 +307,6 @@ defmodule ArbiterCli.Cmd.Prime do
   end
 
   defp emit_security_posture(_), do: :ok
-
-  # Condensed digest of the most-burned-by pitfalls. Always shown so a fresh
-  # session starts with the essentials even before reading the full guide.
-  defp emit_field_guide_digest(issue, worker, repo) do
-    IO.puts("== Operating Pitfalls ==")
-
-    Enum.each(field_guide_pitfalls(issue, worker, repo), fn line ->
-      IO.puts("  [ ] #{line}")
-    end)
-
-    IO.puts("  Full guide: ARBITER_OPERATOR.md")
-    IO.puts("")
-  end
-
-  defp field_guide_pitfalls(issue \\ "issue", worker \\ "worker", repo \\ "repo") do
-    [
-      "Concurrency: keep parallel #{issue}s FILE-DISJOINT — same file = merge collision",
-      "Config: use `arb config get/set` only — raw API PATCH silently clobbers siblings",
-      "Deploy: check for active #{worker}s before restarting the server — they will be abandoned",
-      "Freshness: keep #{repo}s current — a stale #{repo} propagates regressed state",
-      "Verify: check the port/log to confirm a #{worker} is live — status alone can lie",
-      "ReviewGate: read the full implementer↔reviewer transcript before deciding"
-    ]
-  end
 
   defp emit_workers_section({:ok, []}, worker) do
     IO.puts("== Active #{worker}s ==")

@@ -3,17 +3,19 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
   alias ArbiterCli.Cmd.Prime
 
-  defp stub_all(workspaces, workers, ready, admiral \\ []) do
+  # All /api/messages requests (admiral + per-workspace coordinator) share
+  # a single stub matched by path; query params are not matched by stub_routes.
+  defp stub_all(workspaces, workers, ready, messages \\ []) do
     stub_routes([
       {{"get", "/api/workspaces"}, {%{"data" => workspaces}, 200}},
       {{"get", "/api/workers"}, {%{"data" => workers}, 200}},
       {{"get", "/api/issues/ready"}, {%{"data" => ready}, 200}},
-      {{"get", "/api/messages"}, {%{"data" => admiral}, 200}}
+      {{"get", "/api/messages"}, {%{"data" => messages}, 200}}
     ])
   end
 
   describe "text mode" do
-    test "prints all four sections with data populated" do
+    test "prints workspace header, workers, and ready tasks" do
       stub_all(
         [
           %{
@@ -41,11 +43,10 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
 
-      assert out =~ "== Active workspace =="
+      assert out =~ "== Workspace: default (bd) =="
       assert out =~ "default"
       assert out =~ "tracker: jira"
 
-      # Section headers use the plain code terms.
       assert out =~ "== Active workers (1) =="
       assert out =~ "bd-001"
       assert out =~ "step=implement"
@@ -53,6 +54,27 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "== Ready issues (1) =="
       assert out =~ "bd-002"
       assert out =~ "Fix the thing"
+    end
+
+    test "lists all workspaces when multiple are configured" do
+      stub_all(
+        [
+          %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}},
+          %{"id" => "ws-2", "name" => "leotech", "prefix" => "lt", "config" => %{}}
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      assert out =~ "== Workspace: default (bd) =="
+      assert out =~ "== Workspace: leotech (lt) =="
+
+      default_at = :binary.match(out, "== Workspace: default (bd) ==") |> elem(0)
+      leotech_at = :binary.match(out, "== Workspace: leotech (lt) ==") |> elem(0)
+      assert default_at < leotech_at
     end
 
     test "renders the security posture section when the workspace carries one" do
@@ -133,6 +155,30 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "[bd-6c6w82] completion"
     end
 
+    test "Admiral Inbox appears before workspace blocks" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [],
+        [
+          %{
+            "id" => "m-1",
+            "kind" => "failure",
+            "directive_ref" => "bd-9bn4n9",
+            "subject" => "Acolyte exited with code 1",
+            "inserted_at" => "2026-05-28T11:55:00.000000Z"
+          }
+        ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+
+      inbox_at = :binary.match(out, "== Admiral Inbox") |> elem(0)
+      workspace_at = :binary.match(out, "== Workspace:") |> elem(0)
+      assert inbox_at < workspace_at
+    end
+
     test "omits the Admiral Inbox section entirely when there is no unread mail" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
@@ -144,6 +190,43 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
       refute out =~ "Admiral Inbox"
+    end
+
+    test "renders the Coordinator Inbox section when there is unread coordinator mail" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [],
+        [
+          %{
+            "id" => "m-3",
+            "kind" => "escalation",
+            "directive_ref" => "bd-abc",
+            "subject" => "Worker needs direction",
+            "body" => "please advise",
+            "inserted_at" => "2026-05-28T12:00:00.000000Z"
+          }
+        ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      assert out =~ "== Coordinator Inbox"
+      assert out =~ "[bd-abc] escalation"
+      assert out =~ "Worker needs direction"
+    end
+
+    test "omits the Coordinator Inbox section when there is no unread coordinator mail" do
+      stub_all(
+        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
+        [],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
+      assert exit_code == 0
+      refute out =~ "Coordinator Inbox"
     end
 
     test "renders the Standing Orders section from config.standing_orders" do
@@ -177,7 +260,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "[ ] Never boot a second Arbiter instance — it sweeps live runs"
       assert out =~ "[ ] No merge to main without the ReviewGate review gate"
 
-      # Surfaced high: before the work list (workers / ready tasks).
+      # Surfaced within the workspace block, before the work list.
       orders_at = :binary.match(out, "== Standing Orders ==") |> elem(0)
       ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
       assert orders_at < ready_at
@@ -195,7 +278,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       refute out =~ "Standing Orders"
     end
 
-    test "always shows the Operating Pitfalls digest with a pointer to ARBITER_OPERATOR.md" do
+    test "never shows an Operating Pitfalls section" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -204,38 +287,12 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
-
-      assert out =~ "== Operating Pitfalls =="
-      assert out =~ "[ ] Concurrency:"
-      assert out =~ "[ ] Config:"
-      assert out =~ "[ ] Deploy:"
-      assert out =~ "[ ] ReviewGate:"
-      assert out =~ "ARBITER_OPERATOR.md"
-
-      # Surfaced above the work list.
-      pitfalls_at = :binary.match(out, "== Operating Pitfalls ==") |> elem(0)
-      ready_at = :binary.match(out, "== Ready issues ==") |> elem(0)
-      assert pitfalls_at < ready_at
-    end
-
-    test "Operating Pitfalls digest uses the plain code terms" do
-      stub_all(
-        [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
-        [],
-        []
-      )
-
-      {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
-      assert exit_code == 0
-
-      assert out =~ "issue"
-      assert out =~ "worker"
-      assert out =~ "repo"
+      refute out =~ "Operating Pitfalls"
     end
   end
 
   describe "--json mode" do
-    test "emits a single JSON object with all sections including field_guide_pitfalls" do
+    test "emits a JSON object with admiral_inbox and workspaces array" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -247,14 +304,38 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {:ok, decoded} = Jason.decode(String.trim(out))
       assert is_map(decoded)
-      assert Map.has_key?(decoded, "workspace")
-      assert Map.has_key?(decoded, "workers")
-      assert Map.has_key?(decoded, "ready")
       assert Map.has_key?(decoded, "admiral_inbox")
-      assert Map.has_key?(decoded, "standing_orders")
-      assert Map.has_key?(decoded, "field_guide_pitfalls")
-      assert is_list(decoded["field_guide_pitfalls"])
-      assert length(decoded["field_guide_pitfalls"]) > 0
+      assert Map.has_key?(decoded, "workspaces")
+      assert is_list(decoded["workspaces"])
+      refute Map.has_key?(decoded, "field_guide_pitfalls")
+
+      [ws] = decoded["workspaces"]
+      assert Map.has_key?(ws, "workspace")
+      assert Map.has_key?(ws, "workers")
+      assert Map.has_key?(ws, "ready")
+      assert Map.has_key?(ws, "standing_orders")
+      assert Map.has_key?(ws, "coordinator_inbox")
+    end
+
+    test "workspaces array has one entry per configured workspace" do
+      stub_all(
+        [
+          %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}},
+          %{"id" => "ws-2", "name" => "leotech", "prefix" => "lt", "config" => %{}}
+        ],
+        [],
+        []
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      assert length(decoded["workspaces"]) == 2
+
+      names = Enum.map(decoded["workspaces"], fn ws -> ws["workspace"]["name"] end)
+      assert "default" in names
+      assert "leotech" in names
     end
 
     test "standing_orders carries the config list through --json" do
@@ -275,7 +356,8 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert exit_code == 0
 
       {:ok, decoded} = Jason.decode(String.trim(out))
-      assert decoded["standing_orders"] == ["Watch the Admiral inbox"]
+      [ws] = decoded["workspaces"]
+      assert ws["standing_orders"] == ["Watch the Admiral inbox"]
     end
   end
 end
