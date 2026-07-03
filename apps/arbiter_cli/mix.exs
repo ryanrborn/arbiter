@@ -62,7 +62,13 @@ defmodule ArbiterCli.MixProject do
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
       # Test-only: Req.Test stubs run a Plug under the hood.
-      {:plug, "~> 1.15", only: :test}
+      {:plug, "~> 1.15", only: :test},
+      # Test-only: lets ArbiterCli.ConfigSchemaTest assert its hardcoded enum
+      # lists match the real validator (Arbiter.Tasks.Workspace.Changes.
+      # ValidateConfig and friends) so the CLI's config reference can't drift
+      # out of sync with the server-side source of truth. Never shipped in
+      # the escript build (only: :test).
+      {:arbiter, in_umbrella: true, only: :test}
     ]
   end
 end

@@ -33,6 +33,11 @@ defmodule ArbiterCli.Cmd.Workspace do
 
   All verbs accept `--workspace <name>` to target a workspace other than the
   default. Reads from `GET /api/workspaces`; writes via `PATCH /api/workspaces/:id`.
+
+  For the full reference of every `workspace.config` key (tracker, merge,
+  agent/review_agent, security, routing, review/review_gate, review_automation,
+  quota, conductor, standing_orders, repo_paths, pr_patrol, review_patrol) with
+  valid values and defaults, see `arb config schema` (also appended below).
   """
 
   alias ArbiterCli.{Client, Output, Workspace}
@@ -73,10 +78,10 @@ defmodule ArbiterCli.Cmd.Workspace do
         secret(rest)
 
       ["--help" | _] ->
-        IO.puts(@moduledoc)
+        print_help()
 
       ["-h" | _] ->
-        IO.puts(@moduledoc)
+        print_help()
 
       [] ->
         Output.die("workspace requires a subcommand", verbs())
@@ -87,6 +92,12 @@ defmodule ArbiterCli.Cmd.Workspace do
   end
 
   defp verbs, do: "verbs: list, show, create, standing-order, secret"
+
+  defp print_help do
+    IO.puts(@moduledoc)
+    IO.puts("")
+    IO.puts(ArbiterCli.ConfigSchema.render())
+  end
 
   defp list(argv) do
     mode = Output.mode(argv)
