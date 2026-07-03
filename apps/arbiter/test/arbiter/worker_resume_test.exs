@@ -156,6 +156,14 @@ defmodule Arbiter.Worker.ResumeTest do
       refute tmp in out
       assert "--output-format" in out and "stream-json" in out and "--verbose" in out
 
+      # the sh -c script must be swapped back to the inline (mode A) script —
+      # otherwise the rebuilt argv still runs the stdin-mode script with the
+      # `claude` binary as $1, which crashes with zero output (the exact bug
+      # this test guards against, on the resume path).
+      script = Enum.at(out, 2)
+      assert script =~ "< /dev/null"
+      refute script =~ ~s(f="$1")
+
       File.rm(tmp)
     end
   end

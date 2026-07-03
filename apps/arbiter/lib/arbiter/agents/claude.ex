@@ -169,8 +169,12 @@ defmodule Arbiter.Agents.Claude do
         {head, [print | tail]} = Enum.split(argv, idx)
 
         case pop_tmpfile_positional(head) do
-          {true, head} -> {:ok, head ++ [print] ++ insert ++ tail}
-          {false, head} -> {:ok, head ++ [print] ++ insert ++ drop_first(tail)}
+          {true, head} ->
+            head = List.replace_at(head, 2, @inline_prompt_script)
+            {:ok, head ++ [print] ++ insert ++ tail}
+
+          {false, head} ->
+            {:ok, head ++ [print] ++ insert ++ drop_first(tail)}
         end
     end
   end
