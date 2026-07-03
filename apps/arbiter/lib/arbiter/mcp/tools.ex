@@ -157,6 +157,31 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- coordinator_inbox_peek ------------------------------------------------
+
+  @doc """
+  The unread Admiral escalation mailbox for the bound workspace, read-only —
+  lists unread messages without marking them read, so the dashboard unread
+  count is unchanged. Coordinator only; the worker tier is denied at the
+  catalog level. This is the read-only counterpart to `coordinator_inbox`.
+
+  Lists all unread messages where `to_ref == "admiral"` in the workspace
+  without mutating state. Use this for read-only consumers like briefing
+  tools that must not affect the coordinator's unread count.
+  """
+  @spec coordinator_inbox_peek(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def coordinator_inbox_peek(%Scope{} = scope, args) do
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+      messages = Message.inbox("admiral", workspace_id: ws_id)
+
+      {:ok,
+       %{
+         messages: Enum.map(messages, &serialize_message/1),
+         count: length(messages)
+       }}
+    end
+  end
+
   # ---- workspace_show -----------------------------------------------------
 
   @doc """

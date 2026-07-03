@@ -18,6 +18,7 @@ defmodule Arbiter.MCP.Catalog do
   | `task_ready` | coordinator | `Issue.ready/1` |
   | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
   | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (Admiral mailbox) |
+  | `coordinator_inbox_peek` | coordinator | `Messages.inbox/2` read-only (Admiral mailbox, no mark-read) |
   | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
   | `task_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
@@ -96,7 +97,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset)
+  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_peek workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset)
 
   @raw_tools [
     %{
@@ -175,6 +176,17 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.coordinator_inbox/2
+    },
+    %{
+      name: "coordinator_inbox_peek",
+      tiers: @coordinator,
+      description:
+        "Read-only peek at the Admiral escalation mailbox for the workspace — lists all unread " <>
+          "messages where `to_ref == \"admiral\"` without marking them read or mutating state. " <>
+          "Use this for read-only consumers (e.g. briefing tools) that must not affect the " <>
+          "coordinator's unread count. Coordinator only.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.coordinator_inbox_peek/2
     },
     %{
       name: "workspace_show",
