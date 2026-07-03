@@ -150,7 +150,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp gather_workers(ws_id) do
     case Client.get("/api/workers", workspace_id: ws_id) do
-      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, %{"data" => list}} -> {:ok, Enum.filter(list, &(&1["workspace_id"] == ws_id))}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
     end
@@ -166,7 +166,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp gather_coordinator_inbox(ws_id) do
     case Client.get("/api/messages", to_ref: "coordinator", workspace_id: ws_id, unread: "true") do
-      {:ok, %{"data" => list}} -> {:ok, list}
+      {:ok, %{"data" => list}} -> {:ok, Enum.filter(list, &(&1["workspace_id"] == ws_id))}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
     end

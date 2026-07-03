@@ -317,6 +317,66 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert Map.has_key?(ws, "coordinator_inbox")
     end
 
+    test "workers and coordinator inbox are scoped to their own workspace" do
+      # Both stubs return a mixed payload; client-side filtering must assign
+      # each worker/message to only the workspace whose id matches.
+      stub_all(
+        [
+          %{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}},
+          %{"id" => "ws-2", "name" => "leotech", "prefix" => "lt", "config" => %{}}
+        ],
+        [
+          %{
+            "task_id" => "bd-001",
+            "workspace_id" => "ws-1",
+            "status" => "running",
+            "current_step" => "implement",
+            "repo" => "test/repo"
+          },
+          %{
+            "task_id" => "lt-001",
+            "workspace_id" => "ws-2",
+            "status" => "running",
+            "current_step" => "implement",
+            "repo" => "other/repo"
+          }
+        ],
+        [],
+        [
+          %{
+            "id" => "m-ws1",
+            "workspace_id" => "ws-1",
+            "kind" => "escalation",
+            "directive_ref" => "bd-001",
+            "subject" => "default coordinator msg",
+            "inserted_at" => "2026-05-28T12:00:00.000000Z"
+          },
+          %{
+            "id" => "m-ws2",
+            "workspace_id" => "ws-2",
+            "kind" => "escalation",
+            "directive_ref" => "lt-001",
+            "subject" => "leotech coordinator msg",
+            "inserted_at" => "2026-05-28T12:00:00.000000Z"
+          }
+        ]
+      )
+
+      {out, _err, exit_code} = capture(fn -> Prime.run(["--json"]) end)
+      assert exit_code == 0
+
+      {:ok, decoded} = Jason.decode(String.trim(out))
+      [default_ws, leotech_ws] = decoded["workspaces"]
+
+      assert Enum.map(default_ws["workers"], & &1["task_id"]) == ["bd-001"]
+      assert Enum.map(leotech_ws["workers"], & &1["task_id"]) == ["lt-001"]
+
+      assert length(default_ws["coordinator_inbox"]) == 1
+      assert hd(default_ws["coordinator_inbox"])["id"] == "m-ws1"
+      assert length(leotech_ws["coordinator_inbox"]) == 1
+      assert hd(leotech_ws["coordinator_inbox"])["id"] == "m-ws2"
+    end
+
     test "workspaces array has one entry per configured workspace" do
       stub_all(
         [
