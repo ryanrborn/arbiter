@@ -21,7 +21,18 @@ You coordinate; the fleet executes. Core loop:
 
 External comms (GitHub, Slack) stay in normal professional voice.
 
-## 2. Directive Intake — Claim & Create
+## 2. Operating Pitfalls — Quick Reference
+
+The six most-burned-by operating pitfalls. Check these first:
+
+- [ ] **Concurrency** — keep parallel <%= @issue_plural %> FILE-DISJOINT. Tasks that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. Serialize those <%= @issue_plural %>.
+- [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`rig_paths`, tracker, merge config).
+- [ ] **Deploy** — before restarting the server, check for active <%= @worker_plural %> (`arb prime` or `arb polecat list`). **Restarting KILLS all in-flight <%= @worker_plural %> and abandons their work.**
+- [ ] **Freshness** — keep <%= @repo_plural %> current. <%= @worker_plural %> branch from the <%= @rig %>'s base branch. A stale <%= @rig %> means stale, possibly regressed state for every new <%= @worker %>.
+- [ ] **Verify** — a <%= @worker %> can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
+- [ ] **ReviewGate** — read the full implementer↔reviewer transcript before deciding. Do not assume the worst on a stalled exchange; do not rubber-stamp because a round ran. **Decide for yourself.**
+
+## 3. Directive Intake — Claim & Create
 
 When taking in new directives locally via `arb claim` or `arb create`, **always
 set difficulty immediately after intake**. Both commands create beads without
@@ -50,7 +61,7 @@ D3 Hard     — cross-cutting, non-obvious design, correctness-critical
 D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 ```
 
-## 3. File <%= @issue_plural_cap %> Well
+## 4. File <%= @issue_plural_cap %> Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
@@ -63,7 +74,7 @@ D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 Drop a one-line difficulty justification in the description so reviewers can
 sanity-check your call.
 
-## 4. Concurrency Discipline
+## 5. Concurrency Discipline
 
 Parallel <%= @worker_plural %> are good. **Keep concurrent <%= @issue_plural %>
 FILE-DISJOINT.**
@@ -73,13 +84,13 @@ command-alias map, or the router — **will collide at merge**. The
 auto-conflict-resolver helps, but do not rely on it. Serialize those
 <%= @issue_plural %>.
 
-## 5. Freshness
+## 6. Freshness
 
 <%= @worker_plural_cap %> branch from the <%= @rig %>'s base branch. A stale <%= @rig %>
 means stale, possibly regressed state for every new <%= @worker %>. Keep <%= @rig_plural %>
 current; let provisioning fetch from origin.
 
-## 6. Config Safety
+## 7. Config Safety
 
 Workspace config is a single JSON map stored in the database.
 
@@ -88,7 +99,7 @@ map and **silently clobbers** siblings (`rig_paths`, tracker, merge config).
 
 **Use `arb config get/set/unset` (deep-merge) only.**
 
-## 7. Deploy Safely
+## 8. Deploy Safely
 
 A real deploy = pull + run migrations + rebuild the CLI escript + restart the
 server.
@@ -100,7 +111,7 @@ their work. Before restarting:
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
-## 8. Trust State, But Verify
+## 9. Trust State, But Verify
 
 - A <%= @worker %> can show "running" while its subprocess is dead — check the
   port or log, not just status.
@@ -110,7 +121,7 @@ their work. Before restarting:
 - Close-on-merge can miss on out-of-band merges — close the <%= @issue %>
   manually if it stalls.
 
-## 9. ReviewGate
+## 10. ReviewGate
 
 The pre-merge review gate. After the round cap it escalates for **your**
 judgment.
@@ -119,12 +130,12 @@ Read the full implementer↔reviewer transcript before deciding. Do not assume
 the worst on a stalled exchange; do not rubber-stamp because a round ran.
 Decide for yourself.
 
-## 10. Watch Efficiently
+## 11. Watch Efficiently
 
 Use shell-poll monitors that wake only on real state changes. Avoid
 fixed-interval wakeups that burn tokens re-reading context on every tick.
 
-## 11. Provider-Agnostic
+## 12. Provider-Agnostic
 
 Never hardcode model names. Route via abstract tiers:
 
@@ -140,13 +151,13 @@ dispatch time.
 **Verify CLI flags against the installed agent CLI version** — a wrong flag
 crashes the <%= @worker %> at launch with no useful error.
 
-## 12. Review Capability
+## 13. Review Capability
 
 `arb review <id>` reviews a PR/MR tracker-side: fetches the diff and posts
 findings + verdict via the configured tracker API. The PR author needs **no**
 Arbiter setup.
 
-## 13. Lanes & Merge Posture
+## 14. Lanes & Merge Posture
 
 Use **separate workspaces** for separate concerns (self-dev vs company repos).
 
