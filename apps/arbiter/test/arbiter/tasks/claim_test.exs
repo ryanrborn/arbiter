@@ -229,7 +229,10 @@ defmodule Arbiter.Tasks.ClaimTest do
             Req.Test.json(conn, %{"login" => @viewer})
 
           {"GET", _} ->
-            Req.Test.json(conn, issue_payload(%{"assignees" => [%{"login" => "alec-kustanovich"}]}))
+            Req.Test.json(
+              conn,
+              issue_payload(%{"assignees" => [%{"login" => "alec-kustanovich"}]})
+            )
         end
       end)
 

@@ -870,7 +870,8 @@ defmodule Arbiter.Mergers.GithubTest do
         |> Req.Test.json(%{"id" => 202, "body" => "Thanks, fixed!"})
       end)
 
-      assert {:ok, %{"id" => 202}} = Github.reply_to_review_comment(@ref, 101, "Thanks, fixed!", %{})
+      assert {:ok, %{"id" => 202}} =
+               Github.reply_to_review_comment(@ref, 101, "Thanks, fixed!", %{})
     end
 
     test "works with an embedded owner/repo ref" do
@@ -909,7 +910,9 @@ defmodule Arbiter.Mergers.GithubTest do
 
   describe "filter_to_our_threads/2" do
     defp make_thread(id, author, comment_authors) do
-      comments = Enum.map(comment_authors, fn a -> %{id: :rand.uniform(9999), author: a, body: ""} end)
+      comments =
+        Enum.map(comment_authors, fn a -> %{id: :rand.uniform(9999), author: a, body: ""} end)
+
       %{id: id, author: author, body: "x", resolved: false, comments: comments}
     end
 

@@ -255,9 +255,7 @@ defmodule Arbiter.Workers.Reconciler do
       end)
 
     if resumed + escalated > 0 do
-      Logger.info(
-        "Workers.Reconciler: resume sweep — resumed #{resumed}, escalated #{escalated}"
-      )
+      Logger.info("Workers.Reconciler: resume sweep — resumed #{resumed}, escalated #{escalated}")
     end
 
     {:ok, %{resumed: resumed, escalated: escalated}}

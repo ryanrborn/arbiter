@@ -149,9 +149,7 @@ defmodule Arbiter.Workflows.ReviewReply do
   end
 
   def run_step(:post_reply, _state),
-    do:
-      {:error,
-       {:bad_state, "post_reply requires :adapter, :mr_ref, :comment_id, :reply_body"}}
+    do: {:error, {:bad_state, "post_reply requires :adapter, :mr_ref, :comment_id, :reply_body"}}
 
   # ---- helpers --------------------------------------------------------------
 

@@ -392,7 +392,8 @@ defmodule Arbiter.Workflows.ReviewReplyTest do
           mr_ref: "#42",
           thread: thread(),
           comment_id: 102,
-          reply_composer: stub_composer("Correct — the nil guard prevents a crash on empty input.")
+          reply_composer:
+            stub_composer("Correct — the nil guard prevents a crash on empty input.")
         }
 
         assert {:ok, final} = Arbiter.Workflow.run(ReviewReply, initial)
@@ -418,7 +419,8 @@ defmodule Arbiter.Workflows.ReviewReplyTest do
         reply_composer: stub_composer("irrelevant")
       }
 
-      assert {:error, {:read_thread, {:bad_state, _}}} = Arbiter.Workflow.run(ReviewReply, initial)
+      assert {:error, {:read_thread, {:bad_state, _}}} =
+               Arbiter.Workflow.run(ReviewReply, initial)
     end
 
     test "fails cleanly on a compose error" do

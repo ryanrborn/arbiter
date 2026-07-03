@@ -260,6 +260,7 @@ defmodule Arbiter.Reviews.Record do
     attribute :pr_state, :string do
       public? true
       constraints max_length: 64, trim?: true
+
       description "Resolved PR state: open / merged / closed. Nil until first dashboard render resolves it."
     end
 
