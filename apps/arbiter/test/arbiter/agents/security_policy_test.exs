@@ -83,7 +83,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert "B" in p.permissions.deny
     end
 
-    test "workspace config overrides via security.mode" do
+    test "DEPRECATED: workspace config overrides via security.mode (backward compat only)" do
       ws = %Workspace{
         config: %{
           "security" => %{"mode" => "auto"}
@@ -94,7 +94,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert p.permissions.mode == :auto
     end
 
-    test "workspace config overrides via agent.config.security_mode" do
+    test "DEPRECATED: workspace config overrides via agent.config.security_mode (backward compat only)" do
       ws = %Workspace{
         config: %{
           "agent" => %{
@@ -105,6 +105,39 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
       p = SecurityPolicy.resolve(ws)
       assert p.permissions.mode == :strict
+    end
+
+    test "canonical path: workspace.config[\"agent\"][\"security\"][\"permissions\"][\"mode\"]" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "permissions" => %{"mode" => "strict"}
+            }
+          }
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws)
+      assert p.permissions.mode == :strict
+    end
+
+    test "canonical path takes precedence over deprecated alt paths" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "permissions" => %{"mode" => "auto"}
+            },
+            "config" => %{"security_mode" => "strict"}
+          },
+          "security" => %{"mode" => "bypass"}
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws)
+      # Canonical path should win over the alt paths
+      assert p.permissions.mode == :auto
     end
   end
 

@@ -89,8 +89,14 @@ defmodule Arbiter.Agents.SecurityPolicy do
     1. `base/0` — the hardcoded safe baseline (this module).
     2. `Application.get_env(:arbiter, :acolyte_security_policy)` — the
        install-wide default override.
-    3. `workspace.config["agent"]["security"]` — the per-domain (workspace-wide)
-       posture.
+    3. **`workspace.config["agent"]["security"]` — the CANONICAL per-domain
+       (workspace-wide) posture.** This is the documented, stable config path.
+       The `permissions.mode` value is read from
+       `workspace.config["agent"]["security"]["permissions"]["mode"]`.
+       (Legacy paths `workspace.config["security"]["mode"]` and
+       `workspace.config["agent"]["config"]["security_mode"]` are accepted for
+       backward compatibility but are deprecated; new configs must use the
+       canonical path.)
     4. `workspace.config["agent"]["security"]["repos"][repo]` — a per-repo
        override *within* the domain, applied only when a `repo` name is passed.
        This lets a multi-repo workspace run one repo under a different posture
@@ -214,18 +220,34 @@ defmodule Arbiter.Agents.SecurityPolicy do
     config = config || %{}
     workspace_policy = get_in(config, ["agent", "security"]) || %{}
 
-    alt_mode =
-      case get_in(config, ["security", "mode"]) do
-        m when is_binary(m) or (is_atom(m) and not is_nil(m)) ->
-          m
-
-        _ ->
-          case get_in(config, ["agent", "config", "security_mode"]) do
-            m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> m
-            _ -> nil
-          end
+    # Check if the canonical path has a mode set
+    canonical_mode_set? =
+      case get_in(workspace_policy, ["permissions", "mode"]) do
+        m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> true
+        _ -> false
       end
 
+    # DEPRECATED paths (backward compatibility only):
+    # - workspace.config["security"]["mode"]
+    # - workspace.config["agent"]["config"]["security_mode"]
+    # These are accepted for backward compat ONLY when the canonical path is not set.
+    # Canonical path is workspace.config["agent"]["security"]["permissions"]["mode"].
+    # If the canonical path is set, it takes precedence over these deprecated paths.
+    alt_mode =
+      unless canonical_mode_set? do
+        case get_in(config, ["security", "mode"]) do
+          m when is_binary(m) or (is_atom(m) and not is_nil(m)) ->
+            m
+
+          _ ->
+            case get_in(config, ["agent", "config", "security_mode"]) do
+              m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> m
+              _ -> nil
+            end
+        end
+      end
+
+    # If a deprecated alt path set the mode (and canonical was not set), merge it into canonical location.
     workspace_policy =
       if alt_mode do
         Map.update(workspace_policy, "permissions", %{"mode" => alt_mode}, fn perms ->
