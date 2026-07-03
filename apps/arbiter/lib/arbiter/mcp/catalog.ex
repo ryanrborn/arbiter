@@ -36,6 +36,7 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_review` | coordinator (`can_dispatch`) | `Arbiter.Worker.Dispatch.dispatch/2` (`review: true`) / `Arbiter.Reviews.ExternalReview.dispatch/1` (`pr`) |
   | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
   | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
+  | `worker_show` | coordinator | `Arbiter.Worker.whereis/1` + `Worker.state/1`, falls back to `Arbiter.Workers.Run` |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
@@ -620,6 +621,28 @@ defmodule Arbiter.MCP.Catalog do
           "model (short display name e.g. \"Sonnet\"), and cost_usd (sum of all ledger entries for the task).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.worker_list/2
+    },
+    %{
+      name: "worker_show",
+      tiers: @coordinator,
+      description:
+        "Full snapshot for a single task's worker (`arb worker show <task-id>`): status, " <>
+          "activity, and recent output lines. When a worker is currently live, returns its " <>
+          "in-memory state (`source: \"live\"`); otherwise falls back to the most recent " <>
+          "durable run row (`source: \"history\"`) so a finished/exited run stays inspectable. " <>
+          "Not-found only when neither a live worker nor any run has ever been recorded.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Task whose worker to inspect (required)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.worker_show/2
     },
     %{
       name: "external_review_list",
