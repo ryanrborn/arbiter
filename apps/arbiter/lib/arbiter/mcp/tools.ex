@@ -1123,6 +1123,140 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- repo_list ----------------------------------------------------------
+
+  @doc """
+  List registered repos with their paths, sources, active worker counts, and git worktree counts.
+  Coordinator only. Mirrors the data from `GET /api/repos` and `arb repo list`.
+  """
+  @spec repo_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def repo_list(%Scope{}, _args) do
+    repos =
+      list_repos_impl()
+      |> Enum.map(&serialize_repo/1)
+
+    {:ok, %{repos: repos, count: length(repos)}}
+  rescue
+    e -> {:error, {:internal, "repo_list failed: #{Exception.message(e)}"}}
+  end
+
+  # ---- repo_show ----------------------------------------------------------
+
+  @doc """
+  Show details for a single repo: path, source, active worker count, and git worktree count.
+  Coordinator only. Returns not-found if the repo name does not exist.
+  """
+  @spec repo_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def repo_show(%Scope{}, args) do
+    with {:ok, name} <- require_string(args, "name") do
+      repos = list_repos_impl()
+
+      case Enum.find(repos, fn repo -> repo.name == name end) do
+        nil -> {:error, {:not_found, "repo #{inspect(name)} not found"}}
+        repo -> {:ok, serialize_repo(repo)}
+      end
+    end
+  rescue
+    e -> {:error, {:internal, "repo_show failed: #{Exception.message(e)}"}}
+  end
+
+  # Get repos using the same logic as the API controller. Imports the logic
+  # from ArbiterWeb.Api.RepoController.list_repos/0.
+  defp list_repos_impl do
+    alias Arbiter.Tasks.RepoConfig
+    alias Arbiter.Tasks.Workspace
+
+    workspaces =
+      try do
+        Ash.read!(Workspace)
+      rescue
+        _ -> []
+      end
+
+    paths_by_repo = collect_repo_paths(workspaces)
+    workers_by_repo = group_workers_by_repo()
+
+    paths_by_repo
+    |> Map.merge(repos_from_workers(workers_by_repo, paths_by_repo))
+    |> Enum.map(fn {name, entry} ->
+      path = entry.path
+
+      worktree_count =
+        case path do
+          nil -> 0
+          p when is_binary(p) -> safe_worktree_count(p)
+        end
+
+      %{
+        name: name,
+        path: path,
+        source: entry.source,
+        workers: Map.get(workers_by_repo, name, 0),
+        worktrees: worktree_count
+      }
+    end)
+    |> Enum.sort_by(& &1.name)
+  end
+
+  defp collect_repo_paths(workspaces) do
+    alias Arbiter.Tasks.RepoConfig
+
+    app_paths =
+      :arbiter
+      |> Application.get_env(:repo_paths, %{})
+      |> Map.new(fn {name, raw} ->
+        {name, %{path: RepoConfig.repo_path_from_config(raw), source: "(app)"}}
+      end)
+
+    Enum.reduce(workspaces, app_paths, fn ws, acc ->
+      ws_repo_paths =
+        case ws.config do
+          %{"repo_paths" => paths} when is_map(paths) -> paths
+          %{"rig_paths" => paths} when is_map(paths) -> paths
+          _ -> %{}
+        end
+
+      Enum.reduce(ws_repo_paths, acc, fn {name, raw}, acc ->
+        Map.put(acc, name, %{path: RepoConfig.repo_path_from_config(raw), source: ws.name})
+      end)
+    end)
+  end
+
+  defp group_workers_by_repo do
+    try do
+      Arbiter.Worker.list_children()
+    rescue
+      _ -> []
+    end
+    |> Enum.reduce(%{}, fn p, acc ->
+      repo = p.repo || "(none)"
+      Map.update(acc, repo, 1, &(&1 + 1))
+    end)
+  end
+
+  defp repos_from_workers(workers_by_repo, configured) do
+    workers_by_repo
+    |> Map.keys()
+    |> Enum.reject(&Map.has_key?(configured, &1))
+    |> Map.new(fn name -> {name, %{path: nil, source: "(unconfigured)"}} end)
+  end
+
+  defp safe_worktree_count(path) do
+    Arbiter.Worker.Worktree.list(path) |> length()
+  rescue
+    _ -> 0
+  end
+
+  defp serialize_repo(repo) when is_map(repo) do
+    %{
+      name: repo.name,
+      path: repo.path,
+      source: repo.source,
+      workers: repo.workers,
+      worktrees: repo.worktrees
+    }
+  end
+
   # ======================================================================
   # Graph CRUD + lifecycle tools (C7 of #482)
   # ======================================================================

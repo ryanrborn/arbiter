@@ -48,6 +48,8 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
+  | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
+  | `repo_show` | coordinator | single repo from `list_repos()` |
   """
 
   alias Arbiter.MCP.Scope
@@ -1026,6 +1028,35 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.queue_resume/2
+    },
+    %{
+      name: "repo_list",
+      tiers: @coordinator,
+      description:
+        "List registered repos with their paths, sources, active worker counts, and git worktree counts. " <>
+          "Repos are discovered from workspace repo_paths configs, the application-env fallback, " <>
+          "and any repos active workers are using. Mirrors `arb repo list`.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.repo_list/2
+    },
+    %{
+      name: "repo_show",
+      tiers: @coordinator,
+      description:
+        "Show details for a single repo: path, source, active worker count, and git worktree count. " <>
+          "Returns not-found if the repo name does not exist.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{
+            "type" => "string",
+            "description" => "Repo name (required)."
+          }
+        },
+        "required" => ["name"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.repo_show/2
     }
   ]
 

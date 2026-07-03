@@ -1548,6 +1548,66 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "repo_list/2" do
+    test "returns an empty list when no repos are configured", ctx do
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      assert is_list(data.repos)
+      assert data.count == length(data.repos)
+    end
+
+    test "returns repos with expected fields", ctx do
+      # Configure a repo in the workspace
+      ws_config = ctx.ws.config || %{}
+      repo_config = %{
+        "repo_paths" => %{
+          "test-repo" => "/tmp/test-repo"
+        }
+      }
+      {:ok, _updated_ws} = Ash.update(ctx.ws, %{config: Map.merge(ws_config, repo_config)})
+
+      assert {:ok, data} = Tools.repo_list(ctx.coordinator, %{})
+      assert is_list(data.repos)
+      assert data.count >= 1
+
+      # Find the test repo
+      repo = Enum.find(data.repos, fn r -> r.name == "test-repo" end)
+      refute is_nil(repo)
+      assert repo.path == "/tmp/test-repo"
+      assert repo.source == ctx.ws.name
+      assert is_integer(repo.workers)
+      assert is_integer(repo.worktrees)
+    end
+  end
+
+  describe "repo_show/2" do
+    test "requires a repo name", ctx do
+      assert {:error, {:invalid, _}} = Tools.repo_show(ctx.coordinator, %{})
+    end
+
+    test "returns not-found for unknown repo", ctx do
+      assert {:error, {:not_found, msg}} = Tools.repo_show(ctx.coordinator, %{"name" => "unknown-repo"})
+      assert msg =~ "unknown-repo"
+    end
+
+    test "returns repo details for a configured repo", ctx do
+      # Configure a repo in the workspace
+      ws_config = ctx.ws.config || %{}
+      repo_config = %{
+        "repo_paths" => %{
+          "test-repo" => "/tmp/test-repo"
+        }
+      }
+      {:ok, _updated_ws} = Ash.update(ctx.ws, %{config: Map.merge(ws_config, repo_config)})
+
+      assert {:ok, repo} = Tools.repo_show(ctx.coordinator, %{"name" => "test-repo"})
+      assert repo.name == "test-repo"
+      assert repo.path == "/tmp/test-repo"
+      assert repo.source == ctx.ws.name
+      assert is_integer(repo.workers)
+      assert is_integer(repo.worktrees)
+    end
+  end
+
   describe "Catalog.call/3 dispatch" do
     test "routes an authorized call to its handler and returns structured data", ctx do
       assert {:ok, data} = Catalog.call(ctx.worker, "task_show", %{})
