@@ -1040,10 +1040,13 @@ defmodule Arbiter.Worker.Dispatch do
         adapter = Agents.for_type(choice.type)
 
         # Resolve the spawn's security posture from the workspace (per-domain),
-        # with an optional per-dispatch override from dispatch opts. Threaded into
-        # the adapter so it bakes the right permission-mode + deny/allow into
-        # the argv — no inheritance of the operator's ~/.claude (bd-9u10op).
-        policy = SecurityPolicy.resolve(workspace, security_override(opts))
+        # with an optional per-dispatch override from dispatch opts and the
+        # resolved repo name so a multi-repo workspace can scope a different
+        # posture to this repo (bd-3gc18m). Threaded into the adapter so it
+        # bakes the right permission-mode + deny/allow into the argv — no
+        # inheritance of the operator's ~/.claude (bd-9u10op).
+        policy =
+          SecurityPolicy.resolve(workspace, security_override(opts), Keyword.get(opts, :repo))
 
         agent_opts =
           agent_opts_from_choice(choice) ++

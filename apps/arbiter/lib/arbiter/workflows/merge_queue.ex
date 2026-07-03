@@ -557,7 +557,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       # Link the MR back onto the upstream tracker ticket. Best-effort and
       # tracker-agnostic — a no-op for trackers without remote links.
-      _ = maybe_link_mr_to_tracker(task, state.adapter, mr_ref)
+      _ = maybe_link_mr_to_tracker(task, state.adapter, mr_ref, repo)
 
       {:ok, %{state | items: [item | state.items]}}
     else
@@ -1169,15 +1169,16 @@ defmodule Arbiter.Workflows.MergeQueue do
 
   # Attach the opened MR as a remote link on the task's upstream tracker
   # ticket. Dispatches on the task's `tracker_type`, seeds the adapter's
-  # per-process config from the task's workspace, and tolerates trackers that
-  # don't support remote links. Never fails the enqueue.
-  defp maybe_link_mr_to_tracker(%Issue{tracker_type: :none}, _adapter, _mr_ref), do: :ok
+  # per-process config from the task's workspace — including any per-repo
+  # tracker binding override for `repo` (bd-3gc18m) — and tolerates trackers
+  # that don't support remote links. Never fails the enqueue.
+  defp maybe_link_mr_to_tracker(%Issue{tracker_type: :none}, _adapter, _mr_ref, _repo), do: :ok
 
-  defp maybe_link_mr_to_tracker(%Issue{} = task, adapter, mr_ref) do
+  defp maybe_link_mr_to_tracker(%Issue{} = task, adapter, mr_ref, repo) do
     url = adapter.link_for(mr_ref)
     title = "MR #{mr_ref} (task #{task.id})"
 
-    Trackers.prepare(task, task.workspace)
+    Trackers.prepare_with_repo(task, task.workspace, repo)
 
     case Trackers.add_remote_link(task, url, title) do
       :ok ->

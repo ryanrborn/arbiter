@@ -1271,10 +1271,14 @@ defmodule Arbiter.Worker.ReviewGate do
 
         # The reviewer/implementer worker gets the same per-domain security
         # posture as a worker spawn — resolved from the workspace, never the
-        # operator's ~/.claude (bd-9u10op).
+        # operator's ~/.claude (bd-9u10op). Scope it to `state.repo` so a
+        # per-repo override (config["agent"]["security"]["repos"][repo]) reaches
+        # the review/revise workers spawned into that repo's worktree, matching
+        # the dispatch spawn path (bd-3gc18m). `state.repo` defaults to
+        # "unknown", a safe no-op when no override exists.
         agent_opts =
           agent_opts_for_role(ws, role_atom, state.task_id) ++
-            [security: SecurityPolicy.resolve(ws)]
+            [security: SecurityPolicy.resolve(ws, %{}, state.repo)]
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->

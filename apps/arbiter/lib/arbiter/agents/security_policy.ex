@@ -84,16 +84,31 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   ## Resolution
 
-  `resolve/2` layers, lowest precedence first:
+  `resolve/3` layers, lowest precedence first:
 
     1. `base/0` — the hardcoded safe baseline (this module).
     2. `Application.get_env(:arbiter, :acolyte_security_policy)` — the
        install-wide default override.
-    3. `workspace.config["agent"]["security"]` — the per-domain posture.
-    4. an explicit per-dispatch / per-task `override` map.
+    3. **`workspace.config["agent"]["security"]` — the CANONICAL per-domain
+       (workspace-wide) posture.** This is the documented, stable config path.
+       The `permissions.mode` value is read from
+       `workspace.config["agent"]["security"]["permissions"]["mode"]`.
+       (Legacy paths `workspace.config["security"]["mode"]` and
+       `workspace.config["agent"]["config"]["security_mode"]` are accepted for
+       backward compatibility but are deprecated; new configs must use the
+       canonical path.)
+    4. `workspace.config["agent"]["security"]["repos"][repo]` — a per-repo
+       override *within* the domain, applied only when a `repo` name is passed.
+       This lets a multi-repo workspace run one repo under a different posture
+       (e.g. a stricter `mode`, an extra deny rule, or `sandbox.network: false`)
+       without touching the others. The `"repos"` key is inert for `merge/2`
+       (which reads only `permissions`/`sandbox`), so a workspace that never
+       sets it — the common case — resolves exactly as before.
+    5. an explicit per-dispatch / per-task `override` map.
 
   For `permissions.allow` / `permissions.deny` each layer **unions** onto the
-  previous (a domain adds to the baseline rather than dropping it). `mode`,
+  previous (a domain adds to the baseline rather than dropping it) — so a
+  repo override *adds* allow/deny rules on top of the workspace posture. `mode`,
   `safe_defaults`, and every `sandbox` field are **replaced** by the highest
   layer that sets them. Unknown / malformed values are ignored (the codebase
   reads JSON config leniently), so a typo degrades to the safer inherited
@@ -178,40 +193,61 @@ defmodule Arbiter.Agents.SecurityPolicy do
 
   @doc """
   Resolve the effective policy for a workspace (or `nil`), with an optional
-  per-dispatch `override` map applied last. See the moduledoc for precedence.
+  per-dispatch `override` map applied last and an optional `repo` name that
+  pulls in a per-repo override layer. See the moduledoc for precedence.
+
+  `repo` is the workspace's `repo_paths` key (e.g. `"tonic_device"`), the same
+  identifier the merger per-repo overrides key on. `nil`/`""` disables the
+  repo layer, so `resolve/2` behaves exactly as before.
   """
-  @spec resolve(map() | nil, map()) :: t()
-  def resolve(workspace, override \\ %{})
+  @spec resolve(map() | nil, map(), String.t() | nil) :: t()
+  def resolve(workspace, override \\ %{}, repo \\ nil)
 
-  def resolve(nil, override), do: merge(default(), override)
+  def resolve(nil, override, _repo), do: merge(default(), override)
 
-  def resolve(%{__struct__: _, config: config}, override),
-    do: resolve_from_config(config, override)
+  def resolve(%{__struct__: _, config: config}, override, repo),
+    do: resolve_from_config(config, override, repo)
 
-  def resolve(%{"config" => config}, override),
-    do: resolve_from_config(config, override)
+  def resolve(%{"config" => config}, override, repo),
+    do: resolve_from_config(config, override, repo)
 
-  def resolve(%{config: config}, override),
-    do: resolve_from_config(config, override)
+  def resolve(%{config: config}, override, repo),
+    do: resolve_from_config(config, override, repo)
 
-  def resolve(_other, override), do: merge(default(), override)
+  def resolve(_other, override, _repo), do: merge(default(), override)
 
-  defp resolve_from_config(config, override) do
+  defp resolve_from_config(config, override, repo) do
     config = config || %{}
     workspace_policy = get_in(config, ["agent", "security"]) || %{}
 
-    alt_mode =
-      case get_in(config, ["security", "mode"]) do
-        m when is_binary(m) or (is_atom(m) and not is_nil(m)) ->
-          m
-
-        _ ->
-          case get_in(config, ["agent", "config", "security_mode"]) do
-            m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> m
-            _ -> nil
-          end
+    # Check if the canonical path has a mode set
+    canonical_mode_set? =
+      case get_in(workspace_policy, ["permissions", "mode"]) do
+        m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> true
+        _ -> false
       end
 
+    # DEPRECATED paths (backward compatibility only):
+    # - workspace.config["security"]["mode"]
+    # - workspace.config["agent"]["config"]["security_mode"]
+    # These are accepted for backward compat ONLY when the canonical path is not set.
+    # Canonical path is workspace.config["agent"]["security"]["permissions"]["mode"].
+    # If the canonical path is set, it takes precedence over these deprecated paths.
+    alt_mode =
+      unless canonical_mode_set? do
+        case get_in(config, ["security", "mode"]) do
+          m when is_binary(m) or (is_atom(m) and not is_nil(m)) ->
+            m
+
+          _ ->
+            case get_in(config, ["agent", "config", "security_mode"]) do
+              m when is_binary(m) or (is_atom(m) and not is_nil(m)) -> m
+              _ -> nil
+            end
+        end
+      end
+
+    # If a deprecated alt path set the mode (and canonical was not set), merge it into canonical location.
     workspace_policy =
       if alt_mode do
         Map.update(workspace_policy, "permissions", %{"mode" => alt_mode}, fn perms ->
@@ -221,10 +257,28 @@ defmodule Arbiter.Agents.SecurityPolicy do
         workspace_policy
       end
 
+    repo_policy = repo_override(workspace_policy, repo)
+
     default()
     |> merge(workspace_policy)
+    |> merge(repo_policy)
     |> merge(override)
   end
+
+  # The per-repo override sub-map nested under the workspace security block:
+  # `config["agent"]["security"]["repos"][repo]`. Returns `%{}` (a no-op merge
+  # layer) when no `repo` is given or the workspace declares no override for it,
+  # so single-repo / un-overridden workspaces resolve unchanged.
+  defp repo_override(_workspace_policy, repo) when repo in [nil, ""], do: %{}
+
+  defp repo_override(workspace_policy, repo) when is_binary(repo) do
+    case get_in(workspace_policy, ["repos", repo]) do
+      %{} = override -> override
+      _ -> %{}
+    end
+  end
+
+  defp repo_override(_workspace_policy, _repo), do: %{}
 
   @doc """
   Overlay a raw (string- or atom-keyed) map onto a policy. List fields

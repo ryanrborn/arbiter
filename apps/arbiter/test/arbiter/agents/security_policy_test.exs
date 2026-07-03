@@ -83,7 +83,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert "B" in p.permissions.deny
     end
 
-    test "workspace config overrides via security.mode" do
+    test "DEPRECATED: workspace config overrides via security.mode (backward compat only)" do
       ws = %Workspace{
         config: %{
           "security" => %{"mode" => "auto"}
@@ -94,7 +94,7 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
       assert p.permissions.mode == :auto
     end
 
-    test "workspace config overrides via agent.config.security_mode" do
+    test "DEPRECATED: workspace config overrides via agent.config.security_mode (backward compat only)" do
       ws = %Workspace{
         config: %{
           "agent" => %{
@@ -105,6 +105,123 @@ defmodule Arbiter.Agents.SecurityPolicyTest do
 
       p = SecurityPolicy.resolve(ws)
       assert p.permissions.mode == :strict
+    end
+
+    test "canonical path: workspace.config[\"agent\"][\"security\"][\"permissions\"][\"mode\"]" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "permissions" => %{"mode" => "strict"}
+            }
+          }
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws)
+      assert p.permissions.mode == :strict
+    end
+
+    test "canonical path takes precedence over deprecated alt paths" do
+      ws = %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "permissions" => %{"mode" => "auto"}
+            },
+            "config" => %{"security_mode" => "strict"}
+          },
+          "security" => %{"mode" => "bypass"}
+        }
+      }
+
+      p = SecurityPolicy.resolve(ws)
+      # Canonical path should win over the alt paths
+      assert p.permissions.mode == :auto
+    end
+  end
+
+  describe "resolve/3 per-repo overrides" do
+    # A workspace whose `device` repo runs a stricter posture than the
+    # workspace-wide default, and adds an extra deny rule.
+    defp multi_repo_ws do
+      %Workspace{
+        config: %{
+          "agent" => %{
+            "security" => %{
+              "permissions" => %{"mode" => "auto", "deny" => ["Bash(docker:*)"]},
+              "sandbox" => %{"network" => true},
+              "repos" => %{
+                "device" => %{
+                  "permissions" => %{"mode" => "strict", "deny" => ["Bash(curl:*)"]},
+                  "sandbox" => %{"network" => false}
+                }
+              }
+            }
+          }
+        }
+      }
+    end
+
+    test "repo override replaces scalar fields for that repo only" do
+      ws = multi_repo_ws()
+
+      device = SecurityPolicy.resolve(ws, %{}, "device")
+      assert device.permissions.mode == :strict
+      assert device.sandbox.network == false
+
+      # A different repo (no override) sees the workspace-wide posture.
+      other = SecurityPolicy.resolve(ws, %{}, "server")
+      assert other.permissions.mode == :auto
+      assert other.sandbox.network == true
+    end
+
+    test "repo override unions deny onto the workspace deny (additive)" do
+      ws = multi_repo_ws()
+      device = SecurityPolicy.resolve(ws, %{}, "device")
+
+      # Both the workspace-wide and repo-specific deny rules are present.
+      assert "Bash(docker:*)" in device.permissions.deny
+      assert "Bash(curl:*)" in device.permissions.deny
+
+      # The non-overridden repo carries only the workspace-wide deny.
+      other = SecurityPolicy.resolve(ws, %{}, "server")
+      assert "Bash(docker:*)" in other.permissions.deny
+      refute "Bash(curl:*)" in other.permissions.deny
+    end
+
+    test "nil/blank repo resolves identically to resolve/2 (backward compatible)" do
+      ws = multi_repo_ws()
+
+      base = SecurityPolicy.resolve(ws)
+      assert SecurityPolicy.resolve(ws, %{}, nil) == base
+      assert SecurityPolicy.resolve(ws, %{}, "") == base
+      # Workspace-wide posture, unaffected by the repo block.
+      assert base.permissions.mode == :auto
+    end
+
+    test "an unknown repo name falls back to the workspace-wide posture" do
+      ws = multi_repo_ws()
+      p = SecurityPolicy.resolve(ws, %{}, "does-not-exist")
+      assert p.permissions.mode == :auto
+      assert p.sandbox.network == true
+    end
+
+    test "explicit per-dispatch override still wins over the repo layer" do
+      ws = multi_repo_ws()
+      p = SecurityPolicy.resolve(ws, %{"permissions" => %{"mode" => "bypass"}}, "device")
+      assert p.permissions.mode == :bypass
+      # deny from both workspace and repo layers is still unioned under it.
+      assert "Bash(docker:*)" in p.permissions.deny
+      assert "Bash(curl:*)" in p.permissions.deny
+    end
+
+    test "a workspace with no repos block is unaffected by a repo name" do
+      ws = %Workspace{
+        config: %{"agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}}}
+      }
+
+      assert SecurityPolicy.resolve(ws, %{}, "device") == SecurityPolicy.resolve(ws)
     end
   end
 
