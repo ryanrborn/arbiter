@@ -36,6 +36,15 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   an auth/5xx error). A tracker that simply doesn't model the event is skipped
   quietly. This is the fix for VR-17911, whose In-Progress sync failed
   invisibly because a `status_map` mismatch was swallowed (bd-c4cfuv).
+
+  ## Forced sync (`force: true`)
+
+  `:sync_upstream_close` (bd-dqjd2f) makes no local status change — it exists
+  precisely to push a close to the tracker for a task that's already `:closed`
+  locally. Passing `force: true` skips the `old_status == issue.status` no-op
+  guard (which would otherwise always skip a status-unchanged sync) and, when
+  the task is closed with a tracker ref, transitions + verifies the upstream
+  close unconditionally.
   """
 
   use Ash.Resource.Change
@@ -47,12 +56,29 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTracker do
   alias Arbiter.Trackers.Sync
 
   @impl true
-  def change(changeset, _opts, _context) do
+  def change(changeset, opts, _context) do
+    force? = Keyword.get(opts, :force, false)
+
     Ash.Changeset.after_action(changeset, fn cs, issue ->
-      close_upstream = Ash.Changeset.get_argument(cs, :close_upstream)
-      maybe_sync(cs.data.status, issue, cs.action.name, close_upstream)
+      if force? do
+        maybe_force_sync(issue)
+      else
+        close_upstream = Ash.Changeset.get_argument(cs, :close_upstream)
+        maybe_sync(cs.data.status, issue, cs.action.name, close_upstream)
+      end
+
       {:ok, issue}
     end)
+  end
+
+  defp maybe_force_sync(issue) do
+    cond do
+      issue.status != :closed -> :ok
+      issue.tracker_type == :none -> :ok
+      blank?(issue.tracker_ref) -> :ok
+      issue.review_only == true -> :ok
+      true -> sync(issue)
+    end
   end
 
   defp maybe_sync(old_status, issue, action_name, close_upstream) do

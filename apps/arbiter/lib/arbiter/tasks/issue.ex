@@ -214,6 +214,20 @@ defmodule Arbiter.Tasks.Issue do
       end
     end
 
+    update :sync_upstream_close do
+      require_atomic? false
+
+      # No local status/closed_at change — this action exists solely to push
+      # a close to the linked tracker for a task that's already `:closed`
+      # locally but never synced upstream (e.g. it closed before the caller
+      # thought to pass `close_upstream: true`). GuardStatus requires the
+      # task to already be :closed; StopWorker/CleanupWorktree/the auto-close
+      # rollup are all close-time side effects and deliberately do NOT run
+      # here, since this isn't a status transition.
+      change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :sync_upstream_close}
+      change {Arbiter.Tasks.Issue.Changes.SyncTracker, force: true}
+    end
+
     update :reopen do
       require_atomic? false
 
@@ -694,7 +708,11 @@ defmodule Arbiter.Tasks.Issue do
   (possibly updated) parent task. Safe to call repeatedly.
 
   Closing the parent runs the normal `:close` action — including this same
-  rollup — so the closure cascades up a chain of auto-close epics.
+  rollup — so the closure cascades up a chain of auto-close epics. Always
+  passes `close_upstream: true`: an auto-close epic represents "real"
+  completion with no human in the loop to opt in, so a linked tracker issue
+  (if any) should close along with it (bd-dqjd2f). No-ops when the parent
+  has no tracker_ref, same as any other close.
   """
   def maybe_auto_close(parent) do
     parent = Ash.load!(parent, [:child_total, :child_closed])
@@ -714,7 +732,11 @@ defmodule Arbiter.Tasks.Issue do
 
       true ->
         {:ok, closed} =
-          Ash.update(parent, %{reason: "all children closed"}, action: :close)
+          Ash.update(
+            parent,
+            %{reason: "all children closed", close_upstream: true},
+            action: :close
+          )
 
         closed
     end
