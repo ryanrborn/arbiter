@@ -94,8 +94,6 @@ defmodule ArbiterCli.Main do
       ARB_WORKSPACE  Workspace name to use (default "default"); overridden by -w / --workspace
   """
 
-  @version "0.1.0"
-
   # Pre-`arb <resource> <verb>` flat commands, mapped to their new canonical
   # form. Each still runs (we dispatch to the new handler) but prints a
   # one-line note pointing at the new grammar.
@@ -136,8 +134,8 @@ defmodule ArbiterCli.Main do
       ["help" | rest] -> help(rest)
       ["-h"] -> usage_and_exit(0)
       ["--help"] -> usage_and_exit(0)
-      ["-v"] -> IO.puts("arb #{@version}")
-      ["--version"] -> IO.puts("arb #{@version}")
+      ["-v"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
+      ["--version"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
       [cmd | rest] -> dispatch(cmd, rest)
     end
   end

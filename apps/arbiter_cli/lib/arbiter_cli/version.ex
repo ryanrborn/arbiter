@@ -10,9 +10,6 @@ defmodule ArbiterCli.Version do
   SHA — whenever `git pull` moves the branch tip to a new commit.
   """
 
-  @version_file Path.join([__DIR__, "../../../../VERSION"])
-  @external_resource @version_file
-
   @app_version (case System.get_env("RELEASE_VERSION") do
                   v when is_binary(v) and byte_size(v) > 0 ->
                     v |> String.trim() |> String.trim_leading("v")
@@ -22,7 +19,7 @@ defmodule ArbiterCli.Version do
                            stderr_to_stdout: true
                          ) do
                       {tag, 0} -> tag |> String.trim() |> String.trim_leading("v")
-                      _ -> File.read!(@version_file) |> String.trim()
+                      _ -> "0.0.0"
                     end
                 end)
 
