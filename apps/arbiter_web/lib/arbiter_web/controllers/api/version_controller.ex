@@ -16,7 +16,7 @@ defmodule ArbiterWeb.Api.VersionController do
   # Mirrors ArbiterCli.Version — without these @external_resource declarations
   # Mix considers this file unchanged after a pull and skips recompilation,
   # leaving @git_sha frozen at the pre-pull commit.
-  @git_dir Path.expand("../../../../", __DIR__) |> Path.join(".git")
+  @git_dir Path.expand("../../../../../../", __DIR__) |> Path.join(".git")
   @git_head_path Path.join(@git_dir, "HEAD")
   @external_resource @git_head_path
 
