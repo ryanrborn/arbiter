@@ -2859,6 +2859,27 @@ defmodule Arbiter.Worker do
     _ -> nil
   end
 
+  # Resolve the ReviewGate per-pass timeout (ms).
+  #
+  # Resolution order:
+  #   1. An explicit meta `:review_timeout_ms` override (tests / advanced callers).
+  #   2. The workspace `config["review_gate"]["timeout_ms"]` (bd-78vg4v).
+  #   3. `nil` — let the ReviewGate apply its built-in default.
+  defp resolve_review_timeout(%State{meta: meta} = state) do
+    case meta && Map.get(meta, :review_timeout_ms) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      _ ->
+        case state.workspace_id && Ash.get(Arbiter.Tasks.Workspace, state.workspace_id) do
+          {:ok, ws} -> Arbiter.Tasks.Workspace.review_gate_timeout_ms(ws)
+          _ -> nil
+        end
+    end
+  rescue
+    _ -> nil
+  end
+
   # Load the task's difficulty integer (0..4) from the DB. Returns nil on any
   # error so the ReviewGate falls back to its D2 default rather than crashing.
   defp task_difficulty(task_id) when is_binary(task_id) do
@@ -2940,8 +2961,9 @@ defmodule Arbiter.Worker do
         ]
         |> maybe_opt(:command, Map.get(meta, :review_command))
         |> maybe_opt(:revise_command, Map.get(meta, :revise_command))
-        |> maybe_opt(:timeout_ms, Map.get(meta, :review_timeout_ms))
+        |> maybe_opt(:timeout_ms, resolve_review_timeout(state))
         |> maybe_opt(:verdict_retries, Map.get(meta, :review_verdict_retries))
+        |> maybe_opt(:timeout_retries, Map.get(meta, :review_timeout_retries))
         |> maybe_opt(:rounds, resolve_review_rounds(state))
         |> maybe_opt(:pr_ref, Map.get(meta, :review_pr_ref))
 

@@ -24,6 +24,7 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `"by_difficulty"`, `"by_budget"`, `"round_robin"`).
     * If `"review_gate"` is present, it must be a map.
     * If `"review_gate.max_rounds"` is present, it must be a positive integer.
+    * If `"review_gate.timeout_ms"` is present, it must be a positive integer.
     * If `"conductor"` is present, it must be a map.
     * If `"conductor.max_concurrent"` is present, it must be a positive integer.
     * If `"review_automation"` is present, it must be a map.
@@ -253,7 +254,20 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   defp validate_review_gate(changeset, nil), do: changeset
 
   defp validate_review_gate(changeset, review_gate) when is_map(review_gate) do
-    case Map.get(review_gate, "max_rounds") do
+    changeset
+    |> validate_positive_int(review_gate, "max_rounds", "review_gate.max_rounds")
+    |> validate_positive_int(review_gate, "timeout_ms", "review_gate.timeout_ms")
+  end
+
+  defp validate_review_gate(changeset, _) do
+    Changeset.add_error(changeset, field: :config, message: "review_gate must be a map")
+  end
+
+  # A config value that, when present, must be a positive integer (or its
+  # stringified JSON form). Absent → no-op. Used for review_gate.max_rounds and
+  # review_gate.timeout_ms.
+  defp validate_positive_int(changeset, map, key, label) do
+    case Map.get(map, key) do
       nil ->
         changeset
 
@@ -268,20 +282,16 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
           _ ->
             Changeset.add_error(changeset,
               field: :config,
-              message: "review_gate.max_rounds must be a positive integer; got: #{inspect(s)}"
+              message: "#{label} must be a positive integer; got: #{inspect(s)}"
             )
         end
 
       other ->
         Changeset.add_error(changeset,
           field: :config,
-          message: "review_gate.max_rounds must be a positive integer; got: #{inspect(other)}"
+          message: "#{label} must be a positive integer; got: #{inspect(other)}"
         )
     end
-  end
-
-  defp validate_review_gate(changeset, _) do
-    Changeset.add_error(changeset, field: :config, message: "review_gate must be a map")
   end
 
   defp validate_conductor(changeset, nil), do: changeset
