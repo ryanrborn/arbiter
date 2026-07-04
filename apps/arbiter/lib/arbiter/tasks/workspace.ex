@@ -33,8 +33,10 @@ defmodule Arbiter.Tasks.Workspace do
           }
         },
         "review_gate" => %{
-          "max_rounds" => 2                    # optional integer ≥ 1; caps the difficulty
+          "max_rounds" => 2,                   # optional integer ≥ 1; caps the difficulty
                                                # default (min wins). See review_gate_max_rounds/1.
+          "timeout_ms" => 1_200_000            # optional integer > 0; per-pass reviewer/
+                                               # implementer timeout. See review_gate_timeout_ms/1.
         }
       }
 
@@ -533,6 +535,34 @@ defmodule Arbiter.Tasks.Workspace do
   @spec review_gate_max_rounds(t()) :: pos_integer() | nil
   def review_gate_max_rounds(workspace) do
     case get_in(workspace.config || %{}, ["review_gate", "max_rounds"]) do
+      n when is_integer(n) and n > 0 ->
+        n
+
+      s when is_binary(s) ->
+        case Integer.parse(s) do
+          {n, ""} when n > 0 -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  Optional workspace override for the ReviewGate's per-pass timeout, from
+  `config["review_gate"]["timeout_ms"]` (milliseconds).
+
+  Repeated reviewer timeouts at exactly the built-in ceiling can mean a large or
+  complex diff genuinely needs more wall-clock, not that the pass is stuck
+  (bd-78vg4v). This lets an operator grant a workspace more (or less) time per
+  reviewer / implementer pass. Returns `nil` when not configured, letting the
+  ReviewGate's built-in default apply. Accepts a positive integer or the
+  stringified integer that round-trips through JSON config.
+  """
+  @spec review_gate_timeout_ms(t()) :: pos_integer() | nil
+  def review_gate_timeout_ms(workspace) do
+    case get_in(workspace.config || %{}, ["review_gate", "timeout_ms"]) do
       n when is_integer(n) and n > 0 ->
         n
 

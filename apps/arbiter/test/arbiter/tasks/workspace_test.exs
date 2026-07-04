@@ -467,6 +467,47 @@ defmodule Arbiter.Tasks.WorkspaceTest do
     end
   end
 
+  describe "review_gate_timeout_ms/1" do
+    test "returns integer when set as integer" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmt-int",
+          config: %{"review_gate" => %{"timeout_ms" => 1_800_000}}
+        })
+
+      assert Workspace.review_gate_timeout_ms(ws) == 1_800_000
+    end
+
+    test "returns integer when set as string (JSON round-trip)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tmt-str",
+          config: %{"review_gate" => %{"timeout_ms" => "900000"}}
+        })
+
+      assert Workspace.review_gate_timeout_ms(ws) == 900_000
+    end
+
+    test "returns nil when unset" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "tmt-unset"})
+      assert Workspace.review_gate_timeout_ms(ws) == nil
+    end
+
+    test "validate_config rejects non-positive / malformed timeout_ms" do
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmt-bad",
+                 config: %{"review_gate" => %{"timeout_ms" => 0}}
+               })
+
+      assert {:error, _} =
+               Ash.create(Workspace, %{
+                 name: "tmt-bad2",
+                 config: %{"review_gate" => %{"timeout_ms" => "soon"}}
+               })
+    end
+  end
+
   describe "review_automation config validation" do
     test "accepts a valid review_automation block with default and auto_authors" do
       config = %{

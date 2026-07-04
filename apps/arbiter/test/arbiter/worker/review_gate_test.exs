@@ -38,6 +38,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @rounds_empty_last Path.expand("../../fixtures/review_rounds_empty_last.sh", __DIR__)
   @retry_reset Path.expand("../../fixtures/review_retry_reset.sh", __DIR__)
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
+  @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
+  @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
 
@@ -106,6 +108,42 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # cap == 12 lands exactly after the full "€" (bytes 10..12), nothing to shave.
       text = String.duplicate("a", 9) <> "€uro"
       assert ReviewGate.cap(text, 12) == "aaaaaaaaa€\n… (truncated)"
+    end
+  end
+
+  describe "cap_transcript/2 (bd-78vg4v)" do
+    test "returns the text unchanged when within the byte cap" do
+      assert ReviewGate.cap_transcript("short", 50) == "short"
+    end
+
+    test "keeps BOTH the head and the tail, eliding the middle" do
+      # The implementer's actionable conclusion lands at the END, so a correct
+      # cap must preserve the tail — unlike cap/2, which keeps only the prefix.
+      # A unique MIDDLE_MARKER buried in the centre must be elided.
+      filler = String.duplicate("noise xxxxxxxxxx\n", 2000)
+
+      text =
+        "HEAD_MARKER opening context\n" <>
+          filler <> "MIDDLE_MARKER buried\n" <> filler <> "TAIL_MARKER: FIXED the thing"
+
+      capped = ReviewGate.cap_transcript(text, 2_000)
+
+      assert byte_size(capped) < byte_size(text)
+      assert byte_size(capped) <= 2_200, "capped output should be bounded near the cap"
+      assert capped =~ "HEAD_MARKER", "head (opening context) must be kept"
+      assert capped =~ "TAIL_MARKER: FIXED", "tail (the FIX conclusion) must be kept"
+      assert capped =~ "elided", "must mark the elided middle"
+      refute capped =~ "MIDDLE_MARKER", "the middle must be dropped"
+    end
+
+    test "never emits invalid UTF-8 when head/tail land mid-codepoint" do
+      # Fill with multibyte chars so the byte-offset head/tail slices are very
+      # likely to sever a codepoint; the head+tail guards must back off.
+      text = String.duplicate("€", 5000)
+      capped = ReviewGate.cap_transcript(text, 1_000)
+
+      assert String.valid?(capped), "cap_transcript/2 must never emit invalid UTF-8"
+      assert String.trim(capped) == capped |> String.trim()
     end
   end
 
@@ -429,6 +467,86 @@ defmodule Arbiter.Worker.ReviewGateTest do
       runs = Ash.read!(Arbiter.Workers.Run)
       assert Enum.any?(runs, &(&1.task_id == review_id)), "expected a distinct reviewer run row"
       assert Enum.any?(runs, &(&1.task_id == task.id)), "expected the author's own run row"
+    end
+
+    # bd-78vg4v: a reviewing pass that hangs past the timeout ceiling is retried
+    # once with a FRESH reviewer mind before escalating. The @timeout_retry
+    # fixture hangs on its first pass, then APPROVEs on the retry → the branch
+    # merges rather than escalating as timed-out.
+    test "a reviewer that hangs is retried with a fresh mind and converges → merge",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@timeout_retry, "APPROVE"],
+        # Short per-pass timeout so the hung first pass trips it quickly; the
+        # default timeout-retry budget (1) drives the retry.
+        review_timeout_ms: 800
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # First pass hangs → timeout fires → retry approves → merge.
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 8_000)
+      assert merge_commit_count(repo) == 1
+
+      # The retry ran under a distinct timeout-retry id (#t2 suffix), proving the
+      # pass was respawned as a fresh worker rather than re-prompting a hung one.
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &String.starts_with?(&1.task_id, review_id <> "#t")),
+             "expected a distinct timeout-retry reviewer run row"
+    end
+
+    # bd-78vg4v: with the timeout-retry budget exhausted (0), a hung reviewing
+    # pass escalates as timed-out with no merge — the pre-existing behaviour is
+    # preserved when retries are disabled.
+    test "a hung reviewer with no retry budget escalates as timed out — no merge",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@timeout_retry, "APPROVE"],
+        review_timeout_ms: 800,
+        # Disable the retry so the hung pass escalates immediately.
+        review_timeout_retries: 0
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      snap = Worker.state(pid)
+      assert snap.meta.failure_reason == :review_gate_rejected
+      assert snap.meta.review_gate_findings =~ "timed out"
+      assert merge_commit_count(repo) == 0
     end
 
     test "a reviewer requests changes → no merge, task parked + escalated",
@@ -1025,6 +1143,67 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(flags, &(&1.from_ref == task.id and &1.to_ref == review_id)),
              "expected an implementer→reviewer response message"
+    end
+
+    # bd-78vg4v: a large implementer transcript is CAPPED (head+tail) when
+    # recorded into the durable thread, so the round-2 re-review prompt stays
+    # bounded instead of ballooning past round-1's. The @revise_huge fixture
+    # emits ~280 KB with distinctive HEAD/TAIL markers; the persisted
+    # implementer→reviewer message must keep both markers but be far smaller.
+    test "a large implementer transcript is capped in the persisted thread",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: task.id,
+          repo: "trib/repo",
+          workspace_id: ws.id,
+          meta: %{
+            branch: branch,
+            repo_path: repo,
+            target_branch: "main",
+            merge_title: "Merge #{task.id}",
+            review_required: true,
+            review_rounds: 2,
+            worktree_path: repo,
+            review_command: [@rounds, "APPROVE"],
+            revise_command: [@revise_huge],
+            review_timeout_ms: 10_000
+          }
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      # Round 1 rejects → huge revise → round 2 approves → merge.
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 12_000)
+
+      review_id = ReviewGate.reviewer_task_id(task.id)
+      thread = Message.thread(task.id, workspace_id: ws.id)
+
+      impl_msg =
+        Enum.find(
+          thread,
+          &(&1.kind == :flag and &1.from_ref == task.id and &1.to_ref == review_id)
+        )
+
+      assert impl_msg, "expected an implementer→reviewer response in the thread"
+
+      # The recorded transcript is capped well below the raw ~280 KB output but
+      # preserves BOTH the opening context and the actionable FIX conclusion.
+      assert byte_size(impl_msg.body) <= 20_000,
+             "implementer transcript must be capped, was #{byte_size(impl_msg.body)} bytes"
+
+      assert impl_msg.body =~ "IMPL_HEAD_MARKER", "head (opening context) must survive the cap"
+
+      assert impl_msg.body =~ "IMPL_TAIL_MARKER: FIXED",
+             "tail (the FIX conclusion) must survive the cap"
+
+      assert impl_msg.body =~ "elided", "the elided middle must be marked"
     end
 
     # The reviewer holds the line on BOTH rounds (the @rounds fixture rejects

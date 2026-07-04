@@ -162,6 +162,27 @@ defmodule Arbiter.Worker.ReviewGate do
   # one before escalating as inconclusive. Capped; default 1. See bd-8v8ays.
   @default_verdict_retries 1
 
+  # How many times a reviewing pass that hits the timeout ceiling is retried with
+  # a FRESH reviewer mind before escalating as timed-out. A hung / overloaded
+  # model session is usually transient API variance (rate limiting, model
+  # overload) rather than a code problem, so a clean second attempt often
+  # converges where the first stalled (bd-78vg4v, investigate #2/#3). Per-
+  # ReviewGate budget; default 1. Only the reviewing phase is retried — a
+  # revising (implementer) pass still escalates directly on timeout.
+  @default_timeout_retries 1
+
+  # Cap on the implementer transcript recorded into the thread and re-embedded
+  # into every round-2+ re-review prompt (`rereview_prompt/1`). Left uncapped, a
+  # real implementer's full stdout — every file read, tool-call narration, and
+  # test run — ballooned the round-2 reviewer prompt far past round-1's (which
+  # carries no thread at all), which was the dominant cause of round-2 timeouts
+  # and no-parseable-verdict failures (bd-78vg4v, investigate #1). Every other
+  # value fed into a prompt/payload is already capped (diff, worktree status,
+  # subject); this transcript was the lone exception. The implementer's
+  # actionable FIX/REBUT conclusions land at the END of its output, so
+  # `cap_transcript/2` keeps the head AND the tail and elides only the middle.
+  @transcript_cap_bytes 16_000
+
   # Default revise-and-rediscuss round cap when no difficulty is available and
   # no workspace override is set — matches D2 (moderate). See bd-3jm700.
   @default_rounds 3
@@ -192,6 +213,7 @@ defmodule Arbiter.Worker.ReviewGate do
           | {:revise_command, [String.t()] | nil}
           | {:timeout_ms, non_neg_integer()}
           | {:verdict_retries, non_neg_integer()}
+          | {:timeout_retries, non_neg_integer()}
           | {:rounds, pos_integer()}
           | {:pr_ref, String.t() | nil}
 
@@ -312,6 +334,10 @@ defmodule Arbiter.Worker.ReviewGate do
       command: Keyword.get(opts, :command),
       revise_command: Keyword.get(opts, :revise_command),
       timeout_ms: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
+      # Reviewing-pass timeout retry budget (bd-78vg4v). Consumed by the
+      # reviewing-phase timeout handler; not reset per round — it guards against
+      # a whole ReviewGate stalling on transient API hangs, not per-round noise.
+      timeout_retries_left: Keyword.get(opts, :timeout_retries, @default_timeout_retries),
       retries_left: Keyword.get(opts, :verdict_retries, @default_verdict_retries),
       # Stored so finish_revise/1 can reset retries_left at the start of each
       # new round — the retry budget is per-round, not ReviewGate-lifetime.
@@ -329,6 +355,10 @@ defmodule Arbiter.Worker.ReviewGate do
       # The id of the worker whose output/exit we are currently waiting on, so a
       # stale message from a prior (stopped) reviewer/implementer is ignored.
       current_id: nil,
+      # The prompt handed to the current reviewer pass, retained so a timeout
+      # retry can re-launch the SAME pass (same review context) with a fresh
+      # mind rather than reconstructing it. Set by launch_acolyte/5 (bd-78vg4v).
+      current_prompt: nil,
       reviewer_pid: nil,
       lines: [],
       reported?: false,
@@ -586,19 +616,49 @@ defmodule Arbiter.Worker.ReviewGate do
   # from a prior pass can't escalate a pass that has already advanced.
   def handle_info({:timeout, _attempt}, %{reported?: true} = state), do: {:noreply, state}
 
+  # A reviewing pass hit the ceiling. Before escalating as timed-out, retry the
+  # pass once with a fresh reviewer mind (bd-78vg4v): a hung / overloaded session
+  # is usually transient API variance, not a code problem, and a clean second
+  # attempt converges where the first stalled. Only the reviewing phase is
+  # retried — a revising (implementer) pass still escalates on timeout below.
+  def handle_info(
+        {:timeout, attempt},
+        %{attempt: attempt, phase: :reviewing, timeout_retries_left: budget} = state
+      )
+      when budget > 0 and is_binary(state.current_prompt) do
+    Logger.warning(
+      "ReviewGate: reviewing pass timed out for task=#{state.task_id} (round #{state.round}); " <>
+        "retrying with a fresh reviewer (#{budget} left)"
+    )
+
+    stop_acolyte(state)
+    retry_id = timeout_retry_id(state.current_id, state.attempt)
+
+    case launch_acolyte(
+           %{state | timeout_retries_left: budget - 1},
+           retry_id,
+           :reviewer,
+           state.current_prompt,
+           state.command
+         ) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: timeout retry failed to spawn for task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        escalate_timeout(state)
+    end
+  end
+
   def handle_info({:timeout, attempt}, %{attempt: attempt} = state) do
     Logger.warning(
       "ReviewGate: #{state.phase} pass timed out for task=#{state.task_id} (round #{state.round})"
     )
 
-    msg =
-      "ReviewGate #{state.phase} pass timed out after #{div(state.timeout_ms, 1000)}s " <>
-        "with no verdict (round #{state.round})."
-
-    payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
-
-    report(state, {:request_changes, payload})
-    {:stop, :normal, %{state | reported?: true}}
+    escalate_timeout(state)
   end
 
   def handle_info({:timeout, _stale}, state), do: {:noreply, state}
@@ -770,7 +830,10 @@ defmodule Arbiter.Worker.ReviewGate do
       |> Enum.join("\n")
       |> String.trim()
 
-    response = if response == "", do: "(implementer produced no output)", else: response
+    response =
+      if response == "",
+        do: "(implementer produced no output)",
+        else: cap_transcript(response)
 
     state = record_thread(state, :implementer, "Round #{state.round} response", response)
 
@@ -961,6 +1024,20 @@ defmodule Arbiter.Worker.ReviewGate do
     do: {:no_verdict, "Reviewer produced no parseable VERDICT line."}
 
   defp normalize_verdict({:no_verdict, _findings} = v), do: v
+
+  # Escalate the current pass as timed-out: report a REQUEST_CHANGES carrying the
+  # timeout note plus (when a thread exists) the full escalation payload, and
+  # stop. Shared by the reviewing-retry-exhausted path and the revising path.
+  defp escalate_timeout(state) do
+    msg =
+      "ReviewGate #{state.phase} pass timed out after #{div(state.timeout_ms, 1000)}s " <>
+        "with no verdict (round #{state.round})."
+
+    payload = if state.thread == [], do: msg, else: msg <> "\n\n" <> escalation_payload(state)
+
+    report(state, {:request_changes, payload})
+    {:stop, :normal, %{state | reported?: true}}
+  end
 
   # ---- the persisted thread ----------------------------------------------
 
@@ -1196,7 +1273,16 @@ defmodule Arbiter.Worker.ReviewGate do
     case spawn_acolyte(state, id, role, prompt, command) do
       {:ok, pid} ->
         Process.send_after(self(), {:timeout, attempt}, state.timeout_ms)
-        {:ok, %{state | reviewer_pid: pid, current_id: id, attempt: attempt, lines: []}}
+
+        {:ok,
+         %{
+           state
+           | reviewer_pid: pid,
+             current_id: id,
+             attempt: attempt,
+             lines: [],
+             current_prompt: prompt
+         }}
 
       {:error, _reason} = err ->
         err
@@ -1398,6 +1484,11 @@ defmodule Arbiter.Worker.ReviewGate do
   # The implementer id for a given round's revision: distinct per round.
   defp implementer_task_id(review_id, round), do: review_id <> "#impl#{round}"
 
+  # The synthetic id for a reviewer pass respawned after a timeout: distinct per
+  # attempt so it registers its own worker / run row and never collides with the
+  # (now-stopped) hung pass. bd-78vg4v.
+  defp timeout_retry_id(current_id, attempt), do: "#{current_id}#t#{attempt + 1}"
+
   # ---- misc ---------------------------------------------------------------
 
   defp round_subject(state, verdict), do: "Round #{state.round} findings (#{verdict})"
@@ -1422,6 +1513,39 @@ defmodule Arbiter.Worker.ReviewGate do
 
   defp valid_prefix(bin) do
     if String.valid?(bin), do: bin, else: valid_prefix(binary_part(bin, 0, byte_size(bin) - 1))
+  end
+
+  # Cap a transcript to at most `max` bytes, preserving BOTH the head and the
+  # tail and eliding the middle — unlike `cap/2`, which keeps only the prefix.
+  # Used for the implementer transcript recorded into the thread (bd-78vg4v): its
+  # actionable FIX/REBUT conclusions land at the END of the output, so a
+  # prefix-only cap would discard exactly what the re-reviewer needs while
+  # keeping the file-reading noise. Keeps ~1/3 head (opening context) + ~2/3 tail
+  # (the conclusions). Public only so the head+tail behaviour can be unit-tested.
+  @doc false
+  def cap_transcript(text, max \\ @transcript_cap_bytes) when is_binary(text) and max > 0 do
+    if byte_size(text) <= max do
+      text
+    else
+      head_bytes = div(max, 3)
+      tail_bytes = max - head_bytes
+      head = text |> binary_part(0, head_bytes) |> valid_prefix()
+      tail = text |> binary_part(byte_size(text) - tail_bytes, tail_bytes) |> valid_suffix()
+      elided = byte_size(text) - byte_size(head) - byte_size(tail)
+
+      head <>
+        "\n\n… (#{elided} bytes of the implementer transcript elided to bound the " <>
+        "re-review prompt — head and tail kept) …\n\n" <> tail
+    end
+  end
+
+  # Mirror of valid_prefix/1 for a tail slice: shave LEADING bytes forward to a
+  # valid UTF-8 boundary so a tail can't begin mid-codepoint (which would choke
+  # String ops and the Postgres UTF8 column downstream).
+  defp valid_suffix(bin) when byte_size(bin) == 0, do: bin
+
+  defp valid_suffix(bin) do
+    if String.valid?(bin), do: bin, else: valid_suffix(binary_part(bin, 1, byte_size(bin) - 1))
   end
 
   # Minimal snapshot for a ReviewGate probed as if it were a worker. The ReviewGate
