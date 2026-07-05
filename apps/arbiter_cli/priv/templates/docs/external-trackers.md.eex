@@ -1,0 +1,48 @@
+<% _ = assigns %>
+# Runbook: External tracker quirks (GitHub, GitLab, Shortcut, Jira, ...)
+
+## Gated transitions need worker-produced fields
+
+Some trackers gate a status transition on custom fields — e.g. "QA/Deployment
+notes must be filled before Code Review." If those fields are empty, the
+`pr_opened` sync fails and escalates instead of silently skipping the
+transition. The **worker** is responsible for producing those notes
+(`--qa-notes`, `--deployment-notes` on `issue update`) before the transition
+is expected to succeed.
+
+Some trackers also require rich-text fields to be encoded as their
+structured document format (e.g. Atlassian's ADF), not a plain string, even
+when the field's reported schema type says `string`. A plain string can be
+silently rejected or mangled — check the tracker's actual accepted payload
+shape, not just its documented type.
+
+## `tracker_sync` is reconciliation, not a push
+
+`mcp__arbiter__tracker_sync` (CLI: `arb issue sync`) claims
+assigned-but-untracked issues and closes orphaned ones. It does **not** push
+field updates or force a status transition on the tracker side — don't
+reach for it expecting a field-push or re-transition; use the
+tracker-specific update path for that.
+
+## Dependency link direction can be reversed from what you'd expect
+
+When creating a cross-issue dependency link via a tracker's REST API (e.g.
+"X blocks Y" / "X is blocked by Y"), the inward/outward parameter naming is
+sometimes counterintuitive relative to the tracker's own documentation.
+After creating a link, verify the human-readable direction in the tracker UI
+rather than trusting the parameter names matched your intent.
+
+## Numeric vs. string project/repo identifiers
+
+Some trackers accept a `"group/project"`-style string in their web UI but
+reject it (404) via the API, requiring the numeric project ID instead — and
+won't auto-encode the string form for you. If a tracker API call 404s on an
+otherwise-correct-looking reference, check whether it wants a numeric ID.
+
+## Keep internal framing out of external comms
+
+When a worker posts a comment to a coworker's GitHub PR, Slack thread, or
+similar, don't let internal framing leak into the message ("per the team
+lead," "my coordinator says..."). It reads oddly to the external party and
+tends to get parroted back verbatim. Phrase it in the operator's own
+first-person voice, as one collaborator to another.
