@@ -1,0 +1,79 @@
+<% _ = assigns %>
+# Runbook: Diagnosing stuck workers and worktrees
+
+## Status can lie — check reality, not the field
+
+A worker record can show `running` while its subprocess is actually dead.
+Don't trust `status` alone when something feels off — check the port, the
+log, or `claude_session` on the worker record.
+
+## Stuck `idle` with no agent attached
+
+A worker **boots `idle`** and only transitions once its agent session
+attaches. `idle` + `claude_session: false` + no output + `$0` spent means
+**the agent never attached** — it's not "gone quiet," it never started.
+Common causes:
+
+- A dispatch that failed at or after registration (`:missing_worktree`,
+  `:claude_start_failed`) — each failed attempt can leave *another* idle
+  shell behind, so you may see several for one issue.
+- A `--no-agent` dry dispatch (intentional park for manual attach).
+- PR patrol spawning a follow-up shell with no dispatch behind it yet (see
+  `docs/pr-patrol.md`).
+
+## The `repo` argument on dispatch
+
+`mcp__arbiter__worker_dispatch(task_id, repo, provider)` (CLI: `arb issue
+dispatch <id> [<repo>]`) — `repo` is optional in both forms, but a
+**multi-repo workspace with no default** needs it explicit. Omit it there
+and you get a generic "internal server error" with
+`{reason: ":missing_worktree"}`, not a helpful usage hint. If a workspace has
+more than one configured repo, always pass `repo` explicitly.
+
+## Worker resume is not fully reliable
+
+`mcp__arbiter__worker_resume` (CLI: `arb worker resume`) re-attaches a fresh
+session to the preserved worktree, which is usually right, but has
+historically been unreliable at actually driving a resumed session all the
+way to completion. Watch a resumed worker rather than assuming it'll finish
+unattended.
+
+## A server restart wipes in-memory registrations
+
+Idle worker shells vanish on restart (nothing was persisted for them yet);
+issues and completed/failed worker records survive since they're in the
+database. Don't be surprised by idle shells disappearing after a deploy —
+that's expected, not data loss.
+
+## Worktree freshness
+
+Worktrees are cut from a **freshly-fetched** base branch at dispatch time
+(`git fetch --prune` then branch from `origin/<base>`), aborting rather than
+branching off stale local state. So a **freshly dispatched** worker always
+starts on current upstream — a pre-dispatch `git pull` of your own local
+checkout is redundant. The exceptions: a **resumed** worktree can sit on an
+older base (it wasn't re-fetched), and a git-pull-style deploy of the
+Arbiter server itself does need the checkout current.
+
+## Inspect against the real base branch
+
+Forks vary — some repos are based on `main`, others on `development` or a
+release branch. Diffing `<hardcoded-base>..HEAD` when the real base differs
+reads as an empty diff and can mask real, committed work. Use:
+
+```bash
+git log $(git merge-base origin/<base> HEAD)..HEAD
+```
+
+not a hardcoded `<base>..HEAD`, and confirm `<base>` against the workspace's
+actual configured base branch rather than assuming `main`.
+
+## "CLEAN/MERGEABLE" is not "empty diff"
+
+A PR marked CLEAN/MERGEABLE by GitHub means no merge conflict — it says
+nothing about whether the diff has real content. Before calling work "empty"
+or "failed," read the actual diff:
+
+```bash
+git diff origin/<base>...<branch> --stat
+```

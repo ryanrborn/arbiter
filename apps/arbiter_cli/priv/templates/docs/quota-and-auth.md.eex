@@ -1,0 +1,70 @@
+<% _ = assigns %>
+# Runbook: Quota, rate limits, and agent auth
+
+## Agent CLI auth expires silently
+
+The agent CLI's OAuth session on the host expires periodically (roughly
+daily). Once it does, every worker spawn 401s ("Invalid authentication
+credentials") — no auto-refresh, no distinct alert, each just fails as a
+generic error. If a whole batch of dispatches fails the same way at once,
+this is the first thing to check.
+
+**Fix:** log in again on the box (run the agent CLI's own `/login`; workers
+symlink the credentials and pick them up automatically).
+
+**Pre-flight before dispatching a batch:** confirm the CLI is authenticated —
+`echo hi | claude --print` (or the equivalent for your provider) should
+respond, not 401.
+
+## "Rate-limited" at low quota usage is probably a 529, not your 429
+
+Arbiter lumps HTTP 429 (you're rate-limited) and 529 (the provider is
+overloaded) into one `:rate_limited` category. If the quota gauge shows low
+utilization and `allowed`, a "rate-limited / overloaded" error is almost
+certainly an Anthropic-side **529 Overloaded** on the premium model — the
+biggest model is the most capacity-constrained, and difficulty-D3+ work
+routes there by default.
+
+**Fix:** re-dispatch with `--model sonnet` (or another non-premium tier).
+Work-in-progress survives in the worktree — resume with an instruction like
+"review the diff, continue, don't restart" rather than starting over.
+
+Don't burn dispatch attempts chasing quota, rate-limit, or concurrency
+theories before you've actually read the quota gauge.
+
+## Reading the quota gauge
+
+**Anthropic is the only provider the quota gauge covers today.** If this
+workspace also runs Gemini (or another provider) workers,
+`mcp__arbiter__quota_get` tells you nothing about their usage or rate-limit
+state — you're flying blind for those until a provider-specific quota
+tracker exists. This is a known gap, under active exploration; don't assume
+"gauge looks fine" means a non-Claude provider is fine too.
+
+```
+mcp__arbiter__quota_get()
+```
+
+CLI fallback: `arb quota`.
+
+Reports `utilization_5h` / `status_5h` and `utilization_7d` / `status_7d`
+plus reset times. This is a **rolling 5-hour/7-day cap**, not a short-window
+requests-per-minute limit. That distinction matters both ways:
+
+- Low 5h utilization + `allowed` but you're still seeing errors → it's the
+  529-overload case above, not a quota problem.
+- A **burst of concurrent dispatches** can trip the provider's per-minute
+  rate limit even while the 5h gauge reads low and `allowed` — the 5h gauge
+  alone won't catch a concurrency burst. Keep concurrent `--provider claude`
+  workers modest (roughly 3, not a dozen at once) to avoid recompile/API
+  storms.
+
+## The Conductor self-throttles on quota
+
+If you're running an autonomous multi-issue graph and see a directive
+`ready` with `running: 0` while its `run_state` is `running`, that's usually
+**quota-held, not a drain bug** — the Conductor throttles itself around
+~85% 5h utilization and resumes automatically at the window reset. Verify
+with `mcp__arbiter__quota_get` (CLI: `arb quota`) before concluding
+something's stuck. Don't force-dispatch when the gauge shows `rejected` —
+you'll only collect 429s.

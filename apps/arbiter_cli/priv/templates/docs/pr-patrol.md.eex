@@ -1,0 +1,26 @@
+<% _ = assigns %>
+# Runbook: PR patrol
+
+PR patrol watches for open PRs with unresolved review threads and auto-files
+a follow-up issue (plus an idle worker shell) so they don't go stale.
+
+## First boot sweeps the whole backlog
+
+When PR-patrol coverage is newly enabled for a workspace, its first pass
+walks every currently-open PR with unresolved threads — expect a burst of
+follow-up issues and idle shells the first time, not a slow trickle.
+
+## Scope it to specific authors
+
+`pr_patrol.author_logins` limits patrol to listed authors' PRs; leaving it
+unset patrols everyone's. Set it with `mcp__arbiter__workspace_config_set`
+(CLI: `arb config set`) — never a raw API PATCH — see the Config Safety
+pitfall in the field guide.
+
+## Config changes take effect on the next patrol cycle, not instantly
+
+PR patrol re-reads its workspace config fresh on every tick (default
+interval: 60s) — a config change (like adjusting `author_logins`) does
+*not* need a restart, but can lag up to one tick behind. If a scope change
+doesn't seem to have applied, wait for the next cycle before assuming
+something's broken.

@@ -1,9 +1,21 @@
-# <%= @coordinator_cap %> Operator Field Guide
+<% _ = assigns %>
+# Coordinator Operator Field Guide
 
-Hard-won operating knowledge for the <%= @coordinator_cap %> seat.
-Generic — applies to any Arbiter install. Update it as you learn.
+Hard-won operating knowledge for the coordinator seat. Generic — applies to
+any Arbiter install. Update it as you learn.
 
-Run `arb prime` at the start of every session.
+Run `arb prime` at the start of every session. Deep, situational runbooks
+live in `docs/` — this guide stays short on purpose; it points there rather
+than inlining everything.
+
+**MCP first.** Every example below shows the `mcp__arbiter__*` tool call as
+the primary form, with the `arb` CLI equivalent noted alongside it as a
+fallback for when a session has no MCP connection. Where a CLI verb has no
+MCP equivalent yet, that's called out explicitly rather than left implicit.
+
+This preference is yours, not the operator's — they only have a terminal.
+If a section here is telling the operator to do something themselves rather
+than describing what you should do, give them the CLI form.
 
 ---
 
@@ -11,44 +23,85 @@ Run `arb prime` at the start of every session.
 
 You coordinate; the fleet executes. Core loop:
 
-1. File <%= @issue_article %> <%= @issue %> with crisp acceptance criteria, difficulty, and
-   priority.
-2. Dispatch to a <%= @rig %> (`arb dispatch <id> [<%= @rig %>] --with-claude`).
-3. Monitor — `arb prime` / `arb polecat show <id>` / `arb polecat list`.
-4. ReviewGate (pre-merge review gate) escalates for your judgment; decide, don't
-   rubber-stamp.
-5. Merge and close the <%= @issue %> (or let close-on-merge handle it).
+1. File an issue with crisp acceptance criteria, difficulty, and priority
+   (`mcp__arbiter__task_create`; CLI: `arb issue create`).
+2. Dispatch to a repo (`mcp__arbiter__worker_dispatch(task_id, repo,
+   provider: "claude")`; CLI: `arb issue dispatch <id> [<repo>] --provider
+   claude`).
+3. Monitor — `mcp__arbiter__worker_list` (CLI: `arb worker list`), `arb
+   prime` (composite session briefing, CLI-only — no single MCP
+   equivalent), or a persistent event-stream monitor (`docs/monitoring.md`).
+   `arb worker show <task-id>` (full worker detail + output) has **no MCP
+   equivalent yet** — that's a real gap, not an oversight; fall back to the
+   CLI for it.
+4. ReviewGate (pre-merge review gate) escalates for your judgment; decide,
+   don't rubber-stamp (`docs/reviewgate.md`).
+5. Merge and close the issue (`mcp__arbiter__task_close`; CLI: `arb issue
+   close`) — or let close-on-merge handle it.
 
 External comms (GitHub, Slack) stay in normal professional voice.
 
 ## 2. Operating Pitfalls — Quick Reference
 
-The six most-burned-by operating pitfalls. Check these first:
+The pitfalls that burn a coordinator most often. Check these first; each
+links to the runbook with the full story.
 
-- [ ] **Concurrency** — keep parallel <%= @issue_plural %> FILE-DISJOINT. Tasks that touch the same file (especially CLI verb list, command-alias map, or router) **will collide at merge**. Serialize those <%= @issue_plural %>.
-- [ ] **Config** — use `arb config get/set/unset` only. **Never** send partial config via raw API PATCH — it replaces the whole map and **silently clobbers** siblings (`rig_paths`, tracker, merge config).
-- [ ] **Deploy** — before restarting the server, check for active <%= @worker_plural %> (`arb prime` or `arb polecat list`). **Restarting KILLS all in-flight <%= @worker_plural %> and abandons their work.**
-- [ ] **Freshness** — keep <%= @repo_plural %> current. <%= @worker_plural %> branch from the <%= @rig %>'s base branch. A stale <%= @rig %> means stale, possibly regressed state for every new <%= @worker %>.
-- [ ] **Verify** — a <%= @worker %> can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
-- [ ] **ReviewGate** — read the full implementer↔reviewer transcript before deciding. Do not assume the worst on a stalled exchange; do not rubber-stamp because a round ran. **Decide for yourself.**
+- [ ] **Concurrency** — keep parallel issues FILE-DISJOINT. Tasks that touch
+      the same file (especially a CLI verb list, command-alias map, or
+      router) **will collide at merge**. Serialize those issues.
+- [ ] **Config** — use `mcp__arbiter__workspace_config_get` /
+      `workspace_config_set` / `workspace_config_unset` (CLI:
+      `arb config get/set/unset`) only. **Never** send partial config via
+      raw API PATCH — it replaces the whole map and **silently clobbers**
+      siblings (`rig_paths`, tracker, merge config).
+- [ ] **Deploy** — before restarting the server, check for active workers
+      (`mcp__arbiter__worker_list`; CLI: `arb worker list`). **Restarting
+      kills all in-flight workers and abandons their work.** See
+      `docs/deploy.md`.
+- [ ] **Freshness** — worktrees are cut from a freshly-fetched base branch at
+      dispatch time. A pre-dispatch `git pull` of your local checkout is
+      usually redundant; a **resumed** worktree can still sit on a stale base.
+- [ ] **Verify** — a worker can show "running" while its subprocess is dead.
+      Check the port/log, not just status. A PR marked CLEAN/MERGEABLE means
+      no merge conflict, **not** an empty diff. See `docs/worktrees-and-workers.md`.
+- [ ] **ReviewGate** — read the full implementer↔reviewer transcript before
+      deciding. Do not assume the worst on a stalled exchange; do not
+      rubber-stamp because a round ran. **Decide for yourself.**
+- [ ] **Quota vs. rate-limit** — "overloaded" at low quota usage is usually an
+      Anthropic-side capacity issue on the premium model, not your rate limit.
+      Check the quota gauge first (`mcp__arbiter__quota_get`; CLI: `arb
+      quota`). See `docs/quota-and-auth.md`.
 
-## 3. Directive Intake — Claim & Create
+## 3. Issue Intake — Claim & Create
 
-When taking in new directives locally via `arb claim` or `arb create`, **always
-set difficulty immediately after intake**. Both commands create beads without
-prompting for difficulty, and the field defaults to unset. Difficulty drives the
-model tier and thinking budget — set it before dispatching to avoid under-scoped work.
+When taking in new issues locally, **always set difficulty immediately
+after intake**. Both intake paths create issues without prompting for
+difficulty, and the field defaults to unset. Difficulty drives the model
+tier and thinking budget — set it before dispatching to avoid under-scoped
+work.
 
-Workflow:
+MCP first:
+
+```
+# Option A: Claim an existing upstream issue
+mcp__arbiter__tracker_claim(ref: "42")
+mcp__arbiter__task_update(id: "<id>", difficulty: <n>)
+
+# Option B: Create a new local issue
+mcp__arbiter__task_create(title: "Fix widget crash on startup", description: "...")
+mcp__arbiter__task_update(id: "<id>", difficulty: <n>)
+```
+
+CLI fallback:
 
 ```bash
 # Option A: Claim an existing upstream issue
-arb claim 42
-arb update <bead-id> --difficulty <n>
+arb issue claim 42
+arb issue update <id> --difficulty <n>
 
-# Option B: Create a new local directive
-arb create "Fix widget crash on startup" --description "..."
-arb update <bead-id> --difficulty <n>
+# Option B: Create a new local issue
+arb issue create "Fix widget crash on startup" --description "..."
+arb issue update <id> --difficulty <n>
 ```
 
 Difficulty scale (D0–D4):
@@ -61,34 +114,42 @@ D3 Hard     — cross-cutting, non-obvious design, correctness-critical
 D4 Extreme  — novel architecture, deep ambiguity, may warrant multi-pass
 ```
 
-## 4. File <%= @issue_plural_cap %> Well
+## 4. File Issues Well
 
 - **Crisp acceptance criteria** — reference real files and line numbers.
 - **DIFFICULTY (D0–D4)** — drives the model + thinking budget routed to the
-  <%= @worker %>.
+  worker.
 - **PRIORITY (P0–P4)** — drives scheduling urgency.
 - They are **orthogonal** — a P0 can be D0 (trivial config bump); a P3 can be
   D4 (hard architectural change). Do not conflate them.
 - Set `target_branch` when it is not the workspace default.
 
 Drop a one-line difficulty justification in the description so reviewers can
-sanity-check your call.
+sanity-check your call. Both `mcp__arbiter__task_create` and `arb issue
+create` accept difficulty/priority inline — no follow-up update needed at
+filing time.
 
 ## 5. Concurrency Discipline
 
-Parallel <%= @worker_plural %> are good. **Keep concurrent <%= @issue_plural %>
-FILE-DISJOINT.**
+Parallel workers are good. **Keep concurrent issues FILE-DISJOINT.**
 
-<%= @issue_plural_cap %> that touch the same file — especially the CLI verb list,
-command-alias map, or the router — **will collide at merge**. The
-auto-conflict-resolver helps, but do not rely on it. Serialize those
-<%= @issue_plural %>.
+Issues that touch the same file — especially the CLI verb list,
+command-alias map, or the router — **will collide at merge**. An
+auto-conflict-resolver may help, but do not rely on it. Serialize those
+issues: `conflicts_with` as a mutex, plus a `depends_on` chain for order
+(`mcp__arbiter__dep_add`; CLI: `arb dep add`).
 
 ## 6. Freshness
 
-<%= @worker_plural_cap %> branch from the <%= @rig %>'s base branch. A stale <%= @rig %>
-means stale, possibly regressed state for every new <%= @worker %>. Keep <%= @rig_plural %>
-current; let provisioning fetch from origin.
+Workers branch from the repo's base branch. Provisioning fetches from origin
+at dispatch time, so a fresh worker always starts on current upstream — a
+pre-dispatch `git pull` of your local checkout is usually redundant. A
+**resumed** worktree is the exception: it can sit on an older base. Inspect
+against the workspace's real base branch (forks vary — some are cut from
+`main`, others from `development` or a release branch); use
+`git log $(git merge-base origin/<base> HEAD)..HEAD`, not a hardcoded
+`<base>..HEAD`, so a wrong guess doesn't mask real committed work. (Plain
+`git` — no MCP equivalent, and none needed.)
 
 ## 7. Config Safety
 
@@ -97,29 +158,38 @@ Workspace config is a single JSON map stored in the database.
 **NEVER** send a partial config via the raw API PATCH — it replaces the whole
 map and **silently clobbers** siblings (`rig_paths`, tracker, merge config).
 
-**Use `arb config get/set/unset` (deep-merge) only.**
+**Use `mcp__arbiter__workspace_config_get` / `workspace_config_set` /
+`workspace_config_unset` (deep-merge) — CLI fallback: `arb config
+get/set/unset`.** Never anything else.
 
 ## 8. Deploy Safely
 
-A real deploy = pull + run migrations + rebuild the CLI escript + restart the
-server.
+Restarting the server **kills all in-flight workers** and abandons their
+work. Before restarting or deploying:
 
-**Restarting the server KILLS all in-flight <%= @worker_plural %>** and abandons
-their work. Before restarting:
-
-1. Check for active <%= @worker_plural %> (`arb prime` or `arb polecat list`).
-2. If any are running, wait for them to finish — or explicitly stop them first.
+1. Check for active workers (`mcp__arbiter__worker_list`; CLI: `arb worker
+   list`).
+2. If any are running, wait for them to finish — or explicitly stop them
+   first (`mcp__arbiter__worker_stop`; CLI: `arb worker stop`).
 3. Never restart mid-flight as a shortcut.
+
+The full deploy runbook (release cut, `arb server deploy`, migration
+gotchas, verifying a deploy actually landed) is in `docs/deploy.md` — deploy
+itself is CLI/infra-only, no MCP equivalent.
 
 ## 9. Trust State, But Verify
 
-- A <%= @worker %> can show "running" while its subprocess is dead — check the
-  port or log, not just status.
+- A worker can show "running" while its subprocess is dead — check the port
+  or log, not just status.
 - A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
-  Read the real `git diff origin/main...<branch>` before calling work "empty"
-  or "failed".
-- Close-on-merge can miss on out-of-band merges — close the <%= @issue %>
-  manually if it stalls.
+  Read the real `git diff origin/<base>...<branch> --stat` before calling
+  work "empty" or "failed".
+- Close-on-merge can miss on out-of-band merges — close the issue manually
+  if it stalls (`mcp__arbiter__task_close`; CLI: `arb issue close`).
+- A server restart wipes in-memory worker registrations (idle shells vanish);
+  persisted issues survive.
+
+More on diagnosing a stuck or misbehaving worker: `docs/worktrees-and-workers.md`.
 
 ## 10. ReviewGate
 
@@ -128,12 +198,17 @@ judgment.
 
 Read the full implementer↔reviewer transcript before deciding. Do not assume
 the worst on a stalled exchange; do not rubber-stamp because a round ran.
-Decide for yourself.
+Decide for yourself. Edge cases (self-approval blocks, "empty branch"
+verdicts that aren't actually empty, gate-failed issues with a live mergeable
+PR) are in `docs/reviewgate.md`.
 
 ## 11. Watch Efficiently
 
-Use shell-poll monitors that wake only on real state changes. Avoid
-fixed-interval wakeups that burn tokens re-reading context on every tick.
+Run a persistent event-stream monitor instead of polling on a fixed
+interval — it wakes only on real state changes and doesn't burn tokens
+re-reading context on every tick. Setup, gotchas, and the reconnect loop are
+in `docs/monitoring.md` (the event stream itself is a raw HTTP connection,
+not an MCP tool call — token minting stays CLI-only: `arb mcp token mint`).
 
 ## 12. Provider-Agnostic
 
@@ -142,24 +217,34 @@ Never hardcode model names. Route via abstract tiers:
 | Tier | Use |
 |------|-----|
 | economy | Cheap, fast, simple tasks |
-| standard | Most <%= @issue_plural %> (default) |
+| standard | Most issues (default) |
 | premium | Hard / correctness-critical work |
 
 Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
 dispatch time.
 
 **Verify CLI flags against the installed agent CLI version** — a wrong flag
-crashes the <%= @worker %> at launch with no useful error.
+crashes the worker at launch with no useful error.
+
+Agent-CLI auth and quota gotchas (silent 401 batches, 529-vs-429 confusion)
+are in `docs/quota-and-auth.md`.
 
 ## 13. Review Capability
 
-`arb review <id>` reviews a PR/MR tracker-side: fetches the diff and posts
-findings + verdict via the configured tracker API. The PR author needs **no**
-Arbiter setup.
+`mcp__arbiter__worker_review` (CLI: `arb worker review <task-id>`) reviews a
+PR/MR tracker-side: fetches the diff and posts findings + verdict via the
+configured tracker API. The PR author needs **no** Arbiter setup.
+
+For a ticketed review with the issue's acceptance criteria in context, prefer
+a **local** task (`tracker_type: none`) with the criteria pasted in and
+`pr_ref` set, then review that task — full context, zero upstream write-back.
+Never claim a coworker's ticket just to get a review task; `tracker_claim` is
+assignment-as-claim and risks writing back to their upstream issue.
 
 ## 14. Lanes & Merge Posture
 
-Use **separate workspaces** for separate concerns (self-dev vs company repos).
+Use **separate workspaces** for separate concerns (self-dev vs. company
+repos).
 
 | Lane | `auto_merge` | Why |
 |------|-------------|-----|
