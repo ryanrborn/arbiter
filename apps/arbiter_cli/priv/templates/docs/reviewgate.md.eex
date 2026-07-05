@@ -1,0 +1,52 @@
+<% _ = assigns %>
+# Runbook: ReviewGate edge cases
+
+ReviewGate is the pre-merge review step: an implementer and a reviewer go
+back and forth for a bounded number of rounds, then either merges or
+escalates to you.
+
+## Arbiter can't self-approve its own PRs
+
+GitHub blocks a bot identity from approving its own PR. For a PR authored
+under Arbiter's own identity, the review worker posts a *comment* verdict
+instead of a formal approval, and the merge **parks waiting on a human
+teammate** — that's expected, not a bug. For a coworker's PR, Arbiter can
+post a normal formal review.
+
+## A changes-requested verdict looks like a failure but isn't one
+
+A review task that comes back with changes-requested shows status `failed`,
+reason `:review_gate_rejected`. That's the **verdict**, not an error in the
+review process — read it as "reviewer said no," not "something broke."
+
+## "Empty branch" or "no work" verdicts are usually wrong
+
+The most common false negative: the verdict says there's no work, but the
+work is actually there. Two causes to check before trusting the verdict:
+
+1. The implementer edited files but never `git commit`ed — work-in-progress
+   sits uncommitted, `HEAD == base`, so the diff is genuinely empty from
+   git's perspective even though the files changed on disk. Low-tier models
+   are especially prone to skipping the commit step.
+2. The reviewer diffed a **stale HEAD** — it looked at the branch before the
+   latest commit landed.
+
+Before accepting an "empty" or "no work" verdict, inspect the worktree
+yourself: `git status`, `git log <base>..HEAD`, and look at the actual files.
+Verify the *reviewer's* diff, not just the implementer's claim.
+
+## A gate-FAILED issue can still have an open, mergeable PR
+
+The work flow opens a PR independently of whether the review gate passed.
+So a gate-FAILED issue is not automatically "no PR exists" — check
+`gh pr list` for the issue's branch before writing the work off as lost. If
+a PR is there and mergeable, the salvage path is: review it yourself, merge
+it, then close the issue manually (close-on-merge won't fire since the gate
+never passed).
+
+## Escalations after the round cap need your judgment, not a default
+
+When the round cap is hit, the honest failure modes are "the reviewer kept
+finding real issues" and "the two sides talked past each other." Read the
+full implementer↔reviewer transcript before ruling — don't assume the worst
+because a round ran, and don't rubber-stamp because rounds happened at all.
