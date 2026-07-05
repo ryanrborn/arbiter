@@ -1,0 +1,90 @@
+<% _ = assigns %>
+# Runbook: Deploy
+
+Arbiter runs as a **systemd user service** from a prebuilt **OTP release** at
+`~/.arbiter/current` (or `$ARB_DATA_HOME`). The box doesn't need a Mix/Elixir
+toolchain to *run* it — only to build a release from source.
+
+## Deploy a new version
+
+1. **Cut the release:** tag `main` `vX.Y.Z` and push. CI (`release.yml`)
+   builds and publishes the OTP tarball (`arbiter-vX.Y.Z-linux.tar.gz` +
+   `.sha256`). Wait for it to go green before deploying.
+2. **Deploy:** `arb server deploy --version vX.Y.Z` — downloads,
+   sha256-verifies, runs migrations, atomic-swaps the `current` symlink,
+   restarts via systemd, health-checks (`arb doctor`), and **auto-rolls-back**
+   if it doesn't come back green. `--git-pull` is the legacy path for a
+   deploy without a release tag.
+
+## Pre-flight: check for active workers
+
+**Always check for running workers before a restart or deploy** — a restart
+abandons in-flight work. Idle shells are safe to lose. Guard the deploy on
+`mcp__arbiter__worker_list` (CLI fallback: `arb worker list`) showing
+nothing running. Deploy itself has no MCP equivalent — it's an infra-level
+action, CLI/`systemctl` only.
+
+## A migration-bearing merge landed but you didn't deploy yet
+
+If code merged that adds a migration and the server hasn't restarted, every
+API/MCP/events request may start returning 500 (`PendingMigrationError`). Fix
+is a plain restart (`systemctl --user restart arbiter`) — the boot sequence
+applies pending migrations itself. Do **not** run `arb server migrate`
+against a live server; it can race the SQLite writer.
+
+## Post-pull order matters
+
+If you deploy by pulling source rather than a tagged release, restart the
+server **before** reinstalling the CLI (`arb install cli` / `self-update`).
+The escript's version check runs on server boot; if the CLI binary is newer
+than the running server, `arb doctor`'s version check fails.
+
+## Env gotchas (running `arb server deploy` from a bare ssh shell)
+
+A bare ssh shell does not inherit systemd's `EnvironmentFile`. The deploy
+process and the migration step both need secrets from the env file. Source
+it, but **save and restore `PATH`** around it — some env files carry a `PATH`
+line that clobbers `arb`/`gh` on the invoking shell:
+
+```bash
+OLD="$PATH"; set -a; . ~/.arbiter/arbiter.env; set +a; export PATH="$OLD"
+export GITHUB_TOKEN="$(gh auth token)"
+arb server deploy --version vX.Y.Z
+```
+
+## Verifying the deploy actually landed
+
+Don't trust the reported version string alone — a stale or wrong string here
+is a known category of bug, so `arb doctor`'s version check can cry wolf even
+when the deploy succeeded. Confirm with:
+
+- `readlink ~/.arbiter/current` → points at `releases/vX.Y.Z`
+- `systemctl --user status arbiter` → `active (running)`, fresh process
+- `GET /api/version` → `built_at` matches the fresh CI build timestamp —
+  this proves the running binary is the new artifact regardless of what the
+  version string says
+
+## After a tool-adding deploy: reconnect MCP
+
+If the release adds new MCP tools, reconnect your MCP client — its tool
+catalog is snapshotted at connect time and won't pick up new tools until you
+reconnect.
+
+## Logs and restart-only
+
+- Logs: `journalctl --user-unit arbiter.service -f` — not `--user -u`, which
+  reads an empty user-journal namespace. Needs persistent journald and the
+  invoking user in the `systemd-journal` group (a new login session picks up
+  the group).
+- Restart only, no version change: `systemctl --user restart arbiter`.
+- `arb server restart` may hard-depend on `lsof`, which isn't present on
+  every host, and can leave the port dark if it's missing — prefer
+  `arb server deploy` or a direct `systemctl` restart if that happens.
+
+## First-time systemd setup
+
+If this machine has never run the service before: `arb install-service`
+writes `~/.config/systemd/user/arbiter.service`, enables `loginctl
+enable-linger` so it starts at boot before any login, and starts it. Pass
+`--system` to install a machine-wide unit under `/etc/systemd/system`
+instead (needs root).

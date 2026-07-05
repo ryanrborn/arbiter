@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Init do
   @moduledoc """
-  `arb init [path] [--force]` — scaffold a coordinator home base.
+  `arb init [path] [--force] [--dev]` — scaffold a coordinator home base.
 
   A fresh Arbiter adopter has no coordinator working folder. This command
   pre-seeds one — pre-filled for *this* install — so a new session has role
@@ -20,6 +20,11 @@ defmodule ArbiterCli.Cmd.Init do
                                  safety, deploy protocol, trust-but-verify
                                  patterns). Generic and transferable; edit
                                  freely.
+    * `docs/*.md`              — situational runbooks (deploy, monitoring,
+                                 quota/auth, worktrees, ReviewGate, PR patrol,
+                                 external trackers) meant to be read on
+                                 demand, not preloaded — `AGENTS.md` carries
+                                 the index of when to reach for each.
     * `memory/MEMORY.md`       — a clean memory index skeleton (and an
                                  otherwise empty `memory/` dir).
     * `notes/README.md`        — explains the surface-to-operator drop.
@@ -34,15 +39,26 @@ defmodule ArbiterCli.Cmd.Init do
   Non-destructive: existing files are skipped and reported. Pass `--force`
   to overwrite them.
 
+  ## Install topology
+
+  By default the generated "Starting the server" section assumes a
+  **production install**: a systemd user service running a prebuilt OTP
+  release (`arb install-service` / `systemctl --user`). Pass `--dev` when
+  this install is a source checkout dogfooding Arbiter itself — that
+  renders `mix phx.server` instructions instead.
+
   ## Templating
 
-  Templates are shipped in `priv/templates/*.eex` and compiled into this
-  module at build time (so the escript carries them with no runtime file
-  access). They are rendered with runtime values:
+  Templates are shipped in `priv/templates/*.eex` (and `priv/templates/docs/`
+  for the runbooks) and compiled into this module at build time (so the
+  escript carries them with no runtime file access). They are rendered with
+  runtime values:
 
     * dashboard / host URL (`ARB_HOST`, default `http://127.0.0.1:4848`)
     * active domain name + prefix (from `Workspace.resolve/0`)
-    * an Arbiter install-path hint (`ARB_HOME`, else best-effort)
+    * an Arbiter install-path hint (`ARB_HOME`, else best-effort) — used only
+      in `--dev` mode
+    * whether `--dev` was passed
 
   When the server is unreachable the command still scaffolds, falling back
   to a generic install-path hint.
@@ -53,6 +69,7 @@ defmodule ArbiterCli.Cmd.Init do
   require EEx
 
   @templates_dir Path.expand(Path.join([__DIR__, "..", "..", "..", "priv", "templates"]))
+  @docs_templates_dir Path.join(@templates_dir, "docs")
 
   @agents_md Path.join(@templates_dir, "AGENTS.md.eex")
   @operator_guide Path.join(@templates_dir, "OPERATOR_FIELD_GUIDE.md.eex")
@@ -62,6 +79,14 @@ defmodule ArbiterCli.Cmd.Init do
   @gitignore Path.join(@templates_dir, "gitignore.eex")
   @mcp_json Path.join(@templates_dir, "mcp_json.eex")
 
+  @doc_deploy Path.join(@docs_templates_dir, "deploy.md.eex")
+  @doc_monitoring Path.join(@docs_templates_dir, "monitoring.md.eex")
+  @doc_quota_and_auth Path.join(@docs_templates_dir, "quota-and-auth.md.eex")
+  @doc_worktrees_and_workers Path.join(@docs_templates_dir, "worktrees-and-workers.md.eex")
+  @doc_reviewgate Path.join(@docs_templates_dir, "reviewgate.md.eex")
+  @doc_pr_patrol Path.join(@docs_templates_dir, "pr-patrol.md.eex")
+  @doc_external_trackers Path.join(@docs_templates_dir, "external-trackers.md.eex")
+
   @external_resource @agents_md
   @external_resource @operator_guide
   @external_resource @memory_md
@@ -69,6 +94,13 @@ defmodule ArbiterCli.Cmd.Init do
   @external_resource @agents_local
   @external_resource @gitignore
   @external_resource @mcp_json
+  @external_resource @doc_deploy
+  @external_resource @doc_monitoring
+  @external_resource @doc_quota_and_auth
+  @external_resource @doc_worktrees_and_workers
+  @external_resource @doc_reviewgate
+  @external_resource @doc_pr_patrol
+  @external_resource @doc_external_trackers
 
   EEx.function_from_file(:defp, :render_agents_md, @agents_md, [:assigns])
   EEx.function_from_file(:defp, :render_operator_guide, @operator_guide, [:assigns])
@@ -77,12 +109,24 @@ defmodule ArbiterCli.Cmd.Init do
   EEx.function_from_file(:defp, :render_agents_local, @agents_local, [:assigns])
   EEx.function_from_file(:defp, :render_mcp_json, @mcp_json, [:assigns])
 
+  EEx.function_from_file(:defp, :render_doc_deploy, @doc_deploy, [:assigns])
+  EEx.function_from_file(:defp, :render_doc_monitoring, @doc_monitoring, [:assigns])
+  EEx.function_from_file(:defp, :render_doc_quota_and_auth, @doc_quota_and_auth, [:assigns])
+
+  EEx.function_from_file(:defp, :render_doc_worktrees_and_workers, @doc_worktrees_and_workers, [
+    :assigns
+  ])
+
+  EEx.function_from_file(:defp, :render_doc_reviewgate, @doc_reviewgate, [:assigns])
+  EEx.function_from_file(:defp, :render_doc_pr_patrol, @doc_pr_patrol, [:assigns])
+  EEx.function_from_file(:defp, :render_doc_external_trackers, @doc_external_trackers, [:assigns])
+
   # The .gitignore template takes no runtime values — embed it verbatim at
   # compile time rather than running it through EEx with an unused binding.
   @gitignore_contents File.read!(@gitignore)
   defp render_gitignore(_assigns), do: @gitignore_contents
 
-  @switches [force: :boolean, json: :boolean]
+  @switches [force: :boolean, json: :boolean, dev: :boolean]
 
   def run(argv) do
     if Output.help?(argv) do
@@ -91,6 +135,7 @@ defmodule ArbiterCli.Cmd.Init do
       {opts, rest, _invalid} = OptionParser.parse(argv, switches: @switches)
       mode = if opts[:json], do: :json, else: :text
       force = opts[:force] || false
+      dev_mode = opts[:dev] || false
 
       dir =
         case rest do
@@ -98,7 +143,7 @@ defmodule ArbiterCli.Cmd.Init do
           [] -> File.cwd!()
         end
 
-      assigns = build_assigns()
+      assigns = build_assigns(dev_mode)
 
       results =
         [
@@ -108,7 +153,14 @@ defmodule ArbiterCli.Cmd.Init do
           {".gitignore", render_gitignore(assigns)},
           {".mcp.json", render_mcp_json(assigns)},
           {"memory/MEMORY.md", render_memory_md(assigns)},
-          {"notes/README.md", render_notes_readme(assigns)}
+          {"notes/README.md", render_notes_readme(assigns)},
+          {"docs/deploy.md", render_doc_deploy(assigns)},
+          {"docs/monitoring.md", render_doc_monitoring(assigns)},
+          {"docs/quota-and-auth.md", render_doc_quota_and_auth(assigns)},
+          {"docs/worktrees-and-workers.md", render_doc_worktrees_and_workers(assigns)},
+          {"docs/reviewgate.md", render_doc_reviewgate(assigns)},
+          {"docs/pr-patrol.md", render_doc_pr_patrol(assigns)},
+          {"docs/external-trackers.md", render_doc_external_trackers(assigns)}
         ]
         |> Enum.map(fn {rel, contents} ->
           {rel, scaffold_file(Path.join(dir, rel), contents, force)}
@@ -142,12 +194,13 @@ defmodule ArbiterCli.Cmd.Init do
 
   # ---- runtime values ----------------------------------------------------
 
-  defp build_assigns do
+  defp build_assigns(dev_mode) do
     {domain_name, domain_prefix} = resolve_domain()
     base_url = Client.base_url()
     mcp_url = base_url <> "/mcp"
 
     %{
+      dev_mode: dev_mode,
       coordinator: "coordinator",
       coordinator_cap: "Coordinator",
       worker: "worker",
