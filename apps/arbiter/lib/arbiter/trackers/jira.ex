@@ -785,6 +785,44 @@ defmodule Arbiter.Trackers.Jira do
   end
 
   @doc """
+  Returns true when `raw` (a fetched issue's JSON body) shows the issue
+  already at, or downstream of, the status mapped from `event` — i.e. moving
+  it there now would be a no-op.
+
+  Used by `Arbiter.Trackers.Sync` to distinguish a benign "ticket already
+  advanced" transition failure (the tracker rejects the transition because
+  there's nothing left to do) from a genuine one. Any event with a
+  `status_map` entry is supported, not just `:closed` — e.g. `:merged`
+  rejected by a workflow where the ticket already reached Code Complete (or
+  beyond) is exactly this case.
+
+  Checks, in order: exact status-name match, Jira's "done" status category
+  (catches terminal statuses under any name), and — for a configured
+  `transition_graph` — whether the current status is reachable by walking
+  *forward* from the target (i.e. downstream of it, so it was already
+  passed). Returns false (never escalation-suppressing) on any resolution
+  failure, so a genuinely unreachable tracker still escalates.
+  """
+  @spec at_or_past_target?(map(), atom()) :: boolean()
+  def at_or_past_target?(raw, event) when is_atom(event) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_status} <- map_status(cfg, event) do
+      current_status = get_in(raw, ["fields", "status", "name"])
+      current_category = get_in(raw, ["fields", "status", "statusCategory", "key"])
+
+      current_status == target_status or
+        current_category == "done" or
+        (is_binary(current_status) and
+           match?(
+             {:ok, _},
+             plan_transition_path(cfg.transition_graph, target_status, current_status)
+           ))
+    else
+      _ -> false
+    end
+  end
+
+  @doc """
   BFS over a transition graph for the shortest sequence of transition names
   that moves an issue from `from` status to `to` status.
 
