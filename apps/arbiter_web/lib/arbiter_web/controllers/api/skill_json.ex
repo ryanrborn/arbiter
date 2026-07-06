@@ -22,6 +22,8 @@ defmodule ArbiterWeb.Api.SkillJSON do
       name: skill.name,
       body: skill.body,
       metadata: skill.metadata || %{},
+      activation_mode: skill.activation_mode,
+      code_only: skill.code_only,
       created_at: iso(skill.created_at),
       updated_at: iso(skill.updated_at)
     }

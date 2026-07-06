@@ -1008,8 +1008,10 @@ defmodule Arbiter.MCP.Catalog do
         "Create a system-wide skill (a reusable markdown instruction module arbiter " <>
           "materializes into a worker's worktree). NOT workspace-scoped — one definition is " <>
           "shared across the whole system. `name` (unique, kebab-case) and `body` (markdown) " <>
-          "are required; optional `metadata` object. Returns the created skill, plus a " <>
-          "non-fatal `warning` when the name collides with a bundled skill.",
+          "are required; optional `metadata` object, `activation_mode` " <>
+          "(always_on|situational, default situational), and `code_only` (bool, default " <>
+          "false). Returns the created skill, plus a non-fatal `warning` when the name " <>
+          "collides with a bundled skill.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1024,6 +1026,19 @@ defmodule Arbiter.MCP.Catalog do
           "metadata" => %{
             "type" => "object",
             "description" => "Optional free-form metadata (e.g. description, tags)."
+          },
+          "activation_mode" => %{
+            "type" => "string",
+            "enum" => ["situational", "always_on"],
+            "description" =>
+              "always_on = arbiter auto-invokes /<name> in every worker prompt where the " <>
+                "skill applies; situational = advertised only, agent decides. Default situational."
+          },
+          "code_only" => %{
+            "type" => "boolean",
+            "description" =>
+              "When true, the skill only applies to code-producing tasks (feature/bug/chore); " <>
+                "excluded from decision/task/epic. Default false."
           }
         },
         "required" => ["name", "body"],
@@ -1036,8 +1051,9 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Update a system-wide skill identified by `skill` (its id or name). Any subset of " <>
-          "`name` / `body` / `metadata` may be supplied. Returns the updated skill, plus a " <>
-          "non-fatal `warning` when the (new) name collides with a bundled skill.",
+          "`name` / `body` / `metadata` / `activation_mode` / `code_only` may be supplied. " <>
+          "Returns the updated skill, plus a non-fatal `warning` when the (new) name " <>
+          "collides with a bundled skill.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -1047,7 +1063,16 @@ defmodule Arbiter.MCP.Catalog do
           },
           "name" => %{"type" => "string", "description" => "New kebab-case name (optional)."},
           "body" => %{"type" => "string", "description" => "New markdown body (optional)."},
-          "metadata" => %{"type" => "object", "description" => "Replacement metadata (optional)."}
+          "metadata" => %{"type" => "object", "description" => "Replacement metadata (optional)."},
+          "activation_mode" => %{
+            "type" => "string",
+            "enum" => ["situational", "always_on"],
+            "description" => "always_on auto-invokes /<name>; situational advertises only (optional)."
+          },
+          "code_only" => %{
+            "type" => "boolean",
+            "description" => "Restrict the skill to code-producing tasks (optional)."
+          }
         },
         "required" => ["skill"],
         "additionalProperties" => false
