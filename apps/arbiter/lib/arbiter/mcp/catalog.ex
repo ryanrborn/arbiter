@@ -56,6 +56,8 @@ defmodule Arbiter.MCP.Catalog do
   | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
   | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
   | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
+  | `skill_list` | worker, coordinator | `Arbiter.Skills.list_skills/0` |
+  | `skill_get` | worker, coordinator | `Arbiter.Skills.get_skill/1` |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
@@ -1097,6 +1099,36 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.skill_delete/2
+    },
+    %{
+      name: "skill_list",
+      tiers: @both,
+      description:
+        "List all system-wide skills (name, metadata, activation_mode, code_only — no " <>
+          "`body`), ordered by name. Same registry as `skill_create`/materialization; use " <>
+          "`skill_get` to fetch a body.",
+      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+      handler: &Tools.skill_list/2
+    },
+    %{
+      name: "skill_get",
+      tiers: @both,
+      description:
+        "Fetch one system-wide skill's full markdown body by `skill` (its id or name). " <>
+          "Lets the coordinator (not worktree-isolated, so it can't rely on materialization) " <>
+          "or any agent pull a skill body on demand from the same registry.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "skill" => %{
+            "type" => "string",
+            "description" => "Skill id or name to fetch. Required."
+          }
+        },
+        "required" => ["skill"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.skill_get/2
     },
     %{
       name: "usage_summarize",
