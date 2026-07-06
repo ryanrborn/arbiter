@@ -232,7 +232,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   @impl true
   def render(%{not_found: true} = assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-3xl mx-auto space-y-4">
         <.empty_state id="ws-404" icon="hero-building-office-2">
           Workspace not found.
@@ -245,7 +245,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-4xl mx-auto space-y-6">
         <div>
           <.link navigate={~p"/workspaces"} class="link link-hover text-sm text-base-content/60">

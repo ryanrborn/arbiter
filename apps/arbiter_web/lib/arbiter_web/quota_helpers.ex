@@ -39,4 +39,24 @@ defmodule ArbiterWeb.QuotaHelpers do
     secs = DateTime.diff(dt, DateTime.utc_now())
     if secs <= 0, do: "resetting now", else: "resets in #{quota_reset_label(dt)}"
   end
+
+  # Display label for a quota's `provider` code. Known providers get a
+  # human-friendly name; anything else is title-cased as a fallback so a
+  # newly-added provider still renders sensibly before this list is updated.
+  @provider_labels %{
+    "claude" => "Claude",
+    "codex" => "Codex",
+    "gemini_cli" => "Gemini CLI",
+    "antigravity" => "Antigravity"
+  }
+
+  def quota_provider_label(provider) when is_binary(provider) do
+    Map.get(@provider_labels, provider, title_case(provider))
+  end
+
+  defp title_case(provider) do
+    provider
+    |> String.split("_")
+    |> Enum.map_join(" ", &String.capitalize/1)
+  end
 end
