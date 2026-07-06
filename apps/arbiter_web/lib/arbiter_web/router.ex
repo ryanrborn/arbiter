@@ -41,6 +41,8 @@ defmodule ArbiterWeb.Router do
       live("/workspaces", WorkspaceIndexLive)
       live("/workspaces/:id", WorkspaceDetailLive)
 
+      live("/skills", SkillIndexLive)
+
       live("/workers", WorkerIndexLive)
       live("/workers/history", RunIndexLive)
       live("/workers/history/:id", RunDetailLive)
@@ -67,6 +69,14 @@ defmodule ArbiterWeb.Router do
 
     # Repos (repo/project checkouts workers operate on)
     get("/repos", RepoController, :index)
+
+    # Skills (system-wide, user-authored worker skill registry)
+    get("/skills", SkillController, :index)
+    post("/skills", SkillController, :create)
+    get("/skills/:id", SkillController, :show)
+    patch("/skills/:id", SkillController, :update)
+    put("/skills/:id", SkillController, :update)
+    delete("/skills/:id", SkillController, :delete)
 
     # Workspaces
     get("/workspaces", WorkspaceController, :index)

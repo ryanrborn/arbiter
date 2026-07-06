@@ -53,6 +53,9 @@ defmodule Arbiter.MCP.Catalog do
   | `workspace_config_unset` | coordinator | `Ash.update(ws, …, action: :patch_config)` unset |
   | `installation_config_get` | worker, coordinator | `Arbiter.Settings.conductor_system_max_concurrent/0` |
   | `installation_config_set` | coordinator | `Arbiter.Settings.set_conductor_system_max_concurrent/1` |
+  | `skill_create` | coordinator | `Arbiter.Skills.create_skill/1` |
+  | `skill_update` | coordinator | `Arbiter.Skills.update_skill/2` |
+  | `skill_delete` | coordinator | `Arbiter.Skills.delete_skill/1` |
   | `usage_summarize` | coordinator | `Arbiter.Usage.summarize/1` |
   | `queue_resume` | coordinator | `Arbiter.Workflows.Conductor.resume_task/1` (C5 of #482) |
   | `repo_list` | coordinator | `Arbiter.Tasks.RepoConfig.list_repos()` (mirrors `arb repo list`) |
@@ -997,6 +1000,78 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.installation_config_set/2
+    },
+    %{
+      name: "skill_create",
+      tiers: @coordinator,
+      description:
+        "Create a system-wide skill (a reusable markdown instruction module arbiter " <>
+          "materializes into a worker's worktree). NOT workspace-scoped — one definition is " <>
+          "shared across the whole system. `name` (unique, kebab-case) and `body` (markdown) " <>
+          "are required; optional `metadata` object. Returns the created skill, plus a " <>
+          "non-fatal `warning` when the name collides with a bundled skill.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{
+            "type" => "string",
+            "description" => "Unique kebab-case name; the /<name> slash command. Required."
+          },
+          "body" => %{
+            "type" => "string",
+            "description" => "Markdown skill body (the SKILL.md contents). Required."
+          },
+          "metadata" => %{
+            "type" => "object",
+            "description" => "Optional free-form metadata (e.g. description, tags)."
+          }
+        },
+        "required" => ["name", "body"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.skill_create/2
+    },
+    %{
+      name: "skill_update",
+      tiers: @coordinator,
+      description:
+        "Update a system-wide skill identified by `skill` (its id or name). Any subset of " <>
+          "`name` / `body` / `metadata` may be supplied. Returns the updated skill, plus a " <>
+          "non-fatal `warning` when the (new) name collides with a bundled skill.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "skill" => %{
+            "type" => "string",
+            "description" => "Skill id or name to update. Required."
+          },
+          "name" => %{"type" => "string", "description" => "New kebab-case name (optional)."},
+          "body" => %{"type" => "string", "description" => "New markdown body (optional)."},
+          "metadata" => %{"type" => "object", "description" => "Replacement metadata (optional)."}
+        },
+        "required" => ["skill"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.skill_update/2
+    },
+    %{
+      name: "skill_delete",
+      tiers: @coordinator,
+      description:
+        "Delete a system-wide skill identified by `skill` (its id or name). " <>
+          "Returns `{deleted: true, id, name}`.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "skill" => %{
+            "type" => "string",
+            "description" => "Skill id or name to delete. Required."
+          }
+        },
+        "required" => ["skill"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.skill_delete/2
     },
     %{
       name: "usage_summarize",
