@@ -48,6 +48,34 @@ defmodule Arbiter.Quota.AnthropicQuota do
         :captured_at
       ]
     end
+
+    # On-demand secondary source (bd-8tpha6): per-model weekly utilization +
+    # extra_usage overage from `/api/oauth/usage`. A distinct action with a
+    # narrow `upsert_fields` so an oauth-only write never clobbers the
+    # header-capture columns (`utilization_5h` etc.) on an existing row, and
+    # vice versa.
+    create :record_oauth_usage do
+      upsert? true
+      upsert_identity :workspace_provider
+
+      upsert_fields [
+        :per_model_utilization,
+        :extra_usage,
+        :oauth_utilization_5h,
+        :oauth_utilization_7d,
+        :oauth_captured_at
+      ]
+
+      accept [
+        :workspace_id,
+        :provider,
+        :per_model_utilization,
+        :extra_usage,
+        :oauth_utilization_5h,
+        :oauth_utilization_7d,
+        :oauth_captured_at
+      ]
+    end
   end
 
   attributes do
@@ -85,7 +113,39 @@ defmodule Arbiter.Quota.AnthropicQuota do
     attribute :captured_at, :utc_datetime do
       allow_nil? false
       public? true
+      # Only :upsert (header-capture) accepts this; :record_oauth_usage does
+      # not, so an oauth-only insert (no header data captured yet) still
+      # satisfies the not-null constraint without stomping a real header
+      # timestamp on an existing row (see its narrow upsert_fields).
+      default &DateTime.utc_now/0
       description "When the proxy observed these headers."
+    end
+
+    attribute :per_model_utilization, :map do
+      public? true
+      default %{}
+      description "Per-model 7d utilization fraction (0-1) from /api/oauth/usage, e.g. %{\"sonnet\" => 0.42}."
+    end
+
+    attribute :extra_usage, :map do
+      public? true
+      default %{}
+      description "Overage spend beyond the plan's included quota, as returned by /api/oauth/usage."
+    end
+
+    attribute :oauth_utilization_5h, :float do
+      public? true
+      description "5h utilization fraction from /api/oauth/usage — a cross-check against utilization_5h."
+    end
+
+    attribute :oauth_utilization_7d, :float do
+      public? true
+      description "7d utilization fraction from /api/oauth/usage — a cross-check against utilization_7d."
+    end
+
+    attribute :oauth_captured_at, :utc_datetime do
+      public? true
+      description "When /api/oauth/usage was last successfully fetched."
     end
 
     create_timestamp :inserted_at

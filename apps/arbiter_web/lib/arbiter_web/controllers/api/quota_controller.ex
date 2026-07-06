@@ -6,6 +6,11 @@ defmodule ArbiterWeb.Api.QuotaController do
   Resolves the target workspace from `?workspace=<id|name>`, falling back to
   the installation default. Returns `claude: null` when nothing has been
   captured yet (e.g. before the first proxied request).
+
+  Also triggers an on-demand refresh of per-model weekly utilization +
+  `extra_usage` overage from Anthropic's `/api/oauth/usage` (bd-8tpha6) —
+  best-effort, so a failure there never hides the header-capture aggregate
+  figures.
   """
 
   use ArbiterWeb, :controller
@@ -17,7 +22,7 @@ defmodule ArbiterWeb.Api.QuotaController do
   def show(conn, params) do
     case resolve_workspace_id(Map.get(params, "workspace")) do
       {:ok, ws_id} ->
-        render(conn, :show, workspace_id: ws_id, claude: Quota.serialize(ws_id))
+        render(conn, :show, workspace_id: ws_id, claude: Quota.refresh_and_serialize(ws_id))
 
       {:error, message} ->
         conn
