@@ -9,12 +9,18 @@ defmodule ArbiterCli.Cmd.Server do
                           arbiter-<v>-linux.tar.gz → migrate → atomically swap
                           the current symlink → restart → health-check, with
                           auto-rollback on failure.
+                          Requires `ARB_RELEASE_REPO`. When it isn't set (a
+                          dev-mode git-checkout install with no release
+                          artifact), this falls back to the git-pull path
+                          below automatically, rather than dead-ending on
+                          "ARB_RELEASE_REPO is not set".
       arb server deploy --git-pull [--timeout SECONDS] [--json] [--force]
                           dev-runtime path: git pull --ff-only main → migrate →
                           rebuild CLI if changed → restart Phoenix.
                           Use this after a `git pull` that brought in new
                           migrations; it applies them and reloads the server in
-                          one step.
+                          one step. Also used automatically by a bare
+                          `arb server deploy` when `ARB_RELEASE_REPO` is unset.
       arb server migrate  [--timeout SECONDS] [--json] [--force]
                           apply pending database migrations.
                           When the server is running: restarts it so
@@ -74,11 +80,37 @@ defmodule ArbiterCli.Cmd.Server do
   # `arb server deploy` — deploy from a GitHub Release (the new default). The
   # legacy git-pull deploy is preserved behind `--git-pull` until the cutover
   # to release-based deploys is complete.
+  #
+  # A dev-mode install (a git checkout with no `ARB_RELEASE_REPO` configured)
+  # has no release artifact to speak of, so routing it through
+  # `Cmd.ReleaseDeploy` just dead-ends on "ARB_RELEASE_REPO is not set". Detect
+  # that case and fall back to the git-pull path automatically, the same as if
+  # the operator had passed `--git-pull` themselves. Installs with
+  # `ARB_RELEASE_REPO` configured are unaffected — they keep hitting
+  # `Cmd.ReleaseDeploy` exactly as before.
   defp deploy(argv) do
-    if "--git-pull" in argv do
-      Cmd.Update.deploy(argv -- ["--git-pull"])
-    else
-      Cmd.ReleaseDeploy.run(argv)
+    cond do
+      "--git-pull" in argv ->
+        Cmd.Update.deploy(argv -- ["--git-pull"])
+
+      release_repo_configured?() ->
+        Cmd.ReleaseDeploy.run(argv)
+
+      true ->
+        Start.log_text(
+          "ARB_RELEASE_REPO is not set — this looks like a dev-mode (git-checkout) " <>
+            "install. Falling back to the git-pull deploy path " <>
+            "(pull -> migrate -> rebuild CLI escript if changed -> restart)."
+        )
+
+        Cmd.Update.deploy(argv)
+    end
+  end
+
+  defp release_repo_configured? do
+    case System.get_env("ARB_RELEASE_REPO") do
+      slug when is_binary(slug) and slug != "" -> true
+      _ -> false
     end
   end
 
