@@ -279,11 +279,49 @@ defmodule Arbiter.Trackers.Jira do
       # than a hardcoded field list) keeps this provider-accurate and free of
       # per-workspace gating config.
       case gating_transition(cfg, ref, transitions, target_status) do
-        {:ok, transition} -> {:ok, required_field_descriptors(cfg, transition)}
-        :none -> {:ok, []}
+        {:ok, transition} ->
+          detected = required_field_descriptors(cfg, transition)
+          {:ok, merge_forced_note_descriptors(cfg, status, detected)}
+
+        :none ->
+          {:ok, []}
       end
     end
   end
+
+  # `expand=transitions.fields` only reports fields required by the
+  # transition's *screen* — a workflow *validator* requiring a field (e.g.
+  # LeoTech's VR Story workflow gates "Pull request created" on QA/Deployment
+  # notes this way) has no screen and is invisible to that call, so live
+  # detection alone under-reports the gate (bd-4isprn). For lifecycle events
+  # listed in `cfg.gated_note_events`, force qa_notes/deployment_notes into
+  # the gate whenever the workspace has them mapped in `field_ids`, merging
+  # with (not replacing) whatever live detection already found.
+  defp merge_forced_note_descriptors(cfg, status, descriptors) do
+    if status in cfg.gated_note_events do
+      existing_ids = MapSet.new(descriptors, & &1.id)
+
+      forced =
+        [:qa_notes, :deployment_notes]
+        |> Enum.map(&forced_note_descriptor(cfg, &1))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.reject(&MapSet.member?(existing_ids, &1.id))
+
+      descriptors ++ forced
+    else
+      descriptors
+    end
+  end
+
+  defp forced_note_descriptor(cfg, key) do
+    case Map.get(cfg.field_ids, key) do
+      id when is_binary(id) and id != "" -> %{id: id, key: key, name: forced_note_name(key)}
+      _ -> nil
+    end
+  end
+
+  defp forced_note_name(:qa_notes), do: "QA Testing Notes"
+  defp forced_note_name(:deployment_notes), do: "Deployment Notes"
 
   # Resolve the transition `transition/2` would fire first: a live transition
   # that lands directly on the target, else the first hop of the planned
