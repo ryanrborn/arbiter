@@ -11,6 +11,7 @@ defmodule ArbiterCli.Cmd.ServerTest do
   setup do
     System.delete_env("ARB_ACOLYTE_BEAD_ID")
     System.delete_env("ARB_HOME")
+    System.delete_env("ARB_RELEASE_REPO")
     :ok
   end
 
@@ -180,6 +181,91 @@ defmodule ArbiterCli.Cmd.ServerTest do
 
       assert code == 0
       assert out =~ "restarted" or out =~ "Arbiter"
+    end
+  end
+
+  # ---- deploy: dev-mode fallback when ARB_RELEASE_REPO is unset ------------
+
+  describe "deploy — dev-mode fallback (no ARB_RELEASE_REPO)" do
+    setup do
+      System.put_env("ARB_HOME", "/tmp/arbiter-server-deploy-test")
+      System.delete_env("ARB_RELEASE_REPO")
+      on_exit(fn -> System.delete_env("ARB_HOME") end)
+      Process.put(:bd2_sleep, fn _ms -> :ok end)
+      Process.put(:bd2_port_check, fn _port -> true end)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+
+        case {cmd, args} do
+          {"git", ["rev-parse", "--abbrev-ref", "HEAD"]} -> {"main\n", 0}
+          {"git", ["status", "--porcelain"]} -> {"", 0}
+          {"git", ["rev-parse", "HEAD"]} -> {"aaaaaaa\n", 0}
+          {"git", ["pull", "--ff-only"]} -> {"Already up to date.\n", 0}
+          {"git", ["log" | _]} -> {"", 0}
+          {"git", ["diff" | _]} -> {"", 0}
+          {"systemctl", ["--user", "cat", "arbiter.service"]} -> {"", 1}
+          {"lsof", _} -> {"", 1}
+          {"sh", _} -> {"", 0}
+          _ -> {"", 0}
+        end
+      end)
+
+      :ok
+    end
+
+    test "falls back to the git-pull deploy path instead of dead-ending" do
+      {out, _err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      assert code == 0
+      refute out =~ "ARB_RELEASE_REPO is not set"
+      assert out =~ "already up to date" or out =~ "Already up to date"
+      # Went through the git-pull path (preflight + pull), not the release path.
+      assert_received {:cmd, "git", ["rev-parse", "--abbrev-ref", "HEAD"]}
+      assert_received {:cmd, "git", ["pull", "--ff-only"]}
+    end
+
+    test "explicit --git-pull still works the same way" do
+      {out, _err, code} = capture(fn -> Server.run(["deploy", "--git-pull"]) end)
+
+      assert code == 0
+      refute out =~ "ARB_RELEASE_REPO is not set"
+      assert_received {:cmd, "git", ["pull", "--ff-only"]}
+    end
+  end
+
+  describe "deploy — release path unchanged when ARB_RELEASE_REPO is set" do
+    test "still requires reaching the GitHub Releases API, not the git-pull path" do
+      System.put_env("ARB_RELEASE_REPO", "acme/arbiter")
+      on_exit(fn -> System.delete_env("ARB_RELEASE_REPO") end)
+
+      stub_routes([
+        {{"get", "/api/workspaces"}, {@green, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ])
+
+      test_pid = self()
+
+      Process.put(:bd2_cmd_runner, fn cmd, args, _opts ->
+        send(test_pid, {:cmd, cmd, args})
+        {"", 0}
+      end)
+
+      {_out, err, code} = capture(fn -> Server.run(["deploy"]) end)
+
+      # Never even gets to `git` — it dies inside the release path trying to
+      # reach the (unstubbed) GitHub Releases API, proving dispatch went to
+      # Cmd.ReleaseDeploy, not Cmd.Update.
+      assert code == 1
+      refute_received {:cmd, "git", _}
+      refute err =~ "ARB_RELEASE_REPO is not set"
     end
   end
 
