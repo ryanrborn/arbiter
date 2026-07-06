@@ -33,3 +33,6 @@ case existing do
   %Workspace{} ->
     IO.puts("• Default workspace already exists; skipping")
 end
+
+Arbiter.Skills.Seeds.seed!()
+IO.puts("✓ Seeded built-in skills")
