@@ -72,3 +72,9 @@ config :arbiter, :credential_warden, enabled: false
 # Disable the quota refresh probe in test — there's no proxy or real Claude CLI;
 # tests that exercise probe logic inject a :probe_fun stub and enable explicitly.
 config :arbiter, :quota_refresh_probe, enabled: false
+
+# Direct Codex quota (bd-cqfn5i): point the auth-file read at a path that never
+# exists so surface tests (quota_get / GET /api/quota) get the graceful no-op
+# and make no real network call. Tests exercising the live path inject
+# `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
+config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"

@@ -1,11 +1,15 @@
 defmodule ArbiterWeb.Api.QuotaController do
   @moduledoc """
-  `GET /api/quota` — the latest captured Anthropic quota snapshot for a
-  workspace. Backs `arb quota`.
+  `GET /api/quota` — the current quota state for a workspace. Backs `arb quota`.
 
   Resolves the target workspace from `?workspace=<id|name>`, falling back to
-  the installation default. Returns `claude: null` when nothing has been
-  captured yet (e.g. before the first proxied request).
+  the installation default.
+
+    * `claude` — the latest snapshot the local proxy captured off Claude worker
+      traffic; `null` before the first proxied request.
+    * `codex` — fetched live from OpenAI's rate-limit endpoint using the
+      `codex` CLI's stored token; `null` (with a `codex_message`) when Codex
+      isn't authenticated or the usage API is unavailable.
   """
 
   use ArbiterWeb, :controller
@@ -17,7 +21,14 @@ defmodule ArbiterWeb.Api.QuotaController do
   def show(conn, params) do
     case resolve_workspace_id(Map.get(params, "workspace")) do
       {:ok, ws_id} ->
-        render(conn, :show, workspace_id: ws_id, claude: Quota.serialize(ws_id))
+        codex = Quota.Codex.fetch(ws_id)
+
+        render(conn, :show,
+          workspace_id: ws_id,
+          claude: Quota.serialize(ws_id),
+          codex: codex.codex,
+          codex_message: codex.message
+        )
 
       {:error, message} ->
         conn

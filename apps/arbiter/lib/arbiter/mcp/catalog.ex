@@ -206,9 +206,11 @@ defmodule Arbiter.MCP.Catalog do
       name: "quota_get",
       tiers: @both,
       description:
-        "Current Anthropic rate-limit / quota state for the scope's workspace (captured by the " <>
-          "local proxy): 5h + 7d utilization, reset times, status, and which window binds. " <>
-          "Returns `{\"claude\": null}` when nothing has been captured yet.",
+        "Current rate-limit / quota state for the scope's workspace. `claude`: Anthropic's 5h + " <>
+          "7d utilization, reset times, status, and which window binds (captured by the local " <>
+          "proxy; `null` until the first proxied request). `codex`: OpenAI session + weekly " <>
+          "windows fetched live from the rate-limit endpoint (`null` with a `codex_message` when " <>
+          "Codex isn't authenticated or the usage API is unavailable).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.quota_get/2
     },
