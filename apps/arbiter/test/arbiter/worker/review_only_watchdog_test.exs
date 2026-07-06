@@ -27,9 +27,9 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
   merge — it passes `via_review_gate: true` only, so the Watchdog's merge
   decision follows the workspace's `auto_merge` setting like any other lane.
   This module's `trigger_watchdog_on_approval` path (coordinator-dispatched
-  review_only workers) still passes `force_merge: true` unconditionally and
-  was intentionally left out of scope for bd-dkwhbn — see that task's notes
-  for the follow-up.
+  review_only workers) mirrors that fix as of bd-38e34o: it also passes only
+  `via_review_gate: true`, so a review_only APPROVE never bypasses a
+  human-merge (`auto_merge: false`) workspace policy.
 
   bd-btcyn6 regression: a reviewer that submits the review verdict via the
   tracker CLI (`gh pr review`) and also emits the required `VERDICT:` sentinel
@@ -90,6 +90,19 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
         name: "gh-ws-#{System.unique_integer([:positive])}",
         prefix: "gh",
         config: %{"merge" => %{"strategy" => "github", "auto_merge" => true}}
+      })
+
+    ws
+  end
+
+  # bd-38e34o: a GitHub workspace with a human-merge policy (auto_merge: false).
+  # A review_only reviewer APPROVE must never bypass this policy.
+  defp new_github_workspace_no_auto_merge do
+    {:ok, ws} =
+      Ash.create(Workspace, %{
+        name: "gh-human-ws-#{System.unique_integer([:positive])}",
+        prefix: "ghh",
+        config: %{"merge" => %{"strategy" => "github", "auto_merge" => false}}
       })
 
     ws
@@ -613,7 +626,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       # StubMerger.get default: {status: :open, approved: false} — Watchdog sees
       # :pending → effective_outcome(via_review_gate: true) → :approved →
-      # auto_merge(force_merge) → StubMerger.merge("pr-500") → :ok → complete.
+      # workspace auto_merge: true → StubMerger.merge("pr-500") → :ok → complete.
       worker_pid =
         start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
           merger_workspace_override: ws,
@@ -646,6 +659,36 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.status == :in_progress
+    end
+
+    test "auto_merge:false workspace: APPROVE parks the Watchdog but does NOT merge (bd-38e34o)" do
+      # Regression for bd-38e34o, mirroring bd-dkwhbn: trigger_watchdog_on_approval
+      # (the coordinator-dispatched review_only APPROVE path) must not force a
+      # merge via `force_merge: true`. On a human-merge (auto_merge: false)
+      # hosted-forge workspace, the Watchdog must park the PR open, not merge it.
+      ws = new_github_workspace_no_auto_merge()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-600"}, action: :update)
+
+      worker_pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # Give the Watchdog a few polling cycles to (incorrectly) merge, if it
+      # were going to.
+      Process.sleep(300)
+
+      assert StubMerger.merge_count("pr-600") == 0
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :in_progress
+
+      if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal)
     end
 
     test "no Watchdog spawned and complete_now used when task has no pr_ref (github workspace)" do
