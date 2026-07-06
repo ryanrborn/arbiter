@@ -32,6 +32,13 @@ defmodule ArbiterCli.Main do
       arb repo list
       arb repo show       <name>
 
+      arb skill list
+      arb skill show      <id|name>
+      arb skill create    <name> [--body ... | --body-file PATH | -] [--metadata JSON]
+      arb skill update    <id|name> [--name NEW] [--body ... | --body-file PATH | -]
+                                  [--metadata JSON]
+      arb skill delete    <id|name> [--force]
+
       arb dep add         <from> <type> <to>
       arb dep remove      <from> <to>
 
@@ -225,6 +232,7 @@ defmodule ArbiterCli.Main do
   defp dispatch_known("quota", args), do: ArbiterCli.Cmd.Quota.run(args)
   defp dispatch_known("install", args), do: ArbiterCli.Cmd.Install.run(args)
   defp dispatch_known("mcp", args), do: ArbiterCli.Cmd.Mcp.run(args)
+  defp dispatch_known("skill", args), do: ArbiterCli.Cmd.Skill.run(args)
   # Top-level shortcut: `arb dispatch <id>` == `arb issue dispatch <id>`.
   defp dispatch_known("dispatch", args), do: ArbiterCli.Cmd.Issue.run(["dispatch" | args])
   defp dispatch_known("prime", args), do: ArbiterCli.Cmd.Prime.run(args)

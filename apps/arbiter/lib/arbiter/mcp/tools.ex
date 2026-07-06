@@ -385,6 +385,113 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- skill_create -------------------------------------------------------
+
+  @doc """
+  Create a system-wide skill (bd-cj6i08). Coordinator only (enforced in
+  `Arbiter.MCP.Catalog`). Requires `name` (unique, kebab-case) and `body`
+  (markdown); optional `metadata` (object). The registry is NOT
+  workspace-scoped — one definition is shared across the whole system.
+
+  A `warning` is returned (non-fatal) when the name collides with a bundled
+  skill; the create still succeeds.
+  """
+  @spec skill_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def skill_create(%Scope{} = _scope, args) do
+    with {:ok, name} <- require_string(args, "name"),
+         {:ok, body} <- require_string(args, "body") do
+      attrs =
+        %{"name" => name, "body" => body}
+        |> maybe_put("metadata", fetch_map(args, "metadata"))
+
+      case Arbiter.Skills.create_skill(attrs) do
+        {:ok, skill} ->
+          Logger.info("[skill_create] skill #{skill.id} (#{skill.name}) created")
+          {:ok, skill |> serialize_skill() |> with_bundled_warning(skill.name)}
+
+        {:error, err} ->
+          {:error, {:invalid, ash_error_message(err)}}
+      end
+    end
+  end
+
+  # ---- skill_update -------------------------------------------------------
+
+  @doc """
+  Update a system-wide skill by `skill` (id or name). Coordinator only. Any
+  subset of `name` / `body` / `metadata` may be supplied. Returns the updated
+  skill, with a non-fatal bundled-collision `warning` when the (new) name
+  collides with a bundled skill.
+  """
+  @spec skill_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def skill_update(%Scope{} = _scope, args) do
+    with {:ok, ref} <- require_string(args, "skill"),
+         {:ok, skill} <- fetch_skill(ref) do
+      attrs =
+        %{}
+        |> maybe_put("name", fetch_string(args, "name"))
+        |> maybe_put("body", fetch_string(args, "body"))
+        |> maybe_put("metadata", fetch_map(args, "metadata"))
+
+      case Arbiter.Skills.update_skill(skill, attrs) do
+        {:ok, updated} ->
+          Logger.info("[skill_update] skill #{updated.id} (#{updated.name}) updated")
+          {:ok, updated |> serialize_skill() |> with_bundled_warning(updated.name)}
+
+        {:error, err} ->
+          {:error, {:invalid, ash_error_message(err)}}
+      end
+    end
+  end
+
+  # ---- skill_delete -------------------------------------------------------
+
+  @doc """
+  Delete a system-wide skill by `skill` (id or name). Coordinator only.
+  Returns `{deleted: true, id, name}`.
+  """
+  @spec skill_delete(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def skill_delete(%Scope{} = _scope, args) do
+    with {:ok, ref} <- require_string(args, "skill"),
+         {:ok, skill} <- fetch_skill(ref) do
+      case Arbiter.Skills.delete_skill(skill) do
+        :ok ->
+          Logger.info("[skill_delete] skill #{skill.id} (#{skill.name}) deleted")
+          {:ok, %{deleted: true, id: skill.id, name: skill.name}}
+
+        {:error, err} ->
+          {:error, {:invalid, ash_error_message(err)}}
+      end
+    end
+  end
+
+  defp fetch_skill(ref) do
+    case Arbiter.Skills.get_skill(ref) do
+      {:ok, skill} -> {:ok, skill}
+      {:error, :not_found} -> {:error, {:not_found, "no skill matching #{inspect(ref)}"}}
+    end
+  end
+
+  defp serialize_skill(%Arbiter.Skills.Skill{} = skill) do
+    %{
+      id: skill.id,
+      name: skill.name,
+      body: skill.body,
+      metadata: skill.metadata || %{},
+      created_at: iso(skill.created_at),
+      updated_at: iso(skill.updated_at)
+    }
+  end
+
+  # Attach a non-fatal bundled-skill collision warning to a serialized skill,
+  # or leave it untouched when there is no collision.
+  defp with_bundled_warning(map, name) do
+    case Arbiter.Skills.bundled_collision(name) do
+      nil -> map
+      warning -> Map.put(map, :warning, warning)
+    end
+  end
+
   # ---- quota_get ----------------------------------------------------------
 
   @doc """
@@ -2344,6 +2451,16 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp fetch_string(_args, _key), do: nil
+
+  # An optional map argument; nil when absent or not a map.
+  defp fetch_map(args, key) when is_map(args) do
+    case Map.get(args, key) do
+      m when is_map(m) -> m
+      _ -> nil
+    end
+  end
+
+  defp fetch_map(_args, _key), do: nil
 
   # ---- workspace_config helpers -------------------------------------------
 
