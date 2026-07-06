@@ -373,6 +373,106 @@ defmodule Arbiter.Worker.DispatchTest do
       assert is_binary(result.worktree_path)
     end
 
+    # bd-d5hy7y: at dispatch, ONLY the layered effective skill set is
+    # materialized into the worker's worktree as
+    # `.claude/skills/<name>/SKILL.md`. A canary skill selected via the
+    # workspace layer must land in the worktree; a registry skill NOT selected
+    # must not — nothing global leaks (mirrors the spike's canary method).
+    test "materializes only the resolved skill set into the worktree (canary)",
+         %{tmp: tmp} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "skill-canary-ws",
+          prefix: "sk",
+          config: %{"skills" => %{"workspace" => ["dispatch-canary"]}}
+        })
+
+      {:ok, _} =
+        Arbiter.Skills.create_skill(%{
+          name: "dispatch-canary",
+          body: "# Canary\nMaterialized by dispatch.",
+          activation_mode: :always_on
+        })
+
+      # A second skill that is NOT in the effective set — proves selectivity.
+      {:ok, _} = Arbiter.Skills.create_skill(%{name: "not-selected", body: "# Nope"})
+
+      repo = seed_repo!(tmp, "canaryrepo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "canary-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"canary/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "canary work", workspace_id: ws.id, issue_type: :feature})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "canary/repo",
+          start_driver: false,
+          start_claude: true,
+          claude_command: ["sleep", "2"]
+        )
+
+      wt = result.worktree_path
+      assert is_binary(wt)
+
+      # The selected canary skill is materialized with its body …
+      canary = Path.join(wt, ".claude/skills/dispatch-canary/SKILL.md")
+      assert File.exists?(canary)
+      assert File.read!(canary) =~ "Materialized by dispatch."
+
+      # … and the unselected skill is NOT.
+      refute File.exists?(Path.join(wt, ".claude/skills/not-selected/SKILL.md"))
+
+      # The skills tree is git-excluded so a worker's `git add -A` can't commit
+      # it. A linked worktree's `.git` is a gitfile; the exclude is written under
+      # the per-worktree git dir (`--git-dir`), matching AgentConfig's helper.
+      {git_dir, 0} = System.cmd("git", ["-C", wt, "rev-parse", "--git-dir"])
+      exclude = File.read!(Path.expand(Path.join([String.trim(git_dir), "info", "exclude"]), wt))
+      assert exclude =~ ".claude/skills/"
+    end
+
+    # bd-d5hy7y: an always-on skill is auto-invoked in the worker prompt, while a
+    # situational one is advertised but not forced.
+    test "work prompt auto-invokes always-on skills and advertises situational ones",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "prompt work", workspace_id: ws.id, issue_type: :feature})
+
+      resolved = [
+        %{
+          skill: %Arbiter.Skills.Skill{
+            name: "tdd",
+            body: "x",
+            activation_mode: :always_on,
+            metadata: %{}
+          },
+          activation: :always_on
+        },
+        %{
+          skill: %Arbiter.Skills.Skill{
+            name: "debug",
+            body: "x",
+            activation_mode: :situational,
+            metadata: %{}
+          },
+          activation: :situational
+        }
+      ]
+
+      prompt =
+        Dispatch.prompt_for_task(task, worktree_path: "/tmp/wt", resolved_skills: resolved)
+
+      assert prompt =~ "Required skills"
+      assert prompt =~ "/tdd"
+      assert prompt =~ "Available skills"
+      assert prompt =~ "/debug"
+    end
+
     # bd-dlv3no: a review dispatch has no per-task worktree, so its Claude cwd
     # falls back to the repo's shared checkout. The per-spawn MCP config carries a
     # bearer scope token; writing `.mcp.json` into that canonical checkout leaks

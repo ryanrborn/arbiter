@@ -10,9 +10,18 @@ defmodule ArbiterCli.Cmd.Skill do
       arb skill list                                registered skills (name + size + metadata)
       arb skill show   <id|name>                    one skill's full body + metadata
       arb skill create <name> [--body ... | --body-file PATH | -]
-                                     [--metadata JSON]
+                                     [--metadata JSON] [--activation-mode situational|always_on]
+                                     [--code-only]
       arb skill update <id|name> [--name NEW] [--body ... | --body-file PATH | -]
-                                     [--metadata JSON]
+                                     [--metadata JSON] [--activation-mode situational|always_on]
+                                     [--code-only]
+
+  Activation (DECISION C, epic child 3): `--activation-mode always_on` makes
+  arbiter auto-invoke `/<name>` in every worker prompt where the skill applies;
+  `situational` (default) advertises it and leaves invocation to the agent.
+  `--code-only` restricts the skill to code-producing tasks (feature/bug/chore),
+  so an always-on code-discipline skill (TDD) never attaches to a decision /
+  spike / doc task.
       arb skill delete <id|name> [--force]
 
   Body input for `create` / `update` comes from exactly one of:
@@ -34,6 +43,8 @@ defmodule ArbiterCli.Cmd.Skill do
     body_file: :string,
     metadata: :string,
     name: :string,
+    activation_mode: :string,
+    code_only: :boolean,
     force: :boolean,
     json: :boolean
   ]
@@ -95,8 +106,23 @@ defmodule ArbiterCli.Cmd.Skill do
       bytes = byte_size(s["body"] || "")
       desc = get_in(s, ["metadata", "description"])
       suffix = if desc in [nil, ""], do: "", else: "  — #{desc}"
-      IO.puts("#{s["name"]}  (#{bytes} bytes)#{suffix}")
+      IO.puts("#{s["name"]}  (#{bytes} bytes)#{activation_tag(s)}#{suffix}")
     end)
+  end
+
+  # Compact activation/scope tag for the list view, e.g. " [always_on, code-only]".
+  defp activation_tag(s) do
+    tags =
+      [
+        s["activation_mode"],
+        if(s["code_only"] == true, do: "code-only")
+      ]
+      |> Enum.reject(&(&1 in [nil, "", "situational"]))
+
+    case tags do
+      [] -> ""
+      list -> "  [#{Enum.join(list, ", ")}]"
+    end
   end
 
   # ---- show --------------------------------------------------------------
@@ -115,6 +141,8 @@ defmodule ArbiterCli.Cmd.Skill do
   defp emit_show(skill, :text) do
     IO.puts("Name:       #{skill["name"]}")
     IO.puts("ID:         #{skill["id"]}")
+    IO.puts("Activation: #{skill["activation_mode"] || "situational"}")
+    IO.puts("Code-only:  #{skill["code_only"] == true}")
 
     metadata = skill["metadata"] || %{}
 
@@ -137,6 +165,8 @@ defmodule ArbiterCli.Cmd.Skill do
     payload =
       %{"name" => name, "body" => body}
       |> maybe_put("metadata", metadata)
+      |> maybe_put("activation_mode", validate_activation!(opts[:activation_mode]))
+      |> maybe_put("code_only", opts[:code_only])
 
     case Client.post("/api/skills", payload) do
       {:ok, skill} -> emit_written(skill, "created", mode)
@@ -154,10 +184,13 @@ defmodule ArbiterCli.Cmd.Skill do
       |> maybe_put("name", opts[:name])
       |> maybe_put("body", resolve_body(opts))
       |> maybe_put("metadata", parse_metadata!(opts[:metadata]))
+      |> maybe_put("activation_mode", validate_activation!(opts[:activation_mode]))
+      |> maybe_put("code_only", opts[:code_only])
 
     if payload == %{} do
       Output.die(
-        "skill update: nothing to change (pass --name, --body/--body-file/-, or --metadata)"
+        "skill update: nothing to change (pass --name, --body/--body-file/-, --metadata, " <>
+          "--activation-mode, or --code-only)"
       )
     end
 
@@ -253,6 +286,15 @@ defmodule ArbiterCli.Cmd.Skill do
       data -> data
     end
   end
+
+  # `--activation-mode` accepts only the two known modes; anything else is a
+  # usage error. nil (flag absent) passes through so the server default applies.
+  defp validate_activation!(nil), do: nil
+
+  defp validate_activation!(mode) when mode in ["situational", "always_on"], do: mode
+
+  defp validate_activation!(other),
+    do: Output.die("--activation-mode must be 'situational' or 'always_on', got #{inspect(other)}")
 
   defp parse_metadata!(nil), do: nil
 

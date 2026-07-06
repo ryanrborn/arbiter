@@ -399,10 +399,13 @@ defmodule Arbiter.MCP.Tools do
   @spec skill_create(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def skill_create(%Scope{} = _scope, args) do
     with {:ok, name} <- require_string(args, "name"),
-         {:ok, body} <- require_string(args, "body") do
+         {:ok, body} <- require_string(args, "body"),
+         {:ok, code_only} <- fetch_optional_bool(args, "code_only") do
       attrs =
         %{"name" => name, "body" => body}
         |> maybe_put("metadata", fetch_map(args, "metadata"))
+        |> maybe_put("activation_mode", fetch_string(args, "activation_mode"))
+        |> maybe_put("code_only", code_only)
 
       case Arbiter.Skills.create_skill(attrs) do
         {:ok, skill} ->
@@ -426,12 +429,15 @@ defmodule Arbiter.MCP.Tools do
   @spec skill_update(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def skill_update(%Scope{} = _scope, args) do
     with {:ok, ref} <- require_string(args, "skill"),
-         {:ok, skill} <- fetch_skill(ref) do
+         {:ok, skill} <- fetch_skill(ref),
+         {:ok, code_only} <- fetch_optional_bool(args, "code_only") do
       attrs =
         %{}
         |> maybe_put("name", fetch_string(args, "name"))
         |> maybe_put("body", fetch_string(args, "body"))
         |> maybe_put("metadata", fetch_map(args, "metadata"))
+        |> maybe_put("activation_mode", fetch_string(args, "activation_mode"))
+        |> maybe_put("code_only", code_only)
 
       case Arbiter.Skills.update_skill(skill, attrs) do
         {:ok, updated} ->
@@ -478,6 +484,8 @@ defmodule Arbiter.MCP.Tools do
       name: skill.name,
       body: skill.body,
       metadata: skill.metadata || %{},
+      activation_mode: skill.activation_mode,
+      code_only: skill.code_only,
       created_at: iso(skill.created_at),
       updated_at: iso(skill.updated_at)
     }

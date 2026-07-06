@@ -11,7 +11,33 @@ defmodule Arbiter.SkillsTest do
       assert skill.name == "tdd"
       assert skill.body =~ "Write the test first"
       assert skill.metadata == %{}
+      # bd-d5hy7y: activation/scope default to the safe "advertise, any task" values.
+      assert skill.activation_mode == :situational
+      assert skill.code_only == false
       assert %DateTime{} = skill.created_at
+    end
+
+    test "accepts activation_mode and code_only (bd-d5hy7y)" do
+      {:ok, skill} =
+        Skills.create_skill(%{
+          name: "tdd-strict",
+          body: "# TDD",
+          activation_mode: :always_on,
+          code_only: true
+        })
+
+      assert skill.activation_mode == :always_on
+      assert skill.code_only == true
+    end
+
+    test "casts a string activation_mode (MCP/REST shape) and rejects an invalid one" do
+      {:ok, skill} =
+        Skills.create_skill(%{"name" => "always-skill", "body" => "b", "activation_mode" => "always_on"})
+
+      assert skill.activation_mode == :always_on
+
+      assert {:error, %Ash.Error.Invalid{}} =
+               Skills.create_skill(%{name: "bad-mode", body: "b", activation_mode: :sometimes})
     end
 
     test "accepts optional metadata" do

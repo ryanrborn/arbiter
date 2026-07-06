@@ -33,7 +33,7 @@ defmodule ArbiterWeb.Api.SkillController do
   end
 
   def create(conn, params) do
-    attrs = Map.take(params, ["name", "body", "metadata"])
+    attrs = Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only"])
 
     with {:ok, skill} <- Skills.create_skill(attrs) do
       conn
@@ -43,7 +43,7 @@ defmodule ArbiterWeb.Api.SkillController do
   end
 
   def update(conn, %{"id" => id} = params) do
-    attrs = Map.take(params, ["name", "body", "metadata"])
+    attrs = Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only"])
 
     with {:ok, skill} <- Skills.get_skill(id),
          {:ok, updated} <- Skills.update_skill(skill, attrs) do

@@ -100,7 +100,8 @@ defmodule Arbiter.Tasks.Issue do
         :last_reviewed_sha,
         :last_seen_comment_id,
         :review_automation,
-        :posted_findings
+        :posted_findings,
+        :skills
       ]
 
       # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
@@ -152,7 +153,8 @@ defmodule Arbiter.Tasks.Issue do
         :last_seen_comment_id,
         :review_automation,
         :last_reviewed_at,
-        :posted_findings
+        :posted_findings,
+        :skills
       ]
 
       require_atomic? false
@@ -549,6 +551,27 @@ defmodule Arbiter.Tasks.Issue do
       touches a file we previously flagged) and unchanged-finding de-dupe (never
       re-post a finding whose file/line/message we already posted).
       """
+    end
+
+    # Per-task skill override — the task layer of the layered skill selection
+    # (epic child 3, bd-d5hy7y). Skills are otherwise inherited from the
+    # workspace + repo config layers; this map adjusts or replaces that set for
+    # this one task. Recognised keys (all optional, string-keyed):
+    #
+    #   * `"opt_out" => true`      — this task gets NO skills at all (hard override).
+    #   * `"only" => ["a", "b"]`   — replace the inherited set entirely with these.
+    #   * `"add" => ["a"]`         — add skills on top of the inherited set.
+    #   * `"remove" => ["b"]`      — remove skills from the inherited set (per-task opt-out of one skill).
+    #   * `"activation" => %{"tdd" => "situational"}` — per-skill activation override for this task.
+    #
+    # An empty map (the default) means "inherit the workspace + repo layers
+    # unchanged". Resolved at dispatch by `Arbiter.Skills.Selection`.
+    attribute :skills, :map do
+      allow_nil? true
+      public? true
+      default %{}
+
+      description "Per-task skill selection override (opt_out/only/add/remove/activation); the task layer of layered skill selection."
     end
 
     create_timestamp :created_at

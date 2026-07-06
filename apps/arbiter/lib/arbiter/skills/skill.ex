@@ -52,13 +52,13 @@ defmodule Arbiter.Skills.Skill do
 
     create :create do
       primary? true
-      accept [:name, :body, :metadata]
+      accept [:name, :body, :metadata, :activation_mode, :code_only]
     end
 
     update :update do
       primary? true
       require_atomic? false
-      accept [:name, :body, :metadata]
+      accept [:name, :body, :metadata, :activation_mode, :code_only]
     end
   end
 
@@ -90,6 +90,42 @@ defmodule Arbiter.Skills.Skill do
       default %{}
 
       description "Optional free-form metadata (e.g. description, tags)."
+    end
+
+    # DECISION C (epic child 3, bd-d5hy7y). A materialized skill is only
+    # *listed* to a `--print` worker — it is a slash command, not an
+    # auto-injected system prompt, so the worker won't follow it unless the
+    # dispatch prompt invokes it. The activation mode says how the dispatcher
+    # advertises it:
+    #
+    #   * `:always_on`   — arbiter auto-injects a `/<name>` "use this skill"
+    #     directive into the worker prompt for every dispatch in the effective
+    #     set (e.g. `tdd`).
+    #   * `:situational` — materialized + advertised ("these skills are
+    #     available; invoke the relevant one via /name"), leaving invocation to
+    #     the agent's judgement (e.g. `systematic-debugging`). Default.
+    #
+    # A selection layer (workspace / repo / task) may override this per skill.
+    attribute :activation_mode, :atom do
+      allow_nil? false
+      public? true
+      default :situational
+      constraints one_of: [:situational, :always_on]
+
+      description "How the dispatcher advertises the skill: :always_on auto-invokes /<name>; :situational only advertises it."
+    end
+
+    # Scoping refinement (Ryan, 2026-07-06): code-discipline skills (TDD, etc.)
+    # only make sense for **code-producing** work. When `true`, the skill is
+    # excluded from the effective set entirely for non-code-producing tasks
+    # (`decision`, `task`/spike, `epic`), so an always-on skill is never forced
+    # onto a task that emits no code. Default `false` (applies to any task).
+    attribute :code_only, :boolean do
+      allow_nil? false
+      public? true
+      default false
+
+      description "When true, the skill only applies to code-producing tasks (feature/bug/chore); excluded from decision/task/epic."
     end
 
     create_timestamp :created_at
