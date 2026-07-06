@@ -60,6 +60,16 @@ defmodule Arbiter.Boot.Migrator do
 
   Supersedes any per-command migration logic in `arb start` / `arb restart` /
   `arb update`: migration is now an app-boot concern, owned here.
+
+  ## Built-in skill seeding (bd-503v3d)
+
+  Right after migrations land, the primary instance also runs
+  `Arbiter.Skills.Seeds.seed!/0` — insert-if-absent by name, so a fresh install
+  (or any subsequent boot) always has the built-in skills registered without an
+  operator running `priv/repo/seeds.exs` by hand. Piggybacks on this step
+  rather than a parallel boot mechanism because it needs the same
+  primary-instance gate and the same "runs on install / first boot /
+  migration" timing that migration already has.
   """
 
   require Logger
@@ -100,6 +110,7 @@ defmodule Arbiter.Boot.Migrator do
       Logger.info("Boot.Migrator: primary instance — running pending migrations")
       migrate!()
       Logger.info("Boot.Migrator: migrations up to date")
+      Arbiter.Skills.Seeds.seed!()
     else
       Logger.info("Boot.Migrator: not the primary instance — skipping migrations")
     end
