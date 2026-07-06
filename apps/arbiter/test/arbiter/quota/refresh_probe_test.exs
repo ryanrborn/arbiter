@@ -99,6 +99,24 @@ defmodule Arbiter.Quota.RefreshProbeTest do
     )
   end
 
+  # Over-cap AND the 5h window has already rolled (reset_5h_at in the past) —
+  # the reset-boundary case that should still warrant a real warm-up probe.
+  defp seed_stale_over_cap_quota(ws) do
+    Ash.create!(
+      AnthropicQuota,
+      %{
+        workspace_id: ws.id,
+        provider: "claude",
+        utilization_5h: 0.92,
+        status_5h: "allowed",
+        reset_5h_at:
+          DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second),
+        captured_at:
+          DateTime.utc_now() |> DateTime.add(-300, :second) |> DateTime.truncate(:second)
+      }
+    )
+  end
+
   # Stub dispatcher for DispatchQueue — records drain re-dispatches.
   defmodule RecordingDispatcher do
     def dispatch(task_id, _opts) do
@@ -193,12 +211,14 @@ defmodule Arbiter.Quota.RefreshProbeTest do
   # ---- active / idle cadence -------------------------------------------------
 
   describe "cadence selection" do
-    test "uses active interval when a DispatchQueue has held items" do
+    test "still counts a cycle when a DispatchQueue has held items, even though the exhausted workspace is skipped" do
       enable_proxy()
       ws = make_workspace()
+      # Fresh (non-stale) over-cap snapshot: the workspace is exhausted but the
+      # window hasn't rolled yet, so no real probe should fire for it — the
+      # queue can't get relief until the window actually resets anyway.
       seed_over_cap_quota(ws)
 
-      # Seed an over-cap snapshot and start a queue with a held item.
       Application.put_env(:arbiter, :rp_test_dispatch_pid, self())
       on_exit(fn -> Application.delete_env(:arbiter, :rp_test_dispatch_pid) end)
 
@@ -216,7 +236,6 @@ defmodule Arbiter.Quota.RefreshProbeTest do
       # Verify item is held.
       assert [_] = DispatchQueue.state(q_pid).items
 
-      # The probe should detect held items → active interval.
       pid =
         start_probe(
           probe_fun: recording_probe_fun(self()),
@@ -224,11 +243,122 @@ defmodule Arbiter.Quota.RefreshProbeTest do
           idle_interval_ms: 999_999
         )
 
-      # The probe GenServer tracks held state internally via count_held_workspaces.
-      # We use probe/1 to drive a cycle synchronously, then confirm probe count is 1.
       RefreshProbe.probe(pid)
-      assert_receive {:probed, _ws_id, _quota}, 1_000
+
+      # The exhausted-but-fresh workspace is skipped — no real probe spent.
+      refute_receive {:probed, _ws_id, _quota}, 200
       assert %{probe_count: 1} = RefreshProbe.state(pid)
+    end
+
+    test "probes a held, exhausted workspace once its window has actually rolled (stale)" do
+      enable_proxy()
+      ws = make_workspace()
+      seed_stale_over_cap_quota(ws)
+
+      Application.put_env(:arbiter, :rp_test_dispatch_pid, self())
+      on_exit(fn -> Application.delete_env(:arbiter, :rp_test_dispatch_pid) end)
+
+      {:ok, q_pid} =
+        DispatchQueueSupervisor.start_dispatch_queue(ws.id,
+          dispatcher: RecordingDispatcher,
+          quota_reader: Arbiter.Quota
+        )
+
+      on_exit(fn -> if Process.alive?(q_pid), do: GenServer.stop(q_pid, :normal) end)
+
+      task = make_task(ws)
+      :ok = DispatchQueue.hold(ws.id, task.id, [], {:test_hold, "over cap, window rolled"})
+
+      pid =
+        start_probe(
+          probe_fun: recording_probe_fun(self()),
+          active_interval_ms: 111,
+          idle_interval_ms: 999_999
+        )
+
+      RefreshProbe.probe(pid)
+
+      assert_receive {:probed, ws_id, _quota}, 1_000
+      assert ws_id == ws.id
+    end
+  end
+
+  # ---- skip-when-exhausted / warm-on-reset-only ------------------------------
+
+  describe "skip-when-exhausted and warm-on-reset-only" do
+    test "skips a workspace whose quota is already exhausted and not stale" do
+      enable_proxy()
+      ws = make_workspace()
+      seed_over_cap_quota(ws)
+
+      pid = start_probe(probe_fun: recording_probe_fun(self()))
+
+      RefreshProbe.probe(pid)
+
+      refute_receive {:probed, _ws_id, _quota}, 200
+    end
+
+    test "probes a workspace with no quota snapshot yet (never observed)" do
+      enable_proxy()
+      ws = make_workspace()
+      assert Quota.latest(ws.id) == nil
+
+      pid = start_probe(probe_fun: recording_probe_fun(self()))
+
+      RefreshProbe.probe(pid)
+
+      assert_receive {:probed, ws_id, _quota}, 1_000
+      assert ws_id == ws.id
+    end
+
+    test "probes a workspace whose window has rolled (stale) even though last reading was under cap" do
+      enable_proxy()
+      ws = make_workspace()
+
+      Ash.create!(
+        AnthropicQuota,
+        %{
+          workspace_id: ws.id,
+          provider: "claude",
+          utilization_5h: 0.10,
+          status_5h: "allowed",
+          reset_5h_at:
+            DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.truncate(:second),
+          captured_at:
+            DateTime.utc_now() |> DateTime.add(-300, :second) |> DateTime.truncate(:second)
+        }
+      )
+
+      pid = start_probe(probe_fun: recording_probe_fun(self()))
+
+      RefreshProbe.probe(pid)
+
+      assert_receive {:probed, ws_id, _quota}, 1_000
+      assert ws_id == ws.id
+    end
+
+    test "skips a workspace with a fresh, under-cap snapshot (no reset boundary, no need to warm)" do
+      enable_proxy()
+      ws = make_workspace()
+
+      Ash.create!(
+        AnthropicQuota,
+        %{
+          workspace_id: ws.id,
+          provider: "claude",
+          utilization_5h: 0.10,
+          status_5h: "allowed",
+          reset_5h_at:
+            DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.truncate(:second),
+          captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+        }
+      )
+
+      pid = start_probe(probe_fun: recording_probe_fun(self()))
+
+      RefreshProbe.probe(pid)
+
+      refute_receive {:probed, _ws_id, _quota}, 200
     end
   end
 
@@ -245,8 +375,10 @@ defmodule Arbiter.Quota.RefreshProbeTest do
 
       ws = make_workspace()
 
-      # Seed over-cap snapshot so the gate holds.
-      seed_over_cap_quota(ws)
+      # Seed a stale, over-cap snapshot so the gate holds AND the probe still
+      # considers this workspace worth a real warm-up ping (reset boundary
+      # already passed for the recorded window).
+      seed_stale_over_cap_quota(ws)
 
       Application.put_env(:arbiter, :rp_test_dispatch_pid, self())
       on_exit(fn -> Application.delete_env(:arbiter, :rp_test_dispatch_pid) end)
