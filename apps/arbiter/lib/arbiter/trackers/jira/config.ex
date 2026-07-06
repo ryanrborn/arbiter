@@ -50,7 +50,16 @@ defmodule Arbiter.Trackers.Jira.Config do
           "qa_notes" => "customfield_10184",
           "deployment_notes" => "customfield_10185",
           "assignee" => "assignee"
-        }
+        },
+        # Lifecycle events where the QA/Deployment notes fields must be pushed
+        # (and their absence escalated) regardless of what the live
+        # `expand=transitions.fields` metadata reports. Jira's transitions API
+        # only surfaces *screen*-required fields; a workflow *validator*
+        # requiring a field (LeoTech's VR Story workflow gates "Pull request
+        # created" this way) is invisible to that call, so detection alone
+        # under-reports the gate. Defaults to `["pr_opened"]` — override per
+        # workspace to force additional events.
+        "gated_note_events" => ["pr_opened"]
       }
 
   `credentials_ref` is a small DSL: `"env:NAME"` looks up `System.get_env/1`.
@@ -146,6 +155,14 @@ defmodule Arbiter.Trackers.Jira.Config do
   # buckets are supplied. pts ≤ 1 → D0, ≤ 3 → D1, ≤ 5 → D2, ≤ 8 → D3, > 8 → D4.
   @default_difficulty_buckets [{1, 0}, {3, 1}, {5, 2}, {8, 3}]
 
+  # Lifecycle events forced to gate on the QA/Deployment notes fields
+  # regardless of what the live transitions-metadata detection reports (see
+  # `"gated_note_events"` above). LeoTech's VR Story workflow enforces these
+  # via a workflow validator on "Pull request created" — invisible to the
+  # `expand=transitions.fields` screen-metadata call `gating_fields/2` relies
+  # on for live detection (bd-4isprn).
+  @default_gated_note_events [:pr_opened]
+
   @type transition_edge :: %{required(String.t()) => String.t()}
 
   @type config :: %{
@@ -156,6 +173,7 @@ defmodule Arbiter.Trackers.Jira.Config do
           status_map: %{atom() => String.t()},
           transition_graph: %{String.t() => [transition_edge()]},
           field_ids: %{atom() => String.t()},
+          gated_note_events: [atom()],
           priority_map: %{String.t() => 0..4},
           story_points_field: String.t() | nil,
           difficulty_buckets: [{non_neg_integer(), 0..4}] | nil,
@@ -234,6 +252,7 @@ defmodule Arbiter.Trackers.Jira.Config do
          status_map: status_map(raw),
          transition_graph: transition_graph(raw),
          field_ids: field_ids(raw),
+         gated_note_events: gated_note_events(raw),
          priority_map: priority_map(raw),
          story_points_field: story_points_field(raw),
          difficulty_buckets: difficulty_buckets(raw),
@@ -357,6 +376,27 @@ defmodule Arbiter.Trackers.Jira.Config do
 
     Map.merge(base, extras)
   end
+
+  # gated_note_events: lifecycle event atoms forced to gate on QA/Deployment
+  # notes regardless of live transitions-metadata detection. Explicit `[]`
+  # opts a workspace out entirely; an absent key falls back to the default.
+  # Entries that aren't a known lifecycle-status atom are dropped rather than
+  # raising, so a typo in workspace config degrades to "not forced" instead
+  # of a boot crash.
+  defp gated_note_events(raw) do
+    case Map.get(raw, "gated_note_events") do
+      list when is_list(list) -> Enum.flat_map(list, &parse_gated_note_event/1)
+      _ -> @default_gated_note_events
+    end
+  end
+
+  defp parse_gated_note_event(s) when is_binary(s) do
+    [String.to_existing_atom(s)]
+  rescue
+    ArgumentError -> []
+  end
+
+  defp parse_gated_note_event(_), do: []
 
   defp stringy(nil), do: nil
   defp stringy(v) when is_binary(v), do: v
