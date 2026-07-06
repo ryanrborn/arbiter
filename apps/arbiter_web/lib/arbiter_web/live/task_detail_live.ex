@@ -225,7 +225,7 @@ defmodule ArbiterWeb.TaskDetailLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <%!-- ── Header ───────────────────────────────────────────────── --%>
         <div class="flex items-start justify-between gap-4">
