@@ -70,8 +70,55 @@ defmodule Arbiter.MCP.SkillToolsTest do
     end
   end
 
+  describe "skill_list/2" do
+    test "lists skills ordered by name, without body", %{coordinator: sc} do
+      {:ok, _} = Skills.create_skill(%{name: "zeta", body: "z"})
+      {:ok, _} = Skills.create_skill(%{name: "alpha", body: "a"})
+
+      assert {:ok, %{skills: skills, count: count}} = Tools.skill_list(sc, %{})
+      assert count == 2
+      assert Enum.map(skills, & &1.name) == ["alpha", "zeta"]
+      refute Map.has_key?(hd(skills), :body)
+    end
+
+    test "available to a worker scope too", %{worker: wk} do
+      {:ok, _} = Skills.create_skill(%{name: "for-workers", body: "x"})
+      assert {:ok, %{count: 1}} = Tools.skill_list(wk, %{})
+    end
+  end
+
+  describe "skill_get/2" do
+    test "fetches full body by name", %{coordinator: sc} do
+      {:ok, _} = Skills.create_skill(%{name: "getme", body: "the full body"})
+      assert {:ok, result} = Tools.skill_get(sc, %{"skill" => "getme"})
+      assert result.name == "getme"
+      assert result.body == "the full body"
+    end
+
+    test "fetches by id", %{coordinator: sc} do
+      {:ok, skill} = Skills.create_skill(%{name: "getbyid", body: "v"})
+      assert {:ok, result} = Tools.skill_get(sc, %{"skill" => skill.id})
+      assert result.name == "getbyid"
+    end
+
+    test "available to a worker scope too", %{worker: wk} do
+      {:ok, _} = Skills.create_skill(%{name: "for-worker-get", body: "v"})
+      assert {:ok, result} = Tools.skill_get(wk, %{"skill" => "for-worker-get"})
+      assert result.body == "v"
+    end
+
+    test "errors on unknown skill", %{coordinator: sc} do
+      assert {:error, {:not_found, _}} = Tools.skill_get(sc, %{"skill" => "ghost"})
+    end
+
+    test "errors on missing skill arg", %{coordinator: sc} do
+      assert {:error, {:invalid, msg}} = Tools.skill_get(sc, %{})
+      assert msg =~ "skill"
+    end
+  end
+
   describe "catalog tier visibility" do
-    test "skill_* tools are coordinator-only, not visible to workers", %{
+    test "skill_create/update/delete are coordinator-only, not visible to workers", %{
       coordinator: sc,
       worker: wk
     } do
@@ -81,6 +128,16 @@ defmodule Arbiter.MCP.SkillToolsTest do
       for name <- ~w(skill_create skill_update skill_delete) do
         assert name in coord_names, "#{name} should be visible to coordinator"
         refute name in worker_names, "#{name} should NOT be visible to worker"
+      end
+    end
+
+    test "skill_list/skill_get are visible to both tiers", %{coordinator: sc, worker: wk} do
+      coord_names = Catalog.visible(sc) |> Enum.map(& &1.name)
+      worker_names = Catalog.visible(wk) |> Enum.map(& &1.name)
+
+      for name <- ~w(skill_list skill_get) do
+        assert name in coord_names, "#{name} should be visible to coordinator"
+        assert name in worker_names, "#{name} should be visible to worker"
       end
     end
 
@@ -96,6 +153,16 @@ defmodule Arbiter.MCP.SkillToolsTest do
                Catalog.call(sc, "skill_create", %{"name" => "via-catalog", "body" => "b"})
 
       assert result.name == "via-catalog"
+    end
+
+    test "a worker call to skill_get goes through the catalog end-to-end", %{
+      coordinator: sc,
+      worker: wk
+    } do
+      {:ok, _} = Catalog.call(sc, "skill_create", %{"name" => "catalog-get", "body" => "body"})
+
+      assert {:ok, result} = Catalog.call(wk, "skill_get", %{"skill" => "catalog-get"})
+      assert result.body == "body"
     end
   end
 end
