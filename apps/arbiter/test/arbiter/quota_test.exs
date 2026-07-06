@@ -104,6 +104,24 @@ defmodule Arbiter.QuotaTest do
     end
   end
 
+  describe "google_snapshots/1" do
+    test "returns nils when the google fetch is disabled" do
+      assert Quota.google_snapshots(enabled: false) == %{gemini: nil, antigravity: nil}
+    end
+
+    test "defaults to disabled in the test env (no live network calls)" do
+      assert Quota.google_snapshots() == %{gemini: nil, antigravity: nil}
+    end
+
+    test "no-ops to nils when enabled but credentials are absent" do
+      missing =
+        Path.join(System.tmp_dir!(), "absent_#{System.unique_integer([:positive])}.json")
+
+      assert Quota.google_snapshots(enabled: true, creds_path: missing) ==
+               %{gemini: nil, antigravity: nil}
+    end
+  end
+
   describe "proxy config" do
     test "worker_base_url bakes in the workspace id" do
       Application.put_env(:arbiter, :anthropic_proxy,

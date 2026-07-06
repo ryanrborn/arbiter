@@ -545,14 +545,22 @@ defmodule Arbiter.MCP.Tools do
   # ---- quota_get ----------------------------------------------------------
 
   @doc """
-  Current Anthropic quota state for the scope's workspace, captured by the
-  local proxy. Resolution mirrors `workspace_show`. Returns `%{claude: nil}`
-  when no snapshot has been captured yet.
+  Current quota state for the scope's workspace. Resolution mirrors
+  `workspace_show`. `claude` is the proxy-captured Anthropic snapshot (`nil`
+  until the first proxied request); `gemini` / `antigravity` are live per-model
+  Cloud Code Assist snapshots (`nil` when that CLI isn't authenticated here).
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      {:ok, %{claude: Arbiter.Quota.serialize(ws_id)}}
+      google = Arbiter.Quota.google_snapshots()
+
+      {:ok,
+       %{
+         claude: Arbiter.Quota.serialize(ws_id),
+         gemini: google.gemini,
+         antigravity: google.antigravity
+       }}
     end
   end
 

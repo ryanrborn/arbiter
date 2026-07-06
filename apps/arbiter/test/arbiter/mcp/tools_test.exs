@@ -273,7 +273,10 @@ defmodule Arbiter.MCP.ToolsTest do
 
   describe "quota_get/2" do
     test "returns null claude quota before anything is captured", ctx do
-      assert {:ok, %{claude: nil}} = Tools.quota_get(ctx.worker, %{})
+      assert {:ok, %{claude: nil} = payload} = Tools.quota_get(ctx.worker, %{})
+      # Gemini/Antigravity fetch is disabled in test → present but nil.
+      assert payload.gemini == nil
+      assert payload.antigravity == nil
     end
 
     test "returns the captured snapshot for the scope's workspace", ctx do

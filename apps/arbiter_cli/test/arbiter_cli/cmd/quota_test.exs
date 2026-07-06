@@ -44,5 +44,79 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert code == 0
       assert out =~ "no quota captured yet"
     end
+
+    test "renders per-model Gemini CLI and Antigravity utilization when present" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "gemini" => %{
+            "provider" => "gemini-cli",
+            "plan" => "Standard",
+            "message" => nil,
+            "captured_at" => "2026-07-06T20:20:06Z",
+            "models" => [
+              %{
+                "model_id" => "gemini-2.5-pro",
+                "used" => 500,
+                "total" => 1000,
+                "remaining_percentage" => 50.0,
+                "reset_at" => "2026-06-23T21:38:04Z",
+                "unlimited" => false
+              }
+            ]
+          },
+          "antigravity" => %{
+            "provider" => "antigravity",
+            "plan" => "Pro",
+            "message" => nil,
+            "captured_at" => "2026-07-06T20:20:06Z",
+            "models" => [
+              %{
+                "model_id" => "gemini-3-flash",
+                "display_name" => "Gemini 3 Flash",
+                "used" => 750,
+                "total" => 1000,
+                "remaining_percentage" => 25.0,
+                "reset_at" => "2026-06-23T21:38:04Z",
+                "unlimited" => false
+              }
+            ]
+          }
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Gemini CLI"
+      assert out =~ "plan: Standard"
+      assert out =~ "gemini-2.5-pro"
+      assert out =~ "50.0% remaining"
+      assert out =~ "Antigravity"
+      assert out =~ "Gemini 3 Flash"
+      assert out =~ "25.0% remaining"
+    end
+
+    test "shows the degraded message for Gemini when the API returned one" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "gemini" => %{
+            "provider" => "gemini-cli",
+            "plan" => "Free",
+            "message" => "Gemini CLI quota auth expired; reconnect the CLI.",
+            "captured_at" => "2026-07-06T20:20:06Z",
+            "models" => []
+          },
+          "antigravity" => nil
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Gemini CLI"
+      assert out =~ "auth expired"
+    end
   end
 end

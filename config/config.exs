@@ -93,6 +93,13 @@ config :arbiter, :quota,
   throttle_threshold: 0.85,
   overage_alert_usd: 50.0
 
+# Direct Gemini CLI + Antigravity quota tracking (bd-57ukgb). Unlike the
+# Anthropic snapshot (passively captured by the proxy), these fetch live from
+# Google's Cloud Code Assist API when `GET /api/quota` / `arb quota` / the MCP
+# `quota_get` tool is invoked. Enabled by default; `config/test.exs` turns it
+# off so the quota surface stays a pure DB read under test.
+config :arbiter, :cloud_code_quota, enabled: true
+
 # Finch receive_timeout for the proxy's upstream requests to api.anthropic.com,
 # in milliseconds. Because the proxy streams chunk-by-chunk, this is a
 # per-chunk idle timeout — a generous value buys time-to-first-token headroom
