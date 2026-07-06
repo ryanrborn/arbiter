@@ -184,6 +184,7 @@ defmodule Arbiter.Quota do
   @spec serialize_quota(AnthropicQuota.t()) :: map()
   def serialize_quota(%AnthropicQuota{} = q) do
     %{
+      provider: q.provider,
       utilization_5h: q.utilization_5h,
       reset_5h_at: iso(q.reset_5h_at),
       status_5h: q.status_5h,
@@ -194,6 +195,30 @@ defmodule Arbiter.Quota do
       overage_status: q.overage_status,
       captured_at: iso(q.captured_at)
     }
+  end
+
+  @doc """
+  Every tracked provider's latest quota snapshot for `workspace_id` — one row
+  per distinct `provider` that has ever been captured, `"claude"` sorted
+  first (so the single-provider case renders exactly as before), the rest
+  alphabetically.
+  """
+  @spec list_latest(String.t()) :: [AnthropicQuota.t()]
+  def list_latest(workspace_id) when is_binary(workspace_id) do
+    AnthropicQuota
+    |> Ash.Query.filter(workspace_id == ^workspace_id)
+    |> Ash.read!()
+    |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
+  rescue
+    _ -> []
+  end
+
+  @doc "`list_latest/1`, serialized into the public map shape."
+  @spec list_serialized(String.t()) :: [map()]
+  def list_serialized(workspace_id) do
+    workspace_id
+    |> list_latest()
+    |> Enum.map(&serialize_quota/1)
   end
 
   @doc """
