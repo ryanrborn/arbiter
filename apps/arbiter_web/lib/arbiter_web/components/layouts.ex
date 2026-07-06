@@ -75,6 +75,11 @@ defmodule ArbiterWeb.Layouts do
             </.link>
           </li>
           <li>
+            <.link navigate={~p"/skills"} class={nav_class(@current_path, "/skills")}>
+              {cap_plural("skill")}
+            </.link>
+          </li>
+          <li>
             <.link navigate={~p"/audit"} class={nav_class(@current_path, "/audit")}>
               Audit log
             </.link>
@@ -176,6 +181,15 @@ defmodule ArbiterWeb.Layouts do
                 phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
               >
                 {cap_plural("workspace")}
+              </.link>
+            </li>
+            <li>
+              <.link
+                navigate={~p"/skills"}
+                class={nav_class(@current_path, "/skills")}
+                phx-click={JS.remove_attribute("open", to: "#mobile-nav")}
+              >
+                {cap_plural("skill")}
               </.link>
             </li>
             <li>
