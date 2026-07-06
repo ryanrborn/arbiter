@@ -206,9 +206,10 @@ defmodule Arbiter.MCP.Catalog do
       name: "quota_get",
       tiers: @both,
       description:
-        "Current Anthropic rate-limit / quota state for the scope's workspace (captured by the " <>
-          "local proxy): 5h + 7d utilization, reset times, status, and which window binds. " <>
-          "Returns `{\"claude\": null}` when nothing has been captured yet.",
+        "Current quota state for the scope's workspace. `claude`: Anthropic 5h + 7d utilization, " <>
+          "reset times, status, and which window binds (captured by the local proxy; null until " <>
+          "the first proxied request). `gemini` / `antigravity`: live per-model Cloud Code Assist " <>
+          "quota (null when that CLI isn't authenticated on this host).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.quota_get/2
     },
@@ -1069,7 +1070,8 @@ defmodule Arbiter.MCP.Catalog do
           "activation_mode" => %{
             "type" => "string",
             "enum" => ["situational", "always_on"],
-            "description" => "always_on auto-invokes /<name>; situational advertises only (optional)."
+            "description" =>
+              "always_on auto-invokes /<name>; situational advertises only (optional)."
           },
           "code_only" => %{
             "type" => "boolean",

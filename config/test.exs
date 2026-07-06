@@ -72,3 +72,9 @@ config :arbiter, :credential_warden, enabled: false
 # Disable the quota refresh probe in test — there's no proxy or real Claude CLI;
 # tests that exercise probe logic inject a :probe_fun stub and enable explicitly.
 config :arbiter, :quota_refresh_probe, enabled: false
+
+# Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
+# real Google credentials or endpoints to hit, so the quota surface stays a pure
+# DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and
+# stub HTTP with a Req.Test plug.
+config :arbiter, :cloud_code_quota, enabled: false

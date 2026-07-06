@@ -15,6 +15,17 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert resp["data"]["claude"] == nil
   end
 
+  test "carries gemini/antigravity keys, null when the fetch is disabled in test",
+       %{conn: conn} do
+    resp = conn |> get("/api/quota") |> json_response(200)
+    # The Cloud Code Assist fetch is off in the test env, so these are always
+    # present (never a missing key) but null — no live network call is made.
+    assert Map.has_key?(resp["data"], "gemini")
+    assert Map.has_key?(resp["data"], "antigravity")
+    assert resp["data"]["gemini"] == nil
+    assert resp["data"]["antigravity"] == nil
+  end
+
   test "returns the captured snapshot for the default workspace", %{conn: conn, ws: ws} do
     {:ok, _} =
       Quota.capture(ws.id, [

@@ -6,6 +6,10 @@ defmodule ArbiterWeb.Api.QuotaController do
   Resolves the target workspace from `?workspace=<id|name>`, falling back to
   the installation default. Returns `claude: null` when nothing has been
   captured yet (e.g. before the first proxied request).
+
+  Alongside the passively-captured Anthropic snapshot, `gemini` and
+  `antigravity` carry live per-model Cloud Code Assist quota (bd-57ukgb), each
+  `null` when the corresponding CLI isn't authenticated on this host.
   """
 
   use ArbiterWeb, :controller
@@ -17,7 +21,14 @@ defmodule ArbiterWeb.Api.QuotaController do
   def show(conn, params) do
     case resolve_workspace_id(Map.get(params, "workspace")) do
       {:ok, ws_id} ->
-        render(conn, :show, workspace_id: ws_id, claude: Quota.serialize(ws_id))
+        google = Quota.google_snapshots()
+
+        render(conn, :show,
+          workspace_id: ws_id,
+          claude: Quota.serialize(ws_id),
+          gemini: google.gemini,
+          antigravity: google.antigravity
+        )
 
       {:error, message} ->
         conn

@@ -14,6 +14,9 @@ defmodule ArbiterCli.Cmd.Quota do
   machine-readable snapshot; otherwise a short human-readable summary of the
   5h and 7d windows (utilization, status, reset time).
 
+  When the Gemini CLI / Antigravity are authenticated on this host, their live
+  per-model Cloud Code Assist quota (remaining %, reset time) is shown too.
+
   Reads from `GET /api/quota`.
   """
 
@@ -46,12 +49,18 @@ defmodule ArbiterCli.Cmd.Quota do
 
   defp emit(data, :json), do: IO.puts(Jason.encode!(data))
 
-  defp emit(%{"claude" => nil} = data, :text) do
+  defp emit(data, :text) do
+    emit_claude(data)
+    emit_google(data["gemini"], "Gemini CLI")
+    emit_google(data["antigravity"], "Antigravity")
+  end
+
+  defp emit_claude(%{"claude" => nil} = data) do
     IO.puts("Anthropic quota (workspace #{data["workspace_id"]}):")
     IO.puts("  (no quota captured yet — dispatch a Claude worker to populate it)")
   end
 
-  defp emit(%{"claude" => q} = data, :text) do
+  defp emit_claude(%{"claude" => q} = data) do
     IO.puts("Anthropic quota (workspace #{data["workspace_id"]}):")
     IO.puts("  representative window: #{q["representative_claim"] || "—"}")
     IO.puts("  overage status:        #{q["overage_status"] || "—"}")
@@ -67,6 +76,40 @@ defmodule ArbiterCli.Cmd.Quota do
     )
   end
 
+  # Live Cloud Code Assist snapshots (Gemini CLI / Antigravity). `nil` means
+  # that CLI isn't authenticated on this host — stay quiet rather than noisy.
+  defp emit_google(nil, _label), do: :ok
+
+  defp emit_google(snap, label) do
+    IO.puts("")
+    IO.puts("#{label} quota (plan: #{snap["plan"] || "—"}):")
+
+    case snap["message"] do
+      msg when is_binary(msg) and msg != "" -> IO.puts("  #{msg}")
+      _ -> :ok
+    end
+
+    case snap["models"] do
+      [] ->
+        if snap["message"] in [nil, ""], do: IO.puts("  (no per-model quota reported)")
+
+      models when is_list(models) ->
+        Enum.each(models, &emit_model/1)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp emit_model(m) do
+    name = m["display_name"] || m["model_id"] || "—"
+    reset = m["reset_at"] || "—"
+
+    IO.puts(
+      "  #{name}: #{format_pct_plain(m["remaining_percentage"])} remaining   resets #{reset}"
+    )
+  end
+
   defp format_pct(nil), do: "—"
 
   defp format_pct(n) when is_number(n) do
@@ -74,4 +117,11 @@ defmodule ArbiterCli.Cmd.Quota do
   end
 
   defp format_pct(_), do: "—"
+
+  # Google snapshots already carry a 0–100 percentage, so render it as-is.
+  defp format_pct_plain(n) when is_number(n) do
+    :erlang.float_to_binary(n / 1, decimals: 1) <> "%"
+  end
+
+  defp format_pct_plain(_), do: "—"
 end
