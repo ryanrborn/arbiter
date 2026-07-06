@@ -908,6 +908,56 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "resolve_review_thread/3" do
+    test "POSTs the resolveReviewThread mutation and returns {:ok, thread}" do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/graphql"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["query"] =~ "resolveReviewThread"
+        assert decoded["variables"] == %{"id" => "RT_open"}
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => %{
+            "resolveReviewThread" => %{"thread" => %{"id" => "RT_open", "isResolved" => true}}
+          }
+        })
+      end)
+
+      assert {:ok, %{"id" => "RT_open", "isResolved" => true}} =
+               Github.resolve_review_thread(@ref, "RT_open", %{})
+    end
+
+    test "GraphQL query-level errors (HTTP 200 with errors) surface as {:error, %Error{}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"errors" => [%{"message" => "Could not resolve to a node"}]})
+      end)
+
+      assert {:error, %Error{message: "Could not resolve to a node"}} =
+               Github.resolve_review_thread(@ref, "RT_bad", %{})
+    end
+
+    test "HTTP error status surfaces as {:error, %Error{}}" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"message" => "Bad credentials"})
+      end)
+
+      assert {:error, %Error{status: 401}} = Github.resolve_review_thread(@ref, "RT_x", %{})
+    end
+
+    test "missing config returns {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} =
+               Github.resolve_review_thread(@ref, "RT_x", %{})
+    end
+  end
+
   describe "filter_to_our_threads/2" do
     defp make_thread(id, author, comment_authors) do
       comments =

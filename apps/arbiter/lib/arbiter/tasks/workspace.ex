@@ -433,6 +433,42 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  Whether PRPatrol follow-up workers should resolve bot/automated-reviewer
+  review threads they've addressed, from
+  `config["pr_patrol"]["resolve_bot_threads"]`.
+
+  Defaults to `true` — a bot reviewer (e.g. Copilot) has no standing to
+  re-open a conversation, so once the follow-up worker has pushed a fix and
+  replied to the thread it's safe to resolve it automatically (bd-76ydsu).
+  """
+  @spec pr_patrol_resolve_bot_threads?(t()) :: boolean()
+  def pr_patrol_resolve_bot_threads?(workspace) do
+    case get_in(workspace.config || %{}, ["pr_patrol", "resolve_bot_threads"]) do
+      false -> false
+      "false" -> false
+      _ -> true
+    end
+  end
+
+  @doc """
+  Whether PRPatrol follow-up workers should resolve HUMAN-reviewer review
+  threads they've addressed, from
+  `config["pr_patrol"]["resolve_human_threads"]`.
+
+  Defaults to `false` — a human reviewer should confirm and close their own
+  threads; auto-resolving them on the worker's behalf removes their signal
+  that the fix actually satisfies them (bd-76ydsu).
+  """
+  @spec pr_patrol_resolve_human_threads?(t()) :: boolean()
+  def pr_patrol_resolve_human_threads?(workspace) do
+    case get_in(workspace.config || %{}, ["pr_patrol", "resolve_human_threads"]) do
+      true -> true
+      "true" -> true
+      _ -> false
+    end
+  end
+
+  @doc """
   The fleet's own forge login for ReviewPatrol, from
   `config["review_patrol"]["our_login"]`.
 

@@ -62,6 +62,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Workflows.ReviewThreadFollowUp
   require Ash.Query
 
   @default_interval_ms 60_000
@@ -213,6 +214,20 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   defp author_allowed?(_mr, _workspace), do: true
 
+  # The reply/resolve/pushback protocol text (bd-76ydsu), folded into the
+  # follow-up Issue's description so the dispatched worker doesn't just push
+  # a fix silently. Policy flags default to a nil workspace's defaults
+  # (resolve bots, leave humans) so a follow-up filed before the workspace
+  # loads still carries a sane instruction.
+  defp follow_up_protocol(%Workspace{} = workspace) do
+    ReviewThreadFollowUp.instructions(%{
+      resolve_bot_threads: Workspace.pr_patrol_resolve_bot_threads?(workspace),
+      resolve_human_threads: Workspace.pr_patrol_resolve_human_threads?(workspace)
+    })
+  end
+
+  defp follow_up_protocol(_), do: ReviewThreadFollowUp.instructions(%{})
+
   # The trigger reason this PR is actionable for (a human-readable string folded
   # into the follow-up task), or nil when nothing needs attention. CHANGES_REQUESTED
   # takes priority; otherwise any unresolved review thread / inline comment fires.
@@ -280,6 +295,8 @@ defmodule Arbiter.Workflows.PRPatrol do
       Trigger: #{reason}.
 
       Original PR: #{url}
+
+      #{follow_up_protocol(state.workspace)}
       """
 
     {:ok, task} =
