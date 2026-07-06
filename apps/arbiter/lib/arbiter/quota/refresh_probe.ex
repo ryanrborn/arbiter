@@ -12,12 +12,28 @@ defmodule Arbiter.Quota.RefreshProbe do
 
   ## What this does
 
-  On a recurring timer this GenServer issues one tiny `claude --print "ok"`
-  request **per workspace** through that workspace's quota proxy URL
-  (`Arbiter.Quota.worker_base_url/1`). The proxy captures the response's
-  `anthropic-ratelimit-unified-*` headers, upserts a fresh `AnthropicQuota`
-  snapshot, and broadcasts `{:quota_updated, ws_id, quota}` on PubSub — which
-  the DispatchQueue listens for and uses to drain any held intents.
+  On a recurring timer this GenServer considers issuing one tiny
+  `claude --print "ok"` request **per workspace** through that workspace's
+  quota proxy URL (`Arbiter.Quota.worker_base_url/1`). The proxy captures the
+  response's `anthropic-ratelimit-unified-*` headers, upserts a fresh
+  `AnthropicQuota` snapshot, and broadcasts `{:quota_updated, ws_id, quota}`
+  on PubSub — which the DispatchQueue listens for and uses to drain any held
+  intents.
+
+  A real probe always spends actual quota/tokens, so each workspace is only
+  probed when it is likely to actually help (bd-6bp05l, mirroring 9router's
+  `quotaAutoPing.js`):
+
+    * No snapshot exists yet for the workspace — probe, to get the clock
+      started.
+    * The latest snapshot's 5h window has already elapsed
+      (`Arbiter.Quota.Gate.stale?/1`) — probe, to observe the new window's
+      state promptly (the "reset boundary" case).
+    * Otherwise the workspace is skipped: a fresh, non-exhausted snapshot
+      doesn't need a real request to stay useful, and a fresh *exhausted*
+      snapshot can't be relieved by probing anyway — only the window's
+      actual reset does that, which the `stale?/1` case above picks up on
+      the next cycle.
 
   ## Gate bypass
 
@@ -143,24 +159,35 @@ defmodule Arbiter.Quota.RefreshProbe do
 
   defp do_probe_cycle(%State{} = state) do
     if Arbiter.Quota.proxy_enabled?() do
-      workspaces = list_workspace_ids()
+      workspaces = list_workspaces()
       held_count = count_held_workspaces()
       active? = held_count > 0
+      due = Enum.filter(workspaces, &due_for_probe?/1)
 
       if workspaces != [] do
         Logger.debug(
-          "Arbiter.Quota.RefreshProbe: probing #{length(workspaces)} workspace(s)" <>
+          "Arbiter.Quota.RefreshProbe: #{length(due)}/#{length(workspaces)} workspace(s) due for a real probe" <>
             if(active?, do: ", #{held_count} with held dispatch intents", else: "")
         )
       end
 
-      Enum.each(workspaces, fn ws_id ->
-        spawn_probe(state.probe_fun, ws_id)
+      Enum.each(due, fn workspace ->
+        spawn_probe(state.probe_fun, workspace.id)
       end)
 
       {active?, %{state | probe_count: state.probe_count + 1}}
     else
       {false, state}
+    end
+  end
+
+  # Whether `workspace` is worth spending a real probe request on right now:
+  # no snapshot yet, or its 5h window has already rolled (reset-boundary
+  # warm-up). A fresh snapshot — exhausted or not — is skipped; see moduledoc.
+  defp due_for_probe?(workspace) do
+    case Arbiter.Quota.latest(workspace.id) do
+      nil -> true
+      quota -> Arbiter.Quota.Gate.stale?(quota)
     end
   end
 
@@ -282,9 +309,9 @@ defmodule Arbiter.Quota.RefreshProbe do
 
   # ---- helpers -----------------------------------------------------------
 
-  defp list_workspace_ids do
+  defp list_workspaces do
     case Ash.read(Arbiter.Tasks.Workspace) do
-      {:ok, workspaces} -> Enum.map(workspaces, & &1.id)
+      {:ok, workspaces} -> workspaces
       _ -> []
     end
   rescue
