@@ -2989,12 +2989,18 @@ defmodule Arbiter.Worker do
     branch = Map.get(state.meta, :review_gate_branch) || mergeable_branch(state.meta)
     # Tell the Watchdog the gate approved this MR. Without via_review_gate,
     # hosted-forge adapters (Github) park forever at :awaiting_review waiting
-    # for a PR-level approval the ReviewGate never posts (bd-66ey1o). force_merge
-    # makes this the explicit merge-regardless-of-lane signal (bd-ddtbhb).
+    # for a PR-level approval the ReviewGate never posts (bd-66ey1o) — a
+    # non-terminal poll is treated as approved on the first poll regardless.
+    # Whether the Watchdog then actually clicks merge is NOT forced here — it
+    # follows the workspace's `auto_merge` setting via the normal cond in
+    # do_start_watchdog. bd-ddtbhb's `force_merge: true` unconditionally
+    # merged fleet-authored work even when the workspace has auto_merge:
+    # false, bypassing a human-merge policy for hosted-forge targets
+    # (bd-dkwhbn). auto_merge: true workspaces are unaffected.
     merge_branch(
       state,
       branch,
-      merge_opts_from_meta(state.meta, %{via_review_gate: true, force_merge: true})
+      merge_opts_from_meta(state.meta, %{via_review_gate: true})
     )
   end
 
@@ -3556,7 +3562,10 @@ defmodule Arbiter.Worker do
   # The `:via_review_gate` opt tells the Watchdog the gate has already approved
   # this MR; it short-circuits hosted-forge approval polling (meaning a). It does
   # NOT implicitly force auto_merge — that is opt-in via `:force_merge` (meaning
-  # b). The ReviewGate APPROVE merge path passes both (bd-ddtbhb).
+  # b), which no caller sets unconditionally anymore: whether an approved MR is
+  # actually merged always falls through to the workspace's `auto_merge`
+  # setting unless a caller has an explicit reason to override it
+  # (bd-ddtbhb, bd-dkwhbn).
   defp start_watchdog(%State{} = state, workspace, opts) do
     # Test escape hatch: :watchdog_start_error in opts simulates a Watchdog startup
     # failure without needing a real error condition, mirroring :review_spawn for
