@@ -23,8 +23,13 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     * pr_ref absent → complete directly; Driver closes task.
 
   The full ReviewGate merge path (fleet-authored work: enter_review_gate →
-  merge_branch with force_merge: true) is a separate path and still merges on
-  APPROVE regardless of workspace auto_merge.
+  merge_branch) is a separate path. As of bd-dkwhbn it no longer forces a
+  merge — it passes `via_review_gate: true` only, so the Watchdog's merge
+  decision follows the workspace's `auto_merge` setting like any other lane.
+  This module's `trigger_watchdog_on_approval` path (coordinator-dispatched
+  review_only workers) still passes `force_merge: true` unconditionally and
+  was intentionally left out of scope for bd-dkwhbn — see that task's notes
+  for the follow-up.
 
   bd-btcyn6 regression: a reviewer that submits the review verdict via the
   tracker CLI (`gh pr review`) and also emits the required `VERDICT:` sentinel
