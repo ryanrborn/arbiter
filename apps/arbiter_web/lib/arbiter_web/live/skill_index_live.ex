@@ -28,6 +28,8 @@ defmodule ArbiterWeb.SkillIndexLive do
      |> assign(:form_name, "")
      |> assign(:form_body, "")
      |> assign(:form_metadata, "")
+     |> assign(:form_activation, "situational")
+     |> assign(:form_code_only, false)
      |> assign(:form_error, nil)
      |> assign(:name_warning, nil)
      |> refresh()}
@@ -42,6 +44,8 @@ defmodule ArbiterWeb.SkillIndexLive do
        form_name: "",
        form_body: "",
        form_metadata: "",
+       form_activation: "situational",
+       form_code_only: false,
        form_error: nil,
        name_warning: nil
      )}
@@ -57,6 +61,8 @@ defmodule ArbiterWeb.SkillIndexLive do
            form_name: skill.name,
            form_body: skill.body,
            form_metadata: metadata_to_text(skill.metadata),
+           form_activation: to_string(skill.activation_mode),
+           form_code_only: skill.code_only == true,
            form_error: nil,
            name_warning: Skills.bundled_collision(skill.name)
          )}
@@ -79,6 +85,8 @@ defmodule ArbiterWeb.SkillIndexLive do
        form_name: name,
        form_body: params["body"] || "",
        form_metadata: params["metadata"] || "",
+       form_activation: params["activation_mode"] || "situational",
+       form_code_only: params["code_only"] == "true",
        name_warning: Skills.bundled_collision(name)
      )}
   end
@@ -87,9 +95,18 @@ defmodule ArbiterWeb.SkillIndexLive do
     name = params["name"] |> to_string() |> String.trim()
     body = params["body"] |> to_string()
     metadata_text = params["metadata"] |> to_string() |> String.trim()
+    activation = params["activation_mode"] |> to_string()
+    code_only = params["code_only"] == "true"
 
     with {:ok, metadata} <- parse_metadata(metadata_text) do
-      attrs = %{name: name, body: body, metadata: metadata}
+      attrs = %{
+        name: name,
+        body: body,
+        metadata: metadata,
+        activation_mode: activation,
+        code_only: code_only
+      }
+
       persist(socket, socket.assigns.editing, attrs)
     else
       {:error, msg} ->
@@ -98,6 +115,8 @@ defmodule ArbiterWeb.SkillIndexLive do
            form_name: name,
            form_body: body,
            form_metadata: metadata_text,
+           form_activation: activation,
+           form_code_only: code_only,
            form_error: msg
          )}
     end
@@ -153,6 +172,8 @@ defmodule ArbiterWeb.SkillIndexLive do
        form_name: attrs.name,
        form_body: attrs.body,
        form_metadata: metadata_to_text(attrs.metadata),
+       form_activation: to_string(attrs.activation_mode),
+       form_code_only: attrs.code_only == true,
        form_error: error_message(err)
      )}
   end
@@ -253,6 +274,25 @@ defmodule ArbiterWeb.SkillIndexLive do
                 placeholder={~s({"description": "..."})}
               />
 
+              <div class="flex flex-wrap items-end gap-4">
+                <.input
+                  type="select"
+                  name="skill[activation_mode]"
+                  label="Activation"
+                  value={@form_activation}
+                  options={[
+                    {"Situational — advertised, agent decides", "situational"},
+                    {"Always-on — auto-invoke /name in the worker prompt", "always_on"}
+                  ]}
+                />
+                <.input
+                  type="checkbox"
+                  name="skill[code_only]"
+                  label="Code-only (skip decision/task/epic)"
+                  checked={@form_code_only}
+                />
+              </div>
+
               <p :if={@form_error} class="text-sm text-error">{@form_error}</p>
 
               <div class="flex gap-2 mt-1">
@@ -286,6 +326,20 @@ defmodule ArbiterWeb.SkillIndexLive do
                     title="Collides with a bundled skill name"
                   >
                     <.icon name="hero-exclamation-triangle" class="size-3" /> bundled name
+                  </span>
+                  <span
+                    :if={skill.activation_mode == :always_on}
+                    class="badge badge-sm badge-primary badge-soft"
+                    title="Auto-invoked in every worker prompt where it applies"
+                  >
+                    always-on
+                  </span>
+                  <span
+                    :if={skill.code_only}
+                    class="badge badge-sm badge-ghost"
+                    title="Only applies to code-producing tasks (feature/bug/chore)"
+                  >
+                    code-only
                   </span>
                   <span class="text-xs text-base-content/50">{byte_size(skill.body)} bytes</span>
                   <div class="ml-auto flex items-center gap-1">

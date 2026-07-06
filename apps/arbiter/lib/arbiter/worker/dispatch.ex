@@ -976,6 +976,15 @@ defmodule Arbiter.Worker.Dispatch do
             # the repo's working tree.
             _ = maybe_write_mcp_config(task, worktree_path, opts)
 
+            # Resolve the layered effective skill set and materialize ONLY it
+            # into the isolated worktree (bd-d5hy7y). Threaded onto opts so the
+            # work prompt can auto-invoke always-on skills and advertise
+            # situational ones (DECISION C). No-op without a worktree (review /
+            # task-type dispatch) — skills only ever land in an isolated tree.
+            resolved_skills = resolve_skills(task, worktree_path, opts)
+            _ = Arbiter.Skills.Materializer.materialize(worktree_path, resolved_skills)
+            opts = Keyword.put(opts, :resolved_skills, resolved_skills)
+
             with {:ok, session_opts} <-
                    build_agent_session_opts(task, worker_pid, path, opts),
                  {:ok, port} <- ClaudeSession.start(session_opts) do
@@ -1087,6 +1096,14 @@ defmodule Arbiter.Worker.Dispatch do
 
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
+            # Skill guard (bd-d5hy7y, spike findings): a worker carrying
+            # materialized skills must not be spawned with `--bare` (skips skill
+            # discovery) or `--disable-slash-commands` (blocks `/name`
+            # invocation), or the skills silently do nothing. We never add these
+            # flags — this catches a future regression loudly rather than
+            # shipping dead skills.
+            _ = guard_skill_flags(argv, Keyword.get(opts, :resolved_skills, []))
+
             env = safe_spawn_env(adapter, agent_opts)
             # Thread provider (+ pre-resolved model, when the adapter has one)
             # onto the session so the usage ledger and dashboards attribute the
@@ -1241,6 +1258,54 @@ defmodule Arbiter.Worker.Dispatch do
       :ok
   end
 
+  # Resolve the layered effective skill set for this dispatch (workspace → repo
+  # → per-task, with opt-out and code-awareness — see `Arbiter.Skills.Selection`).
+  # Only meaningful when an isolated worktree exists: skills materialize into
+  # `.claude/skills/` in the worktree, so a nil worktree (review / task-type
+  # dispatch) resolves to the empty set. Best-effort — a resolver error must
+  # never block a dispatch, so we log and fall back to no skills.
+  defp resolve_skills(_task, nil, _opts), do: []
+
+  defp resolve_skills(%Issue{} = task, worktree_path, opts) when is_binary(worktree_path) do
+    Arbiter.Skills.Selection.resolve(
+      task: task,
+      workspace: load_workspace(task),
+      repo: Keyword.get(opts, :repo)
+    )
+  rescue
+    e ->
+      require Logger
+      Logger.warning("Arbiter.Worker.Dispatch: skill resolution failed: #{inspect(e)}")
+      []
+  end
+
+  @skill_blocking_flags ~w(--bare --disable-slash-commands)
+
+  # Warn loudly if a skill-bearing spawn's argv carries a flag that would make
+  # the materialized skills inert (`--bare` skips skill discovery;
+  # `--disable-slash-commands` blocks `/name` invocation — spike findings). We
+  # never add these flags; this catches a future regression rather than blocking
+  # the dispatch, since a warning beats a wedged worker.
+  defp guard_skill_flags(_argv, []), do: :ok
+
+  defp guard_skill_flags(argv, _resolved) when is_list(argv) do
+    case Enum.filter(@skill_blocking_flags, &(&1 in argv)) do
+      [] ->
+        :ok
+
+      offending ->
+        require Logger
+
+        Logger.warning(
+          "Arbiter.Worker.Dispatch: dispatching a skill-bearing worker with " <>
+            "#{Enum.join(offending, ", ")} — materialized skills will not be " <>
+            "discovered/invocable. This should never happen; check argv assembly."
+        )
+    end
+  end
+
+  defp guard_skill_flags(_argv, _resolved), do: :ok
+
   # Resolve which agent-config adapter to inject (.mcp.json vs .gemini/settings.json
   # vs .codex/config.toml). Resolution mirrors `preflight_adapter/3` so a dispatch that
   # forces a provider (`--provider gemini` / `agent_type: :gemini`) writes *that*
@@ -1369,6 +1434,13 @@ defmodule Arbiter.Worker.Dispatch do
     resume_prefix <> base_work_prompt(task, opts)
   end
 
+  # The resolved-skills advertisement block (DECISION C): always-on skills get
+  # an imperative `/name` directive, situational skills are listed as available.
+  # Empty string when no skills resolved (the common case today).
+  defp skills_section(opts) do
+    Arbiter.Skills.Materializer.prompt_section(Keyword.get(opts, :resolved_skills, []))
+  end
+
   defp base_work_prompt(%Issue{} = task, opts) do
     worktree_path = Keyword.get(opts, :worktree_path)
 
@@ -1402,7 +1474,7 @@ defmodule Arbiter.Worker.Dispatch do
     #{task.acceptance || "(none)"}
     #{prior_review_findings_section(task)}
     Your current directory is a fresh git worktree on a per-task branch.
-    #{isolation_section}
+    #{isolation_section}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch, and push it.
 
