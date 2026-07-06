@@ -1660,7 +1660,12 @@ defmodule Arbiter.Worker do
   defp trigger_watchdog_on_approval(%State{} = state) do
     case fetch_task_pr_ref(state.task_id) do
       {:ok, pr_ref} ->
-        opts = merge_opts_from_meta(state.meta, %{via_review_gate: true, force_merge: true})
+        # bd-38e34o: do NOT force_merge. Whether the Watchdog actually clicks
+        # merge follows the workspace's `auto_merge` setting via the normal
+        # cond in do_start_watchdog, mirroring bd-dkwhbn's fix to
+        # apply_review_gate_verdict/2. A review_only APPROVE must never
+        # bypass a human-merge (auto_merge: false) workspace policy.
+        opts = merge_opts_from_meta(state.meta, %{via_review_gate: true})
 
         case resolve_merger(state, opts) do
           {:ok, adapter, workspace} ->
