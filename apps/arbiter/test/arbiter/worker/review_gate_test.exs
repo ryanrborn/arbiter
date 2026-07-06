@@ -305,14 +305,23 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert reloaded.notes =~ "ReviewGate verdict: APPROVE"
     end
 
-    test "APPROVE with a hosted-forge stub adapter that never reports approval still merges (bd-66ey1o)",
-         %{repo: repo, ws: ws} do
+    test "APPROVE with a hosted-forge stub adapter that never reports approval still merges when auto_merge is on (bd-66ey1o)",
+         %{repo: repo} do
       # Reproduces the production bug: a ReviewGate APPROVE arrives, the merger
       # opens (or reuses) an MR, and the adapter's get/1 reports
       # `%{status: :open, approved: false}` (no GitHub-side approval). Before
       # bd-66ey1o the Watchdog polled forever waiting for `approved: true`. The
-      # fix plumbs `via_review_gate: true` through to the Watchdog so the merge
-      # fires on its first poll.
+      # fix plumbs `via_review_gate: true` through to the Watchdog so a
+      # non-terminal poll is treated as approved on the first poll. Whether the
+      # Watchdog then actually clicks merge is a separate decision gated on the
+      # workspace's `auto_merge` setting (bd-dkwhbn) — this workspace opts in.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-ws-automerge-#{System.unique_integer([:positive])}",
+          prefix: "tb",
+          config: %{"review" => %{"required" => true}, "merge" => %{"auto_merge" => true}}
+        })
+
       Arbiter.Test.StubMerger.reset()
       Arbiter.Test.StubMerger.next_open_ref("!76")
       # Don't queue any get results → default :open/approved=false forever.
@@ -322,6 +331,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} =
         start_author(task, repo, %{
           merger_adapter_override: Arbiter.Test.StubMerger,
+          merger_workspace_override: ws,
           watchdog_interval_ms: 20,
           watchdog_initial_delay_ms: 0,
           watchdog_max_polls: 50
@@ -338,6 +348,51 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # The local repo was NOT git-merged (StubMerger is a stub) — the merge
       # happened entirely through the adapter callback.
       assert merge_commit_count(repo) == 0
+    end
+
+    test "APPROVE with a hosted-forge stub adapter does NOT merge when workspace auto_merge is off (bd-dkwhbn)",
+         %{repo: repo} do
+      # bd-dkwhbn: leotech has `merge.auto_merge = false` ("human merges company
+      # repos"), yet a ReviewGate APPROVE on a fleet-authored branch was
+      # force-merging into the hosted-forge target regardless of that setting.
+      # via_review_gate must still prevent the bd-66ey1o hang (a non-terminal
+      # poll counts as approved), but the actual merge click has to respect
+      # auto_merge: false and leave the PR for a human.
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-ws-humanmerge-#{System.unique_integer([:positive])}",
+          prefix: "tb",
+          config: %{"review" => %{"required" => true}, "merge" => %{"auto_merge" => false}}
+        })
+
+      Arbiter.Test.StubMerger.reset()
+      Arbiter.Test.StubMerger.next_open_ref("!77")
+      # Don't queue any get results → default :open/approved=false forever.
+
+      task = new_task(ws)
+
+      {pid, _branch} =
+        start_author(task, repo, %{
+          merger_adapter_override: Arbiter.Test.StubMerger,
+          merger_workspace_override: ws,
+          watchdog_interval_ms: 20,
+          watchdog_initial_delay_ms: 0,
+          watchdog_max_polls: 50
+        })
+
+      send(pid, {:__claude_session_done__, "arb done"})
+      wait_until(fn -> match?(%{status: :awaiting_review_gate}, Worker.state(pid)) end)
+
+      :ok = Worker.review_gate_verdict(pid, {:approve, "VERDICT: APPROVE\nlgtm"})
+
+      # Give the Watchdog several poll cycles to (wrongly) auto-merge if the
+      # bug is present.
+      wait_until(fn -> match?(%{status: :awaiting_review}, Worker.state(pid)) end)
+      Process.sleep(150)
+
+      assert Arbiter.Test.StubMerger.merge_count("!77") == 0
+      assert merge_commit_count(repo) == 0
+      assert match?(%{status: :awaiting_review}, Worker.state(pid))
     end
 
     test "REQUEST_CHANGES parks the task with findings and does NOT merge",
@@ -1743,7 +1798,17 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert reloaded.pr_ref == "acme/repo#88"
     end
 
-    test "APPROVE after a pre-opened PR still merges the same PR", %{repo: repo, ws: ws} do
+    test "APPROVE after a pre-opened PR still merges the same PR", %{repo: repo} do
+      # auto_merge: true — this test is about PR reuse (the already-open PR
+      # gets merged rather than a duplicate being opened), not about the
+      # human-merge policy covered separately under "the gate" (bd-dkwhbn).
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-ws-preopened-#{System.unique_integer([:positive])}",
+          prefix: "tb",
+          config: %{"review" => %{"required" => true}, "merge" => %{"auto_merge" => true}}
+        })
+
       Arbiter.Test.StubMerger.reset()
       Arbiter.Test.StubMerger.next_open_ref("acme/repo#88")
 
@@ -1752,6 +1817,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       {pid, _branch} =
         start_author(task, repo, %{
           merger_adapter_override: Arbiter.Test.StubMerger,
+          merger_workspace_override: ws,
           watchdog_interval_ms: 20,
           watchdog_initial_delay_ms: 0,
           watchdog_max_polls: 50
