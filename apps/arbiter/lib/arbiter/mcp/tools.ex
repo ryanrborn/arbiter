@@ -478,6 +478,48 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
+  # ---- skill_list -----------------------------------------------------------
+
+  @doc """
+  List all system-wide skills (names + metadata, no `body`), ordered by name.
+  Available to both tiers — a coordinator or any worker can discover what's
+  in the registry on demand, the same source of truth as worktree
+  materialization.
+  """
+  @spec skill_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def skill_list(%Scope{} = _scope, _args) do
+    skills = Arbiter.Skills.list_skills() |> Enum.map(&serialize_skill_summary/1)
+    {:ok, %{skills: skills, count: length(skills)}}
+  end
+
+  # ---- skill_get ------------------------------------------------------------
+
+  @doc """
+  Fetch one system-wide skill's full markdown body by `skill` (id or name).
+  Available to both tiers, so the coordinator (which is not worktree-isolated
+  and can't rely on materialization) or any agent can pull a skill body on
+  demand from the same registry workers are materialized from.
+  """
+  @spec skill_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def skill_get(%Scope{} = _scope, args) do
+    with {:ok, ref} <- require_string(args, "skill"),
+         {:ok, skill} <- fetch_skill(ref) do
+      {:ok, serialize_skill(skill)}
+    end
+  end
+
+  defp serialize_skill_summary(%Arbiter.Skills.Skill{} = skill) do
+    %{
+      id: skill.id,
+      name: skill.name,
+      metadata: skill.metadata || %{},
+      activation_mode: skill.activation_mode,
+      code_only: skill.code_only,
+      created_at: iso(skill.created_at),
+      updated_at: iso(skill.updated_at)
+    }
+  end
+
   defp serialize_skill(%Arbiter.Skills.Skill{} = skill) do
     %{
       id: skill.id,
