@@ -70,7 +70,7 @@ defmodule Arbiter.MCP.CatalogTest do
       tool = Enum.find(Catalog.all(), &(&1.name == "worker_dispatch"))
       props = tool.input_schema["properties"]
 
-      assert props["provider"]["enum"] == ["claude", "gemini"]
+      assert props["provider"]["enum"] == ["claude", "gemini", "codex"]
       # The deprecated boolean alias is still advertised so existing callers work.
       assert props["with_claude"]["type"] == "boolean"
     end

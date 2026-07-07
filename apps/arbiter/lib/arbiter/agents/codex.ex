@@ -137,6 +137,54 @@ defmodule Arbiter.Agents.Codex do
     end
   end
 
+  # Splice `insert` (a list of argv elements, e.g. a swapped-in nudge/resume
+  # prompt) right after the `--` flag in `argv`. Returns
+  # `{:error, :no_print_slot}` when `argv` has no `--` flag at all.
+  @doc false
+  def splice_prompt(argv, insert) when is_list(argv) and is_list(insert) do
+    case Enum.find_index(argv, &(&1 == "--")) do
+      nil ->
+        {:error, :no_print_slot}
+
+      dash_idx ->
+        {head, ["--" | _tail]} = Enum.split(argv, dash_idx)
+
+        {head, new_tail} =
+          case insert do
+            ["--resume", session_id, prompt] ->
+              # Replace "exec" with "exec", "resume" in head
+              head =
+                Enum.flat_map(head, fn
+                  "exec" -> ["exec", "resume"]
+                  other -> [other]
+                end)
+
+              {head, [session_id, prompt]}
+
+            [nudge] ->
+              {head, [nudge]}
+          end
+
+        # If it was using stdin delivery (i.e., temporary file positional at index 4),
+        # we want to switch the script to inline_prompt_script and drop the temp file positional.
+        {head, new_tail} =
+          case Enum.at(head, 2) do
+            @stdin_prompt_script ->
+              head =
+                head
+                |> List.replace_at(2, @inline_prompt_script)
+                |> List.delete_at(4)
+
+              {head, new_tail}
+
+            _ ->
+              {head, new_tail}
+          end
+
+        {:ok, head ++ ["--"] ++ new_tail}
+    end
+  end
+
   defp tmpfile_path?(path), do: Path.basename(path) |> String.starts_with?(@prompt_tmp_prefix)
 
   @impl true

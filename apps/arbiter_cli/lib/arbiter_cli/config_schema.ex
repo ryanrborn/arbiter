@@ -17,7 +17,7 @@ defmodule ArbiterCli.ConfigSchema do
 
   @tracker_types ~w(none jira shortcut linear github gitlab)
   @merger_strategies ~w(direct gitlab github)
-  @agent_types ~w(claude gemini)
+  @agent_types ~w(claude gemini codex)
   @routing_policies ~w(static by_priority by_difficulty by_budget round_robin)
   @security_modes ~w(auto strict bypass)
   @sandbox_filesystems ~w(worktree none)
