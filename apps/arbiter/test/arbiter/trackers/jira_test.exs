@@ -390,6 +390,108 @@ defmodule Arbiter.Trackers.JiraTest do
                Jira.gating_fields(@ref, :closed)
     end
 
+    test "forces qa_notes/deployment_notes for :pr_opened even when the transition screen doesn't require them (Story workflow validator, bd-4isprn)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "51",
+              "name" => "Pull request created",
+              "to" => %{"name" => "In Code Review"},
+              # Screen reports neither field required — the actual gate here
+              # is a workflow *validator*, invisible to this metadata call.
+              "fields" => %{"summary" => %{"required" => false, "name" => "Summary"}}
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, fields} = Jira.gating_fields(@ref, :pr_opened)
+
+      assert Enum.sort_by(fields, & &1.id) == [
+               %{id: "customfield_10300", key: :qa_notes, name: "QA Testing Notes"},
+               %{id: "customfield_10400", key: :deployment_notes, name: "Deployment Notes"}
+             ]
+    end
+
+    test "does not double up forced fields already detected as screen-required for :pr_opened" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "51",
+              "name" => "Pull request created",
+              "to" => %{"name" => "In Code Review"},
+              "fields" => %{
+                "customfield_10300" => %{"required" => true, "name" => "QA Notes"}
+              }
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, fields} = Jira.gating_fields(@ref, :pr_opened)
+
+      assert Enum.sort_by(fields, & &1.id) == [
+               %{id: "customfield_10300", key: :qa_notes, name: "QA Notes"},
+               %{id: "customfield_10400", key: :deployment_notes, name: "Deployment Notes"}
+             ]
+    end
+
+    test "does not force notes fields for events outside gated_note_events (e.g. :in_progress)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "1",
+              "name" => "Start work",
+              "to" => %{"name" => "In Progress"},
+              "fields" => %{"summary" => %{"required" => false, "name" => "Summary"}}
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, []} = Jira.gating_fields(@ref, :in_progress)
+    end
+
+    test "workspace can override gated_note_events to opt out entirely" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_key" => @project,
+        "credentials_ref" => "env:#{@env_var}",
+        "email" => "tester@example.com",
+        "field_ids" => %{
+          "qa_notes" => "customfield_10300",
+          "deployment_notes" => "customfield_10400"
+        },
+        "gated_note_events" => []
+      })
+
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "transitions" => [
+            %{
+              "id" => "51",
+              "name" => "Pull request created",
+              "to" => %{"name" => "In Code Review"},
+              "fields" => %{"summary" => %{"required" => false, "name" => "Summary"}}
+            }
+          ]
+        })
+      end)
+
+      assert {:ok, []} = Jira.gating_fields(@ref, :pr_opened)
+    end
+
     test "returns {:error, :status_unmapped} for an event with no target status" do
       Config.put_active(%{
         "host" => @host,

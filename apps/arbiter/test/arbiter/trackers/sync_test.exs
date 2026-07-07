@@ -48,15 +48,21 @@ defmodule Arbiter.Trackers.SyncTest do
     ws
   end
 
-  defp jira_issue(ws) do
+  defp jira_issue(ws, attrs \\ %{}) do
     {:ok, issue} =
-      Ash.create(Issue, %{
-        title: "tracked",
-        tracker_type: :jira,
-        tracker_ref: @ref,
-        skip_upstream_create: true,
-        workspace_id: ws.id
-      })
+      Ash.create(
+        Issue,
+        Map.merge(
+          %{
+            title: "tracked",
+            tracker_type: :jira,
+            tracker_ref: @ref,
+            skip_upstream_create: true,
+            workspace_id: ws.id
+          },
+          attrs
+        )
+      )
 
     issue
   end
@@ -71,7 +77,12 @@ defmodule Arbiter.Trackers.SyncTest do
     test "transitions to In Code Review, comments the PR URL, and adds a remote link" do
       test_pid = self()
       ws = jira_workspace(%{"pr_opened" => "In Code Review"})
-      issue = jira_issue(ws)
+
+      issue =
+        jira_issue(ws, %{
+          qa_notes: "Verify voice ID matches on re-enrollment.",
+          deployment_notes: "None."
+        })
 
       Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
         path = conn.request_path
@@ -89,6 +100,11 @@ defmodule Arbiter.Trackers.SyncTest do
                 }
               ]
             })
+
+          conn.method == "PUT" and String.ends_with?(path, "/issue/#{@ref}") ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:update_fields, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(204) |> Req.Test.json(%{})
 
           conn.method == "POST" and String.ends_with?(path, "/transitions") ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -112,6 +128,18 @@ defmodule Arbiter.Trackers.SyncTest do
       assert :ok =
                Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606 (#{issue.id})")
 
+      # bd-4isprn: the QA/Deployment notes fields are pushed BEFORE the
+      # transition is attempted — LeoTech's Story workflow gates "Pull
+      # request created" on them via a workflow validator invisible to the
+      # transitions-metadata detection, so they're forced regardless.
+      assert_receive {:update_fields,
+                      %{
+                        "fields" => %{
+                          "customfield_10184" => _qa_notes,
+                          "customfield_10185" => _deployment_notes
+                        }
+                      }}
+
       # Transitioned toward "In Code Review" (single-hop via "Pull request created").
       assert_receive {:transition, %{"transition" => %{"id" => "51"}}}
       # Commented with the PR URL (ADF body).
@@ -123,6 +151,55 @@ defmodule Arbiter.Trackers.SyncTest do
 
       # No spurious escalation on the happy path.
       assert escalations_for(ws.id) == []
+    end
+
+    test "escalates and does NOT attempt the transition when QA/Deployment notes are blank (bd-4isprn)" do
+      test_pid = self()
+      ws = jira_workspace(%{"pr_opened" => "In Code Review"})
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "51",
+                  "name" => "Pull request created",
+                  "to" => %{"name" => "In Code Review"}
+                }
+              ]
+            })
+
+          # attach_pr_artifacts runs regardless of the gated transition's
+          # outcome — assert only that the (doomed) transition/field-update
+          # calls never fire, not that nothing else does.
+          conn.method == "POST" and String.ends_with?(path, "/comment") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => "1"})
+
+          conn.method == "POST" and String.ends_with?(path, "/remotelink") ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 10_001})
+
+          true ->
+            send(test_pid, {:unexpected, conn.method, path})
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      url = "https://github.com/leo/voice-id-core/pull/3606"
+
+      assert :ok =
+               Sync.lifecycle(issue, :pr_opened, pr_url: url, pr_title: "PR #3606 (#{issue.id})")
+
+      refute_receive {:unexpected, _method, _path}
+
+      assert [escalation] = escalations_for(ws.id)
+      assert escalation.body =~ "QA Testing Notes"
+      assert escalation.body =~ "Deployment Notes"
     end
   end
 
@@ -548,6 +625,102 @@ defmodule Arbiter.Trackers.SyncTest do
 
       assert :ok = Sync.lifecycle(issue, :closed)
       assert escalations_for(ws.id) == []
+    end
+
+    test "jira: merged POST transition->400 followed by already-Code-Complete GET: no escalation (bd-778)" do
+      # The `merged` analogue of the :closed race above: a live transition
+      # advertises a hop to "Code Complete" (the mapped target), the POST is
+      # rejected because the ticket already advanced past In Code Review, and
+      # the recovery GET confirms the current status is already the exact
+      # target name "Code Complete" (not Jira's "done" statusCategory, which
+      # only the *closed* target usually reaches). Expected: benign no-op —
+      # NOT the wrong-direction escalation from the bd-778 incident.
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "61",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
+              ]
+            })
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{"errorMessages" => ["Action 61 is invalid"], "errors" => %{}})
+
+          conn.method == "GET" ->
+            # Recovery fetch (already_at_target?): the issue is already at
+            # the exact target status name.
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "key" => @ref,
+              "fields" => %{
+                "status" => %{"name" => "Code Complete", "statusCategory" => %{"key" => "indeterminate"}}
+              }
+            })
+        end
+      end)
+
+      ws = jira_workspace(%{"merged" => "Code Complete"})
+      issue = jira_issue(ws)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+      assert escalations_for(ws.id) == []
+    end
+
+    test "jira: merged POST transition->400 with ticket genuinely still In Code Review: escalation fires" do
+      # A real failure must still escalate: the recovery GET shows the ticket
+      # has NOT advanced, so the validation_failed is a genuine problem, not
+      # a benign race.
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "transitions" => [
+                %{
+                  "id" => "61",
+                  "name" => "Approved and merged",
+                  "to" => %{"name" => "Code Complete"}
+                }
+              ]
+            })
+
+          conn.method == "POST" and String.ends_with?(path, "/transitions") ->
+            conn
+            |> Plug.Conn.put_status(400)
+            |> Req.Test.json(%{"errorMessages" => ["Action 61 is invalid"], "errors" => %{}})
+
+          conn.method == "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "key" => @ref,
+              "fields" => %{
+                "status" => %{"name" => "In Code Review", "statusCategory" => %{"key" => "indeterminate"}}
+              }
+            })
+        end
+      end)
+
+      ws = jira_workspace(%{"merged" => "Code Complete"})
+      issue = jira_issue(ws)
+
+      assert :ok = Sync.lifecycle(issue, :merged)
+      assert length(escalations_for(ws.id)) == 1
     end
   end
 
