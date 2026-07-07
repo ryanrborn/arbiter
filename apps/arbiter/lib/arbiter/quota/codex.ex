@@ -261,8 +261,10 @@ defmodule Arbiter.Quota.Codex do
   # ---- serialize ---------------------------------------------------------
 
   @doc """
-  Render a stored `CodexQuota` row into the public map shape, with each window
-  as `{used, total: 100, remaining, reset_at, unlimited: false}`.
+  Render a stored `CodexQuota` row into the public map shape returned by
+  `arb quota` and `GET /api/quota`. This is a pure transformation of persisted
+  data, with each window as `{used, total: 100, remaining, reset_at,
+  unlimited: false}` and no live fetch.
   """
   @spec serialize(CodexQuota.t()) :: map()
   def serialize(%CodexQuota{} = row) do
