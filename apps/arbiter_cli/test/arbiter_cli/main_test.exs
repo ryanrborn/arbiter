@@ -14,6 +14,15 @@ defmodule ArbiterCli.MainTest do
     end
   end
 
+  describe "top-level version flags" do
+    test "-V prints the CLI version" do
+      {out, _err, code} = capture(fn -> Main.main(["-V"]) end)
+
+      assert code == 0
+      assert out =~ "arb #{ArbiterCli.Version.app_version()}"
+    end
+  end
+
   describe "global --workspace / -w flag" do
     setup do
       prev = System.get_env("ARB_WORKSPACE")
