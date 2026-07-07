@@ -352,10 +352,29 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback ref_for_pr(pr :: String.t(), opts :: map()) :: {:ok, mr_ref} | {:error, term()}
 
+  @doc """
+  Resolve (close) a review thread on `mr_ref` — the counterpart to
+  `list_open_review_threads/1`'s `:id` field (bd-76ydsu).
+
+  Used by author-side follow-up (PRPatrol / the merge-queue revise dispatch)
+  after pushing a fix so an addressed thread stops showing as "unresolved" —
+  distinct from `reply_to_review_comment/4`, which only posts a reply and
+  leaves the thread's resolution state untouched.
+
+  Returns `{:ok, term()}` on success. Adapters with no thread-resolution
+  primitive (e.g. `Direct`) return `{:error, :unsupported}`.
+
+  Optional — adapters that don't implement thread resolution simply don't
+  export it; callers guard with `function_exported?/3`.
+  """
+  @callback resolve_review_thread(mr_ref, thread_id :: String.t(), opts :: map()) ::
+              {:ok, term()} | {:error, term()}
+
   @optional_callbacks update_branch: 1,
                       failing_check_logs: 1,
                       ref_for_pr: 2,
                       list_open: 0,
                       list_open_review_threads: 1,
-                      reply_to_review_comment: 4
+                      reply_to_review_comment: 4,
+                      resolve_review_thread: 3
 end

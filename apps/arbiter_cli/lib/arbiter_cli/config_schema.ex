@@ -144,8 +144,15 @@ defmodule ArbiterCli.ConfigSchema do
       repo name -> local worktree root path used to resolve a dispatch's working dir
 
     pr_patrol  (map)
-      author_logins  list of forge logins — when non-empty, PRPatrol only files
-                     follow-ups for PRs authored by one of these logins
+      author_logins        list of forge logins — when non-empty, PRPatrol only
+                           files follow-ups for PRs authored by one of these logins
+      resolve_bot_threads  bool — resolve addressed bot/automated-reviewer review
+                           threads (e.g. Copilot) after the follow-up worker
+                           replies                                    (default: true)
+      resolve_human_threads  bool — resolve addressed HUMAN-reviewer review
+                           threads after the follow-up worker replies; left
+                           false by default so a human confirms their own
+                           threads                                    (default: false)
 
     review_patrol  (map)
       our_login  string — the fleet's own forge login, used to filter PR review

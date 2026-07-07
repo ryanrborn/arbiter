@@ -38,7 +38,9 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   """
 
   alias Arbiter.Mergers.Merger
+  alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.Dispatch
+  alias Arbiter.Workflows.ReviewThreadFollowUp
 
   require Logger
 
@@ -84,7 +86,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   @impl true
   @spec dispatch(dispatch_args()) :: dispatch_result()
   def dispatch(%{task_id: task_id} = args) when is_binary(task_id) do
-    briefing = render_feedback(args)
+    briefing = args |> with_resolve_policy() |> render_feedback()
 
     resume_opts =
       [revise_feedback: briefing]
@@ -100,6 +102,25 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
 
   def dispatch(_), do: {:error, :missing_task_id}
 
+  # Resolves the dispatching workspace's PRPatrol resolve-policy (bd-76ydsu)
+  # and folds it into `args` as :resolve_bot_threads / :resolve_human_threads,
+  # so `render_feedback/1` itself stays pure/DB-free. Best-effort: a missing
+  # or unresolvable workspace_id falls back to `Workspace`'s documented
+  # defaults (resolve bot threads, leave human threads) via `render_feedback/1`.
+  defp with_resolve_policy(%{workspace_id: workspace_id} = args) when is_binary(workspace_id) do
+    case Ash.get(Workspace, workspace_id) do
+      {:ok, workspace} ->
+        args
+        |> Map.put(:resolve_bot_threads, Workspace.pr_patrol_resolve_bot_threads?(workspace))
+        |> Map.put(:resolve_human_threads, Workspace.pr_patrol_resolve_human_threads?(workspace))
+
+      {:error, _} ->
+        args
+    end
+  end
+
+  defp with_resolve_policy(args), do: args
+
   @doc """
   Render the reviewer's feedback into the briefing block prepended to the
   revise worker's prompt. Public for tests + introspection.
@@ -107,12 +128,21 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
   Lists the formal review summaries (with their verdict state) and the inline
   review comments (`path:line — body`), with an explicit, narrow instruction:
   address the feedback, commit, and push to the SAME branch — do not open a
-  new PR.
+  new PR. Appends the review-thread follow-up protocol (bd-76ydsu): reply to
+  each addressed thread with the fix sha, and resolve per
+  `:resolve_bot_threads` / `:resolve_human_threads` (read straight off `args`
+  so this stays a pure, DB-free function — `dispatch/1` populates them from
+  the workspace via `with_resolve_policy/1`).
   """
   @spec render_feedback(dispatch_args()) :: String.t()
   def render_feedback(%{} = args) do
     task_id = Map.get(args, :task_id, "(unknown)")
     feedback = Map.get(args, :feedback) || []
+
+    policy = %{
+      resolve_bot_threads: Map.get(args, :resolve_bot_threads, true),
+      resolve_human_threads: Map.get(args, :resolve_human_threads, false)
+    }
 
     """
     ## Human PR review feedback to address (bd-95lsjb)
@@ -130,6 +160,7 @@ defmodule Arbiter.Workflows.MergeQueue.ReviseDispatcher do
 
     ----
 
+    #{ReviewThreadFollowUp.instructions(policy)}
     """
   end
 

@@ -111,6 +111,17 @@ defmodule Arbiter.Mergers.Github do
   }
   """
 
+  # GraphQL mutation to close a review thread (bd-76ydsu) — the author-side
+  # follow-up worker's counterpart to reply_to_review_comment/4, used after a
+  # bot/Copilot thread has been addressed and replied to.
+  @resolve_review_thread_mutation """
+  mutation($id: ID!) {
+    resolveReviewThread(input: {threadId: $id}) {
+      thread { id isResolved }
+    }
+  }
+  """
+
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
@@ -462,6 +473,14 @@ defmodule Arbiter.Mergers.Github do
         json: payload
       )
       |> handle_json()
+    end
+  end
+
+  @impl true
+  def resolve_review_thread(mr_ref, thread_id, _opts)
+      when is_binary(mr_ref) and is_binary(thread_id) do
+    with {:ok, cfg} <- Config.resolve() do
+      graphql_resolve_review_thread(cfg, thread_id)
     end
   end
 
@@ -1028,6 +1047,44 @@ defmodule Arbiter.Mergers.Github do
 
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  defp graphql_resolve_review_thread(cfg, thread_id) do
+    payload = %{"query" => @resolve_review_thread_mutation, "variables" => %{"id" => thread_id}}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok,
+       %Req.Response{
+         status: status,
+         body: %{"data" => %{"resolveReviewThread" => %{"thread" => thread}}}
+       }}
+      when status in 200..299 ->
+        {:ok, thread}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "unexpected GraphQL response shape",
+           raw: body
+         }}
 
       {:ok, %Req.Response{status: status, body: body}} ->
         {:error, http_error(status, body)}

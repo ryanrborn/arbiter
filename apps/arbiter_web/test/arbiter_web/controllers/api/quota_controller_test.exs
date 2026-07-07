@@ -62,4 +62,26 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     resp = conn |> get("/api/quota?workspace=does-not-exist") |> json_response(404)
     assert resp["error"]["type"] == "not_found"
   end
+
+  test "includes a quotas list alongside the legacy claude key", %{conn: conn, ws: ws} do
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert [%{"provider" => "claude", "utilization_5h" => 0.24}] = resp["data"]["quotas"]
+  end
+
+  test "the quotas list carries every tracked provider", %{conn: conn, ws: ws} do
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
+        provider: "codex"
+      )
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    providers = resp["data"]["quotas"] |> Enum.map(& &1["provider"]) |> Enum.sort()
+    assert providers == ["claude", "codex"]
+  end
 end

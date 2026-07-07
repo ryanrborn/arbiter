@@ -11,9 +11,9 @@ defmodule ArbiterWeb.LiveHooks do
 
   ## `:quota`
 
-  Loads the latest Anthropic quota snapshot for the default workspace and
-  assigns it as `:quota` on the socket. Returns `nil` when no snapshot has
-  been captured yet.
+  Loads the latest quota snapshot for every tracked provider on the default
+  workspace and assigns the list as `:quotas` on the socket (`[]` when
+  nothing has been captured yet).
   """
 
   import Phoenix.Component, only: [assign: 3]
@@ -35,18 +35,18 @@ defmodule ArbiterWeb.LiveHooks do
   def on_mount(:quota, _params, _session, socket) do
     case Arbiter.Quota.default_workspace_id() do
       {:ok, ws_id} ->
-        quota = Arbiter.Quota.latest(ws_id)
+        quotas = Arbiter.Quota.list_latest(ws_id)
 
         socket =
           socket
-          |> assign(:quota, quota)
+          |> assign(:quotas, quotas)
           |> assign(:_quota_workspace_id, ws_id)
           |> maybe_subscribe_quota(ws_id)
 
         {:cont, socket}
 
       _ ->
-        {:cont, assign(socket, :quota, nil)}
+        {:cont, assign(socket, :quotas, [])}
     end
   end
 
@@ -57,7 +57,7 @@ defmodule ArbiterWeb.LiveHooks do
       attach_hook(socket, :quota_updates, :handle_info, fn msg, socket ->
         case msg do
           {:quota_updated, ^workspace_id, quota} ->
-            {:halt, assign(socket, :quota, quota)}
+            {:halt, assign(socket, :quotas, upsert_quota(socket.assigns.quotas, quota))}
 
           _ ->
             {:cont, socket}
@@ -65,6 +65,19 @@ defmodule ArbiterWeb.LiveHooks do
       end)
     else
       socket
+    end
+  end
+
+  # Replace the list entry matching `quota.provider`, or append it when this
+  # is the first snapshot seen for that provider.
+  defp upsert_quota(quotas, quota) do
+    if Enum.any?(quotas, &(&1.provider == quota.provider)) do
+      Enum.map(quotas, fn
+        %{provider: provider} when provider == quota.provider -> quota
+        existing -> existing
+      end)
+    else
+      quotas ++ [quota]
     end
   end
 end

@@ -5,11 +5,17 @@ defmodule ArbiterWeb.Api.QuotaController do
   Resolves the target workspace from `?workspace=<id|name>`, falling back to
   the installation default.
 
+  `quotas` carries every proxy-captured provider (each including its own
+  `provider` field) — `claude` is kept as a top-level key too for `arb quota`
+  and other existing consumers of the pre-multi-provider shape.
+
     * `claude` — the latest snapshot the local proxy captured off Claude worker
       traffic; `null` before the first proxied request.
     * `codex` — fetched live from OpenAI's rate-limit endpoint using the
-      `codex` CLI's stored token; `null` (with a `codex_message`) when Codex
-      isn't authenticated or the usage API is unavailable.
+      `codex` CLI's stored token (a distinct session/weekly-window shape, so it
+      stays a top-level key rather than joining `quotas`); `null` (with a
+      `codex_message`) when Codex isn't authenticated or the usage API is
+      unavailable.
   """
 
   use ArbiterWeb, :controller
@@ -26,6 +32,7 @@ defmodule ArbiterWeb.Api.QuotaController do
         render(conn, :show,
           workspace_id: ws_id,
           claude: Quota.serialize(ws_id),
+          quotas: Quota.list_serialized(ws_id),
           codex: codex.codex,
           codex_message: codex.message
         )

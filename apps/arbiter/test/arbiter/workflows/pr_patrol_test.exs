@@ -220,6 +220,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert task.source_pr == "50"
       assert task.title =~ "PR #50"
       assert task.description =~ "unresolved review thread"
+      assert task.description =~ "Review thread follow-up protocol"
+      assert task.description =~ "Addressed in <sha>"
       assert is_pid(Worker.whereis(task.id))
     end
 
