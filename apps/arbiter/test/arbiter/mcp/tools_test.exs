@@ -910,6 +910,46 @@ defmodule Arbiter.MCP.ToolsTest do
       assert get_in(data.config, ["routing", "policy"]) == "round_robin"
     end
 
+    test "sets an array leaf (multi-provider agent.type)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.type",
+                 "value" => ["claude", "gemini"]
+               })
+
+      assert get_in(data.config, ["agent", "type"]) == ["claude", "gemini"]
+    end
+
+    test "unwraps a stringified JSON array value (bd-1dtufq)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.type",
+                 "value" => "[\"claude\", \"gemini\"]"
+               })
+
+      assert get_in(data.config, ["agent", "type"]) == ["claude", "gemini"]
+    end
+
+    test "unwraps a stringified JSON object value (bd-1dtufq)", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "agent.config",
+                 "value" => "{\"vernacular\": \"terse\"}"
+               })
+
+      assert get_in(data.config, ["agent", "config"]) == %{"vernacular" => "terse"}
+    end
+
+    test "leaves a genuine scalar string value that happens to start with [ untouched", ctx do
+      assert {:ok, data} =
+               Tools.workspace_config_set(ctx.coordinator, %{
+                 "key" => "tracker.config.label",
+                 "value" => "[urgent]"
+               })
+
+      assert get_in(data.config, ["tracker", "config", "label"]) == "[urgent]"
+    end
+
     test "requires a key argument", ctx do
       assert {:error, {:invalid, msg}} =
                Tools.workspace_config_set(ctx.coordinator, %{"value" => "x"})
