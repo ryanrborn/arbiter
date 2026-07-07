@@ -46,55 +46,57 @@ defmodule ArbiterWeb.Api.WorkerController do
   def dispatch(conn, params) do
     case params do
       %{"task_id" => task_id} when is_binary(task_id) and task_id != "" ->
-        opts = dispatch_opts(params)
-
-        case Dispatch.dispatch(task_id, opts) do
-          {:ok, result} ->
-            conn
-            |> put_status(:created)
-            |> render(:dispatch, result: result)
-
-          {:error, {:task_not_found, _}} ->
-            {:error, :not_found}
-
-          {:error, {:task_closed, _}} ->
-            {:error,
-             {:invalid_request, "task is closed; reopen it before dispatching",
-              %{task_id: task_id}}}
-
-          {:error, {:task_awaiting_review, _}} ->
-            {:error,
-             {:invalid_request,
-              "task is already awaiting review; the Watchdog will close it on MR merge",
-              %{task_id: task_id}}}
-
-          {:error, :no_repo_configured} ->
-            {:error,
-             {:invalid_request,
-              "no repos configured — add at least one repo to your workspace config " <>
-                "(repo_paths) or application env (:arbiter, :repo_paths), " <>
-                "or pass a repo explicitly: `arb issue dispatch #{task_id} <repo>`",
-              %{task_id: task_id}}}
-
-          {:error, {:repo_not_found, repo}} ->
-            {:error,
-             {:invalid_request,
-              "repo #{inspect(repo)} is not in :repo_paths — check your workspace config or " <>
-                "application env (:arbiter, :repo_paths)", %{task_id: task_id, repo: repo}}}
-
-          {:error, {:ambiguous_repo, repos}} ->
-            {:error,
-             {:invalid_request,
-              "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
-                "`arb issue dispatch #{task_id} <repo>`",
-              %{task_id: task_id, available_repos: repos}}}
-
-          {:error, reason} ->
-            {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
+        with {:ok, opts} <- dispatch_opts(params) do
+          dispatch_task(conn, task_id, opts)
         end
 
       _ ->
         {:error, {:invalid_request, "task_id is required", %{}}}
+    end
+  end
+
+  defp dispatch_task(conn, task_id, opts) do
+    case Dispatch.dispatch(task_id, opts) do
+      {:ok, result} ->
+        conn
+        |> put_status(:created)
+        |> render(:dispatch, result: result)
+
+      {:error, {:task_not_found, _}} ->
+        {:error, :not_found}
+
+      {:error, {:task_closed, _}} ->
+        {:error,
+         {:invalid_request, "task is closed; reopen it before dispatching", %{task_id: task_id}}}
+
+      {:error, {:task_awaiting_review, _}} ->
+        {:error,
+         {:invalid_request,
+          "task is already awaiting review; the Watchdog will close it on MR merge",
+          %{task_id: task_id}}}
+
+      {:error, :no_repo_configured} ->
+        {:error,
+         {:invalid_request,
+          "no repos configured — add at least one repo to your workspace config " <>
+            "(repo_paths) or application env (:arbiter, :repo_paths), " <>
+            "or pass a repo explicitly: `arb issue dispatch #{task_id} <repo>`",
+          %{task_id: task_id}}}
+
+      {:error, {:repo_not_found, repo}} ->
+        {:error,
+         {:invalid_request,
+          "repo #{inspect(repo)} is not in :repo_paths — check your workspace config or " <>
+            "application env (:arbiter, :repo_paths)", %{task_id: task_id, repo: repo}}}
+
+      {:error, {:ambiguous_repo, repos}} ->
+        {:error,
+         {:invalid_request,
+          "multiple repos available (#{Enum.join(repos, ", ")}) — specify one: " <>
+            "`arb issue dispatch #{task_id} <repo>`", %{task_id: task_id, available_repos: repos}}}
+
+      {:error, reason} ->
+        {:error, {:server_error, "dispatch failed", %{reason: inspect(reason)}}}
     end
   end
 
@@ -343,39 +345,66 @@ defmodule ArbiterWeb.Api.WorkerController do
   #   * none          → use the workspace's `agent.type` config (the default).
   #     Resolves via `Agents.for_workspace`, picking the provider the workspace
   #     is configured for.
+  #
+  # Returns `{:ok, opts}`, or `{:error, {:invalid_request, msg, meta}}` when an
+  # explicit but unrecognized `provider` is supplied (bd-dcvo3n) — that must fail
+  # loudly rather than silently degrade to the workspace default.
   defp dispatch_opts(params) do
     base =
       [repo: params["repo"]]
       |> add_model_override(params["model"])
 
-    worker_opts =
-      cond do
-        truthy(params["no_agent"]) == true ->
-          [start_driver: false]
+    with {:ok, worker_opts} <- worker_dispatch_opts(params) do
+      opts =
+        (base ++ worker_opts)
+        |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
-        provider = normalize_provider(params["provider"]) ->
-          [start_claude: true, agent_type: provider]
-
-        truthy(params["with_claude"]) == true ->
-          [start_claude: true, agent_type: :claude]
-
-        truthy(params["with_gemini"]) == true ->
-          [start_claude: true, agent_type: :gemini]
-
-        true ->
-          [start_claude: true]
-      end
-
-    (base ++ worker_opts)
-    |> Enum.reject(fn {_, v} -> is_nil(v) end)
+      {:ok, opts}
+    end
   end
 
-  # Normalize the `provider` request field to the `:agent_type` atom Dispatch
-  # expects. Unknown / missing values fall through to nil so the alias / default
-  # branches still apply.
-  defp normalize_provider("claude"), do: :claude
-  defp normalize_provider("gemini"), do: :gemini
-  defp normalize_provider(_), do: nil
+  defp worker_dispatch_opts(params) do
+    cond do
+      truthy(params["no_agent"]) == true ->
+        {:ok, [start_driver: false]}
+
+      provider_given?(params["provider"]) ->
+        case normalize_provider(params["provider"]) do
+          {:error, _} = err -> err
+          provider -> {:ok, [start_claude: true, agent_type: provider]}
+        end
+
+      truthy(params["with_claude"]) == true ->
+        {:ok, [start_claude: true, agent_type: :claude]}
+
+      truthy(params["with_gemini"]) == true ->
+        {:ok, [start_claude: true, agent_type: :gemini]}
+
+      true ->
+        {:ok, [start_claude: true]}
+    end
+  end
+
+  # A `provider` field is "given" only when it's a non-blank string. Absent or
+  # blank means "use the workspace default", never an error.
+  defp provider_given?(p) when is_binary(p), do: String.trim(p) != ""
+  defp provider_given?(_), do: false
+
+  # Normalize an explicit `provider` field to the `:agent_type` atom Dispatch
+  # expects. An unrecognized (but non-blank) value is a hard error, not a silent
+  # fallback to the workspace default (bd-dcvo3n).
+  defp normalize_provider(provider) do
+    trimmed = provider |> to_string() |> String.trim()
+
+    if trimmed in Arbiter.Agents.valid_agent_types() do
+      String.to_existing_atom(trimmed)
+    else
+      {:error,
+       {:invalid_request,
+        "unknown provider #{inspect(provider)}; valid providers: " <>
+          Enum.join(Arbiter.Agents.valid_agent_types(), ", "), %{provider: provider}}}
+    end
+  end
 
   # Map request params onto `Dispatch.resume_session/2` opts. Repo is optional —
   # resume falls back to the task's most recent run's repo when omitted.
