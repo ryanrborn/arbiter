@@ -142,6 +142,7 @@ defmodule ArbiterCli.Main do
       ["-h"] -> usage_and_exit(0)
       ["--help"] -> usage_and_exit(0)
       ["-v"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
+      ["-V"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
       ["--version"] -> IO.puts("arb #{ArbiterCli.Version.app_version()}")
       [cmd | rest] -> dispatch(cmd, rest)
     end
