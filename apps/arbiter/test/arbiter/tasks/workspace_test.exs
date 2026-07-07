@@ -644,4 +644,56 @@ defmodule Arbiter.Tasks.WorkspaceTest do
              }) == false
     end
   end
+
+  describe "pr_patrol_resolve_bot_threads?/1" do
+    test "defaults to true when unset" do
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{config: %{}}) == true
+
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{}}
+             }) == true
+    end
+
+    test "false when explicitly set to false (bool or string)" do
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_bot_threads" => false}}
+             }) == false
+
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_bot_threads" => "false"}}
+             }) == false
+    end
+
+    test "true when explicitly set to true" do
+      assert Workspace.pr_patrol_resolve_bot_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_bot_threads" => true}}
+             }) == true
+    end
+  end
+
+  describe "pr_patrol_resolve_human_threads?/1" do
+    test "defaults to false when unset" do
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{config: %{}}) == false
+
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{}}
+             }) == false
+    end
+
+    test "true when explicitly set to true (bool or string)" do
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_human_threads" => true}}
+             }) == true
+
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_human_threads" => "true"}}
+             }) == true
+    end
+
+    test "false when explicitly set to false" do
+      assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
+               config: %{"pr_patrol" => %{"resolve_human_threads" => false}}
+             }) == false
+    end
+  end
 end

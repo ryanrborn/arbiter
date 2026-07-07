@@ -39,6 +39,7 @@ defmodule Arbiter.Trackers.Sync do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.AdmiralNotifier
   alias Arbiter.Trackers
+  alias Arbiter.Trackers.Jira
 
   @doc """
   Drive a lifecycle event for the task's external tracker. Best-effort and
@@ -159,9 +160,10 @@ defmodule Arbiter.Trackers.Sync do
   defp upstream_at_target?(:github, :closed, %{"state" => "closed"}), do: true
   defp upstream_at_target?(:gitlab, :closed, %{"state" => "closed"}), do: true
 
-  defp upstream_at_target?(:jira, :closed, raw) do
-    get_in(raw, ["fields", "status", "statusCategory", "key"]) == "done"
-  end
+  # Jira supports the recovery check for any mapped event (not just
+  # :closed) — e.g. :merged rejected because the ticket already advanced
+  # past the target status. See `Jira.at_or_past_target?/2`.
+  defp upstream_at_target?(:jira, event, raw), do: Jira.at_or_past_target?(raw, event)
 
   defp upstream_at_target?(:shortcut, :closed, %{"completed" => true}), do: true
   defp upstream_at_target?(_, _, _), do: false

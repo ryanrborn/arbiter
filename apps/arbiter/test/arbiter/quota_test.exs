@@ -102,6 +102,52 @@ defmodule Arbiter.QuotaTest do
       assert is_binary(serialized.reset_5h_at)
       assert {:ok, _, _} = DateTime.from_iso8601(serialized.captured_at)
     end
+
+    test "includes the provider field" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      assert Quota.serialize(ws.id).provider == "claude"
+    end
+  end
+
+  describe "list_latest/1" do
+    test "returns an empty list when nothing has been captured" do
+      ws = workspace!()
+      assert Quota.list_latest(ws.id) == []
+    end
+
+    test "returns one row per tracked provider" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
+
+      providers = ws.id |> Quota.list_latest() |> Enum.map(& &1.provider) |> Enum.sort()
+      assert providers == ["claude", "codex"]
+    end
+
+    test "does not include another workspace's rows" do
+      ws = workspace!()
+      other = workspace!("other")
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      {:ok, _} = Quota.capture(other.id, @headers)
+
+      assert [%{workspace_id: id}] = Quota.list_latest(ws.id)
+      assert id == ws.id
+    end
+  end
+
+  describe "list_serialized/1" do
+    test "serializes every tracked provider, each carrying its provider tag" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+      {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
+
+      serialized = Quota.list_serialized(ws.id)
+      providers = serialized |> Enum.map(& &1.provider) |> Enum.sort()
+
+      assert providers == ["claude", "codex"]
+      assert Enum.all?(serialized, &is_binary(&1.captured_at))
+    end
   end
 
   describe "google_snapshots/1" do
