@@ -381,6 +381,150 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — required check failure trigger (bd-ayetel)" do
+    # Both `list_open_review_threads/1` and `list_required_check_failures/1`
+    # POST to the same "/graphql" path with different queries — dispatch on
+    # the request body to answer each one correctly.
+    defp required_check_stub(number, contexts, opts \\ []) do
+      title = Keyword.get(opts, :title, "approved but CI-blocked")
+
+      fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => number, "title" => title, "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/#{number}/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and conn.request_path == "/graphql" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+            if String.contains?(body, "reviewThreads") do
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{
+                "data" => %{
+                  "repository" => %{"pullRequest" => %{"reviewThreads" => %{"nodes" => []}}}
+                }
+              })
+            else
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{
+                "data" => %{
+                  "repository" => %{
+                    "pullRequest" => %{
+                      "commits" => %{
+                        "nodes" => [
+                          %{
+                            "commit" => %{
+                              "statusCheckRollup" => %{"contexts" => %{"nodes" => contexts}}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              })
+            end
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end
+    end
+
+    test "settled required check FAILURE on an approved PR → 1 task, CI triage protocol included",
+         %{ws: ws} do
+      stub(
+        required_check_stub(70, [
+          %{
+            "__typename" => "CheckRun",
+            "name" => "ui-integration-tests",
+            "status" => "COMPLETED",
+            "conclusion" => "FAILURE",
+            "isRequired" => true
+          }
+        ])
+      )
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      [task] = tasks_for_repo()
+      assert task.source_pr == "70"
+      assert task.description =~ "required check(s) failing: ui-integration-tests"
+      assert task.description =~ "Required-check failure triage protocol"
+      assert task.description =~ "FLAKE"
+      assert task.description =~ "PRE-EXISTING ON BASE"
+      assert task.description =~ "REAL REGRESSION"
+      assert is_pid(Worker.whereis(task.id))
+    end
+
+    test "failing but OPTIONAL (isRequired=false) check → no task", %{ws: ws} do
+      stub(
+        required_check_stub(71, [
+          %{
+            "__typename" => "CheckRun",
+            "name" => "optional-lint",
+            "status" => "COMPLETED",
+            "conclusion" => "FAILURE",
+            "isRequired" => false
+          }
+        ])
+      )
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+      assert tasks_for_repo() == []
+    end
+
+    test "required check still IN_PROGRESS (not yet settled) → no task", %{ws: ws} do
+      stub(
+        required_check_stub(72, [
+          %{
+            "__typename" => "CheckRun",
+            "name" => "build",
+            "status" => "IN_PROGRESS",
+            "conclusion" => nil,
+            "isRequired" => true
+          }
+        ])
+      )
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+      assert tasks_for_repo() == []
+    end
+
+    test "dedup: second tick with the same failing required check does NOT create another task",
+         %{ws: ws} do
+      stub(
+        required_check_stub(73, [
+          %{
+            "__typename" => "CheckRun",
+            "name" => "ui-integration-tests",
+            "status" => "COMPLETED",
+            "conclusion" => "FAILURE",
+            "isRequired" => true
+          }
+        ])
+      )
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 1
+    end
+  end
+
   describe "periodic ticking" do
     test "the :tick message reschedules itself", %{ws: ws} do
       stub(fn conn ->

@@ -370,11 +370,35 @@ defmodule Arbiter.Mergers.Merger do
   @callback resolve_review_thread(mr_ref, thread_id :: String.t(), opts :: map()) ::
               {:ok, term()} | {:error, term()}
 
+  @doc """
+  List the **settled, REQUIRED** failing checks on `mr_ref` (bd-ayetel) — the
+  signal PRPatrol's author-side CI trigger fires on.
+
+  Distinct from `failing_check_logs/1`: that surface reports *every* failing
+  check (required or not) for the fix-pass briefing, with no notion of
+  "required for merge". A failing optional/informational check must not page
+  anyone, so this callback filters down to checks the forge's branch
+  protection actually requires — GitHub's GraphQL `isRequired` field on each
+  `statusCheckRollup` context (works for both modern check runs and legacy
+  commit statuses) — and further to checks that have **settled** (not
+  pending/in-progress): a required check still running is not yet a failure.
+
+  Returns `{:ok, [failing_check()]}` (an empty list when every required check
+  is passing/pending, or the PR has none — not an error) or
+  `{:error, term()}`.
+
+  Optional — adapters with no concept of required checks (e.g. `Direct`)
+  simply don't implement it; callers guard with `function_exported?/3` and
+  treat the absence as "no required-check failures".
+  """
+  @callback list_required_check_failures(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
+
   @optional_callbacks update_branch: 1,
                       failing_check_logs: 1,
                       ref_for_pr: 2,
                       list_open: 0,
                       list_open_review_threads: 1,
                       reply_to_review_comment: 4,
-                      resolve_review_thread: 3
+                      resolve_review_thread: 3,
+                      list_required_check_failures: 1
 end
