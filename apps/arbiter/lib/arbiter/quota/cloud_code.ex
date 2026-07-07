@@ -12,10 +12,26 @@ defmodule Arbiter.Quota.CloudCode do
   ## Credentials (read-only)
 
   The Gemini CLI stores its OAuth token at `~/.gemini/oauth_creds.json`
-  (`access_token`). Antigravity has no dedicated file and shares that token (per
-  the bd-4n1r8m spike). We read the file, never write it, and do **not** refresh
-  the token — the real CLI keeps it fresh through normal use, so a stale token
-  degrades to a `message` rather than triggering an OAuth dance here.
+  (`access_token`).
+
+  Antigravity does **not** share that token — despite both being Google Cloud
+  Code Assist clients, they are registered as two separate OAuth clients, each
+  with its own independent refresh token (confirmed against 9router's
+  `open-sse/providers/shared.js`, which lists distinct `ANTIGRAVITY_OAUTH_CLIENT`
+  / `GOOGLE_OAUTH_CLIENT` client ids). Re-authenticating one has no effect on
+  the other, and a stale Gemini CLI token does not mean Antigravity is stale
+  (bd-5bchzv fixes the bd-4n1r8m spike's wrong assumption that they shared a
+  token). Antigravity itself — the IDE app, a VS Code fork — persists its live
+  access token in its own `globalStorage` sqlite DB at
+  `~/.config/Antigravity/User/globalStorage/state.vscdb`, under the
+  `antigravityAuthStatus` key's `apiKey` field, and rewrites that row every time
+  the app refreshes its token in the background. We read that DB read-only via
+  `Exqlite.Sqlite3`. If it's unavailable (e.g. Antigravity was never installed
+  on this host), we fall back to the shared Gemini CLI creds file as a
+  last-ditch attempt rather than reporting "not configured" outright. Neither
+  path is ever written, and we do **not** refresh either token — the real app
+  keeps its own fresh through normal use, so a stale token degrades to a
+  `message` rather than triggering an OAuth dance here.
 
   ## Flow
 
@@ -53,6 +69,8 @@ defmodule Arbiter.Quota.CloudCode do
   @antigravity_load_url "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 
   @default_creds_path "~/.gemini/oauth_creds.json"
+  @default_antigravity_state_path "~/.config/Antigravity/User/globalStorage/state.vscdb"
+  @antigravity_auth_status_key "antigravityAuthStatus"
 
   # Normalized base — the provider only hands us a fraction, not raw units, so
   # we mirror 9router's arbitrary 1000-unit base for used/total. Percentage is
@@ -173,12 +191,18 @@ defmodule Arbiter.Quota.CloudCode do
   # ---- Antigravity -------------------------------------------------------
 
   @doc """
-  Antigravity per-model quota snapshot, or `nil` when not configured. Shares the
-  Gemini CLI credentials. See `gemini/1` for options.
+  Antigravity per-model quota snapshot, or `nil` when not configured.
+
+  Reads Antigravity's own live access token from its `globalStorage` sqlite
+  state DB (see the moduledoc) — falling back to the Gemini CLI creds file
+  only if that DB is unavailable. Options:
+
+    * `:antigravity_state_path` — override the state DB path (tests / non-default homes)
+    * `:creds_path`, `:project_id`, `:plug`, `:receive_timeout` — see `gemini/1`
   """
   @spec antigravity(keyword()) :: snapshot() | nil
   def antigravity(opts \\ []) do
-    case load_access_token(opts) do
+    case load_antigravity_token(opts) do
       {:ok, token} -> fetch_antigravity(token, opts)
       :error -> nil
     end
@@ -498,6 +522,57 @@ defmodule Arbiter.Quota.CloudCode do
     else
       _ -> :error
     end
+  end
+
+  # Antigravity's own token, read from its globalStorage sqlite state DB (see
+  # moduledoc). Falls back to the Gemini CLI creds file as a last resort only
+  # if the state DB isn't readable — Antigravity and Gemini CLI are separate
+  # OAuth clients, so that fallback is a degraded-but-better-than-nothing path,
+  # not the primary source.
+  defp load_antigravity_token(opts) do
+    case load_antigravity_state_token(opts) do
+      {:ok, token} -> {:ok, token}
+      :error -> load_access_token(opts)
+    end
+  end
+
+  defp load_antigravity_state_token(opts) do
+    path =
+      opts[:antigravity_state_path] ||
+        Application.get_env(:arbiter, :antigravity_state_path) ||
+        @default_antigravity_state_path
+
+    expanded = Path.expand(path)
+
+    with true <- File.exists?(expanded),
+         {:ok, raw} <- read_item_table_value(expanded, @antigravity_auth_status_key),
+         {:ok, %{"apiKey" => token}} <- Jason.decode(raw),
+         true <- is_binary(token) and token != "" do
+      {:ok, token}
+    else
+      _ -> :error
+    end
+  end
+
+  # Read a single value out of a VS Code-style `ItemTable (key, value)` sqlite
+  # DB, read-only, without pulling in a full Ecto repo for one lookup.
+  defp read_item_table_value(db_path, key) do
+    with {:ok, db} <- Exqlite.Sqlite3.open(db_path, mode: :readonly) do
+      try do
+        with {:ok, stmt} <-
+               Exqlite.Sqlite3.prepare(db, "SELECT value FROM ItemTable WHERE key = ?"),
+             :ok <- Exqlite.Sqlite3.bind(stmt, [key]),
+             {:row, [value]} <- Exqlite.Sqlite3.step(db, stmt) do
+          {:ok, to_string(value)}
+        else
+          _ -> :error
+        end
+      after
+        Exqlite.Sqlite3.close(db)
+      end
+    end
+  rescue
+    _ -> :error
   end
 
   # ---- HTTP --------------------------------------------------------------

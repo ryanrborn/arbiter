@@ -30,6 +30,51 @@ defmodule Arbiter.Quota.CloudCodeTest do
     Keyword.merge([creds_path: creds_path, plug: {Req.Test, @stub}], extra)
   end
 
+  # A path guaranteed not to exist — used as the default `creds_path` /
+  # `antigravity_state_path` in antigravity tests so a test can never fall
+  # through to reading the real user's live credentials off this machine.
+  defp missing_path(suffix) do
+    Path.join(System.tmp_dir!(), "nope_#{System.unique_integer([:positive])}#{suffix}")
+  end
+
+  defp antigravity_opts(extra) do
+    Keyword.merge(
+      [
+        antigravity_state_path: missing_path(".vscdb"),
+        creds_path: missing_path(".json"),
+        plug: {Req.Test, @stub}
+      ],
+      extra
+    )
+  end
+
+  # Write a throwaway Antigravity `state.vscdb` (the VS Code globalStorage
+  # sqlite DB Antigravity itself writes on every OAuth refresh) containing an
+  # `antigravityAuthStatus` row with the given apiKey, and return its path.
+  defp antigravity_state_file(api_key) do
+    dir = System.tmp_dir!()
+    path = Path.join(dir, "ag_state_#{System.unique_integer([:positive])}.vscdb")
+
+    {:ok, db} = Exqlite.Sqlite3.open(path)
+
+    :ok =
+      Exqlite.Sqlite3.execute(
+        db,
+        "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)"
+      )
+
+    value =
+      Jason.encode!(%{"apiKey" => api_key, "name" => "Test User", "email" => "t@example.com"})
+
+    {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "INSERT INTO ItemTable (key, value) VALUES (?, ?)")
+    :ok = Exqlite.Sqlite3.bind(stmt, ["antigravityAuthStatus", value])
+    :done = Exqlite.Sqlite3.step(db, stmt)
+    :ok = Exqlite.Sqlite3.close(db)
+
+    on_exit(fn -> File.rm(path) end)
+    path
+  end
+
   describe "gemini/1 credential handling" do
     test "returns nil when the creds file is absent (graceful no-op)" do
       missing =
@@ -148,7 +193,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
 
   describe "antigravity/1 quota fetch" do
     test "sends antigravity headers and filters to important models" do
-      creds = creds_file("agtoken")
+      state = antigravity_state_file("agtoken")
 
       Req.Test.stub(@stub, fn conn ->
         cond do
@@ -185,7 +230,7 @@ defmodule Arbiter.Quota.CloudCodeTest do
         end
       end)
 
-      snap = CloudCode.antigravity(opts(creds))
+      snap = CloudCode.antigravity(antigravity_opts(antigravity_state_path: state))
 
       assert snap.provider == "antigravity"
       assert snap.plan == "Pro"
@@ -196,19 +241,64 @@ defmodule Arbiter.Quota.CloudCodeTest do
       assert model.remaining_percentage == 25.0
     end
 
-    test "returns nil when creds are absent" do
-      missing = Path.join(System.tmp_dir!(), "nope_#{System.unique_integer([:positive])}.json")
-      assert CloudCode.antigravity(creds_path: missing) == nil
+    test "returns nil when neither the Antigravity state db nor the gemini creds fallback exist" do
+      assert CloudCode.antigravity(antigravity_opts([])) == nil
+    end
+
+    test "reads its own token from the Antigravity state db, not the Gemini CLI creds file" do
+      state = antigravity_state_file("antigravity-own-token")
+      # A stale/different Gemini CLI token must never leak into the Antigravity request.
+      gemini_creds = creds_file("stale-gemini-token")
+
+      Req.Test.stub(@stub, fn conn ->
+        assert ["Bearer antigravity-own-token"] =
+                 Plug.Conn.get_req_header(conn, "authorization")
+
+        Req.Test.json(conn, %{"models" => %{}})
+      end)
+
+      snap =
+        CloudCode.antigravity(
+          antigravity_state_path: state,
+          creds_path: gemini_creds,
+          project_id: "p",
+          plug: {Req.Test, @stub}
+        )
+
+      assert snap.models == []
+    end
+
+    test "falls back to the Gemini CLI creds file when the Antigravity state db is absent" do
+      missing_state =
+        Path.join(System.tmp_dir!(), "nope_#{System.unique_integer([:positive])}.vscdb")
+
+      gemini_creds = creds_file("fallback-token")
+
+      Req.Test.stub(@stub, fn conn ->
+        assert ["Bearer fallback-token"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, %{"models" => %{}})
+      end)
+
+      snap =
+        CloudCode.antigravity(
+          antigravity_state_path: missing_state,
+          creds_path: gemini_creds,
+          project_id: "p",
+          plug: {Req.Test, @stub}
+        )
+
+      assert snap.models == []
     end
 
     test "degrades to a message on a 403" do
-      creds = creds_file("agtoken")
+      state = antigravity_state_file("agtoken")
 
       Req.Test.stub(@stub, fn conn ->
         conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"error" => "forbidden"})
       end)
 
-      snap = CloudCode.antigravity(opts(creds))
+      snap = CloudCode.antigravity(antigravity_opts(antigravity_state_path: state))
+
       assert snap.models == []
       assert is_binary(snap.message)
     end
