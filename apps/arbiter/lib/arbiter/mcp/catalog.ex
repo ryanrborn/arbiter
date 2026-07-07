@@ -207,7 +207,8 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @both,
       description:
         "Current Anthropic rate-limit / quota state for the scope's workspace (captured by the " <>
-          "local proxy): 5h + 7d utilization, reset times, status, and which window binds. " <>
+          "local proxy): 5h + 7d utilization, reset times, status, and which window binds — plus " <>
+          "an on-demand per-model weekly utilization + extra_usage overage refresh. " <>
           "Returns `{\"claude\": null}` when nothing has been captured yet.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.quota_get/2

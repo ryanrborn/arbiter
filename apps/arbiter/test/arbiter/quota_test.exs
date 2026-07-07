@@ -150,6 +150,131 @@ defmodule Arbiter.QuotaTest do
     end
   end
 
+  describe "capture_oauth_usage/2" do
+    setup do
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("test-token") end)
+      :ok
+    end
+
+    test "layers per-model utilization + extra_usage onto an existing header-capture row" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Req.Test.json(conn, %{
+          "five_hour" => %{"utilization" => 24},
+          "seven_day" => %{"utilization" => 8},
+          "seven_day_sonnet" => %{"utilization" => 55},
+          "seven_day_opus" => %{"utilization" => 5},
+          "extra_usage" => 12.5
+        })
+      end)
+
+      assert {:ok, quota} =
+               Quota.capture_oauth_usage(ws.id, token: "test-token", plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP})
+
+      assert quota.per_model_utilization == %{"sonnet" => 0.55, "opus" => 0.05}
+      assert quota.extra_usage == %{"amount_usd" => 12.5}
+      assert quota.oauth_utilization_5h == 0.24
+      assert quota.oauth_utilization_7d == 0.08
+
+      # never touches the header-capture columns already on the row
+      assert quota.utilization_5h == 0.24
+      assert quota.provider == "claude"
+
+      serialized = Quota.serialize(ws.id)
+      assert serialized.utilization_5h == 0.24
+      assert serialized.per_model_utilization == %{"sonnet" => 0.55, "opus" => 0.05}
+      assert serialized.extra_usage == %{"amount_usd" => 12.5}
+    end
+
+    test "creates a row on its own when no header-capture snapshot exists yet" do
+      ws = workspace!()
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Req.Test.json(conn, %{"seven_day_sonnet" => %{"utilization" => 10}})
+      end)
+
+      assert {:ok, quota} =
+               Quota.capture_oauth_usage(ws.id, token: "test-token", plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP})
+
+      assert quota.per_model_utilization == %{"sonnet" => 0.10}
+      assert quota.utilization_5h == nil
+    end
+
+    test "returns the fetch error and does not touch the snapshot on failure" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Plug.Conn.send_resp(conn, 500, "")
+      end)
+
+      assert {:error, {:http_error, 500}} =
+               Quota.capture_oauth_usage(ws.id, token: "test-token", plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP})
+
+      assert Quota.serialize(ws.id).per_model_utilization == %{}
+    end
+  end
+
+  describe "refresh_and_serialize/2" do
+    setup do
+      on_exit(fn -> Arbiter.Quota.OAuthUsage.reset_cooldown!("test-token") end)
+      :ok
+    end
+
+    test "refreshes oauth usage (reading the token off disk) and returns the serialized snapshot" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      dir = Path.join(System.tmp_dir!(), "quota_refresh_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+
+      File.write!(
+        Path.join(dir, ".credentials.json"),
+        Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "test-token"}})
+      )
+
+      prev_dir = System.get_env("CLAUDE_CONFIG_DIR")
+      System.put_env("CLAUDE_CONFIG_DIR", dir)
+      Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+
+      on_exit(fn ->
+        File.rm_rf!(dir)
+        Application.put_env(:arbiter, :oauth_usage_http_stub, true)
+
+        if prev_dir do
+          System.put_env("CLAUDE_CONFIG_DIR", prev_dir)
+        else
+          System.delete_env("CLAUDE_CONFIG_DIR")
+        end
+      end)
+
+      Req.Test.stub(Arbiter.Quota.OAuthUsage.HTTP, fn conn ->
+        Req.Test.json(conn, %{"seven_day_sonnet" => %{"utilization" => 42}})
+      end)
+
+      result = Quota.refresh_and_serialize(ws.id)
+
+      assert result.utilization_5h == 0.24
+      assert result.per_model_utilization == %{"sonnet" => 0.42}
+    end
+
+    test "still returns the existing snapshot when the oauth fetch fails (no credentials)" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      result = Quota.refresh_and_serialize(ws.id)
+
+      assert result.utilization_5h == 0.24
+    end
+
+    test "returns nil when nothing has ever been captured, without raising" do
+      ws = workspace!()
+      assert Quota.refresh_and_serialize(ws.id) == nil
+    end
+  end
+
   describe "proxy config" do
     test "worker_base_url bakes in the workspace id" do
       Application.put_env(:arbiter, :anthropic_proxy,

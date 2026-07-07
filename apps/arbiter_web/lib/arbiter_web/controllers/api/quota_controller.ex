@@ -7,6 +7,11 @@ defmodule ArbiterWeb.Api.QuotaController do
   the installation default. Returns `claude: null` when nothing has been
   captured yet (e.g. before the first proxied request).
 
+  Also triggers an on-demand refresh of per-model weekly utilization +
+  `extra_usage` overage from Anthropic's `/api/oauth/usage` (bd-8tpha6) —
+  best-effort, so a failure there never hides the header-capture aggregate
+  figures.
+
   `quotas` carries every tracked provider (each including its own `provider`
   field) — `claude` is kept as a top-level key too for `arb quota` and other
   existing consumers of the pre-multi-provider shape.
@@ -23,7 +28,7 @@ defmodule ArbiterWeb.Api.QuotaController do
       {:ok, ws_id} ->
         render(conn, :show,
           workspace_id: ws_id,
-          claude: Quota.serialize(ws_id),
+          claude: Quota.refresh_and_serialize(ws_id),
           quotas: Quota.list_serialized(ws_id)
         )
 
