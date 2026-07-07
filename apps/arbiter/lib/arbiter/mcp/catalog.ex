@@ -583,6 +583,19 @@ defmodule Arbiter.MCP.Catalog do
             "description" =>
               "(task review) Login of the PR author, used to resolve the workspace " <>
                 "review_automation policy (auto_authors list). Ignored when `automation` is set."
+          },
+          "scope" => %{
+            "type" => "string",
+            "enum" => ["diff", "repo"],
+            "description" =>
+              "(`pr` only) Review depth: \"diff\" (default) — the reviewer only sees the unified " <>
+                "diff. \"repo\" — additionally traces cross-file consumers of anything the diff " <>
+                "changes against a read-only checkout of `repo` (no branch switch, no commit), " <>
+                "surfacing downstream call sites a diff-only review would miss. When omitted, " <>
+                "resolved from the workspace `review_scope` policy: a configured default, or " <>
+                "auto-escalated to \"repo\" when the diff touches a `sensitive_globs` path " <>
+                "(e.g. auth/signing code) — cross-cutting or security PRs get the deeper pass " <>
+                "without per-dispatch opt-in."
           }
         },
         "required" => [],
