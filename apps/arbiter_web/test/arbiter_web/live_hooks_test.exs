@@ -53,5 +53,63 @@ defmodule ArbiterWeb.LiveHooksTest do
       html2 = render(view)
       refute html2 =~ "Codex"
     end
+
+    test "on_mount(:quota) filters gemini_cli at mount time", %{conn: conn} do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+
+      # Capture a normal provider and gemini_cli
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}], provider: "gemini_cli")
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      # Claude should be present, Gemini CLI should be filtered out
+      assert html =~ "Claude"
+      refute html =~ "Gemini CLI"
+    end
+
+    test "on_mount(:quota) filters antigravity at mount time", %{conn: conn} do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+
+      # Capture a normal provider and antigravity
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}], provider: "antigravity")
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      # Claude should be present, Antigravity should be filtered out
+      assert html =~ "Claude"
+      refute html =~ "Antigravity"
+    end
+
+    test "on_mount(:quota) handle_info returns :halt for gemini_cli broadcasts", %{conn: conn} do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+
+      {:ok, view, html} = live(conn, ~p"/")
+      assert html =~ "Claude"
+      refute html =~ "Gemini CLI"
+
+      # Broadcast a gemini_cli update
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}], provider: "gemini_cli")
+
+      html2 = render(view)
+      refute html2 =~ "Gemini CLI"
+    end
+
+    test "on_mount(:quota) handle_info returns :halt for antigravity broadcasts", %{conn: conn} do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+
+      {:ok, view, html} = live(conn, ~p"/")
+      assert html =~ "Claude"
+      refute html =~ "Antigravity"
+
+      # Broadcast an antigravity update
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}], provider: "antigravity")
+
+      html2 = render(view)
+      refute html2 =~ "Antigravity"
+    end
   end
 end
