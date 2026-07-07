@@ -21,6 +21,7 @@ defmodule Arbiter.Quota do
   use Ash.Domain
 
   alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.CloudCode
   alias Arbiter.Tasks.Workspace
   require Ash.Query
 
@@ -201,6 +202,57 @@ defmodule Arbiter.Quota do
       oauth_utilization_7d: q.oauth_utilization_7d,
       oauth_captured_at: iso(q.oauth_captured_at)
     }
+  end
+
+  # ---- Google Cloud Code Assist quota (bd-57ukgb) ------------------------
+
+  @doc """
+  On-demand Gemini CLI + Antigravity quota snapshots via the Cloud Code Assist
+  API (`Arbiter.Quota.CloudCode`).
+
+  Returns `%{gemini: snapshot | nil, antigravity: snapshot | nil}`. Unlike the
+  Anthropic snapshot — a passive DB read of proxy-captured headers — these fetch
+  live from Google, so both providers are queried concurrently and each is
+  bounded by a timeout; a hung or crashed fetch degrades to `nil`.
+
+  Gated by the `:arbiter, :cloud_code_quota` `:enabled` flag (default on; the
+  test env turns it off so `GET /api/quota` stays a pure DB read there). Pass
+  `enabled: true` in `opts` to force the live path in a test that stubs HTTP.
+
+  Options are forwarded to `CloudCode.gemini/1` and `CloudCode.antigravity/1`
+  (`:creds_path`, `:project_id`, `:plug`, `:receive_timeout`).
+  """
+  @spec google_snapshots(keyword()) :: %{gemini: map() | nil, antigravity: map() | nil}
+  def google_snapshots(opts \\ []) do
+    if google_enabled?(opts) do
+      fetch_opts = Keyword.delete(opts, :enabled)
+
+      gemini = Task.async(fn -> CloudCode.gemini(fetch_opts) end)
+      antigravity = Task.async(fn -> CloudCode.antigravity(fetch_opts) end)
+
+      %{
+        gemini: await_snapshot(gemini),
+        antigravity: await_snapshot(antigravity)
+      }
+    else
+      %{gemini: nil, antigravity: nil}
+    end
+  end
+
+  defp google_enabled?(opts) do
+    case Keyword.fetch(opts, :enabled) do
+      {:ok, val} -> val == true
+      :error -> Application.get_env(:arbiter, :cloud_code_quota, [])[:enabled] != false
+    end
+  end
+
+  # CloudCode fetchers never raise, but bound the wall time anyway so a stalled
+  # Google endpoint can't hang the quota surface. A timeout / crash → nil.
+  defp await_snapshot(task) do
+    case Task.yield(task, 20_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _ -> nil
+    end
   end
 
   @doc """

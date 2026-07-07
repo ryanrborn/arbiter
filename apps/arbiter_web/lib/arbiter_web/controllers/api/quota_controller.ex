@@ -21,6 +21,9 @@ defmodule ArbiterWeb.Api.QuotaController do
       stays a top-level key rather than joining `quotas`); `null` (with a
       `codex_message`) when Codex isn't authenticated or the usage API is
       unavailable.
+    * `gemini` / `antigravity` — live per-model Cloud Code Assist quota
+      (bd-57ukgb), each `null` when the corresponding CLI isn't authenticated
+      on this host.
   """
 
   use ArbiterWeb, :controller
@@ -33,13 +36,16 @@ defmodule ArbiterWeb.Api.QuotaController do
     case resolve_workspace_id(Map.get(params, "workspace")) do
       {:ok, ws_id} ->
         codex = Quota.Codex.fetch(ws_id)
+        google = Quota.google_snapshots()
 
         render(conn, :show,
           workspace_id: ws_id,
           claude: Quota.refresh_and_serialize(ws_id),
           quotas: Quota.list_serialized(ws_id),
           codex: codex.codex,
-          codex_message: codex.message
+          codex_message: codex.message,
+          gemini: google.gemini,
+          antigravity: google.antigravity
         )
 
       {:error, message} ->

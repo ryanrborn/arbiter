@@ -556,17 +556,22 @@ defmodule Arbiter.MCP.Tools do
   figures. `codex` is fetched live from OpenAI's rate-limit endpoint using the
   `codex` CLI's stored token; it is `nil` with a `codex_message` when Codex
   isn't authenticated or the usage API is unavailable (e.g. an expired token).
+  `gemini` / `antigravity` are live per-model Cloud Code Assist snapshots
+  (`nil` when that CLI isn't authenticated on this host).
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
       codex = Arbiter.Quota.Codex.fetch(ws_id)
+      google = Arbiter.Quota.google_snapshots()
 
       {:ok,
        %{
          claude: Arbiter.Quota.refresh_and_serialize(ws_id),
          codex: codex.codex,
-         codex_message: codex.message
+         codex_message: codex.message,
+         gemini: google.gemini,
+         antigravity: google.antigravity
        }}
     end
   end

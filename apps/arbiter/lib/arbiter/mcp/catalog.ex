@@ -211,7 +211,9 @@ defmodule Arbiter.MCP.Catalog do
           "proxy; `null` until the first proxied request), plus an on-demand per-model weekly " <>
           "utilization + extra_usage overage refresh. `codex`: OpenAI session + weekly " <>
           "windows fetched live from the rate-limit endpoint (`null` with a `codex_message` when " <>
-          "Codex isn't authenticated or the usage API is unavailable).",
+          "Codex isn't authenticated or the usage API is unavailable). `gemini` / `antigravity`: " <>
+          "live per-model Cloud Code Assist quota (`null` when that CLI isn't authenticated on " <>
+          "this host).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.quota_get/2
     },
@@ -1072,7 +1074,8 @@ defmodule Arbiter.MCP.Catalog do
           "activation_mode" => %{
             "type" => "string",
             "enum" => ["situational", "always_on"],
-            "description" => "always_on auto-invokes /<name>; situational advertises only (optional)."
+            "description" =>
+              "always_on auto-invokes /<name>; situational advertises only (optional)."
           },
           "code_only" => %{
             "type" => "boolean",
