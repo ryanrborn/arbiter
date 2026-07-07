@@ -79,6 +79,13 @@ defmodule ArbiterCli.ConfigSchema do
                           {"economy":"haiku","standard":"sonnet","premium":"opus"}
         thinking_argv     map, thinking level -> extra CLI argv, e.g.
                           {"high":["--effort","high"]}
+        <provider>        (claude|gemini|codex) map — per-provider override
+                          scope. In a multi-provider pool the flat keys above
+                          are SHARED by every provider; nest an override here
+                          to scope it to one adapter, e.g.
+                          agent.config.codex.tier_models. A provider's own
+                          sub-map is merged over the flat keys for that
+                          provider only, so it never leaks to another.
       security        map — see "security" below; layered under agent.security
                       (workspace-level override of the install-wide default)
 

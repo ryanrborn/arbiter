@@ -4,10 +4,21 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   Mirrors `Arbiter.Agents.Claude.Config`. The active workspace config is
   seeded by `Arbiter.Agents.prepare/1` and stored in the process dictionary.
+
+  In a multi-provider pool the flat `agent.config` keys (`tier_models`,
+  `thinking_argv`, …) are shared across every adapter; nest an override under
+  the `"gemini"` key (e.g. `agent.config["gemini"]["tier_models"]`) to scope it
+  to this adapter alone. See `Arbiter.Agents.ProviderConfig` (applied at
+  `put_active/2`) and `Arbiter.Agents.Claude.Config` for the full shape.
   """
 
   alias Arbiter.Agents.CredentialsRef
+  alias Arbiter.Agents.ProviderConfig
   alias Arbiter.Tasks.Workspace
+
+  # Provider name used to scope per-provider overrides in a shared
+  # multi-provider `agent.config` (see `Arbiter.Agents.ProviderConfig`).
+  @provider "gemini"
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @rotation_key {__MODULE__, :api_key_rotation_index}
@@ -58,13 +69,16 @@ defmodule Arbiter.Agents.Gemini.Config do
 
   def put_active(%Workspace{config: config} = workspace, role)
       when role in [:agent, :review_agent] do
-    raw = get_in(config || %{}, [Atom.to_string(role), "config"]) || %{}
+    raw =
+      (get_in(config || %{}, [Atom.to_string(role), "config"]) || %{})
+      |> ProviderConfig.apply_overrides(@provider)
+
     Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     :ok
   end
 
   def put_active(%{} = raw, _role) do
-    Process.put(@pdict_key, raw)
+    Process.put(@pdict_key, ProviderConfig.apply_overrides(raw, @provider))
     :ok
   end
 
