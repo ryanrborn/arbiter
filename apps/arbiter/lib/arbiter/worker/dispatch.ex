@@ -1243,11 +1243,17 @@ defmodule Arbiter.Worker.Dispatch do
           depth: Keyword.get(opts, :depth, 0)
         )
 
-      Arbiter.MCP.AgentConfig.write(resolve_mcp_provider(task, opts), worktree_path,
+      provider = resolve_mcp_provider(task, opts)
+
+      write_opts = [
         mcp_url: Arbiter.MCP.server_url(),
         scope_token: token,
         server_name: Arbiter.MCP.server_name()
-      )
+      ]
+
+      result = Arbiter.MCP.AgentConfig.write(provider, worktree_path, write_opts)
+      _ = maybe_verify_codex_mcp_connection(task, provider, result, write_opts)
+      result
     else
       :ok
     end
@@ -1257,6 +1263,36 @@ defmodule Arbiter.Worker.Dispatch do
       Logger.warning("Arbiter.Worker.Dispatch: MCP config injection failed: #{inspect(e)}")
       :ok
   end
+
+  # Codex MCP support has reports of *silent* connect failures (its own
+  # moduledoc: `Arbiter.MCP.AgentConfig.Codex`) — the process starts, the config
+  # file is on disk, but the session never actually reaches Arbiter's MCP
+  # server, e.g. because the wrong bearer token landed in `.codex/config.toml`.
+  # Fire the module's own `verify_connection/1` off the dispatch path right
+  # after a successful write so that failure surfaces as a loud log line
+  # immediately, instead of only showing up later as a credential-watchdog
+  # false positive that requires live debugging to explain (bd-bi5t54).
+  defp maybe_verify_codex_mcp_connection(%Issue{id: task_id}, :codex, :ok, write_opts) do
+    Task.Supervisor.start_child(Arbiter.Worker.MCPVerifySupervisor, fn ->
+      require Logger
+
+      case Arbiter.MCP.AgentConfig.Codex.verify_connection(write_opts) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "Arbiter.Worker.Dispatch: Codex MCP connect check failed for task=#{task_id}: " <>
+              inspect(reason) <>
+              " — .codex/config.toml was written but the session may never reach Arbiter's MCP server"
+          )
+      end
+    end)
+
+    :ok
+  end
+
+  defp maybe_verify_codex_mcp_connection(_task, _provider, _write_result, _write_opts), do: :ok
 
   # Resolve the layered effective skill set for this dispatch (workspace → repo
   # → per-task, with opt-out and code-awareness — see `Arbiter.Skills.Selection`).
@@ -1314,7 +1350,11 @@ defmodule Arbiter.Worker.Dispatch do
   #   2. `:agent_type` explicit provider override.
   #   3. Workspace default via `Agents.for_workspace`.
   # Falls back to :claude on any error so a misconfigured workspace never blocks a
-  # dispatch.
+  # dispatch — but logs the real exception first (bd-bi5t54): a bare `rescue _ ->
+  # :claude` here previously swallowed whatever actually raised, so an explicit
+  # `agent_type: :codex` dispatch that hit this clause would silently write
+  # Claude's `.mcp.json` into the worktree with zero signal as to why, and Codex
+  # would then 401 on its MCP handshake with nothing pointing back here.
   defp resolve_mcp_provider(%Issue{} = task, opts) do
     adapter =
       case Keyword.get(opts, :agent_adapter) do
@@ -1330,7 +1370,16 @@ defmodule Arbiter.Worker.Dispatch do
 
     String.to_existing_atom(adapter.provider())
   rescue
-    _ -> :claude
+    e ->
+      require Logger
+
+      Logger.error(
+        "Arbiter.Worker.Dispatch: resolve_mcp_provider fell back to :claude for task=#{task.id} " <>
+          "(opts agent_type=#{inspect(Keyword.get(opts, :agent_type))}): " <>
+          Exception.format(:error, e, __STACKTRACE__)
+      )
+
+      :claude
   end
 
   defp load_workspace(%Issue{workspace_id: nil}), do: nil
