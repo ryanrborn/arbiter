@@ -351,6 +351,11 @@ defmodule Arbiter.Worker.Watchdog do
           # external tracker moves to its "approved, awaiting merge" status
           # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
           pending_merge_synced: false,
+          # Fired once when an approved + mergeable MR is parked on an
+          # auto_merge:false lane, so the coordinator inbox is paged that the PR
+          # is ready for a manual merge decision instead of parking silently
+          # forever. Debounced like `pending_merge_synced`. (bd-b4pwxa)
+          approved_merge_notified: false,
           # Auto-resolve of an approved `:conflict` block (#354, Phase 2b).
           #   auto_resolve_conflict  — master switch (workspace-tunable).
           #   conflict_resolver      — module that dispatches the rebase acolyte.
@@ -488,22 +493,68 @@ defmodule Arbiter.Worker.Watchdog do
     end
   end
 
-  defp apply_outcome(:approved, _result, %{pending_merge_synced: false} = state) do
-    # Approved but auto_merge is off: the review passed yet we can't merge yet
-    # (other releases in-flight). Move the external tracker to its parked-but-
-    # approved status (Jira VR -> Pending Merge) once, then keep polling for a
-    # human merge. (bd-c4cfuv)
-    sync_tracker_pending_merge(state)
-    reschedule(%{state | pending_merge_synced: true})
-  end
-
-  defp apply_outcome(:approved, _result, state) do
-    # Already synced to Pending Merge; just keep polling. The next poll that
-    # sees :merged will complete.
+  defp apply_outcome(:approved, result, %{auto_merge: false} = state) do
+    # Approved but auto_merge is off: the review passed yet the fleet will not
+    # merge — a human decides. Two once-latched side effects, then keep polling
+    # for the human merge (the next poll that sees :merged completes):
+    #
+    #   * `sync_tracker_pending_merge` moves the external tracker to its parked-
+    #     but-approved status (Jira VR -> Pending Merge). (bd-c4cfuv)
+    #   * `notify_awaiting_manual_merge` pages the coordinator INBOX that the PR
+    #     is ready for a manual merge decision. Without this, an approved+done
+    #     PR on an auto_merge:false lane parked *silently* — nothing was ever
+    #     written to the coordinator inbox, so a ready-to-merge PR could sit
+    #     indefinitely until someone happened to poll `arb worker list`.
+    #     auto_merge:false must mean "ask a human", not "say nothing". (bd-b4pwxa)
+    state = maybe_sync_pending_merge(state)
+    state = maybe_notify_awaiting_manual_merge(state, result)
     reschedule(state)
   end
 
   defp apply_outcome(:pending, _result, state), do: reschedule(state)
+
+  # Sync the external tracker to its parked-but-approved status exactly once per
+  # Watchdog episode (bd-c4cfuv).
+  defp maybe_sync_pending_merge(%{pending_merge_synced: true} = state), do: state
+
+  defp maybe_sync_pending_merge(state) do
+    sync_tracker_pending_merge(state)
+    %{state | pending_merge_synced: true}
+  end
+
+  # Page the coordinator inbox once that an approved PR on an auto_merge:false
+  # lane is ready for a manual merge (bd-b4pwxa). Skip when a block is
+  # outstanding: `merge_blocked/3` already escalates those, and this message is
+  # specifically "approved + mergeable + nothing left but the human merge".
+  #
+  # `effective_block_reason/1 != nil` covers an *approved* PR with a genuine
+  # block (handled by `handle_block/3`); the raw `:needs_nonauthor_approval`
+  # covers the fleet-authored-PR case (handled by `handle_nonauthor_approval/2`),
+  # which classifies as pending on the forge yet still routes here via
+  # `effective_outcome/2`. Both already page the coordinator, so suppress the
+  # duplicate here. Self-latched on `approved_merge_notified` so it fires once.
+  defp maybe_notify_awaiting_manual_merge(%{approved_merge_notified: true} = state, _result),
+    do: state
+
+  defp maybe_notify_awaiting_manual_merge(state, result) do
+    if awaiting_manual_merge?(result) do
+      safe(fn ->
+        Arbiter.Messages.AdmiralNotifier.approved_awaiting_merge(
+          snapshot(state),
+          state.mr_ref,
+          state.via_review_gate
+        )
+      end)
+
+      %{state | approved_merge_notified: true}
+    else
+      state
+    end
+  end
+
+  defp awaiting_manual_merge?(result) do
+    effective_block_reason(result) == nil and block_reason(result) != :needs_nonauthor_approval
+  end
 
   # Fire the approved-but-parked tracker hook. Best-effort + loud-on-failure
   # inside `Arbiter.Trackers.Sync`; an unreadable task just skips.

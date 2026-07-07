@@ -227,12 +227,14 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         _ -> ""
       end
 
+    consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
+
     """
     You are a code reviewer. Review the unified diff below for correctness,
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{consumer_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [
@@ -255,6 +257,29 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     --- END DIFF ---
     """
   end
+
+  # Repo-scoped reviews (bd-5xsp25) carry a deterministic cross-file consumer
+  # trace in `state[:consumer_refs]` (see `ConsumerTrace`) — fold it into the
+  # prompt as extra context so the reviewer can flag a call site the diff
+  # itself never shows. Diff-scoped reviews have no `:consumer_refs` and get
+  # no extra section, so the prompt is byte-for-byte unchanged from before.
+  defp consumer_refs_section(refs) when is_list(refs) and refs != [] do
+    lines =
+      Enum.map(refs, fn ref ->
+        "  - #{ref.file}:#{ref.line} calls `#{ref.identifier}` — #{ref.snippet}"
+      end)
+
+    """
+    The diff changes an identifier with the following call sites elsewhere in \
+    the repo (not shown in the diff itself). Check whether the change breaks \
+    any of these callers:
+
+    #{Enum.join(lines, "\n")}
+
+    """
+  end
+
+  defp consumer_refs_section(_refs), do: ""
 
   # The model occasionally surrounds its JSON with prose ("Here's the
   # review:") despite the prompt. Be permissive: pull the first balanced

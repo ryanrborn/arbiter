@@ -1070,6 +1070,7 @@ defmodule Arbiter.MCP.Tools do
           tracker_context_type: fetch_string(args, "tracker_context_type")
         ]
         |> maybe_put_kw(:follow_up, follow_up)
+        |> maybe_put_kw(:scope, fetch_string(args, "scope"))
 
       case Arbiter.Reviews.ExternalReview.dispatch(opts) do
         {:ok, ack} ->
