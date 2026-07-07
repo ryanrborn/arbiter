@@ -1,6 +1,6 @@
 defmodule ArbiterCli.Cmd.Dispatch do
   @moduledoc """
-  `arb dispatch <task-id> [<repo>] [--provider claude|gemini | --no-agent] [--model <name>]`
+  `arb dispatch <task-id> [<repo>] [--provider claude|gemini|codex | --no-agent] [--model <name>]`
   — spawn a worker to work on a task.
 
   POSTs to `/api/workers/dispatch`. The server transitions the task to
@@ -14,10 +14,11 @@ defmodule ArbiterCli.Cmd.Dispatch do
 
   Flags:
     --provider <p>   force the worker provider regardless of the workspace's
-                     `agent.type`. One of `claude` | `gemini`. `claude`
-                     requires the `claude` CLI on PATH (consumes Anthropic
-                     credits); `gemini` requires the `agy`/`gemini` CLI on PATH
-                     (consumes Google credits).
+                     `agent.type`. One of `claude` | `gemini` | `codex`.
+                     `claude` requires the `claude` CLI on PATH (consumes
+                     Anthropic credits); `gemini` requires the `agy`/`gemini`
+                     CLI on PATH (consumes Google credits); `codex` requires the
+                     `codex` CLI on PATH (consumes OpenAI credits).
     --with-claude    DEPRECATED alias for `--provider claude`.
     --with-gemini    DEPRECATED alias for `--provider gemini`.
     --no-agent       dry dispatch — park the task in `:in_progress` for a hand
@@ -41,7 +42,9 @@ defmodule ArbiterCli.Cmd.Dispatch do
     model: :string
   ]
 
-  @providers ~w(claude gemini)
+  # Mirrors Arbiter.Agents.valid_agent_types/0 (the arbiter app is only a
+  # test-time dep here, so the escript can't call it at runtime). Keep in sync.
+  @providers ~w(claude gemini codex)
 
   def run(argv) do
     if Output.help?(argv) do
