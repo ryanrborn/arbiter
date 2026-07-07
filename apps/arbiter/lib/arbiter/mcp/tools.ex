@@ -2419,6 +2419,9 @@ defmodule Arbiter.MCP.Tools do
       Map.get(args, "provider") == "gemini" ->
         :gemini
 
+      Map.get(args, "provider") == "codex" ->
+        :codex
+
       Map.get(args, "with_claude") in [true, "true"] ->
         :claude
 

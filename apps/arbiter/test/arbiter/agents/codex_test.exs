@@ -197,4 +197,129 @@ defmodule Arbiter.Agents.CodexTest do
       assert ["sh", "-c", _script, "sh", ^codex, "exec" | _rest] = argv
     end
   end
+
+  describe "prompt_tmpfile/1 and splice_prompt/2" do
+    test "prompt_tmpfile/1 extracts the temp file path for stdin-mode argv" do
+      argv = [
+        "sh",
+        "-c",
+        "f=\"$1\"; shift; exec \"$@\" < \"$f\"",
+        "sh",
+        "/tmp/arb_codex_prompt_12345.txt",
+        "/path/to/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--",
+        "-"
+      ]
+
+      assert Codex.prompt_tmpfile(argv) == "/tmp/arb_codex_prompt_12345.txt"
+    end
+
+    test "prompt_tmpfile/1 returns nil for inline-mode argv" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/path/to/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--",
+        "some prompt"
+      ]
+
+      assert Codex.prompt_tmpfile(argv) == nil
+    end
+
+    test "splice_prompt/2 replaces prompt for inline-mode argv (nudge)" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/path/to/codex",
+        "exec",
+        "--json",
+        "--",
+        "original prompt"
+      ]
+
+      assert {:ok, new_argv} = Codex.splice_prompt(argv, ["nudge prompt"])
+
+      assert new_argv == [
+               "sh",
+               "-c",
+               "exec \"$@\" < /dev/null",
+               "sh",
+               "/path/to/codex",
+               "exec",
+               "--json",
+               "--",
+               "nudge prompt"
+             ]
+    end
+
+    test "splice_prompt/2 replaces prompt for stdin-mode argv and switches to inline (nudge)" do
+      argv = [
+        "sh",
+        "-c",
+        "f=\"$1\"; shift; exec \"$@\" < \"$f\"",
+        "sh",
+        "/tmp/arb_codex_prompt_12345.txt",
+        "/path/to/codex",
+        "exec",
+        "--json",
+        "--",
+        "-"
+      ]
+
+      assert {:ok, new_argv} = Codex.splice_prompt(argv, ["nudge prompt"])
+
+      assert new_argv == [
+               "sh",
+               "-c",
+               "exec \"$@\" < /dev/null",
+               "sh",
+               "/path/to/codex",
+               "exec",
+               "--json",
+               "--",
+               "nudge prompt"
+             ]
+    end
+
+    test "splice_prompt/2 rebuilds argv for resume" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/path/to/codex",
+        "exec",
+        "--json",
+        "--",
+        "original prompt"
+      ]
+
+      assert {:ok, new_argv} =
+               Codex.splice_prompt(argv, ["--resume", "sess-123", "continue prompt"])
+
+      assert new_argv == [
+               "sh",
+               "-c",
+               "exec \"$@\" < /dev/null",
+               "sh",
+               "/path/to/codex",
+               "exec",
+               "resume",
+               "--json",
+               "--",
+               "sess-123",
+               "continue prompt"
+             ]
+    end
+  end
 end
