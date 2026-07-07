@@ -612,6 +612,95 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
+    test "codex agent_type dispatch writes .codex/config.toml, not .mcp.json (bd-bi5t54)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      codex_file = Path.join(tmp, "codex-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "codex", codex_file)
+
+      repo = seed_repo!(tmp, "codex-mcp-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "codex-mcp-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"codexmcp/repo" => repo})
+      enable_mcp_injection!()
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      # Workspace's `agent.type` pool deliberately excludes codex — mirrors the
+      # live `default` workspace so the explicit override must win.
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"type" => ["claude", "gemini"]}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "codex mcp task", workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "codexmcp/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :codex,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(codex_file)
+
+      assert File.exists?(Path.join(result.worktree_path, ".codex/config.toml")),
+             "codex dispatch must write .codex/config.toml, not fall back to .mcp.json"
+
+      refute File.exists?(Path.join(result.worktree_path, ".mcp.json"))
+    end
+
+    test "codex dispatch runs a post-spawn MCP connect check and logs loudly on failure (bd-bi5t54)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      codex_file = Path.join(tmp, "codex-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "codex", codex_file)
+
+      repo = seed_repo!(tmp, "codex-verify-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "codex-verify-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"codexverify/repo" => repo})
+      enable_mcp_injection!()
+
+      # Point the MCP endpoint at a closed local port so the post-spawn connect
+      # check fails fast with a connection-refused error, exercising the
+      # verify_connection/1 wiring end to end.
+      prior_url = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp"))
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+        Application.put_env(:arbiter, Arbiter.MCP, prior_url)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "codex verify task", workspace_id: ws.id})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, _result} =
+            Dispatch.dispatch(task.id,
+              repo: "codexverify/repo",
+              start_driver: false,
+              start_claude: true,
+              agent_type: :codex,
+              preflight: false
+            )
+
+          _ = wait_for_argv!(codex_file)
+          # The check runs off the dispatch path (Task.Supervisor) — give it a
+          # moment to complete against the closed port.
+          Process.sleep(300)
+        end)
+
+      assert log =~ "Codex MCP connect check failed"
+    end
+
     test ".mcp.json is not tracked after being untracked from git",
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "gitignore-check")

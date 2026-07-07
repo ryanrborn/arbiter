@@ -59,6 +59,12 @@ defmodule Arbiter.Application do
       # path: the CLI/MCP call returns a "dispatched" ack immediately while the
       # CodeReview adapter workflow posts findings + a verdict to the PR.
       {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
+      # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
+      # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
+      # it starts without error but never reaches the MCP server — so a worker
+      # dispatch fires this off the dispatch path right after injecting the
+      # config, rather than requiring live debugging to notice a wedged worker.
+      {Task.Supervisor, name: Arbiter.Worker.MCPVerifySupervisor},
       MergeQueueSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.PRPatrolRegistry},
       PRPatrolSupervisor,
