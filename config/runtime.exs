@@ -43,3 +43,16 @@ if config_env() == :prod do
 
   config :arbiter, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 end
+
+if config_env() == :dev do
+  secret_key_base =
+    System.get_env("SECRET_KEY_BASE") ||
+      raise """
+      environment variable SECRET_KEY_BASE is missing.
+
+      Generate one with `mix phx.gen.secret` and add it to .arbiter.env:
+        SECRET_KEY_BASE=<generated-value>
+      """
+
+  config :arbiter_web, ArbiterWeb.Endpoint, secret_key_base: secret_key_base
+end
