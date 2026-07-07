@@ -356,6 +356,62 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
     end
   end
 
+  describe "approved_awaiting_merge/3 (bd-b4pwxa)" do
+    defp only_await_escalation(ws) do
+      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      escalation
+    end
+
+    test "raises an addressed escalation that the approved PR awaits a manual merge" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.approved_awaiting_merge(
+                 %{task_id: task_id, workspace_id: ws},
+                 "!314",
+                 false
+               )
+
+      escalation = only_await_escalation(ws)
+      assert escalation.kind == :escalation
+      assert escalation.to_ref == "admiral"
+      assert escalation.directive_ref == task_id
+      assert escalation.from_ref == task_id
+      assert escalation.subject =~ task_id
+      assert escalation.subject =~ "awaiting manual merge"
+      assert escalation.body =~ "PR/MR: !314"
+      assert escalation.body =~ "auto_merge"
+      # Actionable: it tells the coordinator to merge or flip the policy.
+      assert escalation.body =~ "merge"
+    end
+
+    test "names the ReviewGate as the approval source when via_review_gate is true" do
+      ws = uniq("ws")
+      task_id = uniq("bd")
+
+      assert :ok =
+               AdmiralNotifier.approved_awaiting_merge(
+                 %{task_id: task_id, workspace_id: ws},
+                 "!42",
+                 true
+               )
+
+      assert only_await_escalation(ws).body =~ "ReviewGate"
+    end
+
+    test "an approved-awaiting-merge with no workspace posts nothing" do
+      assert :ok =
+               AdmiralNotifier.approved_awaiting_merge(
+                 %{task_id: "bd-noworkspace", workspace_id: nil},
+                 "!1",
+                 false
+               )
+
+      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+    end
+  end
+
   describe "tracker_sync_failed/3 (bd-1dun7v)" do
     defp only_tracker_escalation(ws) do
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)
