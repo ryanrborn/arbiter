@@ -934,8 +934,19 @@ defmodule Arbiter.MCP.Catalog do
             "description" => "Dotted config key to set (e.g. \"merge.auto_merge\"). Required."
           },
           "value" => %{
+            "oneOf" => [
+              %{"type" => "boolean"},
+              %{"type" => "integer"},
+              %{"type" => "number"},
+              %{"type" => "string"},
+              %{"type" => "object"},
+              %{"type" => "array"},
+              %{"type" => "null"}
+            ],
             "description" =>
-              "Value to assign. Accepts any JSON type: boolean, integer, string, object, array, or null."
+              "Value to assign. Accepts any JSON type: boolean, integer, string, object, array, " <>
+                "or null. Pass a real JSON array/object for list/nested keys (e.g. " <>
+                "[\"claude\", \"gemini\"]) — do NOT pass a JSON-encoded string."
           }
         },
         "required" => ["key", "value"],

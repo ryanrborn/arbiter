@@ -2562,9 +2562,32 @@ defmodule Arbiter.MCP.Tools do
   defp require_config_value(args) do
     case Map.fetch(args, "value") do
       :error -> {:error, {:invalid, "`value` is required"}}
-      {:ok, v} -> {:ok, v}
+      {:ok, v} -> {:ok, unwrap_stringified_json(v)}
     end
   end
+
+  # Some MCP tool-calling clients serialize an array/object argument into a
+  # JSON-encoded string before sending it (bd-1dtufq) rather than an actual
+  # JSON array/object value, even though the tool's input_schema advertises
+  # array/object as valid. Detect that shape and decode it, so
+  # `agent.type: "[\"claude\", \"gemini\"]"` is treated the same as a real
+  # `["claude", "gemini"]`. A string that merely starts with `[`/`{` but
+  # isn't valid JSON, or decodes to a scalar, is left untouched — only
+  # unambiguous list/map decodes are unwrapped.
+  defp unwrap_stringified_json(v) when is_binary(v) do
+    trimmed = String.trim(v)
+
+    if String.starts_with?(trimmed, "[") or String.starts_with?(trimmed, "{") do
+      case Jason.decode(trimmed) do
+        {:ok, decoded} when is_list(decoded) or is_map(decoded) -> decoded
+        _ -> v
+      end
+    else
+      v
+    end
+  end
+
+  defp unwrap_stringified_json(v), do: v
 
   # Build a nested map from a dotted-path segment list and a leaf value.
   defp config_put_in_path(map, [k], value) when is_map(map), do: Map.put(map, k, value)
