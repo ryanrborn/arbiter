@@ -139,6 +139,17 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert ws.config["agent"]["type"] == ["claude", "gemini"]
     end
 
+    test "accepts agent.type / review_agent.type set to codex" do
+      config = %{
+        "agent" => %{"type" => "codex"},
+        "review_agent" => %{"type" => ["codex", "claude"]}
+      }
+
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-codex", config: config})
+      assert ws.config["agent"]["type"] == "codex"
+      assert ws.config["review_agent"]["type"] == ["codex", "claude"]
+    end
+
     test "accepts agent.type as a single-element list" do
       config = %{"agent" => %{"type" => ["gemini"]}}
       assert {:ok, ws} = Ash.create(Workspace, %{name: "agent-singleton-list", config: config})
