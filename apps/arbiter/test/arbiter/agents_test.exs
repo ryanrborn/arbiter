@@ -25,9 +25,13 @@ defmodule Arbiter.AgentsTest do
       assert Agents.for_type(:claude) == Claude
     end
 
-    test "for_type/1 raises for unregistered types (codex/aider not shipped)" do
-      assert_raise ArgumentError, ~r/no agent adapter registered for :codex/, fn ->
-        Agents.for_type(:codex)
+    test "for_type/:codex resolves to the Codex adapter" do
+      assert Agents.for_type(:codex) == Arbiter.Agents.Codex
+    end
+
+    test "for_type/1 raises for unregistered types (aider not shipped)" do
+      assert_raise ArgumentError, ~r/no agent adapter registered for :aider/, fn ->
+        Agents.for_type(:aider)
       end
     end
   end
@@ -54,11 +58,15 @@ defmodule Arbiter.AgentsTest do
 
   describe "adapters/0 + valid_agent_types/0" do
     test "adapters/0 exposes the registered map" do
-      assert Agents.adapters() == %{claude: Claude, gemini: Arbiter.Agents.Gemini}
+      assert Agents.adapters() == %{
+               claude: Claude,
+               gemini: Arbiter.Agents.Gemini,
+               codex: Arbiter.Agents.Codex
+             }
     end
 
-    test "valid_agent_types/0 is `[\"claude\", \"gemini\"]`" do
-      assert Agents.valid_agent_types() == ["claude", "gemini"]
+    test "valid_agent_types/0 is `[\"claude\", \"gemini\", \"codex\"]`" do
+      assert Agents.valid_agent_types() == ["claude", "gemini", "codex"]
     end
   end
 
@@ -67,6 +75,7 @@ defmodule Arbiter.AgentsTest do
       on_exit(fn ->
         Claude.Config.clear()
         Arbiter.Agents.Gemini.Config.clear()
+        Arbiter.Agents.Codex.Config.clear()
       end)
 
       :ok
@@ -75,12 +84,15 @@ defmodule Arbiter.AgentsTest do
     test "nil workspace clears the per-process active config" do
       Claude.Config.put_active(%{"model" => "opus"})
       Arbiter.Agents.Gemini.Config.put_active(%{"model" => "gemini-medium"})
+      Arbiter.Agents.Codex.Config.put_active(%{"model" => "gpt-5-codex"})
       assert Claude.Config.active_model() == "opus"
       assert Arbiter.Agents.Gemini.Config.active_model() == "gemini-medium"
+      assert Arbiter.Agents.Codex.Config.active_model() == "gpt-5-codex"
 
       assert Agents.prepare(nil) == :ok
       assert Claude.Config.active_model() == nil
       assert Arbiter.Agents.Gemini.Config.active_model() == nil
+      assert Arbiter.Agents.Codex.Config.active_model() == nil
     end
 
     test "seeds configurations from the workspace `agent.config`" do
@@ -93,6 +105,7 @@ defmodule Arbiter.AgentsTest do
       assert Agents.prepare(ws) == :ok
       assert Claude.Config.active_model() == "sonnet"
       assert Arbiter.Agents.Gemini.Config.active_model() == "sonnet"
+      assert Arbiter.Agents.Codex.Config.active_model() == "sonnet"
     end
 
     test "prepare/2 with :review_agent seeds the reviewer config block" do
