@@ -15,10 +15,16 @@ defmodule ArbiterWeb.LiveHooks do
   workspace and assigns the list as `:quotas` on the socket (`[]` when
   nothing has been captured yet).
 
-  **Temporary:** Codex provider is filtered from the quota list while dispatch
-  is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54). Showing quota bars for a broken
-  provider implies it's dispatchable when it isn't. Once dispatch is fixed,
-  remove the filter and this comment.
+  **Temporary:** These providers are filtered from the quota list pending fixes:
+  - Codex: dispatch is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54). Showing quota
+    bars for a broken provider implies it's dispatchable when it isn't. Once
+    dispatch is fixed, remove the filter.
+  - Gemini CLI: deprecated and has no reconnect path; reports "project id not
+    available; reconnect" (bd-5r6cdy).
+  - Antigravity: quota is only checkable while app is actively open and recently
+    refreshed; token stales ~1h after app closes (bd-5r6cdy).
+
+  Once these are fixed, remove them from @hidden_providers and this comment.
   """
 
   import Phoenix.Component, only: [assign: 3]
@@ -27,7 +33,7 @@ defmodule ArbiterWeb.LiveHooks do
   require Logger
 
   # Providers hidden from the UI pending fix; see module docstring for context.
-  @hidden_providers ["codex"]
+  @hidden_providers ["codex", "gemini_cli", "antigravity"]
 
   def on_mount(:current_path, _params, _session, socket) do
     socket =
