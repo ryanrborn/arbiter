@@ -26,6 +26,7 @@ defmodule Arbiter.Quota do
 
   resources do
     resource Arbiter.Quota.AnthropicQuota
+    resource Arbiter.Quota.CodexQuota
   end
 
   @default_provider "claude"
