@@ -717,6 +717,146 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "codex exec --json parsing" do
+    test "codex events render display lines and summarize the run" do
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("codex-text")
+      topic = "worker:#{task_id}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      events = [
+        %{"type" => "task_started", "turn_id" => "t1", "model_context_window" => 258_400},
+        %{"type" => "agent_message", "message" => "doing the work", "phase" => "final_answer"},
+        %{
+          "type" => "token_count",
+          "info" => %{
+            "total_token_usage" => %{
+              "input_tokens" => 100,
+              "cached_input_tokens" => 10,
+              "output_tokens" => 20,
+              "total_tokens" => 120
+            }
+          }
+        },
+        %{
+          "type" => "task_complete",
+          "last_agent_message" => "doing the work",
+          "duration_ms" => 900
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          topic: topic,
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      wait_for_exit(pid)
+      state = Worker.state(pid)
+      lines = state.meta.output_lines
+
+      assert "doing the work" in lines
+      assert Enum.any?(lines, &String.contains?(&1, "codex session started"))
+      assert Enum.any?(lines, &String.contains?(&1, "codex session complete"))
+      refute state.status == :completed
+    end
+
+    test "arb done in codex agent_message text completes the worker" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("codex-done")
+
+      events = [
+        %{
+          "type" => "agent_message",
+          "message" => "wrapping up\narb done",
+          "phase" => "final_answer"
+        }
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+
+    test "arb done inside a codex exec command result does NOT complete" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("codex-toolresult")
+      :ok = Worker.advance(pid, :implement)
+
+      events = [
+        %{"type" => "exec_command_begin", "command" => ["grep", "-r", "arb done", "."]},
+        %{
+          "type" => "exec_command_end",
+          "exit_code" => 0,
+          "aggregated_output" => "match: 'arb done' in claude_session.ex"
+        },
+        %{"type" => "task_complete", "duration_ms" => 100}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      wait_for_exit(pid)
+
+      refute Worker.state(pid).status == :completed
+    end
+
+    test "codex events wrapped in an {id, msg} envelope are still parsed" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("codex-envelope")
+
+      # Some codex builds wrap each event as {"id": ..., "msg": {payload}}. The
+      # session must unwrap it so the inner agent_message still arms completion.
+      events = [
+        %{"id" => "0", "msg" => %{"type" => "agent_message", "message" => "all set\narb done"}}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+  end
+
   describe "concurrent workers" do
     test "each worker sees only its own output" do
       {pid_a, task_a} = start_worker()
