@@ -1841,6 +1841,32 @@ defmodule Arbiter.MCP.ToolsTest do
 
       on_exit(fn -> Worker.stop(task.id, :normal) end)
     end
+
+    # bd-dcvo3n: an unrecognized `provider` value must fail LOUDLY rather than
+    # silently falling back to the workspace-default agent. Before the fix the
+    # `dispatch_provider/1` catch-all mapped any unknown provider to `nil`
+    # ("use the workspace default"), so a typo — or `provider: "codex"` against
+    # a server too old to know it — silently spawned the default agent (Claude)
+    # with zero error/warning. The tell: the error is about the bad provider,
+    # NOT the (also-unconfigured) repo, proving we reject before dispatching.
+    test "an unrecognized provider is rejected loudly (not a silent default)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "bad provider", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_dispatch(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "kodex",
+                 "repo" => "test/repo"
+               })
+
+      assert msg =~ "provider"
+      assert msg =~ "kodex"
+      # It must NOT have fallen through to the real-work path (whose failure
+      # would be about the missing repo).
+      refute msg =~ "repo"
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+    end
   end
 
   describe "worker_list/2" do

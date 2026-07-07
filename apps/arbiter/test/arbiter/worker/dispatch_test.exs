@@ -892,6 +892,54 @@ defmodule Arbiter.Worker.DispatchTest do
       assert routing.model =~ "gemini"
     end
 
+    test "agent_type: :codex dispatches the Codex adapter, not Claude (bd-dcvo3n)",
+         %{ws: ws, tmp: tmp} do
+      claude_file = Path.join(tmp, "claude-argv.txt")
+      codex_file = Path.join(tmp, "codex-argv.txt")
+      :ok = stub_claude_on_path(tmp, claude_file)
+      :ok = stub_named_on_path(tmp, "codex", codex_file)
+
+      repo = seed_repo!(tmp, "codex-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "cwt"))
+      Application.put_env(:arbiter, :repo_paths, %{"c/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      # Workspace's `agent.type` pool deliberately excludes codex — mirrors the
+      # live `default` workspace (`["claude","gemini"]`) so the explicit override
+      # must win over the workspace default rather than fall back to it.
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{"agent" => %{"type" => ["claude", "gemini"]}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "codex task", workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "c/repo",
+          start_driver: false,
+          start_claude: true,
+          agent_type: :codex,
+          # WORK-spawn argv assertion — skip the auth pre-flight probe (bd-awi4nw)
+          # so its probe doesn't also write to the stub argv files.
+          preflight: false
+        )
+
+      codex_args = wait_for_argv!(codex_file)
+      # The Codex adapter ran (`codex exec --json ...`) — and Claude did not.
+      assert "exec" in codex_args
+      refute File.exists?(claude_file)
+
+      # The worker's routing config records the codex provider.
+      snap = Worker.state(result.worker_pid)
+      routing = snap.meta[:routing_config]
+      assert routing.provider == "codex"
+    end
+
     test "ByPriority routing picks --model from `routing.rules[Pn]`",
          %{ws: ws, tmp: tmp} do
       argv_file = Path.join(tmp, "argv.txt")

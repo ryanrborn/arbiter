@@ -177,6 +177,47 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       assert body["error"]["message"] =~ "repo"
     end
 
+    # bd-dcvo3n: `provider: "codex"` must take the real-work dispatch path with
+    # the codex agent — not silently fall back to the workspace default. With an
+    # unconfigured repo that path returns a 400 repo error, proving the provider
+    # was honored (a silent default would still error on repo, so the decisive
+    # check is the unknown-provider test below).
+    test "provider \"codex\" routes to a real worker dispatch (repo error)",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "codex-provider", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "provider" => "codex",
+          "repo" => "no-such-repo"
+        })
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "repo"
+    end
+
+    # bd-dcvo3n: an unrecognized `provider` must fail LOUDLY (400) rather than
+    # silently falling back to the workspace-default agent. The error must be
+    # about the bad provider, NOT the (also-unconfigured) repo — proving we
+    # reject before ever reaching the dispatch path.
+    test "an unrecognized provider is rejected with a 400 (not a silent default)",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "bad-provider", workspace_id: ws.id})
+
+      conn =
+        post(conn, ~p"/api/workers/dispatch", %{
+          "task_id" => task.id,
+          "provider" => "kodex",
+          "repo" => "no-such-repo"
+        })
+
+      body = json_response(conn, 400)
+      assert body["error"]["message"] =~ "provider"
+      assert body["error"]["message"] =~ "kodex"
+      refute body["error"]["message"] =~ "repo"
+    end
+
     test "returns 404 for an unknown task_id", %{conn: conn} do
       conn = post(conn, ~p"/api/workers/dispatch", %{"task_id" => "no-such-task"})
       assert json_response(conn, 404)
