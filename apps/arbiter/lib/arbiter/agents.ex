@@ -31,6 +31,7 @@ defmodule Arbiter.Agents do
   """
 
   alias Arbiter.Agents.Claude
+  alias Arbiter.Agents.Codex
   alias Arbiter.Agents.Gemini
   alias Arbiter.Agents.ProviderPool
   alias Arbiter.Tasks.Issue
@@ -40,10 +41,11 @@ defmodule Arbiter.Agents do
 
   @adapters %{
     claude: Claude,
-    gemini: Gemini
+    gemini: Gemini,
+    codex: Codex
   }
 
-  @valid_agent_types ~w(claude gemini)
+  @valid_agent_types ~w(claude gemini codex)
 
   @doc """
   Returns the adapter module for the given workspace.
@@ -134,12 +136,14 @@ defmodule Arbiter.Agents do
   def prepare(nil, _role) do
     Claude.Config.put_active(nil)
     Gemini.Config.put_active(nil)
+    Codex.Config.put_active(nil)
     :ok
   end
 
   def prepare(%Workspace{} = workspace, role) when role in [:agent, :review_agent] do
     Claude.Config.put_active(workspace, role)
     Gemini.Config.put_active(workspace, role)
+    Codex.Config.put_active(workspace, role)
     :ok
   end
 

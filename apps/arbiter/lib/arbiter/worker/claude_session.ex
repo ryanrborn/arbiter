@@ -363,6 +363,26 @@ defmodule Arbiter.Worker.ClaudeSession do
     end
   end
 
+  # Codex streams assistant output as `agent_message_delta` chunks too, so the
+  # sentinel can straddle a delta boundary the same way Gemini's can. Mirror the
+  # rolling-buffer safety net for codex sessions.
+  defp scan_split_done(%{provider: "codex", split_done_fired: true} = session, _event),
+    do: session
+
+  defp scan_split_done(%{provider: "codex"} = session, %{"type" => type} = event)
+       when type in ["agent_message", "agent_message_delta"] do
+    text = event["message"] || event["delta"] || ""
+    buf = scan_tail(Map.get(session, :split_done_buf, "") <> text)
+    session = Map.put(session, :split_done_buf, buf)
+
+    if Regex.match?(session.done_regex, buf) do
+      send(self(), {:__claude_session_done__, buf})
+      Map.put(session, :split_done_fired, true)
+    else
+      session
+    end
+  end
+
   defp scan_split_done(session, _event), do: session
 
   # Keep only the last 256 graphemes — enough to span a sentinel split across a
@@ -384,6 +404,15 @@ defmodule Arbiter.Worker.ClaudeSession do
     update_usage(
       session,
       Arbiter.Agents.Gemini.Stream.usage_fields(event, Map.get(session, :model))
+    )
+  end
+
+  # Codex's `exec --json` events carry a different schema again (token_count /
+  # task_complete / turn_context), so route them to the Codex stream parser.
+  defp absorb_usage(%{provider: "codex"} = session, event) do
+    update_usage(
+      session,
+      Arbiter.Agents.Codex.Stream.usage_fields(event, Map.get(session, :model))
     )
   end
 
@@ -449,6 +478,7 @@ defmodule Arbiter.Worker.ClaudeSession do
     label =
       case Map.get(session, :provider) do
         "gemini" -> Arbiter.Agents.Gemini.Stream.activity_for_event(event)
+        "codex" -> Arbiter.Agents.Codex.Stream.activity_for_event(event)
         _ -> activity_for_event(event)
       end
 
@@ -503,20 +533,35 @@ defmodule Arbiter.Worker.ClaudeSession do
   # Decode a line into a stream-json event map. We require it to look like a
   # JSON object with a "type" key so plain-text lines (which may parse as bare
   # JSON scalars, e.g. "42") fall through to the raw path.
+  #
+  # `normalize_event/1` also unwraps the two envelope shapes Codex's
+  # `exec --json` may use — a rollout-style `{"type":"event_msg","payload":{…}}`
+  # or an `{"id":…,"msg":{…}}` protocol wrapper — down to the inner payload
+  # (which carries its own `"type"`). Claude/Gemini events never match those
+  # wrapper clauses, so this is a no-op for them.
   defp decode_event(line) do
     with "{" <> _ <- String.trim_leading(line),
-         {:ok, %{"type" => _} = event} <- Jason.decode(line) do
+         {:ok, obj} when is_map(obj) <- Jason.decode(line),
+         {:ok, event} <- normalize_event(obj) do
       {:ok, event}
     else
       _ -> :error
     end
   end
 
+  defp normalize_event(%{"type" => "event_msg", "payload" => %{"type" => _} = p}), do: {:ok, p}
+  defp normalize_event(%{"msg" => %{"type" => _} = msg}), do: {:ok, msg}
+  defp normalize_event(%{"type" => _} = event), do: {:ok, event}
+  defp normalize_event(_), do: :error
+
   # Provider-aware dispatch: Gemini's stream-json events have a different shape,
   # so they're formatted by the Gemini parser. Claude (and the nil/default
   # provider) use the clauses below.
   defp format_event(event, %{provider: "gemini"}),
     do: Arbiter.Agents.Gemini.Stream.format_event(event)
+
+  defp format_event(event, %{provider: "codex"}),
+    do: Arbiter.Agents.Codex.Stream.format_event(event)
 
   defp format_event(event, _session), do: format_event(event)
 
