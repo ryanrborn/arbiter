@@ -315,7 +315,9 @@ defmodule Arbiter.Workflows.CodeReview do
   defp touches_sensitive_path?(diff, globs) do
     diff
     |> ConsumerTrace.changed_files()
-    |> Enum.any?(fn file -> Enum.any?(globs, &Arbiter.Worker.ReviewScope.glob_match?(&1, file)) end)
+    |> Enum.any?(fn file ->
+      Enum.any?(globs, &Arbiter.Worker.ReviewScope.glob_match?(&1, file))
+    end)
   end
 
   # ---- helpers -----------------------------------------------------------

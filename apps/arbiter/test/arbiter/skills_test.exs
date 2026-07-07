@@ -32,7 +32,11 @@ defmodule Arbiter.SkillsTest do
 
     test "casts a string activation_mode (MCP/REST shape) and rejects an invalid one" do
       {:ok, skill} =
-        Skills.create_skill(%{"name" => "always-skill", "body" => "b", "activation_mode" => "always_on"})
+        Skills.create_skill(%{
+          "name" => "always-skill",
+          "body" => "b",
+          "activation_mode" => "always_on"
+        })
 
       assert skill.activation_mode == :always_on
 

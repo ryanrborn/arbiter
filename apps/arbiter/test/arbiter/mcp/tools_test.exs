@@ -1910,7 +1910,12 @@ defmodule Arbiter.MCP.ToolsTest do
       Application.put_env(:arbiter, :repo_paths, %{"mcp/codex-repo" => repo})
 
       prior_mcp = Application.get_env(:arbiter, Arbiter.MCP)
-      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior_mcp || [], :inject_config, true))
+
+      Application.put_env(
+        :arbiter,
+        Arbiter.MCP,
+        Keyword.put(prior_mcp || [], :inject_config, true)
+      )
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)

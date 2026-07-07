@@ -307,7 +307,8 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
               severity: :warning,
               file: ref.file,
               line: ref.line,
-              message: "call site of changed function `#{ref.identifier}` — verify it still matches"
+              message:
+                "call site of changed function `#{ref.identifier}` — verify it still matches"
             }
           end)
 

@@ -589,7 +589,12 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       +  def sign(payload) do
       """
 
-      state = %{mode: :adapter, diff: diff, repo_path: repo, check_runner: fn _diff, _state -> {:ok, []} end}
+      state = %{
+        mode: :adapter,
+        diff: diff,
+        repo_path: repo,
+        check_runner: fn _diff, _state -> {:ok, []} end
+      }
 
       assert {:ok, result} = CodeReview.run_step(:run_checks, state)
       refute Map.has_key?(result, :consumer_refs)
@@ -1191,7 +1196,12 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       state = %{
         mode: :local,
         consumer_refs: [
-          %{identifier: "sign", file: "lib/verus/session.ex", line: 3, snippet: "Verus.Token.sign(payload)"}
+          %{
+            identifier: "sign",
+            file: "lib/verus/session.ex",
+            line: 3,
+            snippet: "Verus.Token.sign(payload)"
+          }
         ]
       }
 

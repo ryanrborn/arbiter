@@ -671,7 +671,12 @@ defmodule Arbiter.Worker.DispatchTest do
       # check fails fast with a connection-refused error, exercising the
       # verify_connection/1 wiring end to end.
       prior_url = Application.get_env(:arbiter, Arbiter.MCP)
-      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp"))
+
+      Application.put_env(
+        :arbiter,
+        Arbiter.MCP,
+        Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp")
+      )
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
