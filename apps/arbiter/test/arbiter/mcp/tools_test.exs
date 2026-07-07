@@ -285,36 +285,37 @@ defmodule Arbiter.MCP.ToolsTest do
       assert is_binary(result.codex_message)
     end
 
-    test "surfaces live Codex windows when authenticated", ctx do
-      path = Path.join(System.tmp_dir!(), "codex_auth_#{System.unique_integer([:positive])}.json")
-
-      File.write!(
-        path,
-        Jason.encode!(%{"tokens" => %{"access_token" => "AT", "account_id" => "AID"}})
-      )
-
-      prev = Application.get_env(:arbiter, :codex_quota, [])
-      Application.put_env(:arbiter, :codex_quota, auth_path: path)
-      Application.put_env(:arbiter, :codex_quota_http_stub, true)
-
-      on_exit(fn ->
-        File.rm(path)
-        Application.put_env(:arbiter, :codex_quota, prev)
-        Application.delete_env(:arbiter, :codex_quota_http_stub)
-      end)
-
-      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
-        Req.Test.json(conn, %{
-          "plan_type" => "plus",
-          "rate_limit" => %{
-            "primary_window" => %{"used_percent" => 33.0, "reset_at" => 1_782_247_200}
-          }
-        })
-      end)
+    test "surfaces the persisted Codex snapshot from the DB (no live fetch, bd-ajh7bd)", ctx do
+      # quota_get is now a pure DB read: the periodic CloudProbe is the only
+      # thing that fetches Codex live. Persist a snapshot the way the probe
+      # would, then assert quota_get reads it straight back.
+      Ash.create!(Arbiter.Quota.CodexQuota, %{
+        workspace_id: ctx.ws.id,
+        provider: "codex",
+        plan: "plus",
+        session_used_percent: 33.0,
+        session_reset_at: DateTime.utc_now() |> DateTime.truncate(:second),
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
 
       assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
       assert result.codex.session.used == 33.0
       assert result.codex_message == nil
+    end
+
+    test "surfaces the persisted Gemini CLI snapshot from the DB (bd-ajh7bd)", ctx do
+      Ash.create!(Arbiter.Quota.GoogleQuota, %{
+        workspace_id: ctx.ws.id,
+        provider: "gemini_cli",
+        plan: "Free",
+        used_percent: 75.0,
+        snapshot: %{"provider" => "gemini-cli", "plan" => "Free", "models" => []},
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.gemini["plan"] == "Free"
+      assert result.gemini["models"] == []
     end
 
     test "returns the captured snapshot for the scope's workspace", ctx do

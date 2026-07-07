@@ -548,30 +548,32 @@ defmodule Arbiter.MCP.Tools do
   Current quota state for the scope's workspace. Resolution mirrors
   `workspace_show`.
 
-  `claude` is the latest snapshot the local proxy captured from Claude worker
-  traffic (`nil` until the first proxied request), plus an on-demand refresh of
-  per-model weekly utilization and `extra_usage` overage from
-  `/api/oauth/usage` (bd-8tpha6) — best-effort, so a 429/missing-creds/network
-  failure on that secondary call never blocks the header-capture aggregate
-  figures. `codex` is fetched live from OpenAI's rate-limit endpoint using the
-  `codex` CLI's stored token; it is `nil` with a `codex_message` when Codex
-  isn't authenticated or the usage API is unavailable (e.g. an expired token).
-  `gemini` / `antigravity` are live per-model Cloud Code Assist snapshots
-  (`nil` when that CLI isn't authenticated on this host).
+  This is a pure DB read (bd-ajh7bd): every provider's figures are read from the
+  persisted quota tables, kept fresh by the background probes
+  (`Arbiter.Quota.RefreshProbe` for Claude's header capture,
+  `Arbiter.Quota.CloudProbe` for Codex / Gemini CLI / Antigravity and Anthropic's
+  secondary `/api/oauth/usage` layer). Nothing here fetches live, so there's no
+  request-time latency or rate-limit exposure.
+
+  `claude` is the latest captured snapshot (`nil` until the first proxied
+  request), including the per-model weekly + `extra_usage` overage layer when the
+  oauth-usage probe has run. `codex` is `nil` with a `codex_message` until the
+  Codex probe has stored a snapshot (i.e. the `codex` CLI is authenticated on
+  this host). `gemini` / `antigravity` are the persisted per-model Cloud Code
+  Assist snapshots (`nil` until the Gemini CLI is authenticated and probed).
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      codex = Arbiter.Quota.Codex.fetch(ws_id)
-      google = Arbiter.Quota.google_snapshots()
+      codex = Arbiter.Quota.Codex.serialize_latest(ws_id)
 
       {:ok,
        %{
-         claude: Arbiter.Quota.refresh_and_serialize(ws_id),
-         codex: codex.codex,
-         codex_message: codex.message,
-         gemini: google.gemini,
-         antigravity: google.antigravity
+         claude: Arbiter.Quota.serialize(ws_id),
+         codex: codex,
+         codex_message: Arbiter.Quota.codex_absence_message(codex),
+         gemini: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "gemini_cli"),
+         antigravity: Arbiter.Quota.CloudCode.serialize_latest(ws_id, "antigravity")
        }}
     end
   end

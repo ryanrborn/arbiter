@@ -100,6 +100,13 @@ config :arbiter, :quota,
 # off so the quota surface stays a pure DB read under test.
 config :arbiter, :cloud_code_quota, enabled: true
 
+# Periodic refresh of the non-Anthropic quota providers (Codex, Gemini CLI,
+# Antigravity) — `Arbiter.Quota.CloudProbe` (bd-ajh7bd). These have no passive
+# proxy signal, so the prober fetches them on a timer, persists a snapshot, and
+# broadcasts a quota_updated event; `GET /api/quota` then reads the persisted
+# rows rather than fetching live. `config/test.exs` turns it off.
+config :arbiter, :cloud_quota_probe, enabled: true, interval_ms: 300_000
+
 # Finch receive_timeout for the proxy's upstream requests to api.anthropic.com,
 # in milliseconds. Because the proxy streams chunk-by-chunk, this is a
 # per-chunk idle timeout — a generous value buys time-to-first-token headroom

@@ -28,10 +28,33 @@ defmodule Arbiter.Quota do
   resources do
     resource Arbiter.Quota.AnthropicQuota
     resource Arbiter.Quota.CodexQuota
+    resource Arbiter.Quota.GoogleQuota
   end
 
   @default_provider "claude"
   @default_base_url "http://127.0.0.1:4848/proxy/anthropic"
+
+  # Cost pricing (bd-ajh7bd). Rather than invent a second price table, we reuse
+  # the real per-session `cost_usd` already recorded in the `Arbiter.Usage`
+  # ledger (which prices Claude off the CLI's own figure and Gemini via
+  # `Arbiter.Agents.Gemini.Pricing`) and roll a trailing window of actual spend
+  # up per provider, so `arb quota` / the `/usage` page can show dollars spent
+  # alongside utilization %.
+  #
+  # The ledger keys spend by an inferred provider ("claude" / "gemini" /
+  # "openai"), which doesn't 1:1 match the quota provider codes — this maps each
+  # quota code to the ledger key(s) that roll up under it. Antigravity has no
+  # distinct ledger key (it shares Gemini/Claude/GPT models with other surfaces,
+  # so its spend can't be cleanly attributed) → no cost figure.
+  @ledger_providers %{
+    "claude" => ["claude"],
+    "codex" => ["openai"],
+    "gemini_cli" => ["gemini"],
+    "antigravity" => []
+  }
+
+  # Trailing window over which per-provider spend is summed for the cost figure.
+  @cost_window_days 30
 
   # ---- proxy config ------------------------------------------------------
 
@@ -139,12 +162,14 @@ defmodule Arbiter.Quota do
     end
   end
 
-  # Broadcast quota update to all subscribers for the workspace
-  defp broadcast_quota_update(workspace_id, quota) do
+  # Broadcast a quota update to all subscribers for the workspace, carrying the
+  # uniform view map (not the raw resource struct) so every provider's live
+  # update lands on the LiveView in the same shape `list_latest/1` returns.
+  defp broadcast_quota_update(workspace_id, %AnthropicQuota{} = quota) do
     Phoenix.PubSub.broadcast(
       Arbiter.PubSub,
       "quota:#{workspace_id}",
-      {:quota_updated, workspace_id, quota}
+      {:quota_updated, workspace_id, view(quota)}
     )
   rescue
     e ->
@@ -181,6 +206,83 @@ defmodule Arbiter.Quota do
       %AnthropicQuota{} = q -> serialize_quota(q)
     end
   end
+
+  # ---- uniform multi-provider view (bd-ajh7bd) ---------------------------
+
+  @doc """
+  The canonical empty quota "view" — the uniform two-window shape the topbar and
+  `/usage` page render, one entry per tracked provider. Each provider's `view/1`
+  merges its real figures onto this so the UI can read a single set of keys
+  (`utilization_5h`, `reset_5h_at`, `overage_status`, …) across Claude, Codex,
+  Gemini CLI, and Antigravity — whose native shapes differ (5h/7d vs
+  session/weekly vs per-model). `primary_label` / `secondary_label` name the two
+  bars per provider (Claude: "5h"/"7d"; Codex: "session"/"weekly"; Google:
+  "used"/none).
+  """
+  @spec blank_view(String.t()) :: map()
+  def blank_view(provider) when is_binary(provider) do
+    %{
+      workspace_id: nil,
+      provider: provider,
+      utilization_5h: nil,
+      reset_5h_at: nil,
+      status_5h: nil,
+      utilization_7d: nil,
+      reset_7d_at: nil,
+      status_7d: nil,
+      overage_status: nil,
+      representative_claim: nil,
+      captured_at: nil,
+      per_model_utilization: %{},
+      extra_usage: %{},
+      oauth_utilization_5h: nil,
+      oauth_utilization_7d: nil,
+      oauth_captured_at: nil,
+      primary_label: "5h",
+      secondary_label: "7d",
+      plan: nil,
+      message: nil,
+      models: [],
+      cost_usd: nil
+    }
+  end
+
+  @doc "Map a loaded `AnthropicQuota` row to the uniform quota view shape."
+  @spec view(AnthropicQuota.t()) :: map()
+  def view(%AnthropicQuota{} = q) do
+    blank_view(q.provider)
+    |> Map.merge(%{
+      workspace_id: q.workspace_id,
+      utilization_5h: q.utilization_5h,
+      reset_5h_at: q.reset_5h_at,
+      status_5h: q.status_5h,
+      utilization_7d: q.utilization_7d,
+      reset_7d_at: q.reset_7d_at,
+      status_7d: q.status_7d,
+      overage_status: q.overage_status,
+      representative_claim: q.representative_claim,
+      captured_at: q.captured_at,
+      per_model_utilization: q.per_model_utilization || %{},
+      extra_usage: q.extra_usage || %{},
+      oauth_utilization_5h: q.oauth_utilization_5h,
+      oauth_utilization_7d: q.oauth_utilization_7d,
+      oauth_captured_at: q.oauth_captured_at
+    })
+  end
+
+  @doc """
+  The human-readable `codex_message` the `arb quota` / `quota_get` surface pairs
+  with a `nil` Codex snapshot. `nil` when a snapshot *is* present (bd-ajh7bd).
+
+  In the pure-DB-read world a missing Codex row means the periodic probe hasn't
+  stored one yet — almost always because the `codex` CLI isn't authenticated on
+  this host (the probe no-ops without creds).
+  """
+  @spec codex_absence_message(map() | nil) :: String.t() | nil
+  def codex_absence_message(nil),
+    do: "Codex quota not captured yet — authenticate the codex CLI on this host."
+
+  def codex_absence_message(_present), do: nil
 
   @doc "Serialize a loaded `AnthropicQuota` row into the public map shape."
   @spec serialize_quota(AnthropicQuota.t()) :: map()
@@ -317,27 +419,138 @@ defmodule Arbiter.Quota do
   end
 
   @doc """
-  Every tracked provider's latest quota snapshot for `workspace_id` — one row
-  per distinct `provider` that has ever been captured, `"claude"` sorted
-  first (so the single-provider case renders exactly as before), the rest
-  alphabetically.
+  Every tracked provider's latest quota snapshot for `workspace_id`, as the
+  uniform view map (`view/1` / `Codex.view/1` / `CloudCode.view/1`) — one entry
+  per distinct `provider`, `"claude"` sorted first (so the single-provider case
+  renders exactly as before), the rest alphabetically.
+
+  Merges three sources (bd-ajh7bd): the generic `AnthropicQuota` table (Claude +
+  any legacy header-capture provider), the dedicated `CodexQuota` table, and the
+  dedicated `GoogleQuota` table (Gemini CLI / Antigravity). When the same
+  provider appears in both a dedicated table and the generic one, the dedicated
+  row wins. This is the single read path the topbar, `/usage` LiveView, and the
+  REST `quotas` list all sit on — no live provider fetch at request time.
+
+  Each view also carries `cost_usd` — the provider's actual spend over the last
+  #{@cost_window_days} days from the `Arbiter.Usage` ledger (`nil` when none) —
+  so the dashboard can show dollars alongside utilization.
   """
-  @spec list_latest(String.t()) :: [AnthropicQuota.t()]
+  @spec list_latest(String.t()) :: [map()]
   def list_latest(workspace_id) when is_binary(workspace_id) do
-    AnthropicQuota
-    |> Ash.Query.filter(workspace_id == ^workspace_id)
-    |> Ash.read!()
+    dedicated = codex_views(workspace_id) ++ google_views(workspace_id)
+    dedicated_providers = MapSet.new(dedicated, & &1.provider)
+
+    generic =
+      AnthropicQuota
+      |> Ash.Query.filter(workspace_id == ^workspace_id)
+      |> Ash.read!()
+      |> Enum.map(&view/1)
+      |> Enum.reject(&MapSet.member?(dedicated_providers, &1.provider))
+
+    spend = provider_spend(workspace_id)
+
+    (generic ++ dedicated)
+    |> Enum.map(&%{&1 | cost_usd: cost_for(&1.provider, spend)})
     |> Enum.sort_by(&{&1.provider != @default_provider, &1.provider})
   rescue
     _ -> []
   end
 
-  @doc "`list_latest/1`, serialized into the public map shape."
+  @doc """
+  Per-provider actual spend for `workspace_id` over the last
+  #{@cost_window_days} days, as a `%{ledger_provider => total_cost_usd}` map
+  drawn from the `Arbiter.Usage` ledger. Keyed by the *ledger* provider
+  ("claude" / "gemini" / "openai"); `cost_for/2` maps quota codes onto it.
+  Returns `%{}` on any error so cost is a best-effort add-on, never a failure.
+  """
+  @spec provider_spend(String.t()) :: %{optional(String.t()) => float()}
+  def provider_spend(workspace_id) do
+    since = DateTime.utc_now() |> DateTime.add(-@cost_window_days * 86_400, :second)
+
+    case Arbiter.Usage.summarize(by: :provider, since: since, workspace_id: workspace_id) do
+      {:ok, rows} -> Map.new(rows, &{&1.group, &1.total_cost_usd})
+      _ -> %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  # Roll the ledger spend for a quota provider code up from its mapped ledger
+  # key(s). `nil` (not `0.0`) when the provider has no spend / no clean mapping,
+  # so the UI shows "—" rather than a misleading "$0.00".
+  defp cost_for(provider, spend) do
+    keys = Map.get(@ledger_providers, provider, [])
+
+    case Enum.reduce(keys, {0.0, false}, fn key, {sum, any?} ->
+           case Map.get(spend, key) do
+             c when is_number(c) -> {sum + c, true}
+             _ -> {sum, any?}
+           end
+         end) do
+      {_sum, false} -> nil
+      {sum, true} -> Float.round(sum, 6)
+    end
+  end
+
+  defp codex_views(workspace_id) do
+    case Arbiter.Quota.Codex.latest(workspace_id) do
+      nil -> []
+      row -> [Arbiter.Quota.Codex.view(row)]
+    end
+  rescue
+    _ -> []
+  end
+
+  defp google_views(workspace_id) do
+    for provider <- ["gemini_cli", "antigravity"],
+        row = CloudCode.latest(workspace_id, provider),
+        not is_nil(row) do
+      CloudCode.view(row)
+    end
+  rescue
+    _ -> []
+  end
+
+  @doc "`list_latest/1`, serialized into the public map shape (ISO timestamps)."
   @spec list_serialized(String.t()) :: [map()]
   def list_serialized(workspace_id) do
     workspace_id
     |> list_latest()
-    |> Enum.map(&serialize_quota/1)
+    |> Enum.map(&serialize_view/1)
+  end
+
+  @doc """
+  Serialize a uniform view map (from `list_latest/1`) into the public,
+  string-friendly shape — ISO-8601 timestamps, JSON-safe values.
+  """
+  @spec serialize_view(map()) :: map()
+  def serialize_view(%{} = view) do
+    view
+    |> Map.take([
+      :provider,
+      :status_5h,
+      :status_7d,
+      :overage_status,
+      :representative_claim,
+      :per_model_utilization,
+      :extra_usage,
+      :oauth_utilization_5h,
+      :oauth_utilization_7d,
+      :utilization_5h,
+      :utilization_7d,
+      :primary_label,
+      :secondary_label,
+      :plan,
+      :message,
+      :models,
+      :cost_usd
+    ])
+    |> Map.merge(%{
+      reset_5h_at: iso(view[:reset_5h_at]),
+      reset_7d_at: iso(view[:reset_7d_at]),
+      captured_at: iso(view[:captured_at]),
+      oauth_captured_at: iso(view[:oauth_captured_at])
+    })
   end
 
   @doc """

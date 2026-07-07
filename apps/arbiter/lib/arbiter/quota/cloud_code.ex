@@ -30,7 +30,21 @@ defmodule Arbiter.Quota.CloudCode do
   Both `gemini/1` and `antigravity/1` return either `nil` (not configured) or a
   serialized snapshot map — never raise — so the `arb quota` / `quota_get` /
   `GET /api/quota` surface can render or omit them without special-casing errors.
+
+  ## Persistence (bd-ajh7bd)
+
+  `refresh/3` wraps a live fetch with an upsert into `Arbiter.Quota.GoogleQuota`
+  and a `{:quota_updated, ws, view}` PubSub broadcast, so `Arbiter.Quota.CloudProbe`
+  can keep the snapshot fresh on a timer and the web dashboard picks it up live —
+  exactly like the Anthropic header-capture path. `latest/2` / `serialize_latest/2`
+  read the persisted row back so the REST + MCP quota surface never fetches live
+  at request time.
   """
+
+  require Ash.Query
+  require Logger
+
+  alias Arbiter.Quota.GoogleQuota
 
   # ---- endpoints (verified against 9router registry/gemini-cli.js + antigravity.js)
   @gemini_quota_url "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
@@ -228,6 +242,160 @@ defmodule Arbiter.Quota.CloudCode do
   end
 
   defp antigravity_models(_), do: []
+
+  # ---- persistence (bd-ajh7bd) -------------------------------------------
+
+  # Persisted provider codes (match `ArbiterWeb.QuotaHelpers` labels), keyed by
+  # the fetch atom passed to `refresh/3`.
+  @provider_codes %{gemini: "gemini_cli", antigravity: "antigravity"}
+
+  @doc """
+  Fetch one Google provider's live quota and upsert it into `GoogleQuota`.
+
+  `which` is `:gemini` or `:antigravity`. Returns the serialized snapshot map on
+  a successful fetch (persisting a row + broadcasting `{:quota_updated, ws, view}`),
+  or `nil` when the provider isn't configured on this host (no creds) — in which
+  case **no row is written**, so a transient logout doesn't wipe the last good
+  reading. `opts` are forwarded to `gemini/1` / `antigravity/1`.
+  """
+  @spec refresh(String.t(), :gemini | :antigravity, keyword()) :: snapshot() | nil
+  def refresh(workspace_id, which, opts \\ [])
+      when is_binary(workspace_id) and which in [:gemini, :antigravity] do
+    case fetch_snapshot(which, opts) do
+      nil ->
+        nil
+
+      snapshot ->
+        provider = Map.fetch!(@provider_codes, which)
+
+        case upsert(workspace_id, provider, snapshot) do
+          {:ok, row} ->
+            broadcast(workspace_id, row)
+            snapshot
+
+          {:error, reason} ->
+            Logger.debug("Arbiter.Quota.CloudCode: #{provider} upsert failed: #{inspect(reason)}")
+            snapshot
+        end
+    end
+  rescue
+    e ->
+      Logger.debug("Arbiter.Quota.CloudCode.refresh raised: #{Exception.message(e)}")
+      nil
+  end
+
+  defp fetch_snapshot(:gemini, opts), do: gemini(opts)
+  defp fetch_snapshot(:antigravity, opts), do: antigravity(opts)
+
+  defp upsert(workspace_id, provider, snapshot) do
+    {used_percent, reset_at} = representative(snapshot)
+
+    attrs = %{
+      workspace_id: workspace_id,
+      provider: provider,
+      plan: snapshot[:plan],
+      message: snapshot[:message],
+      used_percent: used_percent,
+      reset_at: reset_at,
+      snapshot: stringify(snapshot),
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    }
+
+    GoogleQuota
+    |> Ash.Changeset.for_create(:upsert, attrs)
+    |> Ash.create()
+  end
+
+  # The representative bar figure: the worst (most-used) important model, i.e.
+  # the smallest `remaining_percentage`. `{used_percent :: float | nil,
+  # reset_at :: DateTime | nil}` — nil/nil when the snapshot carries no models.
+  defp representative(%{models: [_ | _] = models}) do
+    worst = Enum.min_by(models, & &1.remaining_percentage)
+    used = Float.round(100.0 - (worst.remaining_percentage || 0.0), 2)
+    {clamp(used, 0.0, 100.0), parse_datetime(worst[:reset_at])}
+  end
+
+  defp representative(_), do: {nil, nil}
+
+  defp parse_datetime(nil), do: nil
+
+  defp parse_datetime(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _} -> DateTime.truncate(dt, :second)
+      _ -> nil
+    end
+  end
+
+  defp parse_datetime(_), do: nil
+
+  defp clamp(n, lo, hi), do: n |> max(lo) |> min(hi)
+
+  # JSON-normalize the snapshot to string keys so the read-back shape is stable
+  # regardless of the `:map` data-layer's round-trip.
+  defp stringify(term) do
+    term |> Jason.encode!() |> Jason.decode!()
+  end
+
+  defp broadcast(workspace_id, %GoogleQuota{} = row) do
+    Phoenix.PubSub.broadcast(
+      Arbiter.PubSub,
+      "quota:#{workspace_id}",
+      {:quota_updated, workspace_id, view(row)}
+    )
+  rescue
+    _ -> :error
+  end
+
+  @doc "Latest stored Google snapshot row for `workspace_id` + `provider`, or `nil`."
+  @spec latest(String.t(), String.t()) :: GoogleQuota.t() | nil
+  def latest(workspace_id, provider) when is_binary(workspace_id) and is_binary(provider) do
+    GoogleQuota
+    |> Ash.Query.filter(workspace_id == ^workspace_id and provider == ^provider)
+    |> Ash.read_one()
+    |> case do
+      {:ok, %GoogleQuota{} = row} -> row
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  @doc "Serialize the latest stored snapshot for `workspace_id` + `provider`, or `nil`."
+  @spec serialize_latest(String.t(), String.t()) :: map() | nil
+  def serialize_latest(workspace_id, provider) do
+    case latest(workspace_id, provider) do
+      nil -> nil
+      %GoogleQuota{snapshot: snapshot} -> snapshot
+    end
+  end
+
+  @doc """
+  Map a stored `GoogleQuota` row to the uniform two-window quota view shape the
+  topbar / `/usage` page render. Google has no time windows, so the
+  representative used-fraction fills the primary ("5h") slot and the secondary
+  ("7d") slot is left empty.
+  """
+  @spec view(GoogleQuota.t()) :: map()
+  def view(%GoogleQuota{} = row) do
+    Arbiter.Quota.blank_view(row.provider)
+    |> Map.merge(%{
+      workspace_id: row.workspace_id,
+      utilization_5h: fraction(row.used_percent),
+      reset_5h_at: row.reset_at,
+      captured_at: row.captured_at,
+      plan: row.plan,
+      message: row.message,
+      models: models_from(row.snapshot),
+      primary_label: "used",
+      secondary_label: nil
+    })
+  end
+
+  defp fraction(nil), do: nil
+  defp fraction(pct) when is_number(pct), do: pct / 100.0
+
+  defp models_from(%{"models" => models}) when is_list(models), do: models
+  defp models_from(_), do: []
 
   # ---- normalization -----------------------------------------------------
 
