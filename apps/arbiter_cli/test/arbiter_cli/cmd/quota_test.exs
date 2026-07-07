@@ -76,6 +76,20 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "Codex CLI not authenticated for this workspace"
     end
 
+    test "shows recent per-provider spend from the quotas list (bd-ajh7bd)" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => @snapshot,
+          "quotas" => [%{"provider" => "claude", "cost_usd" => 12.5}]
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "recent spend (30d): $12.50"
+    end
+
     test "--json mode emits the raw snapshot" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
 

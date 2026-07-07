@@ -196,8 +196,15 @@ defmodule ArbiterWeb.UsageLive do
 
         <%!-- ── Quota windows ──────────────────────────────────────── --%>
         <div :for={quota <- @quotas} class="space-y-2">
-          <h2 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
+          <h2 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide flex items-center gap-2">
             {quota_provider_label(quota.provider)}
+            <span
+              :if={quota[:cost_usd]}
+              class="badge badge-ghost badge-sm font-mono normal-case text-base-content/60"
+              title="Actual spend over the last 30 days from the usage ledger"
+            >
+              {format_usd(quota[:cost_usd])} · 30d
+            </span>
           </h2>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <%!-- 5h card --%>

@@ -83,6 +83,13 @@ defmodule Arbiter.Application do
       # held DispatchQueue intents. Runs outside the QuotaGate (never throttled).
       {Task.Supervisor, name: Arbiter.Quota.RefreshProbeSupervisor},
       Arbiter.Quota.RefreshProbe,
+      # Periodic refresh of the non-Anthropic quota providers (Codex, Gemini
+      # CLI, Antigravity) which have no passive proxy signal (bd-ajh7bd). Each
+      # cycle fetches per workspace, upserts the persisted snapshot, and
+      # broadcasts a quota_updated event so the web dashboard updates live and
+      # `GET /api/quota` stays a pure DB read.
+      {Task.Supervisor, name: Arbiter.Quota.CloudProbeSupervisor},
+      Arbiter.Quota.CloudProbe,
       # One Conductor per running Graph, started on demand by
       # `Conductor.kickoff/2` (no boot enumeration — a graph only gets a
       # Conductor once kicked off). The Registry keys them by graph_id.

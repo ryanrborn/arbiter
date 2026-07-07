@@ -115,6 +115,24 @@ defmodule Arbiter.Quota.CodexTest do
       assert row.session_used_percent == 42.5
       assert row.weekly_used_percent == 8.0
     end
+
+    test "broadcasts the uniform {:quota_updated, ws, view} so LiveView picks it up (bd-ajh7bd)" do
+      ws = workspace!()
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, "quota:#{ws.id}")
+
+      Req.Test.stub(@stub_name, fn conn -> Req.Test.json(conn, @usage_body) end)
+
+      Codex.fetch(ws.id, credentials: creds())
+
+      # Same message shape the Anthropic/Google paths emit — a uniform view map,
+      # provider "codex", session→5h fraction — not the legacy
+      # {:codex_quota_updated, ws, %CodexQuota{}} struct the LiveView ignored.
+      assert_receive {:quota_updated, ws_id, view}, 2_000
+      assert ws_id == ws.id
+      assert is_map(view) and not is_struct(view)
+      assert view.provider == "codex"
+      assert_in_delta view.utilization_5h, 0.425, 0.0001
+    end
   end
 
   describe "fetch/2 — degrade path" do
