@@ -166,5 +166,38 @@ defmodule Arbiter.Worker.ResumeTest do
 
       File.rm(tmp)
     end
+
+    test "inserts resume arguments for Codex and swaps the prompt" do
+      argv = [
+        "sh",
+        "-c",
+        "exec \"$@\" < /dev/null",
+        "sh",
+        "/bin/codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--",
+        "ORIGINAL TASK PROMPT"
+      ]
+
+      {:ok, %{argv: out}} =
+        Worker.inject_resume_argv(%{argv: argv}, "sess-abc", "CONTINUE PROMPT", "codex")
+
+      assert out == [
+               "sh",
+               "-c",
+               "exec \"$@\" < /dev/null",
+               "sh",
+               "/bin/codex",
+               "exec",
+               "resume",
+               "--json",
+               "--skip-git-repo-check",
+               "--",
+               "sess-abc",
+               "CONTINUE PROMPT"
+             ]
+    end
   end
 end
