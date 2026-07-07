@@ -204,6 +204,38 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert json_response(conn, 200)["error"]["code"] == -32_003
     end
 
+    test "workspace_config_set accepts a real JSON array value end-to-end (bd-1dtufq)", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "workspace_config_set",
+            "arguments" => %{"key" => "agent.type", "value" => ["claude", "gemini"]}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["config"]["agent"]["type"] == ["claude", "gemini"]
+    end
+
+    test "workspace_config_set unwraps a client-stringified JSON array (bd-1dtufq)", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "workspace_config_set",
+            "arguments" => %{"key" => "agent.type", "value" => "[\"claude\", \"gemini\"]"}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["config"]["agent"]["type"] == ["claude", "gemini"]
+    end
+
     test "worker_dispatch without can_dispatch is a JSON-RPC not-permitted error", ctx do
       no_dispatch = Scope.mint_coordinator(ctx.ws.id, can_dispatch: false)
 
