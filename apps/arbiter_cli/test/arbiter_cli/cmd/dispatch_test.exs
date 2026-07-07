@@ -199,6 +199,20 @@ defmodule ArbiterCli.Cmd.DispatchTest do
       refute Map.has_key?(body, "with_gemini")
     end
 
+    # bd-dcvo3n: codex is a supported provider (PR #796) but the CLI's local
+    # whitelist was stale, so `--provider codex` died client-side before the
+    # request ever reached the server.
+    test "--provider codex sends provider: codex in the POST body" do
+      stub_dispatch_capture()
+
+      {_out, _err, code} =
+        capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--provider", "codex"]) end)
+
+      assert code == 0
+      assert_receive {:body, body}
+      assert body["provider"] == "codex"
+    end
+
     test "an unknown --provider value dies with a usage hint" do
       {_out, err, code} =
         capture(fn -> ArbiterCli.Cmd.Dispatch.run(["gte-017", "--provider", "llama"]) end)

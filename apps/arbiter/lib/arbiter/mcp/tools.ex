@@ -887,8 +887,9 @@ defmodule Arbiter.MCP.Tools do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id) do
-      case Dispatch.dispatch(task_id, worker_dispatch_opts(scope, args)) do
+         {:ok, _task} <- fetch_task(scope, args, task_id),
+         {:ok, opts} <- worker_dispatch_opts(scope, args) do
+      case Dispatch.dispatch(task_id, opts) do
         {:ok, result} -> {:ok, serialize_dispatch(result, scope.depth + 1)}
         {:error, reason} -> {:error, {:invalid, dispatch_error_message(reason)}}
       end
@@ -2402,40 +2403,68 @@ defmodule Arbiter.MCP.Tools do
     base = dispatch_opts(scope, args)
 
     case dispatch_provider(args) do
+      {:error, {:unknown_provider, value}} ->
+        # bd-dcvo3n: an explicit but unrecognized `provider` must fail LOUDLY.
+        # Falling through to the workspace default here is what silently spawned
+        # Claude when `provider: "codex"` hit a server too old to know the value
+        # — a substitution the caller had no signal for. Reject it instead.
+        {:error,
+         {:invalid,
+          "unknown provider #{inspect(value)}; valid providers: " <>
+            Enum.join(Arbiter.Agents.valid_agent_types(), ", ")}}
+
       :park ->
-        Keyword.put(base, :start_driver, false)
+        {:ok, Keyword.put(base, :start_driver, false)}
 
       nil ->
         # No provider specified — resolve from workspace `agent.type` config.
-        Keyword.put(base, :start_claude, true)
+        {:ok, Keyword.put(base, :start_claude, true)}
 
       type when is_atom(type) ->
-        base |> Keyword.put(:start_claude, true) |> Keyword.put(:agent_type, type)
+        {:ok, base |> Keyword.put(:start_claude, true) |> Keyword.put(:agent_type, type)}
     end
   end
 
   # Resolve the worker provider from `worker_dispatch` args. Returns `:park` for
   # an explicit `no_agent` opt-in, a provider atom when specified via `provider`
-  # or the deprecated `with_claude`, or `nil` to signal "use the workspace default".
+  # or the deprecated `with_claude`, `{:error, {:unknown_provider, value}}` when
+  # `provider` is present but unrecognized, or `nil` to signal "use the workspace
+  # default" (only when no provider was named at all).
   defp dispatch_provider(args) do
     cond do
       Map.get(args, "no_agent") in [true, "true"] ->
         :park
 
-      Map.get(args, "provider") == "claude" ->
-        :claude
-
-      Map.get(args, "provider") == "gemini" ->
-        :gemini
-
-      Map.get(args, "provider") == "codex" ->
-        :codex
+      provider_given?(args) ->
+        provider_atom(Map.get(args, "provider"))
 
       Map.get(args, "with_claude") in [true, "true"] ->
         :claude
 
       true ->
         nil
+    end
+  end
+
+  # A `provider` arg is "given" only when it's a non-blank string. An absent key
+  # or an empty/whitespace value means "use the workspace default" (→ `nil`),
+  # never an error.
+  defp provider_given?(args) do
+    case Map.get(args, "provider") do
+      p when is_binary(p) -> String.trim(p) != ""
+      _ -> false
+    end
+  end
+
+  # Map an explicit provider string to its atom. An unrecognized (but non-blank)
+  # value is a hard error, not a silent fallback to the workspace default.
+  defp provider_atom(provider) do
+    trimmed = String.trim(provider)
+
+    if trimmed in Arbiter.Agents.valid_agent_types() do
+      String.to_existing_atom(trimmed)
+    else
+      {:error, {:unknown_provider, provider}}
     end
   end
 
