@@ -171,7 +171,17 @@ defmodule Arbiter.Quota.Codex do
     _ -> :error
   end
 
-  @doc "Latest stored Codex snapshot for `workspace_id`, or `nil`."
+  @doc """
+  Read-only accessor for the latest persisted Codex quota snapshot.
+
+  This function reads the most recently stored `CodexQuota` row for the given
+  `workspace_id` (and optional `provider`). It does **not** trigger a live fetch
+  from OpenAI's usage API — use `fetch/2` for that. Returns `nil` if no snapshot
+  has been persisted yet.
+
+  This is a read-only accessor that returns only the persisted row, never calls
+  out to the OpenAI usage API. For a live fetch, call `fetch/2` instead.
+  """
   @spec latest(String.t(), String.t()) :: CodexQuota.t() | nil
   def latest(workspace_id, provider \\ @default_provider) when is_binary(workspace_id) do
     CodexQuota
