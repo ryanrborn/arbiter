@@ -279,11 +279,49 @@ defmodule Arbiter.Trackers.Jira do
       # than a hardcoded field list) keeps this provider-accurate and free of
       # per-workspace gating config.
       case gating_transition(cfg, ref, transitions, target_status) do
-        {:ok, transition} -> {:ok, required_field_descriptors(cfg, transition)}
-        :none -> {:ok, []}
+        {:ok, transition} ->
+          detected = required_field_descriptors(cfg, transition)
+          {:ok, merge_forced_note_descriptors(cfg, status, detected)}
+
+        :none ->
+          {:ok, []}
       end
     end
   end
+
+  # `expand=transitions.fields` only reports fields required by the
+  # transition's *screen* — a workflow *validator* requiring a field (e.g.
+  # LeoTech's VR Story workflow gates "Pull request created" on QA/Deployment
+  # notes this way) has no screen and is invisible to that call, so live
+  # detection alone under-reports the gate (bd-4isprn). For lifecycle events
+  # listed in `cfg.gated_note_events`, force qa_notes/deployment_notes into
+  # the gate whenever the workspace has them mapped in `field_ids`, merging
+  # with (not replacing) whatever live detection already found.
+  defp merge_forced_note_descriptors(cfg, status, descriptors) do
+    if status in cfg.gated_note_events do
+      existing_ids = MapSet.new(descriptors, & &1.id)
+
+      forced =
+        [:qa_notes, :deployment_notes]
+        |> Enum.map(&forced_note_descriptor(cfg, &1))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.reject(&MapSet.member?(existing_ids, &1.id))
+
+      descriptors ++ forced
+    else
+      descriptors
+    end
+  end
+
+  defp forced_note_descriptor(cfg, key) do
+    case Map.get(cfg.field_ids, key) do
+      id when is_binary(id) and id != "" -> %{id: id, key: key, name: forced_note_name(key)}
+      _ -> nil
+    end
+  end
+
+  defp forced_note_name(:qa_notes), do: "QA Testing Notes"
+  defp forced_note_name(:deployment_notes), do: "Deployment Notes"
 
   # Resolve the transition `transition/2` would fire first: a live transition
   # that lands directly on the target, else the first hop of the planned
@@ -743,6 +781,44 @@ defmodule Arbiter.Trackers.Jira do
             {:error, _} = err -> err
           end
       end
+    end
+  end
+
+  @doc """
+  Returns true when `raw` (a fetched issue's JSON body) shows the issue
+  already at, or downstream of, the status mapped from `event` — i.e. moving
+  it there now would be a no-op.
+
+  Used by `Arbiter.Trackers.Sync` to distinguish a benign "ticket already
+  advanced" transition failure (the tracker rejects the transition because
+  there's nothing left to do) from a genuine one. Any event with a
+  `status_map` entry is supported, not just `:closed` — e.g. `:merged`
+  rejected by a workflow where the ticket already reached Code Complete (or
+  beyond) is exactly this case.
+
+  Checks, in order: exact status-name match, Jira's "done" status category
+  (catches terminal statuses under any name), and — for a configured
+  `transition_graph` — whether the current status is reachable by walking
+  *forward* from the target (i.e. downstream of it, so it was already
+  passed). Returns false (never escalation-suppressing) on any resolution
+  failure, so a genuinely unreachable tracker still escalates.
+  """
+  @spec at_or_past_target?(map(), atom()) :: boolean()
+  def at_or_past_target?(raw, event) when is_atom(event) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, target_status} <- map_status(cfg, event) do
+      current_status = get_in(raw, ["fields", "status", "name"])
+      current_category = get_in(raw, ["fields", "status", "statusCategory", "key"])
+
+      current_status == target_status or
+        current_category == "done" or
+        (is_binary(current_status) and
+           match?(
+             {:ok, _},
+             plan_transition_path(cfg.transition_graph, target_status, current_status)
+           ))
+    else
+      _ -> false
     end
   end
 

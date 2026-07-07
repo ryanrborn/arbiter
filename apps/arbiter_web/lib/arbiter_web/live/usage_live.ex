@@ -89,13 +89,17 @@ defmodule ArbiterWeb.UsageLive do
     |> assign_overage()
   end
 
-  # Overage-spend indicator (bd-7cd38f): when the latest quota snapshot shows the
+  # Overage-spend indicator (bd-7cd38f): when the Claude quota snapshot shows the
   # default workspace is dispatching past the plan cap (`:continue` mode), surface
   # the windowed overage spend so the paid-overage burn is visible on the
   # dashboard. `0.0` / not-in-overage otherwise. Sourced from the same windowed
   # `Usage.summarize/1` sum the gate uses for the alert threshold.
+  #
+  # Overage tracking mirrors the dispatch gate, which only throttles on
+  # Claude's plan cap, so this looks up that one provider's entry rather than
+  # every tracked quota.
   defp assign_overage(socket) do
-    quota = socket.assigns[:quota]
+    quota = Enum.find(socket.assigns[:quotas] || [], &(&1.provider == "claude"))
     ws_id = socket.assigns[:_quota_workspace_id]
 
     {spend, in_overage?} =
@@ -177,7 +181,7 @@ defmodule ArbiterWeb.UsageLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_path={@current_path} quota={@quota}>
+    <Layouts.app flash={@flash} current_path={@current_path} quotas={@quotas}>
       <div class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
         <%!-- ── Header ───────────────────────────────────────────────── --%>
         <div>
@@ -191,62 +195,70 @@ defmodule ArbiterWeb.UsageLive do
         </div>
 
         <%!-- ── Quota windows ──────────────────────────────────────── --%>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <%!-- 5h card --%>
-          <div class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-5 gap-3">
-              <div class="flex items-baseline justify-between">
-                <h3 class="font-semibold">5-Hour Window</h3>
-                <span class="text-xs text-base-content/40">
-                  {quota_reset_text(@quota && @quota.reset_5h_at)}
-                </span>
-              </div>
-              <div class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden">
-                <div
-                  :if={@quota && @quota.utilization_5h}
-                  class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
-                  style={"width: #{quota_pct(@quota.utilization_5h)}%; background-color: #{quota_color(@quota.utilization_5h, @quota.overage_status)};"}
-                />
-              </div>
-              <div class="flex justify-center text-xs font-mono text-base-content/50">
-                <span :if={@quota && @quota.utilization_5h} class="font-semibold text-base-content/80">
-                  {quota_pct(@quota.utilization_5h)}% utilized
-                </span>
-                <span :if={!(@quota && @quota.utilization_5h)} class="text-base-content/30">
-                  —
-                </span>
+        <div :for={quota <- @quotas} class="space-y-2">
+          <h2 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
+            {quota_provider_label(quota.provider)}
+          </h2>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <%!-- 5h card --%>
+            <div class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-5 gap-3">
+                <div class="flex items-baseline justify-between">
+                  <h3 class="font-semibold">5-Hour Window</h3>
+                  <span class="text-xs text-base-content/40">
+                    {quota_reset_text(quota.reset_5h_at)}
+                  </span>
+                </div>
+                <div class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden">
+                  <div
+                    :if={quota.utilization_5h}
+                    class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
+                    style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
+                  />
+                </div>
+                <div class="flex justify-center text-xs font-mono text-base-content/50">
+                  <span :if={quota.utilization_5h} class="font-semibold text-base-content/80">
+                    {quota_pct(quota.utilization_5h)}% utilized
+                  </span>
+                  <span :if={!quota.utilization_5h} class="text-base-content/30">
+                    —
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
-          <%!-- 7d card --%>
-          <div class="card bg-base-200 border border-base-300 shadow-sm">
-            <div class="card-body p-5 gap-3">
-              <div class="flex items-baseline justify-between">
-                <h3 class="font-semibold">7-Day Window</h3>
-                <span class="text-xs text-base-content/40">
-                  {quota_reset_text(@quota && @quota.reset_7d_at)}
-                </span>
-              </div>
-              <div class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden">
-                <div
-                  :if={@quota && @quota.utilization_7d}
-                  class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
-                  style={"width: #{quota_pct(@quota.utilization_7d)}%; background-color: #{quota_color(@quota.utilization_7d, @quota.overage_status)};"}
-                />
-              </div>
-              <div class="flex justify-center text-xs font-mono text-base-content/50">
-                <span :if={@quota && @quota.utilization_7d} class="font-semibold text-base-content/80">
-                  {quota_pct(@quota.utilization_7d)}% utilized
-                </span>
-                <span :if={!(@quota && @quota.utilization_7d)} class="text-base-content/30">
-                  —
-                </span>
+            <%!-- 7d card --%>
+            <div class="card bg-base-200 border border-base-300 shadow-sm">
+              <div class="card-body p-5 gap-3">
+                <div class="flex items-baseline justify-between">
+                  <h3 class="font-semibold">7-Day Window</h3>
+                  <span class="text-xs text-base-content/40">
+                    {quota_reset_text(quota.reset_7d_at)}
+                  </span>
+                </div>
+                <div class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden">
+                  <div
+                    :if={quota.utilization_7d}
+                    class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
+                    style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
+                  />
+                </div>
+                <div class="flex justify-center text-xs font-mono text-base-content/50">
+                  <span :if={quota.utilization_7d} class="font-semibold text-base-content/80">
+                    {quota_pct(quota.utilization_7d)}% utilized
+                  </span>
+                  <span :if={!quota.utilization_7d} class="text-base-content/30">
+                    —
+                  </span>
+                </div>
               </div>
             </div>
           </div>
         </div>
+        <p :if={@quotas == []} class="text-sm text-base-content/40">
+          No quota data captured yet.
+        </p>
         <p class="text-xs text-base-content/40 -mt-2">
-          Data captured via local Anthropic proxy. Updates on each API request — not real-time.
+          Data captured via local API proxies. Updates on each API request — not real-time.
         </p>
 
         <%!-- ── Overage indicator (bd-7cd38f) ─────────────────────────── --%>
