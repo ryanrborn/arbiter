@@ -14,12 +14,20 @@ defmodule ArbiterWeb.LiveHooks do
   Loads the latest quota snapshot for every tracked provider on the default
   workspace and assigns the list as `:quotas` on the socket (`[]` when
   nothing has been captured yet).
+
+  **Temporary:** Codex provider is filtered from the quota list while dispatch
+  is broken (bd-1nyedk, bd-dcvo3n, bd-bi5t54). Showing quota bars for a broken
+  provider implies it's dispatchable when it isn't. Once dispatch is fixed,
+  remove the filter and this comment.
   """
 
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
 
   require Logger
+
+  # Providers hidden from the UI pending fix; see module docstring for context.
+  @hidden_providers ["codex"]
 
   def on_mount(:current_path, _params, _session, socket) do
     socket =
@@ -35,7 +43,7 @@ defmodule ArbiterWeb.LiveHooks do
   def on_mount(:quota, _params, _session, socket) do
     case Arbiter.Quota.default_workspace_id() do
       {:ok, ws_id} ->
-        quotas = Arbiter.Quota.list_latest(ws_id)
+        quotas = Arbiter.Quota.list_latest(ws_id) |> filter_hidden_providers()
 
         socket =
           socket
@@ -57,7 +65,12 @@ defmodule ArbiterWeb.LiveHooks do
       attach_hook(socket, :quota_updates, :handle_info, fn msg, socket ->
         case msg do
           {:quota_updated, ^workspace_id, quota} ->
-            {:halt, assign(socket, :quotas, upsert_quota(socket.assigns.quotas, quota))}
+            # Skip updates for hidden providers to prevent re-introduction via PubSub
+            if quota.provider in @hidden_providers do
+              {:halt, socket}
+            else
+              {:halt, assign(socket, :quotas, upsert_quota(socket.assigns.quotas, quota))}
+            end
 
           _ ->
             {:cont, socket}
@@ -92,4 +105,9 @@ defmodule ArbiterWeb.LiveHooks do
     do: %{incoming | cost_usd: Map.get(existing, :cost_usd)}
 
   defp preserve_cost(_existing, incoming), do: incoming
+
+  # Filter out providers marked as hidden from the UI.
+  defp filter_hidden_providers(quotas) do
+    Enum.reject(quotas, &(&1.provider in @hidden_providers))
+  end
 end
