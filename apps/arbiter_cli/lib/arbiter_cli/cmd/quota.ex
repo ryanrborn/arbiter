@@ -112,7 +112,7 @@ defmodule ArbiterCli.Cmd.Quota do
     models
     |> Enum.sort()
     |> Enum.each(fn {model, util} ->
-      IO.puts("    #{model}: #{format_pct(util)} used")
+      IO.puts("    #{model}: #{format_frac(util)} used")
     end)
 
     if map_size(extra) > 0 do
