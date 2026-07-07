@@ -13,7 +13,12 @@ defmodule Arbiter.Agents.Codex.Config do
   """
 
   alias Arbiter.Agents.CredentialsRef
+  alias Arbiter.Agents.ProviderConfig
   alias Arbiter.Tasks.Workspace
+
+  # Provider name used to scope per-provider overrides in a shared
+  # multi-provider `agent.config` (see `Arbiter.Agents.ProviderConfig`).
+  @provider "codex"
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @rotation_key {__MODULE__, :api_key_rotation_index}
@@ -26,7 +31,10 @@ defmodule Arbiter.Agents.Codex.Config do
         }
 
   # Default tier → concrete Codex model. Overridable per-workspace via
-  # `agent.config["tier_models"]` (string keys). The values are model ids the
+  # `agent.config["tier_models"]` (string keys), or — in a multi-provider pool
+  # where that flat key is shared — via the Codex-scoped
+  # `agent.config["codex"]["tier_models"]` (merged at `put_active/2`; see
+  # `Arbiter.Agents.ProviderConfig`). The values are model ids the
   # `codex --model` flag accepts. Codex's coding-tuned model is the same across
   # tiers today (only the reasoning `effort` differs); the map exists so a
   # workspace can pin cheaper/pricier ids without an adapter change.
@@ -52,13 +60,16 @@ defmodule Arbiter.Agents.Codex.Config do
 
   def put_active(%Workspace{config: config} = workspace, role)
       when role in [:agent, :review_agent] do
-    raw = get_in(config || %{}, [Atom.to_string(role), "config"]) || %{}
+    raw =
+      (get_in(config || %{}, [Atom.to_string(role), "config"]) || %{})
+      |> ProviderConfig.apply_overrides(@provider)
+
     Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     :ok
   end
 
   def put_active(%{} = raw, _role) do
-    Process.put(@pdict_key, raw)
+    Process.put(@pdict_key, ProviderConfig.apply_overrides(raw, @provider))
     :ok
   end
 
