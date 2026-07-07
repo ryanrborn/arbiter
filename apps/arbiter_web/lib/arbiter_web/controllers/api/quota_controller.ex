@@ -7,9 +7,13 @@ defmodule ArbiterWeb.Api.QuotaController do
   the installation default. Returns `claude: null` when nothing has been
   captured yet (e.g. before the first proxied request).
 
-  Alongside the passively-captured Anthropic snapshot, `gemini` and
-  `antigravity` carry live per-model Cloud Code Assist quota (bd-57ukgb), each
-  `null` when the corresponding CLI isn't authenticated on this host.
+  `quotas` carries every passively-captured provider (each including its own
+  `provider` field) — `claude` is kept as a top-level key too for `arb quota`
+  and other existing consumers of the pre-multi-provider shape.
+
+  Alongside those DB-captured snapshots, `gemini` and `antigravity` carry live
+  per-model Cloud Code Assist quota (bd-57ukgb), each `null` when the
+  corresponding CLI isn't authenticated on this host.
   """
 
   use ArbiterWeb, :controller
@@ -26,6 +30,7 @@ defmodule ArbiterWeb.Api.QuotaController do
         render(conn, :show,
           workspace_id: ws_id,
           claude: Quota.serialize(ws_id),
+          quotas: Quota.list_serialized(ws_id),
           gemini: google.gemini,
           antigravity: google.antigravity
         )
