@@ -20,32 +20,38 @@ defmodule ArbiterWeb.LiveHooksTest do
       assert html =~ "Arbiter"
     end
 
-    test "on_mount(:quota) calls production filter_hidden_providers at live_hooks.ex:46" do
-      # This test documents the fix to Finding 2: the production code
-      # in live_hooks.ex defines filter_hidden_providers/1 as a private
-      # function (line 110). The test framework previously had a local
-      # copy of this function which the reviewer flagged. This test verifies
-      # that tests now invoke the actual on_mount production code instead.
-      #
-      # When on_mount/:quota runs, it calls filter_hidden_providers internally
-      # at live_hooks.ex:46. This is exercised through a real LiveView
-      # mount (above), not by testing a local copy of the filtering logic.
-      assert true
+    test "on_mount(:quota) filters hidden providers at mount time", %{conn: conn} do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+
+      # Capture a normal provider and a hidden provider (codex)
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.50"}], provider: "codex")
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      # Claude should be present, Codex should be filtered out
+      assert html =~ "Claude"
+      refute html =~ "Codex"
     end
 
-    test "on_mount(:quota) handle_info returns :halt for hidden providers at live_hooks.ex:70" do
-      # This test documents the critical fix from Finding 1 at live_hooks.ex:70:
-      # When a PubSub {:quota_updated, ws_id, quota} message arrives for a
-      # hidden provider (like "codex"), the hook now returns {:halt, socket}
-      # instead of the former {:cont, socket}. The :halt status prevents the
-      # message from propagating to parent LiveViews that don't have a
-      # handle_info clause for {:quota_updated, ...}, which would cause a
-      # FunctionClauseError crash.
-      #
-      # The handle_info hook is attached at live_hooks.ex:65 during on_mount
-      # when the socket is connected. This is implicitly tested when the app
-      # runs with live PubSub broadcasts.
-      assert true
+    test "on_mount(:quota) handle_info returns :halt and does not crash for hidden providers", %{conn: conn} do
+      ws = Ash.create!(Arbiter.Tasks.Workspace, %{name: "default"})
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.25"}], provider: "claude")
+
+      {:ok, view, html} = live(conn, ~p"/")
+      assert html =~ "Claude"
+      refute html =~ "Codex"
+
+      # Broadcast a codex update. If handle_info returned {:cont, socket},
+      # this would propagate to the parent LiveView and cause it to crash
+      # (since it doesn't implement handle_info/2 for quota_updated).
+      # Returning {:halt, socket} prevents the crash.
+      {:ok, _} = Arbiter.Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.80"}], provider: "codex")
+
+      # Render the view to confirm it is still alive and has not crashed,
+      # and that Codex is still not rendered.
+      html2 = render(view)
+      refute html2 =~ "Codex"
     end
   end
 end
