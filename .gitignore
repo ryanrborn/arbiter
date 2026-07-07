@@ -44,3 +44,8 @@ MORNING-BRIEF.md
 # worktree root (e.g. Elixir.Arbiter.Worker.Worktree.beam). They are never
 # part of the canonical repo and must not trip the commit gate (bd-3gpeoz).
 *.beam
+
+# Local environment file with secrets (DATABASE_PATH, ARBITER_CLOAK_KEY, SECRET_KEY_BASE).
+# Never commit to version control.
+.arbiter.env
+.arbiter.env.backup
