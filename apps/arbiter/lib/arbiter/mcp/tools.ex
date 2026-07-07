@@ -2004,12 +2004,17 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Read failed/paused task counts from the running Conductor, if any.
+  # Read failed/paused task counts from the running Conductor, if any. A
+  # freshly-started Conductor can be mid-dispatch (handle_continue) and
+  # unable to service a :state call promptly, so this uses a short timeout
+  # and degrades to {0, 0} rather than let a slow/stale Conductor turn
+  # graph_status into an unhandled `:exit` (GenServer.call raises `:exit` on
+  # timeout, which `rescue` alone does not catch).
   defp conductor_failure_counts(graph_id, member_set) do
     pid = ConductorSupervisor.whereis(graph_id)
 
     if is_pid(pid) do
-      snap = Conductor.state(pid)
+      snap = GenServer.call(pid, :state, 1_000)
       failed = snap.failed_ids |> MapSet.intersection(member_set) |> MapSet.size()
       paused = snap.paused_ids |> MapSet.intersection(member_set) |> MapSet.size()
       {failed, paused}
@@ -2018,6 +2023,8 @@ defmodule Arbiter.MCP.Tools do
     end
   rescue
     _ -> {0, 0}
+  catch
+    :exit, _ -> {0, 0}
   end
 
   # Fetch a task and enforce workspace isolation. Honors an optional `workspace`

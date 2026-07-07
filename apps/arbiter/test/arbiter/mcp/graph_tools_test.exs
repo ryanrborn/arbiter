@@ -451,6 +451,35 @@ defmodule Arbiter.MCP.GraphToolsTest do
       assert {:error, {:not_found, _}} =
                Tools.graph_status(ctx.coordinator, %{"graph_id" => Ash.UUIDv7.generate()})
     end
+
+    test "returns a status payload (not a crash) when the Conductor doesn't answer :state in time",
+         ctx do
+      g = graph(ctx.ws)
+      a = issue(ctx.ws, "task-a")
+      add_member(g, a)
+
+      # Register a stub "Conductor" that never replies to any call — this
+      # reproduces the bug report's timing window, where the real Conductor
+      # is mid-dispatch and can't service a :state call within the timeout.
+      test_pid = self()
+
+      {:ok, stub_pid} =
+        Task.start(fn ->
+          Registry.register(Arbiter.Workflows.ConductorRegistry, g.id, nil)
+          send(test_pid, :registered)
+
+          receive do
+          end
+        end)
+
+      assert_receive :registered, 1_000
+
+      assert {:ok, status} = Tools.graph_status(ctx.coordinator, %{"graph_id" => g.id})
+      assert status.failed == 0
+      assert status.paused == 0
+
+      Process.exit(stub_pid, :kill)
+    end
   end
 
   # ---- workspace isolation ------------------------------------------------
