@@ -137,4 +137,42 @@ defmodule Arbiter.Agents.ProviderConfigNamespaceTest do
       assert Gemini.Config.thinking_argv("high") == []
     end
   end
+
+  describe "free-tier Codex model override" do
+    test "codex-scoped free-tier tier_models override resolves correctly for all tiers" do
+      # Free-tier ChatGPT accounts only have gpt-5.4-mini and gpt-5.5 available.
+      # Premium/plus accounts have gpt-5-codex and gpt-5-codex-mini.
+      # This override allows free-tier workspaces to dispatch to Codex without
+      # requesting unavailable models (bd-2pkwjf).
+      config = %{
+        "codex" => %{
+          "tier_models" => %{
+            "economy" => "gpt-5.4-mini",
+            "standard" => "gpt-5.5",
+            "premium" => "gpt-5.5"
+          }
+        }
+      }
+
+      Codex.Config.put_active(config)
+      Claude.Config.put_active(config)
+      Gemini.Config.put_active(config)
+
+      # Codex resolves to free-tier models.
+      assert Codex.Config.model_for_tier("economy") == "gpt-5.4-mini"
+      assert Codex.Config.model_for_tier("standard") == "gpt-5.5"
+      assert Codex.Config.model_for_tier("premium") == "gpt-5.5"
+
+      # Claude and Gemini are unaffected — they see their own built-in defaults.
+      assert Claude.Config.model_for_tier("standard") ==
+               Claude.Config.default_tier_models()["standard"]
+
+      assert Gemini.Config.model_for_tier("standard") ==
+               Gemini.Config.default_tier_models()["standard"]
+
+      # Verify that free-tier models do not appear in Claude/Gemini tiers.
+      refute Claude.Config.model_for_tier("economy") == "gpt-5.4-mini"
+      refute Gemini.Config.model_for_tier("economy") == "gpt-5.4-mini"
+    end
+  end
 end
