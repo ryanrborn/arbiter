@@ -66,4 +66,44 @@ defmodule ArbiterWeb.QuotaTopbarTest do
     assert html =~ "Claude"
     refute html =~ "Codex"
   end
+
+  test "topbar filters gemini_cli and antigravity", %{conn: conn, ws: ws} do
+    {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
+        provider: "gemini_cli"
+      )
+
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.6"}],
+        provider: "antigravity"
+      )
+
+    {:ok, _view, html} = live(conn, "/")
+
+    assert html =~ "Claude"
+    refute html =~ "Gemini CLI"
+    refute html =~ "Antigravity"
+  end
+
+  test "usage page filters gemini_cli and antigravity", %{conn: conn, ws: ws} do
+    {:ok, _} = Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])
+
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.5"}],
+        provider: "gemini_cli"
+      )
+
+    {:ok, _} =
+      Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.6"}],
+        provider: "antigravity"
+      )
+
+    {:ok, _view, html} = live(conn, "/usage")
+
+    assert html =~ "Claude"
+    refute html =~ "Gemini CLI"
+    refute html =~ "Antigravity"
+  end
 end
