@@ -62,6 +62,12 @@ defmodule Arbiter.MixProject do
       {:phoenix_pubsub, "~> 2.1"},
       {:ecto_sql, "~> 3.13"},
       {:ecto_sqlite3, "~> 0.17"},
+
+      # Direct read-only access to Antigravity's globalStorage sqlite state DB
+      # for quota token resolution (bd-5bchzv). Already pulled in transitively
+      # by ecto_sqlite3; declared directly since Arbiter.Quota.CloudCode calls
+      # its NIF-backed API directly rather than going through Ecto.
+      {:exqlite, "~> 0.22"},
       {:jason, "~> 1.2"},
 
       # Signed, expiring scope tokens for the Arbiter.MCP server (bd-dem49g).
