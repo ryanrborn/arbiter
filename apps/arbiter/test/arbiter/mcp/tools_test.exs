@@ -1869,6 +1869,89 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "worker_dispatch/2 provider: \"codex\" writes the Codex MCP config (bd-bi5t54)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "mcp-codex-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      stub_dir = Path.join(tmp, "stub-bin")
+      File.mkdir_p!(stub_dir)
+      codex_file = Path.join(tmp, "codex-argv.txt")
+      stub = Path.join(stub_dir, "codex")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{codex_file}; done
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      remote = Path.join(tmp, "repo-remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"mcp/codex-repo" => repo})
+
+      prior_mcp = Application.get_env(:arbiter, Arbiter.MCP)
+      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior_mcp || [], :inject_config, true))
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+        Application.put_env(:arbiter, Arbiter.MCP, prior_mcp)
+      end)
+
+      %{tmp: tmp, codex_file: codex_file}
+    end
+
+    test "the dispatched worktree gets .codex/config.toml, not .mcp.json", ctx do
+      # Workspace's `agent.type` pool deliberately excludes codex, mirroring the
+      # live `default` workspace — the explicit `provider` override must win.
+      {:ok, ws} =
+        Ash.update(ctx.ws, %{config: %{"agent" => %{"type" => ["claude", "gemini"]}}})
+
+      {:ok, task} = Ash.create(Issue, %{title: "codex mcp dispatch", workspace_id: ws.id})
+      coordinator = %{ctx.coordinator | workspace_id: ws.id}
+
+      assert {:ok, data} =
+               Tools.worker_dispatch(coordinator, %{
+                 "task_id" => task.id,
+                 "provider" => "codex",
+                 "repo" => "mcp/codex-repo"
+               })
+
+      on_exit(fn -> Worker.stop(task.id, :normal) end)
+
+      worktree_path = data.worktree_path
+      assert is_binary(worktree_path)
+
+      # Give the async worker a moment to reach the MCP-config-injection step.
+      Process.sleep(200)
+
+      assert File.exists?(Path.join(worktree_path, ".codex/config.toml")),
+             "provider: \"codex\" dispatch must write .codex/config.toml, not fall back to .mcp.json"
+
+      refute File.exists?(Path.join(worktree_path, ".mcp.json"))
+    end
+  end
+
   describe "worker_list/2" do
     test "returns an empty list when no workers are running in the workspace", ctx do
       assert {:ok, %{workers: [], count: 0}} = Tools.worker_list(ctx.coordinator, %{})
