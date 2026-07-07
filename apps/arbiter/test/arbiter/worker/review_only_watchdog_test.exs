@@ -691,6 +691,51 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal)
     end
 
+    test "auto_merge:false workspace: APPROVE escalates the parked PR to the coordinator inbox (bd-b4pwxa)" do
+      # Regression for bd-b4pwxa: an approved PR on a human-merge
+      # (auto_merge: false) lane must not park *silently*. The Watchdog parks it
+      # (does not merge) AND pages the coordinator inbox once that it is ready for
+      # a manual merge decision — so the coordinator learns of it immediately
+      # instead of having to poll `arb worker list` to discover it.
+      ws = new_github_workspace_no_auto_merge()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-700"}, action: :update)
+
+      worker_pid =
+        start_reviewer(task, ["VERDICT: APPROVE", "LGTM"], %{
+          merger_workspace_override: ws,
+          watchdog_initial_delay_ms: 0,
+          watchdog_interval_ms: 50
+        })
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      # The Watchdog must write an addressed escalation to the coordinator inbox.
+      wait_until(
+        fn ->
+          Enum.any?(Message.inbox("admiral", workspace_id: ws.id), fn m ->
+            m.kind == :escalation and m.directive_ref == task.id and
+              m.subject =~ "awaiting manual merge"
+          end)
+        end,
+        3_000
+      )
+
+      # It parks (never merges) and the escalation is debounced to exactly one
+      # despite the Watchdog polling many times over the window.
+      Process.sleep(250)
+      assert StubMerger.merge_count("pr-700") == 0
+
+      matching =
+        Enum.filter(Message.inbox("admiral", workspace_id: ws.id), fn m ->
+          m.directive_ref == task.id and m.subject =~ "awaiting manual merge"
+        end)
+
+      assert length(matching) == 1
+
+      if Process.alive?(worker_pid), do: GenServer.stop(worker_pid, :normal)
+    end
+
     test "no Watchdog spawned and complete_now used when task has no pr_ref (github workspace)" do
       # Even on a GitHub workspace, when no pr_ref is recorded there is nothing
       # to merge — complete directly. Task stays :in_progress (bd-cw3w9p).
