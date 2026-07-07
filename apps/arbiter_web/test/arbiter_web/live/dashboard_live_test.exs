@@ -650,4 +650,109 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert render(view) =~ "Dashboard"
     end
   end
+
+  describe "recent tasks sorting" do
+    test "sorts by status (in_progress first), then priority, then created_at", %{conn: conn, ws: ws} do
+      # Create issues with mixed statuses, priorities, and creation times.
+      # We create them slightly out of order to ensure the sort isn't just
+      # relying on creation order or updated_at.
+
+      # Open task, P3, created first (status defaults to :open)
+      {:ok, _} =
+        Ash.create(Issue, %{title: "open-p3-old", priority: 3, workspace_id: ws.id})
+
+      Process.sleep(10)
+
+      # In-progress task, P2, created second
+      {:ok, ip_p2_old} =
+        Ash.create(Issue, %{title: "in-progress-p2-old", priority: 2, workspace_id: ws.id})
+      {:ok, _} = Ash.update(ip_p2_old, %{status: :in_progress})
+
+      Process.sleep(10)
+
+      # Open task, P1, created third (lower priority number = higher priority)
+      {:ok, _} =
+        Ash.create(Issue, %{title: "open-p1", priority: 1, workspace_id: ws.id})
+
+      Process.sleep(10)
+
+      # In-progress task, P1, created fourth
+      {:ok, ip_p1} =
+        Ash.create(Issue, %{title: "in-progress-p1", priority: 1, workspace_id: ws.id})
+      {:ok, _} = Ash.update(ip_p1, %{status: :in_progress})
+
+      Process.sleep(10)
+
+      # In-progress task, P3, created fifth
+      {:ok, ip_p3} =
+        Ash.create(Issue, %{title: "in-progress-p3", priority: 3, workspace_id: ws.id})
+      {:ok, _} = Ash.update(ip_p3, %{status: :in_progress})
+
+      Process.sleep(10)
+
+      # Open task, P0, created sixth (touch it to have a more recent updated_at
+      # than the in_progress tasks, proving the sort isn't just by updated_at)
+      {:ok, open_p0} =
+        Ash.create(Issue, %{title: "open-p0", priority: 0, workspace_id: ws.id})
+
+      # Touch the open_p0 issue to give it a recent updated_at
+      {:ok, _} = Ash.update(open_p0, %{notes: "touched"})
+
+      {:ok, view, _html} = live(conn, "/")
+
+      rendered = render(view)
+
+      # Extract the position of each issue in the rendered output
+      positions = %{
+        "in-progress-p2-old" => String.contains?(rendered, "in-progress-p2-old") && position_in_string(rendered, "in-progress-p2-old"),
+        "in-progress-p1" => String.contains?(rendered, "in-progress-p1") && position_in_string(rendered, "in-progress-p1"),
+        "in-progress-p3" => String.contains?(rendered, "in-progress-p3") && position_in_string(rendered, "in-progress-p3"),
+        "open-p0" => String.contains?(rendered, "open-p0") && position_in_string(rendered, "open-p0"),
+        "open-p1" => String.contains?(rendered, "open-p1") && position_in_string(rendered, "open-p1"),
+        "open-p3-old" => String.contains?(rendered, "open-p3-old") && position_in_string(rendered, "open-p3-old")
+      }
+
+      # All issues should be present
+      assert positions["in-progress-p2-old"], "in-progress-p2-old not found"
+      assert positions["in-progress-p1"], "in-progress-p1 not found"
+      assert positions["in-progress-p3"], "in-progress-p3 not found"
+      assert positions["open-p0"], "open-p0 not found"
+      assert positions["open-p1"], "open-p1 not found"
+      assert positions["open-p3-old"], "open-p3-old not found"
+
+      # Expected order:
+      # 1. in-progress-p2-old, in-progress-p1, in-progress-p3 (sorted by priority)
+      # 2. open-p0, open-p1, open-p3-old (sorted by priority)
+
+      ip_tasks = ["in-progress-p2-old", "in-progress-p1", "in-progress-p3"]
+      open_tasks = ["open-p0", "open-p1", "open-p3-old"]
+
+      # Get position of last in_progress task and first open task
+      last_ip_pos = ip_tasks |> Enum.map(&positions[&1]) |> Enum.max()
+      first_open_pos = open_tasks |> Enum.map(&positions[&1]) |> Enum.min()
+
+      # All in_progress should come before all open
+      assert last_ip_pos < first_open_pos, "In-progress tasks should come before open tasks"
+
+      # Within in_progress: P1 < P2 < P3 (by priority ascending)
+      assert positions["in-progress-p1"] < positions["in-progress-p2-old"],
+             "in-progress-p1 should come before in-progress-p2-old"
+      assert positions["in-progress-p2-old"] < positions["in-progress-p3"],
+             "in-progress-p2-old should come before in-progress-p3"
+
+      # Within open: P0 < P1 < P3 (by priority ascending)
+      assert positions["open-p0"] < positions["open-p1"],
+             "open-p0 should come before open-p1 (open-p0 has recent updated_at, so this proves it's not sorting by updated_at)"
+      assert positions["open-p1"] < positions["open-p3-old"],
+             "open-p1 should come before open-p3-old"
+    end
+  end
+
+  # Helper to find position of a substring in a string
+  defp position_in_string(haystack, needle) do
+    case String.split(haystack, needle, parts: 2) do
+      [before, _after] -> String.length(before)
+      [_] -> nil
+    end
+  end
 end
