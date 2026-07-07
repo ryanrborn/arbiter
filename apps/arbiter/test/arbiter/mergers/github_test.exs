@@ -1202,6 +1202,121 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "list_required_check_failures/1 (bd-ayetel)" do
+    defp stub_required_checks(nodes) do
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/graphql"
+
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{
+          "data" => %{
+            "repository" => %{
+              "pullRequest" => %{
+                "commits" => %{
+                  "nodes" => [
+                    %{
+                      "commit" => %{
+                        "statusCheckRollup" => %{
+                          "contexts" => %{"nodes" => nodes}
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        })
+      end)
+    end
+
+    test "returns only settled-failing REQUIRED CheckRun contexts" do
+      stub_required_checks([
+        %{
+          "__typename" => "CheckRun",
+          "name" => "ui-integration-tests",
+          "status" => "COMPLETED",
+          "conclusion" => "FAILURE",
+          "detailsUrl" => "https://github.com/octo/widget/runs/9",
+          "isRequired" => true
+        },
+        # optional check, also failing — must be excluded
+        %{
+          "__typename" => "CheckRun",
+          "name" => "lint-optional",
+          "status" => "COMPLETED",
+          "conclusion" => "FAILURE",
+          "isRequired" => false
+        },
+        # required but still running — must be excluded (transient, not settled)
+        %{
+          "__typename" => "CheckRun",
+          "name" => "build",
+          "status" => "IN_PROGRESS",
+          "conclusion" => nil,
+          "isRequired" => true
+        },
+        # required and settled green — must be excluded
+        %{
+          "__typename" => "CheckRun",
+          "name" => "unit-tests",
+          "status" => "COMPLETED",
+          "conclusion" => "SUCCESS",
+          "isRequired" => true
+        }
+      ])
+
+      assert {:ok, [check]} = Github.list_required_check_failures(@ref)
+      assert check.name == "ui-integration-tests"
+      assert check.url == "https://github.com/octo/widget/runs/9"
+    end
+
+    test "returns only settled-failing REQUIRED legacy StatusContext entries" do
+      stub_required_checks([
+        %{
+          "__typename" => "StatusContext",
+          "context" => "ci/required-status",
+          "state" => "FAILURE",
+          "targetUrl" => "https://ci.example.com/1",
+          "description" => "build failed",
+          "isRequired" => true
+        },
+        %{
+          "__typename" => "StatusContext",
+          "context" => "ci/optional-status",
+          "state" => "FAILURE",
+          "isRequired" => false
+        },
+        %{
+          "__typename" => "StatusContext",
+          "context" => "ci/pending-status",
+          "state" => "PENDING",
+          "isRequired" => true
+        }
+      ])
+
+      assert {:ok, [check]} = Github.list_required_check_failures(@ref)
+      assert check.name == "ci/required-status"
+      assert check.summary =~ "build failed"
+    end
+
+    test "returns an empty list when nothing is failing" do
+      stub_required_checks([
+        %{
+          "__typename" => "CheckRun",
+          "name" => "unit-tests",
+          "status" => "COMPLETED",
+          "conclusion" => "SUCCESS",
+          "isRequired" => true
+        }
+      ])
+
+      assert {:ok, []} = Github.list_required_check_failures(@ref)
+    end
+  end
+
   describe "close/1" do
     test "PATCHes the PR to state: closed" do
       stub(fn conn ->

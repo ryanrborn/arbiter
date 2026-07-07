@@ -17,17 +17,23 @@ defmodule Arbiter.Workflows.PRPatrol do
       comments without requesting changes — e.g. an automated reviewer — which
       the CHANGES_REQUESTED signal alone misses.
 
-  Both signals are read through the provider-agnostic `Arbiter.Mergers.Merger`
-  adapter: PRPatrol never sees GitHub GraphQL or GitLab discussion shapes, only
-  the normalized `changes_requested` boolean and `t:Arbiter.Mergers.Merger.review_thread/0`
-  list. An adapter without a thread surface (e.g. `Direct`) simply doesn't
-  implement `list_open_review_threads/1`; PRPatrol guards with
-  `function_exported?/3` and treats its absence as "no open review feedback".
+    * The PR has at least one **settled, REQUIRED** failing check, via the
+      adapter's `list_required_check_failures/1` primitive (bd-ayetel). This
+      catches an approved-but-BLOCKED PR whose CI failed silently — no review
+      signal fires because nobody requested changes, so without this the PR
+      just sits there. Scoped to required checks only (an optional/
+      informational check failing must not page anyone) and to settled
+      failures only (a required check still running is not yet a failure —
+      firing on it would flap every poll until it completes).
 
-  Future triggers (deferred to a follow-up task):
-
-    * `statusCheckRollup` contains FAILURE — needs the GraphQL API or a
-      separate `check-runs` fetch keyed off the PR head SHA.
+  All three signals are read through the provider-agnostic
+  `Arbiter.Mergers.Merger` adapter: PRPatrol never sees GitHub GraphQL or
+  GitLab discussion shapes, only the normalized `changes_requested` boolean,
+  `t:Arbiter.Mergers.Merger.review_thread/0` list, and
+  `t:Arbiter.Mergers.Merger.failing_check/0` list. An adapter without a given
+  surface (e.g. `Direct`) simply doesn't implement the corresponding
+  optional callback; PRPatrol guards each with `function_exported?/3` and
+  treats absence as "nothing to report" for that signal.
 
   ## Dedup
 
@@ -62,7 +68,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Worker
-  alias Arbiter.Workflows.ReviewThreadFollowUp
+  alias Arbiter.Workflows.{CIFailureFollowUp, ReviewThreadFollowUp}
   require Ash.Query
 
   @default_interval_ms 60_000
@@ -188,9 +194,9 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
     with true <- author_allowed?(mr, state.workspace),
-         reason when is_binary(reason) <- actionable_reason(adapter, mr_ref),
+         {reason, extra_protocol} when is_binary(reason) <- actionable_reason(adapter, mr_ref),
          false <- deduped?(pr_number, state.workspace_id) do
-      task = create_follow_up(mr, state, reason)
+      task = create_follow_up(mr, state, reason, extra_protocol)
       _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
       :ok
     else
@@ -229,21 +235,24 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp follow_up_protocol(_), do: ReviewThreadFollowUp.instructions(%{})
 
   # The trigger reason this PR is actionable for (a human-readable string folded
-  # into the follow-up task), or nil when nothing needs attention. CHANGES_REQUESTED
-  # takes priority; otherwise any unresolved review thread / inline comment fires.
+  # into the follow-up task), or nil when nothing needs attention.
+  # CHANGES_REQUESTED takes priority; then any unresolved review thread /
+  # inline comment; then a settled required-check failure (bd-ayetel) — CI
+  # failing silently on an otherwise-clean, approved PR.
   defp actionable_reason(adapter, mr_ref) do
     cond do
       changes_requested?(adapter, mr_ref) ->
-        "at least one review with state=CHANGES_REQUESTED"
+        {"at least one review with state=CHANGES_REQUESTED", ""}
+
+      (n = open_review_thread_count(adapter, mr_ref)) > 0 ->
+        {"#{n} unresolved review thread(s) / inline review comment(s)", ""}
+
+      (names = required_check_failure_names(adapter, mr_ref)) != [] ->
+        {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
+         CIFailureFollowUp.instructions(names)}
 
       true ->
-        case open_review_thread_count(adapter, mr_ref) do
-          n when n > 0 ->
-            "#{n} unresolved review thread(s) / inline review comment(s)"
-
-          _ ->
-            nil
-        end
+        nil
     end
   end
 
@@ -268,6 +277,23 @@ defmodule Arbiter.Workflows.PRPatrol do
     end
   end
 
+  # The names of settled, REQUIRED failing checks on this PR, via the
+  # adapter's optional `list_required_check_failures/1` primitive (bd-ayetel).
+  # Adapters without a required-check surface (e.g. `Direct`) don't export
+  # it — treat that as no failures. A transport/API error also yields no
+  # failures rather than raising: a patrol tick must not crash the GenServer
+  # on a flaky forge API call, and the next tick will re-check anyway.
+  defp required_check_failure_names(adapter, mr_ref) do
+    if function_exported?(adapter, :list_required_check_failures, 1) do
+      case adapter.list_required_check_failures(mr_ref) do
+        {:ok, checks} when is_list(checks) -> Enum.map(checks, & &1.name)
+        _ -> []
+      end
+    else
+      []
+    end
+  end
+
   defp deduped?(pr_number, workspace_id) do
     ref = to_string(pr_number)
 
@@ -285,7 +311,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     |> Enum.any?()
   end
 
-  defp create_follow_up(%{number: number, title: title, url: url}, state, reason) do
+  defp create_follow_up(%{number: number, title: title, url: url}, state, reason, extra_protocol) do
     issue_title = "PR ##{number}: #{title} needs follow-up"
 
     description =
@@ -297,6 +323,7 @@ defmodule Arbiter.Workflows.PRPatrol do
       Original PR: #{url}
 
       #{follow_up_protocol(state.workspace)}
+      #{extra_protocol}
       """
 
     {:ok, task} =
