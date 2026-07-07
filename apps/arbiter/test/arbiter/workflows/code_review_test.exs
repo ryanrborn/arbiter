@@ -319,6 +319,43 @@ defmodule Arbiter.Workflows.CodeReviewTest do
     %{repo: repo, tmp: tmp}
   end
 
+  # A repo checkout with a function definition (`sign/1`) plus a second file
+  # that calls it — used to prove repo-scoped review can trace a consumer a
+  # diff-only review would never see.
+  defp setup_repo_with_consumer(opts \\ []) do
+    token_path = Keyword.get(opts, :token_path, "lib/verus/token.ex")
+    unique = "gte021-consumer-#{:erlang.unique_integer([:positive])}"
+    repo = Path.join(System.tmp_dir!(), unique)
+    File.mkdir_p!(Path.join(repo, Path.dirname(token_path)))
+    File.mkdir_p!(Path.join(repo, "lib/verus"))
+
+    File.write!(Path.join(repo, token_path), """
+    defmodule Verus.Token do
+      def sign(payload) do
+        :ok
+      end
+    end
+    """)
+
+    File.write!(Path.join(repo, "lib/verus/session.ex"), """
+    defmodule Verus.Session do
+      def start(payload) do
+        Verus.Token.sign(payload)
+      end
+    end
+    """)
+
+    {_, 0} = System.cmd("git", ["init", "-q", repo])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test User"])
+    {_, 0} = System.cmd("git", ["-C", repo, "add", "-A"])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+    on_exit(fn -> File.rm_rf!(repo) end)
+
+    %{repo: repo}
+  end
+
   defp put_status(conn, status) do
     %{conn | status: status}
     |> Plug.Conn.put_resp_header("content-type", "application/json")
@@ -466,6 +503,96 @@ defmodule Arbiter.Workflows.CodeReviewTest do
     test "default runner short-circuits empty diff to {:ok, []}" do
       state = %{mode: :local, diff: ""}
       assert {:ok, %{findings: []}} = CodeReview.run_step(:run_checks, state)
+    end
+
+    test "scope: :repo populates :consumer_refs with cross-file callers before invoking the runner" do
+      %{repo: repo} = setup_repo_with_consumer()
+
+      diff = """
+      diff --git a/lib/verus/token.ex b/lib/verus/token.ex
+      --- a/lib/verus/token.ex
+      +++ b/lib/verus/token.ex
+      @@ -1,3 +1,3 @@
+      -  def sign(payload, algorithm) do
+      +  def sign(payload) do
+      """
+
+      state = %{
+        mode: :adapter,
+        diff: diff,
+        scope: :repo,
+        repo_path: repo,
+        check_runner: fn _diff, _state -> {:ok, []} end
+      }
+
+      assert {:ok, %{consumer_refs: [%{identifier: "sign", file: "lib/verus/session.ex"}]}} =
+               CodeReview.run_step(:run_checks, state)
+    end
+
+    test "auto-escalates to repo scope when a changed file matches a sensitive glob" do
+      %{repo: repo} = setup_repo_with_consumer(token_path: "lib/verus/sigv4/token.ex")
+
+      diff = """
+      diff --git a/lib/verus/sigv4/token.ex b/lib/verus/sigv4/token.ex
+      --- a/lib/verus/sigv4/token.ex
+      +++ b/lib/verus/sigv4/token.ex
+      @@ -1,3 +1,3 @@
+      -  def sign(payload, algorithm) do
+      +  def sign(payload) do
+      """
+
+      state = %{
+        mode: :adapter,
+        diff: diff,
+        repo_path: repo,
+        sensitive_globs: ["**/sigv4/**"],
+        check_runner: fn _diff, _state -> {:ok, []} end
+      }
+
+      assert {:ok, %{consumer_refs: [%{identifier: "sign", file: "lib/verus/session.ex"}]}} =
+               CodeReview.run_step(:run_checks, state)
+    end
+
+    test "does not escalate when no changed file matches a sensitive glob" do
+      %{repo: repo} = setup_repo_with_consumer()
+
+      diff = """
+      diff --git a/lib/verus/token.ex b/lib/verus/token.ex
+      --- a/lib/verus/token.ex
+      +++ b/lib/verus/token.ex
+      @@ -1,3 +1,3 @@
+      -  def sign(payload, algorithm) do
+      +  def sign(payload) do
+      """
+
+      state = %{
+        mode: :adapter,
+        diff: diff,
+        repo_path: repo,
+        sensitive_globs: ["**/sigv4/**"],
+        check_runner: fn _diff, _state -> {:ok, []} end
+      }
+
+      assert {:ok, result} = CodeReview.run_step(:run_checks, state)
+      refute Map.has_key?(result, :consumer_refs)
+    end
+
+    test "scope: :diff (default) leaves :consumer_refs unset" do
+      %{repo: repo} = setup_repo_with_consumer()
+
+      diff = """
+      diff --git a/lib/verus/token.ex b/lib/verus/token.ex
+      --- a/lib/verus/token.ex
+      +++ b/lib/verus/token.ex
+      @@ -1,3 +1,3 @@
+      -  def sign(payload, algorithm) do
+      +  def sign(payload) do
+      """
+
+      state = %{mode: :adapter, diff: diff, repo_path: repo, check_runner: fn _diff, _state -> {:ok, []} end}
+
+      assert {:ok, result} = CodeReview.run_step(:run_checks, state)
+      refute Map.has_key?(result, :consumer_refs)
     end
   end
 
@@ -1049,6 +1176,45 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
 
       assert {:error, :boom} = Checks.run("DIFF", %{mode: :local})
+    end
+
+    test "folds :consumer_refs (repo-scoped reviews) into the reviewer prompt (bd-5xsp25)" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      state = %{
+        mode: :local,
+        consumer_refs: [
+          %{identifier: "sign", file: "lib/verus/session.ex", line: 3, snippet: "Verus.Token.sign(payload)"}
+        ]
+      }
+
+      assert {:ok, []} = Checks.run("DIFF", state)
+      assert_received {:prompt, prompt}
+      assert prompt =~ "lib/verus/session.ex:3"
+      assert prompt =~ "sign"
+      assert prompt =~ "Verus.Token.sign(payload)"
+    end
+
+    test "omits the consumer section from the prompt when :consumer_refs is absent (diff scope)" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :local})
+      assert_received {:prompt, prompt}
+      refute prompt =~ "consumer"
     end
 
     # -- bd-dl49fo regression: large-diff E2BIG (MAX_ARG_STRLEN) fix ----------

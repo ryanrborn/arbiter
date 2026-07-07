@@ -1231,6 +1231,26 @@ defmodule Arbiter.MCP.ToolsTest do
       assert ack.strategy == :github
     end
 
+    test "external review (pr) accepts a scope: \"repo\" override (bd-5xsp25)" do
+      {:ok, gh_ws} =
+        Ash.create(Workspace, %{
+          name: "rv-github-scope",
+          prefix: "rvgs",
+          config: %{"merge" => %{"strategy" => "github", "config" => %{}}}
+        })
+
+      coordinator = %Scope{tier: :coordinator, workspace_id: gh_ws.id, can_dispatch: true}
+
+      assert {:ok, ack} =
+               Tools.worker_review(coordinator, %{
+                 "pr" => "https://github.com/leo/verus_sigv4/pull/6",
+                 "scope" => "repo"
+               })
+
+      assert ack.external == true
+      assert ack.status == "dispatched"
+    end
+
     test "resume surfaces the no-worktree error for a task never slung", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "never slung", workspace_id: ctx.ws.id})
 

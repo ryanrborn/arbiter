@@ -198,6 +198,157 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "review/1 — scope: repo (bd-5xsp25)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    # A shared-signature change: token.ex's `sign/1` diff, plus session.ex — an
+    # untouched file elsewhere in the repo — calling it. A diff-only review
+    # only ever sees token.ex's own diff text; a repo-scoped review can trace
+    # session.ex as a consumer via a read-only repo checkout.
+    defp consumer_fixture_repo do
+      dir = Path.join(System.tmp_dir!(), "er-consumer-#{:erlang.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(dir, "lib/verus"))
+
+      File.write!(Path.join(dir, "lib/verus/token.ex"), """
+      defmodule Verus.Token do
+        def sign(payload) do
+          :ok
+        end
+      end
+      """)
+
+      File.write!(Path.join(dir, "lib/verus/session.ex"), """
+      defmodule Verus.Session do
+        def start(payload) do
+          Verus.Token.sign(payload)
+        end
+      end
+      """)
+
+      {_, 0} = System.cmd("git", ["init", "-q", dir])
+      {_, 0} = System.cmd("git", ["-C", dir, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", dir, "config", "user.name", "Test"])
+      {_, 0} = System.cmd("git", ["-C", dir, "add", "-A"])
+      {_, 0} = System.cmd("git", ["-C", dir, "commit", "-q", "-m", "init"])
+
+      on_exit(fn -> File.rm_rf!(dir) end)
+      dir
+    end
+
+    defp consumer_ws(name, repo_path) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: name,
+          prefix: uniq_prefix(),
+          config: %{
+            "repo_paths" => %{"widget" => repo_path},
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "octo",
+                "repo" => "widget",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      ws
+    end
+
+    defp stub_signature_diff do
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        cond do
+          "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, """
+            diff --git a/lib/verus/token.ex b/lib/verus/token.ex
+            --- a/lib/verus/token.ex
+            +++ b/lib/verus/token.ex
+            @@ -1,3 +1,3 @@
+            -  def sign(payload, algorithm) do
+            +  def sign(payload) do
+            """)
+
+          conn.method == "GET" and conn.request_path =~ ~r{/repos/octo/widget/pulls/\d+$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"number" => 7, "head" => %{"sha" => "abc"}}))
+
+          conn.method == "POST" and conn.request_path =~ ~r{/reviews$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"id" => 1}))
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{}))
+        end
+      end)
+    end
+
+    # A stub reviewer that can only see what diff-only review sees (the diff
+    # text) plus, when present, the repo-scope consumer trace — flags a
+    # finding for each consumer ref, none otherwise. This is how a real
+    # reviewer prompt would behave once `Checks.build_prompt/2` folds
+    # `consumer_refs` in: nothing to say about a caller it never saw.
+    defp consumer_aware_runner do
+      fn _diff, state ->
+        findings =
+          (state[:consumer_refs] || [])
+          |> Enum.map(fn ref ->
+            %{
+              severity: :warning,
+              file: ref.file,
+              line: ref.line,
+              message: "call site of changed function `#{ref.identifier}` — verify it still matches"
+            }
+          end)
+
+        {:ok, findings}
+      end
+    end
+
+    test "repo scope surfaces a downstream consumer finding a diff-only review misses" do
+      repo = consumer_fixture_repo()
+      consumer_ws("er-scope-repo", repo)
+
+      stub_signature_diff()
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#7",
+                 repo: "widget",
+                 scope: "repo",
+                 check_runner: consumer_aware_runner()
+               )
+
+      assert result.findings == 1
+    end
+
+    test "the default (diff) scope does not surface the same finding" do
+      repo = consumer_fixture_repo()
+      consumer_ws("er-scope-diff", repo)
+
+      stub_signature_diff()
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#8",
+                 repo: "widget",
+                 check_runner: consumer_aware_runner()
+               )
+
+      assert result.findings == 0
+    end
+  end
+
   describe "review/1 — follow-up engagement (Option A)" do
     setup do
       System.put_env(@env_var, "test-token")

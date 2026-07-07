@@ -87,7 +87,7 @@ defmodule Arbiter.Workflows.CodeReview do
 
   alias Arbiter.Mergers
   alias Arbiter.Worker.Worktree
-  alias Arbiter.Workflows.CodeReview.{Checks, LocalMode}
+  alias Arbiter.Workflows.CodeReview.{Checks, ConsumerTrace, LocalMode}
 
   step(:load_pr,
     description: "Record branch (local) or accept adapter mr_ref (adapter)",
@@ -185,6 +185,7 @@ defmodule Arbiter.Workflows.CodeReview do
   def run_step(:run_checks, state) do
     diff = Map.get(state, :diff, "")
     runner = Map.get(state, :check_runner) || (&Checks.run/2)
+    state = maybe_add_consumer_refs(state, diff)
 
     case runner.(diff, state) do
       {:ok, findings} when is_list(findings) ->
@@ -280,6 +281,42 @@ defmodule Arbiter.Workflows.CodeReview do
   end
 
   def run_step(:verdict, _state), do: {:error, {:bad_state, "verdict: unknown mode"}}
+
+  # ---- scope resolution / consumer trace ---------------------------------
+
+  # Repo-scoped reviews get a deterministic cross-file consumer trace (see
+  # `ConsumerTrace` moduledoc for why this isn't just handed to the LLM as
+  # filesystem access). Diff scope (the default) never touches disk here.
+  defp maybe_add_consumer_refs(%{repo_path: repo_path} = state, diff) when is_binary(repo_path) do
+    if effective_scope(state, diff) == :repo do
+      Map.put(state, :consumer_refs, ConsumerTrace.trace(diff, repo_path))
+    else
+      state
+    end
+  end
+
+  defp maybe_add_consumer_refs(state, _diff), do: state
+
+  # Explicit `:scope` wins; otherwise a changed file matching any of
+  # `:sensitive_globs` (workspace `review_scope.sensitive_globs`, resolved by
+  # the caller) auto-escalates a security/cross-cutting PR to repo scope.
+  defp effective_scope(%{scope: :repo}, _diff), do: :repo
+
+  defp effective_scope(state, diff) do
+    globs = Map.get(state, :sensitive_globs) || []
+
+    if globs != [] and touches_sensitive_path?(diff, globs) do
+      :repo
+    else
+      Map.get(state, :scope, :diff)
+    end
+  end
+
+  defp touches_sensitive_path?(diff, globs) do
+    diff
+    |> ConsumerTrace.changed_files()
+    |> Enum.any?(fn file -> Enum.any?(globs, &Arbiter.Worker.ReviewScope.glob_match?(&1, file)) end)
+  end
 
   # ---- helpers -----------------------------------------------------------
 
