@@ -122,6 +122,60 @@ defmodule Arbiter.Mergers.Github do
   }
   """
 
+  # GraphQL query for the PR head commit's status-check rollup, used by
+  # `list_required_check_failures/1` (bd-ayetel) to tell a required check
+  # apart from an optional/informational one. REST's check-runs API (used by
+  # `failing_check_logs/1`) has no notion of "required for merge" — that only
+  # exists via GraphQL's `isRequired` field on each rollup context, which
+  # works for both a `CheckRun` (Actions / most CI) and a legacy
+  # `StatusContext` (external CI posting via the Statuses API). `isRequired`
+  # takes the PR number so GitHub can resolve it against that PR's branch
+  # protection rule.
+  @required_checks_query """
+  query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun {
+                      name
+                      status
+                      conclusion
+                      detailsUrl
+                      isRequired(pullRequestNumber: $number)
+                    }
+                    ... on StatusContext {
+                      context
+                      state
+                      targetUrl
+                      description
+                      isRequired(pullRequestNumber: $number)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  # `CheckRun.conclusion` values (GraphQL enum, upper snake case) that count as
+  # a settled failure — the GraphQL-side counterpart to `@failing_conclusions`.
+  @failing_check_run_conclusions ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"]
+
+  # `StatusContext.state` values that count as a settled failure. Legacy
+  # commit statuses have no separate "still running" status field — PENDING
+  # already means "not settled" and is excluded by omission.
+  @failing_status_context_states ["FAILURE", "ERROR"]
+
   # ---- Merger behaviour ----------------------------------------------------
 
   @impl true
@@ -273,6 +327,33 @@ defmodule Arbiter.Mergers.Github do
          {:ok, pr} <-
            request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}", []) |> handle_json() do
       fetch_failing_checks(cfg, owner, repo, get_in(pr, ["head", "sha"]))
+    end
+  end
+
+  @impl true
+  def list_required_check_failures(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, body} <- graphql_required_checks(cfg, owner, repo, number) do
+      contexts =
+        body
+        |> get_in(["data", "repository", "pullRequest", "commits", "nodes"])
+        |> List.wrap()
+        |> List.first()
+        |> case do
+          %{"commit" => %{"statusCheckRollup" => %{"contexts" => %{"nodes" => nodes}}}}
+          when is_list(nodes) ->
+            nodes
+
+          _ ->
+            []
+        end
+
+      {:ok,
+       contexts
+       |> Enum.reject(&is_nil/1)
+       |> Enum.filter(&required_settled_failure?/1)
+       |> Enum.map(&summarize_required_check/1)}
     end
   end
 
@@ -1054,6 +1135,69 @@ defmodule Arbiter.Mergers.Github do
       {:error, exception} ->
         {:error, transport_error(exception)}
     end
+  end
+
+  # POST the required-checks query. Same error-surfacing shape as
+  # `graphql_review_threads/4` — GraphQL returns HTTP 200 even for
+  # query-level errors.
+  defp graphql_required_checks(cfg, owner, repo, number) do
+    variables = %{"owner" => owner, "repo" => repo, "number" => number}
+    payload = %{"query" => @required_checks_query, "variables" => variables}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # A required rollup context (CheckRun or legacy StatusContext) that has
+  # settled on a failing outcome. A required check still IN_PROGRESS/PENDING
+  # is excluded — not yet a failure, just not green yet.
+  defp required_settled_failure?(%{"isRequired" => true} = ctx) do
+    case Map.get(ctx, "__typename") do
+      "CheckRun" ->
+        Map.get(ctx, "status") == "COMPLETED" and
+          Map.get(ctx, "conclusion") in @failing_check_run_conclusions
+
+      "StatusContext" ->
+        Map.get(ctx, "state") in @failing_status_context_states
+
+      _ ->
+        false
+    end
+  end
+
+  defp required_settled_failure?(_), do: false
+
+  defp summarize_required_check(%{"__typename" => "CheckRun"} = ctx) do
+    %{
+      name: Map.get(ctx, "name") || "",
+      summary: Map.get(ctx, "conclusion") || "",
+      url: Map.get(ctx, "detailsUrl")
+    }
+  end
+
+  defp summarize_required_check(%{"__typename" => "StatusContext"} = ctx) do
+    %{
+      name: Map.get(ctx, "context") || "",
+      summary: Map.get(ctx, "description") || Map.get(ctx, "state") || "",
+      url: Map.get(ctx, "targetUrl")
+    }
   end
 
   defp graphql_resolve_review_thread(cfg, thread_id) do
