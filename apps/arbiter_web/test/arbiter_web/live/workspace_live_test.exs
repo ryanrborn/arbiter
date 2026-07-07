@@ -86,7 +86,7 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       view
       |> form("form[phx-submit=save_config]", %{
         "config" => %{
-          "agent_type" => "claude",
+          "agent_types" => ["claude"],
           "tracker_type" => "none",
           "merger_strategy" => "direct",
           "routing_policy" => "by_priority",
@@ -98,6 +98,91 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert reloaded.config["routing"]["policy"] == "by_priority"
       assert reloaded.config["review"]["required"] == true
+    end
+
+    test "displays agent.type and review_agent.type provider checkboxes", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{"type" => ["claude", "gemini"]},
+            "review_agent" => %{"type" => "gemini"}
+          }
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert html =~ ~s(name="config[agent_types][]")
+      assert html =~ ~s(name="config[review_agent_types][]")
+
+      # Both agent.type providers checked.
+      assert html =~
+               ~s(name="config[agent_types][]" value="claude" checked)
+
+      assert html =~
+               ~s(name="config[agent_types][]" value="gemini" checked)
+
+      # Only the configured review_agent.type provider is checked.
+      assert html =~
+               ~s(name="config[review_agent_types][]" value="gemini" checked)
+    end
+
+    test "saves a multi-provider pool for agent.type", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "agent_types" => ["claude", "gemini"],
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "review_required" => "false"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["agent"]["type"] == ["claude", "gemini"]
+    end
+
+    test "saves a single review_agent.type and can clear it back to fallback", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "agent_types" => ["claude"],
+          "review_agent_types" => ["gemini"],
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "review_required" => "false"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["review_agent"]["type"] == "gemini"
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "agent_types" => ["claude"],
+          "review_agent_types" => [],
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "review_required" => "false"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["review_agent"] || %{}, "type")
     end
 
     test "sets and removes a secret without ever echoing its value", %{conn: conn} do
