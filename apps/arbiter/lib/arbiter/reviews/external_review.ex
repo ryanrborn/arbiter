@@ -67,7 +67,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Mergers
   alias Arbiter.Reviews.Record
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
-  alias Arbiter.Worker.ReviewAutomation
+  alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
@@ -93,7 +93,13 @@ defmodule Arbiter.Reviews.ExternalReview do
           # Read-only tracker context (e.g. the ticket the PR implements) carried
           # onto the engagement for re-review intent (#638).
           tracker_context_ref: String.t() | nil,
-          tracker_context_type: atom() | String.t() | nil
+          tracker_context_type: atom() | String.t() | nil,
+          # Review depth (bd-5xsp25): "diff" (default) sees only the unified
+          # diff; "repo" additionally gets a read-only cross-file consumer
+          # trace against the resolved repo checkout. Unset ⇒ resolved from
+          # the workspace `review_scope` policy (default + sensitive-path
+          # auto-escalation) — see `Arbiter.Worker.ReviewScope`.
+          scope: :diff | :repo | String.t() | nil
         ]
 
   @doc """
@@ -390,6 +396,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp run_workflow(prepared, opts) do
     %{adapter: adapter, mr_ref: mr_ref, workspace: workspace, repo_path: repo_path} = prepared
     report_only = Map.get(opts, :report_only, false)
+    ws_config = workspace_config(workspace)
 
     state =
       %{
@@ -403,7 +410,13 @@ defmodule Arbiter.Reviews.ExternalReview do
         adapter_opts: adapter_opts(repo_path),
         # report-only (propose): CodeReview reads the diff + computes findings /
         # verdict but posts NOTHING; the proposed comments land in state.
-        report_only: report_only
+        report_only: report_only,
+        # Review scope (bd-5xsp25): explicit override resolved now (doesn't
+        # depend on the diff); sensitive-glob auto-escalation is resolved
+        # inside CodeReview once the diff's changed files are known.
+        scope: ReviewScope.resolve(ws_config, Map.get(opts, :scope), []),
+        repo_path: repo_path,
+        sensitive_globs: sensitive_globs(ws_config)
       }
       |> maybe_put_check_runner(opts)
 
@@ -455,6 +468,11 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp workspace_config(%Workspace{config: config}), do: config
   defp workspace_config(_), do: nil
+
+  defp sensitive_globs(%{"review_scope" => %{"sensitive_globs" => globs}}) when is_list(globs),
+    do: globs
+
+  defp sensitive_globs(_ws_config), do: []
 
   # ---- report-only coordinator notification (bd-36qzgx) --------------------
 

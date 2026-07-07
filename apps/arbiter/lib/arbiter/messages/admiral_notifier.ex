@@ -446,6 +446,75 @@ defmodule Arbiter.Messages.AdmiralNotifier do
 
   def merge_block_unresolved(_snapshot, _mr_ref, _reason, _attempts), do: :ok
 
+  @doc """
+  Escalate an approved-but-parked PR awaiting a manual merge (bd-b4pwxa).
+
+  Fired by `Arbiter.Worker.Watchdog` when a PR is approved and mergeable (no
+  outstanding block) on a lane where `merge.auto_merge` is `false`. auto_merge
+  off is a legitimate "ask a human before merging" policy — but the Watchdog used
+  to honour it *silently*: it parked the PR and polled forever without ever
+  telling the coordinator the PR was ready. Approved-and-done work could sit
+  indefinitely with nothing in the inbox (the whole incident this addresses).
+
+  This surfaces the ready-to-merge PR as an addressed `:escalation` **mailbox**
+  message (`to_ref: "admiral"`) — the same shape as `merge_blocked/3` — so it
+  lands in `arb inbox` as an actionable item the moment the review passes. A
+  block (`merge_blocked/3`) is escalated separately; this fires only when nothing
+  is blocking the merge and it is purely awaiting the human decision.
+
+  `snapshot` carries `:task_id` + `:workspace_id`; `mr_ref` is the PR/MR ref (may
+  be `nil`); `via_review_gate` names the approval source in the body. Best-effort,
+  returns `:ok`.
+  """
+  @spec approved_awaiting_merge(map(), String.t() | nil, boolean()) :: :ok
+  def approved_awaiting_merge(%{workspace_id: ws_id} = snapshot, mr_ref, via_review_gate)
+      when is_binary(ws_id) and is_boolean(via_review_gate) do
+    task_id = Map.get(snapshot, :task_id, "system")
+
+    subject = "#{task_id} approved — awaiting manual merge (auto_merge off)"
+
+    approval_line =
+      if via_review_gate do
+        "The ReviewGate approved this PR in-process and no merge block remains."
+      else
+        "This PR is approved and no merge block remains."
+      end
+
+    body =
+      [
+        "#{title_for(task_id)} is approved and ready to merge, but this workspace " <>
+          "has `merge.auto_merge` disabled — so the fleet will not merge it " <>
+          "automatically and it is parked awaiting a human decision.",
+        mr_ref && "PR/MR: #{mr_ref}",
+        approval_line,
+        "Merge it now (or set `merge.auto_merge` to true for this workspace) and " <>
+          "the Watchdog will complete the task on its next poll. Until then the PR " <>
+          "stays open and the Watchdog keeps watching — no work is lost."
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: task_id,
+      subject: subject,
+      body: body
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.debug("AdmiralNotifier.approved_awaiting_merge/3 swallowed: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  def approved_awaiting_merge(_snapshot, _mr_ref, _via_review_gate), do: :ok
+
   defp block_label(:conflict), do: "merge conflict with the base branch"
   defp block_label(:behind_base), do: "branch is behind the base branch"
   defp block_label(:ci_failed), do: "required CI checks are failing"
