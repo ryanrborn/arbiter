@@ -6,9 +6,12 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   workspace: tracker, merger, agent + review-agent, routing policy, review gate,
   standing orders, and secrets. The page is fully editable:
 
-    * **Configuration** — a single form for the high-level enums (agent type,
-      tracker type, merger strategy, routing policy, review required) patched
-      atomically through the `:patch_config` action so siblings are preserved.
+    * **Configuration** — a single form for the high-level enums (agent /
+      review-agent provider pools as checkbox groups, tracker type, merger
+      strategy, routing policy, review required), patched atomically through
+      the `:patch_config` action so siblings (e.g. `agent.config`,
+      `agent.security`) are preserved. The resolved security posture is
+      surfaced read-only underneath; edit it with `arb config set`.
     * **Standing orders** — add/remove individual orders without clobbering the
       list (`config.standing_orders`).
     * **Secrets** — the *names* of configured secrets only; set/rm via a modal.
@@ -23,6 +26,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Workspace
 
   @impl true
@@ -52,15 +56,26 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   @impl true
   def handle_event("save_config", %{"config" => params}, socket) do
+    agent_types = List.wrap(params["agent_types"]) |> Enum.reject(&(&1 in [nil, ""]))
+
+    review_agent_types =
+      List.wrap(params["review_agent_types"]) |> Enum.reject(&(&1 in [nil, ""]))
+
     patch = %{
-      "agent" => %{"type" => params["agent_type"]},
+      "agent" => %{"type" => type_value(agent_types, "claude")},
       "tracker" => %{"type" => params["tracker_type"]},
       "merge" => %{"strategy" => params["merger_strategy"]},
       "routing" => %{"policy" => params["routing_policy"]},
       "review" => %{"required" => params["review_required"] == "true"}
     }
 
-    case patch_config(socket.assigns.workspace, patch, []) do
+    {patch, unset_paths} =
+      case type_value(review_agent_types, nil) do
+        nil -> {patch, ["review_agent.type"]}
+        value -> {Map.put(patch, "review_agent", %{"type" => value}), []}
+      end
+
+    case patch_config(socket.assigns.workspace, patch, unset_paths) do
       {:ok, ws} ->
         {:noreply,
          socket
@@ -205,14 +220,24 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
-  # Agent type may be a string or a multi-provider pool list; the form edits the
-  # scalar case, so render a list as a comma-joined read-only hint.
-  defp agent_type_value(ws) do
-    case cfg(ws, ["agent", "type"]) do
-      t when is_binary(t) -> t
-      _ -> "claude"
+  # `agent.type` / `review_agent.type` may be a scalar string or a
+  # multi-provider pool list. Normalize to a list of checked provider names
+  # for the checkbox group.
+  defp agent_type_list(ws, role) do
+    case cfg(ws, [role, "type"]) do
+      t when is_binary(t) -> [t]
+      types when is_list(types) -> types
+      _ -> []
     end
   end
+
+  # Collapse a checkbox selection back to the config shape: a single
+  # provider saves as a scalar string (matching existing single-provider
+  # workspaces), multiple providers save as a pool list. An empty selection
+  # falls back to `default` (nil signals "unset this key").
+  defp type_value([], default), do: default
+  defp type_value([single], _default), do: single
+  defp type_value(many, _default) when is_list(many), do: many
 
   defp order_text(order) when is_binary(order), do: order
 
@@ -226,6 +251,10 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   defp order_text(order), do: inspect(order)
 
   defp review_required?(ws), do: cfg(ws, ["review", "required"]) in [true, "true"]
+
+  # Effective security posture for the worker agent (mode, sandbox, and
+  # safe-default deny count) — read-only, set via `arb config set agent.security.*`.
+  defp security_summary(ws), do: ws |> SecurityPolicy.resolve() |> SecurityPolicy.one_line()
 
   # ---- render ----
 
@@ -273,13 +302,39 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               phx-submit="save_config"
               class="grid sm:grid-cols-2 gap-x-4"
             >
-              <.input
-                type="select"
-                name="config[agent_type]"
-                label="Agent type"
-                options={Enum.map(@agent_types, &{&1, &1})}
-                value={agent_type_value(@workspace)}
-              />
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">Worker agent (agent.type)</legend>
+                <div class="flex flex-wrap gap-3">
+                  <label :for={type <- @agent_types} class="label gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      name="config[agent_types][]"
+                      value={type}
+                      checked={type in agent_type_list(@workspace, "agent")}
+                      class="checkbox checkbox-sm"
+                    />
+                    {type}
+                  </label>
+                </div>
+              </fieldset>
+              <fieldset class="fieldset">
+                <legend class="fieldset-legend">Review agent (review_agent.type)</legend>
+                <div class="flex flex-wrap gap-3">
+                  <label :for={type <- @agent_types} class="label gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      name="config[review_agent_types][]"
+                      value={type}
+                      checked={type in agent_type_list(@workspace, "review_agent")}
+                      class="checkbox checkbox-sm"
+                    />
+                    {type}
+                  </label>
+                </div>
+                <p class="text-xs text-base-content/50">
+                  Leave unchecked to fall back to the worker agent's type.
+                </p>
+              </fieldset>
               <.input
                 type="select"
                 name="config[tracker_type]"
@@ -319,6 +374,10 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 <p :if={@config_error} class="text-sm text-error">{@config_error}</p>
               </div>
             </.form>
+            <p class="text-xs text-base-content/50">
+              Security posture (<code>agent.security.*</code>):
+              <span class="font-mono">{security_summary(@workspace)}</span>
+            </p>
             <p class="text-xs text-base-content/50">
               Adapter-specific details (hosts, owner/repo, <code>credentials_ref</code>) are set with <code>arb config set</code>. Reference a secret below via <code>secret:&lt;key&gt;</code>.
             </p>
