@@ -279,6 +279,44 @@ defmodule Arbiter.MCP.ToolsTest do
       assert payload.antigravity == nil
     end
 
+    test "includes a graceful codex no-op when Codex is not authenticated", ctx do
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex == nil
+      assert is_binary(result.codex_message)
+    end
+
+    test "surfaces live Codex windows when authenticated", ctx do
+      path = Path.join(System.tmp_dir!(), "codex_auth_#{System.unique_integer([:positive])}.json")
+
+      File.write!(
+        path,
+        Jason.encode!(%{"tokens" => %{"access_token" => "AT", "account_id" => "AID"}})
+      )
+
+      prev = Application.get_env(:arbiter, :codex_quota, [])
+      Application.put_env(:arbiter, :codex_quota, auth_path: path)
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+
+      on_exit(fn ->
+        File.rm(path)
+        Application.put_env(:arbiter, :codex_quota, prev)
+        Application.delete_env(:arbiter, :codex_quota_http_stub)
+      end)
+
+      Req.Test.stub(Arbiter.Quota.Codex.HTTP, fn conn ->
+        Req.Test.json(conn, %{
+          "plan_type" => "plus",
+          "rate_limit" => %{
+            "primary_window" => %{"used_percent" => 33.0, "reset_at" => 1_782_247_200}
+          }
+        })
+      end)
+
+      assert {:ok, result} = Tools.quota_get(ctx.worker, %{})
+      assert result.codex.session.used == 33.0
+      assert result.codex_message == nil
+    end
+
     test "returns the captured snapshot for the scope's workspace", ctx do
       {:ok, _} =
         Arbiter.Quota.capture(ctx.ws.id, [
