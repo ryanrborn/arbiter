@@ -487,16 +487,19 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   # CURRENT directives only: the landing shows the open + in-progress slice,
-  # newest-updated first, capped at . Closed directives are
+  # sorted by status (in_progress first), then priority (ascending, 0 = highest),
+  # then created_at (ascending, oldest first), capped at 8. Closed directives are
   # never shown here — they live on the `/tasks` index ("See all"). This keeps
   # the landing bounded as the directive history grows unbounded.
   defp refresh_recent_tasks(socket) do
     tasks =
       Issue
       |> Ash.Query.filter(status != :closed)
-      |> Ash.Query.sort(updated_at: :desc)
-      |> Ash.Query.limit(@recent_tasks_limit)
       |> Ash.read!()
+      |> Enum.sort_by(fn task ->
+        {status_rank(task.status), task.priority, task.created_at}
+      end)
+      |> Enum.take(@recent_tasks_limit)
 
     blocked_counts = blocked_counts_for(Enum.map(tasks, & &1.id))
 
@@ -507,6 +510,12 @@ defmodule ArbiterWeb.DashboardLive do
 
     assign(socket, :recent_tasks, tasks)
   end
+
+  # Map status to a sort rank: in_progress comes first (0), then open and others (1).
+  # Using explicit ranking rather than alphabetical ordering ensures the semantics
+  # hold if the status enum or filter ever changes.
+  defp status_rank(:in_progress), do: 0
+  defp status_rank(_), do: 1
 
   # CURRENT campaigns only: open epic tasks (issue_type == :epic), newest-updated
   # first, capped. Each is loaded with its `:parent_of` child-progress rollup for
