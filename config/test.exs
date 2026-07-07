@@ -74,6 +74,11 @@ config :arbiter, :credential_warden, enabled: false
 # tests that exercise probe logic inject a :probe_fun stub and enable explicitly.
 config :arbiter, :quota_refresh_probe, enabled: false
 
+# Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
+# no real CLIs or endpoints to hit. Tests that exercise the prober inject a
+# :refresh_fun stub and enable explicitly.
+config :arbiter, :cloud_quota_probe, enabled: false
+
 # Disable direct Gemini CLI / Antigravity quota fetching in test — there are no
 # real Google credentials or endpoints to hit, so the quota surface stays a pure
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and

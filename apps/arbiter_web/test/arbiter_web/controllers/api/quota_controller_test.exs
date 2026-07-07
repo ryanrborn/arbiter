@@ -82,6 +82,22 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert [%{"provider" => "claude", "utilization_5h" => 0.24}] = resp["data"]["quotas"]
   end
 
+  test "surfaces a persisted Gemini CLI snapshot from the DB (bd-ajh7bd)", %{conn: conn, ws: ws} do
+    # The controller is now a pure DB read — no live Google fetch. A row
+    # persisted by the CloudProbe (or here directly) is what surfaces.
+    Ash.create!(Arbiter.Quota.GoogleQuota, %{
+      workspace_id: ws.id,
+      provider: "gemini_cli",
+      plan: "Free",
+      used_percent: 75.0,
+      snapshot: %{"provider" => "gemini-cli", "plan" => "Free", "models" => []},
+      captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+    })
+
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["gemini"]["plan"] == "Free"
+  end
+
   test "the quotas list carries every tracked provider", %{conn: conn, ws: ws} do
     {:ok, _} =
       Quota.capture(ws.id, [{"anthropic-ratelimit-unified-5h-utilization", "0.24"}])

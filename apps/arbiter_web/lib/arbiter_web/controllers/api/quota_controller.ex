@@ -5,25 +5,25 @@ defmodule ArbiterWeb.Api.QuotaController do
   Resolves the target workspace from `?workspace=<id|name>`, falling back to
   the installation default.
 
-  Also triggers an on-demand refresh of per-model weekly utilization +
-  `extra_usage` overage from Anthropic's `/api/oauth/usage` (bd-8tpha6) —
-  best-effort, so a failure there never hides the header-capture aggregate
-  figures.
+  A pure DB read (bd-ajh7bd): every provider is read from its persisted quota
+  table, kept fresh by the background probes (`Arbiter.Quota.RefreshProbe` for
+  Claude's header capture, `Arbiter.Quota.CloudProbe` for Codex / Gemini CLI /
+  Antigravity and Anthropic's secondary `/api/oauth/usage` layer). No provider is
+  fetched live here, so a dashboard/CLI load carries no request-time latency or
+  rate-limit exposure.
 
-  `quotas` carries every proxy-captured provider (each including its own
-  `provider` field) — `claude` is kept as a top-level key too for `arb quota`
-  and other existing consumers of the pre-multi-provider shape.
+  `quotas` carries every tracked provider as the uniform view shape (each
+  including its own `provider` field) — `claude` is kept as a top-level key too
+  for `arb quota` and other existing consumers of the pre-multi-provider shape.
 
     * `claude` — the latest snapshot the local proxy captured off Claude worker
-      traffic; `null` before the first proxied request.
-    * `codex` — fetched live from OpenAI's rate-limit endpoint using the
-      `codex` CLI's stored token (a distinct session/weekly-window shape, so it
-      stays a top-level key rather than joining `quotas`); `null` (with a
-      `codex_message`) when Codex isn't authenticated or the usage API is
-      unavailable.
-    * `gemini` / `antigravity` — live per-model Cloud Code Assist quota
-      (bd-57ukgb), each `null` when the corresponding CLI isn't authenticated
-      on this host.
+      traffic, plus the oauth-usage layer; `null` before the first capture.
+    * `codex` — the persisted OpenAI session/weekly-window snapshot (a distinct
+      shape, so it stays a top-level key rather than joining `quotas`); `null`
+      (with a `codex_message`) until the Codex probe has stored one.
+    * `gemini` / `antigravity` — the persisted per-model Cloud Code Assist
+      snapshot (bd-57ukgb), each `null` until that CLI is authenticated and
+      probed on this host.
   """
 
   use ArbiterWeb, :controller
@@ -35,17 +35,16 @@ defmodule ArbiterWeb.Api.QuotaController do
   def show(conn, params) do
     case resolve_workspace_id(Map.get(params, "workspace")) do
       {:ok, ws_id} ->
-        codex = Quota.Codex.fetch(ws_id)
-        google = Quota.google_snapshots()
+        codex = Quota.Codex.serialize_latest(ws_id)
 
         render(conn, :show,
           workspace_id: ws_id,
-          claude: Quota.refresh_and_serialize(ws_id),
+          claude: Quota.serialize(ws_id),
           quotas: Quota.list_serialized(ws_id),
-          codex: codex.codex,
-          codex_message: codex.message,
-          gemini: google.gemini,
-          antigravity: google.antigravity
+          codex: codex,
+          codex_message: Quota.codex_absence_message(codex),
+          gemini: Quota.CloudCode.serialize_latest(ws_id, "gemini_cli"),
+          antigravity: Quota.CloudCode.serialize_latest(ws_id, "antigravity")
         )
 
       {:error, message} ->

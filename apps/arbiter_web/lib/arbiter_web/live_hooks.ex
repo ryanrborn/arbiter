@@ -73,11 +73,23 @@ defmodule ArbiterWeb.LiveHooks do
   defp upsert_quota(quotas, quota) do
     if Enum.any?(quotas, &(&1.provider == quota.provider)) do
       Enum.map(quotas, fn
-        %{provider: provider} when provider == quota.provider -> quota
-        existing -> existing
+        %{provider: provider} = existing when provider == quota.provider ->
+          preserve_cost(existing, quota)
+
+        existing ->
+          existing
       end)
     else
       quotas ++ [quota]
     end
   end
+
+  # Live broadcast views don't carry `cost_usd` (it's a read-path add-on from the
+  # usage ledger, not part of the per-provider fetch), so a naive replace would
+  # blank the figure on every tick. Keep the last known cost when the incoming
+  # update omits it (bd-ajh7bd).
+  defp preserve_cost(existing, %{cost_usd: nil} = incoming),
+    do: %{incoming | cost_usd: Map.get(existing, :cost_usd)}
+
+  defp preserve_cost(_existing, incoming), do: incoming
 end
