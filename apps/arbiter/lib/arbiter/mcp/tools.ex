@@ -546,13 +546,16 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Current Anthropic quota state for the scope's workspace, captured by the
-  local proxy. Resolution mirrors `workspace_show`. Returns `%{claude: nil}`
-  when no snapshot has been captured yet.
+  local proxy, plus an on-demand refresh of per-model weekly utilization and
+  `extra_usage` overage from `/api/oauth/usage` (bd-8tpha6) — best-effort, so
+  a 429/missing-creds/network failure on that secondary call never blocks the
+  header-capture aggregate figures. Resolution mirrors `workspace_show`.
+  Returns `%{claude: nil}` when no snapshot has been captured yet.
   """
   @spec quota_get(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def quota_get(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      {:ok, %{claude: Arbiter.Quota.serialize(ws_id)}}
+      {:ok, %{claude: Arbiter.Quota.refresh_and_serialize(ws_id)}}
     end
   end
 

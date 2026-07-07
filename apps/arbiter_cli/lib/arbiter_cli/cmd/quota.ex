@@ -4,7 +4,10 @@ defmodule ArbiterCli.Cmd.Quota do
 
   The local HTTP proxy captures Anthropic's `anthropic-ratelimit-unified-*`
   headers off every Claude request and stores the latest snapshot per
-  workspace. This surfaces it.
+  workspace. This surfaces it, plus an on-demand secondary fetch of
+  Anthropic's `/api/oauth/usage` for a per-model weekly breakdown and
+  `extra_usage` overage (bd-8tpha6) — best-effort, so it never hides the
+  header-capture figures if it fails or is cooling down from a 429.
 
   Usage:
 
@@ -12,7 +15,8 @@ defmodule ArbiterCli.Cmd.Quota do
 
   Defaults to the installation's default workspace. With `--json` emits the
   machine-readable snapshot; otherwise a short human-readable summary of the
-  5h and 7d windows (utilization, status, reset time).
+  5h and 7d windows (utilization, status, reset time), per-model weekly
+  utilization, and extra usage overage.
 
   Reads from `GET /api/quota`.
   """
@@ -65,7 +69,33 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts(
       "  7d:  #{format_pct(q["utilization_7d"])} used   status=#{q["status_7d"] || "—"}   resets #{q["reset_7d_at"] || "—"}"
     )
+
+    emit_oauth_usage(q)
   end
+
+  defp emit_oauth_usage(%{"per_model_utilization" => models, "extra_usage" => extra} = q)
+       when map_size(models) > 0 or map_size(extra) > 0 do
+    IO.puts("")
+    IO.puts("  per-model weekly (7d) — via /api/oauth/usage, captured #{q["oauth_captured_at"] || "—"}:")
+
+    models
+    |> Enum.sort()
+    |> Enum.each(fn {model, util} ->
+      IO.puts("    #{model}: #{format_pct(util)} used")
+    end)
+
+    if map_size(extra) > 0 do
+      IO.puts("  extra usage overage: #{format_extra_usage(extra)}")
+    end
+  end
+
+  defp emit_oauth_usage(_), do: :ok
+
+  defp format_extra_usage(%{"amount_usd" => n}) when is_number(n) do
+    "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+  end
+
+  defp format_extra_usage(extra), do: inspect(extra)
 
   defp format_pct(nil), do: "—"
 

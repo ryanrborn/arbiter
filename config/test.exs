@@ -27,6 +27,7 @@ config :arbiter, :github_http_stub, true
 config :arbiter, :jira_http_stub, true
 config :arbiter, :shortcut_http_stub, true
 config :arbiter, :gitlab_http_stub, true
+config :arbiter, :oauth_usage_http_stub, true
 config :arbiter, :auto_start_refineries, false
 
 # Acolyte CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
