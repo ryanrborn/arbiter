@@ -50,7 +50,6 @@ defmodule ArbiterCli.Client do
     System.get_env("ARB_TOKEN")
   end
 
-
   @spec get(String.t(), keyword()) :: {:ok, any()} | {:error, Error.t()}
   def get(path, params \\ []), do: request(:get, path, params: params)
 
@@ -126,7 +125,8 @@ defmodule ArbiterCli.Client do
       status: 401,
       body: err,
       message: msg,
-      hint: "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
+      hint:
+        "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
     }
   end
 
@@ -136,7 +136,8 @@ defmodule ArbiterCli.Client do
       status: 401,
       body: body,
       message: "HTTP 401 (Unauthorized)",
-      hint: "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
+      hint:
+        "set ARB_TOKEN — remote arb requires a token (mint one with `arb mcp token mint --tier coordinator`)"
     }
   end
 

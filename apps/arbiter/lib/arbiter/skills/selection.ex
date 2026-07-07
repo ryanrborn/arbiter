@@ -125,7 +125,9 @@ defmodule Arbiter.Skills.Selection do
   end
 
   defp repo_layer(_config, nil), do: nil
-  defp repo_layer(config, repo) when is_binary(repo), do: get_in(config, ["skills", "repos", repo])
+
+  defp repo_layer(config, repo) when is_binary(repo),
+    do: get_in(config, ["skills", "repos", repo])
 
   # The repo layer may be a bare list (all treated as additions) or a map with
   # "add"/"remove" (each an entry list). Removals are applied after additions.

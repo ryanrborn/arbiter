@@ -665,7 +665,10 @@ defmodule Arbiter.Trackers.SyncTest do
             |> Req.Test.json(%{
               "key" => @ref,
               "fields" => %{
-                "status" => %{"name" => "Code Complete", "statusCategory" => %{"key" => "indeterminate"}}
+                "status" => %{
+                  "name" => "Code Complete",
+                  "statusCategory" => %{"key" => "indeterminate"}
+                }
               }
             })
         end
@@ -710,7 +713,10 @@ defmodule Arbiter.Trackers.SyncTest do
             |> Req.Test.json(%{
               "key" => @ref,
               "fields" => %{
-                "status" => %{"name" => "In Code Review", "statusCategory" => %{"key" => "indeterminate"}}
+                "status" => %{
+                  "name" => "In Code Review",
+                  "statusCategory" => %{"key" => "indeterminate"}
+                }
               }
             })
         end

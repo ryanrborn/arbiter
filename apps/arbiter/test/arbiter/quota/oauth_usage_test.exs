@@ -64,7 +64,9 @@ defmodule Arbiter.Quota.OAuthUsageTest do
     end
 
     test "reads the token from .credentials.json when none is passed" do
-      tmp = System.tmp_dir!() |> Path.join("oauth_usage_test_#{System.unique_integer([:positive])}")
+      tmp =
+        System.tmp_dir!() |> Path.join("oauth_usage_test_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(tmp)
       on_exit(fn -> File.rm_rf!(tmp) end)
 
@@ -84,7 +86,10 @@ defmodule Arbiter.Quota.OAuthUsageTest do
     end
 
     test "errors when there is no credentials file to read" do
-      tmp = System.tmp_dir!() |> Path.join("oauth_usage_test_missing_#{System.unique_integer([:positive])}")
+      tmp =
+        System.tmp_dir!()
+        |> Path.join("oauth_usage_test_missing_#{System.unique_integer([:positive])}")
+
       File.mkdir_p!(tmp)
       on_exit(fn -> File.rm_rf!(tmp) end)
 
