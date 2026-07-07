@@ -67,7 +67,7 @@ defmodule ArbiterWeb.LiveHooks do
           {:quota_updated, ^workspace_id, quota} ->
             # Skip updates for hidden providers to prevent re-introduction via PubSub
             if quota.provider in @hidden_providers do
-              {:cont, socket}
+              {:halt, socket}
             else
               {:halt, assign(socket, :quotas, upsert_quota(socket.assigns.quotas, quota))}
             end
