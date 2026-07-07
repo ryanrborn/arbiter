@@ -27,6 +27,7 @@ config :arbiter, :github_http_stub, true
 config :arbiter, :jira_http_stub, true
 config :arbiter, :shortcut_http_stub, true
 config :arbiter, :gitlab_http_stub, true
+config :arbiter, :oauth_usage_http_stub, true
 config :arbiter, :auto_start_refineries, false
 
 # Acolyte CLAUDE_CONFIG_DIR isolation (bd-3y2mda) is off by default in the suite
@@ -78,3 +79,9 @@ config :arbiter, :quota_refresh_probe, enabled: false
 # DB read. Tests that exercise the fetch path pass `enabled: true` explicitly and
 # stub HTTP with a Req.Test plug.
 config :arbiter, :cloud_code_quota, enabled: false
+
+# Direct Codex quota (bd-cqfn5i): point the auth-file read at a path that never
+# exists so surface tests (quota_get / GET /api/quota) get the graceful no-op
+# and make no real network call. Tests exercising the live path inject
+# `credentials:`/`auth_path:` and enable the Req.Test stub explicitly.
+config :arbiter, :codex_quota, auth_path: "/nonexistent/codex/auth.json"

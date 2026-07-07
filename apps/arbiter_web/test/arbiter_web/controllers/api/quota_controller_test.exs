@@ -26,6 +26,12 @@ defmodule ArbiterWeb.Api.QuotaControllerTest do
     assert resp["data"]["antigravity"] == nil
   end
 
+  test "includes a graceful codex no-op when Codex is not authenticated", %{conn: conn} do
+    resp = conn |> get("/api/quota") |> json_response(200)
+    assert resp["data"]["codex"] == nil
+    assert is_binary(resp["data"]["codex_message"])
+  end
+
   test "returns the captured snapshot for the default workspace", %{conn: conn, ws: ws} do
     {:ok, _} =
       Quota.capture(ws.id, [

@@ -13,6 +13,26 @@ defmodule ArbiterCli.Cmd.QuotaTest do
     "captured_at" => "2026-06-23T20:20:06Z"
   }
 
+  @codex %{
+    "plan" => "plus",
+    "limit_reached" => false,
+    "session" => %{
+      "used" => 42.5,
+      "total" => 100,
+      "remaining" => 57.5,
+      "reset_at" => "2026-06-23T23:00:00Z",
+      "unlimited" => false
+    },
+    "weekly" => %{
+      "used" => 8.0,
+      "total" => 100,
+      "remaining" => 92.0,
+      "reset_at" => "2026-06-29T00:00:00Z",
+      "unlimited" => false
+    },
+    "captured_at" => "2026-06-23T20:20:06Z"
+  }
+
   describe "arb quota" do
     test "renders 5h and 7d utilization, status, and reset times in text mode" do
       stub_get("/api/quota", %{"data" => %{"workspace_id" => "ws-1", "claude" => @snapshot}})
@@ -25,6 +45,35 @@ defmodule ArbiterCli.Cmd.QuotaTest do
       assert out =~ "status=allowed"
       assert out =~ "2026-06-23T23:00:00Z"
       assert out =~ "representative window: five_hour"
+    end
+
+    test "renders codex session + weekly windows in text mode" do
+      stub_get("/api/quota", %{
+        "data" => %{"workspace_id" => "ws-1", "claude" => @snapshot, "codex" => @codex}
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Codex quota (workspace ws-1)"
+      assert out =~ "plan:"
+      assert out =~ "session:  42.5% used"
+      assert out =~ "weekly:   8.0% used"
+      assert out =~ "2026-06-29T00:00:00Z"
+    end
+
+    test "explains the codex empty state with the message" do
+      stub_get("/api/quota", %{
+        "data" => %{
+          "workspace_id" => "ws-1",
+          "claude" => nil,
+          "codex" => nil,
+          "codex_message" => "Codex CLI not authenticated for this workspace"
+        }
+      })
+
+      {out, _err, code} = capture(fn -> ArbiterCli.Cmd.Quota.run([]) end)
+      assert code == 0
+      assert out =~ "Codex CLI not authenticated for this workspace"
     end
 
     test "--json mode emits the raw snapshot" do

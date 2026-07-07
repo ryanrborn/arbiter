@@ -7,6 +7,8 @@ defmodule ArbiterWeb.Api.QuotaJSON do
         workspace_id: ws_id,
         claude: claude,
         quotas: quotas,
+        codex: Map.get(assigns, :codex),
+        codex_message: Map.get(assigns, :codex_message),
         gemini: Map.get(assigns, :gemini),
         antigravity: Map.get(assigns, :antigravity)
       }

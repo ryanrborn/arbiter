@@ -206,10 +206,14 @@ defmodule Arbiter.MCP.Catalog do
       name: "quota_get",
       tiers: @both,
       description:
-        "Current quota state for the scope's workspace. `claude`: Anthropic 5h + 7d utilization, " <>
-          "reset times, status, and which window binds (captured by the local proxy; null until " <>
-          "the first proxied request). `gemini` / `antigravity`: live per-model Cloud Code Assist " <>
-          "quota (null when that CLI isn't authenticated on this host).",
+        "Current rate-limit / quota state for the scope's workspace. `claude`: Anthropic's 5h + " <>
+          "7d utilization, reset times, status, and which window binds (captured by the local " <>
+          "proxy; `null` until the first proxied request), plus an on-demand per-model weekly " <>
+          "utilization + extra_usage overage refresh. `codex`: OpenAI session + weekly " <>
+          "windows fetched live from the rate-limit endpoint (`null` with a `codex_message` when " <>
+          "Codex isn't authenticated or the usage API is unavailable). `gemini` / `antigravity`: " <>
+          "live per-model Cloud Code Assist quota (`null` when that CLI isn't authenticated on " <>
+          "this host).",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
       handler: &Tools.quota_get/2
     },
