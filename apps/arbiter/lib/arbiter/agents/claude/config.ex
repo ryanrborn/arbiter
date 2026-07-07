@@ -42,6 +42,21 @@ defmodule Arbiter.Agents.Claude.Config do
   All keys are optional. Missing config falls back to "let the CLI pick the
   model" — i.e. today's behavior, unchanged.
 
+  ## Per-provider override scope (multi-provider pools)
+
+  When `agent.type` is a list (e.g. `["claude", "gemini"]`) every adapter reads
+  this same shared `config` map, so a flat `tier_models` / `thinking_argv`
+  override applies to *all* of them (bd-a6vu3c). To scope an override to Claude
+  alone, nest it under the `"claude"` key:
+
+      "config" => %{
+        "claude" => %{"tier_models" => %{"standard" => "opus"}}
+      }
+
+  The provider sub-map is merged over the flat keys at `put_active/2` (see
+  `Arbiter.Agents.ProviderConfig`), so it reaches Claude only and never leaks
+  into Gemini/Codex tier resolution.
+
   ## Credential resolution
 
   `credentials_ref` (and each entry in `api_keys`) is a small DSL:
@@ -59,7 +74,12 @@ defmodule Arbiter.Agents.Claude.Config do
   """
 
   alias Arbiter.Agents.CredentialsRef
+  alias Arbiter.Agents.ProviderConfig
   alias Arbiter.Tasks.Workspace
+
+  # Provider name used to scope per-provider overrides in a shared
+  # multi-provider `agent.config` (see `Arbiter.Agents.ProviderConfig`).
+  @provider "claude"
 
   @pdict_key {__MODULE__, :active_workspace_config}
   @rotation_key {__MODULE__, :api_key_rotation_index}
@@ -116,13 +136,16 @@ defmodule Arbiter.Agents.Claude.Config do
 
   def put_active(%Workspace{config: config} = workspace, role)
       when role in [:agent, :review_agent] do
-    raw = get_in(config || %{}, [Atom.to_string(role), "config"]) || %{}
+    raw =
+      (get_in(config || %{}, [Atom.to_string(role), "config"]) || %{})
+      |> ProviderConfig.apply_overrides(@provider)
+
     Process.put(@pdict_key, CredentialsRef.embed_secrets(raw, Workspace.secrets_map(workspace)))
     :ok
   end
 
   def put_active(%{} = raw, _role) do
-    Process.put(@pdict_key, raw)
+    Process.put(@pdict_key, ProviderConfig.apply_overrides(raw, @provider))
     :ok
   end
 
