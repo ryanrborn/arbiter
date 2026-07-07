@@ -4,7 +4,10 @@ defmodule ArbiterCli.Cmd.Quota do
 
   * Claude: the local HTTP proxy captures Anthropic's
     `anthropic-ratelimit-unified-*` headers off every Claude request and stores
-    the latest snapshot per workspace.
+    the latest snapshot per workspace, plus an on-demand secondary fetch of
+    Anthropic's `/api/oauth/usage` for a per-model weekly breakdown and
+    `extra_usage` overage (bd-8tpha6) — best-effort, so it never hides the
+    header-capture figures if it fails or is cooling down from a 429.
   * Codex: fetched live from OpenAI's rate-limit endpoint using the `codex`
     CLI's stored token — session + weekly windows. Shows a short message when
     Codex isn't authenticated (no call is made in that case).
@@ -15,7 +18,9 @@ defmodule ArbiterCli.Cmd.Quota do
 
   Defaults to the installation's default workspace. With `--json` emits the
   machine-readable snapshot; otherwise a short human-readable summary of each
-  provider's windows (utilization / used-percent and reset time).
+  provider's windows — Claude's 5h/7d utilization (status, reset time), its
+  per-model weekly utilization and extra usage overage, plus Codex's
+  session/weekly used-percent and reset time.
 
   Reads from `GET /api/quota`.
   """
@@ -75,6 +80,8 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts(
       "  7d:  #{format_frac(q["utilization_7d"])} used   status=#{q["status_7d"] || "—"}   resets #{q["reset_7d_at"] || "—"}"
     )
+
+    emit_oauth_usage(q)
   end
 
   # Codex (OpenAI): windows already normalized to a 0..100 used-percent.
@@ -96,6 +103,30 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("Codex quota (workspace #{data["workspace_id"]}):")
     IO.puts("  (no Codex quota available)")
   end
+
+  defp emit_oauth_usage(%{"per_model_utilization" => models, "extra_usage" => extra} = q)
+       when map_size(models) > 0 or map_size(extra) > 0 do
+    IO.puts("")
+    IO.puts("  per-model weekly (7d) — via /api/oauth/usage, captured #{q["oauth_captured_at"] || "—"}:")
+
+    models
+    |> Enum.sort()
+    |> Enum.each(fn {model, util} ->
+      IO.puts("    #{model}: #{format_pct(util)} used")
+    end)
+
+    if map_size(extra) > 0 do
+      IO.puts("  extra usage overage: #{format_extra_usage(extra)}")
+    end
+  end
+
+  defp emit_oauth_usage(_), do: :ok
+
+  defp format_extra_usage(%{"amount_usd" => n}) when is_number(n) do
+    "$" <> :erlang.float_to_binary(n / 1, decimals: 2)
+  end
+
+  defp format_extra_usage(extra), do: inspect(extra)
 
   defp format_window(nil), do: "—"
 
