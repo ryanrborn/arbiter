@@ -22,6 +22,9 @@ defmodule ArbiterCli.Cmd.Quota do
   per-model weekly utilization and extra usage overage, plus Codex's
   session/weekly used-percent and reset time.
 
+  When the Gemini CLI / Antigravity are authenticated on this host, their live
+  per-model Cloud Code Assist quota (remaining %, reset time) is shown too.
+
   Reads from `GET /api/quota`.
   """
 
@@ -58,6 +61,8 @@ defmodule ArbiterCli.Cmd.Quota do
     emit_claude(data)
     IO.puts("")
     emit_codex(data)
+    emit_google(data["gemini"], "Gemini CLI")
+    emit_google(data["antigravity"], "Antigravity")
   end
 
   # Anthropic (Claude): utilization headers stored as a 0..1 fraction.
@@ -102,6 +107,40 @@ defmodule ArbiterCli.Cmd.Quota do
   defp emit_codex(data) do
     IO.puts("Codex quota (workspace #{data["workspace_id"]}):")
     IO.puts("  (no Codex quota available)")
+  end
+
+  # Live Cloud Code Assist snapshots (Gemini CLI / Antigravity). `nil` means
+  # that CLI isn't authenticated on this host — stay quiet rather than noisy.
+  defp emit_google(nil, _label), do: :ok
+
+  defp emit_google(snap, label) do
+    IO.puts("")
+    IO.puts("#{label} quota (plan: #{snap["plan"] || "—"}):")
+
+    case snap["message"] do
+      msg when is_binary(msg) and msg != "" -> IO.puts("  #{msg}")
+      _ -> :ok
+    end
+
+    case snap["models"] do
+      [] ->
+        if snap["message"] in [nil, ""], do: IO.puts("  (no per-model quota reported)")
+
+      models when is_list(models) ->
+        Enum.each(models, &emit_model/1)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp emit_model(m) do
+    name = m["display_name"] || m["model_id"] || "—"
+    reset = m["reset_at"] || "—"
+
+    IO.puts(
+      "  #{name}: #{format_pct_plain(m["remaining_percentage"])} remaining   resets #{reset}"
+    )
   end
 
   defp emit_oauth_usage(%{"per_model_utilization" => models, "extra_usage" => extra} = q)
@@ -149,4 +188,11 @@ defmodule ArbiterCli.Cmd.Quota do
   end
 
   defp format_pct(_), do: "—"
+
+  # Google snapshots already carry a 0–100 percentage, so render it as-is.
+  defp format_pct_plain(n) when is_number(n) do
+    :erlang.float_to_binary(n / 1, decimals: 1) <> "%"
+  end
+
+  defp format_pct_plain(_), do: "—"
 end
