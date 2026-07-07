@@ -15,8 +15,8 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
       `Arbiter.Tasks.Workspace.valid_merger_strategies/0` (`"direct"`, `"gitlab"`, `"github"`).
     * If `"agent"` / `"review_agent"` is present, it must be a map.
     * If `"agent.type"` is present, it must be one of the values in
-      `Arbiter.Agents.valid_agent_types/0` (`"claude"`, `"gemini"`), OR a
-      non-empty list of such strings (multi-provider pool).
+      `Arbiter.Agents.valid_agent_types/0` (`"claude"`, `"gemini"`, `"codex"`),
+      OR a non-empty list of such strings (multi-provider pool).
     * If `"agent.config"` / `"review_agent.config"` is present, it must be a map.
     * If `"routing"` is present, it must be a map.
     * If `"routing.policy"` is present, it must be one of the values in

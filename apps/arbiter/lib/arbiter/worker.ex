@@ -941,8 +941,11 @@ defmodule Arbiter.Worker do
       # injection above swapped it out for the short continue prompt, that
       # temp file is now orphaned — nothing will ever open it — so reclaim it
       # immediately rather than leaking it until the worker exits.
+      provider = Map.get(session_config, :provider)
+      adapter = agent_adapter_for_provider(provider)
+
       if spawn_args != pristine_args do
-        case Arbiter.Agents.Claude.prompt_tmpfile(pristine_args.argv) do
+        case get_prompt_tmpfile(adapter, pristine_args.argv) do
           path when is_binary(path) -> File.rm(path)
           nil -> :ok
         end
@@ -954,7 +957,7 @@ defmodule Arbiter.Worker do
       session =
         session_config
         |> Map.put(:port, port)
-        |> Map.put(:prompt_tmpfile, Arbiter.Agents.Claude.prompt_tmpfile(spawn_args.argv))
+        |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, spawn_args.argv))
         |> Map.put(:output_lines, [])
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
@@ -999,7 +1002,10 @@ defmodule Arbiter.Worker do
   defp resume_spawn_args(%State{meta: meta} = state, port_args) do
     case meta && Map.get(meta, :resume_session_id) do
       sid when is_binary(sid) and sid != "" ->
-        case inject_resume_argv(port_args, sid, continue_prompt(state)) do
+        routing_config = (meta && Map.get(meta, :routing_config)) || %{}
+        provider = Map.get(routing_config, :provider) || "claude"
+
+        case inject_resume_argv(port_args, sid, continue_prompt(state), provider) do
           {:ok, resumed_args} ->
             Logger.info("Worker: bd-1z7624 session-resume task=#{state.task_id} session=#{sid}")
 
@@ -1906,8 +1912,12 @@ defmodule Arbiter.Worker do
     label = Keyword.get(opts, :label, "gate")
     spawn_args = meta && Map.get(meta, :claude_spawn)
 
+    routing_config = (meta && Map.get(meta, :routing_config)) || %{}
+    provider = Map.get(routing_config, :provider) || "claude"
+    model = Map.get(routing_config, :model)
+
     with %{} = port_args <- spawn_args || :no_spawn_args,
-         {:ok, new_args} <- inject_nudge_argv(port_args, nudge),
+         {:ok, new_args} <- inject_nudge_argv(port_args, nudge, provider),
          {:ok, port} <- safe_open_port(new_args) do
       next_attempts = ((meta && Map.get(meta, attempts_key)) || 0) + 1
 
@@ -1920,18 +1930,22 @@ defmodule Arbiter.Worker do
         task_id: state.task_id,
         topic: "worker:" <> state.task_id,
         line_cap: Arbiter.Worker.ClaudeSession.line_cap(),
-        done_regex: Arbiter.Worker.ClaudeSession.done_regex()
+        done_regex: Arbiter.Worker.ClaudeSession.done_regex(),
+        provider: provider,
+        model: model
       }
 
       now = DateTime.utc_now()
 
+      adapter = agent_adapter_for_provider(provider)
+
       session =
         session_config
         |> Map.put(:port, port)
-        # inject_nudge_argv/2 always leaves the prompt inline (a nudge is
+        # inject_nudge_argv/3 always leaves the prompt inline (a nudge is
         # short), so this is always nil — kept for parity with the other two
         # open-port sites rather than a real leak risk here.
-        |> Map.put(:prompt_tmpfile, Arbiter.Agents.Claude.prompt_tmpfile(new_args.argv))
+        |> Map.put(:prompt_tmpfile, get_prompt_tmpfile(adapter, new_args.argv))
         |> Map.put(:output_lines, [])
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
@@ -1977,14 +1991,20 @@ defmodule Arbiter.Worker do
   # original prompt). If no `--print` slot is present (test fixtures, custom
   # commands) we accept the argv unchanged and rely on the fixture to honor a
   # re-run; the cap then bounds how many times we try.
-  defp inject_nudge_argv(%{argv: argv} = port_args, nudge) when is_list(argv) do
-    case Arbiter.Agents.Claude.splice_prompt(argv, [nudge]) do
-      {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
-      {:error, :no_print_slot} -> {:ok, port_args}
+  defp inject_nudge_argv(%{argv: argv} = port_args, nudge, provider) when is_list(argv) do
+    adapter = agent_adapter_for_provider(provider)
+
+    if function_exported?(adapter, :splice_prompt, 2) do
+      case apply(adapter, :splice_prompt, [argv, [nudge]]) do
+        {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
+        {:error, :no_print_slot} -> {:ok, port_args}
+      end
+    else
+      {:ok, port_args}
     end
   end
 
-  defp inject_nudge_argv(_port_args, _nudge), do: {:error, :missing_argv}
+  defp inject_nudge_argv(_port_args, _nudge, _provider), do: {:error, :missing_argv}
 
   defp commit_nudge_prompt(%State{task_id: task_id, meta: meta}, :uncommitted) do
     branch = (meta && Map.get(meta, :branch)) || "(your branch)"
@@ -2248,8 +2268,12 @@ defmodule Arbiter.Worker do
     spawn_args = meta && Map.get(meta, :claude_spawn)
     prompt = continue_prompt(state)
 
+    routing_config = (meta && Map.get(meta, :routing_config)) || %{}
+    provider = Map.get(routing_config, :provider) || "claude"
+    model = Map.get(routing_config, :model)
+
     with %{} = port_args <- spawn_args || :no_spawn_args,
-         {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt),
+         {:ok, new_args} <- inject_resume_argv(port_args, session_id, prompt, provider),
          {:ok, port} <- safe_open_port(new_args) do
       next_attempts = ((meta && Map.get(meta, :resume_attempts)) || 0) + 1
 
@@ -2265,13 +2289,18 @@ defmodule Arbiter.Worker do
           task_id: state.task_id,
           topic: "worker:" <> state.task_id,
           line_cap: Arbiter.Worker.ClaudeSession.line_cap(),
-          done_regex: Arbiter.Worker.ClaudeSession.done_regex()
+          done_regex: Arbiter.Worker.ClaudeSession.done_regex(),
+          provider: provider,
+          model: model
         }
         |> Map.put(:port, port)
         # inject_resume_argv/3 always leaves the prompt inline (the continue
         # prompt is short), so this is always nil — see the parity note in
         # respawn_with_nudge/3.
-        |> Map.put(:prompt_tmpfile, Arbiter.Agents.Claude.prompt_tmpfile(new_args.argv))
+        |> Map.put(
+          :prompt_tmpfile,
+          get_prompt_tmpfile(agent_adapter_for_provider(provider), new_args.argv)
+        )
         |> Map.put(:output_lines, [])
         |> Map.put(:line_buf, "")
         |> Map.put(:exit_status, nil)
@@ -2330,15 +2359,39 @@ defmodule Arbiter.Worker do
   # slot (test fixtures / custom commands) → can't build a resume invocation,
   # so the caller falls back to failing.
   @doc false
-  def inject_resume_argv(%{argv: argv} = port_args, session_id, prompt)
+  def inject_resume_argv(port_args, session_id, prompt, provider \\ "claude")
+
+  def inject_resume_argv(%{argv: argv} = port_args, session_id, prompt, provider)
       when is_list(argv) and is_binary(session_id) do
-    case Arbiter.Agents.Claude.splice_prompt(argv, ["--resume", session_id, prompt]) do
-      {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
-      {:error, _} = err -> err
+    adapter = agent_adapter_for_provider(provider)
+
+    if function_exported?(adapter, :splice_prompt, 2) do
+      case apply(adapter, :splice_prompt, [argv, ["--resume", session_id, prompt]]) do
+        {:ok, new_argv} -> {:ok, %{port_args | argv: new_argv}}
+        {:error, _} = err -> err
+      end
+    else
+      {:error, :unsupported_provider}
     end
   end
 
-  def inject_resume_argv(_port_args, _session_id, _prompt), do: {:error, :missing_argv}
+  def inject_resume_argv(_port_args, _session_id, _prompt, _provider), do: {:error, :missing_argv}
+
+  defp agent_adapter_for_provider(provider) do
+    case provider do
+      "gemini" -> Arbiter.Agents.Gemini
+      "codex" -> Arbiter.Agents.Codex
+      _ -> Arbiter.Agents.Claude
+    end
+  end
+
+  defp get_prompt_tmpfile(adapter, argv) do
+    if function_exported?(adapter, :prompt_tmpfile, 1) do
+      adapter.prompt_tmpfile(argv)
+    else
+      nil
+    end
+  end
 
   defp continue_prompt(%State{task_id: task_id}) do
     """
