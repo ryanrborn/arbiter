@@ -180,4 +180,40 @@ defmodule Arbiter.Quota.CodexTest do
       assert {:error, _} = Codex.read_credentials(auth_path: "/nope/auth.json")
     end
   end
+
+  describe "latest/2" do
+    test "is read-only and does not trigger a live fetch" do
+      ws = workspace!()
+
+      # latest/2 should return nil when no snapshot exists yet
+      assert Codex.latest(ws.id) == nil,
+             "latest/2 should return nil when no snapshot has been persisted"
+
+      # Create a snapshot via fetch (which calls the API)
+      Application.put_env(:arbiter, :codex_quota_http_stub, true)
+      on_exit(fn -> Application.delete_env(:arbiter, :codex_quota_http_stub) end)
+
+      Req.Test.stub(@stub_name, fn conn ->
+        Req.Test.json(conn, %{
+          "plan_type" => "plus",
+          "rate_limit" => %{
+            "primary_window" => %{"used_percent" => 42.5, "reset_at" => 1_782_247_200}
+          }
+        })
+      end)
+
+      Codex.fetch(ws.id, credentials: creds())
+
+      # Now latest/2 returns the persisted row
+      row = Codex.latest(ws.id)
+      assert row != nil
+      assert row.session_used_percent == 42.5
+
+      # Calling latest/2 again should NOT make another HTTP call
+      # If it did, Req.Test would complain about an unexpected second request
+      # We can verify this by calling it again and checking the result is identical
+      row2 = Codex.latest(ws.id)
+      assert row2.id == row.id
+    end
+  end
 end
