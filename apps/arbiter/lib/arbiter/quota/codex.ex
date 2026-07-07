@@ -158,11 +158,14 @@ defmodule Arbiter.Quota.Codex do
     result
   end
 
-  defp broadcast(workspace_id, row) do
+  # Broadcast the uniform `{:quota_updated, ws, view}` (not the raw resource
+  # struct) so the LiveView `:quota` hook — which only handles that message —
+  # picks up Codex live, exactly like the Anthropic and Google paths (bd-ajh7bd).
+  defp broadcast(workspace_id, %CodexQuota{} = row) do
     Phoenix.PubSub.broadcast(
       Arbiter.PubSub,
       "quota:#{workspace_id}",
-      {:codex_quota_updated, workspace_id, row}
+      {:quota_updated, workspace_id, view(row)}
     )
   rescue
     _ -> :error
@@ -280,6 +283,31 @@ defmodule Arbiter.Quota.Codex do
       %CodexQuota{} = row -> serialize(row)
     end
   end
+
+  @doc """
+  Map a stored `CodexQuota` row to the uniform two-window quota view shape the
+  topbar / `/usage` page render (bd-ajh7bd). Codex's session window fills the
+  primary ("5h") slot and the weekly window the secondary ("7d") slot; the used
+  percents (0-100) are rescaled to the 0-1 fraction the view uses.
+  """
+  @spec view(CodexQuota.t()) :: map()
+  def view(%CodexQuota{} = row) do
+    Arbiter.Quota.blank_view(row.provider)
+    |> Map.merge(%{
+      workspace_id: row.workspace_id,
+      utilization_5h: fraction(row.session_used_percent),
+      reset_5h_at: row.session_reset_at,
+      utilization_7d: fraction(row.weekly_used_percent),
+      reset_7d_at: row.weekly_reset_at,
+      captured_at: row.captured_at,
+      plan: row.plan,
+      primary_label: "session",
+      secondary_label: "weekly"
+    })
+  end
+
+  defp fraction(nil), do: nil
+  defp fraction(pct) when is_number(pct), do: pct / 100.0
 
   defp serialize_window(nil, nil), do: nil
 

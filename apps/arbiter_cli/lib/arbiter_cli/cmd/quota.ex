@@ -2,28 +2,29 @@ defmodule ArbiterCli.Cmd.Quota do
   @moduledoc """
   `arb quota` — show the current rate-limit / quota state per provider.
 
+  Every provider is read from its persisted snapshot (a pure DB read, bd-ajh7bd);
+  background probes keep them fresh, so this command never fetches live and
+  carries no request-time latency:
+
   * Claude: the local HTTP proxy captures Anthropic's
     `anthropic-ratelimit-unified-*` headers off every Claude request and stores
-    the latest snapshot per workspace, plus an on-demand secondary fetch of
-    Anthropic's `/api/oauth/usage` for a per-model weekly breakdown and
-    `extra_usage` overage (bd-8tpha6) — best-effort, so it never hides the
-    header-capture figures if it fails or is cooling down from a 429.
-  * Codex: fetched live from OpenAI's rate-limit endpoint using the `codex`
-    CLI's stored token — session + weekly windows. Shows a short message when
-    Codex isn't authenticated (no call is made in that case).
+    the latest snapshot per workspace, plus the secondary `/api/oauth/usage`
+    per-model weekly breakdown and `extra_usage` overage (bd-8tpha6).
+  * Codex: OpenAI session + weekly windows, refreshed by the quota probe using
+    the `codex` CLI's stored token. Shows a short message until a snapshot has
+    been captured (i.e. the CLI isn't authenticated on this host).
+  * Gemini CLI / Antigravity: per-model Cloud Code Assist quota (remaining %,
+    reset time), shown once that CLI is authenticated and probed on this host.
+
+  Each provider also shows its recent spend (last 30 days, actual dollars from
+  the usage ledger) when any is recorded.
 
   Usage:
 
       arb quota [--workspace <id|name>] [--json]
 
   Defaults to the installation's default workspace. With `--json` emits the
-  machine-readable snapshot; otherwise a short human-readable summary of each
-  provider's windows — Claude's 5h/7d utilization (status, reset time), its
-  per-model weekly utilization and extra usage overage, plus Codex's
-  session/weekly used-percent and reset time.
-
-  When the Gemini CLI / Antigravity are authenticated on this host, their live
-  per-model Cloud Code Assist quota (remaining %, reset time) is shown too.
+  machine-readable snapshot; otherwise a short human-readable summary.
 
   Reads from `GET /api/quota`.
   """
@@ -61,8 +62,29 @@ defmodule ArbiterCli.Cmd.Quota do
     emit_claude(data)
     IO.puts("")
     emit_codex(data)
-    emit_google(data["gemini"], "Gemini CLI")
-    emit_google(data["antigravity"], "Antigravity")
+    emit_google(data["gemini"], "Gemini CLI", provider_cost(data, "gemini_cli"))
+    emit_google(data["antigravity"], "Antigravity", provider_cost(data, "antigravity"))
+  end
+
+  # Recent-spend line, sourced from the multi-provider `quotas` list each entry
+  # of which carries `cost_usd` (30-day actual spend from the usage ledger).
+  defp emit_spend(data, provider) do
+    case provider_cost(data, provider) do
+      cost when is_number(cost) ->
+        IO.puts("  recent spend (30d): $#{:erlang.float_to_binary(cost / 1, decimals: 2)}")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp provider_cost(data, provider) do
+    (data["quotas"] || [])
+    |> Enum.find(&(&1["provider"] == provider))
+    |> case do
+      %{"cost_usd" => c} when is_number(c) -> c
+      _ -> nil
+    end
   end
 
   # Anthropic (Claude): utilization headers stored as a 0..1 fraction.
@@ -86,6 +108,7 @@ defmodule ArbiterCli.Cmd.Quota do
       "  7d:  #{format_frac(q["utilization_7d"])} used   status=#{q["status_7d"] || "—"}   resets #{q["reset_7d_at"] || "—"}"
     )
 
+    emit_spend(data, "claude")
     emit_oauth_usage(q)
   end
 
@@ -102,6 +125,7 @@ defmodule ArbiterCli.Cmd.Quota do
     IO.puts("")
     IO.puts("  session:  #{format_window(c["session"])}")
     IO.puts("  weekly:   #{format_window(c["weekly"])}")
+    emit_spend(data, "codex")
   end
 
   defp emit_codex(data) do
@@ -111,9 +135,9 @@ defmodule ArbiterCli.Cmd.Quota do
 
   # Live Cloud Code Assist snapshots (Gemini CLI / Antigravity). `nil` means
   # that CLI isn't authenticated on this host — stay quiet rather than noisy.
-  defp emit_google(nil, _label), do: :ok
+  defp emit_google(nil, _label, _cost), do: :ok
 
-  defp emit_google(snap, label) do
+  defp emit_google(snap, label, cost) do
     IO.puts("")
     IO.puts("#{label} quota (plan: #{snap["plan"] || "—"}):")
 
@@ -132,6 +156,10 @@ defmodule ArbiterCli.Cmd.Quota do
       _ ->
         :ok
     end
+
+    if is_number(cost) do
+      IO.puts("  recent spend (30d): $#{:erlang.float_to_binary(cost / 1, decimals: 2)}")
+    end
   end
 
   defp emit_model(m) do
@@ -146,7 +174,10 @@ defmodule ArbiterCli.Cmd.Quota do
   defp emit_oauth_usage(%{"per_model_utilization" => models, "extra_usage" => extra} = q)
        when map_size(models) > 0 or map_size(extra) > 0 do
     IO.puts("")
-    IO.puts("  per-model weekly (7d) — via /api/oauth/usage, captured #{q["oauth_captured_at"] || "—"}:")
+
+    IO.puts(
+      "  per-model weekly (7d) — via /api/oauth/usage, captured #{q["oauth_captured_at"] || "—"}:"
+    )
 
     models
     |> Enum.sort()

@@ -150,6 +150,119 @@ defmodule Arbiter.QuotaTest do
     end
   end
 
+  describe "list_latest/1 multi-provider merge (bd-ajh7bd)" do
+    alias Arbiter.Quota.CodexQuota
+    alias Arbiter.Quota.GoogleQuota
+
+    defp usage_event!(ws_id, provider, cost) do
+      Ash.create!(Arbiter.Usage.Event, %{
+        task_id: "cost-#{System.unique_integer([:positive])}",
+        step: :work,
+        provider: provider,
+        cost_usd: cost,
+        workspace_id: ws_id,
+        occurred_at: DateTime.utc_now()
+      })
+    end
+
+    test "attaches recent per-provider spend from the usage ledger as cost_usd" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      Ash.create!(CodexQuota, %{
+        workspace_id: ws.id,
+        provider: "codex",
+        session_used_percent: 10.0,
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      # Ledger provider keys ("claude"/"openai"/"gemini") differ from the quota
+      # provider codes ("claude"/"codex"/"gemini_cli"); the mapping rolls spend up.
+      usage_event!(ws.id, "claude", 1.25)
+      usage_event!(ws.id, "claude", 0.75)
+      usage_event!(ws.id, "openai", 3.0)
+
+      views = Quota.list_latest(ws.id)
+      claude = Enum.find(views, &(&1.provider == "claude"))
+      codex = Enum.find(views, &(&1.provider == "codex"))
+
+      assert_in_delta claude.cost_usd, 2.0, 0.0001
+      assert_in_delta codex.cost_usd, 3.0, 0.0001
+    end
+
+    test "cost_usd is nil for a provider with no ledger spend" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      views = Quota.list_latest(ws.id)
+      claude = Enum.find(views, &(&1.provider == "claude"))
+      assert claude.cost_usd == nil
+    end
+
+    test "folds real Codex + Google rows into the uniform view, claude first" do
+      ws = workspace!()
+      {:ok, _} = Quota.capture(ws.id, @headers)
+
+      Ash.create!(CodexQuota, %{
+        workspace_id: ws.id,
+        provider: "codex",
+        plan: "plus",
+        session_used_percent: 42.0,
+        weekly_used_percent: 8.0,
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      Ash.create!(GoogleQuota, %{
+        workspace_id: ws.id,
+        provider: "gemini_cli",
+        plan: "Free",
+        used_percent: 75.0,
+        snapshot: %{"models" => []},
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      views = Quota.list_latest(ws.id)
+      providers = Enum.map(views, & &1.provider)
+
+      # claude sorts first; the rest present regardless of order
+      assert hd(providers) == "claude"
+      assert Enum.sort(providers) == ["claude", "codex", "gemini_cli"]
+
+      # every entry is the uniform view map (not a raw resource struct)
+      assert Enum.all?(views, &is_map/1)
+      refute Enum.any?(views, &is_struct/1)
+
+      codex = Enum.find(views, &(&1.provider == "codex"))
+      assert_in_delta codex.utilization_5h, 0.42, 0.0001
+      assert_in_delta codex.utilization_7d, 0.08, 0.0001
+      assert codex.primary_label == "session"
+
+      google = Enum.find(views, &(&1.provider == "gemini_cli"))
+      assert_in_delta google.utilization_5h, 0.75, 0.0001
+    end
+
+    test "the dedicated Codex table wins over a same-provider generic row" do
+      ws = workspace!()
+      # A generic 'codex' row in the anthropic/quota table (legacy capture path)…
+      {:ok, _} = Quota.capture(ws.id, @headers, provider: "codex")
+
+      # …and the real CodexQuota snapshot. Only one 'codex' entry, from the
+      # dedicated table.
+      Ash.create!(CodexQuota, %{
+        workspace_id: ws.id,
+        provider: "codex",
+        session_used_percent: 90.0,
+        captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      })
+
+      views = Quota.list_latest(ws.id)
+      codex_views = Enum.filter(views, &(&1.provider == "codex"))
+
+      assert length(codex_views) == 1
+      assert_in_delta hd(codex_views).utilization_5h, 0.90, 0.0001
+    end
+  end
+
   describe "google_snapshots/1" do
     test "returns nils when the google fetch is disabled" do
       assert Quota.google_snapshots(enabled: false) == %{gemini: nil, antigravity: nil}
@@ -189,7 +302,10 @@ defmodule Arbiter.QuotaTest do
       end)
 
       assert {:ok, quota} =
-               Quota.capture_oauth_usage(ws.id, token: "test-token", plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP})
+               Quota.capture_oauth_usage(ws.id,
+                 token: "test-token",
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
 
       assert quota.per_model_utilization == %{"sonnet" => 0.55, "opus" => 0.05}
       assert quota.extra_usage == %{"amount_usd" => 12.5}
@@ -214,7 +330,10 @@ defmodule Arbiter.QuotaTest do
       end)
 
       assert {:ok, quota} =
-               Quota.capture_oauth_usage(ws.id, token: "test-token", plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP})
+               Quota.capture_oauth_usage(ws.id,
+                 token: "test-token",
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
 
       assert quota.per_model_utilization == %{"sonnet" => 0.10}
       assert quota.utilization_5h == nil
@@ -229,7 +348,10 @@ defmodule Arbiter.QuotaTest do
       end)
 
       assert {:error, {:http_error, 500}} =
-               Quota.capture_oauth_usage(ws.id, token: "test-token", plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP})
+               Quota.capture_oauth_usage(ws.id,
+                 token: "test-token",
+                 plug: {Req.Test, Arbiter.Quota.OAuthUsage.HTTP}
+               )
 
       assert Quota.serialize(ws.id).per_model_utilization == %{}
     end
