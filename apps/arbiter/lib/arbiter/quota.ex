@@ -194,8 +194,74 @@ defmodule Arbiter.Quota do
       status_7d: q.status_7d,
       representative_claim: q.representative_claim,
       overage_status: q.overage_status,
-      captured_at: iso(q.captured_at)
+      captured_at: iso(q.captured_at),
+      per_model_utilization: q.per_model_utilization || %{},
+      extra_usage: q.extra_usage || %{},
+      oauth_utilization_5h: q.oauth_utilization_5h,
+      oauth_utilization_7d: q.oauth_utilization_7d,
+      oauth_captured_at: iso(q.oauth_captured_at)
     }
+  end
+
+  @doc """
+  On-demand fetch of Anthropic's `/api/oauth/usage` endpoint (bd-8tpha6) —
+  per-model weekly utilization + `extra_usage` overage, layered onto the
+  workspace's `AnthropicQuota` snapshot alongside (never instead of) the
+  header-capture aggregate figures.
+
+  Best-effort by design: a 429 cooldown (`Arbiter.Quota.OAuthUsage`), missing
+  credentials, or any transport error is returned as `{:error, reason}` here
+  but never raises — callers that just want "whatever we have" should use
+  `refresh_and_serialize/2` instead, which swallows this outright.
+  """
+  @spec capture_oauth_usage(String.t() | nil, keyword()) ::
+          {:ok, AnthropicQuota.t()} | {:error, term()}
+  def capture_oauth_usage(workspace_id, opts \\ []) do
+    provider = Keyword.get(opts, :provider, @default_provider)
+
+    with {:ok, ws_id} <- resolve_workspace_id(workspace_id),
+         {:ok, usage} <- Arbiter.Quota.OAuthUsage.fetch(opts) do
+      attrs = %{
+        workspace_id: ws_id,
+        provider: provider,
+        per_model_utilization: usage.per_model_utilization,
+        extra_usage: usage.extra_usage,
+        oauth_utilization_5h: usage.utilization_5h,
+        oauth_utilization_7d: usage.utilization_7d,
+        oauth_captured_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      }
+
+      result =
+        AnthropicQuota
+        |> Ash.Changeset.for_create(:record_oauth_usage, attrs)
+        |> Ash.create()
+
+      with {:ok, quota} <- result do
+        broadcast_quota_update(ws_id, quota)
+      end
+
+      result
+    end
+  end
+
+  @doc """
+  `serialize/2`, but first attempts a `capture_oauth_usage/2` refresh and
+  silently ignores any failure (missing creds, 429 cooldown, network error) —
+  the header-capture aggregate figures already in the snapshot are returned
+  either way. This is what `arb quota` / the `quota_get` MCP tool call.
+  """
+  @spec refresh_and_serialize(String.t() | nil, String.t()) :: map() | nil
+  def refresh_and_serialize(workspace_id, provider \\ @default_provider) do
+    _ = safe_capture_oauth_usage(workspace_id, provider: provider)
+    serialize(workspace_id, provider)
+  end
+
+  defp safe_capture_oauth_usage(workspace_id, opts) do
+    capture_oauth_usage(workspace_id, opts)
+  rescue
+    _ -> :error
+  catch
+    :exit, _ -> :error
   end
 
   @doc """

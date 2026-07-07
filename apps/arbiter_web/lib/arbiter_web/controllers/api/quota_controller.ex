@@ -5,6 +5,11 @@ defmodule ArbiterWeb.Api.QuotaController do
   Resolves the target workspace from `?workspace=<id|name>`, falling back to
   the installation default.
 
+  Also triggers an on-demand refresh of per-model weekly utilization +
+  `extra_usage` overage from Anthropic's `/api/oauth/usage` (bd-8tpha6) —
+  best-effort, so a failure there never hides the header-capture aggregate
+  figures.
+
   `quotas` carries every proxy-captured provider (each including its own
   `provider` field) — `claude` is kept as a top-level key too for `arb quota`
   and other existing consumers of the pre-multi-provider shape.
@@ -31,7 +36,7 @@ defmodule ArbiterWeb.Api.QuotaController do
 
         render(conn, :show,
           workspace_id: ws_id,
-          claude: Quota.serialize(ws_id),
+          claude: Quota.refresh_and_serialize(ws_id),
           quotas: Quota.list_serialized(ws_id),
           codex: codex.codex,
           codex_message: codex.message
