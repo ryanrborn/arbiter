@@ -6,7 +6,7 @@ defmodule Arbiter.TrackersTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers
-  alias Arbiter.Trackers.{GitHub, Jira, Linear, None, Shortcut}
+  alias Arbiter.Trackers.{Gitlab, GitHub, Jira, Linear, None, Shortcut}
 
   describe "for_task/1 and for_type/1" do
     test "returns Tracker.None for :none-typed issues" do
@@ -38,7 +38,14 @@ defmodule Arbiter.TrackersTest do
 
     test "adapters/0 exposes the registered map" do
       assert Trackers.adapters() ==
-               %{none: None, jira: Jira, shortcut: Shortcut, github: GitHub, linear: Linear}
+               %{
+                 none: None,
+                 jira: Jira,
+                 shortcut: Shortcut,
+                 github: GitHub,
+                 linear: Linear,
+                 gitlab: Gitlab
+               }
     end
   end
 

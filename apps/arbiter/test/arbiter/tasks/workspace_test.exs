@@ -295,7 +295,7 @@ defmodule Arbiter.Tasks.WorkspaceTest do
 
   describe "valid_tracker_types/0" do
     test "returns the canonical set" do
-      assert Workspace.valid_tracker_types() == ~w(none jira shortcut linear github)
+      assert Workspace.valid_tracker_types() == ~w(none jira shortcut linear github gitlab)
     end
   end
 
