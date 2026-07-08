@@ -152,6 +152,20 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     do: escalate(:preflight_failed, snapshot, reason)
 
   @doc """
+  Escalate a post-`start_worker` dispatch failure to the Admiral (bd-bi5pn0).
+
+  Fired by `Arbiter.Worker.Dispatch` when a step AFTER `start_worker/3` fails
+  (e.g. a transient network/VPN outage during the agent subprocess spawn, or
+  a workflow-machine attach failure) — the worker it just registered `:idle`
+  is failed rather than left as a silent zombie registration. Same addressed
+  `:escalation` shape as `acolyte_stopped/2` / `preflight_failed/2`.
+  Best-effort, returns `:ok`.
+  """
+  @spec spawn_failed(snapshot(), StopReason.t()) :: :ok
+  def spawn_failed(snapshot, %StopReason{} = reason),
+    do: escalate(:spawn_failed, snapshot, reason)
+
+  @doc """
   Escalate a proactively-detected credential expiry to the Admiral (bd-5wchp1).
 
   Fired by `Arbiter.Agents.CredentialWatchdog` when a periodic liveness probe
@@ -686,6 +700,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
       case event do
         :acolyte_stopped -> "stopped"
         :preflight_failed -> "pre-flight auth failed"
+        :spawn_failed -> "spawn failed"
       end
 
     subject = "#{task_id} #{verb} — #{StopReason.label(reason)}"
@@ -698,6 +713,9 @@ defmodule Arbiter.Messages.AdmiralNotifier do
         :preflight_failed ->
           "Refused to dispatch #{title_for(task_id)} — agent pre-flight auth probe failed: " <>
             "#{reason.summary}."
+
+        :spawn_failed ->
+          "Worker for #{title_for(task_id)} failed to spawn: #{reason.summary}."
       end
 
     body =
@@ -723,6 +741,12 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   # so there is no worktree to resume.
   defp resume_hint(:acolyte_stopped, task_id),
     do: "Resume: run `arb worker resume #{task_id}` to continue from the preserved worktree."
+
+  # bd-bi5pn0: a spawn failure happens before the agent ever ran, so there is
+  # no prior session/worktree progress to resume from — a plain re-dispatch
+  # (not `resume`) is the correct retry.
+  defp resume_hint(:spawn_failed, task_id),
+    do: "Re-dispatch: run `arb dispatch #{task_id}` to retry."
 
   defp resume_hint(_event, _task_id), do: nil
 

@@ -115,8 +115,26 @@ defmodule Arbiter.Worker.Dispatch do
          :ok <- maybe_preflight(task, opts),
          {:ok, task} <- transition_to_in_progress(task, opts),
          {:ok, worktree_path} <- maybe_provision_worktree(task, opts),
-         {:ok, worker_pid} <- start_worker(task, worktree_path, opts),
-         {:ok, claude_port} <-
+         {:ok, worker_pid} <- start_worker(task, worktree_path, opts) do
+      finish_dispatch(task, worker_pid, worktree_path, opts)
+    else
+      err -> err
+    end
+  end
+
+  # Everything after `start_worker/3` succeeds — the worker is already
+  # registered `:idle`, so a failure here must not be swallowed silently
+  # (bd-bi5pn0). A step failing partway (e.g. a transient network/VPN outage
+  # during the Claude subprocess spawn, or a workflow-machine attach failure)
+  # previously left that `:idle` registration stranded forever: no retry, no
+  # escalation, and the task stuck `:in_progress` — which also permanently
+  # blackholed PRPatrol dedup for the underlying PR (it treats any non-closed
+  # follow-up as "already handled"). On error, explicitly fail the worker
+  # (`:idle` -> `:failed` is a valid FSM transition) with a `:spawn_failed`
+  # `StopReason` and escalate to the Admiral, mirroring the
+  # `realign_task_if_orphaned/2` pattern (bd-cgmidt) above.
+  defp finish_dispatch(task, worker_pid, worktree_path, opts) do
+    with {:ok, claude_port} <-
            maybe_start_claude(task, worker_pid, worktree_path, opts),
          {:ok, machine_id, machine_pid} <-
            attach_and_start_machine(task, worktree_path, opts),
@@ -142,8 +160,41 @@ defmodule Arbiter.Worker.Dispatch do
          claude_port: claude_port
        }}
     else
-      err -> err
+      {:error, reason} = err ->
+        fail_spawned_worker(worker_pid, reason)
+        err
     end
+  end
+
+  # Fail the just-started worker into `:failed` with a `:spawn_failed`
+  # StopReason and raise an Admiral escalation, so the caller's error return
+  # is never the *only* signal — the bead is not left silently stranded.
+  # Best-effort: a dead worker (already terminated some other way) or a
+  # notification hiccup must never mask the original dispatch error.
+  defp fail_spawned_worker(worker_pid, reason) when is_pid(worker_pid) do
+    if Process.alive?(worker_pid) do
+      stop_reason = StopReason.spawn_failed(reason)
+      snapshot = safe_worker_snapshot(worker_pid)
+
+      _ = Worker.fail(worker_pid, stop_reason)
+      AdmiralNotifier.spawn_failed(snapshot, stop_reason)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp fail_spawned_worker(_worker_pid, _reason), do: :ok
+
+  defp safe_worker_snapshot(pid) do
+    Worker.state(pid)
+  rescue
+    _ -> %{task_id: nil}
+  catch
+    :exit, _ -> %{task_id: nil}
   end
 
   @doc """
