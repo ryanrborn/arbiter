@@ -144,7 +144,6 @@ defmodule Arbiter.Tasks.Issue do
         :tracker_ref,
         :tracker_context_type,
         :tracker_context_ref,
-        :source_pr,
         :pr_ref,
         :pr_body,
         :target_branch,
@@ -158,6 +157,13 @@ defmodule Arbiter.Tasks.Issue do
       ]
 
       require_atomic? false
+
+      # `source_pr` is deliberately NOT in `accept` above: it's the PR-dedup
+      # linkage PRPatrol/ExternalReview set at :create time (and :reopen clears
+      # it), and no legitimate caller of :update ever needs to touch it. A
+      # generic partial-update path (e.g. `task_update`, which has no
+      # `source_pr` parameter at all) must never be able to null it out from
+      # under PRPatrol's `deduped?/2` check — see bd-ag9pq3.
 
       # Allow open ⇄ in_progress, but block transitions involving :closed via :update
       change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :update}
