@@ -1491,6 +1491,25 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.worker_stop(ctx.coordinator, %{"task_id" => task.id})
     end
 
+    # bd-cgmidt: `worker_stop` is teardown — it must NEVER transition the bead to
+    # `:closed`. A bead only reaches `:closed` via a real completion or an
+    # explicit close, never from tearing down a zombie/idle worker.
+    test "stopping a worker leaves the bead not-:closed (bd-cgmidt Guard 1)", ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "stop teardown", workspace_id: ctx.ws.id})
+
+      {:ok, in_progress} = Ash.update(task, %{status: :in_progress}, action: :update)
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ctx.ws.id)
+      on_exit(fn -> Process.alive?(pid) && Worker.stop(task.id, :normal) end)
+
+      assert {:ok, %{stopped: true}} =
+               Tools.worker_stop(ctx.coordinator, %{"task_id" => task.id})
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      refute reloaded.status == :closed
+      assert reloaded.status == in_progress.status
+    end
+
     test "cannot stop a worker for a task in another workspace (not-found)", ctx do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "st-other", prefix: "sto"})
       {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
