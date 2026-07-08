@@ -42,7 +42,41 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       if prior, do: System.put_env("GITHUB_TOKEN", prior), else: System.delete_env("GITHUB_TOKEN")
     end)
 
-    {:ok, ws: ws}
+    # PRPatrol now routes follow-up dispatch through the full
+    # Dispatch.dispatch/2 pipeline (bd-bi5pn0), which requires a real repo
+    # path to provision a worktree. Seed one for "owner/repo" and point
+    # start_claude at a "sleep" stand-in so tests never invoke a real `claude`
+    # subprocess (mirrors dispatch_test.exs's Claude-session tests).
+    tmp = Path.join(System.tmp_dir!(), "prpatrol-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    repo_path = seed_repo!(tmp, "repo")
+
+    Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "wt"))
+    Application.put_env(:arbiter, :repo_paths, %{"owner/repo" => repo_path})
+
+    on_exit(fn ->
+      # Real dispatches register real Worker GenServers under the app's
+      # DynamicSupervisor (not tied to this test's process), so they outlive
+      # the test unless stopped explicitly — left running, they'd keep using
+      # this test's about-to-be-rolled-back sandbox connection and leak writes
+      # into whatever test runs next (mirrors dispatch_test.exs's own
+      # per-test `GenServer.stop` cleanup for real Claude-session workers).
+      Issue
+      |> Ash.Query.filter(not is_nil(source_pr))
+      |> Ash.read!()
+      |> Enum.each(fn issue ->
+        case Worker.whereis(issue.id) do
+          nil -> :ok
+          pid -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 5_000)
+        end
+      end)
+
+      File.rm_rf!(tmp)
+      Application.delete_env(:arbiter, :worktree_root)
+      Application.delete_env(:arbiter, :repo_paths)
+    end)
+
+    {:ok, ws: ws, tmp: tmp}
   end
 
   defp stub(fun), do: Req.Test.stub(@stub_name, fun)
@@ -58,7 +92,11 @@ defmodule Arbiter.Workflows.PRPatrolTest do
              repo: "owner/repo",
              workspace_id: ws.id,
              interval_ms: 60_000,
-             name: name
+             name: name,
+             # Stand-in for a running `claude --print` session — stays alive
+             # long enough to prove Dispatch.dispatch/2 was actually invoked
+             # (a live worker + worktree), without shelling out to `claude`.
+             dispatch_opts: [claude_command: ["sleep", "2"]]
            ],
            opts
          )}
@@ -68,6 +106,27 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     Req.Test.allow(@stub_name, self(), pid)
 
     {pid, name}
+  end
+
+  # Real git repo + bare "origin" remote so Dispatch.dispatch/2's worktree
+  # provisioning (fetch from origin, branch from origin/<base>) succeeds.
+  defp seed_repo!(tmp, sub) do
+    repo = Path.join(tmp, sub)
+    File.mkdir_p!(repo)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+    {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+    File.write!(Path.join(repo, "README.md"), "x\n")
+    {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+    {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+    remote = Path.join(tmp, sub <> "-remote.git")
+    {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", remote])
+    {_, 0} = System.cmd("git", ["-C", repo, "push", "-q", "origin", "main"])
+
+    repo
   end
 
   describe "start_link/1" do
@@ -542,7 +601,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — multi-repo workspace (no repo in config)" do
-    test "patrol with explicit repo works when workspace config omits repo field", %{ws: _ws} do
+    test "patrol with explicit repo works when workspace config omits repo field", %{tmp: tmp} do
       # Simulates the leotech multi-repo shape: owner is set, but repo is absent
       # from the workspace merge config. The per-patrol repo ("owner/explicit-repo")
       # must be injected via prepare_with_repo so list_open/0 resolves the correct
@@ -592,6 +651,11 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       name = String.to_atom("PRPatrol_multirepo_#{System.unique_integer([:positive])}")
 
+      explicit_repo_path = seed_repo!(tmp, "explicit-repo")
+
+      repo_paths = Application.get_env(:arbiter, :repo_paths, %{})
+      Application.put_env(:arbiter, :repo_paths, Map.put(repo_paths, "owner/explicit-repo", explicit_repo_path))
+
       pid =
         start_supervised!(
           {PRPatrol,
@@ -599,7 +663,8 @@ defmodule Arbiter.Workflows.PRPatrolTest do
              repo: "owner/explicit-repo",
              workspace_id: multi_ws.id,
              interval_ms: 60_000,
-             name: name
+             name: name,
+             dispatch_opts: [claude_command: ["sleep", "2"]]
            ]}
         )
 
@@ -752,6 +817,132 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       assert open_tasks == [],
              "expected no open tasks after allowlist applied, got: #{inspect(open_tasks)}"
+    end
+  end
+
+  describe "tick/1 — dispatch failure handling (bd-bi5pn0)" do
+    # The old bare `Worker.start` never failed, so a dispatch error had no
+    # handling path. Now that maybe_dispatch/3 routes through
+    # Dispatch.dispatch/2, a repo that can't be resolved must close the
+    # follow-up (freeing dedup for a retry) and escalate to the admiral,
+    # instead of leaving an idle, worktree-less worker registered forever.
+    test "dispatch failure (repo not configured) closes the follow-up and escalates",
+         %{ws: _ws} do
+      {:ok, unconfigured_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-unconfigured-#{System.unique_integer([:positive])}",
+          prefix: "ppu#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "unconfigured-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/unconfigured-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"number" => 90, "title" => "no repo path", "html_url" => "x"}
+            ])
+
+          conn.request_path == "/repos/owner/unconfigured-repo/pulls/90/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/unconfigured-repo/pulls/90/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      name = String.to_atom("PRPatrol_unconfigured_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/unconfigured-repo",
+           workspace_id: unconfigured_ws.id,
+           interval_ms: 60_000,
+           name: name}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+      :ok = PRPatrol.tick(name)
+
+      [task] =
+        Issue
+        |> Ash.Query.filter(source_pr == "90")
+        |> Ash.read!()
+
+      assert task.status == :closed
+      refute is_pid(Worker.whereis(task.id))
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(to_ref == "admiral" and directive_ref == ^task.id)
+        |> Ash.read!()
+
+      assert [%{kind: :escalation}] = escalations
+    end
+  end
+
+  describe "tick/1 — zombie follow-up does not permanently block dedup (bd-bi5pn0)" do
+    # Simulates a pre-existing zombie from the old bare-Worker.start bug (or
+    # any future dispatch crash between registration and worktree
+    # provisioning): a live, registered worker stuck :idle with no
+    # meta.worktree_path. Left unfiltered, deduped?/2 would treat this as
+    # "PR already handled" forever (lt-c9td4r) — the fix must ignore it.
+    test "a zombie idle/no-worktree worker does not block re-dispatch on the same PR", %{ws: ws} do
+      {:ok, zombie} =
+        Ash.create(Issue, %{
+          title: "zombie follow-up",
+          tracker_type: :none,
+          source_pr: "91",
+          workspace_id: ws.id
+        })
+
+      {:ok, _pid} = Worker.start(task_id: zombie.id, repo: "owner/repo", workspace_id: ws.id)
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 91, "title" => "zombie retry", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/91/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/91/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      tasks =
+        Issue
+        |> Ash.Query.filter(source_pr == "91")
+        |> Ash.read!()
+
+      assert length(tasks) == 2
     end
   end
 
