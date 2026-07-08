@@ -460,6 +460,31 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:not_found, _}} =
                Tools.task_update(ctx.coordinator, %{"id" => foreign.id, "notes" => "x"})
     end
+
+    test "preserves source_pr (a PRPatrol/lifecycle-owned attribute) when updating unrelated fields (bd-ag9pq3)",
+         ctx do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "PR ##{3266}: needs follow-up",
+          workspace_id: ctx.ws.id,
+          tracker_type: :none,
+          source_pr: "3266"
+        })
+
+      assert task.source_pr == "3266"
+
+      assert {:ok, data} =
+               Tools.task_update(ctx.coordinator, %{
+                 "id" => task.id,
+                 "title" => "retasked title",
+                 "description" => "retasked description"
+               })
+
+      assert data.title == "retasked title"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.source_pr == "3266"
+    end
   end
 
   describe "task_close/2" do
