@@ -149,6 +149,70 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  # bd-bi5pn0: a step AFTER start_worker/3 (e.g. the Claude subprocess spawn,
+  # hit by a transient network/VPN outage in production) can fail while the
+  # worker GenServer is already registered `:idle`. Previously that left a
+  # zombie `:idle` registration on an `:in_progress` task forever — no retry,
+  # no escalation — which also permanently blackholed PRPatrol dedup for the
+  # underlying PR. dispatch/2 must instead fail the just-started worker and
+  # escalate to the Admiral.
+  describe "post-start_worker spawn failure does not zombie (bd-bi5pn0)" do
+    alias Arbiter.Messages.Message
+
+    # bd-1ziw04: real-work dispatches require the repo to be in :repo_paths.
+    setup do
+      prior = Application.get_env(:arbiter, :repo_paths)
+      Application.put_env(:arbiter, :repo_paths, %{"test/repo" => "/tmp"})
+
+      on_exit(fn ->
+        if prior,
+          do: Application.put_env(:arbiter, :repo_paths, prior),
+          else: Application.delete_env(:arbiter, :repo_paths)
+      end)
+    end
+
+    test "fails the worker instead of leaving it idle", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "spawn fails", workspace_id: ws.id})
+
+      # provision_worktree: false + start_claude: true fails inside
+      # maybe_start_claude/4 (:missing_worktree) — AFTER start_worker/3 already
+      # registered a live `:idle` worker. preflight: false skips the real CLI
+      # probe so the test never touches the network.
+      assert {:error, :missing_worktree} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 provision_worktree: false,
+                 preflight: false
+               )
+
+      pid = Worker.whereis(task.id)
+      assert is_pid(pid)
+      assert Worker.state(pid).status == :failed
+      assert Worker.state(pid).meta.stop_reason.category == :spawn_failed
+    end
+
+    test "escalates to the Admiral instead of silently stranding the bead", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "spawn fails escalate", workspace_id: ws.id})
+
+      assert {:error, :missing_worktree} =
+               Dispatch.dispatch(task.id,
+                 repo: "test/repo",
+                 start_driver: false,
+                 start_claude: true,
+                 provision_worktree: false,
+                 preflight: false
+               )
+
+      assert [escalation] =
+               Message.inbox("admiral", workspace_id: ws.id)
+               |> Enum.filter(&(&1.directive_ref == task.id))
+
+      assert escalation.subject =~ "spawn"
+    end
+  end
+
   describe "pre-flight auth check (bd-awi4nw)" do
     alias Arbiter.Messages.Message
 

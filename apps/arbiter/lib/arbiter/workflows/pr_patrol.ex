@@ -67,9 +67,12 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
+  alias Arbiter.Messages.Message
   alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Workflows.{CIFailureFollowUp, ReviewThreadFollowUp}
   require Ash.Query
+  require Logger
 
   @default_interval_ms 60_000
 
@@ -81,7 +84,11 @@ defmodule Arbiter.Workflows.PRPatrol do
     :timer_ref,
     ticks: 0,
     last_dispatched: %{},
-    last_tick_at: nil
+    last_tick_at: nil,
+    # Test-only escape hatch merged into the Dispatch.dispatch/2 opts (e.g.
+    # `claude_command:` to avoid spawning a real `claude` subprocess).
+    # Production never sets this — it always defaults to [].
+    dispatch_opts: []
   ]
 
   # ---- public API ----
@@ -104,6 +111,7 @@ defmodule Arbiter.Workflows.PRPatrol do
     repo = Keyword.fetch!(opts, :repo)
     workspace_id = Keyword.fetch!(opts, :workspace_id)
     interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
+    dispatch_opts = Keyword.get(opts, :dispatch_opts, [])
 
     workspace =
       case Ash.get(Workspace, workspace_id) do
@@ -115,7 +123,8 @@ defmodule Arbiter.Workflows.PRPatrol do
       repo: repo,
       workspace_id: workspace_id,
       workspace: workspace,
-      interval_ms: interval_ms
+      interval_ms: interval_ms,
+      dispatch_opts: dispatch_opts
     }
 
     {:ok, schedule_next(state)}
@@ -197,11 +206,63 @@ defmodule Arbiter.Workflows.PRPatrol do
          {reason, extra_protocol} when is_binary(reason) <- actionable_reason(adapter, mr_ref),
          false <- deduped?(pr_number, state.workspace_id) do
       task = create_follow_up(mr, state, reason, extra_protocol)
-      _ = Worker.start(task_id: task.id, repo: state.repo, workspace_id: state.workspace_id)
+      dispatch_follow_up(task, state)
       :ok
     else
       _ -> :noop
     end
+  end
+
+  # Route the follow-up through the full Dispatch.dispatch/2 pipeline — the
+  # same one manual `worker_dispatch` uses — instead of a bare `Worker.start`,
+  # which only registers an idle GenServer with no worktree and no subprocess
+  # (bd-bi5pn0). A follow-up whose dispatch fails is closed immediately (rather
+  # than left open as a zombie `:idle` registration) so `deduped?/2` naturally
+  # frees the PR for a retry on the next patrol tick, and an escalation is sent
+  # to the Admiral so a persistently-failing repo/quota/worktree condition
+  # doesn't retry silently forever. A quota hold is NOT a failure: it means
+  # Dispatch.dispatch/2 already enqueued the intent in DispatchQueue for
+  # automatic re-drain, and closing the task here would make that later
+  # re-dispatch fail at ensure_not_closed.
+  defp dispatch_follow_up(task, state) do
+    opts = Keyword.merge([repo: state.repo, start_claude: true], state.dispatch_opts)
+
+    case Dispatch.dispatch(task.id, opts) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, {:quota_held, _task_id}} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "PRPatrol: dispatch failed for follow-up #{task.id} (PR #{task.source_pr}): " <>
+            inspect(reason) <> " — closing and escalating"
+        )
+
+        escalate_dispatch_failure(task, state, reason)
+        Ash.update(task, %{reason: "PRPatrol dispatch failed: #{inspect(reason)}"}, action: :close)
+        :ok
+    end
+  end
+
+  defp escalate_dispatch_failure(task, state, reason) do
+    Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task.id,
+      workspace_id: state.workspace_id,
+      directive_ref: task.id,
+      subject: "PRPatrol follow-up dispatch failed for PR ##{task.source_pr}",
+      body:
+        "PRPatrol auto-filed a follow-up for #{state.repo} PR ##{task.source_pr}, but " <>
+          "Dispatch.dispatch/2 failed: #{inspect(reason)}. The follow-up task has been " <>
+          "closed so the next patrol tick can retry filing it."
+    })
+  rescue
+    e -> Logger.debug("PRPatrol.escalate_dispatch_failure/3 swallowed: #{Exception.message(e)}")
+  catch
+    :exit, _ -> :ok
   end
 
   # When the workspace sets `config["pr_patrol"]["author_logins"]`, only patrol
@@ -308,7 +369,35 @@ defmodule Arbiter.Workflows.PRPatrol do
         (source_pr == ^ref or (tracker_type == :github and tracker_ref == ^ref))
     )
     |> Ash.read!()
-    |> Enum.any?()
+    |> Enum.any?(&still_blocking?/1)
+  end
+
+  # A non-closed follow-up normally blocks dedup — but a follow-up whose
+  # worker registered `:idle` and never provisioned a worktree is a zombie
+  # (bd-bi5pn0 — the pre-Dispatch.dispatch/2 bare Worker.start bug, or any
+  # future dispatch crash between registration and worktree provisioning).
+  # Dispatch.dispatch/2 always provisions the worktree before starting the
+  # worker for a reviewable follow-up, so a live worker with no
+  # `meta.worktree_path` can only mean a zombie registration, never a normal
+  # in-progress run. Left unfiltered, that zombie would permanently blackhole
+  # every future PRPatrol trigger on the PR (lt-c9td4r) since it never
+  # transitions to :closed on its own.
+  defp still_blocking?(%Issue{} = issue) do
+    case Worker.whereis(issue.id) do
+      nil -> true
+      pid when is_pid(pid) -> not zombie_idle?(pid)
+    end
+  end
+
+  defp zombie_idle?(pid) do
+    case Worker.state(pid) do
+      %{status: :idle, meta: meta} -> is_nil(meta) or is_nil(Map.get(meta, :worktree_path))
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp create_follow_up(%{number: number, title: title, url: url}, state, reason, extra_protocol) do

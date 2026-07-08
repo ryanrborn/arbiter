@@ -56,6 +56,16 @@ defmodule Arbiter.Worker.StopReason do
       classification — synthesized by the completion path to refuse closing a
       bead that produced no deliverable. Remediation: investigate why
       provisioning was skipped, then re-dispatch.
+    * `:spawn_failed` — a step of `Arbiter.Worker.Dispatch.dispatch/2` AFTER
+      `start_worker/3` failed (e.g. a transient network/VPN outage during the
+      agent subprocess spawn, or a workflow-machine attach failure). Not a
+      subprocess-exit classification — there is no port/process to exit,
+      since the agent never got a chance to start (bd-bi5pn0). Distinct from
+      `:exited_without_done`, which covers a port that opened then exited
+      early. Synthesized by `Dispatch.dispatch/2` itself so the worker it just
+      registered `:idle` does not zombie with no retry/escalate. Remediation:
+      investigate the dispatch error (often transient connectivity), then
+      re-dispatch.
 
   ## Provider-agnostic signatures
 
@@ -79,6 +89,7 @@ defmodule Arbiter.Worker.StopReason do
           | :exited_without_done
           | :stalled
           | :missing_worktree
+          | :spawn_failed
 
   @type t :: %__MODULE__{
           category: category(),
@@ -274,6 +285,26 @@ defmodule Arbiter.Worker.StopReason do
   end
 
   @doc """
+  Build a `:spawn_failed` reason (bd-bi5pn0): a `Dispatch.dispatch/2` step
+  after `start_worker/3` failed, before any agent subprocess ever ran. Unlike
+  `classify/2` this isn't derived from an exit status — there is no
+  process/port to inspect — so the dispatch error term itself is folded into
+  the summary.
+  """
+  @spec spawn_failed(term()) :: t()
+  def spawn_failed(dispatch_error) do
+    %__MODULE__{
+      category: :spawn_failed,
+      summary: "worker spawn failed after registration: #{inspect(dispatch_error)}",
+      remediation:
+        "A dispatch step failed after the worker was registered (often a transient " <>
+          "network/VPN outage). Investigate the error above, then re-dispatch the task.",
+      exit_status: nil,
+      signal: nil
+    }
+  end
+
+  @doc """
   A compact one-line label for logs / message subjects, e.g.
   `"credentials expired (exit 1)"`.
   """
@@ -291,6 +322,7 @@ defmodule Arbiter.Worker.StopReason do
         :exited_without_done -> "exited without completing"
         :stalled -> "stalled (no output)"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
+        :spawn_failed -> "spawn failed (dispatch error after worker registration)"
       end
 
     case reason.exit_status do
