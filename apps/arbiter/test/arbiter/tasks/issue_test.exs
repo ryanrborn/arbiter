@@ -216,10 +216,13 @@ defmodule Arbiter.Tasks.IssueTest do
 
     test "clears stale pr_ref and source_pr so a fresh attempt starts clean (bd-38l3px)",
          %{ws: ws} do
-      {:ok, issue} = Ash.create(Issue, %{title: "opened-a-pr", workspace_id: ws.id})
-      # A prior run opened a PR (pr_ref) / was a PRPatrol follow-up (source_pr).
+      # A PRPatrol follow-up: source_pr is set at create time (it's not in the
+      # :update action's accept list — bd-ag9pq3 — since nothing legitimately
+      # rewrites it later). A prior run opened a PR (pr_ref), set via :update.
       {:ok, issue} =
-        Ash.update(issue, %{pr_ref: "owner/repo#123", source_pr: "123"}, action: :update)
+        Ash.create(Issue, %{title: "opened-a-pr", workspace_id: ws.id, source_pr: "123"})
+
+      {:ok, issue} = Ash.update(issue, %{pr_ref: "owner/repo#123"}, action: :update)
 
       {:ok, closed} = Ash.update(issue, %{}, action: :close)
       assert {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
