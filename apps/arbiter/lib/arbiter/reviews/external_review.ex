@@ -974,8 +974,12 @@ defmodule Arbiter.Reviews.ExternalReview do
     }
 
     case Ash.create(Record, attrs) do
-      {:ok, record} -> record
-      {:error, _} -> nil
+      {:ok, record} ->
+        broadcast_review_event(ws_id, :running, record)
+        record
+
+      {:error, _} ->
+        nil
     end
   rescue
     _ -> nil
@@ -1011,12 +1015,34 @@ defmodule Arbiter.Reviews.ExternalReview do
       |> maybe_put_proposed(report_only, Map.get(result, :proposed_comments) || [])
 
     case Ash.update(record, attrs, action: :complete) do
-      {:ok, _} -> :ok
-      {:error, _} -> :ok
+      {:ok, updated} ->
+        broadcast_review_event(record.workspace_id, status, updated)
+        :ok
+
+      {:error, _} ->
+        :ok
     end
   rescue
     _ -> :ok
   end
+
+  # Broadcast an ExternalReview lifecycle transition on the workspace (and
+  # global) `/events` stream (bd-6f9u6z), so a live coordinator subscriber
+  # sees running/completed/failed without polling the audit list. Best-effort:
+  # `Arbiter.Events.broadcast/3` itself swallows PubSub failures.
+  defp broadcast_review_event(ws_id, status, %Record{} = record) when is_binary(ws_id) do
+    Arbiter.Events.broadcast(ws_id, "external_review", %{
+      status: to_string(status),
+      pr_ref: record.pr_ref,
+      verdict: record.verdict,
+      finding_count: record.finding_count,
+      mode: record.mode,
+      review_record_id: record.id,
+      engagement_id: record.engagement_id
+    })
+  end
+
+  defp broadcast_review_event(_ws_id, _status, _record), do: :ok
 
   defp findings_summary([]), do: nil
 
