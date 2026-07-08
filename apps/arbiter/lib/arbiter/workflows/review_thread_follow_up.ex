@@ -18,6 +18,12 @@ defmodule Arbiter.Workflows.ReviewThreadFollowUp do
   Root problem this addresses: a follow-up worker that implements every
   finding and pushes fixes but posts zero thread replies and resolves
   nothing leaves the human reviewer with no acknowledgement at all.
+
+  Also covers the bd-7ezcqb gap: a reply that DEFERS work to a follow-up
+  must not be posted unless that follow-up has actually been filed (via
+  `arb create --parent <task-id>`) and its key cited in the reply — a
+  promised-but-unfiled follow-up is a dangling commitment under the
+  operator's name.
   """
 
   @doc """
@@ -61,6 +67,24 @@ defmodule Arbiter.Workflows.ReviewThreadFollowUp do
       * reply on the thread explaining, in your own words, why you're not
         making the change, AND
       * escalate to the coordinator mailbox so a human can weigh in.
+
+    If instead you decide the right response is to DEFER the work (a
+    follow-up, a separate PR, "later") rather than fix it now or push back:
+    you MUST file that follow-up BEFORE you reply, and cite its key in the
+    reply. A reply that promises future work ("I'll file a follow-up",
+    "keeping this as a follow-up", "will track separately", etc.) posted
+    without a filed, cited ticket is a dangling commitment under the
+    operator's name and is NEVER acceptable (bd-7ezcqb) — do not post it.
+      1. File it: `arb create <title> --parent <this task's id>` (this
+         task's own id — the one you were dispatched with). If a tracker is
+         configured this also files the upstream ticket; capture the printed
+         `ID:` and, if present, `Tracker: <type>:<ref>` line.
+      2. Reply ON THAT THREAD citing the filed key, e.g.:
+           "Agreed — deferring this to a follow-up rather than folding it
+            into this PR. Filed as <task-id> (<tracker-ref-if-any>)."
+      3. Do NOT resolve a thread whose work was deferred, regardless of the
+         resolve policy above — a deferred thread stays open until the
+         filed follow-up lands.
 
     Never mark or imply a thread is addressed without an actual pushed fix
     and a posted reply.
