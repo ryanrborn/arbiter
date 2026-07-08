@@ -15,6 +15,7 @@ defmodule Arbiter.Events do
   | `worker_failed`| An worker stops unexpectedly (status → failed)         |
   | `worker_done`  | An worker completes (status → completed)               |
   | `task_state`    | Any task FSM transition (noisier — opt-in only)         |
+  | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
 
   ## Broadcast hooks
 
@@ -24,13 +25,15 @@ defmodule Arbiter.Events do
     * `Arbiter.Worker.escalate_review_gate/3` → `:review_gate`
     * `Arbiter.Messages.Message.broadcast_new/1` → `:inbox` (admiral-addressed only)
     * `Arbiter.Tasks.Issue.broadcast_lifecycle/2` → `:task_state`
+    * `Arbiter.Reviews.ExternalReview.create_review_record/2` and
+      `complete_review_record/3` → `:external_review`
 
   All broadcasts are best-effort: PubSub failures are logged at debug and swallowed.
   """
 
   require Logger
 
-  @valid_topics ~w(inbox review_gate worker_failed worker_done task_state)
+  @valid_topics ~w(inbox review_gate worker_failed worker_done task_state external_review)
 
   @doc "All valid topic name strings accepted by the `subscribe=` query parameter."
   def valid_topics, do: @valid_topics

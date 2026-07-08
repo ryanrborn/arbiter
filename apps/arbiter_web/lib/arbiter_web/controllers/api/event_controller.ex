@@ -12,6 +12,8 @@ defmodule ArbiterWeb.Api.EventController do
     * worker_failed — a worker stopped unexpectedly (status → failed)
     * worker_done   — a worker completed (status → completed)
     * task_state     — any task FSM transition (noisier — opt-in only)
+    * external_review — an ExternalReview lifecycle transition: running / completed /
+                        failed (opt-in only — pass subscribe=...,external_review)
 
   Wire format: one newline-terminated JSON object per event. A bare newline
   is sent every 30 seconds on idle connections as a keepalive.
