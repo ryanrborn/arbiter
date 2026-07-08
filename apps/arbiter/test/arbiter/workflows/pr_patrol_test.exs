@@ -294,6 +294,77 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert length(tasks_for_repo()) == 1
     end
 
+    # Regression for bd-ag9pq3. `Arbiter.MCP.Tools.task_update`'s spec never
+    # carries a `source_pr` key (verified: `task_update_spec/0` at
+    # `mcp/tools.ex:2351` has no such entry, so `collect_attrs/2` can never put
+    # one in the attrs it hands to `Ash.update/3`) — so that path was never the
+    # nulling mechanism. The mechanism that *can* reach `action: :update` with
+    # an explicit `source_pr` key is `ArbiterWeb.Api.IssueController.update/2`
+    # (`PATCH /api/issues/:id`), which forwards the raw request body — any of
+    # `source_pr`, unlike the MCP tool's fixed field allowlist — straight into
+    # `Ash.update(issue, attrs)` with no `action:` (i.e. the primary `:update`
+    # action). This pins that exact mechanism: before the fix, an explicit
+    # `source_pr` in the update attrs (however it got there — a raw API caller,
+    # a script round-tripping a differently-shaped payload, anything upstream
+    # of the MCP layer) was accepted and could null the dedup linkage; after
+    # the fix it must not silently succeed in nulling it.
+    test "dedup survives an explicit source_pr write reaching the :update action (bd-ag9pq3)",
+         %{ws: ws} do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 3266, "title" => "retask me", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/3266/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/3266/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      [task] = tasks_for_repo()
+      assert task.source_pr == "3266"
+
+      # Exactly what `IssueController.update/2` does: forward the raw params
+      # straight to `Ash.update/2` with no `action:` override. A caller whose
+      # local model of the task doesn't carry `source_pr` (the REST show/index
+      # JSON never renders it — see `IssueJSON.data/1`) round-trips it back as
+      # `nil`, which is exactly how the incident nulled it.
+      patch_attrs = %{
+        "title" => "retasked title",
+        "description" => "retasked description",
+        "source_pr" => nil
+      }
+
+      case Ash.update(task, patch_attrs) do
+        {:ok, updated} ->
+          assert updated.source_pr == "3266"
+
+        {:error, _} ->
+          # Rejecting the unaccepted `source_pr` key outright (rather than
+          # silently nulling it) is an acceptable fix too — either way the
+          # linkage must survive.
+          :ok
+      end
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.source_pr == "3266"
+
+      :ok = PRPatrol.tick(name)
+      assert length(tasks_for_repo()) == 1
+    end
+
     # Regression for bd-5g6rw4: legacy follow-ups recorded the PR via
     # tracker_type: :github + tracker_ref: <pr#> before source_pr existed.
     # deduped?/1 must recognise them so the patrol does not file a duplicate.
