@@ -564,6 +564,61 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "review/1 — external_review event broadcast (bd-6f9u6z)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "broadcasts running then completed on the workspace event stream" do
+      ws = github_ws("er-events-1")
+      stub_full_review(head_sha: "sha-ev1", author: "dev", max_comment_id: 1)
+
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      assert_receive {:event, %{topic: "external_review", status: "running"} = running}
+      assert running.pr_ref == "octo/widget#42"
+      assert running.mode == :auto
+      assert is_binary(running.review_record_id)
+
+      assert_receive {:event, %{topic: "external_review", status: "completed"} = completed}
+      assert completed.pr_ref == "octo/widget#42"
+      assert completed.verdict == :request_changes
+      assert completed.finding_count == 1
+      assert completed.mode == :auto
+      assert completed.review_record_id == running.review_record_id
+    end
+
+    test "broadcasts failed when the workflow errors" do
+      ws = github_ws("er-events-2")
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(500, Jason.encode!(%{"message" => "boom"}))
+      end)
+
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(ws.id))
+
+      assert {:error, _} =
+               ExternalReview.review(pr: "octo/widget#42", workspace: ws.name, follow_up: false)
+
+      assert_receive {:event, %{topic: "external_review", status: "running"}}
+      assert_receive {:event, %{topic: "external_review", status: "failed"} = failed}
+      assert failed.pr_ref == "octo/widget#42"
+      assert is_nil(failed.verdict)
+    end
+  end
+
   describe "review/1 — report_only (propose) mode (bd-36qzgx)" do
     setup do
       System.put_env(@env_var, "test-token")
