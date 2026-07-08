@@ -1303,6 +1303,24 @@ defmodule Arbiter.Worker do
     new_state
   end
 
+  # bd-bi5pn0: `Dispatch.dispatch/2` fails a just-registered `:idle` worker
+  # with a `%StopReason{}` (category `:spawn_failed`) when a post-`start_worker`
+  # step blows up. Stash the full classification in `meta[:stop_reason]`, same
+  # shape `fail_stopped/2` uses, so dashboards/tooling see a consistent
+  # structure regardless of which path failed the worker.
+  defp fail_now(%State{} = state, %Arbiter.Worker.StopReason{} = reason) do
+    meta =
+      state.meta
+      |> Map.put(:failure_reason, reason.summary)
+      |> Map.put(:stop_reason, Arbiter.Worker.StopReason.to_map(reason))
+
+    new_state = %State{state | status: :failed, meta: meta}
+    record_run_finished(new_state)
+    Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
+    broadcast_worker_failed(new_state)
+    new_state
+  end
+
   defp fail_now(%State{} = state, reason) do
     meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
     new_state = %State{state | status: :failed, meta: meta}
