@@ -46,5 +46,30 @@ defmodule Arbiter.Workflows.ReviewThreadFollowUpTest do
       refute human_clause =~ "do NOT resolve"
       assert human_clause =~ "resolve"
     end
+
+    test "deferring work to a follow-up requires filing a ticket before replying (bd-7ezcqb)" do
+      text = ReviewThreadFollowUp.instructions(%{})
+
+      assert text =~ "arb create"
+      assert text =~ "--parent"
+      assert text =~ "cite"
+    end
+
+    test "an unfiled follow-up promise is explicitly called out as invalid" do
+      text = ReviewThreadFollowUp.instructions(%{})
+
+      assert text =~ "Never" or text =~ "NEVER"
+      assert text =~ "without a filed"
+    end
+
+    test "a deferred thread is not resolved even under a resolve-everything policy" do
+      text =
+        ReviewThreadFollowUp.instructions(%{
+          resolve_bot_threads: true,
+          resolve_human_threads: true
+        })
+
+      assert text =~ "deferred" and text =~ "stays open"
+    end
   end
 end
