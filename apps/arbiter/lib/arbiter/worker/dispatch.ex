@@ -121,7 +121,16 @@ defmodule Arbiter.Worker.Dispatch do
          {:ok, machine_id, machine_pid} <-
            attach_and_start_machine(task, worktree_path, opts),
          {:ok, driver_pid} <-
-           maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts) do
+           maybe_start_driver(task, worker_pid, machine_id, machine_pid, worktree_path, opts),
+         # bd-cgmidt: `ensure_not_closed/1` above is a front-of-pipeline check. An
+         # async close (in production, the MergeQueue direct-strategy close of an
+         # in-flight `{:worker_done}` from the just-stopped run) can land in the
+         # window between that guard and `start_worker/3`, flipping the bead to
+         # `:closed` AFTER the guard passed but as/just before the new worker is
+         # attached — leaving a live worker orphaned on a `:closed` task (the
+         # close's own StopWorker found no worker to stop). Re-assert here, now
+         # that the worker is live, and realign a raced-closed bead.
+         {:ok, task} <- realign_task_if_orphaned(task.id, worker_pid) do
       {:ok,
        %{
          task: task,
@@ -417,6 +426,58 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp ensure_not_closed(%Issue{status: :closed, id: id}), do: {:error, {:task_closed, id}}
   defp ensure_not_closed(_task), do: :ok
+
+  # Invariant backstop for the dispatch window (bd-cgmidt): when a live worker has
+  # just been attached to `task_id`, guarantee the bead is not `:closed`. A close
+  # can land asynchronously between `ensure_not_closed/1` (checked once, at the
+  # front of `dispatch/2`) and `start_worker/3` — e.g. the MergeQueue's
+  # direct-strategy close of an in-flight `{:worker_done}` from the run the
+  # operator just stopped. Because that close's `StopWorker` after-action fires
+  # when no worker is registered yet (the old one torn down, the new one not
+  # started), the freshly-started worker would otherwise be orphaned on a
+  # `:closed` task — the 2026-07-08 lt-c9td4r failure.
+  #
+  # When the bead raced to `:closed` and the worker is still alive, atomically
+  # reopen it (`:reopen` → `:in_progress`) so the live worker is realigned rather
+  # than orphaned — the same recovery the operator had to perform by hand
+  # (`task_reopen`). Otherwise the task is returned unchanged. Public (`@doc
+  # false`) so the invariant is unit-testable in isolation.
+  @doc false
+  @spec realign_task_if_orphaned(String.t(), pid() | nil) ::
+          {:ok, Issue.t()} | {:error, term()}
+  def realign_task_if_orphaned(task_id, worker_pid) when is_binary(task_id) do
+    with {:ok, task} <- load_task(task_id) do
+      cond do
+        task.status != :closed ->
+          {:ok, task}
+
+        not (is_pid(worker_pid) and Process.alive?(worker_pid)) ->
+          # No live worker to realign — leave the legitimate close intact.
+          {:ok, task}
+
+        true ->
+          require Logger
+
+          Logger.warning(
+            "Dispatch: task #{task_id} raced to :closed inside the dispatch window " <>
+              "(a close landed after the not-closed guard); reopening to realign the " <>
+              "live worker and avoid orphaning it on a closed task (bd-cgmidt)"
+          )
+
+          with {:ok, reopened} <- reopen_task(task),
+               {:ok, in_progress} <- transition_to_in_progress(reopened, []) do
+            {:ok, in_progress}
+          end
+      end
+    end
+  end
+
+  defp reopen_task(%Issue{} = task) do
+    case Ash.update(task, %{}, action: :reopen) do
+      {:ok, reopened} -> {:ok, reopened}
+      {:error, e} -> {:error, {:reopen_failed, e}}
+    end
+  end
 
   # Guard against re-dispatching a task whose worker is already parked at
   # :awaiting_review with an active Watchdog. A second dispatch in this state
