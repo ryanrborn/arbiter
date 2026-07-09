@@ -1054,7 +1054,7 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
   end
 
-  # ---- base-aware serialized merge — the Crucible (#354, Phase 3) ----------
+  # ---- base-aware serialized merge (#354, Phase 3) ----------
 
   # A stateful GitHub stub driven by an Agent of `%{pr_number => state}` so a
   # test can mutate a PR's mergeable state between ticks (simulating the base
