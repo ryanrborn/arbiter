@@ -270,7 +270,7 @@ resolved at spawn time:
   `gemini-2.5-pro`; thinking → `GEMINI_THINKING_LEVEL` env var
   (default; configurable per-workspace via `thinking_argv`).
 
-Built-in default mapping (signed off by the Admiral; do not change
+Built-in default mapping (signed off by the coordinator; do not change
 without re-litigation):
 
 | Difficulty | model_tier | thinking |

@@ -29,13 +29,15 @@ codebase actually is today:
    serves POST and GET, upgrading to SSE only for long-running calls). Build on
    Streamable HTTP; it is what all three target CLIs negotiate today.
 
-2. **Scope tiers: `worker` and `coordinator`, not "worker and Mayor".** There
-   is **no Mayor agent** in Arbiter today. The broad-capability client today is
-   the **human operator** driving `arb` + the LiveView dashboard, plus internal
-   GenServers (merge queue / watchdog, review gate). The spec keeps the two-tier
-   capability model the issue asks for, but names the broad tier `coordinator`
-   and is honest that its first consumer is the operator's own tooling; a future
-   autonomous coordinator ("Mayor") would present the same token.
+2. **Scope tiers: `worker` and `coordinator`.** The issue proposed themed
+   names (*Mayor* for the broad tier, now retired in favor of `coordinator`).
+   There is **no Mayor agent** in Arbiter today — that is a future possibility,
+   now called "autonomous coordinator agent". The broad-capability client today
+   is the **human operator** driving `arb` + the LiveView dashboard, plus
+   internal GenServers (merge queue / watchdog, review gate). The spec keeps the
+   two-tier capability model the issue asks for, but names the broad tier
+   `coordinator` and is honest that its first consumer is the operator's own
+   tooling; a future autonomous coordinator would present the same token.
 
 **Phase 1** ships read tools over Streamable HTTP behind two scope tiers, wired
 to **Claude Code** via a per-spawn `.mcp.json`. **Phase 2** adds mutating tools
@@ -57,19 +59,20 @@ The issue's framing is GT-era. Two corrections matter for the design:
   discoverable only via `--help`. (`bd2` in this repo is just a test-seam prefix
   for process-dictionary keys — `:bd2_req_options` etc. — not a route.)
 
-- **There is no Mayor session.** No agent process mutates state "all session
-  long". Coordination is operator-driven (`arb` + dashboard) plus internal
-  GenServers. So the broad-scope MCP client is, at first, the operator's own
-  tooling — not an autonomous agent.
+- **There is no autonomous coordinator agent session (the themed name *Mayor*,
+  now retired).** No agent process mutates state "all session long". Coordination
+  is operator-driven (`arb` + dashboard) plus internal GenServers. So the
+  broad-scope MCP client is, at first, the operator's own tooling — not an
+  autonomous agent.
 
 An MCP server fixes the agent-facing half at both tiers:
 
 - **Workers** get a scoped, agent-native way to read their own task, check
   their mailbox, report progress, and write completion notes — from inside the
   agent loop, as typed tool calls instead of stringly-typed CLI guessing.
-- **Coordinator-scope clients** (operator tooling now; a Mayor agent later) get
-  validated `task_create` / `worker_dispatch` / convoy mutations with structured
-  returns instead of CLI argv.
+- **Coordinator-scope clients** (operator tooling now; a future autonomous
+  coordinator agent later) get validated `task_create` / `worker_dispatch` /
+  convoy mutations with structured returns instead of CLI argv.
 
 Because MCP is the write-once/use-across-agents abstraction, the tool
 definitions are written **once** and agent type becomes a per-session config
@@ -353,10 +356,10 @@ for the first cut:
   `task_update_progress`, `message_send`) and **steer the generated `CLAUDE.md`
   / work prompt toward the tools** for those ops, while leaving `arb` available.
   We do not exclude Bash (it's load-bearing for the actual work).
-- **Re-evaluate replacing `arb` for coordinator-scope clients** once a Mayor
-  agent exists — that session mutates state all session long and is the strongest
-  case for tools-only. Until then the operator's `arb`/dashboard is the
-  coordinator and needs no change.
+- **Re-evaluate replacing `arb` for coordinator-scope clients** once an
+  autonomous coordinator agent exists — that session mutates state all session
+  long and is the strongest case for tools-only. Until then the operator's
+  `arb`/dashboard is the coordinator and needs no change.
 
 This keeps Phase 1 additive and reversible: if the tools underperform, the
 prompt steering is a one-line revert and `arb` is untouched.
@@ -418,9 +421,10 @@ Each phase is independently shippable.
    against Claude Code's `initialize` handshake and per-connection scope.
 2. **Token type** — `Phoenix.Token` (no new dep, single service) vs. JWT (if we
    later verify tokens off-BEAM). Phase 1 leans `Phoenix.Token`.
-3. **Mayor** — when an autonomous coordinator agent lands, does it get
-   `coordinator` scope wholesale, or a third intermediate tier? Defer until the
-   agent exists; the two-tier model is forward-compatible.
+3. **Future autonomous coordinator agent** — when an autonomous coordinator
+   agent lands, does it get `coordinator` scope wholesale, or a third
+   intermediate tier? Defer until the agent exists; the two-tier model is
+   forward-compatible.
 4. **Tool-vs-CLI steering strength** — how hard to push the prompt toward MCP
    tools without excluding Bash. Measure tool-call adoption on Phase 1 workers
    before tightening.

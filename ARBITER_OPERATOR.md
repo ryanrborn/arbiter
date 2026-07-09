@@ -1,6 +1,6 @@
 # Arbiter Operator Guide
 
-Operating knowledge for the Admiral seat. Generic — applies to any Arbiter
+Operating knowledge for the coordinator seat. Generic — applies to any Arbiter
 install. Update it as you learn.
 
 Run `arb prime` at the start of every session.
@@ -31,12 +31,12 @@ The six most-burned-by operating pitfalls. Check these first:
 - [ ] **Verify** — a worker can show "running" while its subprocess is dead. **Check the port/log, not just status.** A PR marked CLEAN/MERGEABLE means no merge conflict, **not** an empty diff.
 - [ ] **ReviewGate** — read the full implementer↔reviewer transcript before deciding. Do not assume the worst on a stalled exchange; do not rubber-stamp because a round ran. **Decide for yourself.**
 
-## 3. Directive Intake — Claim & Create
+## 3. Issue Intake — Claim & Create
 
-When taking in new directives locally via `arb claim` or `arb create`, **always
+When taking in new issues locally via `arb claim` or `arb create`, **always
 set difficulty immediately after intake**. Both commands create tasks without
 prompting for difficulty, and the field defaults to unset. Difficulty drives the
-model tier and thinking budget — set it before slinging to avoid under-scoped work.
+model tier and thinking budget — set it before dispatching to avoid under-scoped work.
 
 Workflow:
 
@@ -140,7 +140,7 @@ Never hardcode model names. Route via abstract tiers:
 | Tier | Use |
 |------|-----|
 | economy | Cheap, fast, simple tasks |
-| standard | Most directives (default) |
+| standard | Most issues (default) |
 | premium | Hard / correctness-critical work |
 
 Plus thinking budget: `none / low / medium / high`. Resolved per adapter at
@@ -174,10 +174,10 @@ Use **separate workspaces** for separate concerns (self-dev vs company repos).
 | Company / shared | OFF | A human merges |
 | Self-dev / experimental | ON | Safe to automate |
 
-## 15. Legacy aliases
+## 15. Legacy terminology reference
 
 Older docs and transcripts use themed names for generic concepts. The mapping,
-for reference:
+for reference (these terms are retired; use the current terms listed below):
 
 | Legacy term | Current term |
 |-------------|--------------|
