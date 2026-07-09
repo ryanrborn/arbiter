@@ -183,54 +183,72 @@ defmodule Arbiter.Mergers.Github do
       when is_binary(branch) and is_binary(title) and is_map(opts) do
     with {:ok, cfg} <- Config.resolve(),
          {:ok, {owner, repo, ref_form}} <- resolve_target(cfg, opts) do
-      target = Map.get(opts, :target_branch) || cfg.default_target_branch
+      # Look-before-create (bd-8rrn9t): a re-entry into open/4 for a branch
+      # that already has an open PR — e.g. a worker opened the PR itself
+      # earlier in its run, or finalize is re-run after a restart — should
+      # adopt that PR rather than race a create against it. The 422
+      # "already exists" handling below stays as a fallback for the case
+      # where the PR is created concurrently between this lookup and the
+      # POST (or the lookup itself fails).
+      case find_existing_open_pr_number(cfg, owner, repo, branch) do
+        {:ok, number} ->
+          {:ok, build_mr_ref(ref_form, owner, repo, number)}
 
-      payload = %{
-        "head" => branch,
-        "base" => target,
-        "title" => title,
-        "body" => description || "",
-        "draft" => Map.get(opts, :draft, false)
-      }
-
-      case request(cfg, :post, "/repos/#{owner}/#{repo}/pulls", json: payload) do
-        {:ok, %Req.Response{status: status, body: %{"number" => number}}}
-        when status in 200..299 and is_integer(number) ->
-          mr_ref = build_mr_ref(ref_form, owner, repo, number)
-          maybe_request_reviewers(cfg, owner, repo, number, reviewers(cfg, opts))
-          {:ok, mr_ref}
-
-        {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-          {:error,
-           %Error{
-             kind: :validation_failed,
-             status: status,
-             message: "PR creation response missing \"number\"",
-             raw: body
-           }}
-
-        {:ok, %Req.Response{status: 422, body: body}} ->
-          # GitHub returns 422 when an open PR already exists for the head
-          # branch. Treat open/4 as idempotent: resolve the existing PR
-          # instead of failing the retry. Reviewer requests are skipped — the
-          # existing PR may already have them, and the merge step is what
-          # the caller actually wants on retry.
-          if already_exists_error?(body) do
-            case find_existing_open_pr_number(cfg, owner, repo, branch) do
-              {:ok, number} -> {:ok, build_mr_ref(ref_form, owner, repo, number)}
-              :none -> {:error, http_error(422, body)}
-              {:error, _} -> {:error, http_error(422, body)}
-            end
-          else
-            {:error, http_error(422, body)}
-          end
-
-        {:ok, %Req.Response{status: status, body: body}} ->
-          {:error, http_error(status, body)}
-
-        {:error, exception} ->
-          {:error, transport_error(exception)}
+        _ ->
+          create_pr(cfg, owner, repo, ref_form, branch, title, description, opts)
       end
+    end
+  end
+
+  defp create_pr(cfg, owner, repo, ref_form, branch, title, description, opts) do
+    target = Map.get(opts, :target_branch) || cfg.default_target_branch
+
+    payload = %{
+      "head" => branch,
+      "base" => target,
+      "title" => title,
+      "body" => description || "",
+      "draft" => Map.get(opts, :draft, false)
+    }
+
+    case request(cfg, :post, "/repos/#{owner}/#{repo}/pulls", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"number" => number}}}
+      when status in 200..299 and is_integer(number) ->
+        mr_ref = build_mr_ref(ref_form, owner, repo, number)
+        maybe_request_reviewers(cfg, owner, repo, number, reviewers(cfg, opts))
+        {:ok, mr_ref}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "PR creation response missing \"number\"",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: 422, body: body}} ->
+        # GitHub returns 422 when an open PR already exists for the head
+        # branch — the look-before-create GET above raced the PR's creation
+        # (or itself failed). Treat open/4 as idempotent: resolve the
+        # existing PR instead of failing the retry. Reviewer requests are
+        # skipped — the existing PR may already have them, and the merge
+        # step is what the caller actually wants on retry.
+        if already_exists_error?(body) do
+          case find_existing_open_pr_number(cfg, owner, repo, branch) do
+            {:ok, number} -> {:ok, build_mr_ref(ref_form, owner, repo, number)}
+            :none -> {:error, http_error(422, body)}
+            {:error, _} -> {:error, http_error(422, body)}
+          end
+        else
+          {:error, http_error(422, body)}
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
     end
   end
 

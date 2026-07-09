@@ -147,6 +147,14 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert {:merge_failed, _reason} = snap.meta.failure_reason
     # Critically: not silently :completed.
     refute snap.status == :completed
+
+    # bd-8rrn9t: a non-conflict merge failure must escalate to the Admiral
+    # too, not just fail silently — an approved run whose merge step fails
+    # can leave a real PR stranded and needs a human to notice.
+    escalations = Message.inbox("admiral", workspace_id: ws.id)
+    escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
+    assert escalation
+    assert escalation.body =~ "feature/x"
   end
 
   test "a conflicting auto-merge aborts, keeps main clean, escalates, and does NOT close the task",

@@ -31,10 +31,20 @@ defmodule Arbiter.Mergers.GithubTest do
 
   defp stub(fun), do: Req.Test.stub(Arbiter.Mergers.Github.HTTP, fun)
 
+  # A stub GET response for the look-before-create lookup that reports no
+  # existing open PR for the head branch — the common path in these tests,
+  # where open/4 is expected to fall through to a fresh create.
+  defp stub_no_existing_pr(conn) do
+    conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+  end
+
   describe "open/4" do
-    test "POSTs to /repos/:owner/:repo/pulls and returns {:ok, mr_ref}" do
+    test "with no existing PR: looks up the head branch, then POSTs and returns {:ok, mr_ref}" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
+
           {"POST", "/repos/octo/widget/pulls"} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
 
@@ -70,6 +80,9 @@ defmodule Arbiter.Mergers.GithubTest do
     test "honours target_branch / reviewer_ids / draft from opts" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
+
           {"POST", "/repos/octo/widget/pulls"} ->
             {:ok, body, conn} = Plug.Conn.read_body(conn)
             decoded = Jason.decode!(body)
@@ -106,49 +119,25 @@ defmodule Arbiter.Mergers.GithubTest do
       })
 
       stub(fn conn ->
-        assert {conn.method, conn.request_path} == {"POST", "/repos/octo/widget/pulls"}
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
 
-        conn
-        |> Plug.Conn.put_status(201)
-        |> Req.Test.json(%{"number" => 99})
+          {"POST", "/repos/octo/widget/pulls"} ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{"number" => 99})
+        end
       end)
 
       assert {:ok, "#99"} = Github.open("feature/z", "T", "B", %{})
     end
 
-    test "422 (non-duplicate) maps to {:error, %Error{kind: :validation_failed}}" do
-      stub(fn conn ->
-        # The POST attempt fails; on a non-"already exists" 422 we should NOT
-        # fall through to the duplicate-lookup path.
-        assert {conn.method, conn.request_path} == {"POST", "/repos/octo/widget/pulls"}
-
-        conn
-        |> Plug.Conn.put_status(422)
-        |> Req.Test.json(%{"message" => "Validation Failed"})
-      end)
-
-      assert {:error, %Error{kind: :validation_failed, status: 422, message: "Validation Failed"}} =
-               Github.open("x", "T", "B", %{})
-    end
-
-    test "422 'already exists' resolves the existing open PR and returns its ref" do
+    test "an existing open PR for the head branch is adopted without a create POST" do
       branch = "feature/x"
 
       stub(fn conn ->
         case {conn.method, conn.request_path} do
-          {"POST", "/repos/octo/widget/pulls"} ->
-            conn
-            |> Plug.Conn.put_status(422)
-            |> Req.Test.json(%{
-              "message" => "Validation Failed",
-              "errors" => [
-                %{
-                  "code" => "custom",
-                  "message" => "A pull request already exists for octo:#{branch}."
-                }
-              ]
-            })
-
           {"GET", "/repos/octo/widget/pulls"} ->
             # Pre-existing PR lookup: must be scoped to head=owner:branch and
             # state=open so we resolve the right one.
@@ -166,9 +155,73 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, "#68"} = Github.open(branch, "Add thing", "does the thing", %{})
     end
 
+    test "422 (non-duplicate) maps to {:error, %Error{kind: :validation_failed}}" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
+
+          {"POST", "/repos/octo/widget/pulls"} ->
+            # The POST attempt fails; on a non-"already exists" 422 we should
+            # NOT fall through to the duplicate-lookup path.
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed"})
+        end
+      end)
+
+      assert {:error, %Error{kind: :validation_failed, status: 422, message: "Validation Failed"}} =
+               Github.open("x", "T", "B", %{})
+    end
+
+    test "422 'already exists' race (look-before-create missed it) resolves the existing PR" do
+      branch = "feature/x"
+      {:ok, get_calls} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(get_calls), do: Agent.stop(get_calls) end)
+
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            # The look-before-create GET misses (PR not yet created); the PR
+            # appears in the window between that GET and the POST below (a
+            # genuine race). The second GET — triggered by the POST's 422 —
+            # sees it.
+            case Agent.get_and_update(get_calls, &{&1, &1 + 1}) do
+              0 ->
+                stub_no_existing_pr(conn)
+
+              _ ->
+                conn
+                |> Plug.Conn.put_status(200)
+                |> Req.Test.json([
+                  %{"number" => 68, "state" => "open", "head" => %{"ref" => branch}}
+                ])
+            end
+
+          {"POST", "/repos/octo/widget/pulls"} ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{
+              "message" => "Validation Failed",
+              "errors" => [
+                %{
+                  "code" => "custom",
+                  "message" => "A pull request already exists for octo:#{branch}."
+                }
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, "#68"} = Github.open(branch, "Add thing", "does the thing", %{})
+    end
+
     test "422 'already exists' but lookup returns no PRs falls back to 422 error" do
       stub(fn conn ->
         case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
+
           {"POST", "/repos/octo/widget/pulls"} ->
             conn
             |> Plug.Conn.put_status(422)
@@ -178,9 +231,6 @@ defmodule Arbiter.Mergers.GithubTest do
                 %{"code" => "custom", "message" => "A pull request already exists for x."}
               ]
             })
-
-          {"GET", "/repos/octo/widget/pulls"} ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
         end
       end)
 
@@ -1420,10 +1470,13 @@ defmodule Arbiter.Mergers.GithubTest do
       repo_dir: repo_dir
     } do
       stub(fn conn ->
-        assert {conn.method, conn.request_path} ==
-                 {"POST", "/repos/leo-technologies-llc/verus_server/pulls"}
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+            stub_no_existing_pr(conn)
 
-        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 7})
+          {"POST", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 7})
+        end
       end)
 
       assert {:ok, "leo-technologies-llc/verus_server#7"} =
@@ -1478,10 +1531,13 @@ defmodule Arbiter.Mergers.GithubTest do
       Config.put_active(%{"credentials_ref" => "env:#{@env_var}"})
 
       stub(fn conn ->
-        assert {conn.method, conn.request_path} ==
-                 {"POST", "/repos/leo-technologies-llc/verus_server/pulls"}
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+            stub_no_existing_pr(conn)
 
-        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 5})
+          {"POST", "/repos/leo-technologies-llc/verus_server/pulls"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 5})
+        end
       end)
 
       assert {:ok, "leo-technologies-llc/verus_server#5"} =
@@ -1521,8 +1577,13 @@ defmodule Arbiter.Mergers.GithubTest do
       })
 
       stub(fn conn ->
-        assert {conn.method, conn.request_path} == {"POST", "/repos/octo/widget/pulls"}
-        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 9})
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/octo/widget/pulls"} ->
+            stub_no_existing_pr(conn)
+
+          {"POST", "/repos/octo/widget/pulls"} ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 9})
+        end
       end)
 
       assert {:ok, "#9"} = Github.open("feature/x", "T", "B", %{repo_path: repo_dir})
