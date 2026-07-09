@@ -35,7 +35,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
   When the gate returns `{:overage, spend_usd}` (dispatch proceeds past the cap),
   the dispatcher calls `record_overage/3`. This process tracks the windowed
   overage spend against the workspace's `overage_alert_usd` threshold and fires
-  exactly one `Arbiter.Messages.AdmiralNotifier.overage_alert/3` per threshold
+  exactly one `Arbiter.Messages.CoordinatorNotifier.overage_alert/3` per threshold
   crossing (debounced on the crossed multiple) — it never stops dispatch.
 
   ## Injection seams (start_link opts / app-env)
@@ -43,7 +43,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
     * `:dispatcher` → `:arbiter, :dispatch_queue_dispatcher` → `Arbiter.Worker.Dispatch`
       — the module whose `dispatch/2` drains held intents. Tests pass a stub.
     * `:quota_reader` → `Arbiter.Quota` — supplies `latest/2` snapshots on drain.
-    * `:notifier` → `Arbiter.Messages.AdmiralNotifier` — the overage-alert channel.
+    * `:notifier` → `Arbiter.Messages.CoordinatorNotifier` — the overage-alert channel.
     * `:auto_subscribe` (default `true`) — subscribe to the `quota:<ws>` topic.
   """
 
@@ -182,7 +182,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
           Application.get_env(:arbiter, :dispatch_queue_dispatcher, Arbiter.Worker.Dispatch)
         ),
       quota_reader: Keyword.get(opts, :quota_reader, Arbiter.Quota),
-      notifier: Keyword.get(opts, :notifier, Arbiter.Messages.AdmiralNotifier),
+      notifier: Keyword.get(opts, :notifier, Arbiter.Messages.CoordinatorNotifier),
       auto_subscribe: auto_subscribe,
       items: [],
       last_overage_alert_multiple: 0

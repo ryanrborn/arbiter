@@ -42,7 +42,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   require Logger
 
   alias Arbiter.Agents.Preflight
-  alias Arbiter.Messages.AdmiralNotifier
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Worker.StopReason
 
   @default_interval_ms 300_000
@@ -225,7 +225,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
       workspaces = Ash.read!(Arbiter.Tasks.Workspace)
 
       Enum.each(workspaces, fn ws ->
-        AdmiralNotifier.credential_expired(%{workspace_id: ws.id}, adapter, reason)
+        CoordinatorNotifier.credential_expired(%{workspace_id: ws.id}, adapter, reason)
       end)
     end)
   end

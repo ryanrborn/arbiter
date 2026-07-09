@@ -1,11 +1,11 @@
-defmodule Arbiter.Messages.AdmiralNotifier do
+defmodule Arbiter.Messages.CoordinatorNotifier do
   @moduledoc """
-  Auto-posts Admiral notifications on worker (worker) lifecycle events, so the
-  Admiral is informed without workers having to send messages by hand.
+  Auto-posts coordinator notifications on worker (worker) lifecycle events, so
+  the coordinator is informed without workers having to send messages by hand.
 
   Wired into `Arbiter.Worker`'s terminal/await transitions. Each event maps to
   a durable `:notification` `Arbiter.Messages.Message` — the broadcast kind that
-  feeds the Admiral's dashboard (`to_ref` nil, never "consumed"):
+  feeds the coordinator's dashboard (`to_ref` nil, never "consumed"):
 
   | Event                | Body                                                       |
   |----------------------|------------------------------------------------------------|
@@ -31,7 +31,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   The originating task (bd-25ftl0) imagined dedicated `:completion` / `:failure`
   kinds and a `to="admiral"` / `directive_ref=task_id` shape. The Message
   resource that actually shipped (bd-bduz2k) settled on a leaner taxonomy:
-  broadcast `:notification`s (the Admiral feed) vs. addressed mailbox kinds.
+  broadcast `:notification`s (the coordinator feed) vs. addressed mailbox kinds.
   We honour the realised design — every lifecycle auto-post is a
   `:notification` with `from_ref` set to the directive's task id; the
   completed/failed/awaiting distinction lives in the subject + body.
@@ -125,7 +125,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   end
 
   @doc """
-  Escalate a stopped/dead worker to the Admiral (bd-awi4nw).
+  Escalate a stopped/dead worker to the coordinator (bd-awi4nw).
 
   Unlike the lifecycle `:notification`s above, this is an addressed
   `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
@@ -139,7 +139,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     do: escalate(:acolyte_stopped, snapshot, reason)
 
   @doc """
-  Escalate a failed pre-flight auth probe to the Admiral (bd-awi4nw).
+  Escalate a failed pre-flight auth probe to the coordinator (bd-awi4nw).
 
   Fired by `Arbiter.Worker.Dispatch` when the agent CLI fails its cheap
   token-validity probe *before* any worker is dispatched — so a wave of spawns
@@ -152,7 +152,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     do: escalate(:preflight_failed, snapshot, reason)
 
   @doc """
-  Escalate a post-`start_worker` dispatch failure to the Admiral (bd-bi5pn0).
+  Escalate a post-`start_worker` dispatch failure to the coordinator (bd-bi5pn0).
 
   Fired by `Arbiter.Worker.Dispatch` when a step AFTER `start_worker/3` fails
   (e.g. a transient network/VPN outage during the agent subprocess spawn, or
@@ -166,7 +166,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     do: escalate(:spawn_failed, snapshot, reason)
 
   @doc """
-  Escalate a proactively-detected credential expiry to the Admiral (bd-5wchp1).
+  Escalate a proactively-detected credential expiry to the coordinator (bd-5wchp1).
 
   Fired by `Arbiter.Agents.CredentialWatchdog` when a periodic liveness probe
   detects that credentials are expired *before* any worker has been dispatched
@@ -187,7 +187,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def credential_expired(_snapshot, _adapter, _reason), do: :ok
 
   @doc """
-  Escalate a failed external-tracker sync to the Admiral (bd-c4cfuv).
+  Escalate a failed external-tracker sync to the coordinator (bd-c4cfuv).
 
   Fired by `Arbiter.Trackers.Sync` / `Arbiter.Tasks.Issue.Changes.SyncTracker`
   when a lifecycle transition (dispatch → In Progress, PR-open → In Code Review,
@@ -233,7 +233,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.tracker_sync_failed/3 swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.tracker_sync_failed/3 swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
@@ -242,13 +242,13 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def tracker_sync_failed(_snapshot, _event, _reason), do: :ok
 
   @doc """
-  Escalate a stalled auto-merge to the Admiral (bd-6gxosc).
+  Escalate a stalled auto-merge to the coordinator (bd-6gxosc).
 
   Fired by `Arbiter.Worker.Watchdog` after N consecutive `safe_merge` failures on
   an approved PR — the merge keeps failing (race, transient forge error, unknown
   `mergeable_state`) but the Watchdog keeps retrying silently. After the threshold
   is hit, this surfaces the stall as an actionable `:escalation` mailbox item so
-  the Admiral can intervene if needed. The Watchdog continues retrying; it does
+  the coordinator can intervene if needed. The Watchdog continues retrying; it does
   NOT stop. `attempts` is the total consecutive failure count; `reason` is the
   last error from the merger adapter. Best-effort, returns `:ok`.
   """
@@ -284,7 +284,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.auto_merge_stalled/4 swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.auto_merge_stalled/4 swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
@@ -339,7 +339,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.merge_blocked/3 swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.merge_blocked/3 swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
@@ -348,7 +348,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
   def merge_blocked(_snapshot, _mr_ref, _reason), do: :ok
 
   @doc """
-  Escalate a quota-overage spend crossing to the Admiral (bd-7cd38f).
+  Escalate a quota-overage spend crossing to the coordinator (bd-7cd38f).
 
   Fired by `Arbiter.Workflows.DispatchQueue` in `:continue` mode when the
   workspace's windowed overage spend crosses a multiple of its
@@ -395,7 +395,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.overage_alert/3 swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.overage_alert/3 swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
@@ -452,7 +452,10 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.merge_block_unresolved/4 swallowed: #{Exception.message(e)}")
+      Logger.debug(
+        "CoordinatorNotifier.merge_block_unresolved/4 swallowed: #{Exception.message(e)}"
+      )
+
       :ok
   catch
     :exit, _ -> :ok
@@ -521,7 +524,10 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.approved_awaiting_merge/3 swallowed: #{Exception.message(e)}")
+      Logger.debug(
+        "CoordinatorNotifier.approved_awaiting_merge/3 swallowed: #{Exception.message(e)}"
+      )
+
       :ok
   catch
     :exit, _ -> :ok
@@ -639,14 +645,14 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.post/2 swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.post/2 swallowed: #{Exception.message(e)}")
       :ok
   end
 
   defp post(_event, _snapshot), do: :ok
 
   # Actionable escalations are addressed mailbox messages (not broadcast
-  # notifications) so they queue in `arb inbox` for the Admiral. They are NOT
+  # notifications) so they queue in `arb inbox` for the coordinator. They are NOT
   # gated by the `admiral_notifications` toggle — silencing routine completion
   # noise must never silence a "your credentials expired" alarm. A worker with
   # no workspace_id has nowhere to post (Message.workspace_id is required).
@@ -667,7 +673,7 @@ defmodule Arbiter.Messages.AdmiralNotifier do
     :ok
   rescue
     e ->
-      Logger.debug("AdmiralNotifier.escalate/3 swallowed: #{Exception.message(e)}")
+      Logger.debug("CoordinatorNotifier.escalate/3 swallowed: #{Exception.message(e)}")
       :ok
   catch
     :exit, _ -> :ok
