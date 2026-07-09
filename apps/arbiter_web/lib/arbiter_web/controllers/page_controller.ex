@@ -4,7 +4,7 @@ defmodule ArbiterWeb.PageController do
   def home(conn, _params) do
     render(conn, :home,
       issues_label: "Issues",
-      acolytes_label: "Workers",
+      workers_label: "Workers",
       domains_label: "Workspaces"
     )
   end
