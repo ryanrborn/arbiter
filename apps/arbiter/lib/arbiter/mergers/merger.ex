@@ -167,8 +167,8 @@ defmodule Arbiter.Mergers.Merger do
         }
 
   @typedoc """
-  A single failing CI check surfaced by `failing_check_logs/1` so the Warden
-  can brief a fix-pass acolyte with the failure (#354, Phase 2a).
+  A single failing CI check surfaced by `failing_check_logs/1` so the Watchdog
+  can brief a fix-pass worker with the failure (#354, Phase 2a).
 
     * `:name` — the check/job name (e.g. `"build"`, `"test (1.16)"`).
     * `:summary` — a tail of the failure output (title/summary/log excerpt),
@@ -233,7 +233,7 @@ defmodule Arbiter.Mergers.Merger do
 
   @doc """
   Update the MR's head branch from its base — the mechanical rebase-forward the
-  base-aware merge queue (Crucible, #354 Phase 3) runs to keep an in-flight PR
+  base-aware merge queue (#354 Phase 3) runs to keep an in-flight PR
   continuously rebased as the integration branch moves. For hosted forges
   (GitHub: `PUT /pulls/:n/update-branch`; GitLab: `PUT …/rebase`) the update
   may complete asynchronously — the queue re-polls `get/1` to observe the
@@ -256,7 +256,7 @@ defmodule Arbiter.Mergers.Merger do
 
   @doc """
   Fetch the failing CI checks for `mr_ref` — their names and a tail of each
-  one's output — so the Warden can brief a fix-pass acolyte on a `:ci_failed`
+  one's output — so the Watchdog can brief a fix-pass worker on a `:ci_failed`
   block (#354, Phase 2a). For GitHub this reads the Checks API for the PR's head
   commit.
 
@@ -264,7 +264,7 @@ defmodule Arbiter.Mergers.Merger do
   no CI is configured) or `{:error, term()}`.
 
   Optional — adapters that don't expose check logs simply don't implement it;
-  the Warden guards with `function_exported?/3` and dispatches the fix pass with
+  the Watchdog guards with `function_exported?/3` and dispatches the fix pass with
   whatever context it has.
   """
   @callback failing_check_logs(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
