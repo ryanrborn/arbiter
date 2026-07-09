@@ -9,7 +9,7 @@ defmodule Arbiter.Messages.WorktreeDelivery do
   ## Delivery semantics
 
   - Only task-targeted message kinds trigger delivery (`:mailbox`, `:direction`,
-    `:flag`). Admiral-bound kinds (`:completion`, `:failure`, etc.) are skipped.
+    `:flag`). Coordinator-bound kinds (`:completion`, `:failure`, etc.) are skipped.
   - If no worker is running for the `to_ref`, delivery is a no-op.
   - If a worker is running but has no worktree (no `:worktree_path` in meta),
     delivery is a no-op.

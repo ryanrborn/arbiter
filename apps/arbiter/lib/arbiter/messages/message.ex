@@ -6,7 +6,7 @@ defmodule Arbiter.Messages.Message do
 
     * `:notification` — broadcast event, no specific recipient (`to_ref` nil).
       Worker completion, progress milestones, system events. Feeds the
-      Admiral's live dashboard. Never "consumed" — `read_at` stays nil.
+      coordinator's live dashboard. Never "consumed" — `read_at` stays nil.
     * `:mailbox` — targeted at a specific task (`to_ref`). Requires read
       acknowledgement (`mark_read`).
     * `:direction` — user-authored instruction sent from the LiveView to a
@@ -14,13 +14,13 @@ defmodule Arbiter.Messages.Message do
     * `:flag` — worker-to-worker signal (e.g. Varek telling Soren the API
       shape changed). A subtype of mailbox.
 
-  The remaining kinds are the **Admiral mailbox family** — addressed reports
-  an worker (or the system) sends *up* to the Admiral (`to_ref "admiral"`),
+  The remaining kinds are the **coordinator mailbox family** — addressed reports
+  an worker (or the system) sends *up* to the coordinator (`to_ref "admiral"`),
   surfaced by `arb inbox` and the prime briefing:
 
     * `:completion` — a directive finished successfully.
     * `:failure` — a directive failed (crash, non-zero exit, aborted run).
-    * `:escalation` — needs the Admiral's attention/decision.
+    * `:escalation` — needs the coordinator's attention/decision.
     * `:info` — a neutral FYI; the default for `arb msg`.
 
   `:mailbox`, `:direction`, `:flag`, `:completion`, `:failure`,

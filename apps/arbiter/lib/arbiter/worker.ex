@@ -520,7 +520,7 @@ defmodule Arbiter.Worker do
     # feed: record a durable :notification alongside the transient broadcast.
     # This in turn broadcasts {:new_message, _} on "messages:<ws>" via the
     # resource's after_action hook, which the dashboard feed subscribes to.
-    Arbiter.Messages.AdmiralNotifier.completed(snapshot(state))
+    Arbiter.Messages.CoordinatorNotifier.completed(snapshot(state))
 
     :ok
   rescue
@@ -824,7 +824,7 @@ defmodule Arbiter.Worker do
       end
 
     new_state = %State{state | status: :awaiting, meta: meta}
-    Arbiter.Messages.AdmiralNotifier.awaiting_review(snapshot(new_state))
+    Arbiter.Messages.CoordinatorNotifier.awaiting_review(snapshot(new_state))
     {:reply, :ok, new_state}
   end
 
@@ -1319,7 +1319,7 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
+    Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
     new_state
   end
@@ -1331,7 +1331,7 @@ defmodule Arbiter.Worker do
     meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
+    Arbiter.Messages.CoordinatorNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
     new_state
   end
@@ -1450,7 +1450,7 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.AdmiralNotifier.acolyte_stopped(snapshot(new_state), reason)
+    Arbiter.Messages.CoordinatorNotifier.acolyte_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
     broadcast_worker_failed(new_state)
     new_state
@@ -1648,7 +1648,7 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.AdmiralNotifier.acolyte_stopped(snapshot(new_state), reason)
+    Arbiter.Messages.CoordinatorNotifier.acolyte_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
     broadcast_worker_failed(new_state)
     new_state
@@ -2925,7 +2925,11 @@ defmodule Arbiter.Worker do
   # silent). Escalate to the Admiral with the branch, MR ref (if one was
   # already opened), and error so this never strands invisibly. Mirrors
   # escalate_merge_conflict/3.
-  defp escalate_merge_failure(%State{workspace_id: ws_id, task_id: task_id} = state, branch, reason)
+  defp escalate_merge_failure(
+         %State{workspace_id: ws_id, task_id: task_id} = state,
+         branch,
+         reason
+       )
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
