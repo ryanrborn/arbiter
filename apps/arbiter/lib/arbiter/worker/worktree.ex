@@ -31,10 +31,6 @@ defmodule Arbiter.Worker.Worktree do
 
   @default_root "/home/rborn/dev/arbiter-worktrees"
 
-  # App directories that must recompile fresh in every worktree — never copied
-  # from the source repo's _build (bd-cwov25: no cross-branch contamination).
-  @app_dirs ~w(arbiter arbiter_web arbiter_cli)
-
   # Mix envs that acolytes actually use. `test` is the minimum; `dev` is
   # included because some dispatched workers compile in dev mode.
   @seed_envs ~w(test dev)
@@ -695,7 +691,7 @@ defmodule Arbiter.Worker.Worktree do
 
         source_lib
         |> File.ls!()
-        |> Enum.reject(&(&1 in @app_dirs))
+        |> Enum.filter(&File.dir?(Path.join([source_repo, "deps", &1])))
         |> Enum.each(fn dep ->
           source_dep = Path.join(source_lib, dep)
           dest_dep = Path.join(dest_lib, dep)
