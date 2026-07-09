@@ -1,37 +1,27 @@
 defmodule ArbiterCli.Cmd.WarshipsTest do
-  use ArbiterCli.CliCase, async: true
+  use ArbiterCli.CliCase, async: false
 
-  alias ArbiterCli.Cmd.Warships
+  alias ArbiterCli.Main
 
-  test "prints one row per repo" do
-    stub_get("/api/repos", %{
-      "data" => [
-        %{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"},
-        %{"name" => "tonic", "path" => "/home/ryan/dev/tonic", "source" => "config"}
-      ]
-    })
+  describe "arb warships (deprecated alias for arb repo list)" do
+    test "runs arb repo list and prints a migration note" do
+      stub_get("/api/repos", %{
+        "data" => [
+          %{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"}
+        ]
+      })
 
-    {out, _err, exit_code} = capture(fn -> Warships.run([]) end)
-    assert exit_code == 0
-    assert out =~ "arbiter"
-    assert out =~ "/home/ryan/dev/arbiter"
-    assert out =~ "tonic"
-  end
+      {out, err, code} = capture(fn -> Main.main(["warships"]) end)
+      assert code == 0
+      assert out =~ "arbiter"
+      assert err =~ "`arb warships` is now `arb repo list`"
+    end
 
-  test "empty list prints placeholder" do
-    stub_get("/api/repos", %{"data" => []})
-    {out, _err, exit_code} = capture(fn -> Warships.run([]) end)
-    assert exit_code == 0
-    assert out =~ "(no warships registered)"
-  end
-
-  test "--json emits {\"data\": [...]}" do
-    stub_get("/api/repos", %{
-      "data" => [%{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"}]
-    })
-
-    {out, _err, exit_code} = capture(fn -> Warships.run(["--json"]) end)
-    assert exit_code == 0
-    assert {:ok, %{"data" => [_]}} = Jason.decode(String.trim(out))
+    test "empty list still prints the placeholder" do
+      stub_get("/api/repos", %{"data" => []})
+      {out, _err, code} = capture(fn -> Main.main(["warships"]) end)
+      assert code == 0
+      assert out =~ "(no repos registered)"
+    end
   end
 end

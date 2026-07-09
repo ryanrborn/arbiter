@@ -1,19 +1,19 @@
 defmodule ArbiterCli.Cmd.Inbox do
   @moduledoc """
-  `arb inbox` — the Admiral's mailbox: messages workers (and the system) send
-  *up* the chain — completions, failures, escalations, FYIs.
+  `arb inbox` — the coordinator's mailbox: messages workers (and the system)
+  send *up* the chain — completions, failures, escalations, FYIs.
 
   Usage:
 
-      arb inbox                 unread mail addressed to the Admiral
+      arb inbox                 unread mail addressed to the coordinator
       arb inbox --all           the 20 most recent (read + unread)
       arb inbox read <id>       show one message in full, mark it read
-      arb inbox clear           destroy every already-read Admiral message
+      arb inbox clear           destroy every already-read coordinator message
       arb inbox clear --all     destroy all messages (read + unread)
       arb inbox <task-id>       (worker path) a task's unread mail; drained
                                 — marked read on fetch
 
-  The Admiral view is read-only triage: listing does NOT mark mail read. You
+  The coordinator view is read-only triage: listing does NOT mark mail read. You
   drain it deliberately with `read <id>` (one) and `clear` (read only) or
   `clear --all` (everything). The task path is the inverse — workers auto-drain
   their queue on fetch, so `arb inbox <task-id>` at the top of each workflow
@@ -56,7 +56,7 @@ defmodule ArbiterCli.Cmd.Inbox do
     end
   end
 
-  # ---- admiral views -------------------------------------------------------
+  # ---- coordinator views ----------------------------------------------------
 
   defp admiral_inbox(unread_only, mode) do
     params =
@@ -65,17 +65,19 @@ defmodule ArbiterCli.Cmd.Inbox do
         else: [to_ref: @admiral, limit: @all_limit]
 
     case Client.get("/api/messages", params) do
-      {:ok, %{"data" => list}} -> emit_list(list, mode, admiral_label(unread_only, list))
-      {:ok, _} -> emit_list([], mode, admiral_label(unread_only, []))
+      {:ok, %{"data" => list}} -> emit_list(list, mode, coordinator_label(unread_only, list))
+      {:ok, _} -> emit_list([], mode, coordinator_label(unread_only, []))
       {:error, err} -> Output.die(err)
     end
   end
 
-  defp admiral_label(true, list),
-    do: {"Admiral inbox — #{length(list)} unread:", "(admiral inbox empty — no unread mail)"}
+  defp coordinator_label(true, list),
+    do:
+      {"Coordinator inbox — #{length(list)} unread:",
+       "(coordinator inbox empty — no unread mail)"}
 
-  defp admiral_label(false, list),
-    do: {"Admiral inbox — #{length(list)} recent:", "(admiral inbox empty)"}
+  defp coordinator_label(false, list),
+    do: {"Coordinator inbox — #{length(list)} recent:", "(coordinator inbox empty)"}
 
   # ---- worker (task) path -------------------------------------------------
 
@@ -119,14 +121,14 @@ defmodule ArbiterCli.Cmd.Inbox do
   end
 
   # A full uuid passes straight through; a short prefix is resolved against the
-  # Admiral's mail (the list the operator just read these ids from).
+  # coordinator's mail (the list the operator just read these ids from).
   defp resolve_id(token) do
     if full_uuid?(token) do
       {:ok, token}
     else
       case Client.get("/api/messages", to_ref: @admiral, limit: 50) do
         {:ok, %{"data" => list}} -> match_prefix(list, token)
-        {:ok, _} -> {:error, "no admiral message matches id #{inspect(token)}"}
+        {:ok, _} -> {:error, "no coordinator message matches id #{inspect(token)}"}
         {:error, err} -> Output.die(err)
       end
     end
@@ -135,7 +137,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   defp match_prefix(list, token) do
     case Enum.filter(list, &String.starts_with?(to_string(&1["id"]), token)) do
       [%{"id" => id}] -> {:ok, id}
-      [] -> {:error, "no admiral message matches id #{inspect(token)}"}
+      [] -> {:error, "no coordinator message matches id #{inspect(token)}"}
       _ -> {:error, "ambiguous id prefix #{inspect(token)} — give more characters"}
     end
   end

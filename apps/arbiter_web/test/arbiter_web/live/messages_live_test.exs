@@ -136,9 +136,9 @@ defmodule ArbiterWeb.MessagesLiveTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      # Notification reaches the feed, but the Admiral mailbox stays empty.
+      # Notification reaches the feed, but the coordinator mailbox stays empty.
       assert html =~ "just-an-fyi"
-      assert html =~ "admiral-mailbox-empty"
+      assert html =~ "coordinator-mailbox-empty"
       assert html =~ "0 unread"
       assert Message.inbox("admiral") == []
     end
@@ -172,7 +172,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "ack-this-up"
 
       view
-      |> element(~s(#admiral-mailbox button[phx-click="mark_read"][phx-value-id="#{msg.id}"]))
+      |> element(~s(#coordinator-mailbox button[phx-click="mark_read"][phx-value-id="#{msg.id}"]))
       |> render_click()
 
       refute render(view) =~ "ack-this-up"
@@ -206,7 +206,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "still-unread"
 
       view
-      |> element(~s(button[phx-click="clear_admiral"]))
+      |> element(~s(button[phx-click="clear_coordinator"]))
       |> render_click()
 
       # Read message destroyed; unread message untouched.
