@@ -103,7 +103,7 @@ defmodule Arbiter.MCP.Catalog do
 
   # Tools that call resolve_workspace_id and thus support the optional `workspace` arg.
   # All other tools do not accept a workspace override.
-  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_peek workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset)
+  @workspace_tools ~w(task_ready coordinator_inbox coordinator_inbox_peek workspace_show quota_get task_create worker_list task_list usage_summarize notify_list tracker_claim tracker_sync graph_create workspace_config_get workspace_config_overview workspace_config_set workspace_config_unset external_review_list)
 
   @raw_tools [
     %{
@@ -755,10 +755,11 @@ defmodule Arbiter.MCP.Catalog do
       name: "external_review_list",
       tiers: @coordinator,
       description:
-        "List recent ExternalReview audit records for the workspace (bd-31fh9e). Returns in-flight " <>
+        "List recent ExternalReview audit records for a workspace (bd-31fh9e). Returns in-flight " <>
           "and completed external PR reviews in reverse-chronological order. Each record carries the " <>
           "PR ref, verdict, finding count, model, cost, dispatched-by, and timestamps. Optional " <>
-          "`limit` (default 20, max 200) and `status` filter (`running` | `completed` | `failed`).",
+          "`limit` (default 20, max 200), `status` filter (`running` | `completed` | `failed`), and " <>
+          "`workspace` to target a workspace other than the default.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -775,6 +776,27 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.external_review_list/2
+    },
+    %{
+      name: "external_review_show",
+      tiers: @coordinator,
+      description:
+        "Fetch a single ExternalReview record by `record_id`, including its full " <>
+          "`proposed_comments` (file, line, severity, message, body) — the pre-greenlight read " <>
+          "path for a report_only review (bd-dmy4pk). Workspace-agnostic: looked up directly by " <>
+          "id, no workspace filter.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "record_id" => %{
+            "type" => "string",
+            "description" => "ExternalReview record id to fetch (required)."
+          }
+        },
+        "required" => ["record_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.external_review_show/2
     },
     %{
       name: "review_greenlight",

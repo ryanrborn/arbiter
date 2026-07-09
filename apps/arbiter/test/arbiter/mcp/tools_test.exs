@@ -1954,7 +1954,12 @@ defmodule Arbiter.MCP.ToolsTest do
       Application.put_env(:arbiter, :repo_paths, %{"mcp/codex-repo" => repo})
 
       prior_mcp = Application.get_env(:arbiter, Arbiter.MCP)
-      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior_mcp || [], :inject_config, true))
+
+      Application.put_env(
+        :arbiter,
+        Arbiter.MCP,
+        Keyword.put(prior_mcp || [], :inject_config, true)
+      )
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
@@ -2105,6 +2110,97 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.task_list(ctx.coordinator, %{"issue_type" => "bogus"})
 
       assert msg =~ "issue_type"
+    end
+  end
+
+  describe "external_review_list/2 (bd-dmy4pk: workspace: arg)" do
+    setup ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "erl-other-ws", prefix: "erl"})
+
+      {:ok, here} =
+        Ash.create(Arbiter.Reviews.Record, %{
+          pr_ref: "github:acme/here#1",
+          pr: "1",
+          workspace_id: ctx.ws.id,
+          strategy: "github",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, there} =
+        Ash.create(Arbiter.Reviews.Record, %{
+          pr_ref: "github:acme/there#2",
+          pr: "2",
+          workspace_id: other_ws.id,
+          strategy: "github",
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, Map.merge(ctx, %{other_ws: other_ws, here: here, there: there})}
+    end
+
+    test "with no `workspace` arg, lists only the scope's own workspace", ctx do
+      assert {:ok, %{external_reviews: records}} =
+               Tools.external_review_list(ctx.coordinator, %{})
+
+      assert Enum.any?(records, &(&1.id == ctx.here.id))
+      refute Enum.any?(records, &(&1.id == ctx.there.id))
+    end
+
+    test "passing `workspace:` scopes the list to that workspace", ctx do
+      agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
+
+      assert {:ok, %{external_reviews: records}} =
+               Tools.external_review_list(agnostic, %{"workspace" => ctx.other_ws.name})
+
+      assert Enum.any?(records, &(&1.id == ctx.there.id))
+      refute Enum.any?(records, &(&1.id == ctx.here.id))
+    end
+
+    test "the catalog advertises the optional `workspace` param", _ctx do
+      tool = Enum.find(Catalog.all(), &(&1.name == "external_review_list"))
+      assert is_map(tool.input_schema["properties"]["workspace"])
+      refute "workspace" in (tool.input_schema["required"] || [])
+    end
+  end
+
+  describe "external_review_show/2 (bd-dmy4pk: pre-greenlight findings read)" do
+    test "returns a record's full proposed_comments regardless of workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "ers-other-ws", prefix: "ers"})
+
+      {:ok, record} =
+        Ash.create(Arbiter.Reviews.Record, %{
+          pr_ref: "github:acme/there#3",
+          pr: "3",
+          workspace_id: other_ws.id,
+          strategy: "github",
+          status: :completed,
+          mode: :report_only,
+          proposed_comments: [
+            %{"file" => "lib/foo.ex", "line" => 12, "severity" => "warn", "body" => "fix this"}
+          ],
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, data} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => record.id})
+
+      assert data.id == record.id
+      assert data.workspace_id == other_ws.id
+      assert [%{"file" => "lib/foo.ex"}] = data.proposed_comments
+    end
+
+    test "an unknown record_id is not-found", ctx do
+      assert {:error, {:not_found, msg}} =
+               Tools.external_review_show(ctx.coordinator, %{"record_id" => "no-such-record"})
+
+      assert msg =~ "no external review record"
+    end
+
+    test "requires record_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.external_review_show(ctx.coordinator, %{})
+      assert msg =~ "record_id"
     end
   end
 
