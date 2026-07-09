@@ -8,7 +8,7 @@ defmodule ArbiterWeb.Api.EventController do
 
   Topics (default: inbox,review_gate,worker_failed):
     * inbox          — a message arrived in the coordinator's mailbox
-    * review_gate       — a review_gate escalation requires Admiral ruling
+    * review_gate       — a review_gate escalation requires coordinator ruling
     * worker_failed — a worker stopped unexpectedly (status → failed)
     * worker_done   — a worker completed (status → completed)
     * task_state     — any task FSM transition (noisier — opt-in only)

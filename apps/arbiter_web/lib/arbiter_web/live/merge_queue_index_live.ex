@@ -78,7 +78,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     |> assign(:page, result.page)
     |> assign(:total_pages, result.total_pages)
     |> assign(:total_count, result.total_count)
-    |> assign(:crucible, crucible_entries(workspaces_by_id))
+    |> assign(:serialized_queue, serialized_queue_entries(workspaces_by_id))
   end
 
   # The live, serialized, base-aware queue (#354, Phase 3): each running
@@ -86,7 +86,7 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
   # worker-based `entries` above (which list awaiting-review workers) — this is
   # the Refinery's own view of the queue it is integrating one PR at a time.
   # Best-effort: a failure to reach the queues yields an empty section.
-  defp crucible_entries(workspaces_by_id) do
+  defp serialized_queue_entries(workspaces_by_id) do
     MergeQueueSupervisor.queue_views()
     |> Enum.flat_map(fn {ws_id, items} ->
       name = workspace_name(workspaces_by_id, ws_id)
@@ -148,26 +148,26 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
         </div>
 
         <section
-          :if={@crucible != []}
-          id="crucible"
+          :if={@serialized_queue != []}
+          id="serialized-queue"
           class="card bg-base-200 border border-base-300 shadow-sm"
         >
           <div class="card-body p-4 gap-3">
             <div class="flex items-center gap-2">
               <.icon name="hero-fire" class="size-4 text-warning" />
               <h2 class="text-sm font-semibold tracking-tight">
-                Crucible · serialized merge order
+                Serialized merge order
               </h2>
-              <span class="badge badge-sm badge-ghost">{length(@crucible)}</span>
+              <span class="badge badge-sm badge-ghost">{length(@serialized_queue)}</span>
             </div>
             <p class="text-xs text-base-content/60 -mt-1">
               Approved {plural(@pr_label)} are kept rebased on the moving base and merged one at a
               time, front of queue first.
             </p>
 
-            <ul id="crucible-list" class="flex flex-col gap-2">
+            <ul id="serialized-queue-list" class="flex flex-col gap-2">
               <li
-                :for={c <- @crucible}
+                :for={c <- @serialized_queue}
                 class="rounded-box bg-base-100 border border-base-300 p-2.5 flex items-center justify-between gap-2"
               >
                 <div class="flex items-center gap-2 min-w-0">
@@ -199,8 +199,8 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
                   <span class="text-xs text-base-content/50 truncate hidden sm:inline">
                     {c.workspace_name}
                   </span>
-                  <span class={["badge badge-sm", crucible_status_class(c.status)]}>
-                    {crucible_status_label(c.status)}
+                  <span class={["badge badge-sm", serialized_queue_status_class(c.status)]}>
+                    {serialized_queue_status_label(c.status)}
                   </span>
                 </div>
               </li>
@@ -331,27 +331,27 @@ defmodule ArbiterWeb.MergeQueueIndexLive do
     end
   end
 
-  # Crucible item status (#354, Phase 3) — the Refinery's own view of where each
+  # Serialized-queue item status (#354, Phase 3) — the Refinery's own view of where each
   # queued PR is in the serialized, base-aware merge pipeline.
-  defp crucible_status_label(:opening), do: "Opening"
-  defp crucible_status_label(:awaiting_approval), do: "In review"
-  defp crucible_status_label(:ci_running), do: "CI running"
-  defp crucible_status_label(:updating_base), do: "Rebasing onto base"
-  defp crucible_status_label(:ready_to_merge), do: "Queued to merge"
-  defp crucible_status_label(:merging), do: "Merging"
-  defp crucible_status_label(:conflict_resolving), do: "Resolving conflict"
-  defp crucible_status_label(:changes_requested), do: "Revising"
-  defp crucible_status_label(:failed), do: "Failed"
-  defp crucible_status_label(other), do: other |> to_string() |> String.capitalize()
+  defp serialized_queue_status_label(:opening), do: "Opening"
+  defp serialized_queue_status_label(:awaiting_approval), do: "In review"
+  defp serialized_queue_status_label(:ci_running), do: "CI running"
+  defp serialized_queue_status_label(:updating_base), do: "Rebasing onto base"
+  defp serialized_queue_status_label(:ready_to_merge), do: "Queued to merge"
+  defp serialized_queue_status_label(:merging), do: "Merging"
+  defp serialized_queue_status_label(:conflict_resolving), do: "Resolving conflict"
+  defp serialized_queue_status_label(:changes_requested), do: "Revising"
+  defp serialized_queue_status_label(:failed), do: "Failed"
+  defp serialized_queue_status_label(other), do: other |> to_string() |> String.capitalize()
 
-  defp crucible_status_class(:ready_to_merge), do: "badge-success"
-  defp crucible_status_class(:merging), do: "badge-success"
-  defp crucible_status_class(:updating_base), do: "badge-info"
-  defp crucible_status_class(:ci_running), do: "badge-info"
-  defp crucible_status_class(:conflict_resolving), do: "badge-warning"
-  defp crucible_status_class(:changes_requested), do: "badge-warning"
-  defp crucible_status_class(:failed), do: "badge-error"
-  defp crucible_status_class(_), do: "badge-ghost"
+  defp serialized_queue_status_class(:ready_to_merge), do: "badge-success"
+  defp serialized_queue_status_class(:merging), do: "badge-success"
+  defp serialized_queue_status_class(:updating_base), do: "badge-info"
+  defp serialized_queue_status_class(:ci_running), do: "badge-info"
+  defp serialized_queue_status_class(:conflict_resolving), do: "badge-warning"
+  defp serialized_queue_status_class(:changes_requested), do: "badge-warning"
+  defp serialized_queue_status_class(:failed), do: "badge-error"
+  defp serialized_queue_status_class(_), do: "badge-ghost"
 
   # A blocked merge surfaces the *why* (#354, Phase 1) so an unmergeable PR is
   # never indistinguishable from one merely "in review".
