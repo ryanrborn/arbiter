@@ -314,6 +314,44 @@ defmodule Arbiter.Worker.CommitGateTest do
       refute Map.has_key?(snap.meta, :commit_gate_reason)
     end
 
+    test "a live agent is terminated before the run is failed (bd-7a0pi8)",
+         %{repo: repo, ws: ws} do
+      # Regression for bd-7a0pi8: a premature `arb done` with zero commits used
+      # to fail the run + reap the worktree while the agent subprocess was still
+      # alive — it kept issuing commands in a cwd that had been deleted out from
+      # under it. The teardown must now SIGKILL the agent OS process and confirm
+      # it is dead as part of `fail_now`, which runs synchronously inside the
+      # worker before `status` becomes `:failed`. Because any observer (the
+      # Driver) can only read `:failed` via a serialized GenServer.call, the
+      # agent is provably dead before any worktree removal can begin.
+      task = new_task(ws)
+      path = provision_worktree(repo, "bd-gate/#{task.id}")
+
+      pid = start_worker(task, repo, path, %{commit_nudge_cap: 0})
+
+      # A REAL, still-live agent: print the marker, then linger (sleep) exactly
+      # as a mid-work agent would. Its os_pid must be dead once the run fails.
+      {:ok, port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: path,
+          command: ["sh", "-c", "echo 'arb done'; sleep 30"]
+        )
+
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+      assert {_, 0} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end)
+
+      # The instant the worker is observable as :failed, the agent is already
+      # dead — no post-teardown commands can run.
+      {_, kill_status} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      assert kill_status != 0, "agent os_pid=#{os_pid} was still alive after the run failed"
+
+      snap = Worker.state(pid)
+      assert snap.meta.failure_reason == :no_commits_at_completion
+    end
+
     test "a review-only worker (reviewer) completes despite zero commits (bd-40j98i)",
          %{repo: repo, ws: ws} do
       # Reviewers operate in review-only mode (meta[:review_only] = true) and

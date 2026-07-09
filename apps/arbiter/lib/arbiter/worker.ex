@@ -1309,6 +1309,9 @@ defmodule Arbiter.Worker do
   # shape `fail_stopped/2` uses, so dashboards/tooling see a consistent
   # structure regardless of which path failed the worker.
   defp fail_now(%State{} = state, %Arbiter.Worker.StopReason{} = reason) do
+    # bd-7a0pi8: kill any still-live agent BEFORE marking the run terminal.
+    state = terminate_live_sessions(state)
+
     meta =
       state.meta
       |> Map.put(:failure_reason, reason.summary)
@@ -1322,12 +1325,99 @@ defmodule Arbiter.Worker do
   end
 
   defp fail_now(%State{} = state, reason) do
+    # bd-7a0pi8: kill any still-live agent BEFORE marking the run terminal.
+    state = terminate_live_sessions(state)
+
     meta = if is_nil(reason), do: state.meta, else: Map.put(state.meta, :failure_reason, reason)
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
     Arbiter.Messages.AdmiralNotifier.failed(snapshot(new_state))
     broadcast_worker_failed(new_state)
     new_state
+  end
+
+  # bd-7a0pi8: a terminal failure must never leave a live agent behind. The
+  # commit-gate teardown (and the Driver's worktree reap that follows once it
+  # observes `:failed`) races the agent process otherwise: the orphaned agent
+  # keeps issuing commands in a cwd that `git worktree remove` has deleted out
+  # from under it, burning tokens and invisible to normal control until a human
+  # `worker_stop`s it. This runs INSIDE the worker's process, synchronously,
+  # before `status` becomes `:failed` — and the Driver can only read `:failed`
+  # via a serialized `GenServer.call`, so the agent is provably dead before any
+  # worktree removal can begin. Ordering: SIGKILL the OS process → confirm exit
+  # → close the port.
+  #
+  # Erlang does NOT terminate a `:spawn_executable` port's OS process on
+  # `Port.close/1`, so the explicit SIGKILL is load-bearing, not belt-and-
+  # suspenders. Best-effort throughout: a kill hiccup must not crash teardown.
+  defp terminate_live_sessions(%State{claude_sessions: sessions} = state)
+       when map_size(sessions) > 0 do
+    Enum.each(sessions, fn {port, session} ->
+      if is_nil(Map.get(session, :exit_status)), do: terminate_session_port(state, port)
+    end)
+
+    state
+  end
+
+  defp terminate_live_sessions(%State{} = state), do: state
+
+  defp terminate_session_port(%State{task_id: task_id}, port) do
+    os_pid =
+      case safe_port_os_pid(port) do
+        {:ok, pid} -> pid
+        _ -> nil
+      end
+
+    if is_integer(os_pid) do
+      _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+      unless os_process_gone?(os_pid) do
+        Logger.warning(
+          "Worker: task=#{task_id} agent os_pid=#{os_pid} still alive after SIGKILL during teardown"
+        )
+      end
+    end
+
+    # Close the port from its owner. A port that already closed on its own
+    # (the child exited between the exit_status check and here) has no info,
+    # so guard against the double-close ArgumentError.
+    if is_port(port) and not is_nil(Port.info(port)), do: Port.close(port)
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker: task=#{task_id} terminate_session_port failed: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp safe_port_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) -> {:ok, pid}
+      _ -> :error
+    end
+  rescue
+    _ -> :error
+  end
+
+  # Poll `kill -0` until the OS process is gone (SIGKILL is prompt, so this
+  # usually returns on the first probe). Bounded so a wedged/zombie pid can't
+  # block worker teardown indefinitely.
+  defp os_process_gone?(os_pid, attempts \\ 25) do
+    Enum.reduce_while(1..attempts, false, fn _i, _acc ->
+      case System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do
+        {_, 0} ->
+          Process.sleep(20)
+          {:cont, false}
+
+        _ ->
+          {:halt, true}
+      end
+    end)
+  rescue
+    _ -> true
   end
 
   # bd-awi4nw: a stopped/dead worker detected via the closed port. Classify the

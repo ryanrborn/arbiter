@@ -54,10 +54,15 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   ## Completion detection
 
-  A display line matching `~r/\\barb done\\b/` triggers `Worker.complete/2`.
-  The regex is intentionally word-bounded so the substring "arb doneness"
-  doesn't trip it — but a literal marker line like `arb done` (or
-  `>> arb done <<`) does. Under stream-json, detection is scoped to the
+  A display line matching `~r/\\barb done[^\\p{L}\\p{N}]*$/u` triggers
+  `Worker.complete/2`. The marker must be the **last** token on the line
+  (only whitespace / punctuation / decoration may trail it), so a literal
+  marker line like `arb done`, `>> arb done <<`, or a turn ending in
+  `… — arb done` trips it, but a prose line that merely *mentions* the marker
+  mid-sentence ("I'll print arb done when the tests pass") does NOT (bd-7a0pi8:
+  a worker narrating its intent to finish must not falsely complete before it
+  has done the work). The leading `\\b` still rejects the "arb doneness"
+  substring. Under stream-json, detection is additionally scoped to the
   worker's **assistant text** (and the raw-line fallback): tool calls and tool
   *results* are displayed but never trip completion, so an worker that greps
   or cats "arb done" mid-task can't falsely complete itself.
@@ -90,7 +95,12 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Worker.OutputLog
 
   @line_cap 1000
-  @done_regex ~r/\barb done\b/
+  # bd-7a0pi8: anchor the marker to end-of-line. `\barb done` still rejects the
+  # "arb doneness" substring; the trailing `[^\p{L}\p{N}]*$` requires the marker
+  # to be the last token (only whitespace/punctuation/decoration may follow), so
+  # a worker narrating "I'll print arb done once the tests pass" no longer trips
+  # a premature, false completion.
+  @done_regex ~r/\barb done[^\p{L}\p{N}]*$/u
 
   @typedoc "Accepted options for `start/1`."
   @type opt ::
