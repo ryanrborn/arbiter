@@ -2860,7 +2860,8 @@ defmodule Arbiter.Worker do
     fail_now(state, :merge_conflict)
   end
 
-  defp park_merge_failure(%State{} = state, _branch, reason) do
+  defp park_merge_failure(%State{} = state, branch, reason) do
+    escalate_merge_failure(state, branch, reason)
     fail_now(state, {:merge_failed, reason})
   end
 
@@ -2916,6 +2917,46 @@ defmodule Arbiter.Worker do
   end
 
   defp escalate_merge_conflict(_state, _branch, _detail), do: :ok
+
+  # A non-conflict merge failure — the forge rejected the PR open/merge, a
+  # push failed, config was missing, etc. — still leaves an approved run
+  # stranded with no PR merged (bd-8rrn9t: a 422 "already exists" on
+  # create-PR left an approved PR open+mergeable with the failure otherwise
+  # silent). Escalate to the Admiral with the branch, MR ref (if one was
+  # already opened), and error so this never strands invisibly. Mirrors
+  # escalate_merge_conflict/3.
+  defp escalate_merge_failure(%State{workspace_id: ws_id, task_id: task_id} = state, branch, reason)
+       when is_binary(ws_id) do
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: "admiral",
+      from_ref: task_id,
+      workspace_id: ws_id,
+      directive_ref: task_id,
+      subject: "Merge failed: #{task_id} could not be opened/merged",
+      body: merge_failure_body(state, branch, reason)
+    })
+
+    :ok
+  rescue
+    e -> log_merge_conflict_warning(task_id, e)
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp escalate_merge_failure(_state, _branch, _reason), do: :ok
+
+  defp merge_failure_body(%State{mr_ref: mr_ref}, branch, reason) do
+    ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
+
+    """
+    Merge of branch #{branch} failed and was NOT completed. The task is parked \
+    failed (not closed) — any PR/MR already opened for this branch may be \
+    approved and mergeable but stranded, and needs manual attention.
+    #{ref_line}
+    Error: #{inspect(reason)}
+    """
+  end
 
   defp log_merge_conflict_warning(task_id, reason) do
     Logger.warning(
