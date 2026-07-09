@@ -300,7 +300,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   describe "blocked-merge detection (#354)" do
     test "an approved :conflict records the reason, dispatches a rebase acolyte, and does not fail" do
       {pid, task_id} = running_worker()
-      # An approved-but-conflicting PR. Phase 2b: the Warden records the reason
+      # An approved-but-conflicting PR. Phase 2b: the Watchdog records the reason
       # AND dispatches a rebase-resolve acolyte against the existing worktree
       # (rather than only parking). A :running stub stays "in flight" so this
       # is a single dispatch. The worker must NOT be failed.
@@ -386,7 +386,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   describe "auto-resolve :behind_base (#354 Phase 2a)" do
     test "runs update-branch on an approved behind-base PR, then merges when caught up" do
       {pid, task_id} = running_worker()
-      # Poll 1: approved but behind base -> the Warden runs update-branch.
+      # Poll 1: approved but behind base -> the Watchdog runs update-branch.
       # Poll 2: caught up (no block) -> auto-merge fires.
       StubMerger.queue_get("!ar1", [
         %{status: :open, approved: true, block_reason: :behind_base},
@@ -402,7 +402,7 @@ defmodule Arbiter.Worker.WatchdogTest do
 
     test "stops retrying update-branch after max_auto_resolve_attempts and parks" do
       {pid, task_id} = running_worker()
-      # Perpetually behind base: the Warden retries update-branch up to the cap,
+      # Perpetually behind base: the Watchdog retries update-branch up to the cap,
       # then escalates + parks (no more update-branch calls).
       StubMerger.queue_get("!ar2", [%{status: :open, approved: true, block_reason: :behind_base}])
 
@@ -553,7 +553,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert_receive {:resolve_called, _}, 1_000
       assert_receive {:resolve_called, _}, 1_000
       assert_receive {:escalate_called, _, _, _, _}, 1_000
-      # Past the cap the Warden stays parked and must not keep spawning acolytes
+      # Past the cap the Watchdog stays parked and must not keep spawning acolytes
       # or re-paging on every subsequent poll.
       refute_receive {:resolve_called, _}, 200
       refute_receive {:escalate_called, _, _, _, _}, 200
@@ -584,7 +584,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       {pid, task_id} = running_worker()
       StubConflictResolver.arm(task_id, self(), pid: :completed)
       # Conflict, then mergeable+approved — the resolver's force-push cleared it
-      # and the Warden's next poll re-attempts (and lands) the merge.
+      # and the Watchdog's next poll re-attempts (and lands) the merge.
       StubMerger.queue_get("!c5", [
         %{status: :open, approved: true, block_reason: :conflict},
         %{status: :open, approved: true}
