@@ -10,22 +10,22 @@ defmodule Arbiter.VernacularSweepTest do
   use ExUnit.Case
 
   @target_files [
-    "apps/arbiter/lib/arbiter/agents/claude/config_dir.ex",
-    "apps/arbiter/lib/arbiter/agents/security_policy.ex",
-    "apps/arbiter/lib/arbiter/agents/credential_watchdog.ex",
-    "apps/arbiter/lib/arbiter/agents/routing/by_difficulty.ex",
-    "apps/arbiter/lib/arbiter/trackers/sync.ex",
-    "apps/arbiter/lib/arbiter/tasks/workspace.ex",
-    "apps/arbiter/lib/arbiter/tasks/decommission_sweep.ex",
-    "apps/arbiter/lib/arbiter/workers/reconciler.ex",
-    "apps/arbiter/lib/arbiter/events.ex",
-    "apps/arbiter/lib/arbiter/application.ex",
-    "apps/arbiter/lib/arbiter/github.ex"
+    "lib/arbiter/agents/claude/config_dir.ex",
+    "lib/arbiter/agents/security_policy.ex",
+    "lib/arbiter/agents/credential_watchdog.ex",
+    "lib/arbiter/agents/routing/by_difficulty.ex",
+    "lib/arbiter/trackers/sync.ex",
+    "lib/arbiter/tasks/workspace.ex",
+    "lib/arbiter/tasks/decommission_sweep.ex",
+    "lib/arbiter/workers/reconciler.ex",
+    "lib/arbiter/events.ex",
+    "lib/arbiter/application.ex",
+    "lib/arbiter/github.ex"
   ]
 
   describe "vernacular sweep" do
     test "config_dir.ex: acolyte_memory function is renamed to worker_memory" do
-      content = read_file("apps/arbiter/lib/arbiter/agents/claude/config_dir.ex")
+      content = read_file("lib/arbiter/agents/claude/config_dir.ex")
 
       # Should NOT find the old function name
       refute content =~ "def acolyte_memory",
@@ -37,7 +37,7 @@ defmodule Arbiter.VernacularSweepTest do
     end
 
     test "credential_watchdog.ex: Admiral in comments → coordinator" do
-      content = read_file("apps/arbiter/lib/arbiter/agents/credential_watchdog.ex")
+      content = read_file("lib/arbiter/agents/credential_watchdog.ex")
 
       # Comments should mention "coordinator" not "Admiral"
       assert content =~ "Escalates to the coordinator",
@@ -51,56 +51,56 @@ defmodule Arbiter.VernacularSweepTest do
     end
 
     test "by_difficulty.ex: Admiral → coordinator in comments" do
-      content = read_file("apps/arbiter/lib/arbiter/agents/routing/by_difficulty.ex")
+      content = read_file("lib/arbiter/agents/routing/by_difficulty.ex")
 
       assert content =~ "The coordinator signed off",
         "Should update 'The Admiral signed off' to 'The coordinator signed off'"
     end
 
     test "trackers/sync.ex: Admiral → coordinator in mailbox comments" do
-      content = read_file("apps/arbiter/lib/arbiter/trackers/sync.ex")
+      content = read_file("lib/arbiter/trackers/sync.ex")
 
       assert content =~ "coordinator mailbox",
         "Should update 'Admiral mailbox' to 'coordinator mailbox'"
     end
 
     test "workspace.ex: Admiral → coordinator in comments" do
-      content = read_file("apps/arbiter/lib/arbiter/tasks/workspace.ex")
+      content = read_file("lib/arbiter/tasks/workspace.ex")
 
       assert content =~ "escalates to the coordinator",
         "Should update 'escalates to the Admiral' to 'escalates to the coordinator'"
     end
 
     test "reconciler.ex: Admiral → coordinator" do
-      content = read_file("apps/arbiter/lib/arbiter/workers/reconciler.ex")
+      content = read_file("lib/arbiter/workers/reconciler.ex")
 
       assert content =~ "coordinator's mailbox",
         "Should update 'Admiral's mailbox' to 'coordinator's mailbox'"
     end
 
     test "events.ex: Admiral → coordinator in event documentation" do
-      content = read_file("apps/arbiter/lib/arbiter/events.ex")
+      content = read_file("lib/arbiter/events.ex")
 
       assert content =~ "coordinator ruling",
         "Should update 'Admiral ruling' to 'coordinator ruling'"
     end
 
     test "application.ex: Admiral → coordinator" do
-      content = read_file("apps/arbiter/lib/arbiter/application.ex")
+      content = read_file("lib/arbiter/application.ex")
 
       assert content =~ "Escalates each to the coordinator",
         "Should update Admiral reference to coordinator"
     end
 
     test "github.ex: polecat → worker in comments" do
-      content = read_file("apps/arbiter/lib/arbiter/github.ex")
+      content = read_file("lib/arbiter/github.ex")
 
       assert content =~ "worker-orchestrator",
         "Should update 'polecat-orchestrator' to 'worker-orchestrator'"
     end
 
     test "decommission_sweep.ex: mayor → coordinator in comments (but preserve historical artifact matching)" do
-      content = read_file("apps/arbiter/lib/arbiter/tasks/decommission_sweep.ex")
+      content = read_file("lib/arbiter/tasks/decommission_sweep.ex")
 
       # The comments about old artifacts should be updated
       assert content =~ "coordinator/witness session-handoff",

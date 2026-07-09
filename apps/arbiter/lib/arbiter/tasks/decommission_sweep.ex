@@ -143,7 +143,7 @@ defmodule Arbiter.Tasks.DecommissionSweep do
       String.starts_with?(t, "Witness for ") -> true
       Regex.match?(~r/^Crew worker .* in /, t) -> true
       String.starts_with?(t, "Deacon (daemon beacon)") -> true
-      String.starts_with?(t, "Coordinator - global coordinator") -> true
+      String.starts_with?(t, "Mayor - global coordinator") -> true
       true -> false
     end
   end
