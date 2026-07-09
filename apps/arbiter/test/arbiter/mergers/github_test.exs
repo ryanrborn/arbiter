@@ -516,8 +516,8 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
-  # #354 Phase 1: get/1 classifies *why* an open PR can't merge so the Warden
-  # (Watchdog) can escalate a blocked merge instead of parking it silently.
+  # #354 Phase 1: get/1 classifies *why* an open PR can't merge so the Watchdog
+  # can escalate a blocked merge instead of parking it silently.
   describe "get/1 block_reason (#354)" do
     defp block_get(pr_fields, check_runs \\ []) do
       pr = Map.merge(%{"state" => "open", "merged" => false, "html_url" => "u"}, pr_fields)

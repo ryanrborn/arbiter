@@ -359,8 +359,8 @@ defmodule Arbiter.Mergers.GitlabTest do
     end
   end
 
-  # #354 Phase 1: get/1 classifies *why* an open MR can't merge so the Warden
-  # (Watchdog) can escalate a blocked merge instead of parking it silently.
+  # #354 Phase 1: get/1 classifies *why* an open MR can't merge so the Watchdog
+  # can escalate a blocked merge instead of parking it silently.
   describe "get/1 block_reason (#354)" do
     defp block_get(mr_fields, pipelines \\ []) do
       mr = Map.merge(%{"iid" => @iid, "state" => "opened"}, mr_fields)
