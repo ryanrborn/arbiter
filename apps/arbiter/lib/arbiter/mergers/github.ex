@@ -4,7 +4,7 @@ defmodule Arbiter.Mergers.Github do
 
   Wraps GitHub's REST API v3 for pull-request open / get / merge / close /
   comment / request-review flows. This is the hosted-forge merge path for
-  GitHub-hosted warships (and for Arbiter's own repo).
+  GitHub-hosted rigs (and for Arbiter's own repo).
 
   ## Active-workspace contract
 
@@ -42,7 +42,7 @@ defmodule Arbiter.Mergers.Github do
   target repo from the repo's `origin` remote via
   `Arbiter.Mergers.Github.RepoResolver` and bakes the result into the
   minted `mr_ref`. The caller passes the repo path through `opts.repo_path`
-  (the same key the `Direct` adapter already requires; the Polecat seeds
+  (the same key the `Direct` adapter already requires; the worker seeds
   it from the repo's worktree).
 
   ## Config selection
@@ -967,8 +967,8 @@ defmodule Arbiter.Mergers.Github do
   end
 
   # Collect the failing check runs for the PR's head commit and render each one
-  # into a `name` + `summary` (output tail) + `url` map the Warden hands to a
-  # fix-pass acolyte. No head SHA (or no check runs) → an empty list, never an
+  # into a `name` + `summary` (output tail) + `url` map the Watchdog hands to a
+  # fix-pass worker. No head SHA (or no check runs) → an empty list, never an
   # error — a `:ci_failed` block with nothing fetchable still dispatches the
   # fix pass, just without log context.
   defp fetch_failing_checks(_cfg, _owner, _repo, sha) when sha in [nil, ""], do: {:ok, []}
@@ -1317,7 +1317,7 @@ defmodule Arbiter.Mergers.Github do
 
   # Post the verdict as a top-level issue comment when a formal review
   # submission is rejected because the reviewer is the PR author. The fleet
-  # merge gate uses the internal polecat verdict, not GitHub's review state,
+  # merge gate uses the internal worker verdict, not GitHub's review state,
   # so this comment is for human visibility only.
   defp fallback_self_review_comment(cfg, owner, repo, number, verdict, body) do
     verdict_label = if verdict == :approve, do: "APPROVE", else: "REQUEST_CHANGES"
