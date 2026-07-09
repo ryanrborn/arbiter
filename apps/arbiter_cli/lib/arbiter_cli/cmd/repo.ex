@@ -9,18 +9,53 @@ defmodule ArbiterCli.Cmd.Repo do
   Both read from `GET /api/repos`.
   """
 
-  alias ArbiterCli.{Client, Cmd, Output}
+  alias ArbiterCli.{Client, Output}
+
+  @switches [json: :boolean]
 
   def run(argv) do
     case argv do
-      ["list" | rest] -> Cmd.Warships.run(rest)
-      ["ls" | rest] -> Cmd.Warships.run(rest)
+      ["list" | rest] -> list(rest)
+      ["ls" | rest] -> list(rest)
       ["show" | rest] -> show(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
       ["-h" | _] -> IO.puts(@moduledoc)
       [] -> Output.die("repo requires a subcommand", "verbs: list, show")
       [unknown | _] -> Output.die("unknown repo subcommand: #{unknown}", "verbs: list, show")
     end
+  end
+
+  defp list(argv) do
+    {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches)
+    mode = if opts[:json], do: :json, else: :text
+
+    case Client.get("/api/repos") do
+      {:ok, %{"data" => repos}} -> emit_list(repos, mode)
+      {:error, err} -> Output.die(err)
+    end
+  end
+
+  defp emit_list(repos, :json), do: IO.puts(Jason.encode!(%{data: repos}))
+
+  defp emit_list([], :text), do: IO.puts("(no repos registered)")
+
+  defp emit_list(repos, :text) do
+    fmt = "~-24s ~-8s ~s~n"
+    :io.format(fmt, ["NAME", "SOURCE", "PATH"])
+
+    :io.format(fmt, [
+      String.duplicate("-", 24),
+      String.duplicate("-", 8),
+      String.duplicate("-", 40)
+    ])
+
+    Enum.each(repos, fn repo ->
+      :io.format(fmt, [
+        repo["name"] || "",
+        repo["source"] || "",
+        repo["path"] || ""
+      ])
+    end)
   end
 
   defp show(argv) do

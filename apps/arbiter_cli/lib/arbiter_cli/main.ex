@@ -123,7 +123,8 @@ defmodule ArbiterCli.Main do
     "notify" => {"message", ["notify"]},
     "msg" => {"message", ["send"]},
     "install-cli" => {"install", ["cli"]},
-    "install-service" => {"install", ["service"]}
+    "install-service" => {"install", ["service"]},
+    "warships" => {"repo", ["list"]}
   }
 
   def main(argv) do

@@ -1,12 +1,13 @@
 defmodule ArbiterCli.Cmd.Prime do
   @moduledoc """
   `arb prime` — dump everything a fresh Claude Code session needs to play
-  the Admiral role.
+  the coordinator role.
 
   Output (in order):
 
-    1. **Admiral Inbox** — up to 5 most recent unread messages addressed to
-       the Admiral. Omitted entirely when there are none.
+    1. **Global Coordinator Inbox** — up to 5 most recent unread messages
+       addressed to the coordinator, not scoped to any single workspace.
+       Omitted entirely when there are none.
     2. **Per-workspace blocks** (one per configured workspace, in server order):
        a. Workspace header — name, prefix, id, tracker, security posture.
        b. Standing Orders — the domain's operating disciplines, sourced from
@@ -138,7 +139,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp gather_standing_orders(_), do: {:ok, []}
 
-  # Up to 5 most recent unread messages addressed to the Admiral. The REST
+  # Up to 5 most recent unread messages addressed to the coordinator. The REST
   # index already sorts newest-first, so a take/2 gives "most recent".
   defp gather_admiral_inbox do
     case Client.get("/api/messages", to_ref: "admiral", unread: "true") do
@@ -228,11 +229,11 @@ defmodule ArbiterCli.Cmd.Prime do
   defp standing_order_line(order) when is_binary(order), do: "[ ] #{order}"
   defp standing_order_line(order), do: "[ ] #{inspect(order)}"
 
-  # Omitted entirely when there's no unread Admiral mail.
+  # Omitted entirely when there's no unread coordinator mail.
   defp maybe_emit_admiral_inbox({:ok, []}), do: :ok
 
   defp maybe_emit_admiral_inbox({:ok, list}) do
-    IO.puts("== Admiral Inbox (#{length(list)} unread) ==")
+    IO.puts("== Global Coordinator Inbox (#{length(list)} unread) ==")
 
     list
     |> Enum.take(5)
@@ -282,7 +283,7 @@ defmodule ArbiterCli.Cmd.Prime do
   defp humanize(s), do: "#{div(s, 86_400)}d ago"
 
   # The resolved worker security posture (server-computed; see
-  # ArbiterWeb.Api.WorkspaceJSON). Surfaced so a fresh Admiral session sees,
+  # ArbiterWeb.Api.WorkspaceJSON). Surfaced so a fresh coordinator session sees,
   # up front, what a worker spawned in this domain may and may not do.
   defp emit_security_posture(%{} = posture) do
     sandbox = posture["sandbox"] || %{}
