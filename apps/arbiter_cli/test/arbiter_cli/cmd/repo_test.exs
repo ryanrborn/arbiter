@@ -29,6 +29,45 @@ defmodule ArbiterCli.Cmd.RepoTest do
     assert out =~ "arbiter"
   end
 
+  test "list prints one row per repo in text mode" do
+    stub_get("/api/repos", %{
+      "data" => [
+        %{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"},
+        %{"name" => "tonic", "path" => "/home/ryan/dev/tonic", "source" => "config"}
+      ]
+    })
+
+    {out, _err, code} = capture(fn -> Repo.run(["list"]) end)
+    assert code == 0
+    assert out =~ "arbiter"
+    assert out =~ "/home/ryan/dev/arbiter"
+    assert out =~ "tonic"
+  end
+
+  test "list empty prints placeholder" do
+    stub_get("/api/repos", %{"data" => []})
+    {out, _err, code} = capture(fn -> Repo.run(["list"]) end)
+    assert code == 0
+    assert out =~ "(no repos registered)"
+  end
+
+  test "list --json emits {\"data\": [...]}" do
+    stub_get("/api/repos", %{
+      "data" => [%{"name" => "arbiter", "path" => "/home/ryan/dev/arbiter", "source" => "config"}]
+    })
+
+    {out, _err, code} = capture(fn -> Repo.run(["list", "--json"]) end)
+    assert code == 0
+    assert {:ok, %{"data" => [_]}} = Jason.decode(String.trim(out))
+  end
+
+  test "ls is an alias for list" do
+    stub_get("/api/repos", %{"data" => []})
+    {out, _err, code} = capture(fn -> Repo.run(["ls"]) end)
+    assert code == 0
+    assert out =~ "(no repos registered)"
+  end
+
   test "show finds a repo by name" do
     stub_get("/api/repos", @rigs)
     {out, _err, code} = capture(fn -> Repo.run(["show", "arbiter", "--json"]) end)

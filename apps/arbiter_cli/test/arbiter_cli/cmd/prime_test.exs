@@ -123,7 +123,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert out =~ "== Ready issues =="
     end
 
-    test "renders the Admiral Inbox section when there is unread mail" do
+    test "renders the Global Coordinator Inbox section when there is unread mail" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -150,13 +150,13 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
-      assert out =~ "== Admiral Inbox (2 unread) =="
+      assert out =~ "== Global Coordinator Inbox (2 unread) =="
       assert out =~ "[bd-9bn4n9] failure"
       assert out =~ "Acolyte exited with code 1"
       assert out =~ "[bd-6c6w82] completion"
     end
 
-    test "Admiral Inbox appears before workspace blocks" do
+    test "Global Coordinator Inbox appears before workspace blocks" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -175,12 +175,12 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
 
-      inbox_at = :binary.match(out, "== Admiral Inbox") |> elem(0)
+      inbox_at = :binary.match(out, "== Global Coordinator Inbox") |> elem(0)
       workspace_at = :binary.match(out, "== Workspace:") |> elem(0)
       assert inbox_at < workspace_at
     end
 
-    test "omits the Admiral Inbox section entirely when there is no unread mail" do
+    test "omits the Global Coordinator Inbox section entirely when there is no unread mail" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -190,7 +190,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {out, _err, exit_code} = capture(fn -> Prime.run([]) end)
       assert exit_code == 0
-      refute out =~ "Admiral Inbox"
+      refute out =~ "Global Coordinator Inbox"
     end
 
     test "renders the Coordinator Inbox section when there is unread coordinator mail" do
