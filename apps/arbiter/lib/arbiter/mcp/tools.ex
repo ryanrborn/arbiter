@@ -1255,9 +1255,10 @@ defmodule Arbiter.MCP.Tools do
   # ---- external_review_list -----------------------------------------------
 
   @doc """
-  List recent ExternalReview audit records for the scope's workspace (bd-31fh9e).
+  List recent ExternalReview audit records for a workspace (bd-31fh9e, bd-dmy4pk).
   Coordinator only. Returns records newest-first. Optional `limit` (default 20,
-  max 200) and `status` filter.
+  max 200), `status` filter, and `workspace` (resolved the same way as
+  `worker_list`/`task_ready` — explicit arg, then the installation default).
   """
   @spec external_review_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def external_review_list(%Scope{} = scope, args) do
@@ -1282,6 +1283,32 @@ defmodule Arbiter.MCP.Tools do
     end
   rescue
     e -> {:error, {:internal, "external_review_list failed: #{Exception.message(e)}"}}
+  end
+
+  # ---- external_review_show ------------------------------------------------
+
+  @doc """
+  Fetch a single ExternalReview audit record by `record_id` (bd-dmy4pk), including
+  its full `proposed_comments` — so a report_only review's findings can be read
+  before `review_greenlight`. Coordinator only. Workspace-agnostic: looked up
+  directly by id, with no workspace filter, since the caller already has the
+  specific record id (e.g. from a dispatch response or `external_review_list`).
+  """
+  @spec external_review_show(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def external_review_show(%Scope{} = _scope, args) do
+    alias Arbiter.Reviews.Record, as: ExternalReviewRecord
+
+    with {:ok, record_id} <- require_string(args, "record_id") do
+      case Ash.get(ExternalReviewRecord, record_id) do
+        {:ok, %ExternalReviewRecord{} = record} ->
+          {:ok, serialize_external_review(record, proposed_comments: true)}
+
+        _ ->
+          {:error, {:not_found, "no external review record found for #{record_id}"}}
+      end
+    end
+  rescue
+    e -> {:error, {:internal, "external_review_show failed: #{Exception.message(e)}"}}
   end
 
   # ---- review_greenlight --------------------------------------------------
@@ -1340,8 +1367,8 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  defp serialize_external_review(%Arbiter.Reviews.Record{} = r) do
-    %{
+  defp serialize_external_review(%Arbiter.Reviews.Record{} = r, opts \\ []) do
+    base = %{
       id: r.id,
       pr_ref: r.pr_ref,
       pr: r.pr,
@@ -1364,6 +1391,12 @@ defmodule Arbiter.MCP.Tools do
       started_at: iso_dt(r.started_at),
       completed_at: iso_dt(r.completed_at)
     }
+
+    if Keyword.get(opts, :proposed_comments, false) do
+      Map.put(base, :proposed_comments, r.proposed_comments || [])
+    else
+      base
+    end
   end
 
   defp parse_bounded_limit(args, key, default, max) do

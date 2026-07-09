@@ -18,13 +18,15 @@ defmodule Arbiter.MCP.CatalogTest do
                        worker_resume worker_review worker_stop worker_list worker_show worker_runs
                        worker_log task_list
                        tracker_claim tracker_sync workspace_list usage_summarize coordinator_inbox
-                       workspace_config_set workspace_config_unset)
+                       workspace_config_set workspace_config_unset
+                       external_review_list external_review_show review_greenlight)
 
   # Tools that call resolve_workspace_id and thus expose the optional `workspace` param.
   @workspace_resolving_tools ~w(task_ready coordinator_inbox coordinator_inbox_peek workspace_show
                                 quota_get task_create worker_list task_list usage_summarize notify_list
                                 tracker_claim tracker_sync worker_review graph_create workspace_config_get
-                                workspace_config_overview workspace_config_set workspace_config_unset)
+                                workspace_config_overview workspace_config_set workspace_config_unset
+                                external_review_list)
 
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do
