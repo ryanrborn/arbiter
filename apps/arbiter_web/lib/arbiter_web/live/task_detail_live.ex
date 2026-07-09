@@ -434,7 +434,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                     <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-primary/40 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.notes}</pre>
                   <% else %>
                     <p class="text-xs italic text-base-content/50 bg-base-100 border border-base-300 p-3 rounded-box">
-                      No findings recorded yet — the acolyte writes its results here before completing.
+                      No findings recorded yet — the worker writes its results here before completing.
                     </p>
                   <% end %>
                 </div>
