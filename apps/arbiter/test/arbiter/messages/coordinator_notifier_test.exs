@@ -1,7 +1,7 @@
-defmodule Arbiter.Messages.AdmiralNotifierTest do
+defmodule Arbiter.Messages.CoordinatorNotifierTest do
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Messages.AdmiralNotifier
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Messages.Message
 
   defp uniq(prefix), do: "#{prefix}-#{System.unique_integer([:positive])}"
@@ -19,7 +19,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.completed(%{
+               CoordinatorNotifier.completed(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(125),
@@ -42,7 +42,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
         })
 
       assert :ok =
-               AdmiralNotifier.completed(%{
+               CoordinatorNotifier.completed(%{
                  task_id: issue.id,
                  workspace_id: workspace.id,
                  started_at: started_ago(5),
@@ -60,7 +60,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.failed(%{
+               CoordinatorNotifier.failed(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(3661),
@@ -77,7 +77,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.failed(%{
+               CoordinatorNotifier.failed(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(30),
@@ -94,7 +94,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.awaiting_review(%{
+               CoordinatorNotifier.awaiting_review(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(10),
@@ -109,7 +109,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.awaiting_review(%{
+               CoordinatorNotifier.awaiting_review(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(10),
@@ -126,7 +126,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.awaiting_review_stuck(
+               CoordinatorNotifier.awaiting_review_stuck(
                  %{task_id: task_id, workspace_id: ws, started_at: started_ago(900), meta: %{}},
                  "#76"
                )
@@ -143,7 +143,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.awaiting_review_stuck(%{
+               CoordinatorNotifier.awaiting_review_stuck(%{
                  task_id: task_id,
                  workspace_id: ws,
                  started_at: started_ago(60),
@@ -158,7 +158,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
   describe "guards" do
     test "a worker with no workspace posts nothing" do
       assert :ok =
-               AdmiralNotifier.completed(%{
+               CoordinatorNotifier.completed(%{
                  task_id: "bd-x",
                  workspace_id: nil,
                  started_at: started_ago(1),
@@ -183,7 +183,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
-               AdmiralNotifier.acolyte_stopped(
+               CoordinatorNotifier.acolyte_stopped(
                  %{
                    task_id: task_id,
                    workspace_id: ws,
@@ -211,7 +211,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
-               AdmiralNotifier.acolyte_stopped(
+               CoordinatorNotifier.acolyte_stopped(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
@@ -225,7 +225,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       reason = StopReason.classify(137, [])
 
       assert :ok =
-               AdmiralNotifier.acolyte_stopped(
+               CoordinatorNotifier.acolyte_stopped(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
@@ -237,7 +237,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
-               AdmiralNotifier.acolyte_stopped(
+               CoordinatorNotifier.acolyte_stopped(
                  %{task_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
                  reason
                )
@@ -257,7 +257,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.merge_blocked(
+               CoordinatorNotifier.merge_blocked(
                  %{task_id: task_id, workspace_id: ws},
                  "!42",
                  :conflict
@@ -279,7 +279,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.merge_blocked(
+               CoordinatorNotifier.merge_blocked(
                  %{task_id: task_id, workspace_id: ws},
                  "#7",
                  :ci_failed
@@ -295,7 +295,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.merge_blocked(
+               CoordinatorNotifier.merge_blocked(
                  %{task_id: task_id, workspace_id: ws},
                  "#3609",
                  :needs_nonauthor_approval
@@ -309,7 +309,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
     test "a block with no workspace posts nothing" do
       assert :ok =
-               AdmiralNotifier.merge_blocked(
+               CoordinatorNotifier.merge_blocked(
                  %{task_id: "bd-noworkspace", workspace_id: nil},
                  "!1",
                  :behind_base
@@ -325,7 +325,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.merge_block_unresolved(
+               CoordinatorNotifier.merge_block_unresolved(
                  %{task_id: task_id, workspace_id: ws},
                  "!88",
                  :ci_failed,
@@ -345,7 +345,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
     test "an unresolved block with no workspace posts nothing" do
       assert :ok =
-               AdmiralNotifier.merge_block_unresolved(
+               CoordinatorNotifier.merge_block_unresolved(
                  %{task_id: "bd-noworkspace", workspace_id: nil},
                  "!1",
                  :behind_base,
@@ -367,7 +367,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.approved_awaiting_merge(
+               CoordinatorNotifier.approved_awaiting_merge(
                  %{task_id: task_id, workspace_id: ws},
                  "!314",
                  false
@@ -391,7 +391,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       task_id = uniq("bd")
 
       assert :ok =
-               AdmiralNotifier.approved_awaiting_merge(
+               CoordinatorNotifier.approved_awaiting_merge(
                  %{task_id: task_id, workspace_id: ws},
                  "!42",
                  true
@@ -402,7 +402,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
 
     test "an approved-awaiting-merge with no workspace posts nothing" do
       assert :ok =
-               AdmiralNotifier.approved_awaiting_merge(
+               CoordinatorNotifier.approved_awaiting_merge(
                  %{task_id: "bd-noworkspace", workspace_id: nil},
                  "!1",
                  false
@@ -431,7 +431,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       }
 
       assert :ok =
-               AdmiralNotifier.tracker_sync_failed(
+               CoordinatorNotifier.tracker_sync_failed(
                  %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-1"},
                  :code_review,
                  reason
@@ -463,7 +463,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       }
 
       assert :ok =
-               AdmiralNotifier.tracker_sync_failed(
+               CoordinatorNotifier.tracker_sync_failed(
                  %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-2"},
                  :code_review,
                  reason
@@ -488,7 +488,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       }
 
       assert :ok =
-               AdmiralNotifier.tracker_sync_failed(
+               CoordinatorNotifier.tracker_sync_failed(
                  %{task_id: task_id, workspace_id: ws, tracker_type: :jira, tracker_ref: "VR-3"},
                  :in_progress,
                  reason
@@ -508,7 +508,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       }
 
       assert :ok =
-               AdmiralNotifier.tracker_sync_failed(
+               CoordinatorNotifier.tracker_sync_failed(
                  %{task_id: "bd-noworkspace", workspace_id: nil},
                  :in_progress,
                  reason
@@ -527,7 +527,7 @@ defmodule Arbiter.Messages.AdmiralNotifierTest do
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
-               AdmiralNotifier.preflight_failed(
+               CoordinatorNotifier.preflight_failed(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )

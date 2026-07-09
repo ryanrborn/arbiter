@@ -1,11 +1,12 @@
 defmodule ArbiterCli.Cmd.Message do
   @moduledoc """
   `arb message <verb>` — the inter-agent message queue: mailboxes + the
-  Admiral's notification feed.
+  coordinator's notification feed.
 
       arb message inbox  [--all | read <id> | clear | <task-id>]
-                         the Admiral's mailbox (messages sent *up* the chain);
-                         a `<task-id>` drains that task's unread direction.
+                         the coordinator's mailbox (messages sent *up* the
+                         chain); a `<task-id>` drains that task's unread
+                         direction.
       arb message send   <recipient> <body> [--subject ...] [--directive bd-x]
                          [--kind notification|completion|failure|escalation|info]
                          send a message up (or across) the chain. The `from`
@@ -14,8 +15,8 @@ defmodule ArbiterCli.Cmd.Message do
                          the recent notification feed.
 
   As a shorthand, `arb message <task-id> <text>` (no verb) sends a
-  `:direction` from the Admiral down to a running worker — the worker picks
-  it up next time it runs `arb message inbox <task-id>`.
+  `:direction` from the coordinator down to a running worker — the worker
+  picks it up next time it runs `arb message inbox <task-id>`.
   """
 
   alias ArbiterCli.{Client, Cmd, Output, Workspace}
@@ -30,7 +31,7 @@ defmodule ArbiterCli.Cmd.Message do
       ["send" | rest] -> send(rest)
       ["--help" | _] -> IO.puts(@moduledoc)
       ["-h" | _] -> IO.puts(@moduledoc)
-      # Shorthand: `arb message <task-id> <text>` → an Admiral direction.
+      # Shorthand: `arb message <task-id> <text>` → a coordinator direction.
       [task_id | [_ | _] = rest] -> direction(task_id, rest)
       [_task_id] -> Output.die("message requires text: `arb message <task-id> <text>`")
       [] -> Output.die("message requires a subcommand", usage_hint())
