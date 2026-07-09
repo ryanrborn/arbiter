@@ -4,8 +4,8 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   checks, fix the root cause, and push back to the **same branch** so CI re-runs
   (#354, Phase 2a).
 
-  Invoked by `Arbiter.Worker.Watchdog` (the Warden) when an approved PR is
-  blocked because its required checks are failing. Before this, the Warden only
+  Invoked by `Arbiter.Worker.Watchdog` when an approved PR is
+  blocked because its required checks are failing. Before this, the Watchdog only
   *escalated* a `:ci_failed` block to the Admiral and parked the PR; the fix-pass
   dispatcher lets the common, mechanically-fixable failures (a broken test, a
   formatting violation, a missing compile fix) unblock themselves.
@@ -22,7 +22,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   ## Registry slot
 
   The original work worker is still registered under `task_id` (parked at
-  `:awaiting_review`, watched by the Warden). The fix-pass worker registers under
+  `:awaiting_review`, watched by the Watchdog). The fix-pass worker registers under
   `task_id <> ":fixpass"` so `Worker.start` doesn't collide with it — exactly the
   pattern `Arbiter.Workflows.MergeQueue.ConflictResolver` uses for `:conflict`.
 
@@ -30,11 +30,11 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
   Like the `ConflictResolver`, this operates on raw git artefacts (a local
   checkout, a branch). The CI signal itself is read one layer up (by the merger
-  adapter the Warden polls); this module only needs the failing-check briefing.
+  adapter the Watchdog polls); this module only needs the failing-check briefing.
 
   ## Behaviour
 
-  `FixPassDispatcher` is a behaviour so the Warden accepts a swappable
+  `FixPassDispatcher` is a behaviour so the Watchdog accepts a swappable
   implementation (defaults to this module). Tests inject a stub so they don't
   boot a real Claude session or shell out to git.
   """
@@ -55,7 +55,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
   @behaviour __MODULE__
 
   # The registry suffix the fix-pass worker registers under. MUST match the
-  # Warden's `@fix_pass_registry_suffix` so it can detect an in-flight fix pass.
+  # Watchdog's `@fix_pass_registry_suffix` so it can detect an in-flight fix pass.
   @registry_suffix ":fixpass"
 
   @type failing_check :: Merger.failing_check()
@@ -82,18 +82,18 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
 
   Resolves `branch`, `target_branch`, and `repo_path` from the task + workspace
   when not supplied in `args`. Returns `{:ok, info}` once the worker is spawned
-  (the fix pass runs asynchronously); the Warden picks up the resolution on its
+  (the fix pass runs asynchronously); the Watchdog picks up the resolution on its
   next poll when CI passes and the PR turns mergeable.
 
   Returns `{:error, reason}` when the worker can't be spawned (no local checkout,
-  no branch, a fix pass already running). The Warden's bounded-retry counter
+  no branch, a fix pass already running). The Watchdog's bounded-retry counter
   handles persistent failure by escalating after N attempts.
   """
   @callback dispatch(args :: dispatch_args()) :: dispatch_result()
 
   @doc """
   The registry suffix the fix-pass worker registers under (`":fixpass"`). Public
-  so the Warden can reuse the exact same literal when checking for an in-flight
+  so the Watchdog can reuse the exact same literal when checking for an in-flight
   fix pass.
   """
   @spec registry_suffix() :: String.t()

@@ -79,13 +79,13 @@ defmodule Arbiter.Workflows.MergeQueue do
   → `:arbiter, :merge_queue_conflict_resolver` (application env) → the default
   real implementation. Tests pass a stub so they don't spawn real workers.
 
-  ## Base-aware serialized merge — the Crucible (#354, Phase 3)
+  ## Base-aware serialized merge (#354, Phase 3)
 
   Phase 2's conflict resolver (above) is *reactive*: it rebases a PR after a
   conflict has already appeared. The durable fix is to keep in-flight PRs
   continuously rebased as the integration branch moves, and to merge them one
   at a time against a frozen base so two individually-clean PRs can't break
-  together when merged in sequence. The merge queue is that Crucible:
+  together when merged in sequence. This is that base-aware serialized merge:
 
   ### Continuous auto-update-branch
 
@@ -305,7 +305,7 @@ defmodule Arbiter.Workflows.MergeQueue do
   @doc """
   Return the queue's items in merge-admission order (front of the queue first),
   projected to the display fields the dashboard renders (#354, Phase 3). This is
-  the "Crucible" view: each entry carries its 1-based queue `position`, current
+  the queue view: each entry carries its 1-based queue `position`, current
   `status`, task `priority`, and MR ref. A pure state projection — answers
   immediately even while a poll cycle is in flight (use a short call timeout).
   """
@@ -621,7 +621,7 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     # Pass 2: serialized merge admission — merge at most one front-of-queue item
     # per cycle so the queue integrates one PR at a time against a frozen base
-    # (Phase 3, the Crucible).
+    # (Phase 3, base-aware serialized merge).
     {advanced, state} = admit_one_merge(state, advanced)
 
     # Drop items that have reached :done — they've been closed already.
@@ -1232,7 +1232,7 @@ defmodule Arbiter.Workflows.MergeQueue do
     }
   end
 
-  # Project the live items into the dashboard's Crucible view (#354, Phase 3),
+  # Project the live items into the dashboard's queue view (#354, Phase 3),
   # ordered front-of-queue first and stamped with a 1-based position.
   defp build_queue_view(%State{items: items, workspace_id: ws_id, adapter: adapter}) do
     items

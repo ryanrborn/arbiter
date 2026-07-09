@@ -387,13 +387,13 @@ defmodule Arbiter.Worker.ReviewGate do
     # stale base it was cut from. A branch that conflicts with the advanced
     # target escalates instead of being reviewed stale.
     case prepare_branch_for_review(state) do
-      {:error, {:conflict, summons}} ->
+      {:error, {:conflict, escalation}} ->
         Logger.warning(
           "ReviewGate: branch `#{state.branch}` conflicts with `#{state.target_branch}` " <>
             "for task=#{state.task_id}; escalating instead of reviewing a stale base"
         )
 
-        report(state, {:request_changes, summons})
+        report(state, {:request_changes, escalation})
         {:stop, :normal, %{state | reported?: true}}
 
       {:ok, state} ->
@@ -474,7 +474,7 @@ defmodule Arbiter.Worker.ReviewGate do
   #   * clean update (merged / already up to date) → proceed; record the
   #     merge-base so the reviewer diff isolates the branch's own changes.
   #   * conflict → do NOT review a stale/conflicted branch. Return a conflict
-  #     Summons so the gate escalates for resolution (mirrors the #97
+  #     escalation so the gate escalates for resolution (mirrors the #97
   #     abort-on-conflict posture; the merge is aborted by update_from_target/2,
   #     leaving the worktree clean).
   #   * any other git error (no origin, fetch failed) → fail open and proceed;
@@ -516,7 +516,7 @@ defmodule Arbiter.Worker.ReviewGate do
             {:ok, with_base_sha(state)}
 
           {:error, {:conflict, info}} ->
-            {:error, {:conflict, conflict_summons(state, info)}}
+            {:error, {:conflict, conflict_escalation(state, info)}}
 
           {:error, reason} ->
             Logger.warning(
@@ -546,7 +546,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # The escalation findings for a branch that conflicts with its target: name
   # the conflicting files and instruct resolution. A request_changes verdict, so
   # the author parks + escalates to the Admiral rather than merging stale work.
-  defp conflict_summons(state, %{files: files}) do
+  defp conflict_escalation(state, %{files: files}) do
     files_block =
       case files do
         [] -> "  (conflicting paths could not be determined)"

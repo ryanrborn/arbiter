@@ -871,7 +871,7 @@ defmodule Arbiter.Worker.ClaudeSession do
   # every worker child shell. Without this, `mix test` (and `arb inbox`) in a
   # worktree tries to boot from the release's ERTS rather than the
   # per-worktree mise-pinned toolchain, crashing with a missing boot file and
-  # forcing the Tribunal to static-analysis-only. The cleanup pairs are a
+  # forcing the ReviewGate to static-analysis-only. The cleanup pairs are a
   # no-op on a plain dev VM (ReleaseEnv.clean_pairs/0 returns [] when no
   # release vars are detected). Caller-explicit `:env` is appended after the
   # cleanup so it can always override specific vars if needed.

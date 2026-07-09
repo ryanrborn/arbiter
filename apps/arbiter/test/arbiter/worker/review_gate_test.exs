@@ -1567,7 +1567,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
              "review_prompt must warn against the two-dot diff that leaks target commits"
     end
 
-    # A branch that conflicts with the advanced target must escalate (a Summons)
+    # A branch that conflicts with the advanced target must escalate (a conflict escalation)
     # rather than be reviewed against a stale base — and the reviewer must never
     # be spawned (mirrors the #97 abort-on-conflict posture).
     test "a branch that conflicts with an advanced target escalates before the reviewer spawns",

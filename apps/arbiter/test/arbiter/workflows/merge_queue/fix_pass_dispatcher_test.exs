@@ -55,7 +55,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherTest do
   end
 
   describe "registry_suffix/0" do
-    test "is the :fixpass suffix the Warden watches for" do
+    test "is the :fixpass suffix the Watchdog watches for" do
       assert FixPassDispatcher.registry_suffix() == ":fixpass"
     end
   end
