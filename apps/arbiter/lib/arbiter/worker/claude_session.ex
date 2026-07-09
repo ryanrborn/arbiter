@@ -54,15 +54,20 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   ## Completion detection
 
-  A display line matching `~r/\\barb done[^\\p{L}\\p{N}]*$/u` triggers
-  `Worker.complete/2`. The marker must be the **last** token on the line
-  (only whitespace / punctuation / decoration may trail it), so a literal
-  marker line like `arb done`, `>> arb done <<`, or a turn ending in
-  `… — arb done` trips it, but a prose line that merely *mentions* the marker
-  mid-sentence ("I'll print arb done when the tests pass") does NOT (bd-7a0pi8:
-  a worker narrating its intent to finish must not falsely complete before it
-  has done the work). The leading `\\b` still rejects the "arb doneness"
-  substring. Under stream-json, detection is additionally scoped to the
+  A display line matching `~r/^[^\\p{L}\\p{N}]*arb done[^\\p{L}\\p{N}]*$/mu`
+  triggers `Worker.complete/2`. The marker must be the **sole** content of the
+  line — only whitespace / punctuation / decoration may surround it — so a
+  literal marker line like `arb done`, `>> arb done <<`, or `` `arb done` ``
+  trips it, but any line with prose before OR after the marker does NOT: neither
+  a narration ending in the phrase ("…and then print arb done") nor one
+  mentioning it mid-sentence ("I'll print arb done when the tests pass")
+  completes the run (bd-7a0pi8: a worker narrating its intent to finish must not
+  falsely complete before it has done the work). The leading decoration class
+  subsumes a word boundary, so the "arb doneness" substring is still rejected.
+  The `m` flag anchors `^`/`$` to line boundaries so a sole-content marker line
+  still fires inside the multi-line rolling buffer the gemini/codex split-done
+  safety net matches against.
+  Under stream-json, detection is additionally scoped to the
   worker's **assistant text** (and the raw-line fallback): tool calls and tool
   *results* are displayed but never trip completion, so an worker that greps
   or cats "arb done" mid-task can't falsely complete itself.
@@ -95,12 +100,20 @@ defmodule Arbiter.Worker.ClaudeSession do
   alias Arbiter.Worker.OutputLog
 
   @line_cap 1000
-  # bd-7a0pi8: anchor the marker to end-of-line. `\barb done` still rejects the
-  # "arb doneness" substring; the trailing `[^\p{L}\p{N}]*$` requires the marker
-  # to be the last token (only whitespace/punctuation/decoration may follow), so
-  # a worker narrating "I'll print arb done once the tests pass" no longer trips
-  # a premature, false completion.
-  @done_regex ~r/\barb done[^\p{L}\p{N}]*$/u
+  # bd-7a0pi8: the marker must be the SOLE content of a display line (the worker
+  # prompt says to print it "on a line by itself, exactly"). Anchoring only the
+  # end (`\barb done…$`) was not enough — narration commonly ENDS with the phrase
+  # ("…and then print arb done"), which still falsely completed run 7abf4049.
+  # Both ends are now anchored: only non-alphanumeric decoration (whitespace,
+  # `>>`, backticks, punctuation) may surround the marker. A leading decoration
+  # class also subsumes the old `\b` — the char before "arb" is start-of-line or
+  # a non-letter, so "arb doneness" (trailing "ness") and "print arb done"
+  # (leading prose) both fail to match. The `m` flag anchors `^`/`$` to line
+  # boundaries, not just string ends: emit_line/3 checks one logical line (where
+  # it is a no-op), but the gemini/codex rolling buffer matches a multi-line tail
+  # as a whole — `m` lets a sole-content sentinel LINE within that tail fire while
+  # still rejecting a buffer whose "arb done" sits on a prose line.
+  @done_regex ~r/^[^\p{L}\p{N}]*arb done[^\p{L}\p{N}]*$/mu
 
   @typedoc "Accepted options for `start/1`."
   @type opt ::
