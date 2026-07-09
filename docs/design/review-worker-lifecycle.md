@@ -65,7 +65,7 @@ not `flag` — the earlier `flag`-for-infra wiring was corrected in bd-36qzgx.
 
 A report-only first-pass review persists its proposed comments on the
 `ExternalReview` record (`mode: :report_only`, `greenlight_status: :pending`) and
-mails them to `to_ref: "coordinator"`. The coordinator posts the approved subset with
+mails them to `to_ref: "admiral"`. The coordinator posts the approved subset with
 the `review_greenlight` MCP tool (backed by
 `Arbiter.Reviews.ExternalReview.greenlight/1`):
 
@@ -123,7 +123,7 @@ On a passing re-review, ReviewPatrol:
 
 If automation mode is `:report_only`, ReviewPatrol runs the full re-review
 (new-diff-only + dedupe, exactly as `:auto`) but posts **nothing** to the PR.
-Instead it sends an `:escalation` to `to_ref: "coordinator"` carrying the proposed
+Instead it sends an `:escalation` to `to_ref: "admiral"` carrying the proposed
 comment text, records the reported findings in `posted_findings` (so they aren't
 re-reported), and advances `last_reviewed_sha`.
 
@@ -147,7 +147,7 @@ The automation mode governs the response:
   and post a threaded reply. The reply is anchored to the specific comment in the
   original review thread, not a new PR comment.
 - **`:report_only` / `:flag`** — posts NOTHING to the PR. Raises exactly one
-  `:escalation` message addressed to `to_ref: "coordinator"` with the PR link, thread
+  `:escalation` message addressed to `to_ref: "admiral"` with the PR link, thread
   path, and a 280-char body snippet. A human decides whether to reply or trigger a
   re-review. (Author replies are a conversation, not a diff, so `report_only`
   escalates them rather than auto-drafting a reply.)
@@ -185,7 +185,7 @@ tick
                    some →
                      automation?
                        :auto                 → ReviewReply sub-run (in-thread)
-                       :report_only / :flag  → one :escalation to "coordinator", advance cursor
+                       :report_only / :flag  → one :escalation to "admiral", advance cursor
 ```
 
 ---
@@ -308,7 +308,7 @@ When `review_automation` is `:flag`, ReviewPatrol never posts to the PR. Instead
   engagement id) appears in the coordinator mailbox under `arb inbox`.
   It names the PR, the new head SHA, and notes that no re-review was posted.
 - **Author reply on our thread** → a mailbox message (kind: `:escalation`,
-  `to_ref`: `"coordinator"`) lands in the coordinator inbox. It includes the PR link,
+  `to_ref`: `"admiral"`) lands in the coordinator inbox. It includes the PR link,
   the file path of the thread, and a 280-char snippet of the author's reply.
 
 Both message types are deduplicated: a given push or reply fires at most one

@@ -94,7 +94,7 @@ workspace config removes those categories from the per-spawn `--settings` deny
 list, but the config-dir floor still carries them. The practical effect is that
 the config-dir safe-default denies are a **hard minimum** that cannot be removed
 through workspace config alone — only changing `SecurityPolicy.base/0` or the
-install-level `:worker_security_policy` app env removes them.
+install-level `:acolyte_security_policy` app env removes them.
 
 ### Sandbox
 
@@ -186,7 +186,7 @@ Override the floor every domain inherits via application config (see
 `config/config.exs`):
 
 ```elixir
-config :arbiter, :worker_security_policy, %{
+config :arbiter, :acolyte_security_policy, %{
   "permissions" => %{"mode" => "auto"},
   "sandbox" => %{"network" => false}
 }
@@ -201,7 +201,7 @@ The hardcoded safe baseline lives in `Arbiter.Agents.SecurityPolicy.base/0`.
 
 ### Resolution precedence
 
-`base/0` → `:worker_security_policy` app env → `workspace.config["agent"]["security"]`
+`base/0` → `:acolyte_security_policy` app env → `workspace.config["agent"]["security"]`
 → `workspace.config["agent"]["security"]["repos"][repo]` (only when a repo name
 is passed) → per-dispatch override. `allow`/`deny` **union** across layers;
 `mode`, `safe_defaults`, and `sandbox` fields are **replaced** by the highest
