@@ -37,7 +37,7 @@ defmodule Arbiter.Trackers.Sync do
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
-  alias Arbiter.Messages.AdmiralNotifier
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Trackers
   alias Arbiter.Trackers.Jira
 
@@ -282,7 +282,7 @@ defmodule Arbiter.Trackers.Sync do
     else
       failure_dedup_record(issue.id, event)
 
-      AdmiralNotifier.tracker_sync_failed(
+      CoordinatorNotifier.tracker_sync_failed(
         %{
           task_id: issue.id,
           workspace_id: issue.workspace_id,
