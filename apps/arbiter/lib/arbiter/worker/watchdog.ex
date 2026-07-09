@@ -476,7 +476,7 @@ defmodule Arbiter.Worker.Watchdog do
         state =
           if fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified do
             safe(fn ->
-              Arbiter.Messages.AdmiralNotifier.auto_merge_stalled(
+              Arbiter.Messages.CoordinatorNotifier.auto_merge_stalled(
                 snapshot(state),
                 state.mr_ref,
                 fail_count,
@@ -539,7 +539,7 @@ defmodule Arbiter.Worker.Watchdog do
   defp maybe_notify_awaiting_manual_merge(state, result) do
     if awaiting_manual_merge?(result) do
       safe(fn ->
-        Arbiter.Messages.AdmiralNotifier.approved_awaiting_merge(
+        Arbiter.Messages.CoordinatorNotifier.approved_awaiting_merge(
           snapshot(state),
           state.mr_ref,
           state.via_review_gate
@@ -620,7 +620,7 @@ defmodule Arbiter.Worker.Watchdog do
             _ -> %{task_id: state.task_id, workspace_id: nil}
           end
 
-        Arbiter.Messages.AdmiralNotifier.pipeline_failed(snap, state.mr_ref)
+        Arbiter.Messages.CoordinatorNotifier.pipeline_failed(snap, state.mr_ref)
       end)
     end
 
@@ -755,7 +755,7 @@ defmodule Arbiter.Worker.Watchdog do
     )
 
     safe(fn ->
-      Arbiter.Messages.AdmiralNotifier.merge_blocked(snapshot(state), state.mr_ref, reason)
+      Arbiter.Messages.CoordinatorNotifier.merge_blocked(snapshot(state), state.mr_ref, reason)
     end)
 
     %{state | last_block_reason: reason}
@@ -801,7 +801,11 @@ defmodule Arbiter.Worker.Watchdog do
         # update-branch introduced (or hit) a conflict — escalate as :conflict so
         # a human / the Phase 2b rebase agent takes over, and park.
         safe(fn ->
-          Arbiter.Messages.AdmiralNotifier.merge_blocked(snapshot(state), state.mr_ref, :conflict)
+          Arbiter.Messages.CoordinatorNotifier.merge_blocked(
+            snapshot(state),
+            state.mr_ref,
+            :conflict
+          )
         end)
 
         reschedule(%{state | last_block_reason: :conflict, auto_resolve_attempts: attempts})
@@ -867,7 +871,7 @@ defmodule Arbiter.Worker.Watchdog do
     )
 
     safe(fn ->
-      Arbiter.Messages.AdmiralNotifier.merge_block_unresolved(
+      Arbiter.Messages.CoordinatorNotifier.merge_block_unresolved(
         snapshot(state),
         state.mr_ref,
         reason,
@@ -1168,7 +1172,7 @@ defmodule Arbiter.Worker.Watchdog do
       end
 
     safe(fn ->
-      Arbiter.Messages.AdmiralNotifier.awaiting_review_stuck(snap, state.mr_ref)
+      Arbiter.Messages.CoordinatorNotifier.awaiting_review_stuck(snap, state.mr_ref)
     end)
   end
 

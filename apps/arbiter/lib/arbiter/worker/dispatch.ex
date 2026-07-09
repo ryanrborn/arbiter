@@ -53,7 +53,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
-  alias Arbiter.Messages.AdmiralNotifier
+  alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
@@ -177,7 +177,7 @@ defmodule Arbiter.Worker.Dispatch do
       snapshot = safe_worker_snapshot(worker_pid)
 
       _ = Worker.fail(worker_pid, stop_reason)
-      AdmiralNotifier.spawn_failed(snapshot, stop_reason)
+      CoordinatorNotifier.spawn_failed(snapshot, stop_reason)
     end
 
     :ok
@@ -974,7 +974,7 @@ defmodule Arbiter.Worker.Dispatch do
     # guard is skipped when the watchdog isn't running (returns false by default).
     if Arbiter.Agents.CredentialWatchdog.expired?(adapter) do
       reason = known_expired_stop_reason()
-      AdmiralNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
+      CoordinatorNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
       {:error, {:auth_check_failed, reason}}
     else
       # Route the probe through the same quota-capturing proxy a real spawn
@@ -989,7 +989,7 @@ defmodule Arbiter.Worker.Dispatch do
           :ok
 
         {:error, reason} ->
-          AdmiralNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
+          CoordinatorNotifier.preflight_failed(preflight_snapshot(task, opts), reason)
           {:error, {:auth_check_failed, reason}}
       end
     end
