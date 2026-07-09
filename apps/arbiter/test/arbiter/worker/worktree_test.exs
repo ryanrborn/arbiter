@@ -367,6 +367,7 @@ defmodule Arbiter.Worker.WorktreeTest do
       ebin_src = Path.join(dep_src, "ebin")
       File.mkdir_p!(ebin_src)
       File.write!(Path.join(ebin_src, "jason.beam"), "fake beam")
+      File.mkdir_p!(Path.join([repo, "deps", "jason"]))
 
       assert :ok = Worktree.seed_compiled_deps(repo, wt)
 
@@ -381,13 +382,17 @@ defmodule Arbiter.Worker.WorktreeTest do
     } do
       {:ok, wt} = Worktree.create(repo, "feature/seed-exclude", "main")
 
+      # Arbiter's own umbrella apps: compiled under _build/.../lib but never
+      # fetched, so no matching deps/<app> entry exists.
       for app <- ~w(arbiter arbiter_web arbiter_cli) do
         dir = Path.join([repo, "_build", "test", "lib", app])
         File.mkdir_p!(dir)
       end
 
+      # A real fetched dependency has both _build/.../lib/<dep> AND deps/<dep>.
       dep_dir = Path.join([repo, "_build", "test", "lib", "plug"])
       File.mkdir_p!(dep_dir)
+      File.mkdir_p!(Path.join([repo, "deps", "plug"]))
 
       assert :ok = Worktree.seed_compiled_deps(repo, wt)
 
@@ -399,12 +404,36 @@ defmodule Arbiter.Worker.WorktreeTest do
       end
     end
 
+    test "excludes the TARGET repo's own compiled app dir even when its name isn't in Arbiter's umbrella (bd-iz7483)",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-exclude-other-repo", "main")
+
+      # Simulate a non-Arbiter managed repo (e.g. vstim): its own compiled
+      # app dir has no matching deps/<name> entry, unlike a real dependency.
+      own_app_dir = Path.join([repo, "_build", "test", "lib", "vstim"])
+      File.mkdir_p!(own_app_dir)
+
+      real_dep_dir = Path.join([repo, "_build", "test", "lib", "phoenix"])
+      File.mkdir_p!(real_dep_dir)
+      File.mkdir_p!(Path.join([repo, "deps", "phoenix"]))
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      lib = Path.join([wt, "_build", "test", "lib"])
+      assert File.dir?(Path.join(lib, "phoenix")), "real dep 'phoenix' should be copied"
+
+      refute File.exists?(Path.join(lib, "vstim")),
+             "target repo's own app dir 'vstim' must NOT be copied even though it's not in Arbiter's hardcoded app list"
+    end
+
     test "seeds both test and dev envs when both exist in source", %{repo: repo} do
       {:ok, wt} = Worktree.create(repo, "feature/seed-envs", "main")
 
       for env <- ~w(test dev) do
         File.mkdir_p!(Path.join([repo, "_build", env, "lib", "ecto"]))
       end
+
+      File.mkdir_p!(Path.join([repo, "deps", "ecto"]))
 
       assert :ok = Worktree.seed_compiled_deps(repo, wt)
 
@@ -428,6 +457,7 @@ defmodule Arbiter.Worker.WorktreeTest do
       ebin_src = Path.join([repo, "_build", "test", "lib", "telemetry", "ebin"])
       File.mkdir_p!(ebin_src)
       File.write!(Path.join(ebin_src, "telemetry.beam"), "source version")
+      File.mkdir_p!(Path.join([repo, "deps", "telemetry"]))
 
       ebin_dst = Path.join([wt, "_build", "test", "lib", "telemetry", "ebin"])
       File.mkdir_p!(ebin_dst)
@@ -445,6 +475,7 @@ defmodule Arbiter.Worker.WorktreeTest do
       dep_src = Path.join([repo, "_build", "test", "lib", "phoenix"])
       File.mkdir_p!(dep_src)
       File.write!(Path.join(dep_src, "phoenix.app"), "[{application, phoenix}].")
+      File.mkdir_p!(Path.join([repo, "deps", "phoenix"]))
 
       assert {:ok, wt} = Worktree.create(repo, "feature/seed-on-create", "main")
 
