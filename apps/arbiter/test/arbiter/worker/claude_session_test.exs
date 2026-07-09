@@ -316,10 +316,15 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
 
     test "a prose line that merely mentions the marker does NOT trip" do
+      # The prior end-anchored regex (`\barb done[^\p{L}\p{N}]*$`) still fired on
+      # any narration line that ENDED with the marker phrase — the run-7abf4049
+      # false-done: an agent describing its plan ("...then print arb done"), or
+      # mentioning it mid-line, must not complete the run.
       for line <- [
+            "I will now commit the fix and then print arb done",
+            "the completion sentinel to print is arb done",
+            "once the fix is committed I run: arb done",
             "I will commit the fix and then print arb done shortly",
-            "remember to run arb done at the very end",
-            "the completion sentinel is `arb done` on its own line",
             "discussing arb doneness in the abstract"
           ] do
         ClaudeSession.handle_data(detection_session(), line, true)
@@ -327,12 +332,12 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       end
     end
 
-    test "the marker embedded mid-sentence in assistant TEXT does NOT trip" do
+    test "the marker inside a longer assistant TEXT line does NOT trip" do
       event = %{
         "type" => "assistant",
         "message" => %{
           "content" => [
-            %{"type" => "text", "text" => "Next I will commit and print arb done at the end."}
+            %{"type" => "text", "text" => "Next I will commit and then print arb done"}
           ]
         }
       }
@@ -748,13 +753,14 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       {pid, _task_id} = start_worker()
       cwd = tmp_dir!("gem-sj-split")
 
-      # The sentinel straddles a `delta: true` chunk boundary — per-line
+      # The sentinel is on its own line (sole-content, per bd-7a0pi8) but the
+      # "arb done" phrase straddles a `delta: true` chunk boundary — per-line
       # detection would miss it; the rolling buffer must still fire.
       events = [
         %{
           "type" => "message",
           "role" => "assistant",
-          "content" => "all good now arb ",
+          "content" => "all good now\narb ",
           "delta" => true
         },
         %{"type" => "message", "role" => "assistant", "content" => "done\n", "delta" => true}
