@@ -3,17 +3,17 @@ defmodule Arbiter.Tasks.DecommissionSweep do
   One-time sweep to bulk-close tasks orphaned by the GT → arbiter
   cutover. The Dolt importer carried forward the entire `hq` and `server`
   workspaces, including tasks that are now obsolete (daemon role
-  definitions, mayor session handoffs, GT-specific bug reports,
+  definitions, coordinator session handoffs, GT-specific bug reports,
   compaction reports, etc.).
 
   ## Patterns swept
 
   Categories (each becomes the closure reason):
 
-    * **HANDOFF**: title starts with `🤝 HANDOFF` — old GT mayor/witness
+    * **HANDOFF**: title starts with `🤝 HANDOFF` — old GT coordinator/witness
       session-handoff protocol artifacts.
     * **Daemon role definition**: `MergeQueue for X`, `Witness for X`,
-      `Crew worker N in X`, `mayor`/`deacon` titles. The GT identity
+      `Crew worker N in X`, `coordinator`/`deacon` titles. The GT identity
       tasks for daemon roles per repo.
     * **Worker identity**: task IDs matching `<prefix>-...-worker-...`.
     * **Workflow definition**: task IDs starting with `hq-wf-` or
@@ -143,7 +143,7 @@ defmodule Arbiter.Tasks.DecommissionSweep do
       String.starts_with?(t, "Witness for ") -> true
       Regex.match?(~r/^Crew worker .* in /, t) -> true
       String.starts_with?(t, "Deacon (daemon beacon)") -> true
-      String.starts_with?(t, "Mayor - global coordinator") -> true
+      String.starts_with?(t, "Coordinator - global coordinator") -> true
       true -> false
     end
   end

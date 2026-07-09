@@ -11,9 +11,9 @@ defmodule Arbiter.Events do
   | Topic           | Fires when                                             |
   |-----------------|--------------------------------------------------------|
   | `inbox`         | A message arrives in the coordinator's mailbox          |
-  | `review_gate`      | A review_gate escalation requires Admiral ruling           |
-  | `worker_failed`| An worker stops unexpectedly (status → failed)         |
-  | `worker_done`  | An worker completes (status → completed)               |
+  | `review_gate`      | A review_gate escalation requires coordinator ruling           |
+  | `worker_failed`| A worker stops unexpectedly (status → failed)         |
+  | `worker_done`  | A worker completes (status → completed)               |
   | `task_state`    | Any task FSM transition (noisier — opt-in only)         |
   | `external_review` | An ExternalReview lifecycle transition (running/completed/failed) |
 

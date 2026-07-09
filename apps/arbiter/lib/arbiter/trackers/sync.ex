@@ -251,7 +251,7 @@ defmodule Arbiter.Trackers.Sync do
   @failure_dedup_table :tracker_sync_failure_dedup
   # One escalation per (task, event) per 5-minute window — covers concurrent
   # callers (Watchdog + MergeQueue, MergedPRFinalizer ticks) firing on the same
-  # merge without spamming the Admiral mailbox.
+  # merge without spamming the coordinator mailbox.
   @failure_dedup_ttl_ms 300_000
 
   @doc """
@@ -261,7 +261,7 @@ defmodule Arbiter.Trackers.Sync do
   Escalations are deduplicated: at most **one** escalation is raised per
   `(task_id, event)` pair within a #{div(@failure_dedup_ttl_ms, 60_000)}-minute
   window. Subsequent calls still log at `:error` level (for visibility) but
-  suppress the Admiral mailbox message, preventing escalation-spam when multiple
+  suppress the coordinator mailbox message, preventing escalation-spam when multiple
   callers (Watchdog, MergeQueue, MergedPRFinalizer) fire the same failure in
   quick succession on a single merge.
   """
