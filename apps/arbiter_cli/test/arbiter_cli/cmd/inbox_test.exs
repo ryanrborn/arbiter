@@ -25,7 +25,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
 
       {out, _err, code} = capture(fn -> Inbox.run([]) end)
       assert code == 0
-      assert out =~ "Admiral inbox — 1 unread"
+      assert out =~ "Coordinator inbox — 1 unread"
       assert out =~ "[bd-1qx1nt]"
       assert out =~ "completion"
       assert out =~ "from acolyte-019e"
@@ -47,7 +47,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
       stub_get("/api/messages", %{"data" => []}, 200)
       {out, _err, code} = capture(fn -> Inbox.run([]) end)
       assert code == 0
-      assert out =~ "admiral inbox empty"
+      assert out =~ "coordinator inbox empty"
     end
 
     test "--json emits the raw message array" do
@@ -68,7 +68,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
 
       {out, _err, code} = capture(fn -> Inbox.run(["--all"]) end)
       assert code == 0
-      assert out =~ "Admiral inbox — 1 recent"
+      assert out =~ "Coordinator inbox — 1 recent"
     end
   end
 
