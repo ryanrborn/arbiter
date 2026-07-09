@@ -4,6 +4,7 @@ defmodule Arbiter.Worker.DriverTest do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
+  alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.Dispatch
   alias Arbiter.TestWorkflows
@@ -552,6 +553,49 @@ defmodule Arbiter.Worker.DriverTest do
       assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
 
       refute File.dir?(wt_path)
+    end
+
+    test "kills a live agent before reaping the worktree — no orphaned agent in a deleted cwd (bd-7a0pi8)",
+         %{ws: ws, wt_path: wt_path} do
+      {:ok, task} = Ash.create(Issue, %{title: "cw-live-fail", workspace_id: ws.id})
+
+      {:ok, worker_pid} = Worker.start(task_id: task.id, repo: "r")
+      {:ok, machine_id} = Machine.attach(TestWorkflows.Three, task.id, %{x: "v"})
+      {:ok, machine_pid} = Machine.start(machine_id)
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+
+      # A LIVE agent whose cwd is the worktree the Driver is about to reap. This
+      # is the run-7abf4049 shape: the run gets failed while the agent process
+      # is still alive. If teardown removes the worktree without stopping the
+      # agent first, the agent keeps issuing commands in a deleted cwd.
+      {:ok, port} =
+        ClaudeSession.start(owner: worker_pid, worktree_path: wt_path, command: ["sh", "-c", "sleep 60"])
+
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+      {:ok, driver_pid} =
+        Driver.start(
+          task_id: task.id,
+          worker_pid: worker_pid,
+          machine_id: machine_id,
+          machine_pid: machine_pid,
+          interval_ms: 5,
+          claude_driven: true,
+          worktree_path: wt_path,
+          cleanup_worktree: true
+        )
+
+      :ok = Worker.fail(worker_pid, :no_commits_at_completion)
+
+      ref = Process.monitor(driver_pid)
+      assert_receive {:DOWN, ^ref, :process, _pid, :normal}, 2_000
+
+      # Worktree reaped AND the agent is dead — the agent can no longer run any
+      # command against the deleted cwd.
+      refute File.dir?(wt_path)
+
+      {_, code} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+      assert code != 0, "agent os process #{os_pid} should be dead after teardown"
     end
 
     test "skips cleanup when the worktree has commits ahead of base", %{ws: ws, wt_path: wt_path} do
