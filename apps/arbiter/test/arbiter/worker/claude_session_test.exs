@@ -41,6 +41,11 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     ["cat", path]
   end
 
+  defp os_process_alive?(os_pid) do
+    {_, code} = System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    code == 0
+  end
+
   defp wait_for_exit(pid) do
     eventually(fn ->
       case Worker.state(pid).meta do
@@ -279,6 +284,100 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       # :completed (it stayed in the :running state from the advance above).
       refute Worker.state(pid).status == :completed
       assert "discussing arb doneness in the abstract" in Worker.state(pid).meta.output_lines
+    end
+  end
+
+  # bd-7a0pi8: the completion marker must be the SOLE content of a display line
+  # (the worker prompt says to print it "on a line by itself, exactly"). Before
+  # this fix the detector matched `\barb done\b` ANYWHERE in a line, so an agent
+  # merely narrating its plan ("...then print arb done") falsely completed the
+  # run mid-task — the premature/false `arb done` that failed run 7abf4049.
+  #
+  # These assert on the detection primitive directly: handle_data/3 sends the
+  # `{:__claude_session_done__, _}` signal to the CALLING process (here, the
+  # test), so detection is observed synchronously with no worker/port races.
+  describe "done-marker detection is anchored to a whole line (bd-7a0pi8)" do
+    defp detection_session do
+      %{
+        task_id: "bd-detect",
+        topic: "worker:detect-#{System.unique_integer([:positive])}",
+        line_cap: ClaudeSession.line_cap(),
+        done_regex: ClaudeSession.done_regex(),
+        output_lines: [],
+        line_buf: ""
+      }
+    end
+
+    test "the marker alone on a line trips, with or without simple decoration" do
+      for line <- ["arb done", "  arb done  ", ">> arb done <<", "`arb done`"] do
+        ClaudeSession.handle_data(detection_session(), line, true)
+        assert_received {:__claude_session_done__, _}, "expected #{inspect(line)} to trip"
+      end
+    end
+
+    test "a prose line that merely mentions the marker does NOT trip" do
+      for line <- [
+            "I will commit the fix and then print arb done shortly",
+            "remember to run arb done at the very end",
+            "the completion sentinel is `arb done` on its own line",
+            "discussing arb doneness in the abstract"
+          ] do
+        ClaudeSession.handle_data(detection_session(), line, true)
+        refute_received {:__claude_session_done__, _}, "expected #{inspect(line)} NOT to trip"
+      end
+    end
+
+    test "the marker embedded mid-sentence in assistant TEXT does NOT trip" do
+      event = %{
+        "type" => "assistant",
+        "message" => %{
+          "content" => [
+            %{"type" => "text", "text" => "Next I will commit and print arb done at the end."}
+          ]
+        }
+      }
+
+      ClaudeSession.handle_data(detection_session(), Jason.encode!(event), true)
+      refute_received {:__claude_session_done__, _}
+    end
+
+    test "the marker on its OWN line inside a multi-line assistant TEXT block trips" do
+      event = %{
+        "type" => "assistant",
+        "message" => %{
+          "content" => [%{"type" => "text", "text" => "all finished here\narb done"}]
+        }
+      }
+
+      ClaudeSession.handle_data(detection_session(), Jason.encode!(event), true)
+      assert_received {:__claude_session_done__, _}
+    end
+  end
+
+  describe "failed run terminates a live agent (bd-7a0pi8)" do
+    test "failing a run SIGKILLs a live port and confirms exit before :failed is observable" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("cs-fail-live")
+
+      :ok = Worker.advance(pid, :implement)
+
+      # A long-lived child. Without the teardown fix it would keep running (and
+      # could execute commands against a cwd a worktree-reap is about to delete)
+      # long after the run is failed — the orphaned-agent bug (bd-7a0pi8).
+      {:ok, port} =
+        ClaudeSession.start(owner: pid, worktree_path: cwd, command: ["sh", "-c", "sleep 60"])
+
+      {:os_pid, os_pid} = Port.info(port, :os_pid)
+      assert os_process_alive?(os_pid)
+
+      :ok = Worker.fail(pid, :simulated_failure)
+
+      # fail_now/2 kills the port synchronously, so by the time the run is
+      # observably :failed (the signal the Driver / a :close after-action keys
+      # off to reap the worktree) the agent is already dead.
+      assert Worker.state(pid).status == :failed
+      refute os_process_alive?(os_pid)
+      assert Port.info(port) == nil
     end
   end
 
