@@ -82,7 +82,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "the API contract"
 
       # The direction landed as a real mailbox-family message addressed to the task.
-      assert [%Message{kind: :direction, from_ref: "coordinator", body: "check the API contract"}] =
+      assert [%Message{kind: :direction, from_ref: "admiral", body: "check the API contract"}] =
                Message.inbox(task.id, workspace_id: ws.id)
     end
 
@@ -111,7 +111,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
           workspace_id: ws.id,
           kind: :escalation,
           from_ref: "bd-soren",
-          to_ref: "coordinator",
+          to_ref: "admiral",
           subject: "needs a decision",
           body: "the device API contract is ambiguous",
           directive_ref: "bd-soren"
@@ -140,7 +140,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "just-an-fyi"
       assert html =~ "coordinator-mailbox-empty"
       assert html =~ "0 unread"
-      assert Message.inbox("coordinator") == []
+      assert Message.inbox("admiral") == []
     end
 
     test "updates live when coordinator mail is broadcast", %{conn: conn, ws: ws} do
@@ -151,7 +151,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           subject: "freshly-escalated",
           body: "live arrival"
         })
@@ -164,7 +164,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :info,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           body: "ack-this-up"
         })
 
@@ -186,7 +186,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :info,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           body: "old-read"
         })
 
@@ -196,7 +196,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :escalation,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           body: "still-unread"
         })
 
@@ -223,7 +223,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :completion,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           subject: "live-clear-test",
           body: "should disappear live"
         })
@@ -232,7 +232,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "live-clear-test"
 
       # Simulate arb inbox clear --all (the external, non-LiveView path).
-      Message.clear_all("coordinator", workspace_id: ws.id)
+      Message.clear_all("admiral", workspace_id: ws.id)
 
       # The {:mailbox_cleared, _} broadcast must drive a live refresh
       # without any manual page reload.
@@ -246,7 +246,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :info,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           body: "read-then-cleared"
         })
 
@@ -256,7 +256,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
         Message.send_mail(%{
           workspace_id: ws.id,
           kind: :info,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           body: "stays-unread"
         })
 
@@ -265,7 +265,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "stays-unread"
 
       # External clear_read: destroys the read message and broadcasts.
-      Message.clear_read("coordinator", workspace_id: ws.id)
+      Message.clear_read("admiral", workspace_id: ws.id)
 
       # The unread message must still be present (clear_read doesn't touch unread).
       assert render(view) =~ "stays-unread"

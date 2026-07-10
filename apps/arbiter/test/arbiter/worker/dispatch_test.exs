@@ -1901,7 +1901,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # Dispatch but DON'T stop — the worker is live (:idle/:running), not stopped.
       {:ok, _live} = Dispatch.dispatch(task.id, repo: "rs/repo", start_driver: false)
 
-      assert {:error, {:worker_active, _status}} =
+      assert {:error, {:acolyte_active, _status}} =
                Dispatch.resume(task.id, start_driver: false)
     end
 

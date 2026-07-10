@@ -19,17 +19,17 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
     # The persona file we must NOT carry over.
     File.write!(Path.join(source, "CLAUDE.md"), "# Darth Persona\nAlways roleplay.\n")
 
-    prev_isolate = Application.get_env(:arbiter, :worker_isolate_config)
-    prev_dir = Application.get_env(:arbiter, :worker_config_dir)
+    prev_isolate = Application.get_env(:arbiter, :acolyte_isolate_config)
+    prev_dir = Application.get_env(:arbiter, :acolyte_config_dir)
     prev_src = System.get_env("CLAUDE_CONFIG_DIR")
 
-    Application.put_env(:arbiter, :worker_isolate_config, true)
-    Application.put_env(:arbiter, :worker_config_dir, target)
+    Application.put_env(:arbiter, :acolyte_isolate_config, true)
+    Application.put_env(:arbiter, :acolyte_config_dir, target)
     System.put_env("CLAUDE_CONFIG_DIR", source)
 
     on_exit(fn ->
-      restore_env(:worker_isolate_config, prev_isolate)
-      restore_env(:worker_config_dir, prev_dir)
+      restore_env(:acolyte_isolate_config, prev_isolate)
+      restore_env(:acolyte_config_dir, prev_dir)
 
       case prev_src do
         nil -> System.delete_env("CLAUDE_CONFIG_DIR")
@@ -134,7 +134,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
 
   describe "ensure/0 when disabled" do
     test "returns :disabled and env/0 is empty", %{target: target} do
-      Application.put_env(:arbiter, :worker_isolate_config, false)
+      Application.put_env(:arbiter, :acolyte_isolate_config, false)
 
       assert ConfigDir.ensure() == :disabled
       assert ConfigDir.env() == []
