@@ -1,8 +1,8 @@
 defmodule Arbiter.Agents.SecurityPolicy do
   @moduledoc """
-  The normalized, **provider-agnostic** security posture for an worker run.
+  The normalized, **provider-agnostic** security posture for a worker run.
 
-  An worker (worker or reviewer) is an autonomous coding agent spawned in a
+  A worker (implementer or reviewer) is an autonomous coding agent spawned in a
   git worktree. Left unconfigured it silently inherits the host operator's
   global agent config — on the Claude provider that means the operator's
   personal `~/.claude/settings.json` (historically `defaultMode: auto`, an

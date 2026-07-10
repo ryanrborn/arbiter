@@ -69,7 +69,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
-  # Default mapping: D0..D4 → {model_tier, thinking}. The Admiral signed
+  # Default mapping: D0..D4 → {model_tier, thinking}. The coordinator signed
   # off on this exact table; do not adjust without re-litigation.
   @default_mapping %{
     0 => %{"model_tier" => "economy", "thinking" => "none"},
@@ -93,7 +93,7 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
 
   @doc """
   Default mapping table (`%{0..4 => %{"model_tier" => _, "thinking" => _}}`).
-  Exposed for tests / introspection; the Admiral signed off on the exact
+  Exposed for tests / introspection; the coordinator signed off on the exact
   values.
   """
   @spec default_mapping() :: %{(0..4) => map()}

@@ -96,7 +96,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       assert count_after == count_before
     end
 
-    test "escalates to Admiral across all active workspaces" do
+    test "escalates to the coordinator across all active workspaces" do
       {:ok, ws1} = Ash.create(Workspace, %{name: "cw-ws1", prefix: "cw1"})
       {:ok, ws2} = Ash.create(Workspace, %{name: "cw-ws2", prefix: "cw2"})
       pid = start_watchdog()

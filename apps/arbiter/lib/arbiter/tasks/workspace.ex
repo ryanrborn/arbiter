@@ -347,7 +347,7 @@ defmodule Arbiter.Tasks.Workspace do
   Whether the Watchdog should watch CI pipeline status alongside MR state, from
   `config["merge"]["watch_pipeline"]`.
 
-  When `true`, the Watchdog escalates to the Admiral when a pipeline fails, but
+  When `true`, the Watchdog escalates to the coordinator when a pipeline fails, but
   does NOT fail the task — a human may force-merge or rerun. Defaults to
   `false` so installs without CI are unaffected.
 

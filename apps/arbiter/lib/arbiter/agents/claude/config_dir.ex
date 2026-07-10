@@ -154,8 +154,8 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   end
 
   @doc "The worker memory written into the isolated dir's `CLAUDE.md`."
-  @spec acolyte_memory() :: String.t()
-  def acolyte_memory do
+  @spec worker_memory() :: String.t()
+  def worker_memory do
     """
     # Arbiter Worker — Operating Context
 
@@ -208,7 +208,7 @@ defmodule Arbiter.Agents.Claude.ConfigDir do
   # Always (re)write the clean worker memory so it can't drift from the source
   # of truth above. Returns :ok | {:error, reason}.
   defp write_memory(dir) do
-    File.write(Path.join(dir, @memory_filename), acolyte_memory())
+    File.write(Path.join(dir, @memory_filename), worker_memory())
   end
 
   # Always (re)write the generated, hardened settings.json so the config dir
