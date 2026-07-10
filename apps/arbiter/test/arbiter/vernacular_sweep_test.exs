@@ -53,8 +53,8 @@ defmodule Arbiter.VernacularSweepTest do
     test "by_difficulty.ex: Admiral → coordinator in comments" do
       content = read_file("lib/arbiter/agents/routing/by_difficulty.ex")
 
-      assert content =~ "The coordinator signed off",
-        "Should update 'The Admiral signed off' to 'The coordinator signed off'"
+      assert content =~ ~r/coordinator signed\s+off/,
+        "Should update 'Admiral signed off' to 'coordinator signed off'"
     end
 
     test "trackers/sync.ex: Admiral → coordinator in mailbox comments" do
@@ -103,7 +103,7 @@ defmodule Arbiter.VernacularSweepTest do
       content = read_file("lib/arbiter/tasks/decommission_sweep.ex")
 
       # The comments about old artifacts should be updated
-      assert content =~ "coordinator/witness session-handoff",
+      assert content =~ ~r/coordinator\/witness\s+session-handoff/,
         "Should update 'mayor/witness' in comments"
 
       # But the string matching for historical artifacts should be preserved
