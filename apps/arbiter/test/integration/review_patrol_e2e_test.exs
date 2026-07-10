@@ -852,7 +852,7 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
       {_pid, name} = start_patrol(ws)
       assert :ok = ReviewPatrol.tick(name)
 
-      # Escalation raised to admiral; cursor advanced.
+      # Escalation raised to coordinator; cursor advanced.
       escalations =
         Arbiter.Messages.Message
         |> Ash.Query.filter(directive_ref == ^eng.id and kind == :escalation)

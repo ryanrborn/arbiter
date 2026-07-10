@@ -5,7 +5,7 @@ defmodule ArbiterWeb.Api.ClaimControllerTest do
   alias Arbiter.Trackers.GitHub.Config
   alias Arbiter.Trackers.Jira.Config, as: JiraConfig
 
-  @viewer "ctrl-acolyte"
+  @viewer "ctrl-worker"
   @jira_account_id "ctrl-jira-account"
   @env_var "ARBITER_CLAIM_CTRL_TOKEN"
 

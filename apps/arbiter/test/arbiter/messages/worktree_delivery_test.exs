@@ -44,7 +44,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       assert result == :ok
     end
 
-    test "no-ops for admiral-bound kinds even with a matching worker" do
+    test "no-ops for coordinator-bound kinds even with a matching worker" do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
@@ -205,7 +205,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
         Message.send_mail(%{
           kind: :direction,
           workspace_id: @ws,
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: task_id,
           body: "please prioritise the merge conflict"
         })
@@ -223,7 +223,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
         Message.send_mail(%{
           kind: :direction,
           workspace_id: @ws,
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: task_id,
           body: "no worker here"
         })

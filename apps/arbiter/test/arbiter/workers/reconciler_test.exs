@@ -193,7 +193,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert_received {:rewatched, task_id}
     assert task_id == issue.id
 
-    # Re-watched, NOT escalated — no mail lands in Admiral's inbox.
+    # Re-watched, NOT escalated — no mail lands in the coordinator's inbox.
     assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 

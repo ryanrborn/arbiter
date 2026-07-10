@@ -112,7 +112,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
 
     # ...and the worker's work landed on main via that merge.
     {tree, 0} = git(["ls-tree", "--name-only", "main"], repo)
-    assert tree =~ "acolyte_work.txt"
+    assert tree =~ "worker_work.txt"
   end
 
   test "a merge failure surfaces as a failure_reason and does NOT complete the worker",
@@ -148,7 +148,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     # Critically: not silently :completed.
     refute snap.status == :completed
 
-    # bd-8rrn9t: a non-conflict merge failure must escalate to the Admiral
+    # bd-8rrn9t: a non-conflict merge failure must escalate to the coordinator
     # too, not just fail silently — an approved run whose merge step fails
     # can leave a real PR stranded and needs a human to notice.
     escalations = Message.inbox("admiral", workspace_id: ws.id)
@@ -211,7 +211,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert reloaded.notes =~ "Merge conflict"
     assert reloaded.notes =~ "README.md"
 
-    # 3. the Admiral inbox got an escalation naming the conflicting files.
+    # 3. the Coordinator inbox got an escalation naming the conflicting files.
     escalations = Message.inbox("admiral", workspace_id: ws.id)
     escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     assert escalation

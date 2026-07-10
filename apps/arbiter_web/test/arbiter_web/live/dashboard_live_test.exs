@@ -362,7 +362,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "completed acolytes section" do
+  describe "completed workers section" do
     test "renders an empty-state row when no runs exist", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "Completed"

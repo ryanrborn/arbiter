@@ -6,7 +6,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
   # misclassified as a stop.
   #
   # async: false — Port + Worker registry are global; DataCase gives the DB
-  # sandbox the Admiral escalation write needs.
+  # sandbox the Coordinator escalation write needs.
   use Arbiter.DataCase, async: false
 
   alias Arbiter.Tasks.{Issue, Workspace}
@@ -139,7 +139,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
       assert state.meta.stop_reason.signal == 9
     end
 
-    test "an Admiral escalation is raised naming the task + cause", %{ws: ws} do
+    test "a Coordinator escalation is raised naming the task + cause", %{ws: ws} do
       {pid, task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-escalate")
