@@ -13,7 +13,7 @@ defmodule Arbiter.Tasks.DecommissionSweep do
     * **HANDOFF**: title starts with `🤝 HANDOFF` — old GT coordinator/witness
       session-handoff protocol artifacts.
     * **Daemon role definition**: `MergeQueue for X`, `Witness for X`,
-      `Crew worker N in X`, `coordinator`/`deacon` titles. The GT identity
+      `Crew worker N in X`, `mayor`/`deacon` titles. The GT identity
       tasks for daemon roles per repo.
     * **Worker identity**: task IDs matching `<prefix>-...-worker-...`.
     * **Workflow definition**: task IDs starting with `hq-wf-` or
