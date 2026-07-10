@@ -62,7 +62,7 @@ defmodule ArbiterCli.Main do
       arb message send    <recipient> <body> [--subject ...] [--directive bd-x] [--kind ...]
       arb message notify  [--limit N]
 
-      arb usage show      [--by day|task|campaign|workspace|repo|model|step|provider]
+      arb usage show      [--by day|task|epic|workspace|repo|model|step|provider]
                                   [--since 7d|24h|<iso>] [--workspace <id>] [--limit N]
       arb usage events    [--task <task-id>] [--workspace <id>] [--step work|review]
                                   [--since ...] [--limit N]
