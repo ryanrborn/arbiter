@@ -114,7 +114,7 @@ defmodule Arbiter.Workers.Reconciler do
 
   Escalation is kept only as the fallback: a bead whose workspace has no patrol
   coverage (e.g. no hosted-forge merger configured) can't be auto-watched, so it
-  still lands in Admiral's mailbox rather than being silently dropped.
+  still lands in the coordinator's mailbox rather than being silently dropped.
 
   Respects the `worker_live?` guard (C6): a bead that still has a live worker is
   left untouched — no duplicate watcher is established.

@@ -3,14 +3,14 @@ defmodule Arbiter.Tasks.DecommissionSweep do
   One-time sweep to bulk-close tasks orphaned by the GT → arbiter
   cutover. The Dolt importer carried forward the entire `hq` and `server`
   workspaces, including tasks that are now obsolete (daemon role
-  definitions, mayor session handoffs, GT-specific bug reports,
+  definitions, coordinator session handoffs, GT-specific bug reports,
   compaction reports, etc.).
 
   ## Patterns swept
 
   Categories (each becomes the closure reason):
 
-    * **HANDOFF**: title starts with `🤝 HANDOFF` — old GT mayor/witness
+    * **HANDOFF**: title starts with `🤝 HANDOFF` — old GT coordinator/witness
       session-handoff protocol artifacts.
     * **Daemon role definition**: `MergeQueue for X`, `Witness for X`,
       `Crew worker N in X`, `mayor`/`deacon` titles. The GT identity

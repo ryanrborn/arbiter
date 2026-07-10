@@ -1,7 +1,7 @@
 defmodule Arbiter.GitHub do
   @moduledoc """
   Thin HTTP wrapper around the GitHub REST API (plus one GraphQL call for
-  resolving review threads) used by the polecat-orchestrator (gte-020/021/022)
+  resolving review threads) used by the worker-orchestrator (gte-020/021/022)
   to open PRs, watch reviews, post comments, and merge.
 
   ## Design

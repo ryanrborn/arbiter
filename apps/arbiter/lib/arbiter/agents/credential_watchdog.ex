@@ -7,7 +7,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   `:auth_expired` the Watchdog:
 
     1. Records the adapter as credential-expired in its own state.
-    2. Escalates to the Admiral across every active workspace so the operator
+    2. Escalates to the coordinator across every active workspace so the operator
        is notified before any worker has to fail first.
 
   The stored state feeds two guards:
@@ -74,9 +74,9 @@ defmodule Arbiter.Agents.CredentialWatchdog do
   end
 
   @doc """
-  Immediately mark `adapter` as credential-expired and raise Admiral escalations.
+  Immediately mark `adapter` as credential-expired and raise coordinator escalations.
 
-  Called by `Arbiter.Worker.fail_stopped/2` when an worker dies with category
+  Called by `Arbiter.Worker.fail_stopped/2` when a worker dies with category
   `:auth_expired`, so the Watchdog records the failure and blocks future dispatches
   without waiting for the next periodic probe. Fire-and-forget; best-effort.
   Pass a `server` pid/name to target a specific instance (useful in tests).
@@ -218,7 +218,7 @@ defmodule Arbiter.Agents.CredentialWatchdog do
     end
   end
 
-  # Send an Admiral escalation to every active workspace. Best-effort — a DB
+  # Send a coordinator escalation to every active workspace. Best-effort — a DB
   # hiccup or an empty workspace table must not crash the Watchdog.
   defp escalate_all(adapter, %StopReason{} = reason) do
     safe(fn ->
