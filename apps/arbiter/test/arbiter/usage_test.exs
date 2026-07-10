@@ -8,6 +8,7 @@ defmodule Arbiter.UsageTest do
   alias Arbiter.Worker
   alias Arbiter.Usage
   alias Arbiter.Usage.Event
+  alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   require Ash.Query
 
   defp create_event!(attrs) do
@@ -198,6 +199,76 @@ defmodule Arbiter.UsageTest do
 
     test "invalid by errors" do
       assert {:error, {:invalid_grouping, :nonsense}} = Usage.summarize(by: :nonsense)
+    end
+
+    test "by epic groups a task's usage under its parent_of parent" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "usage-epic-ws", prefix: "ue"})
+
+      {:ok, epic} =
+        Ash.create(Issue, %{title: "Epic for usage test", issue_type: :epic, workspace_id: ws.id})
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "Child of the epic", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Dependency, %{
+          type: :parent_of,
+          from_issue_id: epic.id,
+          to_issue_id: child.id
+        })
+
+      create_event!(%{
+        task_id: child.id,
+        workspace_id: "ws-usage",
+        cost_usd: 2.00,
+        occurred_at: DateTime.utc_now()
+      })
+
+      {:ok, rollups} = Usage.summarize(by: :epic, workspace_id: "ws-usage")
+
+      epic_rollup = Enum.find(rollups, &(&1.group == epic.id))
+      assert epic_rollup, "the child task's usage should roll up under its parent epic"
+      assert_in_delta epic_rollup.total_cost_usd, 2.00, 0.001
+    end
+
+    test "by epic falls back to (no_epic) for parentless tasks", %{task_b: b} do
+      {:ok, rollups} = Usage.summarize(by: :epic, workspace_id: "ws-other")
+
+      no_epic = Enum.find(rollups, &(&1.group == "(no_epic)"))
+      assert no_epic
+      assert_in_delta no_epic.total_cost_usd, 0.25, 0.001
+      refute Enum.any?(rollups, &(&1.group == b))
+    end
+
+    test "campaign is still accepted as a deprecated alias for epic" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "usage-campaign-alias-ws", prefix: "uc"})
+
+      {:ok, epic} =
+        Ash.create(Issue, %{
+          title: "Epic for campaign alias test",
+          issue_type: :epic,
+          workspace_id: ws.id
+        })
+
+      {:ok, child} =
+        Ash.create(Issue, %{title: "Child of the aliased epic", workspace_id: ws.id})
+
+      {:ok, _dep} =
+        Ash.create(Dependency, %{
+          type: :parent_of,
+          from_issue_id: epic.id,
+          to_issue_id: child.id
+        })
+
+      create_event!(%{
+        task_id: child.id,
+        workspace_id: "ws-usage",
+        cost_usd: 1.00,
+        occurred_at: DateTime.utc_now()
+      })
+
+      assert {:ok, rollups} = Usage.summarize(by: :campaign, workspace_id: "ws-usage")
+      assert Enum.any?(rollups, &(&1.group == epic.id))
     end
   end
 

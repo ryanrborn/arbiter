@@ -14,9 +14,11 @@ defmodule Arbiter.Usage do
 
   ## Aggregation
 
-  `summarize/1` rolls events up by one of `:day`, `:task`, `:campaign`
-  (parent/epic), `:workspace`, `:repo`, `:model`, or `:step`. It returns a list
+  `summarize/1` rolls events up by one of `:day`, `:task`, `:epic`,
+  `:workspace`, `:repo`, `:model`, or `:step`. It returns a list
   of maps with `{group:, total_cost_usd:, tokens_in:, tokens_out:, ...}`.
+  `:campaign` (the old name for `:epic`) is still accepted as a deprecated
+  alias — see `summarize/1` below.
 
   The CLI (`arb usage`) and Phoenix endpoint (`GET /api/usage`) sit on top of
   this. Anything new (per-day burn dashboards, budget routing) should call
@@ -34,7 +36,7 @@ defmodule Arbiter.Usage do
   end
 
   @type group_by ::
-          :day | :task | :campaign | :workspace | :repo | :model | :step | :provider
+          :day | :task | :epic | :workspace | :repo | :model | :step | :provider
 
   @type since :: DateTime.t() | nil
 
@@ -49,14 +51,20 @@ defmodule Arbiter.Usage do
           required(:duration_ms) => non_neg_integer()
         }
 
-  @valid_by ~w(day task campaign workspace repo model step provider)a
+  @valid_by ~w(day task epic workspace repo model step provider)a
+
+  # `campaign` was the old name for the `epic` grouping. Accepted as a
+  # deprecated alias for one release; normalized to `:epic` before validation
+  # so every caller (CLI, REST, MCP) gets the same grouping.
+  @deprecated_by %{campaign: :epic}
 
   @doc """
   Roll up usage events into a list of summary rows.
 
   ## Options
 
-    * `:by` — one of `#{inspect(@valid_by)}`. Required.
+    * `:by` — one of `#{inspect(@valid_by)}` (`:campaign` also accepted as a
+      deprecated alias for `:epic`). Required.
     * `:since` — `%DateTime{}` filter on `occurred_at`. Optional.
     * `:workspace_id` — restrict to one workspace. Optional.
     * `:limit` — cap the returned rows (after sort). Optional.
@@ -64,10 +72,10 @@ defmodule Arbiter.Usage do
   Returns `{:ok, [rollup]}` or `{:error, reason}`. Rows are sorted by
   `total_cost_usd` desc (or chronologically for `:by :day`).
 
-  `:campaign` groups by a task's `:parent_of` parent(s) — a task with more than
+  `:epic` groups by a task's `:parent_of` parent(s) — a task with more than
   one parent is counted in each, mirroring the parent-with-progress rollup.
   Tasks with *no* parent don't disappear; they fall into the catch-all sentinel
-  `(no_campaign)` so spend isn't silently lost.
+  `(no_epic)` so spend isn't silently lost.
   """
   @spec summarize(keyword()) :: {:ok, [rollup()]} | {:error, term()}
   def summarize(opts) when is_list(opts) do
@@ -89,13 +97,32 @@ defmodule Arbiter.Usage do
   @spec valid_groupings() :: [group_by()]
   def valid_groupings, do: @valid_by
 
+  @doc """
+  Groupings acceptable as input, including deprecated aliases (e.g.
+  `:campaign`). Callers that parse a raw `by` string/atom before calling
+  `summarize/1` (the REST controller, the MCP tool) should validate against
+  this list rather than `valid_groupings/0`, then pass the raw atom through —
+  `summarize/1` normalizes it.
+  """
+  @spec acceptable_groupings() :: [atom()]
+  def acceptable_groupings, do: @valid_by ++ Map.keys(@deprecated_by)
+
+  @doc "Normalize a deprecated alias (e.g. `:campaign`) to its canonical grouping."
+  @spec normalize_by(atom()) :: group_by()
+  def normalize_by(by), do: Map.get(@deprecated_by, by, by)
+
   # ---- aggregation -------------------------------------------------------
 
   defp fetch_by(opts) do
     case Keyword.fetch(opts, :by) do
-      {:ok, by} when by in @valid_by -> {:ok, by}
-      {:ok, other} -> {:error, {:invalid_grouping, other}}
-      :error -> {:error, :missing_grouping}
+      {:ok, by} ->
+        case normalize_by(by) do
+          norm when norm in @valid_by -> {:ok, norm}
+          _ -> {:error, {:invalid_grouping, by}}
+        end
+
+      :error ->
+        {:error, :missing_grouping}
     end
   end
 
@@ -113,7 +140,7 @@ defmodule Arbiter.Usage do
     end
   end
 
-  # Group events by the requested dimension. For :campaign we resolve each
+  # Group events by the requested dimension. For :epic we resolve each
   # event's task's `:parent_of` parents at read time (a join would be cleaner
   # but the data volume is small for now; this is plain in-memory grouping).
   defp group_events(events, :day) do
@@ -130,21 +157,21 @@ defmodule Arbiter.Usage do
   defp group_events(events, :provider), do: Enum.group_by(events, &(&1.provider || "(unknown)"))
   defp group_events(events, :step), do: Enum.group_by(events, &Atom.to_string(&1.step))
 
-  defp group_events(events, :campaign) do
+  defp group_events(events, :epic) do
     parents = load_parent_edges(events)
 
     Enum.reduce(events, %{}, fn ev, acc ->
       base_task = base_task_id(ev.task_id)
 
       case Map.get(parents, base_task, []) do
-        [] -> Map.update(acc, "(no_campaign)", [ev], &[ev | &1])
+        [] -> Map.update(acc, "(no_epic)", [ev], &[ev | &1])
         ids -> Enum.reduce(ids, acc, fn pid, a -> Map.update(a, pid, [ev], &[ev | &1]) end)
       end
     end)
   end
 
   # Drop the "#review" suffix used by ReviewGate reviewers so a review event is
-  # still attributable to the author task for campaign lookup.
+  # still attributable to the author task for epic lookup.
   defp base_task_id(<<id::binary>>) do
     case String.split(id, "#", parts: 2) do
       [base | _] -> base

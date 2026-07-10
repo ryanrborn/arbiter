@@ -5,9 +5,11 @@ defmodule ArbiterWeb.Api.UsageController do
   Routes:
 
     * `GET /api/usage`          — aggregated rollup. Required query: `by` (one of
-                                  `day | task | campaign | workspace | repo |
-                                  model | step | provider`). Optional:
-                                  `workspace_id`, `since` (ISO8601), `limit`.
+                                  `day | task | epic | workspace | repo |
+                                  model | step | provider`; `campaign` also
+                                  accepted as a deprecated alias for `epic`).
+                                  Optional: `workspace_id`, `since` (ISO8601),
+                                  `limit`.
     * `GET /api/usage/events`   — raw event list (newest first). Optional
                                   filters: `workspace_id`, `task_id`, `since`,
                                   `step`, `limit` (default 50).
@@ -38,7 +40,10 @@ defmodule ArbiterWeb.Api.UsageController do
 
       case Usage.summarize(opts) do
         {:ok, rollups} ->
-          json(conn, %{by: Atom.to_string(by), data: Enum.map(rollups, &render_rollup/1)})
+          json(conn, %{
+            by: Atom.to_string(Usage.normalize_by(by)),
+            data: Enum.map(rollups, &render_rollup/1)
+          })
 
         {:error, reason} ->
           {:error, {:invalid_request, "could not summarize usage: #{inspect(reason)}"}}
@@ -139,7 +144,7 @@ defmodule ArbiterWeb.Api.UsageController do
     try do
       atom = String.to_existing_atom(raw)
 
-      if atom in Usage.valid_groupings() do
+      if atom in Usage.acceptable_groupings() do
         {:ok, atom}
       else
         {:error,

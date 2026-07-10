@@ -1458,14 +1458,15 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Roll up the token/cost usage ledger for the scope's workspace. Coordinator
-  only. `by` is required (one of `Arbiter.Usage.valid_groupings/0`); `since`
-  (ISO-8601) and `limit` are optional. `workspace_id` is forced to the scope's
-  workspace. Backs onto `Arbiter.Usage.summarize/1`.
+  only. `by` is required (one of `Arbiter.Usage.valid_groupings/0`, or the
+  deprecated `campaign` alias for `epic`); `since` (ISO-8601) and `limit` are
+  optional. `workspace_id` is forced to the scope's workspace. Backs onto
+  `Arbiter.Usage.summarize/1`.
   """
   @spec usage_summarize(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def usage_summarize(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args),
-         {:ok, by} <- require_enum(args, "by", Usage.valid_groupings()),
+         {:ok, by} <- require_enum(args, "by", Usage.acceptable_groupings()),
          {:ok, since} <- optional_datetime(args, "since"),
          {:ok, limit} <- optional_integer(args, "limit") do
       opts =
@@ -1475,7 +1476,8 @@ defmodule Arbiter.MCP.Tools do
 
       case Usage.summarize(opts) do
         {:ok, rollups} ->
-          {:ok, %{by: Atom.to_string(by), rollups: rollups, count: length(rollups)}}
+          {:ok,
+           %{by: Atom.to_string(Usage.normalize_by(by)), rollups: rollups, count: length(rollups)}}
 
         {:error, reason} ->
           {:error, {:invalid, "usage_summarize failed: #{inspect(reason)}"}}

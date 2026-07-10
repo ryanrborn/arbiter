@@ -1187,7 +1187,8 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Roll up the token/cost usage ledger for the workspace. `by` is required (day, task, " <>
-          "campaign, workspace, repo, model, step, provider); optional `since` (ISO-8601) and `limit`.",
+          "epic, workspace, repo, model, step, provider — `campaign` also accepted as a " <>
+          "deprecated alias for `epic`); optional `since` (ISO-8601) and `limit`.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
