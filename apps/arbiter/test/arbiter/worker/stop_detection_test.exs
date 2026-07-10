@@ -155,7 +155,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
 
       escalation =
         eventually(fn ->
-          Message.inbox("coordinator", workspace_id: ws.id)
+          Message.inbox("admiral", workspace_id: ws.id)
           |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))
         end)
 

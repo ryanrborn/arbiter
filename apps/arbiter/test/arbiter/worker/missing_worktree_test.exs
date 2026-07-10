@@ -124,7 +124,7 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
       refute_receive {:worker_done, _}, 200
 
       # The Coordinator gets an addressed escalation naming the failure.
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =
         Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
@@ -206,7 +206,7 @@ defmodule Arbiter.Worker.MissingWorktreeTest do
       refute_receive {:worker_done, _}, 200
 
       # The Coordinator gets an addressed escalation for the stopped worker.
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       assert Enum.any?(
                escalations,

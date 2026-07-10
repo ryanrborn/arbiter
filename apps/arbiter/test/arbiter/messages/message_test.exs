@@ -125,7 +125,7 @@ defmodule Arbiter.Messages.MessageTest do
           workspace_id: @ws
         })
 
-      [msg] = Message.inbox("coordinator", workspace_id: @ws)
+      [msg] = Message.inbox("admiral", workspace_id: @ws)
       assert msg.kind == :completion
       assert msg.directive_ref == "bd-soren"
       assert msg.subject == "GitLab adapter complete"
@@ -160,7 +160,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} = Message.mark_read(m)
       assert_receive {:message_read, _}
 
-      Message.clear_read("coordinator", workspace_id: @ws)
+      Message.clear_read("admiral", workspace_id: @ws)
 
       assert_receive {:mailbox_cleared, @ws}
     end
@@ -185,7 +185,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert_receive {:message_read, _}
       assert_receive {:message_read, _}
 
-      Message.clear_read("coordinator")
+      Message.clear_read("admiral")
 
       received =
         for _ <- 1..2 do
@@ -214,7 +214,7 @@ defmodule Arbiter.Messages.MessageTest do
 
       assert_receive {:new_message, _}
 
-      Message.clear_all("coordinator", workspace_id: @ws)
+      Message.clear_all("admiral", workspace_id: @ws)
 
       assert_receive {:mailbox_cleared, @ws}
     end
@@ -230,7 +230,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, unread} =
         Ash.create(Message, %{kind: :info, to_ref: "coordinator", body: "unread", workspace_id: @ws})
 
-      assert Message.clear_read("coordinator") == {:ok, 1, 0, 1}
+      assert Message.clear_read("admiral") == {:ok, 1, 0, 1}
 
       assert {:error, _} = Ash.get(Message, read.id)
       assert {:ok, _} = Ash.get(Message, unread.id)
@@ -246,7 +246,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} = Message.mark_read(mine)
       {:ok, _} = Message.mark_read(theirs)
 
-      assert Message.clear_read("coordinator") == {:ok, 1, 0, 0}
+      assert Message.clear_read("admiral") == {:ok, 1, 0, 0}
       assert {:ok, _} = Ash.get(Message, theirs.id)
     end
   end

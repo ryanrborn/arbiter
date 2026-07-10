@@ -116,7 +116,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       # Let a poll interval pass to ensure the notifier call fires.
       Process.sleep(60)
 
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       stall_msg =
         Enum.find(escalations, fn m ->
@@ -148,7 +148,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       wait_until(fn -> StubMerger.merge_count("!stall2") >= 6 end)
       Process.sleep(40)
 
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       stall_msgs =
         Enum.filter(escalations, fn m ->
@@ -214,7 +214,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       # but the Ecto sandbox may need a moment to flush the write).
       Process.sleep(50)
 
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =
         Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))

@@ -243,7 +243,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
           body: "needs attention"
         })
 
-      [msg] = Message.inbox("coordinator", workspace_id: @ws)
+      [msg] = Message.inbox("admiral", workspace_id: @ws)
       assert msg.body == "needs attention"
     end
   end

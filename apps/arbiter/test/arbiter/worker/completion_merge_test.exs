@@ -151,7 +151,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     # bd-8rrn9t: a non-conflict merge failure must escalate to the coordinator
     # too, not just fail silently — an approved run whose merge step fails
     # can leave a real PR stranded and needs a human to notice.
-    escalations = Message.inbox("coordinator", workspace_id: ws.id)
+    escalations = Message.inbox("admiral", workspace_id: ws.id)
     escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     assert escalation
     assert escalation.body =~ "feature/x"
@@ -212,7 +212,7 @@ defmodule Arbiter.Worker.CompletionMergeTest do
     assert reloaded.notes =~ "README.md"
 
     # 3. the Coordinator inbox got an escalation naming the conflicting files.
-    escalations = Message.inbox("coordinator", workspace_id: ws.id)
+    escalations = Message.inbox("admiral", workspace_id: ws.id)
     escalation = Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     assert escalation
     assert escalation.body =~ "README.md"

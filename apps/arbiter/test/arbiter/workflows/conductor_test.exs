@@ -93,7 +93,7 @@ defmodule Arbiter.Workflows.ConductorTest do
 
   # Drain the Coordinator inbox for a workspace and return unread escalations.
   defp admiral_inbox(ws) do
-    Message.inbox("coordinator", workspace_id: ws.id)
+    Message.inbox("admiral", workspace_id: ws.id)
   end
 
   # ---- acyclicity validation ----------------------------------------------

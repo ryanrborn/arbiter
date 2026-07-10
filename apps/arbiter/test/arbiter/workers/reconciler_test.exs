@@ -161,7 +161,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert {:ok, %{rewatched: 0, escalated: 1}} = Reconciler.reconcile_open_pr_tasks()
 
-    mail = Message.inbox("coordinator", workspace_id: ws.id)
+    mail = Message.inbox("admiral", workspace_id: ws.id)
     assert length(mail) >= 1
 
     escalation = Enum.find(mail, &(&1.directive_ref == issue.id))
@@ -194,7 +194,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert task_id == issue.id
 
     # Re-watched, NOT escalated — no mail lands in the coordinator's inbox.
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "re-watches a review-only engagement (no pr_ref) via the patrol layer" do
@@ -232,7 +232,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
              Reconciler.reconcile_open_pr_tasks(rewatch_fun: rewatch)
 
     refute_received {:rewatched, _}
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "open-PR sweep leaves a bead with no pr_ref alone (that is the resume sweep's job)" do
@@ -241,7 +241,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert {:ok, %{rewatched: 0, escalated: 0}} = Reconciler.reconcile_open_pr_tasks()
 
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "open-PR sweep ignores a :closed or :open task even if it somehow has a pr_ref" do
@@ -250,7 +250,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert {:ok, %{rewatched: 0, escalated: 0}} = Reconciler.reconcile_open_pr_tasks()
 
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "open-PR sweep skips when primary?: false" do
@@ -264,7 +264,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert {:ok, :skipped} = Reconciler.reconcile_open_pr_tasks(primary?: false)
 
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   # ---- reconcile_resumable_tasks (:running/revising resume) --------------
@@ -285,7 +285,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert_received {:resumed, task_id}
     assert task_id == issue.id
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "escalates a mid-flight bead that cannot be safely resumed (no outpost)" do
@@ -298,7 +298,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert {:ok, %{resumed: 0, escalated: 1}} =
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)
 
-    mail = Message.inbox("coordinator", workspace_id: ws.id)
+    mail = Message.inbox("admiral", workspace_id: ws.id)
     escalation = Enum.find(mail, &(&1.directive_ref == issue.id))
     assert escalation != nil
     assert escalation.kind == :escalation
@@ -319,7 +319,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)
 
     refute_received {:resumed, _}
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "resume sweep does not touch open-PR or review-only beads" do
@@ -336,7 +336,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert {:ok, %{resumed: 0, escalated: 0}} =
              Reconciler.reconcile_resumable_tasks(resume_fun: resume)
 
-    assert Message.inbox("coordinator", workspace_id: ws.id) == []
+    assert Message.inbox("admiral", workspace_id: ws.id) == []
   end
 
   test "resume sweep skips when primary?: false" do
@@ -379,7 +379,7 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert_received {:rewatched, watched_id}
     assert watched_id == watched.id
 
-    mail = Message.inbox("coordinator", workspace_id: ws.id)
+    mail = Message.inbox("admiral", workspace_id: ws.id)
 
     # Only the un-resumable bead escalated.
     assert Enum.find(mail, &(&1.directive_ref == watched.id)) == nil

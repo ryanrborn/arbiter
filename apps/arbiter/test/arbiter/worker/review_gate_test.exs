@@ -423,7 +423,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert reloaded.notes =~ "needs a guard"
 
       # The Coordinator was escalated.
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     end
 
@@ -636,7 +636,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
@@ -863,7 +863,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
@@ -1300,7 +1300,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       # The escalation to the Coordinator carries the FULL ordered transcript (both
       # rounds of findings + the implementer's response) and the current diff —
       # Darth Gnosis judges with the whole argument, not a summary.
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
       escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
       assert escalation, "expected an escalation to the coordinator"
       assert escalation.body =~ "transcript"

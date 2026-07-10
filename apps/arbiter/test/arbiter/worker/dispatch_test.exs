@@ -206,7 +206,7 @@ defmodule Arbiter.Worker.DispatchTest do
                )
 
       assert [escalation] =
-               Message.inbox("coordinator", workspace_id: ws.id)
+               Message.inbox("admiral", workspace_id: ws.id)
                |> Enum.filter(&(&1.directive_ref == task.id))
 
       assert escalation.subject =~ "spawn"
@@ -268,7 +268,7 @@ defmodule Arbiter.Worker.DispatchTest do
         )
 
       assert [escalation] =
-               Message.inbox("coordinator", workspace_id: ws.id)
+               Message.inbox("admiral", workspace_id: ws.id)
                |> Enum.filter(&(&1.directive_ref == task.id))
 
       assert escalation.subject =~ "pre-flight auth failed"

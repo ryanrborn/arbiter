@@ -247,7 +247,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert reloaded.notes =~ "forgotten_work.txt"
 
       # The Coordinator got an escalation that explicitly names the failure mode.
-      escalations = Message.inbox("coordinator", workspace_id: ws.id)
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =
         Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
