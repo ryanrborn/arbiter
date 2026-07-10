@@ -9,10 +9,10 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
   the worker had no Watchdog watching it, so the task hung at `:awaiting_review`
   indefinitely with no path to completion.
 
-  The fix captures the `start_watchdog` result and escalates to the Admiral when
+  The fix captures the `start_watchdog` result and escalates to the Coordinator when
   it is not `:ok`, so the orphaned MR is surfaced rather than silently lost.
   The worker still parks at `:awaiting_review` (the MR is real and must be
-  preserved), but the Admiral can manually complete or fail the worker once
+  preserved), but the Coordinator can manually complete or fail the worker once
   the MR resolves.
   """
 
@@ -98,7 +98,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
   end
 
   describe "auto-merge stall notification (bd-6gxosc)" do
-    test "Admiral receives an inbox escalation after N consecutive safe_merge failures" do
+    test "Coordinator receives an inbox escalation after N consecutive safe_merge failures" do
       ws = new_workspace()
       task = new_task(ws)
       pid = running_worker(task, ws)
@@ -124,7 +124,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
             String.contains?(m.subject || "", "stalled")
         end)
 
-      assert stall_msg, "expected an Admiral escalation for the stalled auto-merge"
+      assert stall_msg, "expected a Coordinator escalation for the stalled auto-merge"
       assert stall_msg.subject =~ task.id
       assert stall_msg.body =~ "!stall1"
       assert stall_msg.body =~ "3"
@@ -189,7 +189,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       assert snap.mr_ref == "!orphan"
     end
 
-    test "Admiral is escalated with the MR ref when Watchdog fails to start" do
+    test "Coordinator is escalated with the MR ref when Watchdog fails to start" do
       ws = new_workspace()
       task = new_task(ws)
       pid = running_worker(task, ws)
@@ -219,7 +219,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       escalation =
         Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
 
-      assert escalation, "expected an Admiral escalation for the orphaned MR"
+      assert escalation, "expected a Coordinator escalation for the orphaned MR"
       assert escalation.subject =~ "Watchdog startup failed"
       assert escalation.body =~ "!orphan2"
       assert escalation.body =~ task.id

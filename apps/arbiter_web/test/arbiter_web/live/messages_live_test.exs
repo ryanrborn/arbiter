@@ -48,7 +48,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
     end
   end
 
-  describe "per-acolyte mailbox" do
+  describe "per-worker mailbox" do
     test "lists unread mailbox messages addressed to the task", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "mbx", workspace_id: ws.id})
       {:ok, _pid} = Worker.start(task_id: task.id, repo: "r", workspace_id: ws.id)
@@ -104,8 +104,8 @@ defmodule ArbiterWeb.MessagesLiveTest do
     end
   end
 
-  describe "admiral mailbox panel" do
-    test "renders unread mailbox-family mail addressed to the admiral", %{conn: conn, ws: ws} do
+  describe "coordinator mailbox panel" do
+    test "renders unread mailbox-family mail addressed to the coordinator", %{conn: conn, ws: ws} do
       {:ok, _} =
         Message.send_mail(%{
           workspace_id: ws.id,
@@ -128,9 +128,9 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert html =~ "1 unread"
     end
 
-    test "a plain :notification does NOT land in the admiral mailbox", %{conn: conn, ws: ws} do
+    test "a plain :notification does NOT land in the coordinator mailbox", %{conn: conn, ws: ws} do
       # Notifications are broadcast events, not addressed mail — they feed the
-      # notifications panel, never the Admiral's actionable inbox.
+      # notifications panel, never the coordinator's actionable inbox.
       {:ok, _} =
         Message.notify(%{workspace_id: ws.id, subject: "just-an-fyi", body: "background hum"})
 
@@ -143,7 +143,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert Message.inbox("admiral") == []
     end
 
-    test "updates live when admiral mail is broadcast", %{conn: conn, ws: ws} do
+    test "updates live when coordinator mail is broadcast", %{conn: conn, ws: ws} do
       {:ok, view, html} = live(conn, "/")
       refute html =~ "freshly-escalated"
 

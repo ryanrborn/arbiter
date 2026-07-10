@@ -6,7 +6,7 @@ defmodule Arbiter.Tasks.ClaimTest do
   alias Arbiter.Trackers.Jira.Config, as: JiraConfig
   alias Arbiter.Trackers.Shortcut.Config, as: SCConfig
 
-  @viewer "test-acolyte"
+  @viewer "test-worker"
   @env_var "ARBITER_CLAIM_TEST_TOKEN"
 
   setup do

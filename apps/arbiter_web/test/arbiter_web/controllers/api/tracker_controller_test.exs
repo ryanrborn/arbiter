@@ -4,7 +4,7 @@ defmodule ArbiterWeb.Api.TrackerControllerTest do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Trackers.GitHub.Config
 
-  @viewer "tracker-acolyte"
+  @viewer "tracker-worker"
   @env_var "ARBITER_TRACKER_CTRL_TOKEN"
 
   setup %{conn: conn} do

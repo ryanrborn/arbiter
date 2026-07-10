@@ -6,7 +6,7 @@
 # reported "no code exists" while sitting on the very changes it claimed
 # were missing.
 set -e
-echo "work the acolyte forgot to commit" > forgotten_work.txt
+echo "work the worker forgot to commit" > forgotten_work.txt
 # Deliberately NO `git add` / `git commit` — that is the whole point.
 echo "arb done"
 exit 0

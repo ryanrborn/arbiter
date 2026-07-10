@@ -193,7 +193,7 @@ defmodule Arbiter.Worker.CommitGateTest do
     test "reports :ready when committed work exists alongside untracked .hex and deps dirs (bd-acj2ck)",
          %{repo: repo} do
       # Regression test for bd-acj2ck: the commit gate was false-tripping on
-      # untracked `.hex` and `deps` dirs that accumulate in acolyte worktrees
+      # untracked `.hex` and `deps` dirs that accumulate in worker worktrees
       # from `mix deps.get`. A worker with fully committed source should complete
       # even when those artifact dirs are present.
       path = provision_worktree(repo, "feature/hex-regression")
@@ -221,7 +221,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       # right there. After the gate, with the nudge cap pinned at 0 (so we
       # assert the structural gate without the retry layer), the worker must
       # park as :failed with a bd-ofql8k-specific failure reason and surface
-      # the uncommitted state to the Admiral.
+      # the uncommitted state to the coordinator.
       task = new_task(ws)
       path = provision_worktree(repo, "bd-gate/#{task.id}")
       File.write!(Path.join(path, "forgotten_work.txt"), "edited but not committed\n")
@@ -246,7 +246,7 @@ defmodule Arbiter.Worker.CommitGateTest do
       assert reloaded.notes =~ "Commit gate tripped"
       assert reloaded.notes =~ "forgotten_work.txt"
 
-      # The Admiral got an escalation that explicitly names the failure mode.
+      # The Coordinator got an escalation that explicitly names the failure mode.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =

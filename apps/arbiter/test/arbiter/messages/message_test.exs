@@ -72,7 +72,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _m} =
         Message.send_mail(%{
           workspace_id: @ws,
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: "bd-soren",
           body: "check the API contract"
         })

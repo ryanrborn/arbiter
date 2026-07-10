@@ -39,7 +39,7 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert body["name"] == "showme"
     end
 
-    test "includes the resolved acolyte security_posture", %{conn: conn} do
+    test "includes the resolved worker security_posture", %{conn: conn} do
       {:ok, ws} =
         Ash.create(Workspace, %{
           name: "secure-ws",

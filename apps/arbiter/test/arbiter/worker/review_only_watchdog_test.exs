@@ -232,7 +232,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert StubMerger.merge_count("pr-77") == 0
     end
 
-    test "escalates findings to the Admiral mailbox" do
+    test "escalates findings to the Coordinator mailbox" do
       ws = new_workspace()
       task = new_task(ws)
       {:ok, task} = Ash.update(task, %{pr_ref: "pr-77"}, action: :update)
@@ -247,13 +247,13 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       wait_until(fn -> Worker.state(pid).status == :failed end)
 
-      # An escalation message should have been posted to the Admiral mailbox.
+      # An escalation message should have been posted to the Coordinator mailbox.
       messages = Message.inbox("admiral", workspace_id: ws.id)
 
       assert Enum.any?(messages, fn m ->
                m.kind == :escalation and m.directive_ref == task.id
              end),
-             "expected an Admiral escalation for task #{task.id}"
+             "expected a Coordinator escalation for task #{task.id}"
     end
   end
 

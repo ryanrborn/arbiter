@@ -10,7 +10,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     # units into so we never touch ~/.config or /etc.
     System.put_env("ARB_HOME", "/tmp/arbiter-install-test")
     # Clear the worker guard so tests aren't blocked when run inside a worker session.
-    prior_acolyte_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
+    prior_worker_id = System.get_env("ARB_ACOLYTE_BEAD_ID")
     System.delete_env("ARB_ACOLYTE_BEAD_ID")
 
     unit_dir =
@@ -39,7 +39,7 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       System.delete_env("ARB_HOME")
       File.rm_rf(unit_dir)
       File.rm_rf(arbiter_home)
-      if prior_acolyte_id, do: System.put_env("ARB_ACOLYTE_BEAD_ID", prior_acolyte_id)
+      if prior_worker_id, do: System.put_env("ARB_ACOLYTE_BEAD_ID", prior_worker_id)
     end)
 
     {:ok, unit_dir: unit_dir, arbiter_home: arbiter_home}

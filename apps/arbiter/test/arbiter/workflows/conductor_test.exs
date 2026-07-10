@@ -91,7 +91,7 @@ defmodule Arbiter.Workflows.ConductorTest do
     Process.sleep(50)
   end
 
-  # Drain the Admiral inbox for a workspace and return unread escalations.
+  # Drain the Coordinator inbox for a workspace and return unread escalations.
   defp admiral_inbox(ws) do
     Message.inbox("admiral", workspace_id: ws.id)
   end
@@ -705,10 +705,10 @@ defmodule Arbiter.Workflows.ConductorTest do
     end
   end
 
-  # ---- C5: Admiral inbox escalation ----------------------------------------
+  # ---- C5: Coordinator inbox escalation ----------------------------------------
 
-  describe "Admiral inbox escalation on failure" do
-    test "a failed member posts an :escalation to the Admiral inbox", %{ws: ws} do
+  describe "Coordinator inbox escalation on failure" do
+    test "a failed member posts an :escalation to the Coordinator inbox", %{ws: ws} do
       a = issue(ws)
       b = issue(ws)
       g = graph(ws)

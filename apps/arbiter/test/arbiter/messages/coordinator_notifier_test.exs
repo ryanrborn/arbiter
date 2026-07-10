@@ -37,7 +37,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       {:ok, issue} =
         Ash.create(Arbiter.Tasks.Issue, %{
-          title: "Wire the admiral mailbox",
+          title: "Wire the coordinator mailbox",
           workspace_id: workspace.id
         })
 
@@ -50,7 +50,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                })
 
       assert only_notification(workspace.id).body ==
-               "Wire the admiral mailbox completed in 5s"
+               "Wire the coordinator mailbox completed in 5s"
     end
   end
 

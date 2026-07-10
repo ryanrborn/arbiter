@@ -9,7 +9,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   alias Arbiter.Test.StubFixPassDispatcher
 
   # A stand-in for the resolver's `Arbiter.Worker` GenServer. The REAL resolver
-  # worker does NOT exit when its rebase acolyte finishes — it lingers in a
+  # worker does NOT exit when its rebase worker finishes — it lingers in a
   # terminal status (:completed/:failed) until task :close — so the Watchdog must
   # detect completion from the worker's *status*, not a process `:DOWN` (#354
   # review). This fake models exactly that: it stays alive and answers `:snapshot`
@@ -49,7 +49,7 @@ defmodule Arbiter.Worker.WatchdogTest do
     @doc """
     Arm the stub for `task_id`. Opts:
       * `:pid` — the resolver worker the Watchdog gets back. The fake stays alive
-        (mirroring the real resolver, which lingers after its acolyte exits):
+        (mirroring the real resolver, which lingers after its worker exits):
         * `:completed` (default) — reports a terminal status, so the Watchdog
           detects the pass finished *without the process dying* and can
           retry/escalate (a fresh fake is minted per `resolve/1` call);
@@ -298,10 +298,10 @@ defmodule Arbiter.Worker.WatchdogTest do
   end
 
   describe "blocked-merge detection (#354)" do
-    test "an approved :conflict records the reason, dispatches a rebase acolyte, and does not fail" do
+    test "an approved :conflict records the reason, dispatches a rebase worker, and does not fail" do
       {pid, task_id} = running_worker()
       # An approved-but-conflicting PR. Phase 2b: the Watchdog records the reason
-      # AND dispatches a rebase-resolve acolyte against the existing worktree
+      # AND dispatches a rebase-resolve worker against the existing worktree
       # (rather than only parking). A :running stub stays "in flight" so this
       # is a single dispatch. The worker must NOT be failed.
       StubConflictResolver.arm(task_id, self(), pid: :running)
@@ -322,7 +322,7 @@ defmodule Arbiter.Worker.WatchdogTest do
         is_map(status) and Map.get(status, :block_reason) == :conflict
       end)
 
-      # Auto-resolve must not fail the worker — it stays parked while the acolyte
+      # Auto-resolve must not fail the worker — it stays parked while the worker
       # rebases, and a single in-flight resolver is never escalated.
       refute Worker.state(pid).status == :failed
       refute_receive {:escalate_called, _, _, _, _}, 200
@@ -435,7 +435,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   end
 
   describe "auto-resolve :ci_failed (#354 Phase 2a)" do
-    test "dispatches a fix-pass acolyte briefed with the failing check logs" do
+    test "dispatches a fix-pass worker briefed with the failing check logs" do
       {pid, task_id} = running_worker()
       StubMerger.set_failing_checks("!cf1", [%{name: "test", summary: "boom", url: nil}])
       StubMerger.queue_get("!cf1", [%{status: :open, approved: true, block_reason: :ci_failed}])
@@ -470,7 +470,7 @@ defmodule Arbiter.Worker.WatchdogTest do
   end
 
   describe "conflict auto-resolve (#354, Phase 2b)" do
-    test "dispatches the rebase acolyte with the task id + mr ref" do
+    test "dispatches the rebase worker with the task id + mr ref" do
       {pid, task_id} = running_worker()
       StubConflictResolver.arm(task_id, self(), pid: :running)
       StubMerger.queue_get("!c1", [%{status: :open, approved: true, block_reason: :conflict}])
@@ -537,7 +537,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> not Process.alive?(first) end)
     end
 
-    test "only dispatches max_conflict_attempts acolytes, not one per poll" do
+    test "only dispatches max_conflict_attempts workers, not one per poll" do
       {pid, task_id} = running_worker()
       StubConflictResolver.arm(task_id, self(), pid: :completed)
       StubMerger.queue_get("!c3", [%{status: :open, approved: true, block_reason: :conflict}])
@@ -553,7 +553,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert_receive {:resolve_called, _}, 1_000
       assert_receive {:resolve_called, _}, 1_000
       assert_receive {:escalate_called, _, _, _, _}, 1_000
-      # Past the cap the Watchdog stays parked and must not keep spawning acolytes
+      # Past the cap the Watchdog stays parked and must not keep spawning workers
       # or re-paging on every subsequent poll.
       refute_receive {:resolve_called, _}, 200
       refute_receive {:escalate_called, _, _, _, _}, 200
@@ -618,7 +618,7 @@ defmodule Arbiter.Worker.WatchdogTest do
         is_map(status) and Map.get(status, :block_reason) == :conflict
       end)
 
-      # With auto-resolve off, no rebase acolyte is dispatched.
+      # With auto-resolve off, no rebase worker is dispatched.
       refute_receive {:resolve_called, _}, 200
       refute Worker.state(pid).status == :failed
     end

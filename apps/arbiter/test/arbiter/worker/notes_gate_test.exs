@@ -145,7 +145,7 @@ defmodule Arbiter.Worker.NotesGateTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       refute reloaded.status == :closed
 
-      # Admiral receives an escalation naming the gate failure.
+      # Coordinator receives an escalation naming the gate failure.
       escalations = Message.inbox("admiral", workspace_id: ws.id)
 
       escalation =
@@ -225,7 +225,7 @@ defmodule Arbiter.Worker.NotesGateTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       refute reloaded.status == :closed
 
-      # Admiral receives the notes-gate escalation naming the failure.
+      # Coordinator receives the notes-gate escalation naming the failure.
       escalation =
         Message.inbox("admiral", workspace_id: ws.id)
         |> Enum.find(&(&1.kind == :escalation and &1.directive_ref == task.id))

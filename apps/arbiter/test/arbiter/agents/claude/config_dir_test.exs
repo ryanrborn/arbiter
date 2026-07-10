@@ -11,7 +11,7 @@ defmodule Arbiter.Agents.Claude.ConfigDirTest do
     uniq = System.unique_integer([:positive])
     base = Path.join(System.tmp_dir!(), "arbiter-configdir-test-#{uniq}")
     source = Path.join(base, "source")
-    target = Path.join(base, "acolyte")
+    target = Path.join(base, "worker")
     File.mkdir_p!(source)
 
     File.write!(Path.join(source, ".credentials.json"), ~s({"token":"fake"}))

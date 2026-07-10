@@ -155,7 +155,7 @@ defmodule Arbiter.Worker.DispatchTest do
   # zombie `:idle` registration on an `:in_progress` task forever — no retry,
   # no escalation — which also permanently blackholed PRPatrol dedup for the
   # underlying PR. dispatch/2 must instead fail the just-started worker and
-  # escalate to the Admiral.
+  # escalate to the coordinator.
   describe "post-start_worker spawn failure does not zombie (bd-bi5pn0)" do
     alias Arbiter.Messages.Message
 
@@ -193,7 +193,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.state(pid).meta.stop_reason.category == :spawn_failed
     end
 
-    test "escalates to the Admiral instead of silently stranding the bead", %{ws: ws} do
+    test "escalates to the Coordinator instead of silently stranding the bead", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "spawn fails escalate", workspace_id: ws.id})
 
       assert {:error, :missing_worktree} =
@@ -255,7 +255,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == nil
     end
 
-    test "a failed pre-flight escalates to the Admiral with a re-auth message", %{ws: ws} do
+    test "a failed pre-flight escalates to the Coordinator with a re-auth message", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "auth escalate", workspace_id: ws.id})
 
       {:error, {:auth_check_failed, _}} =
@@ -1827,7 +1827,7 @@ defmodule Arbiter.Worker.DispatchTest do
     # Dispatch a task, provisioning its worktree, then simulate a mid-work stop:
     # the worker fails (lingers in :failed, registered) with the worktree left
     # on disk — exactly the state `arb resume` is built to recover from.
-    defp stop_acolyte_with_outpost(task_id) do
+    defp stop_worker_with_outpost(task_id) do
       {:ok, first} = Dispatch.dispatch(task_id, repo: "rs/repo", start_driver: false)
       assert is_binary(first.worktree_path)
       :ok = Worker.fail(first.worker_pid, :token_exhausted)
@@ -1836,7 +1836,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "reuses the worktree, links the new run, and boots into :resuming", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "resume work", workspace_id: ws.id})
-      first = stop_acolyte_with_outpost(task.id)
+      first = stop_worker_with_outpost(task.id)
 
       prior_run = latest_run(task.id)
       assert prior_run.status == :failed
@@ -1861,7 +1861,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "the resumed worker's prompt is briefed with the prior work", %{ws: ws, repo: repo} do
       {:ok, task} = Ash.create(Issue, %{title: "briefed resume", workspace_id: ws.id})
-      first = stop_acolyte_with_outpost(task.id)
+      first = stop_worker_with_outpost(task.id)
 
       # Commit some "prior work" into the worktree so the briefing has content.
       wt = first.worktree_path
@@ -1879,7 +1879,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "refuses when there is no preserved worktree", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no worktree", workspace_id: ws.id})
-      first = stop_acolyte_with_outpost(task.id)
+      first = stop_worker_with_outpost(task.id)
 
       # Tear the worktree down — nothing left to resume.
       Arbiter.Worker.Worktree.cleanup(first.worktree_path)
@@ -1890,7 +1890,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "refuses to resume a closed task", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "closed resume", workspace_id: ws.id})
-      _ = stop_acolyte_with_outpost(task.id)
+      _ = stop_worker_with_outpost(task.id)
       {:ok, _} = Ash.update(task, %{}, action: :close)
 
       assert {:error, {:task_closed, _}} = Dispatch.resume(task.id, start_driver: false)
@@ -1907,7 +1907,7 @@ defmodule Arbiter.Worker.DispatchTest do
 
     test "inherits the repo from the prior run when omitted", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "repo inherit", workspace_id: ws.id})
-      _ = stop_acolyte_with_outpost(task.id)
+      _ = stop_worker_with_outpost(task.id)
 
       # No repo passed — must inherit "rs/repo" from the prior run record.
       {:ok, result} =

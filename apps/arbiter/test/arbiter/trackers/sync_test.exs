@@ -988,7 +988,7 @@ defmodule Arbiter.Trackers.SyncTest do
       Sync.notify_failure(issue, :merged, reason)
       Sync.notify_failure(issue, :merged, reason)
 
-      # Only the first call fires the Admiral escalation.
+      # Only the first call fires the Coordinator escalation.
       assert length(escalations_for(ws.id)) == 1
     end
 
