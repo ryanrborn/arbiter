@@ -1775,6 +1775,11 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert rollups == []
     end
+
+    test "campaign is accepted as a deprecated alias and normalized to epic", ctx do
+      assert {:ok, %{by: "epic", rollups: []}} =
+               Tools.usage_summarize(ctx.coordinator, %{"by" => "campaign"})
+    end
   end
 
   describe "worker_dispatch/2 (dispatch-recursion guardrail, §4.3)" do

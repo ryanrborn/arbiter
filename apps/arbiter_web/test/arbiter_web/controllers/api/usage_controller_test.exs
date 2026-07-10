@@ -58,6 +58,19 @@ defmodule ArbiterWeb.Api.UsageControllerTest do
       assert by_step["review"]["rows"] == 1
     end
 
+    test "by=campaign is accepted as a deprecated alias for by=epic", %{conn: conn} do
+      _ = insert_event!(%{cost_usd: 1.0})
+
+      conn = get(conn, ~p"/api/usage", %{by: "campaign", workspace_id: @ws})
+      body = json_response(conn, 200)["data"]
+      assert Enum.any?(body, &(&1["group"] == "(no_epic)"))
+    end
+
+    test "the response echoes the normalized by dimension for a deprecated alias", %{conn: conn} do
+      conn = get(conn, ~p"/api/usage", %{by: "campaign", workspace_id: @ws})
+      assert json_response(conn, 200)["by"] == "epic"
+    end
+
     test "missing by returns 400", %{conn: conn} do
       conn = get(conn, ~p"/api/usage", %{})
       assert %{"error" => %{"type" => "invalid_request"}} = json_response(conn, 400)
