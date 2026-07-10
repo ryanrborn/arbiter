@@ -3,7 +3,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
   alias ArbiterCli.Cmd.Prime
 
-  # All /api/messages requests (admiral + per-workspace coordinator) share
+  # All /api/messages requests (coordinator + per-workspace coordinator) share
   # a single stub matched by path; query params are not matched by stub_routes.
   defp stub_all(workspaces, workers, ready, messages \\ []) do
     stub_routes([
@@ -133,7 +133,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "id" => "m-1",
             "kind" => "failure",
             "directive_ref" => "bd-9bn4n9",
-            "subject" => "Acolyte exited with code 1",
+            "subject" => "Worker exited with code 1",
             "body" => "stderr tail...",
             "inserted_at" => "2026-05-28T11:55:00.000000Z"
           },
@@ -152,7 +152,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert exit_code == 0
       assert out =~ "== Global Coordinator Inbox (2 unread) =="
       assert out =~ "[bd-9bn4n9] failure"
-      assert out =~ "Acolyte exited with code 1"
+      assert out =~ "Worker exited with code 1"
       assert out =~ "[bd-6c6w82] completion"
     end
 
@@ -166,7 +166,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "id" => "m-1",
             "kind" => "failure",
             "directive_ref" => "bd-9bn4n9",
-            "subject" => "Acolyte exited with code 1",
+            "subject" => "Worker exited with code 1",
             "inserted_at" => "2026-05-28T11:55:00.000000Z"
           }
         ]
@@ -240,7 +240,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "prefix" => "bd",
             "config" => %{
               "standing_orders" => [
-                "Watch the Admiral inbox — stand a ~60s background poll.",
+                "Watch the Coordinator inbox — stand a ~60s background poll.",
                 %{
                   "title" => "Never boot a second Arbiter instance",
                   "detail" => "it sweeps live runs"
@@ -258,7 +258,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
       assert exit_code == 0
 
       assert out =~ "== Standing Orders =="
-      assert out =~ "[ ] Watch the Admiral inbox — stand a ~60s background poll."
+      assert out =~ "[ ] Watch the Coordinator inbox — stand a ~60s background poll."
       assert out =~ "[ ] Never boot a second Arbiter instance — it sweeps live runs"
       assert out =~ "[ ] No merge to main without the ReviewGate review gate"
 
@@ -407,7 +407,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
             "id" => "ws-1",
             "name" => "default",
             "prefix" => "bd",
-            "config" => %{"standing_orders" => ["Watch the Admiral inbox"]}
+            "config" => %{"standing_orders" => ["Watch the Coordinator inbox"]}
           }
         ],
         [],
@@ -419,7 +419,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {:ok, decoded} = Jason.decode(String.trim(out))
       [ws] = decoded["workspaces"]
-      assert ws["standing_orders"] == ["Watch the Admiral inbox"]
+      assert ws["standing_orders"] == ["Watch the Coordinator inbox"]
     end
   end
 end

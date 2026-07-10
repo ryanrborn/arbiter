@@ -305,7 +305,7 @@ defmodule Arbiter.Trackers.SyncTest do
       escalations = escalations_for(ws.id)
       assert length(escalations) == 1
       [summons] = escalations
-      assert summons.to_ref == "admiral"
+      assert summons.to_ref == "coordinator"
       assert summons.directive_ref == issue.id
       assert summons.subject =~ "tracker sync failed"
       assert summons.body =~ "status_map"
@@ -988,7 +988,7 @@ defmodule Arbiter.Trackers.SyncTest do
       Sync.notify_failure(issue, :merged, reason)
       Sync.notify_failure(issue, :merged, reason)
 
-      # Only the first call fires the Admiral escalation.
+      # Only the first call fires the Coordinator escalation.
       assert length(escalations_for(ws.id)) == 1
     end
 

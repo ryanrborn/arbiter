@@ -44,7 +44,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       assert result == :ok
     end
 
-    test "no-ops for admiral-bound kinds even with a matching worker" do
+    test "no-ops for coordinator-bound kinds even with a matching worker" do
       task_id = new_task_id()
       tmp = System.tmp_dir!() |> Path.join("arb-inbox-#{task_id}")
       on_exit(fn -> File.rm_rf!(tmp) end)
@@ -205,7 +205,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
         Message.send_mail(%{
           kind: :direction,
           workspace_id: @ws,
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: task_id,
           body: "please prioritise the merge conflict"
         })
@@ -223,7 +223,7 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
         Message.send_mail(%{
           kind: :direction,
           workspace_id: @ws,
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: task_id,
           body: "no worker here"
         })
@@ -232,18 +232,18 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       assert msg.body == "no worker here"
     end
 
-    test "existing inbox tests are unaffected (send_mail to admiral still works)" do
+    test "existing inbox tests are unaffected (send_mail to coordinator still works)" do
       {:ok, _msg} =
         Message.send_mail(%{
           kind: :escalation,
           workspace_id: @ws,
           from_ref: "bd-some-worker",
-          to_ref: "admiral",
+          to_ref: "coordinator",
           directive_ref: "bd-some-worker",
           body: "needs attention"
         })
 
-      [msg] = Message.inbox("admiral", workspace_id: @ws)
+      [msg] = Message.inbox("coordinator", workspace_id: @ws)
       assert msg.body == "needs attention"
     end
   end

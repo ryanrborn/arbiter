@@ -10,7 +10,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       required,
     * APPROVE → the branch merges (a real `git merge --no-ff` on main),
     * REQUEST_CHANGES → the branch is NOT merged, the task is parked with the
-      findings, and the Admiral is escalated,
+      findings, and the Coordinator is escalated,
     * review-off (default) → completion routes straight to the merger, no gate.
 
   Plus a full end-to-end path where a **distinct** reviewer worker (a second
@@ -171,7 +171,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   # Create a feature branch with one commit ahead of main, then return to main.
   defp seed_feature_branch(repo, branch) do
     {_, 0} = git(["checkout", "-q", "-b", branch], repo)
-    File.write!(Path.join(repo, "feature.txt"), "acolyte work\n")
+    File.write!(Path.join(repo, "feature.txt"), "worker work\n")
     {_, 0} = git(["add", "feature.txt"], repo)
     {_, 0} = git(["commit", "-q", "-m", "feature work"], repo)
     {_, 0} = git(["checkout", "-q", "main"], repo)
@@ -422,8 +422,8 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert reloaded.notes =~ "ReviewGate verdict: REQUEST_CHANGES"
       assert reloaded.notes =~ "needs a guard"
 
-      # The Admiral was escalated.
-      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      # The Coordinator was escalated.
+      escalations = Message.inbox("coordinator", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
     end
 
@@ -636,7 +636,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
-      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalations = Message.inbox("coordinator", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
@@ -863,7 +863,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
-      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalations = Message.inbox("coordinator", workspace_id: ws.id)
       assert Enum.any?(escalations, &(&1.directive_ref == task.id))
     end
 
@@ -1086,7 +1086,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
     # NOT consume that round — the fix (bd-79goxj) extends max_rounds to 4 so
     # the re-prompt's real findings still reach an implementer, and a round-4
     # reviewer can then approve → merge. Without the fix: handle_reject sees
-    # round(3) >= max_rounds(3) and escalates; the Admiral gets an unresolved
+    # round(3) >= max_rounds(3) and escalates; the Coordinator gets an unresolved
     # task even though the work was sound.
     test "empty-findings in the LAST round of a 3-round gate does not consume that round",
          %{repo: repo, ws: ws} do
@@ -1297,12 +1297,12 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert merge_commit_count(repo) == 0
       assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
 
-      # The escalation to the Admiral carries the FULL ordered transcript (both
+      # The escalation to the Coordinator carries the FULL ordered transcript (both
       # rounds of findings + the implementer's response) and the current diff —
       # Darth Gnosis judges with the whole argument, not a summary.
-      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalations = Message.inbox("coordinator", workspace_id: ws.id)
       escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
-      assert escalation, "expected an escalation to the Admiral"
+      assert escalation, "expected an escalation to the coordinator"
       assert escalation.body =~ "transcript"
       assert escalation.body =~ "Round 1"
       assert escalation.body =~ "Round 2"

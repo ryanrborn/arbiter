@@ -331,7 +331,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
       assert item.prior_status == nil
       assert item.resolver_spawned_at == nil
 
-      # Acceptance criterion: Admiral / author is notified of the resolution.
+      # Acceptance criterion: Coordinator / author is notified of the resolution.
       assert_received {:notify_called, ^task_id, _ws_id, _branch}
     end
   end
@@ -395,7 +395,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
   # ---- ConflictResolver.escalate_unresolved/4 ----------------------------
 
   describe "ConflictResolver.escalate_unresolved/4" do
-    test "creates an :escalation Message addressed to admiral", %{
+    test "creates an :escalation Message addressed to coordinator", %{
       workspace: ws,
       task: task
     } do
@@ -409,7 +409,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
       messages =
         Message
-        |> filter(workspace_id == ^ws.id and to_ref == "admiral" and kind == :escalation)
+        |> filter(workspace_id == ^ws.id and to_ref == "coordinator" and kind == :escalation)
         |> Ash.read!()
 
       assert [msg] = messages

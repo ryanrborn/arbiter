@@ -91,9 +91,9 @@ defmodule Arbiter.Workflows.ConductorTest do
     Process.sleep(50)
   end
 
-  # Drain the Admiral inbox for a workspace and return unread escalations.
+  # Drain the Coordinator inbox for a workspace and return unread escalations.
   defp admiral_inbox(ws) do
-    Message.inbox("admiral", workspace_id: ws.id)
+    Message.inbox("coordinator", workspace_id: ws.id)
   end
 
   # ---- acyclicity validation ----------------------------------------------
@@ -705,10 +705,10 @@ defmodule Arbiter.Workflows.ConductorTest do
     end
   end
 
-  # ---- C5: Admiral inbox escalation ----------------------------------------
+  # ---- C5: Coordinator inbox escalation ----------------------------------------
 
-  describe "Admiral inbox escalation on failure" do
-    test "a failed member posts an :escalation to the Admiral inbox", %{ws: ws} do
+  describe "Coordinator inbox escalation on failure" do
+    test "a failed member posts an :escalation to the Coordinator inbox", %{ws: ws} do
       a = issue(ws)
       b = issue(ws)
       g = graph(ws)
@@ -731,7 +731,7 @@ defmodule Arbiter.Workflows.ConductorTest do
       escalation = Enum.find(escalations, &(&1.directive_ref == a.id))
       assert escalation != nil
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == a.id
       # The body should mention how to resume.
       assert String.contains?(escalation.body, "queue resume")

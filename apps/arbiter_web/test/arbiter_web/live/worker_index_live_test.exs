@@ -16,12 +16,12 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, ws: ws}
   end
 
-  test "empty state when no acolytes are active", %{conn: conn} do
+  test "empty state when no workers are active", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/workers")
     assert html =~ ~s(id="workers-empty")
   end
 
-  test "lists an active acolyte with its workspace, linking to detail", %{conn: conn, ws: ws} do
+  test "lists an active worker with its workspace, linking to detail", %{conn: conn, ws: ws} do
     {:ok, task} = Ash.create(Issue, %{title: "active-worker", workspace_id: ws.id})
     {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 
@@ -33,7 +33,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     assert html =~ ~s(href="/workers/#{task.id}")
   end
 
-  test "live: stopping an acolyte removes it via PubSub", %{conn: conn, ws: ws} do
+  test "live: stopping an worker removes it via PubSub", %{conn: conn, ws: ws} do
     {:ok, task} = Ash.create(Issue, %{title: "soon-stopped", workspace_id: ws.id})
     {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 

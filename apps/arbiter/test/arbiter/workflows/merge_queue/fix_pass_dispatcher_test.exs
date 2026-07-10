@@ -49,7 +49,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcherTest do
       assert prompt =~ "Failing checks:"
       assert prompt =~ "test"
       assert prompt =~ "1 failed"
-      assert prompt =~ "arb message admiral"
+      assert prompt =~ "arb message coordinator"
       assert prompt =~ "arb done"
     end
   end

@@ -46,7 +46,7 @@ defmodule Arbiter.Mergers.GitlabTest do
         assert decoded["target_branch"] == "main"
         assert decoded["title"] == "Implement GitLab merger"
         assert decoded["reviewer_ids"] == [7]
-        assert decoded["labels"] == "polecat,merger"
+        assert decoded["labels"] == "worker,merger"
 
         conn
         |> Plug.Conn.put_status(201)
@@ -58,7 +58,7 @@ defmodule Arbiter.Mergers.GitlabTest do
 
       assert {:ok, @ref} =
                Gitlab.open("feature/bd-9bn4n9", "Implement GitLab merger", "body", %{
-                 labels: ["polecat", "merger"]
+                 labels: ["worker", "merger"]
                })
     end
 

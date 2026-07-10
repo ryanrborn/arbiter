@@ -37,7 +37,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       {:ok, issue} =
         Ash.create(Arbiter.Tasks.Issue, %{
-          title: "Wire the admiral mailbox",
+          title: "Wire the coordinator mailbox",
           workspace_id: workspace.id
         })
 
@@ -50,7 +50,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                })
 
       assert only_notification(workspace.id).body ==
-               "Wire the admiral mailbox completed in 5s"
+               "Wire the coordinator mailbox completed in 5s"
     end
   end
 
@@ -169,11 +169,11 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     end
   end
 
-  describe "acolyte_stopped/2 (bd-awi4nw)" do
+  describe "worker_stopped/2 (bd-awi4nw)" do
     alias Arbiter.Worker.StopReason
 
     defp only_escalation(ws) do
-      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert [escalation] = Message.inbox("coordinator", workspace_id: ws)
       escalation
     end
 
@@ -183,7 +183,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{
                    task_id: task_id,
                    workspace_id: ws,
@@ -195,7 +195,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ task_id
       assert escalation.subject =~ "credentials expired"
@@ -211,7 +211,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
@@ -225,7 +225,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(137, [])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
@@ -237,18 +237,18 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{task_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
                  reason
                )
 
-      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+      assert Message.inbox("coordinator") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
     end
   end
 
   describe "merge_blocked/3 (#354)" do
     defp only_merge_escalation(ws) do
-      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert [escalation] = Message.inbox("coordinator", workspace_id: ws)
       escalation
     end
 
@@ -265,7 +265,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_merge_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ task_id
       assert escalation.subject =~ "merge blocked"
@@ -315,7 +315,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  :behind_base
                )
 
-      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+      assert Message.inbox("coordinator") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
     end
   end
 
@@ -332,9 +332,9 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  2
                )
 
-      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert [escalation] = Message.inbox("coordinator", workspace_id: ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ "auto-resolve exhausted (2×)"
       assert escalation.body =~ "after 2 auto-resolve attempt"
@@ -352,13 +352,13 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  2
                )
 
-      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+      assert Message.inbox("coordinator") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
     end
   end
 
   describe "approved_awaiting_merge/3 (bd-b4pwxa)" do
     defp only_await_escalation(ws) do
-      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert [escalation] = Message.inbox("coordinator", workspace_id: ws)
       escalation
     end
 
@@ -375,7 +375,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_await_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.from_ref == task_id
       assert escalation.subject =~ task_id
@@ -408,13 +408,13 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  false
                )
 
-      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+      assert Message.inbox("coordinator") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
     end
   end
 
   describe "tracker_sync_failed/3 (bd-1dun7v)" do
     defp only_tracker_escalation(ws) do
-      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert [escalation] = Message.inbox("coordinator", workspace_id: ws)
       escalation
     end
 
@@ -439,7 +439,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_tracker_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ "tracker sync failed"
       # The provider's real error must be front-and-center
@@ -514,7 +514,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  reason
                )
 
-      assert Message.inbox("admiral") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
+      assert Message.inbox("coordinator") |> Enum.filter(&(&1.from_ref == "bd-noworkspace")) == []
     end
   end
 
@@ -532,7 +532,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
                  reason
                )
 
-      assert [escalation] = Message.inbox("admiral", workspace_id: ws)
+      assert [escalation] = Message.inbox("coordinator", workspace_id: ws)
       assert escalation.subject =~ "pre-flight auth failed"
       assert escalation.body =~ "Refused to dispatch"
     end

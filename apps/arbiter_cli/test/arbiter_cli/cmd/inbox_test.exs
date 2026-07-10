@@ -3,13 +3,13 @@ defmodule ArbiterCli.Cmd.InboxTest do
 
   alias ArbiterCli.Cmd.Inbox
 
-  defp admiral_msg(attrs) do
+  defp coordinator_msg(attrs) do
     Map.merge(
       %{
         "id" => "0b9d1f2a-1111-2222-3333-444455556666",
         "kind" => "completion",
-        "from_ref" => "acolyte-019e",
-        "to_ref" => "admiral",
+        "from_ref" => "worker-019e",
+        "to_ref" => "coordinator",
         "directive_ref" => "bd-1qx1nt",
         "subject" => "GitLab adapter complete",
         "body" => "All tests green.",
@@ -19,16 +19,16 @@ defmodule ArbiterCli.Cmd.InboxTest do
     )
   end
 
-  describe "arb inbox (admiral, unread)" do
-    test "lists unread admiral mail in the directive/kind/from format" do
-      stub_get("/api/messages", %{"data" => [admiral_msg(%{})]}, 200)
+  describe "arb inbox (coordinator, unread)" do
+    test "lists unread coordinator mail in the directive/kind/from format" do
+      stub_get("/api/messages", %{"data" => [coordinator_msg(%{})]}, 200)
 
       {out, _err, code} = capture(fn -> Inbox.run([]) end)
       assert code == 0
       assert out =~ "Coordinator inbox — 1 unread"
       assert out =~ "[bd-1qx1nt]"
       assert out =~ "completion"
-      assert out =~ "from acolyte-019e"
+      assert out =~ "from worker-019e"
       assert out =~ "GitLab adapter complete"
       # The leading token is the short message id handle.
       assert out =~ "0b9d1f2a"
@@ -37,7 +37,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
     test "does NOT mark messages read (triage is deliberate)" do
       # Only the GET is stubbed. If the command tried to POST a read,
       # the stub would 500 and the body assertion below would fail.
-      stub_get("/api/messages", %{"data" => [admiral_msg(%{})]}, 200)
+      stub_get("/api/messages", %{"data" => [coordinator_msg(%{})]}, 200)
       {out, _err, code} = capture(fn -> Inbox.run([]) end)
       assert code == 0
       assert out =~ "GitLab adapter complete"
@@ -51,10 +51,10 @@ defmodule ArbiterCli.Cmd.InboxTest do
     end
 
     test "--json emits the raw message array" do
-      stub_get("/api/messages", %{"data" => [admiral_msg(%{})]}, 200)
+      stub_get("/api/messages", %{"data" => [coordinator_msg(%{})]}, 200)
       {out, _err, code} = capture(fn -> Inbox.run(["--json"]) end)
       assert code == 0
-      assert {:ok, %{"data" => [%{"to_ref" => "admiral"}]}} = Jason.decode(out)
+      assert {:ok, %{"data" => [%{"to_ref" => "coordinator"}]}} = Jason.decode(out)
     end
   end
 
@@ -62,7 +62,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
     test "lists recent read + unread" do
       stub_get(
         "/api/messages",
-        %{"data" => [admiral_msg(%{"read_at" => "2026-05-28T12:30:00.000000Z"})]},
+        %{"data" => [coordinator_msg(%{"read_at" => "2026-05-28T12:30:00.000000Z"})]},
         200
       )
 
@@ -78,7 +78,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
 
       stub_routes([
         {{"post", "/api/messages/#{id}/read"},
-         {admiral_msg(%{"id" => id, "body" => "Full body text here."}), 200}}
+         {coordinator_msg(%{"id" => id, "body" => "Full body text here."}), 200}}
       ])
 
       {out, _err, code} = capture(fn -> Inbox.run(["read", id]) end)
@@ -88,13 +88,13 @@ defmodule ArbiterCli.Cmd.InboxTest do
       assert out =~ "bd-1qx1nt"
     end
 
-    test "resolves a short id prefix against admiral mail, then reads it" do
+    test "resolves a short id prefix against coordinator mail, then reads it" do
       full = "0b9d1f2a-1111-2222-3333-444455556666"
 
       stub_routes([
-        {{"get", "/api/messages"}, {%{"data" => [admiral_msg(%{"id" => full})]}, 200}},
+        {{"get", "/api/messages"}, {%{"data" => [coordinator_msg(%{"id" => full})]}, 200}},
         {{"post", "/api/messages/#{full}/read"},
-         {admiral_msg(%{"id" => full, "body" => "Resolved by prefix."}), 200}}
+         {coordinator_msg(%{"id" => full, "body" => "Resolved by prefix."}), 200}}
       ])
 
       {out, _err, code} = capture(fn -> Inbox.run(["read", "0b9d1f2a"]) end)
@@ -170,7 +170,7 @@ defmodule ArbiterCli.Cmd.InboxTest do
               %{
                 "id" => "m-1",
                 "kind" => "direction",
-                "from_ref" => "admiral",
+                "from_ref" => "coordinator",
                 "to_ref" => "bd-1",
                 "body" => "check the API contract"
               }

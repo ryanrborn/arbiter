@@ -82,7 +82,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       Process.sleep(20)
 
       count_before =
-        Message.inbox("admiral", workspace_id: ws.id)
+        Message.inbox("coordinator", workspace_id: ws.id)
         |> Enum.count(&(&1.kind == :escalation))
 
       # A second mark_expired must not send a duplicate escalation.
@@ -90,7 +90,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       Process.sleep(20)
 
       count_after =
-        Message.inbox("admiral", workspace_id: ws.id)
+        Message.inbox("coordinator", workspace_id: ws.id)
         |> Enum.count(&(&1.kind == :escalation))
 
       assert count_after == count_before
@@ -105,11 +105,11 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       Process.sleep(100)
 
       esc1 =
-        Message.inbox("admiral", workspace_id: ws1.id)
+        Message.inbox("coordinator", workspace_id: ws1.id)
         |> Enum.find(&(&1.kind == :escalation))
 
       esc2 =
-        Message.inbox("admiral", workspace_id: ws2.id)
+        Message.inbox("coordinator", workspace_id: ws2.id)
         |> Enum.find(&(&1.kind == :escalation))
 
       assert esc1, "expected escalation in ws1 inbox"
@@ -138,7 +138,7 @@ defmodule Arbiter.Agents.CredentialWatchdogTest do
       assert CredentialWatchdog.expired?(Arbiter.Agents.Claude, pid)
 
       escalation =
-        Message.inbox("admiral", workspace_id: ws.id)
+        Message.inbox("coordinator", workspace_id: ws.id)
         |> Enum.find(&(&1.kind == :escalation))
 
       assert escalation

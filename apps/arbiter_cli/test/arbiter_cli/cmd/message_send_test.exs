@@ -18,15 +18,15 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
   end
 
   describe "arb message send <recipient> <body>" do
-    test "sends an info message to admiral by default" do
+    test "sends an info message to coordinator by default" do
       echo_create()
 
       {out, _err, code} =
-        capture(fn -> Message.run(["send", "admiral", "needs", "attention", "--json"]) end)
+        capture(fn -> Message.run(["send", "coordinator", "needs", "attention", "--json"]) end)
 
       assert code == 0
       sent = Jason.decode!(out)
-      assert sent["to_ref"] == "admiral"
+      assert sent["to_ref"] == "coordinator"
       assert sent["kind"] == "info"
       assert sent["body"] == "needs attention"
       assert sent["from_ref"] == "cli"
@@ -39,7 +39,7 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
         capture(fn ->
           Message.run([
             "send",
-            "admiral",
+            "coordinator",
             "GitLab adapter complete",
             "--kind",
             "completion",
@@ -59,25 +59,25 @@ defmodule ArbiterCli.Cmd.MessageSendTest do
     end
 
     test "from identity comes from ARB_FROM when set" do
-      System.put_env("ARB_FROM", "acolyte-019e")
+      System.put_env("ARB_FROM", "worker-019e")
       on_exit(fn -> System.delete_env("ARB_FROM") end)
       echo_create()
 
-      {out, _err, code} = capture(fn -> Message.run(["send", "admiral", "done", "--json"]) end)
+      {out, _err, code} = capture(fn -> Message.run(["send", "coordinator", "done", "--json"]) end)
       assert code == 0
-      assert Jason.decode!(out)["from_ref"] == "acolyte-019e"
+      assert Jason.decode!(out)["from_ref"] == "worker-019e"
     end
 
     test "rejects an invalid kind" do
       {_out, err, code} =
-        capture(fn -> Message.run(["send", "admiral", "x", "--kind", "bogus"]) end)
+        capture(fn -> Message.run(["send", "coordinator", "x", "--kind", "bogus"]) end)
 
       assert code != 0
       assert err =~ "invalid --kind"
     end
 
     test "requires a body" do
-      {_out, err, code} = capture(fn -> Message.run(["send", "admiral"]) end)
+      {_out, err, code} = capture(fn -> Message.run(["send", "coordinator"]) end)
       assert code != 0
       assert err =~ "requires a body"
     end

@@ -14,7 +14,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       conn =
         post(conn, ~p"/api/messages", %{
           kind: "mailbox",
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: "bd-xyz",
           subject: "heads up",
           body: "check the API contract",
@@ -38,12 +38,12 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
       assert %{"error" => %{"type" => "validation_error"}} = json_response(conn, 422)
     end
 
-    test "accepts an admiral-bound completion with a directive_ref", %{conn: conn} do
+    test "accepts a coordinator-bound completion with a directive_ref", %{conn: conn} do
       conn =
         post(conn, ~p"/api/messages", %{
           kind: "completion",
           from_ref: "bd-soren",
-          to_ref: "admiral",
+          to_ref: "coordinator",
           directive_ref: "bd-soren",
           body: "GitLab adapter complete",
           workspace_id: @ws
@@ -51,7 +51,7 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
       body = json_response(conn, 201)
       assert body["kind"] == "completion"
-      assert body["to_ref"] == "admiral"
+      assert body["to_ref"] == "coordinator"
       assert body["directive_ref"] == "bd-soren"
     end
   end
@@ -106,10 +106,10 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
   describe "DELETE /api/messages (clear)" do
     test "destroys only the read messages addressed to to_ref", %{conn: conn} do
       {:ok, unread} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "keep me"})
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "keep me"})
 
       {:ok, read} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "drain me"})
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "drain me"})
 
       {:ok, _} = Message.mark_read(read)
 
@@ -118,17 +118,17 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
           workspace_id: @ws,
           to_ref: "bd-other",
           kind: :info,
-          body: "not admiral's"
+          body: "not coordinator's"
         })
 
       {:ok, _} = Message.mark_read(other)
 
-      conn = delete(conn, ~p"/api/messages", %{to_ref: "admiral"})
+      conn = delete(conn, ~p"/api/messages", %{to_ref: "coordinator"})
 
       assert %{"data" => %{"deleted_read" => 1, "deleted_unread" => 0, "remaining_unread" => 1}} =
                json_response(conn, 200)
 
-      # The unread admiral message and the other task's read message survive.
+      # The unread coordinator message and the other task's read message survive.
       remaining = Ash.read!(Message) |> Enum.map(& &1.id) |> MapSet.new()
       assert MapSet.member?(remaining, unread.id)
       assert MapSet.member?(remaining, other.id)
@@ -137,14 +137,14 @@ defmodule ArbiterWeb.Api.MessageControllerTest do
 
     test "all=true destroys both read and unread messages addressed to to_ref", %{conn: conn} do
       {:ok, unread} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "unread"})
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "unread"})
 
       {:ok, read} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "read"})
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "read"})
 
       {:ok, _} = Message.mark_read(read)
 
-      conn = delete(conn, ~p"/api/messages", %{to_ref: "admiral", all: "true"})
+      conn = delete(conn, ~p"/api/messages", %{to_ref: "coordinator", all: "true"})
 
       assert %{"data" => %{"deleted_read" => 1, "deleted_unread" => 1, "remaining_unread" => 0}} =
                json_response(conn, 200)

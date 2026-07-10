@@ -895,7 +895,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     # The old bare `Worker.start` never failed, so a dispatch error had no
     # handling path. Now that maybe_dispatch/3 routes through
     # Dispatch.dispatch/2, a repo that can't be resolved must close the
-    # follow-up (freeing dedup for a retry) and escalate to the admiral,
+    # follow-up (freeing dedup for a retry) and escalate to the coordinator,
     # instead of leaving an idle, worktree-less worker registered forever.
     test "dispatch failure (repo not configured) closes the follow-up and escalates",
          %{ws: _ws} do
@@ -961,7 +961,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       escalations =
         Arbiter.Messages.Message
-        |> Ash.Query.filter(to_ref == "admiral" and directive_ref == ^task.id)
+        |> Ash.Query.filter(to_ref == "coordinator" and directive_ref == ^task.id)
         |> Ash.read!()
 
       assert [%{kind: :escalation}] = escalations

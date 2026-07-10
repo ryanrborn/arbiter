@@ -49,7 +49,7 @@ defmodule Arbiter.Messages.MessageTest do
         Message.send_mail(%{
           workspace_id: @ws,
           from_ref: "bd-soren",
-          to_ref: "admiral",
+          to_ref: "coordinator",
           kind: :completion,
           subject: "bd-soren complete",
           body: "done"
@@ -72,7 +72,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _m} =
         Message.send_mail(%{
           workspace_id: @ws,
-          from_ref: "admiral",
+          from_ref: "coordinator",
           to_ref: "bd-soren",
           body: "check the API contract"
         })
@@ -105,7 +105,7 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
-  describe "admiral mailbox kinds" do
+  describe "coordinator mailbox kinds" do
     test "completion/failure/escalation/info are valid and mailbox-family" do
       for kind <- ~w(completion failure escalation info)a do
         assert kind in Message.kinds()
@@ -113,19 +113,19 @@ defmodule Arbiter.Messages.MessageTest do
       end
     end
 
-    test "an worker's completion addressed to the admiral shows in the admiral inbox" do
+    test "a worker's completion addressed to the coordinator shows in the coordinator inbox" do
       {:ok, _} =
         Ash.create(Message, %{
           kind: :completion,
           from_ref: "bd-soren",
-          to_ref: "admiral",
+          to_ref: "coordinator",
           directive_ref: "bd-soren",
           subject: "GitLab adapter complete",
           body: "All 19 tests green.",
           workspace_id: @ws
         })
 
-      [msg] = Message.inbox("admiral", workspace_id: @ws)
+      [msg] = Message.inbox("coordinator", workspace_id: @ws)
       assert msg.kind == :completion
       assert msg.directive_ref == "bd-soren"
       assert msg.subject == "GitLab adapter complete"
@@ -135,14 +135,14 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, with_ref} =
         Ash.create(Message, %{
           kind: :info,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           body: "x",
           directive_ref: "bd-1",
           workspace_id: @ws
         })
 
       {:ok, without_ref} =
-        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "y", workspace_id: @ws})
+        Ash.create(Message, %{kind: :info, to_ref: "coordinator", body: "y", workspace_id: @ws})
 
       assert with_ref.directive_ref == "bd-1"
       assert without_ref.directive_ref == nil
@@ -154,13 +154,13 @@ defmodule Arbiter.Messages.MessageTest do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))
 
       {:ok, m} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "to clear"})
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "to clear"})
 
       assert_receive {:new_message, _}
       {:ok, _} = Message.mark_read(m)
       assert_receive {:message_read, _}
 
-      Message.clear_read("admiral", workspace_id: @ws)
+      Message.clear_read("coordinator", workspace_id: @ws)
 
       assert_receive {:mailbox_cleared, @ws}
     end
@@ -171,10 +171,10 @@ defmodule Arbiter.Messages.MessageTest do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ws2))
 
       {:ok, m1} =
-        Message.send_mail(%{workspace_id: @ws, to_ref: "admiral", kind: :info, body: "ws1"})
+        Message.send_mail(%{workspace_id: @ws, to_ref: "coordinator", kind: :info, body: "ws1"})
 
       {:ok, m2} =
-        Message.send_mail(%{workspace_id: ws2, to_ref: "admiral", kind: :info, body: "ws2"})
+        Message.send_mail(%{workspace_id: ws2, to_ref: "coordinator", kind: :info, body: "ws2"})
 
       {:ok, _} = Message.mark_read(m1)
       {:ok, _} = Message.mark_read(m2)
@@ -185,7 +185,7 @@ defmodule Arbiter.Messages.MessageTest do
       assert_receive {:message_read, _}
       assert_receive {:message_read, _}
 
-      Message.clear_read("admiral")
+      Message.clear_read("coordinator")
 
       received =
         for _ <- 1..2 do
@@ -207,14 +207,14 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} =
         Message.send_mail(%{
           workspace_id: @ws,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           kind: :info,
           body: "unread too"
         })
 
       assert_receive {:new_message, _}
 
-      Message.clear_all("admiral", workspace_id: @ws)
+      Message.clear_all("coordinator", workspace_id: @ws)
 
       assert_receive {:mailbox_cleared, @ws}
     end
@@ -223,14 +223,14 @@ defmodule Arbiter.Messages.MessageTest do
   describe "clear_read/2" do
     test "destroys only already-read mail addressed to to_ref, keeping unread" do
       {:ok, read} =
-        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "read", workspace_id: @ws})
+        Ash.create(Message, %{kind: :info, to_ref: "coordinator", body: "read", workspace_id: @ws})
 
       {:ok, _} = Message.mark_read(read)
 
       {:ok, unread} =
-        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "unread", workspace_id: @ws})
+        Ash.create(Message, %{kind: :info, to_ref: "coordinator", body: "unread", workspace_id: @ws})
 
-      assert Message.clear_read("admiral") == {:ok, 1, 0, 1}
+      assert Message.clear_read("coordinator") == {:ok, 1, 0, 1}
 
       assert {:error, _} = Ash.get(Message, read.id)
       assert {:ok, _} = Ash.get(Message, unread.id)
@@ -238,7 +238,7 @@ defmodule Arbiter.Messages.MessageTest do
 
     test "leaves other recipients' read mail untouched" do
       {:ok, mine} =
-        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "a", workspace_id: @ws})
+        Ash.create(Message, %{kind: :info, to_ref: "coordinator", body: "a", workspace_id: @ws})
 
       {:ok, theirs} =
         Ash.create(Message, %{kind: :info, to_ref: "bd-9", body: "b", workspace_id: @ws})
@@ -246,7 +246,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} = Message.mark_read(mine)
       {:ok, _} = Message.mark_read(theirs)
 
-      assert Message.clear_read("admiral") == {:ok, 1, 0, 0}
+      assert Message.clear_read("coordinator") == {:ok, 1, 0, 0}
       assert {:ok, _} = Ash.get(Message, theirs.id)
     end
   end
@@ -267,7 +267,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           workspace_id: @ws,
           subject: "ReviewGate: changes requested for bd-aaa",
           body: "first"
@@ -276,7 +276,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, second} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           workspace_id: @ws,
           subject: "ReviewGate: review inconclusive for bd-bbb",
           body: "second"
@@ -285,7 +285,7 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           workspace_id: "other-ws",
           body: "elsewhere"
         })
@@ -299,12 +299,12 @@ defmodule Arbiter.Messages.MessageTest do
 
     test "ignores non-escalation mailbox kinds" do
       {:ok, _} =
-        Message.send_mail(%{kind: :info, to_ref: "admiral", workspace_id: @ws, body: "fyi"})
+        Message.send_mail(%{kind: :info, to_ref: "coordinator", workspace_id: @ws, body: "fyi"})
 
       {:ok, _} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           workspace_id: @ws,
           body: "needs attention"
         })

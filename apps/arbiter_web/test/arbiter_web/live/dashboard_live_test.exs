@@ -362,7 +362,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
     end
   end
 
-  describe "completed acolytes section" do
+  describe "completed workers section" do
     test "renders an empty-state row when no runs exist", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
       assert html =~ "Completed"
@@ -482,7 +482,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _changes} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           from_ref: "bd-rejected",
           directive_ref: "bd-rejected",
           workspace_id: ws.id,
@@ -493,7 +493,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _inconclusive} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: "coordinator",
           from_ref: "bd-murky",
           directive_ref: "bd-murky",
           workspace_id: ws.id,
