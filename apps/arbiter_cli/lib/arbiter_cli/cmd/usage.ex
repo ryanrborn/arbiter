@@ -4,19 +4,21 @@ defmodule ArbiterCli.Cmd.Usage do
 
   Every Claude session (work worker or ReviewGate reviewer) writes a usage row
   with tokens (in/out/cache), cost in USD, duration, model, and provider. This
-  command rolls those rows up so you can answer "spend per campaign / per day
+  command rolls those rows up so you can answer "spend per epic / per day
   / per workspace" — and, by counting `:work` rows per task, see what got
   re-slung (rework spend).
 
   Usage:
 
-      arb usage [--by day|task|campaign|workspace|repo|model|step|provider]
+      arb usage [--by day|task|epic|workspace|repo|model|step|provider]
                 [--since YYYY-MM-DD | <iso8601>]
                 [--workspace <id>]
                 [--limit N]
                 [--json]
       arb usage events [--task <task-id>] [--workspace <id>] [--step work|review]
                        [--since ...] [--limit N] [--json]
+
+  `--by campaign` is still accepted as a deprecated alias for `--by epic`.
 
   Defaults to `--by day`. `--since 7d` and `--since 24h` are accepted as
   shortcuts. `events` lists raw rows newest-first (default limit 50) and is
