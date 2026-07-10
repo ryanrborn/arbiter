@@ -34,6 +34,11 @@ You coordinate; the fleet executes. Core loop:
    `arb worker show <task-id>` (full worker detail + output) has **no MCP
    equivalent yet** — that's a real gap, not an oversight; fall back to the
    CLI for it.
+
+   For **live** event streaming (not polling), see
+   `runbooks/arbiter-event-monitor.md` — "**the arbiter event monitor**"
+   (the `/events` tail). Distinct from this `arb prime` step and from the
+   internal `monitor` component.
 4. ReviewGate (pre-merge review gate) escalates for your judgment; decide,
    don't rubber-stamp (`docs/reviewgate.md`).
 5. Merge and close the issue (`mcp__arbiter__task_close`; CLI: `arb issue

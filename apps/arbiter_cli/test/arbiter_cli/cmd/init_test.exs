@@ -41,10 +41,24 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert File.exists?(Path.join(dir, ".gitignore"))
       assert File.exists?(Path.join(dir, "memory/MEMORY.md"))
       assert File.exists?(Path.join(dir, "notes/README.md"))
+      assert File.exists?(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
 
       assert out =~ "created"
       assert out =~ "AGENTS.md"
       assert out =~ "ARBITER_OPERATOR.md"
+      assert out =~ "runbooks/arbiter-event-monitor.md"
+    end
+
+    test "runbooks/arbiter-event-monitor.md is the canonical event monitor runbook" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      runbook = File.read!(Path.join(dir, "runbooks/arbiter-event-monitor.md"))
+
+      assert runbook =~ "arbiter event monitor"
+      assert runbook =~ "http://127.0.0.1:4848"
+      assert runbook =~ "/events"
     end
 
     test "ARBITER_OPERATOR.md is the operator field guide with all key sections" do

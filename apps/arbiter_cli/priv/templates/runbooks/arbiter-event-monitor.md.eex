@@ -1,0 +1,48 @@
+---
+title: Arbiter event monitor
+status: in use
+---
+
+# Arbiter event monitor
+
+Live-tail the Arbiter server's `/events` stream (worker done/failed, ReviewGate, inbox) so you don't have to poll.
+
+> [!note] Naming — read this first
+> **"The arbiter event monitor" = this live `/events` NDJSON tail.** It is NOT:
+> - the internal **`monitor`** runtime component, nor
+> - the generic **"Monitor"** operator step (`arb prime` / `arb <id> show`).
+> When the docs say "the event monitor," they mean the loop below.
+
+Route is `/events` (NOT `/api/events`, which 404s). Served as `application/x-ndjson` from `<%= @host %>`.
+
+> [!todo] Run the monitor — self-healing loop (re-mints a fresh token each cycle, streams directly)
+> ```bash
+> while true; do
+>   TOKEN=$(arb mcp token mint --tier coordinator --json 2>/dev/null | jq -r .token)
+>   /usr/bin/curl -sN --connect-timeout 8 --max-time 240 \
+>     "<%= @host %>/events?token=$TOKEN&subscribe=worker_done,worker_failed,review_gate,inbox" \
+>     2>/dev/null \
+>   | /usr/bin/grep --line-buffered -aE '"at"'
+>   sleep 1
+> done
+> ```
+> Each cycle re-mints a fresh token then streams. Survives token expiry and stream drops.
+
+> [!info]- Why each flag
+> - **`--max-time 240`** — recycle the connection every 4 min so a network blip drops one cycle instead of hanging forever.
+> - **`--connect-timeout 8`** — fail fast if the server's unreachable; the `while` + `sleep 1` reconnects.
+> - **`grep -aE '"at"'`** — every real event carries an `"at"` timestamp; this filters out SSE keepalives. `--line-buffered` surfaces events immediately.
+> - **absolute `/usr/bin/curl` & `/usr/bin/grep`** — on macOS zsh/mise the `command_not_found_handler` can choke on bare commands inside a loop.
+> - **`subscribe=…`** — the event classes worth waking for; adjust to taste.
+
+> [!warning] Don't tunnel the long-lived stream
+> If the server is remote, connect to it directly — do NOT wrap the long-lived stream in `ssh` (or any transport that can wedge half-open). A blip then makes the monitor go silently deaf — no error, it just stops receiving, and `curl --max-time` can't kill a wedged tunnel. A one-shot token mint over `ssh` is fine; the stream must be direct.
+
+## Running it inside an agent
+
+**Claude Code:** run the loop via the **Monitor tool** with `persistent: true`, so each event line becomes a chat notification. Do NOT use a `run_in_background` Bash — an infinite loop never exits, so it never notifies; it only buffers to a file.
+
+**Other agents (Codex, Antigravity, etc.):** use your harness's own persistent-background / output-streaming primitive if it has one; otherwise run the loop as a background process and poll its output, or skip live-tailing and rely on the mailbox.
+
+> [!danger] Backstop — the stream is not durable
+> There's no replay across the ~1s reconnect gap, so an event landing exactly then won't print. **`arb message inbox` is the source of truth**; the stream is only for live watching.

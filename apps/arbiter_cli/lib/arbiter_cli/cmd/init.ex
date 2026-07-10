@@ -28,6 +28,11 @@ defmodule ArbiterCli.Cmd.Init do
     * `memory/MEMORY.md`       — a clean memory index skeleton (and an
                                  otherwise empty `memory/` dir).
     * `notes/README.md`        — explains the surface-to-operator drop.
+    * `runbooks/arbiter-event-monitor.md` — the canonical runbook for "the
+                                 arbiter event monitor": the live `/events`
+                                 NDJSON tail, disambiguated from the internal
+                                 `monitor` runtime component and the generic
+                                 "Monitor" operator step.
     * `AGENTS.local.md`        — a stub personal overlay (gitignored, never
                                  committed); the operator fills it with
                                  persona / local identity.
@@ -79,6 +84,9 @@ defmodule ArbiterCli.Cmd.Init do
   @gitignore Path.join(@templates_dir, "gitignore.eex")
   @mcp_json Path.join(@templates_dir, "mcp_json.eex")
 
+  @runbooks_templates_dir Path.join(@templates_dir, "runbooks")
+  @runbook_event_monitor Path.join(@runbooks_templates_dir, "arbiter-event-monitor.md.eex")
+
   @doc_deploy Path.join(@docs_templates_dir, "deploy.md.eex")
   @doc_monitoring Path.join(@docs_templates_dir, "monitoring.md.eex")
   @doc_quota_and_auth Path.join(@docs_templates_dir, "quota-and-auth.md.eex")
@@ -101,6 +109,7 @@ defmodule ArbiterCli.Cmd.Init do
   @external_resource @doc_reviewgate
   @external_resource @doc_pr_patrol
   @external_resource @doc_external_trackers
+  @external_resource @runbook_event_monitor
 
   EEx.function_from_file(:defp, :render_agents_md, @agents_md, [:assigns])
   EEx.function_from_file(:defp, :render_operator_guide, @operator_guide, [:assigns])
@@ -120,6 +129,8 @@ defmodule ArbiterCli.Cmd.Init do
   EEx.function_from_file(:defp, :render_doc_reviewgate, @doc_reviewgate, [:assigns])
   EEx.function_from_file(:defp, :render_doc_pr_patrol, @doc_pr_patrol, [:assigns])
   EEx.function_from_file(:defp, :render_doc_external_trackers, @doc_external_trackers, [:assigns])
+
+  EEx.function_from_file(:defp, :render_runbook_event_monitor, @runbook_event_monitor, [:assigns])
 
   # The .gitignore template takes no runtime values — embed it verbatim at
   # compile time rather than running it through EEx with an unused binding.
@@ -154,6 +165,7 @@ defmodule ArbiterCli.Cmd.Init do
           {".mcp.json", render_mcp_json(assigns)},
           {"memory/MEMORY.md", render_memory_md(assigns)},
           {"notes/README.md", render_notes_readme(assigns)},
+          {"runbooks/arbiter-event-monitor.md", render_runbook_event_monitor(assigns)},
           {"docs/deploy.md", render_doc_deploy(assigns)},
           {"docs/monitoring.md", render_doc_monitoring(assigns)},
           {"docs/quota-and-auth.md", render_doc_quota_and_auth(assigns)},
