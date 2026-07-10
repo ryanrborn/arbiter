@@ -77,3 +77,45 @@ or "failed," read the actual diff:
 ```bash
 git diff origin/<base>...<branch> --stat
 ```
+
+## The commit gate (bd-ofql8k) checks dispatch-time metadata, not the live issue_type
+
+Before routing a completed worker to ReviewGate or the merger, Arbiter runs a
+**commit gate**: for any task whose `issue_type` isn't `task`, it requires
+the worktree be clean with ≥1 commit ahead of base. Zero commits trips it —
+Arbiter relaunches the worker once with a "you need to commit" nudge
+(capped at 1 attempt by default), and if that's still unresolved, parks the
+task `failed` with an escalation in your inbox.
+
+**The gotcha:** whether a task counts as a "reviewable code type" is decided
+from `issue_type` **stamped into the worker's metadata at dispatch time** —
+not the task's current/live `issue_type`. If you dispatch a task under the
+wrong type (e.g. `bug` instead of `task` for a research/diagnosis
+assignment) and only notice partway through, correcting the task with
+`task_update`'s `issue_type` field does **not** retroactively exempt the
+already-running worker — the worktree was already provisioned under the old
+type, and the commit gate will still fire against that stale dispatch-time
+snapshot when the worker finishes with no commits, even though the task
+record now correctly says `task`.
+
+What actually works:
+- **Get `issue_type` right before dispatching.** The only fully reliable
+  fix — there's no metadata to be stale if it was correct from the start.
+- **Caught it after dispatch, work hasn't progressed much?** Stop the
+  worker (`worker_stop`), fix the task's `issue_type`, then dispatch fresh —
+  a new dispatch re-runs worktree-provisioning logic against the corrected
+  type and skips provisioning entirely for `task`.
+- **Caught it after the worker already finished and the gate tripped?** A
+  correct, complete, genuinely no-diff piece of research/diagnosis work
+  tripping this gate is a **false positive**, not a real failure — read the
+  worker's notes (the findings are usually still there and still good, the
+  gate only judged the git history) and rule on it yourself: `task_close`
+  with a reason explaining the gate mis-fired, rather than nudging further
+  or treating the escalation as "the work is bad." Repeated nudging in this
+  situation just pressures the worker to manufacture a spurious commit for
+  work that correctly shouldn't have one.
+
+This is a distinct, earlier-stage mechanism from ReviewGate (`docs/reviewgate.md`)
+— the commit gate decides whether a worker's completion even reaches
+ReviewGate/merge routing at all; ReviewGate's own "no PR means no review" is
+a separate, later concern once a task genuinely has no code to review.

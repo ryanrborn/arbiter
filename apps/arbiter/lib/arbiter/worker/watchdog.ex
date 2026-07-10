@@ -27,7 +27,7 @@ defmodule Arbiter.Worker.Watchdog do
   ## Auto-resolving blocked merges (#354, Phase 2a)
 
   An *approved* PR that still can't merge carries a `block_reason`
-  (`effective_block_reason/1`). On an `auto_merge` lane the Warden tries to
+  (`effective_block_reason/1`). On an `auto_merge` lane the Watchdog tries to
   resolve the two mechanically-fixable reasons itself before escalating:
 
       :behind_base -> `adapter.update_branch/1` (update-branch), then re-poll.
@@ -38,7 +38,7 @@ defmodule Arbiter.Worker.Watchdog do
                       root cause and push, then re-poll.
 
   Each attempt increments a per-episode counter; after `max_auto_resolve_attempts`
-  (default 2) the Warden stops retrying and escalates with the reason + attempt
+  (default 2) the Watchdog stops retrying and escalates with the reason + attempt
   count. The remaining reasons (`:conflict`, `:needs_approval`, `:draft`,
   `:blocked_other`) keep the Phase 1 behaviour: escalate once and park.
 
@@ -94,17 +94,17 @@ defmodule Arbiter.Worker.Watchdog do
   @default_max_polls_auto 30
   @default_max_polls_manual :infinity
 
-  # Consecutive auto-resolve attempts (#354, Phase 2a) before the Warden stops
+  # Consecutive auto-resolve attempts (#354, Phase 2a) before the Watchdog stops
   # mechanically resolving a block and escalates to the coordinator with the
   # reason + attempt count. Override via opt `:max_auto_resolve_attempts` or
   # workspace config["merge"]["max_auto_resolve_attempts"].
   @default_max_auto_resolve_attempts 2
 
-  # The default dispatcher the Warden uses to spawn a fix-pass acolyte for a
+  # The default dispatcher the Watchdog uses to spawn a fix-pass acolyte for a
   # :ci_failed block. Swappable via the `:fix_pass_dispatcher` opt (tests stub it).
   @default_fix_pass_dispatcher Arbiter.Workflows.MergeQueue.FixPassDispatcher
 
-  # Consecutive safe_merge failures before the Warden pages the Admiral with a
+  # Consecutive safe_merge failures before the Watchdog pages the Admiral with a
   # stall notification (bd-6gxosc). The Watchdog keeps retrying after notifying;
   # the counter resets on a successful merge so a future stall re-notifies.
   @default_merge_fail_notify_threshold 3
@@ -112,7 +112,7 @@ defmodule Arbiter.Worker.Watchdog do
   # Registry suffix the fix-pass worker registers under — MUST match
   # `FixPassDispatcher.registry_suffix/0` so we can detect an in-flight fix pass.
   @fix_pass_registry_suffix ":fixpass"
-  # Bounded rebase attempts before the Warden gives up auto-resolving a
+  # Bounded rebase attempts before the Watchdog gives up auto-resolving a
   # `:conflict` block and escalates to the coordinator (#354, Phase 2b). Each
   # attempt is one dispatched rebase-resolve acolyte; if two consecutive passes
   # don't clear the conflict it is almost certainly semantic and needs a human.
@@ -120,7 +120,7 @@ defmodule Arbiter.Worker.Watchdog do
 
   # The resolver that dispatches a rebase-resolve acolyte against the task's
   # existing worktree. Injectable via the `:conflict_resolver` opt (tests pass a
-  # stub). The default is the same module the MergeQueue uses, so the Warden-
+  # stub). The default is the same module the MergeQueue uses, so the Watchdog-
   # driven Phase 2b flow and the legacy #122 MergeQueue path share one resolver.
   @default_conflict_resolver Arbiter.Workflows.MergeQueue.ConflictResolver
 
@@ -340,7 +340,7 @@ defmodule Arbiter.Worker.Watchdog do
           last_block_reason: nil,
           # Consecutive auto-resolve attempts for the current block episode
           # (#354, Phase 2a). Reset to 0 when the block clears. After
-          # `max_auto_resolve_attempts` the Warden escalates instead of retrying.
+          # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
           auto_resolve_attempts: 0,
           max_auto_resolve_attempts: max_auto_resolve_attempts,
           fix_pass_dispatcher: fix_pass_dispatcher,
@@ -644,7 +644,7 @@ defmodule Arbiter.Worker.Watchdog do
   # the branch caught up, the MR merged, or approval has not landed yet) resets
   # the latch so a later re-block re-escalates. Best-effort — a notifier failure
   # must not disrupt the poll loop.
-  # Phase 2b owns `:conflict`: when auto-resolve is enabled the Warden rebases
+  # Phase 2b owns `:conflict`: when auto-resolve is enabled the Watchdog rebases
   # rather than paging on a conflict, and only escalates after the bounded
   # retries are exhausted (see `maybe_auto_resolve_conflict/2`). So skip the
   # generic page here for `:conflict` — the other reasons still escalate.
@@ -890,13 +890,13 @@ defmodule Arbiter.Worker.Watchdog do
   defp max_auto_resolve_from_workspace(_), do: nil
   # Auto-resolve an approved-but-conflicting PR (#354, Phase 2b). When the
   # merger reports a `:conflict` block on an *approved* PR — mergeable in
-  # isolation but no longer applying cleanly on the moved base — the Warden
+  # isolation but no longer applying cleanly on the moved base — the Watchdog
   # dispatches a short-lived rebase-resolve acolyte against the task's existing
   # worktree instead of parking and paging a human. The acolyte rebases,
   # resolves honoring the task intent, runs tests, and force-pushes; the next
   # poll then re-attempts the merge.
   #
-  # Bounded: a resolver runs asynchronously and the Warden monitors it, so it
+  # Bounded: a resolver runs asynchronously and the Watchdog monitors it, so it
   # never spawns a second while one is in flight. After `max_conflict_attempts`
   # passes that don't clear the conflict it escalates once (attempt count +
   # context) and stays parked. A cleared conflict resets the counter so a future

@@ -2,10 +2,10 @@ defmodule Arbiter.Test.StubFixPassDispatcher do
   @moduledoc """
   In-memory `Arbiter.Workflows.MergeQueue.FixPassDispatcher` stub for tests.
 
-  Backed by a single named `Agent` so it can be observed from the Warden's poll
+  Backed by a single named `Agent` so it can be observed from the Watchdog's poll
   process (a process-dictionary stub wouldn't survive the cross-process hop).
   Records every `dispatch/1` call (assert via `call_count/0` / `last_args/0`) and
-  returns `{:ok, %{stub: true}}` so the Warden treats the dispatch as succeeded.
+  returns `{:ok, %{stub: true}}` so the Watchdog treats the dispatch as succeeded.
   """
 
   @behaviour Arbiter.Workflows.MergeQueue.FixPassDispatcher

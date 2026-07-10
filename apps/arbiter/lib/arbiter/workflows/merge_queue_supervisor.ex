@@ -81,7 +81,7 @@ defmodule Arbiter.Workflows.MergeQueueSupervisor do
   end
 
   @doc """
-  Gather the live Crucible view of every running merge queue (#354, Phase 3),
+  Gather the live queue view of every running merge queue (#354, Phase 3),
   as `[{workspace_id, [queue_item]}]`. Each queue is queried with a short call
   timeout and a busy/unreachable queue is simply skipped, so a slow poll can
   never hang the dashboard. Used by the merge-queue LiveView to render the

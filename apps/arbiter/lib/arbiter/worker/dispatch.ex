@@ -1520,12 +1520,12 @@ defmodule Arbiter.Worker.Dispatch do
   @doc """
   Briefing for a **conflict-resolve** acolyte (#354, Phase 2b).
 
-  The Warden (`Arbiter.Worker.Watchdog`) dispatches a short-lived acolyte
+  The Watchdog (`Arbiter.Worker.Watchdog`) dispatches a short-lived acolyte
   against the task's existing worktree when an *approved* PR is blocked as
   `:conflict` — mergeable in isolation but no longer applying cleanly on top of
   the current base. The acolyte's job is narrow: rebase the branch onto the
   current base, resolve the conflicts **honoring the task's original intent**,
-  fix anything the rebase broke, and force-push so the Warden's next poll can
+  fix anything the rebase broke, and force-push so the Watchdog's next poll can
   re-attempt the merge.
 
   The original intent (title / description / acceptance) is embedded so a
