@@ -232,13 +232,13 @@ defmodule Arbiter.Messages.WorktreeDeliveryTest do
       assert msg.body == "no worker here"
     end
 
-    test "existing inbox tests are unaffected (send_mail to coordinator still works)" do
+    test "existing inbox tests are unaffected (send_mail to admiral still works)" do
       {:ok, _msg} =
         Message.send_mail(%{
           kind: :escalation,
           workspace_id: @ws,
           from_ref: "bd-some-worker",
-          to_ref: "coordinator",
+          to_ref: "admiral",
           directive_ref: "bd-some-worker",
           body: "needs attention"
         })

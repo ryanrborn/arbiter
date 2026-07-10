@@ -482,7 +482,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _changes} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           from_ref: "bd-rejected",
           directive_ref: "bd-rejected",
           workspace_id: ws.id,
@@ -493,7 +493,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       {:ok, _inconclusive} =
         Message.send_mail(%{
           kind: :escalation,
-          to_ref: "coordinator",
+          to_ref: "admiral",
           from_ref: "bd-murky",
           directive_ref: "bd-murky",
           workspace_id: ws.id,

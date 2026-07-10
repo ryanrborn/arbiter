@@ -536,7 +536,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       # The proposed comments were reported to the coordinator mailbox.
       escalations =
         Arbiter.Messages.Message
-        |> Ash.Query.filter(directive_ref == ^eng.id and to_ref == "coordinator")
+        |> Ash.Query.filter(directive_ref == ^eng.id and to_ref == "admiral")
         |> Ash.read!()
 
       assert Enum.any?(escalations, fn m ->
@@ -707,7 +707,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert length(escalations) == 1
       [esc] = escalations
-      assert esc.to_ref == "coordinator"
+      assert esc.to_ref == "admiral"
       assert esc.body =~ "prauthor"
       assert esc.body =~ "why? seems fine to me"
 

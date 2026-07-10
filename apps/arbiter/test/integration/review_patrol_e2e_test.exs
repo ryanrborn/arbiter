@@ -860,7 +860,7 @@ defmodule Arbiter.Integration.ReviewPatrolE2ETest do
 
       assert length(escalations) == 1
       [esc] = escalations
-      assert esc.to_ref == "coordinator"
+      assert esc.to_ref == "admiral"
       assert esc.body =~ "dev"
       assert reload(eng).last_seen_comment_id == "501"
       assert ReviewPatrol.state(name).last_escalated == [eng.id]

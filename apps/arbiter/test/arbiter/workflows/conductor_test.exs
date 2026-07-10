@@ -731,7 +731,7 @@ defmodule Arbiter.Workflows.ConductorTest do
       escalation = Enum.find(escalations, &(&1.directive_ref == a.id))
       assert escalation != nil
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "coordinator"
+      assert escalation.to_ref == "admiral"
       assert escalation.directive_ref == a.id
       # The body should mention how to resume.
       assert String.contains?(escalation.body, "queue resume")

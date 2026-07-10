@@ -151,9 +151,9 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "coordinator_inbox/2" do
-    test "lists unread Coordinator messages and marks them read", ctx do
+    test "lists unread Admiral messages and marks them read", ctx do
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "Escalation!"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
 
       assert {:ok,
               %{
@@ -166,7 +166,7 @@ defmodule Arbiter.MCP.ToolsTest do
                Tools.coordinator_inbox(ctx.coordinator, %{})
 
       assert msg.body == "Escalation!"
-      assert msg.to_ref == "coordinator"
+      assert msg.to_ref == "admiral"
 
       # Second call is empty — the first marked them read.
       assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
@@ -175,14 +175,14 @@ defmodule Arbiter.MCP.ToolsTest do
     test "clear: true destroys already-read messages (including the ones just marked read)",
          ctx do
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "first"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
 
       # First call: lists "first" and marks it read.
       {:ok, %{count: 1}} = Tools.coordinator_inbox(ctx.coordinator, %{})
 
       # Send a second unread message.
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "second"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
 
       # With clear: true — lists "second" (count: 1), marks it read, then clears all already-read
       # messages. "first" and "second" are both read at this point, so deleted_read: 2.
@@ -194,7 +194,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-other", prefix: "cio"})
 
       {:ok, _} =
-        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "foreign"})
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "admiral", body: "foreign"})
 
       assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
     end
@@ -208,15 +208,15 @@ defmodule Arbiter.MCP.ToolsTest do
   end
 
   describe "coordinator_inbox_peek/2" do
-    test "lists unread Coordinator messages without marking them read", ctx do
+    test "lists unread Admiral messages without marking them read", ctx do
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "Escalation!"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "Escalation!"})
 
       assert {:ok, %{messages: [msg], count: 1}} =
                Tools.coordinator_inbox_peek(ctx.coordinator, %{})
 
       assert msg.body == "Escalation!"
-      assert msg.to_ref == "coordinator"
+      assert msg.to_ref == "admiral"
 
       # Second call still returns the message — it was not marked read.
       assert {:ok, %{messages: [msg2], count: 1}} =
@@ -227,10 +227,10 @@ defmodule Arbiter.MCP.ToolsTest do
 
     test "does not mutate unread count across calls", ctx do
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "first"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
 
       {:ok, _} =
-        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "coordinator", body: "second"})
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
 
       # First peek: both messages are there.
       assert {:ok, %{count: 2}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
@@ -248,7 +248,7 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, other_ws} = Ash.create(Workspace, %{name: "ci-other", prefix: "cio"})
 
       {:ok, _} =
-        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "coordinator", body: "foreign"})
+        Message.send_mail(%{workspace_id: other_ws.id, to_ref: "admiral", body: "foreign"})
 
       assert {:ok, %{count: 0}} = Tools.coordinator_inbox_peek(ctx.coordinator, %{})
     end

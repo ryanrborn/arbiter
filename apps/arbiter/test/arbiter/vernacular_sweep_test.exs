@@ -24,29 +24,29 @@ defmodule Arbiter.VernacularSweepTest do
   ]
 
   describe "vernacular sweep" do
-    test "config_dir.ex: worker_memory function is renamed to worker_memory" do
+    test "config_dir.ex: acolyte_memory function is renamed to worker_memory" do
       content = read_file("lib/arbiter/agents/claude/config_dir.ex")
 
       # Should NOT find the old function name
-      refute content =~ "def worker_memory",
-        "Found 'def worker_memory' — should be renamed to 'def worker_memory'"
+      refute content =~ "def acolyte_memory",
+        "Found 'def acolyte_memory' — should be renamed to 'def worker_memory'"
 
       # Should find the new function name
       assert content =~ "def worker_memory",
         "Should find 'def worker_memory' after renaming"
     end
 
-    test "credential_watchdog.ex: Coordinator in comments → coordinator" do
+    test "credential_watchdog.ex: Admiral in comments → coordinator" do
       content = read_file("lib/arbiter/agents/credential_watchdog.ex")
 
       # Comments should mention "coordinator" not "Admiral"
       assert content =~ "Escalates to the coordinator",
-        "Should update 'Escalates to the coordinator' to 'Escalates to the coordinator'"
+        "Should update 'Escalates to the Admiral' to 'Escalates to the coordinator'"
 
       assert content =~ "coordinator escalations",
-        "Should update Coordinator escalations to coordinator escalations"
+        "Should update Admiral escalations to coordinator escalations"
 
-      refute content =~ ~r/Escalates to the coordinator(?![\w])/,
+      refute content =~ ~r/Escalates to the Admiral(?![\w])/,
         "Should not have unqualified 'Admiral' in escalation context"
     end
 

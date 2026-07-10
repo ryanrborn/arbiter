@@ -305,7 +305,7 @@ defmodule Arbiter.Trackers.SyncTest do
       escalations = escalations_for(ws.id)
       assert length(escalations) == 1
       [summons] = escalations
-      assert summons.to_ref == "coordinator"
+      assert summons.to_ref == "admiral"
       assert summons.directive_ref == issue.id
       assert summons.subject =~ "tracker sync failed"
       assert summons.body =~ "status_map"
