@@ -253,7 +253,7 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
       assert Enum.any?(messages, fn m ->
                m.kind == :escalation and m.directive_ref == task.id
              end),
-             "expected an Coordinator escalation for task #{task.id}"
+             "expected a Coordinator escalation for task #{task.id}"
     end
   end
 

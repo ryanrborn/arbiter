@@ -1,6 +1,6 @@
 defmodule Arbiter.VernacularSweepTest do
   @moduledoc """
-  Validates that old vernacular terms (Admiral, Mayor, Worker, worker, Deacon)
+  Validates that old vernacular terms (Admiral, Mayor, Polecat, acolyte, Deacon)
   have been replaced with new terms (coordinator, worker, etc.) in comments and
   internal identifiers only — not in config keys or wire values.
 
@@ -50,53 +50,53 @@ defmodule Arbiter.VernacularSweepTest do
         "Should not have unqualified 'Admiral' in escalation context"
     end
 
-    test "by_difficulty.ex: Coordinator → coordinator in comments" do
+    test "by_difficulty.ex: Admiral → coordinator in comments" do
       content = read_file("lib/arbiter/agents/routing/by_difficulty.ex")
 
       assert content =~ ~r/coordinator signed\s+off/,
         "Should update 'Admiral signed off' to 'coordinator signed off'"
     end
 
-    test "trackers/sync.ex: Coordinator → coordinator in mailbox comments" do
+    test "trackers/sync.ex: Admiral → coordinator in mailbox comments" do
       content = read_file("lib/arbiter/trackers/sync.ex")
 
       assert content =~ "coordinator mailbox",
         "Should update 'Admiral mailbox' to 'coordinator mailbox'"
     end
 
-    test "workspace.ex: Coordinator → coordinator in comments" do
+    test "workspace.ex: Admiral → coordinator in comments" do
       content = read_file("lib/arbiter/tasks/workspace.ex")
 
       assert content =~ "escalates to the coordinator",
-        "Should update 'escalates to the coordinator' to 'escalates to the coordinator'"
+        "Should update 'escalates to the Admiral' to 'escalates to the coordinator'"
     end
 
-    test "reconciler.ex: Coordinator → coordinator" do
+    test "reconciler.ex: Admiral → coordinator" do
       content = read_file("lib/arbiter/workers/reconciler.ex")
 
       assert content =~ "coordinator's mailbox",
         "Should update 'Admiral's mailbox' to 'coordinator's mailbox'"
     end
 
-    test "events.ex: Coordinator → coordinator in event documentation" do
+    test "events.ex: Admiral → coordinator in event documentation" do
       content = read_file("lib/arbiter/events.ex")
 
       assert content =~ "coordinator ruling",
         "Should update 'Admiral ruling' to 'coordinator ruling'"
     end
 
-    test "application.ex: Coordinator → coordinator" do
+    test "application.ex: Admiral → coordinator" do
       content = read_file("lib/arbiter/application.ex")
 
       assert content =~ "Escalates each to the coordinator",
-        "Should update Coordinator reference to coordinator"
+        "Should update Admiral reference to coordinator"
     end
 
-    test "github.ex: worker → worker in comments" do
+    test "github.ex: polecat → worker in comments" do
       content = read_file("lib/arbiter/github.ex")
 
       assert content =~ "worker-orchestrator",
-        "Should update 'worker-orchestrator' to 'worker-orchestrator'"
+        "Should update 'polecat-orchestrator' to 'worker-orchestrator'"
     end
 
     test "decommission_sweep.ex: mayor → coordinator in comments (but preserve historical artifact matching)" do

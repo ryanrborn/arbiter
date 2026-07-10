@@ -139,7 +139,7 @@ defmodule Arbiter.Worker.StopDetectionTest do
       assert state.meta.stop_reason.signal == 9
     end
 
-    test "an Coordinator escalation is raised naming the task + cause", %{ws: ws} do
+    test "a Coordinator escalation is raised naming the task + cause", %{ws: ws} do
       {pid, task} = start_worker(ws)
       :ok = Worker.advance(pid, :claude)
       cwd = tmp_dir!("sd-escalate")

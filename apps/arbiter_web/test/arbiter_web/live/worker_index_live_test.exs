@@ -33,7 +33,7 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     assert html =~ ~s(href="/workers/#{task.id}")
   end
 
-  test "live: stopping an worker removes it via PubSub", %{conn: conn, ws: ws} do
+  test "live: stopping a worker removes it via PubSub", %{conn: conn, ws: ws} do
     {:ok, task} = Ash.create(Issue, %{title: "soon-stopped", workspace_id: ws.id})
     {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
 

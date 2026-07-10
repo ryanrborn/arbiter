@@ -124,7 +124,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
             String.contains?(m.subject || "", "stalled")
         end)
 
-      assert stall_msg, "expected an Coordinator escalation for the stalled auto-merge"
+      assert stall_msg, "expected a Coordinator escalation for the stalled auto-merge"
       assert stall_msg.subject =~ task.id
       assert stall_msg.body =~ "!stall1"
       assert stall_msg.body =~ "3"
@@ -219,7 +219,7 @@ defmodule Arbiter.Worker.WatchdogFailureTest do
       escalation =
         Enum.find(escalations, &(&1.kind == :escalation and &1.directive_ref == task.id))
 
-      assert escalation, "expected an Coordinator escalation for the orphaned MR"
+      assert escalation, "expected a Coordinator escalation for the orphaned MR"
       assert escalation.subject =~ "Watchdog startup failed"
       assert escalation.body =~ "!orphan2"
       assert escalation.body =~ task.id
