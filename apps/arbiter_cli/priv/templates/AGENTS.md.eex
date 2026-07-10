@@ -126,8 +126,10 @@ workspace. The active workspace is **<%= @domain_name %>** (prefix `<%= @domain_
 
 ## Concepts
 
-- **Issue** — a unit of work (task, bug, feature). Has an id like
-  `<%= @domain_prefix %>-001`.
+- **Issue** — a unit of work. Has an id like `<%= @domain_prefix %>-001` and
+  an `issue_type`: `task`, `bug`, `feature`, `chore`, `decision`, or `epic`.
+  See "Filing convention: issue_type signals whether a PR is expected" below
+  — picking the right one isn't cosmetic.
 - **Epic** — a parent issue grouping related issues via `parent_of` edges;
   rolls up child progress and can auto-close when its children are done.
 - **Worker** — a worker agent. Dispatching an issue starts a worker to work it.
@@ -163,6 +165,44 @@ When filing, also drop a one-line **difficulty justification** in the
 description ("D3 because the change spans the routing dispatcher, two
 adapter configs, and the review_gate seam") so reviewers can sanity-check
 your call. `arb issue create --help` carries the same rubric inline.
+
+## Filing convention: issue_type signals whether a PR is expected
+
+`issue_type` isn't just a label — it tells the dispatched worker (and you,
+reading the result later) whether a committed code change is expected:
+
+- **`bug` / `feature` / `chore`** — the worker is expected to make a change,
+  commit it, and open a PR. ReviewGate engages on that PR before merge.
+- **`task`** — the generic type. Use it for anything that *isn't* expected
+  to end in a committed fix: research, investigation, tracing a bug to its
+  root cause, a spike, "read the code and report back." A `task` worker
+  should report findings via `task_update_progress` notes and close with no
+  diff and no PR.
+- **`decision`** — a choice to be made/documented, not implemented (compare
+  a design-options writeup, not a code change).
+- **`epic`** — a parent issue grouping children via `parent_of` edges; not
+  worked directly.
+
+**Why this matters beyond labeling:** ReviewGate only engages when a PR
+actually exists (see `docs/reviewgate.md`). File a pure research assignment
+as `bug` and a worker that (correctly) produces no diff can dead-end waiting
+on a review that has nothing to review. File it as `task` instead — it
+completes cleanly with `pr_ref: nil` and no ReviewGate involvement at all,
+which is the *correct* outcome for that kind of work, not a shortcut around
+review.
+
+**Get this right before you dispatch, not after.** A running worker's
+worktree-provisioning decision is made once, from `issue_type` as it stood
+*at dispatch time* — fixing the task's `issue_type` afterward with
+`task_update` (the only way to change it after filing; the CLI's
+`arb issue update` has no `--issue-type` flag as of this writing) does
+**not** retroactively exempt an already-dispatched worker from the commit
+gate (`docs/worktrees-and-workers.md`). If you catch the mistake early,
+stop the worker and re-dispatch fresh instead of patching a live run. If you
+catch it only after the worker already finished and the commit gate tripped
+on a legitimately no-diff completion, that's a false positive to rule on
+yourself (`task_close` with a reason) — see the commit-gate section in
+`docs/worktrees-and-workers.md` for the full playbook.
 
 ## Memory discipline
 

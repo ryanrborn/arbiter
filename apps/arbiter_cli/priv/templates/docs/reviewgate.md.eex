@@ -44,6 +44,21 @@ a PR is there and mergeable, the salvage path is: review it yourself, merge
 it, then close the issue manually (close-on-merge won't fire since the gate
 never passed).
 
+## No PR means no review — and that's correct for research-only issues
+
+ReviewGate only engages when a worker actually opens a PR. An issue filed
+with `issue_type: task` for research/investigation ("trace this and report
+back," a spike, a diagnosis-only assignment) is expected to close with
+`pr_ref: nil` and **no ReviewGate verdict at all** — that's a clean
+completion, not a stalled or skipped review. Don't escalate or go looking
+for a missing review on these; read the task's `notes` for the findings
+instead.
+
+This cuts the other way too: if a `bug`/`feature`/`chore` issue closes with
+no PR and no diff, that's the "empty branch" failure mode above, not a
+legitimate no-review completion — `issue_type` is the signal for which case
+you're actually looking at.
+
 ## Escalations after the round cap need your judgment, not a default
 
 When the round cap is hit, the honest failure modes are "the reviewer kept
