@@ -119,3 +119,55 @@ This is a distinct, earlier-stage mechanism from ReviewGate (`docs/reviewgate.md
 — the commit gate decides whether a worker's completion even reaches
 ReviewGate/merge routing at all; ReviewGate's own "no PR means no review" is
 a separate, later concern once a task genuinely has no code to review.
+
+## Coordinator-mediated conflict resolution
+
+When two parallel workers touch the same file, merging both PRs can produce a
+real merge conflict. While the Concurrency Discipline (see `ARBITER_OPERATOR.md`,
+"Concurrency Discipline") discourages shared edits, conflicts still happen. The
+coordinator can resolve them directly rather than asking workers to retry:
+
+1. **Create a local resolution branch** from the PR branch of one worker:
+   ```bash
+   git checkout -b resolve/<issue-id> origin/<worker-branch>
+   ```
+
+2. **Rebase onto the current base** to surface conflicts:
+   ```bash
+   git rebase origin/main
+   ```
+   (or the workspace's configured base branch if not `main`)
+
+3. **Resolve conflicts by reading both sides.** Most conflicts in this scenario
+   are additive — each worker added different fields, functions, or tests.
+   Keep both sides rather than picking one:
+   - **Type specs / schema additions**: merge all new fields from both sides
+   - **Function bodies**: take the more recent or complete structure, then graft
+     in non-conflicting additions from the other branch
+   - **Test blocks**: keep both; they usually test disjoint scenarios
+   - **Imports / module declarations**: union all new additions from both sides
+
+4. **Validate** before pushing. Compile and run the test suite to confirm the
+   merged resolution is sound:
+   ```bash
+   mix compile
+   mix test
+   ```
+
+5. **Force-push to the original branch** with a safety flag:
+   ```bash
+   git push origin resolve/<issue-id>:<original-worker-branch> --force-with-lease
+   ```
+   The `--force-with-lease` guard protects against clobbering concurrent
+   pushes to that branch.
+
+6. **Authorization is required** before force-pushing. A worker's branch is
+   in-flight work — the coordinator must obtain explicit sign-off (e.g. from
+   the task owner, the Admiral, or standing orders) before pushing, especially
+   if the branch is tied to another worker's active dispatch. Unilateral
+   force-pushes can corrupt a worker's worktree state or undo their progress.
+
+After resolution, the merged PR will reflect both workers' changes. Any
+subsequent PR from the other worker (the one whose branch was not the base
+for resolution) may also show the resolved conflicts in its diff, but CI
+will now pass since the conflicts are resolved upstream.
