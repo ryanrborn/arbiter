@@ -16,6 +16,20 @@ when the field's reported schema type says `string`. A plain string can be
 silently rejected or mangled — check the tracker's actual accepted payload
 shape, not just its documented type.
 
+## Tracker status_map mismatches cause silent, permanent failures
+
+A tracker adapter's default `status_map` may not match the actual upstream
+board's workflow states. When it doesn't, `arb issue create` succeeds locally
+but fails the upstream push silently and permanently — the create→tracker push
+only fires once at creation; no auto-retry. The worker run succeeds (locally),
+but the issue ends up with `tracker_ref: null`, unable to sync status changes
+back to the upstream board. If `arb issue create` reports or is later found to
+have `tracker_ref: null`, don't retry the same create — instead, check the
+adapter's default `status_map` against the real upstream board's workflow
+states first (usually a workflow_id/state-name mismatch). Fix the mismatch via
+`arb config set tracker.config.status_map '{...}' -w <ws>`, then close the
+broken local record and recreate.
+
 ## `tracker_sync` is reconciliation, not a push
 
 `mcp__arbiter__tracker_sync` (CLI: `arb issue sync`) claims
@@ -38,6 +52,35 @@ Some trackers accept a `"group/project"`-style string in their web UI but
 reject it (404) via the API, requiring the numeric project ID instead — and
 won't auto-encode the string form for you. If a tracker API call 404s on an
 otherwise-correct-looking reference, check whether it wants a numeric ID.
+
+## GitLab-strategy workspaces require both `host` and `project_id` in merge.config
+
+For a GitLab-strategy workspace, `merge.config` needs **both** `host` and
+`project_id` set explicitly — `credentials_ref` alone is insufficient. The
+failure mode is nasty: nothing fails at config-set or dispatch time. The
+failure surfaces much later, silently, after ReviewGate approves and the
+merge actually runs (`{:merge_failed, %Arbiter.Mergers.Gitlab.Error{kind:
+:config_missing}}`). This leaves the worker run with `status: failed`,
+`pr_ref: null`, and the issue stuck `in_progress` forever. When
+configuring a GitLab-strategy workspace, ensure both are explicitly set:
+
+```
+arb config set merge.config.host gitlab.com -w <ws>
+arb config set merge.config.project_id <numeric-id> -w <ws>
+```
+
+Even if the values seem obvious or already configured in credentials, set them
+explicitly in `merge.config` — the merger requires them.
+
+## Code-evidence audits are inconclusive, not "not started"
+
+A ticket with no code/git evidence during a staleness audit isn't necessarily
+"not started" — it may legitimately track non-code work (ops, a manual
+migration, research, a decision) that would never show up in git. When a
+code-evidence audit finds nothing for a ticket, treat that as "code audit
+doesn't apply / inconclusive," not "not started." Flag such tickets
+separately from those where the audit found clear evidence either way, and
+confirm with the operator before changing status on the inconclusive ones.
 
 ## Keep internal framing out of external comms
 
