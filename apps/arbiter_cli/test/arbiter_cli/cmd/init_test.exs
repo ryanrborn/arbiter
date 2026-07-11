@@ -61,6 +61,20 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert runbook =~ "/events"
     end
 
+    test "docs/monitoring.md documents workspace-agnostic coordinator tokens and token recovery" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      monitoring = File.read!(Path.join(dir, "docs/monitoring.md"))
+
+      # Verifies documentation about stale/legacy tokens and workspace-agnostic tokens
+      assert monitoring =~ "workspace-agnostic"
+      assert monitoring =~ "arb mcp token mint --tier coordinator"
+      assert monitoring =~ ".mcp.json"
+      assert monitoring =~ "/mcp"
+    end
+
     test "ARBITER_OPERATOR.md is the operator field guide with all key sections" do
       stub_install()
       dir = tmp_dir()
