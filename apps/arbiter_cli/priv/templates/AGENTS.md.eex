@@ -45,12 +45,18 @@ before assuming the bare-process instructions below.
 `ExecStart` is `arb start` / `arb server start`, not a release binary): treat
 it like the prod path — restart with `systemctl --user restart arbiter`,
 tail logs with `journalctl --user-unit arbiter.service -f` (not `--user -u`,
-which reads an empty namespace), and if it was never installed on this
-machine set it up once with `arb install-service` (writes a unit whose
-`ExecStart` runs `arb start` for a dev checkout, enables lingering so it
-survives logout, and starts it). `arb start` / `arb server start` no-ops if
+which reads an empty namespace). `arb start` / `arb server start` no-ops if
 the server is already up, otherwise spawns `mix phx.server` detached and
 polls `arb doctor` until green — don't hand-manage the process yourself.
+
+`arb install-service` currently only generates the **prod** unit — its
+`ExecStart` points at the OTP release binary under `~/.arbiter/current`,
+which doesn't exist in a source checkout. If this dev install was never
+wired up for systemd, don't run `arb install-service` expecting a working
+dev unit; write one by hand instead, pointing `ExecStart` at `arb start`
+(find `arb` with `which arb`) and `WorkingDirectory` at
+`<%= @install_path %>`, then `systemctl --user daemon-reload` and
+`systemctl --user enable --now arbiter`.
 
 **If bare** (no systemd unit — you started `mix phx.server` by hand):
 
