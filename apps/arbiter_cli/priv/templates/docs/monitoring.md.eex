@@ -29,6 +29,23 @@ arb mcp token mint --tier coordinator --json | jq -r .token
 Tokens expire — mint a fresh one each time you (re)start the monitor rather
 than reusing an old one across a long session.
 
+### If you see "this scope is bound to a single workspace"
+
+This error signals a stale or legacy coordinator token — one minted before
+coordinator tokens became workspace-agnostic by default. Modern coordinator
+tokens carry `workspace_id: null` and work across every workspace in the
+install. The token embedded in your `.mcp.json` is an older single-workspace
+mint. **Fix:** mint a fresh workspace-agnostic token:
+
+```bash
+arb mcp token mint --tier coordinator --json | jq -r .token
+```
+
+Then swap the new token value into `.mcp.json`'s `url` query param
+(`url=...&token=<new-token>`). Unlike adding a brand-new MCP server entry
+(which needs a full client restart), swapping an existing token is picked up
+by a simple `/mcp` reconnect in the client.
+
 ## If the server is on this machine
 
 No ssh, no VPN — just curl the loopback address directly:
