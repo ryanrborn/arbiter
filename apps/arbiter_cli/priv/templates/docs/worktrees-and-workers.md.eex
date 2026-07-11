@@ -123,9 +123,9 @@ a separate, later concern once a task genuinely has no code to review.
 ## Coordinator-mediated conflict resolution
 
 When two parallel workers touch the same file, merging both PRs can produce a
-real merge conflict. While the Concurrency Discipline (see `docs/pr-patrol.md`)
-discourages shared edits, conflicts still happen. The coordinator can resolve
-them directly rather than asking workers to retry:
+real merge conflict. While the Concurrency Discipline (see `ARBITER_OPERATOR.md`,
+"Concurrency Discipline") discourages shared edits, conflicts still happen. The
+coordinator can resolve them directly rather than asking workers to retry:
 
 1. **Create a local resolution branch** from the PR branch of one worker:
    ```bash
