@@ -1,4 +1,51 @@
-<% _ = assigns %>
+<%= if @dev_mode do %># Runbook: Deploy (dev)
+
+This install runs from a **source checkout** at `<%= @install_path %>` —
+there's no OTP release or tagged version to pull. "Deploying" means pulling
+new source and restarting the running process in place.
+
+## Deploy a new version
+
+1. **Check for local work first:** `git status` in `<%= @install_path %>`.
+   If there's unpushed local work, stop and reconcile it before pulling —
+   a `git pull` on top of it can conflict or silently shadow it.
+2. **Pull:** `git pull` in `<%= @install_path %>`.
+3. **Deps, if the pull added any:** `mix deps.get` (safe to run even when
+   nothing changed; skip only if you know deps didn't move).
+4. **Restart the server:**
+   - Systemd-wrapped: `systemctl --user restart arbiter`.
+   - Bare: kill the running `mix phx.server` process and re-run
+     `mix phx.server &`.
+5. **Rebuild and reinstall the CLI:**
+
+       cd apps/arbiter_cli && mix escript.build && \cp -f apps/arbiter_cli/arb ~/.local/bin/arb
+
+   Note the escaped `\cp` — if you have a `cp -i` shell alias, a bare `cp -f`
+   can silently no-op instead of overwriting, leaving a stale `arb` on PATH.
+6. **Confirm:** `arb server doctor` — checks the CLI and running server
+   versions match.
+
+## Never `mix clean` a live checkout
+
+`mix clean` wipes the build artifacts the running server's hot-reload
+depends on — it can wedge the server the same way a half-merged conflict
+does (see the note on merge conflicts in `docs/worktrees-and-workers.md`).
+This is a distinct, still-live footgun; don't reach for `mix clean` to "fix"
+a dev checkout that looks stale.
+
+## Pre-flight: check for active workers
+
+**Always check for running workers before a restart** — a restart abandons
+in-flight work. Idle shells are safe to lose. Guard the restart on
+`mcp__arbiter__worker_list` (CLI fallback: `arb worker list`) showing
+nothing running.
+
+## Logs
+
+Systemd-wrapped: `journalctl --user-unit arbiter.service -f` — not
+`--user -u`, which reads an empty user-journal namespace. Bare: whatever
+terminal/log redirection `mix phx.server &` was started with.
+<% else %><% _ = assigns %>
 # Runbook: Deploy
 
 Arbiter runs as a **systemd user service** from a prebuilt **OTP release** at
@@ -88,3 +135,4 @@ writes `~/.config/systemd/user/arbiter.service`, enables `loginctl
 enable-linger` so it starts at boot before any login, and starts it. Pass
 `--system` to install a machine-wide unit under `/etc/systemd/system`
 instead (needs root).
+<% end %>
