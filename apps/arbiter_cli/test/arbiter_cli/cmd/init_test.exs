@@ -61,6 +61,23 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert runbook =~ "/events"
     end
 
+    test "docs/worktrees-and-workers.md covers coordinator-mediated conflict resolution" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      doc = File.read!(Path.join(dir, "docs/worktrees-and-workers.md"))
+
+      # Verify the new section exists
+      assert doc =~ "Coordinator-mediated conflict resolution"
+      # Verify key concepts from the pattern
+      assert doc =~ "resolve/<issue-id>"
+      assert doc =~ "--force-with-lease"
+      assert doc =~ "Authorization is required"
+      assert doc =~ "mix compile"
+      assert doc =~ "mix test"
+    end
+
     test "ARBITER_OPERATOR.md is the operator field guide with all key sections" do
       stub_install()
       dir = tmp_dir()
