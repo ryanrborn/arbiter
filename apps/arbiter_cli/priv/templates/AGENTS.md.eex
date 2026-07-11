@@ -38,6 +38,27 @@ command, never MCP tool-call syntax.
 <%= if @dev_mode do %>
 This install runs from a **source checkout** at `<%= @install_path %>` —
 Arbiter dogfooding itself, not the systemd/OTP-release path most installs use.
+There are two ways a dev checkout gets supervised; check which one applies
+before assuming the bare-process instructions below.
+
+**If systemd-wrapped** (a `systemctl --user status arbiter` unit exists whose
+`ExecStart` is `arb start` / `arb server start`, not a release binary): treat
+it like the prod path — restart with `systemctl --user restart arbiter`,
+tail logs with `journalctl --user-unit arbiter.service -f` (not `--user -u`,
+which reads an empty namespace). `arb start` / `arb server start` no-ops if
+the server is already up, otherwise spawns `mix phx.server` detached and
+polls `arb doctor` until green — don't hand-manage the process yourself.
+
+`arb install-service` currently only generates the **prod** unit — its
+`ExecStart` points at the OTP release binary under `~/.arbiter/current`,
+which doesn't exist in a source checkout. If this dev install was never
+wired up for systemd, don't run `arb install-service` expecting a working
+dev unit; write one by hand instead, pointing `ExecStart` at `arb start`
+(find `arb` with `which arb`) and `WorkingDirectory` at
+`<%= @install_path %>`, then `systemctl --user daemon-reload` and
+`systemctl --user enable --now arbiter`.
+
+**If bare** (no systemd unit — you started `mix phx.server` by hand):
 
 If `arb doctor` reports the server is down:
 
@@ -46,6 +67,10 @@ If `arb doctor` reports the server is down:
     mix phx.server &              # start Phoenix in the background
 
 Wait a few seconds, then run `arb doctor` again to confirm everything is green.
+
+Either way, restarting **kills every in-flight worker** — check
+`arb worker list` first. Deploying a new version has its own runbook:
+`docs/deploy.md`.
 <% else %>
 Arbiter runs as a **systemd user service** from a prebuilt OTP release —
 `~/.arbiter/current/bin/arbiter start` under `systemctl --user`.
