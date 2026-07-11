@@ -75,6 +75,23 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert monitoring =~ "/mcp"
     end
 
+    test "docs/worktrees-and-workers.md covers coordinator-mediated conflict resolution" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      doc = File.read!(Path.join(dir, "docs/worktrees-and-workers.md"))
+
+      # Verify the new section exists
+      assert doc =~ "Coordinator-mediated conflict resolution"
+      # Verify key concepts from the pattern
+      assert doc =~ "resolve/<issue-id>"
+      assert doc =~ "--force-with-lease"
+      assert doc =~ "Authorization is required"
+      assert doc =~ "mix compile"
+      assert doc =~ "mix test"
+    end
+
     test "ARBITER_OPERATOR.md is the operator field guide with all key sections" do
       stub_install()
       dir = tmp_dir()
@@ -251,6 +268,30 @@ defmodule ArbiterCli.Cmd.InitTest do
       assert decoded["domain"]["prefix"] == "emr"
       assert is_list(decoded["files"])
       assert Enum.any?(decoded["files"], fn f -> f["path"] == "AGENTS.md" end)
+    end
+  end
+
+  describe "docs/external-trackers.md" do
+    test "includes gotchas for code-evidence audits, GitLab config, and status_map" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      trackers = File.read!(Path.join(dir, "docs/external-trackers.md"))
+
+      # Gotcha 1: Code-evidence audits are inconclusive, not "not started"
+      assert trackers =~ "code-evidence"
+      assert trackers =~ "inconclusive"
+
+      # Gotcha 2: GitLab-strategy workspaces need both host and project_id
+      assert trackers =~ "GitLab"
+      assert trackers =~ "host"
+      assert trackers =~ "project_id"
+      assert trackers =~ "merge.config"
+
+      # Gotcha 3: Tracker status_map mismatch
+      assert trackers =~ "status_map"
+      assert trackers =~ "tracker_ref"
     end
   end
 end
