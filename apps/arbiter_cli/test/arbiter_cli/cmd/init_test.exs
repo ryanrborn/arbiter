@@ -208,6 +208,62 @@ defmodule ArbiterCli.Cmd.InitTest do
     end
   end
 
+  describe "--dev mode" do
+    test "AGENTS.md covers both bare and systemd-wrapped dev sub-cases" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir, "--dev"]) end)
+      agents = File.read!(Path.join(dir, "AGENTS.md"))
+
+      # Bare source checkout sub-case (existing).
+      assert agents =~ "mix phx.server &"
+
+      # Systemd-wrapped dev sub-case (new).
+      assert agents =~ "arb start"
+      assert agents =~ "systemctl --user restart"
+      assert agents =~ "journalctl --user-unit"
+      assert agents =~ "arb install-service"
+
+      # deploy.md pointer still present for the dev-mode restart-kills-workers note.
+      assert agents =~ "docs/deploy.md"
+    end
+
+    test "docs/deploy.md renders the dev-mode manual deploy sequence" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir, "--dev"]) end)
+      deploy = File.read!(Path.join(dir, "docs/deploy.md"))
+
+      assert deploy =~ "git pull"
+      assert deploy =~ "git status"
+      assert deploy =~ "mix deps.get"
+      assert deploy =~ "systemctl --user restart"
+      assert deploy =~ "mix escript.build"
+      assert deploy =~ "\\cp -f"
+      assert deploy =~ "arb server doctor"
+      assert deploy =~ "mix clean"
+
+      # Prod-only content must not leak into the dev runbook.
+      refute deploy =~ "arb server deploy --version"
+      refute deploy =~ "~/.arbiter/current"
+    end
+
+    test "docs/deploy.md without --dev is unchanged prod release runbook" do
+      stub_install()
+      dir = tmp_dir()
+
+      capture(fn -> Init.run([dir]) end)
+      deploy = File.read!(Path.join(dir, "docs/deploy.md"))
+
+      assert deploy =~ "OTP release"
+      assert deploy =~ "arb server deploy --version"
+      assert deploy =~ "~/.arbiter/current"
+      refute deploy =~ "mix escript.build"
+    end
+  end
+
   describe "non-destructive behavior" do
     test "skips files that already exist and reports them" do
       stub_install()
