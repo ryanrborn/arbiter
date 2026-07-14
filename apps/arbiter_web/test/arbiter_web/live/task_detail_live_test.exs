@@ -5,6 +5,7 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
 
   alias Arbiter.Tasks.{Dependency, Issue, Workspace}
   alias Arbiter.Worker
+  alias Arbiter.Workers.Run
 
   setup do
     for snap <- Worker.list_children() do
@@ -104,6 +105,73 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       {:ok, _} = Ash.update(task, %{status: :in_progress})
 
       assert render(view) =~ "in_progress"
+    end
+  end
+
+  describe "Merge section — prior MR history (bd-6h4ia3)" do
+    defp create_run(task, mr_ref, started_at) do
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          repo: "test/repo",
+          status: :completed,
+          started_at: started_at,
+          mr_ref: mr_ref
+        })
+
+      run
+    end
+
+    test "single worker run with one MR shows no history clutter", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "one mr", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{pr_ref: "#100"})
+
+      create_run(task, "#100", ~U[2026-07-01 00:00:00.000000Z])
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "#100"
+      refute html =~ "Prior MRs"
+    end
+
+    test "multiple runs opening genuinely different MRs show all, most recent first", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "many mrs", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{pr_ref: "#300"})
+
+      create_run(task, "#100", ~U[2026-07-01 00:00:00.000000Z])
+      create_run(task, "#200", ~U[2026-07-02 00:00:00.000000Z])
+      create_run(task, "#300", ~U[2026-07-03 00:00:00.000000Z])
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ "Prior MRs"
+      assert html =~ "#100"
+      assert html =~ "#200"
+      assert html =~ "#300"
+
+      idx200 = :binary.match(html, "#200") |> elem(0)
+      idx100 = :binary.match(html, "#100") |> elem(0)
+      assert idx200 < idx100
+    end
+
+    test "task resumed multiple times against the same MR shows it once", %{
+      conn: conn,
+      ws: ws
+    } do
+      {:ok, task} = Ash.create(Issue, %{title: "resumed same mr", workspace_id: ws.id})
+      {:ok, task} = Ash.update(task, %{pr_ref: "#100"})
+
+      create_run(task, "#100", ~U[2026-07-01 00:00:00.000000Z])
+      create_run(task, "#100", ~U[2026-07-02 00:00:00.000000Z])
+      create_run(task, "#100", ~U[2026-07-03 00:00:00.000000Z])
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert (html |> String.split("#100") |> length()) - 1 == 1
+      refute html =~ "Prior MRs"
     end
   end
 end
