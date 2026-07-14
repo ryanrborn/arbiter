@@ -326,26 +326,34 @@ defmodule Arbiter.Worker.Worktree do
   @injected_config_patterns ~w(.mcp.json .gemini/ .codex/)
 
   @doc """
-  Return `{:ok, true}` if the committed diff between `base_ref` and HEAD contains
-  any Arbiter-injected agent-config file (`.mcp.json`, `.gemini/`, `.codex/`),
-  else `{:ok, false}`.
+  Return `{:ok, true}` if the branch's own committed diff (relative to its
+  merge-base with `base_ref`, NOT a literal `base_ref..HEAD` two-dot diff)
+  contains any Arbiter-injected agent-config file (`.mcp.json`, `.gemini/`,
+  `.codex/`), else `{:ok, false}`.
 
   These files carry per-spawn bearer tokens and must NEVER appear in commits. This
   check is the commit-gate backstop (bd-9q966y) for the case where `.git/info/exclude`
-  protection was bypassed and the file was explicitly staged and committed. Fails
-  open on any git error so a transient hiccup does not strand a completion.
+  protection was bypassed and the file was explicitly staged and committed.
+
+  Uses `merge_base/2` (bd-4ltc3e) rather than diffing straight against
+  `base_ref`'s current tip: a literal `base_ref..HEAD` diff also picks up
+  files that changed on `base_ref` itself after the branch was cut. If
+  `base_ref` later gained its own (unrelated) commit touching one of these
+  paths, every branch forked before it would false-trip on a diff it never
+  produced — exactly what a reviewer's `base...HEAD` (three-dot) compare
+  avoids. Fails open on any git error so a transient hiccup does not strand
+  a completion.
   """
   @spec has_injected_config_in_commits?(path(), String.t()) ::
           {:ok, boolean()} | {:error, error_reason()}
   def has_injected_config_in_commits?(path, base_ref \\ "main") when is_binary(path) do
-    case run_git(["diff", "--name-only", base_ref <> "..HEAD", "--"], cd: path) do
-      {:ok, output} ->
-        changed = String.split(output, "\n", trim: true)
-        found? = Enum.any?(changed, &injected_config_path?/1)
-        {:ok, found?}
-
-      {:error, _} ->
-        {:ok, false}
+    with base when is_binary(base) <- merge_base(path, base_ref),
+         {:ok, output} <- run_git(["diff", "--name-only", base <> "..HEAD", "--"], cd: path) do
+      changed = String.split(output, "\n", trim: true)
+      found? = Enum.any?(changed, &injected_config_path?/1)
+      {:ok, found?}
+    else
+      _ -> {:ok, false}
     end
   end
 
