@@ -104,29 +104,67 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # returns errno E2BIG (= 7), which Erlang surfaces as exit-code 7 with empty
   # stdout — indistinguishable from a crashed process. Passing the prompt via a
   # temp file + stdin redirect eliminates the per-argument ceiling entirely.
-  defp default_invoke(prompt, _state) do
+  defp default_invoke(prompt, state) do
     case System.find_executable("claude") do
       nil ->
         {:error, {:executable_not_found, "claude"}}
 
       path ->
         # No prompt in args — delivered via stdin below.
-        args = ["--print", "--output-format", "stream-json", "--verbose"]
-
-        # Honor the active model slot when one is seeded in the process dict.
-        # ReviewPatrol seeds `:review_agent` via `Agents.prepare(ws, :review_agent)`
-        # before running a re-review, so re-reviews can run on a cheaper model than
-        # the first pass (bd-f3fg22); mirrors `ReviewReply.default_compose/2`.
         args =
-          case Arbiter.Agents.Claude.Config.active_model() do
-            model when is_binary(model) and model != "" -> args ++ ["--model", model]
-            _ -> args
-          end
+          ["--print", "--output-format", "stream-json", "--verbose"]
+          |> maybe_add_model_arg()
+          |> maybe_add_agentic_args(state)
 
-        invoke_via_stdin(path, args, prompt)
+        invoke_via_stdin(path, args, prompt, review_cwd(state))
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
+  end
+
+  # Honor the active model slot when one is seeded in the process dict.
+  # ReviewPatrol seeds `:review_agent` via `Agents.prepare(ws, :review_agent)`
+  # before running a re-review, so re-reviews can run on a cheaper model than
+  # the first pass (bd-f3fg22); mirrors `ReviewReply.default_compose/2`.
+  defp maybe_add_model_arg(args) do
+    case Arbiter.Agents.Claude.Config.active_model() do
+      model when is_binary(model) and model != "" -> args ++ ["--model", model]
+      _ -> args
+    end
+  end
+
+  # Tier 2 (bd-6onexk): when the reviewer is running against a real PR-head
+  # checkout (`state[:review_cwd]`, set by `Arbiter.Reviews.ExternalReview`),
+  # grant it file/grep/bash tool access so it can explore beyond the diff —
+  # the diff becomes the entry point, not the entire context. Mirrors
+  # `Arbiter.Agents.Claude.Security`'s `--dangerously-skip-permissions` +
+  # `--settings` deny-list pattern, but denies only the mutating tools
+  # (Edit/Write/NotebookEdit) plus web access — the reviewer has no business
+  # changing the checkout or reaching the network, but needs Read/Grep/Bash/
+  # Glob. Diff-only reviews (no `review_cwd`) get no extra args, so the
+  # existing non-agentic invocation is byte-for-byte unchanged.
+  defp maybe_add_agentic_args(args, state) do
+    case review_cwd(state) do
+      nil ->
+        args
+
+      _cwd ->
+        settings =
+          Jason.encode!(%{
+            "permissions" => %{
+              "deny" => ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+            }
+          })
+
+        args ++ ["--dangerously-skip-permissions", "--settings", settings]
+    end
+  end
+
+  defp review_cwd(state) do
+    case Map.get(state, :review_cwd) do
+      cwd when is_binary(cwd) and cwd != "" -> cwd
+      _ -> nil
+    end
   end
 
   # Write the prompt to a temporary file and invoke claude with its stdin
@@ -140,7 +178,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # Release-env vars (ROOTDIR/BINDIR/RELEASE_*) are stripped so a node repo's
   # .nvmrc — if picked up by a shell hook — can't switch the Node runtime out
   # from under the reviewer process.
-  defp invoke_via_stdin(path, args, prompt) do
+  defp invoke_via_stdin(path, args, prompt, cwd \\ nil) do
     tmp =
       Path.join(
         System.tmp_dir!(),
@@ -156,7 +194,11 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         Enum.map_join([path | args], " ", &sh_quote/1) <> " < " <> sh_quote(tmp)
 
       env = build_invoke_env()
-      opts = [{:stderr_to_stdout, true}] ++ if(env == [], do: [], else: [{:env, env}])
+
+      opts =
+        [{:stderr_to_stdout, true}] ++
+          if(env == [], do: [], else: [{:env, env}]) ++
+          if(cwd, do: [{:cd, cwd}], else: [])
 
       case System.cmd("sh", ["-c", shell], opts) do
         {output, 0} -> extract_text_and_usage(output)
@@ -232,6 +274,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     tracker_section = tracker_context_section(Map.get(state, :tracker_context))
     pr_section = pr_section(Map.get(state, :pr))
     consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
+    tool_access_section = tool_access_section(review_cwd(state))
     elision_note = elision_note(elided_paths)
 
     """
@@ -239,7 +282,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}#{tracker_section}#{pr_section}#{consumer_section}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{tracker_section}#{pr_section}#{consumer_section}#{tool_access_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [
@@ -336,6 +379,25 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   defp consumer_refs_section(_refs), do: ""
+
+  # Tier 2 (bd-6onexk): when a real PR-head checkout is available, tell the
+  # reviewer it isn't limited to the diff below — it has read-only Read/Grep/
+  # Bash/Glob access at `cwd` and should use it to check real call sites,
+  # open neighboring modules, etc. Diff-only reviews (no checkout) get no
+  # such note since there is nothing to explore.
+  defp tool_access_section(nil), do: ""
+
+  defp tool_access_section(cwd) when is_binary(cwd) do
+    """
+    You are running with read-only file tools (Read, Grep, Bash, Glob) at \
+    #{cwd}, checked out at the PR's actual head commit. The diff below is \
+    your entry point, not your entire context — use these tools to open \
+    neighboring modules, trace real call sites, and run greps when the diff \
+    alone doesn't tell you enough. You cannot edit or write files in this \
+    checkout.
+
+    """
+  end
 
   # Generated/minified/lockfile diffs (bundled `app.js`, `package-lock.json`,
   # `mix.lock`) add nothing for a reviewer to check but routinely blow past

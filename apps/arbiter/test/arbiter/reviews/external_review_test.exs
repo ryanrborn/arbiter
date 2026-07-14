@@ -350,6 +350,163 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  describe "review/1 — worktree-backed checkout (bd-6onexk)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    # A real local "origin" + a clone of it (used as the workspace's
+    # `repo_paths` entry, standing in for a worker's shared checkout). The
+    # PR's head commit (`b.txt`) is committed to `origin` only — the clone
+    # does NOT have it yet — mirroring a PR the shared checkout hasn't
+    # fetched. Returns `{clone_path, head_sha}`.
+    defp checkout_fixture_repo do
+      root = Path.join(System.tmp_dir!(), "er-checkout-#{:erlang.unique_integer([:positive])}")
+      origin = Path.join(root, "origin")
+      clone = Path.join(root, "clone")
+      File.mkdir_p!(origin)
+
+      {_, 0} = System.cmd("git", ["init", "-q", origin])
+      {_, 0} = System.cmd("git", ["-C", origin, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", origin, "config", "user.name", "Test"])
+      File.write!(Path.join(origin, "a.txt"), "a")
+      {_, 0} = System.cmd("git", ["-C", origin, "add", "-A"])
+      {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "init"])
+
+      {_, 0} = System.cmd("git", ["clone", "-q", origin, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "remote", "set-url", "origin", origin])
+
+      File.write!(Path.join(origin, "b.txt"), "pr head content")
+      {_, 0} = System.cmd("git", ["-C", origin, "add", "-A"])
+      {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "pr head"])
+      {head_sha, 0} = System.cmd("git", ["-C", origin, "rev-parse", "HEAD"])
+
+      on_exit(fn -> File.rm_rf(root) end)
+
+      {clone, String.trim(head_sha)}
+    end
+
+    defp checkout_ws(name, repo_path) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: name,
+          prefix: uniq_prefix(),
+          config: %{
+            "repo_paths" => %{"widget" => repo_path},
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "octo",
+                "repo" => "widget",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            }
+          }
+        })
+
+      ws
+    end
+
+    defp stub_pr(head_sha) do
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        cond do
+          "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, "diff --git a/a.txt b/a.txt\n+x\n")
+
+          conn.method == "GET" and conn.request_path =~ ~r{/repos/octo/widget/pulls/\d+$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{"number" => 9, "head" => %{"sha" => head_sha}})
+            )
+
+          conn.method == "POST" and conn.request_path =~ ~r{/reviews$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"id" => 1}))
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{}))
+        end
+      end)
+    end
+
+    defp state_capturing_runner(test_pid) do
+      fn _diff, state ->
+        # Snapshot whether the checkout is actually populated *now*, while the
+        # runner is executing — `ExternalReview` tears the worktree down right
+        # after the workflow completes, which is before `review/1` returns to
+        # the caller, so checking `File.exists?` after the fact would always
+        # observe the post-teardown (already-removed) state.
+        cwd = state[:review_cwd]
+        b_txt_present? = is_binary(cwd) and File.exists?(Path.join(cwd, "b.txt"))
+        send(test_pid, {:captured_state, state, b_txt_present?})
+        {:ok, []}
+      end
+    end
+
+    test "provisions a PR-head worktree, points repo_path/review_cwd at it, tears it down after" do
+      {repo, head_sha} = checkout_fixture_repo()
+      checkout_ws("er-checkout-ok", repo)
+      stub_pr(head_sha)
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#9",
+                 repo: "widget",
+                 check_runner: state_capturing_runner(self())
+               )
+
+      assert_received {:captured_state, state, b_txt_present?}
+
+      cwd = state[:review_cwd]
+      assert is_binary(cwd)
+      assert cwd != repo
+      assert state[:repo_path] == cwd
+
+      # The worktree really was checked out at the PR head — a file that
+      # exists on `origin` at that commit but never made it into the shared
+      # clone `repo` — while the reviewer was running against it.
+      assert b_txt_present?
+
+      # Best-effort teardown ran after the workflow completed (by the time
+      # `review/1` returned to us here).
+      refute File.dir?(cwd)
+    end
+
+    test "falls back to the diff-only path (no review_cwd) when checkout can't be provisioned" do
+      # repo_path resolves to a directory that isn't a git repo at all, so
+      # `Checkout.provision/2` fails and the review must still complete using
+      # the Tier-1 diff-only path.
+      not_a_repo =
+        Path.join(System.tmp_dir!(), "er-not-a-repo-#{:erlang.unique_integer([:positive])}")
+
+      File.mkdir_p!(not_a_repo)
+      on_exit(fn -> File.rm_rf(not_a_repo) end)
+
+      checkout_ws("er-checkout-fallback", not_a_repo)
+      stub_pr("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#10",
+                 repo: "widget",
+                 check_runner: state_capturing_runner(self())
+               )
+
+      assert_received {:captured_state, state, _b_txt_present?}
+      assert state[:review_cwd] == nil
+      assert state[:repo_path] == not_a_repo
+    end
+  end
+
   describe "review/1 — follow-up engagement (Option A)" do
     setup do
       System.put_env(@env_var, "test-token")

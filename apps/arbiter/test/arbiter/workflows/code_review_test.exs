@@ -1409,6 +1409,129 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert {:ok, findings, _usage} = result
       assert findings == []
     end
+
+    # -- bd-6onexk: agentic invocation against a PR-head worktree ------------
+
+    test "default invoker runs with cwd + read-only tool access when state has :review_cwd" do
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "fake_claude_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      fake = Path.join(tmp_dir, "claude")
+      capture = Path.join(tmp_dir, "captured_argv")
+
+      # Records cwd + argv, consumes stdin, then exits 0 with an empty findings
+      # JSON so Checks.run/2 completes normally.
+      File.write!(fake, """
+      #!/bin/sh
+      cat > /dev/null
+      pwd > #{capture}
+      printf '%s\\n' "$@" >> #{capture}
+      echo '{"findings": []}'
+      """)
+
+      File.chmod!(fake, 0o755)
+
+      review_cwd =
+        Path.join(System.tmp_dir!(), "fake_review_cwd_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(review_cwd)
+
+      orig_path = System.get_env("PATH", "")
+
+      on_exit(fn ->
+        System.put_env("PATH", orig_path)
+        File.rm_rf(tmp_dir)
+        File.rm_rf(review_cwd)
+        Application.delete_env(:arbiter, :code_review_invoker)
+      end)
+
+      System.put_env("PATH", "#{tmp_dir}:#{orig_path}")
+      Application.delete_env(:arbiter, :code_review_invoker)
+
+      assert {:ok, [], _usage} =
+               Checks.run("DIFF", %{mode: :adapter, adapter: nil, review_cwd: review_cwd})
+
+      captured = File.read!(capture)
+      [cwd_line | argv_lines] = String.split(captured, "\n", trim: true)
+
+      # realpath both sides: macOS/Linux tmp dirs are frequently symlinks
+      # (e.g. /tmp -> /private/tmp), so a raw string compare of `pwd`'s
+      # output against the literal path can spuriously fail.
+      assert Path.expand(cwd_line) == Path.expand(review_cwd)
+
+      argv = Enum.join(argv_lines, " ")
+      assert argv =~ "--dangerously-skip-permissions"
+      assert argv =~ "--settings"
+      assert argv =~ "Edit"
+      assert argv =~ "Write"
+      assert argv =~ "NotebookEdit"
+    end
+
+    test "default invoker does not add cwd or agentic args when :review_cwd is absent" do
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "fake_claude_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(tmp_dir)
+      fake = Path.join(tmp_dir, "claude")
+      capture = Path.join(tmp_dir, "captured_argv")
+
+      File.write!(fake, """
+      #!/bin/sh
+      cat > /dev/null
+      printf '%s\\n' "$@" >> #{capture}
+      echo '{"findings": []}'
+      """)
+
+      File.chmod!(fake, 0o755)
+
+      orig_path = System.get_env("PATH", "")
+
+      on_exit(fn ->
+        System.put_env("PATH", orig_path)
+        File.rm_rf(tmp_dir)
+        Application.delete_env(:arbiter, :code_review_invoker)
+      end)
+
+      System.put_env("PATH", "#{tmp_dir}:#{orig_path}")
+      Application.delete_env(:arbiter, :code_review_invoker)
+
+      assert {:ok, [], _usage} = Checks.run("DIFF", %{mode: :adapter, adapter: nil})
+
+      argv = File.read!(capture)
+      refute argv =~ "--dangerously-skip-permissions"
+      refute argv =~ "--settings"
+    end
+
+    test "prompt mentions tool access when state has :review_cwd" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :adapter, review_cwd: "/some/worktree"})
+      assert_received {:prompt, prompt}
+      assert prompt =~ "/some/worktree"
+    end
+
+    test "prompt omits tool access section when :review_cwd is absent" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :local})
+      assert_received {:prompt, prompt}
+      refute prompt =~ "worktree"
+    end
   end
 
   # =======================================================================
