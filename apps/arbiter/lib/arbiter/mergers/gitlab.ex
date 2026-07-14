@@ -136,6 +136,11 @@ defmodule Arbiter.Mergers.Gitlab do
              # MR head commit SHA — ReviewPatrol records this into an
              # engagement's `last_reviewed_sha` to detect new commits later.
              head_sha: Map.get(body, "sha"),
+             # MR title/description — folded into the reviewer prompt
+             # (bd-adpwl0) so the reviewer sees the author's own account of
+             # the change's intent.
+             title: Map.get(body, "title"),
+             body: Map.get(body, "description"),
              approved: approved?(body),
              changes_requested: false,
              latest_review_id: nil,

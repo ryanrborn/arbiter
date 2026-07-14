@@ -279,6 +279,10 @@ defmodule Arbiter.Mergers.Github do
          # reply on a review thread apart from another reviewer's comment
          # (phase-2 author-reply handling, bd-8fg64x).
          author: get_in(pr, ["user", "login"]),
+         # PR title/body — folded into the reviewer prompt (bd-adpwl0) so the
+         # reviewer sees the author's own account of the change's intent.
+         title: Map.get(pr, "title"),
+         body: Map.get(pr, "body"),
          approved: approved,
          changes_requested: changes_requested,
          latest_review_id: latest_changes_requested_id(reviews),

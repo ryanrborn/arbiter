@@ -74,7 +74,9 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         {:ok, []}
 
       true ->
-        invoke_reviewer(build_prompt(diff, state), state)
+        {filtered_diff, elided_paths} = filter_diff(diff, state)
+
+        invoke_reviewer(build_prompt(filtered_diff, elided_paths, state), state)
         |> case do
           {:ok, raw} -> {:ok, parse_findings(raw)}
           {:ok, raw, usage} -> {:ok, parse_findings(raw), usage}
@@ -219,7 +221,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   defp absorb_number(map, _key, n) when not is_number(n), do: map
   defp absorb_number(map, key, n), do: Map.put(map, key, n)
 
-  defp build_prompt(diff, state) do
+  defp build_prompt(diff, elided_paths, state) do
     task_line =
       case Map.get(state, :task) do
         %{id: id, title: title} -> "Task being reviewed: #{id} — #{title}\n\n"
@@ -227,14 +229,17 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
         _ -> ""
       end
 
+    tracker_section = tracker_context_section(Map.get(state, :tracker_context))
+    pr_section = pr_section(Map.get(state, :pr))
     consumer_section = consumer_refs_section(Map.get(state, :consumer_refs))
+    elision_note = elision_note(elided_paths)
 
     """
     You are a code reviewer. Review the unified diff below for correctness,
     safety, and adherence to the task's intent. Be concise and focus on
     real problems — not style nits.
 
-    #{task_line}#{consumer_section}Respond with a SINGLE JSON object and nothing else:
+    #{task_line}#{tracker_section}#{pr_section}#{consumer_section}Respond with a SINGLE JSON object and nothing else:
 
     {
       "findings": [
@@ -253,10 +258,61 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
     If you find nothing to flag, respond with: {"findings": []}
 
     --- BEGIN DIFF ---
-    #{diff}
+    #{elision_note}#{diff}
     --- END DIFF ---
     """
   end
+
+  # Ticket body/description for the tracker item the PR implements (bd-adpwl0).
+  # `state[:tracker_context]` is threaded in by the caller (e.g.
+  # `Arbiter.Reviews.ExternalReview`) as `%{ref:, type:, title:, description:}`
+  # fetched read-only via the workspace tracker adapter. Absent for local
+  # reviews and for PRs with no linked ticket — the prompt is then unchanged.
+  defp tracker_context_section(%{ref: ref} = ctx) when is_binary(ref) and ref != "" do
+    body =
+      [ctx[:title] && "Title: #{ctx[:title]}", ctx[:description]]
+      |> Enum.filter(&non_blank?/1)
+      |> Enum.join("\n\n")
+
+    """
+    --- Tracker ticket (read-only, #{ctx[:type]}:#{ref}) ---
+    #{body}
+    --- End tracker ticket ---
+
+    """
+  end
+
+  defp tracker_context_section(_ctx), do: ""
+
+  # `state.pr` is populated by `CodeReview`'s `:load_pr` step in `:adapter`
+  # mode (the raw adapter `get/1` map) but was previously unused by the
+  # prompt — the reviewer never saw the PR author's own description of what
+  # the change is meant to do (bd-adpwl0).
+  defp pr_section(pr) when is_map(pr) do
+    title = pr[:title] || pr["title"]
+    body = pr[:body] || pr["body"]
+
+    if non_blank?(title) or non_blank?(body) do
+      parts =
+        [non_blank?(title) && "Title: #{title}", non_blank?(body) && "Body:\n#{body}"]
+        |> Enum.filter(& &1)
+        |> Enum.join("\n\n")
+
+      """
+      --- PR description ---
+      #{parts}
+      --- End PR description ---
+
+      """
+    else
+      ""
+    end
+  end
+
+  defp pr_section(_pr), do: ""
+
+  defp non_blank?(s) when is_binary(s), do: String.trim(s) != ""
+  defp non_blank?(_), do: false
 
   # Repo-scoped reviews (bd-5xsp25) carry a deterministic cross-file consumer
   # trace in `state[:consumer_refs]` (see `ConsumerTrace`) — fold it into the
@@ -280,6 +336,69 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   end
 
   defp consumer_refs_section(_refs), do: ""
+
+  # Generated/minified/lockfile diffs (bundled `app.js`, `package-lock.json`,
+  # `mix.lock`) add nothing for a reviewer to check but routinely blow past
+  # the model's context window (VR-18174 #3652: ~1.5M tokens from one bundled
+  # asset). Strip whole-file diff hunks matching an exclude glob before they
+  # ever reach the prompt; note what was dropped so the reviewer (and anyone
+  # reading its findings) knows the diff was incomplete on purpose.
+  @default_diff_excludes ["priv/static/**", "*-lock.json", "mix.lock"]
+
+  defp filter_diff(diff, state) do
+    excludes = diff_exclude_globs(state)
+
+    diff
+    |> split_diff_by_file()
+    |> Enum.reduce({[], []}, fn {path, chunk}, {kept, elided} ->
+      if excluded_path?(path, excludes) do
+        {kept, [path | elided]}
+      else
+        {[chunk | kept], elided}
+      end
+    end)
+    |> then(fn {kept, elided} ->
+      {kept |> Enum.reverse() |> Enum.join(), Enum.reverse(elided)}
+    end)
+  end
+
+  defp diff_exclude_globs(state) do
+    case Map.get(state, :diff_exclude_globs) do
+      globs when is_list(globs) -> globs
+      _ -> @default_diff_excludes
+    end
+  end
+
+  defp excluded_path?(path, excludes) when is_binary(path) do
+    Enum.any?(excludes, &Arbiter.Worker.ReviewScope.glob_match?(&1, path))
+  end
+
+  defp excluded_path?(_path, _excludes), do: false
+
+  # Split a unified diff into one chunk per file, each starting at its
+  # `diff --git a/<path> b/<path>` header. A diff with no such headers (e.g.
+  # a test fixture, or an adapter that returns a bare hunk) is returned as a
+  # single unmatched chunk — nothing to filter, so it always passes through.
+  defp split_diff_by_file(diff) do
+    diff
+    |> String.split(~r/(?=^diff --git )/m)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(fn chunk -> {diff_chunk_path(chunk), chunk} end)
+  end
+
+  defp diff_chunk_path(chunk) do
+    case Regex.run(~r/^diff --git a\/(.+?) b\/.+$/m, chunk) do
+      [_, path] -> path
+      _ -> nil
+    end
+  end
+
+  defp elision_note([]), do: ""
+
+  defp elision_note(paths) do
+    "[#{length(paths)} generated/lockfile path(s) elided from this diff: " <>
+      "#{Enum.join(paths, ", ")}]\n\n"
+  end
 
   # The model occasionally surrounds its JSON with prose ("Here's the
   # review:") despite the prompt. Be permissive: pull the first balanced

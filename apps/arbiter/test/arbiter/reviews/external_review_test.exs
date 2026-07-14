@@ -307,7 +307,8 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
               severity: :warning,
               file: ref.file,
               line: ref.line,
-              message: "call site of changed function `#{ref.identifier}` — verify it still matches"
+              message:
+                "call site of changed function `#{ref.identifier}` — verify it still matches"
             }
           end)
 
@@ -470,6 +471,102 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       engagement = Ash.get!(Issue, result.engagement)
       assert engagement.review_automation == :auto
       assert engagement.tracker_context_ref == "VR-18004"
+    end
+  end
+
+  describe "review/1 — tracker ticket body + PR metadata in the reviewer prompt (bd-adpwl0)" do
+    @jira_env "EXTERNAL_REVIEW_JIRA_TEST_TOKEN"
+
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "the PR's title + body reach state.pr and the reviewer prompt" do
+      ws = github_ws("er-pr-meta")
+      stub_full_review(head_sha: "sha-1", author: "coworker", max_comment_id: 1)
+
+      test_pid = self()
+
+      runner = fn _diff, state ->
+        send(test_pid, {:state, state})
+        {:ok, []}
+      end
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 check_runner: runner
+               )
+
+      assert_received {:state, state}
+      assert state.pr.title == "Fix widget overflow"
+      assert state.pr.body == "Closes #42 by clamping the widget height."
+    end
+
+    test "tracker_context_ref/type are fetched and threaded onto the workflow state" do
+      System.put_env(@jira_env, "test-jira-token")
+      on_exit(fn -> System.delete_env(@jira_env) end)
+
+      ws =
+        Ash.create!(Workspace, %{
+          name: "er-jira-ctx",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "octo",
+                "repo" => "widget",
+                "credentials_ref" => "env:#{@env_var}"
+              }
+            },
+            "tracker" => %{
+              "type" => "jira",
+              "config" => %{
+                "host" => "leotechnologies.atlassian.net",
+                "project_key" => "VR",
+                "credentials_ref" => "env:#{@jira_env}",
+                "email" => "tester@example.com"
+              }
+            }
+          }
+        })
+
+      stub_full_review(head_sha: "sha-1", author: "coworker", max_comment_id: 1)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        json(conn, %{
+          "key" => "VR-18174",
+          "fields" => %{
+            "summary" => "Prompt too long on large PRs",
+            "description" => "The reviewer chokes on bundled app.js diffs."
+          }
+        })
+      end)
+
+      test_pid = self()
+
+      runner = fn _diff, state ->
+        send(test_pid, {:state, state})
+        {:ok, []}
+      end
+
+      assert {:ok, _result} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 tracker_context_ref: "VR-18174",
+                 check_runner: runner
+               )
+
+      assert_received {:state, state}
+      assert state.tracker_context.ref == "VR-18174"
+      assert state.tracker_context.type == :jira
+      assert state.tracker_context.title == "Prompt too long on large PRs"
+      assert state.tracker_context.description == "The reviewer chokes on bundled app.js diffs."
     end
   end
 
@@ -845,7 +942,9 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
             "state" => "open",
             "head" => %{"sha" => head_sha},
             "user" => %{"login" => author},
-            "html_url" => "https://github.com/octo/widget/pull/42"
+            "html_url" => "https://github.com/octo/widget/pull/42",
+            "title" => Keyword.get(opts, :pr_title, "Fix widget overflow"),
+            "body" => Keyword.get(opts, :pr_body, "Closes #42 by clamping the widget height.")
           })
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
