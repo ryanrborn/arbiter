@@ -218,6 +218,22 @@ defmodule ArbiterWeb.TaskDetailLive do
     socket
     |> assign(:runs, runs)
     |> assign(:usage_by_run, usage_by_run)
+    |> assign(:prior_mr_refs, prior_mr_refs(runs, current_pr_ref(socket.assigns[:task])))
+  end
+
+  defp current_pr_ref(%Issue{pr_ref: pr_ref}), do: pr_ref
+  defp current_pr_ref(_), do: nil
+
+  # bd-6h4ia3: every distinct MR/PR ref a task's worker runs opened or adopted
+  # over its history, most recent first (runs are already sorted that way),
+  # excluding the task's current pr_ref (already shown above this list) so a
+  # task resumed repeatedly against the same MR doesn't show it twice.
+  defp prior_mr_refs(runs, current_pr_ref) do
+    runs
+    |> Enum.map(& &1.mr_ref)
+    |> Enum.filter(&present?/1)
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == current_pr_ref))
   end
 
   # ---- render ----
@@ -447,7 +463,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 </div>
 
                 <%!-- Merge section — pr_ref, target_branch, pr_body --%>
-                <%= if present?(@task.pr_ref) or present?(@task.target_branch) or present?(@task.pr_body) do %>
+                <%= if present?(@task.pr_ref) or present?(@task.target_branch) or present?(@task.pr_body) or @prior_mr_refs != [] do %>
                   <div class="border-t border-base-300 pt-3 space-y-2">
                     <h3 class="text-sm font-medium text-base-content/60 flex items-center gap-1.5">
                       <.icon name="hero-code-bracket" class="size-4" /> Merge
@@ -481,6 +497,27 @@ defmodule ArbiterWeb.TaskDetailLive do
                         </dd>
                       <% end %>
                     </dl>
+                    <div :if={@prior_mr_refs != []} class="space-y-1">
+                      <h4 class="text-xs font-medium text-base-content/50">Prior MRs</h4>
+                      <ul class="space-y-0.5">
+                        <li :for={ref <- @prior_mr_refs}>
+                          <% ref_url = pr_url(@workspace, ref) %>
+                          <%= if ref_url != "" do %>
+                            <a
+                              href={ref_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="link link-hover text-xs font-mono text-primary flex items-center gap-0.5"
+                            >
+                              #{ref}
+                              <.icon name="hero-arrow-top-right-on-square" class="size-3" />
+                            </a>
+                          <% else %>
+                            <code class="text-xs text-base-content/70">#{ref}</code>
+                          <% end %>
+                        </li>
+                      </ul>
+                    </div>
                     <div :if={present?(@task.pr_body)} class="space-y-1">
                       <h4 class="text-xs font-medium text-base-content/50">PR description</h4>
                       <pre class="whitespace-pre-wrap text-xs bg-base-100 border border-base-300 p-3 rounded-box font-mono text-base-content/80 overflow-x-auto">{@task.pr_body}</pre>

@@ -71,7 +71,9 @@ defmodule Arbiter.Workers.Run do
         :exit_code,
         :output_lines,
         :failure_reason,
-        :resumed_from_run_id
+        :resumed_from_run_id,
+        :mr_ref,
+        :merger_url
       ]
     end
 
@@ -86,7 +88,9 @@ defmodule Arbiter.Workers.Run do
         :exit_code,
         :output_lines,
         :failure_reason,
-        :task_title
+        :task_title,
+        :mr_ref,
+        :merger_url
       ]
     end
   end
@@ -177,6 +181,23 @@ defmodule Arbiter.Workers.Run do
                     "when an worker was resumed via `arb resume` rather than slung fresh, " <>
                     "so the lineage of a stopped→resumed task is traceable and metrics " <>
                     "don't double-count a single task's work as two unrelated runs."
+    end
+
+    attribute :mr_ref, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "The PR/MR ref this run opened or adopted (bd-6h4ia3). Nullable; a run " <>
+                    "that never reached the merge step (or failed before opening one) has " <>
+                    "no ref. Lets the task detail page show the full history of MRs a task " <>
+                    "went through across its worker runs, not just the task's current " <>
+                    "pr_ref (which is overwritten on each new MR)."
+    end
+
+    attribute :merger_url, :string do
+      public? true
+      constraints max_length: 2000, trim?: true
+      description "Clickable link for mr_ref, resolved at record time (best-effort)."
     end
 
     create_timestamp :inserted_at

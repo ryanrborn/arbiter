@@ -1810,6 +1810,7 @@ defmodule Arbiter.Worker do
   # actually on main.
   defp adopt_pr_and_spawn_watchdog(%State{} = state, pr_ref, adapter, workspace, opts) do
     merger_url = safe_link_for(adapter, pr_ref)
+    record_mr_ref_on_run(state, pr_ref, merger_url)
 
     new_state = %State{
       state
@@ -3442,6 +3443,7 @@ defmodule Arbiter.Worker do
                 # through to open_mr_for/3, fails opening a second PR on the
                 # already-merged branch, and the task is never auto-closed.
                 record_pr_ref_on_task(state, mr_ref)
+                record_mr_ref_on_run(state, mr_ref, merger_url)
                 sync_tracker_pr_opened(state, mr_ref, merger_url)
 
                 new_state = %State{
@@ -3636,6 +3638,7 @@ defmodule Arbiter.Worker do
           {:ok, mr_ref} ->
             merger_url = safe_link_for(adapter, mr_ref)
             record_pr_ref_on_task(state, mr_ref)
+            record_mr_ref_on_run(state, mr_ref, merger_url)
             sync_tracker_pr_opened(state, mr_ref, merger_url)
             {:ok, mr_ref}
 
@@ -3742,6 +3745,30 @@ defmodule Arbiter.Worker do
   end
 
   defp record_pr_ref_on_task(_state, _mr_ref), do: :ok
+
+  # Persist the opened/adopted MR ref onto *this run's* durable Workers.Run
+  # row (bd-6h4ia3), alongside record_pr_ref_on_task's write to the task's
+  # single pr_ref. The task's pr_ref is overwritten by whatever MR is current;
+  # this per-run column is what lets the task detail page show every distinct
+  # MR a task's worker-run history ever opened, not just the latest one.
+  # Best-effort, mirroring the other Run writes in this module (run_id nil or
+  # a DB hiccup just skips).
+  defp record_mr_ref_on_run(%State{run_id: nil}, _mr_ref, _merger_url), do: :ok
+
+  defp record_mr_ref_on_run(%State{run_id: run_id, task_id: task_id}, mr_ref, merger_url)
+       when is_binary(mr_ref) and mr_ref != "" do
+    with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
+         {:ok, _updated} <-
+           Ash.update(run, %{mr_ref: mr_ref, merger_url: merger_url}, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("mr_ref", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("mr_ref", task_id, e)
+  end
+
+  defp record_mr_ref_on_run(_state, _mr_ref, _merger_url), do: :ok
 
   # PR-open: drive the task's external tracker forward (e.g. Jira VR ->
   # In Code Review) and attach the PR as a comment + remote link. The original
