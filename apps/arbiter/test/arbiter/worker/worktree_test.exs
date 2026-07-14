@@ -183,18 +183,21 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert {:ok, true} = Worktree.has_uncommitted?(path)
     end
 
-    # Regression for bd-dg0gs6 / #172: per-task worktrees symlink `deps`
-    # (and sometimes `_build`) to a shared cache. The repo's directory-only
-    # `/deps/` `/_build/` ignore patterns don't match a symlink, so git emits
-    # `?? deps` — which previously false-tripped the commit gate on committed
-    # work. A worktree whose only untracked entries are those artifact roots
-    # must read as clean.
+    # Regression for bd-dg0gs6 / #172. `seed_compiled_deps/2` copies `deps`
+    # and `_build/<env>/lib` into every worktree as real directories, which
+    # should already match a target repo's directory-only `/deps/` `/_build/`
+    # gitignore patterns. This test guards the belt-and-suspenders fallback
+    # (see `@ignored_artifact_paths`) for when that gitignore coverage is
+    # missing, or some other untracked `deps`/`_build` entry (e.g. a symlink,
+    # from a manually-provisioned worktree, or any other unexpected leftover)
+    # shows up at the worktree root — such an entry must not false-trip the
+    # commit gate on genuinely-committed work.
     test "ignores leaked deps/_build artifact entries", %{repo: repo} do
       {:ok, path} = Worktree.create(repo, "feature/artifacts", "main")
       assert {:ok, false} = Worktree.has_uncommitted?(path)
 
-      # A `deps` symlink (as the real worktree setup creates) and an untracked
-      # `_build` dir — both should be disregarded.
+      # An untracked `deps` symlink and an untracked `_build` dir — both
+      # should be disregarded regardless of how they got there.
       File.ln_s!(System.tmp_dir!(), Path.join(path, "deps"))
       File.mkdir_p!(Path.join(path, "_build/dev"))
       assert {:ok, false} = Worktree.has_uncommitted?(path)
@@ -487,6 +490,65 @@ defmodule Arbiter.Worker.WorktreeTest do
       for app <- ~w(arbiter arbiter_web arbiter_cli) do
         refute File.exists?(Path.join([wt, "_build", "test", "lib", app]))
       end
+    end
+
+    # bd-6040y1: seed_compiled_deps only copied _build/, never deps/ itself —
+    # so `mix test` in a fresh worktree still saw every dep as "not available"
+    # and workers had to run a real `mix deps.get` against Hex on every dispatch.
+    test "copies the deps/ directory itself, not just _build/", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-deps-dir", "main")
+
+      dep_src = Path.join([repo, "deps", "jason"])
+      File.mkdir_p!(Path.join(dep_src, "lib"))
+      File.write!(Path.join([dep_src, "lib", "jason.ex"]), "defmodule Jason do end\n")
+      File.write!(Path.join(dep_src, "mix.exs"), "# jason mix.exs\n")
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      dep_dst = Path.join([wt, "deps", "jason"])
+      assert File.dir?(dep_dst)
+
+      {:ok, %File.Stat{type: type}} = File.lstat(dep_dst)
+      assert type == :directory, "deps/<dep> must be a real copy, not a symlink"
+      assert File.exists?(Path.join([dep_dst, "lib", "jason.ex"]))
+      assert File.exists?(Path.join(dep_dst, "mix.exs"))
+    end
+
+    test "deps/ copy is a no-op when the source repo has no deps dir", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-deps-no-src", "main")
+
+      refute File.dir?(Path.join(repo, "deps"))
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      refute File.dir?(Path.join(wt, "deps"))
+    end
+
+    test "skips a deps/<dep> entry that is already present in the worktree", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/seed-deps-skip-existing", "main")
+
+      File.mkdir_p!(Path.join([repo, "deps", "telemetry"]))
+      File.write!(Path.join([repo, "deps", "telemetry", "mix.exs"]), "source version")
+
+      dest_dep = Path.join([wt, "deps", "telemetry"])
+      File.mkdir_p!(dest_dep)
+      File.write!(Path.join(dest_dep, "mix.exs"), "pre-existing version")
+
+      assert :ok = Worktree.seed_compiled_deps(repo, wt)
+
+      # The pre-existing version in the worktree must not be overwritten.
+      assert File.read!(Path.join(dest_dep, "mix.exs")) == "pre-existing version"
+    end
+
+    test "create/3 seeds the deps/ directory into the fresh worktree", %{repo: repo} do
+      File.mkdir_p!(Path.join([repo, "deps", "phoenix"]))
+      File.write!(Path.join([repo, "deps", "phoenix", "mix.exs"]), "phoenix mix.exs")
+
+      assert {:ok, wt} = Worktree.create(repo, "feature/seed-deps-on-create", "main")
+
+      dep_dst = Path.join([wt, "deps", "phoenix"])
+      assert File.dir?(dep_dst), "deps/<dep> must be seeded by create/3"
+      assert File.exists?(Path.join(dep_dst, "mix.exs"))
     end
   end
 
