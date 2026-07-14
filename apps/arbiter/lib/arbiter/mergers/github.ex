@@ -1009,6 +1009,12 @@ defmodule Arbiter.Mergers.Github do
     if String.length(str) > limit, do: String.slice(str, 0, limit) <> "…", else: str
   end
 
+  # `:pending` here means genuinely in-flight (queued/running); `:neutral`
+  # means every check run has *completed* with a non-failing, non-all-success
+  # conclusion mix (e.g. `neutral`/`skipped`/`stale`) — a settled, mergeable
+  # state, not CI-still-running (bd-cnytw3 finding #1: conflating the two made
+  # the Watchdog defer indefinitely on a PR that was actually done and
+  # mergeable).
   defp map_check_run_status(runs) do
     conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
     statuses = Enum.map(runs, &Map.get(&1, "status"))
@@ -1025,7 +1031,7 @@ defmodule Arbiter.Mergers.Github do
         :running
 
       true ->
-        :pending
+        :neutral
     end
   end
 

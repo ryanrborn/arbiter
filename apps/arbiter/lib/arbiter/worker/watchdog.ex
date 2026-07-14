@@ -470,7 +470,11 @@ defmodule Arbiter.Worker.Watchdog do
   # check (bd-cnytw3). `block_reason/1` deliberately collapses this in-progress
   # state to `nil` (correctly — it's not a genuine block to escalate on), so it
   # can't tell "genuinely mergeable" apart from "CI in flight"; the raw
-  # `:pipeline` signal both adapters already expose can.
+  # `:pipeline` signal both adapters already expose can. `:pending` here means
+  # genuinely queued/in-flight on both adapters — each adapter maps its own
+  # *settled*-but-non-success states (GitHub neutral/skipped/stale check runs,
+  # GitLab skipped/manual pipelines) to `:neutral` instead, so they fall
+  # through to a real merge attempt rather than deferring forever.
   defp ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending]
 
   defp do_apply_approved_auto_merge(state) do

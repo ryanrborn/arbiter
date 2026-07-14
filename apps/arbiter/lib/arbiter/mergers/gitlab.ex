@@ -700,6 +700,17 @@ defmodule Arbiter.Mergers.Gitlab do
   defp map_pipeline_status("failed"), do: :failed
   defp map_pipeline_status("canceled"), do: :failed
   defp map_pipeline_status("running"), do: :running
+  # "skipped" (pipeline explicitly skipped) and "manual" (pipeline is done
+  # except for an optional manual job) are both *settled*, mergeable outcomes,
+  # not CI-still-running — folding them into the queued/transient bucket below
+  # made the Watchdog defer indefinitely on an already-mergeable MR
+  # (bd-cnytw3 finding #1).
+  defp map_pipeline_status("skipped"), do: :neutral
+  defp map_pipeline_status("manual"), do: :neutral
+  # "created" / "waiting_for_resource" / "preparing" / "pending" / "scheduled",
+  # and any future GitLab status we don't recognize yet, are treated as
+  # queued/transient — safer to keep deferring on an unknown status than to
+  # risk attempting a merge GitLab isn't ready for.
   defp map_pipeline_status(_), do: :pending
 
   # Fetch the latest failed pipeline for the MR, collect its failing jobs, and
