@@ -945,4 +945,68 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert ReviewPatrol.state(name).last_terminated == []
     end
   end
+
+  describe "tick/1 — pacing GitHub calls across engagements (bd-1yva53)" do
+    # A tick with many open engagements must not fire a burst of unthrottled
+    # `get()` calls — that's what trips GitHub's secondary (abuse) rate limit.
+    # Assert the pacing hook fires once per engagement after the first.
+    test "pace hook fires between engagements, not before the first", %{ws: ws} do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :review_patrol_pace_sleep_fun, fn ms ->
+        send(test_pid, {:paced, ms})
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :review_patrol_pace_sleep_fun) end)
+
+      engs = for n <- [700, 701, 702], do: engagement(ws, n)
+
+      stub(fn conn ->
+        cond do
+          Enum.any?(engs, &(conn.request_path == "/repos/owner/repo/pulls/#{&1.source_pr}")) ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"merged" => true, "html_url" => "x"})
+
+          Enum.any?(
+            engs,
+            &(conn.request_path == "/repos/owner/repo/pulls/#{&1.source_pr}/reviews")
+          ) ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # 3 engagements → 2 pace delays (none before the first).
+      assert_receive {:paced, _}
+      assert_receive {:paced, _}
+      refute_receive {:paced, _}
+
+      assert length(ReviewPatrol.state(name).last_terminated) == 3
+    end
+
+    test "a single-engagement tick never pays a pace delay", %{ws: ws} do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :review_patrol_pace_sleep_fun, fn ms ->
+        send(test_pid, {:paced, ms})
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :review_patrol_pace_sleep_fun) end)
+
+      eng = engagement(ws, 703)
+      pr_stub(703, %{"number" => 703, "merged" => true, "html_url" => "x"})
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:paced, _}
+      assert reload(eng).status == :closed
+    end
+  end
 end
