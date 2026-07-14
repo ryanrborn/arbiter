@@ -1396,7 +1396,7 @@ defmodule Arbiter.Mergers.Github do
       ]
       |> Keyword.merge(stub_opts())
 
-    case Req.request(full_opts) do
+    case perform_request(full_opts, 0) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, to_string(body)}
 
@@ -1409,6 +1409,16 @@ defmodule Arbiter.Mergers.Github do
   end
 
   # ---- Internals: HTTP -----------------------------------------------------
+
+  # Bounded retries for GitHub's *secondary* (abuse) rate limit — a transient,
+  # burst-triggered 403 distinct from primary quota exhaustion (bd-1yva53).
+  # ReviewPatrol's per-tick poll of every open engagement is the main source of
+  # these bursts; retrying here (rather than in every caller) also covers
+  # mid-review adapter calls (get_diff, post_inline_comment, …) so a single
+  # secondary-limit 403 no longer fails an entire CodeReview run.
+  @max_secondary_retries 2
+  @base_backoff_ms 250
+  @max_backoff_ms 5_000
 
   defp request(cfg, method, path, req_opts) do
     url = cfg.base_url <> path
@@ -1424,7 +1434,81 @@ defmodule Arbiter.Mergers.Github do
       |> Keyword.merge(req_opts)
       |> Keyword.merge(stub_opts())
 
-    Req.request(full_opts)
+    perform_request(full_opts, 0)
+  end
+
+  defp perform_request(full_opts, attempt) do
+    case Req.request(full_opts) do
+      {:ok, %Req.Response{status: 403} = resp} = result ->
+        if attempt < @max_secondary_retries and secondary_rate_limited?(resp) do
+          Logger.info(
+            "GitHub: secondary rate limit hit (attempt #{attempt + 1}); backing off before retry"
+          )
+
+          wait_before_retry(resp, attempt)
+          perform_request(full_opts, attempt + 1)
+        else
+          result
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # GitHub's secondary/abuse limit is a 403 whose body names it explicitly, or
+  # (per GitHub's docs) may carry a `Retry-After` header — unlike a primary
+  # quota 403, which never does. Either signal is enough to treat it as
+  # transient rather than a hard auth/permissions failure.
+  defp secondary_rate_limited?(%Req.Response{} = resp) do
+    retry_after_seconds(resp) != nil or secondary_limit_message?(resp.body)
+  end
+
+  defp secondary_limit_message?(%{"message" => msg}) when is_binary(msg) do
+    msg = String.downcase(msg)
+    String.contains?(msg, "secondary rate limit") or String.contains?(msg, "abuse detection")
+  end
+
+  defp secondary_limit_message?(_), do: false
+
+  defp wait_before_retry(resp, attempt) do
+    ms =
+      case retry_after_seconds(resp) do
+        nil -> backoff_ms(attempt)
+        seconds -> min(seconds * 1_000, @max_backoff_ms)
+      end
+
+    sleep(ms)
+  end
+
+  defp retry_after_seconds(%Req.Response{} = resp) do
+    case Req.Response.get_header(resp, "retry-after") do
+      [v | _] ->
+        case Integer.parse(v) do
+          {n, _} when n >= 0 -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # Exponential backoff with jitter, capped — used when GitHub gives no
+  # Retry-After header to honor directly.
+  defp backoff_ms(attempt) do
+    base = @base_backoff_ms * Integer.pow(2, attempt)
+    jitter = :rand.uniform(div(base, 2) + 1)
+    min(base + jitter, @max_backoff_ms)
+  end
+
+  # Overridable in tests (`Application.put_env(:arbiter, :github_retry_sleep_fun, fun)`)
+  # so retry backoff never actually blocks the test suite.
+  defp sleep(ms) do
+    case Application.get_env(:arbiter, :github_retry_sleep_fun) do
+      fun when is_function(fun, 1) -> fun.(ms)
+      _ -> Process.sleep(ms)
+    end
   end
 
   defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,

@@ -491,6 +491,93 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  # bd-1yva53: GitHub's secondary/abuse rate limit (403, distinct from primary
+  # quota exhaustion) is transient — a short backoff and retry should recover
+  # instead of failing the whole caller (ReviewPatrol tick / CodeReview step).
+  describe "secondary rate limit retry (bd-1yva53)" do
+    setup do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :github_retry_sleep_fun, fn ms ->
+        send(test_pid, {:slept, ms})
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :github_retry_sleep_fun) end)
+      :ok
+    end
+
+    defp secondary_limit_response(conn) do
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "1")
+      |> Plug.Conn.put_status(403)
+      |> Req.Test.json(%{
+        "message" =>
+          "You have exceeded a secondary rate limit and have been temporarily blocked " <>
+            "from content creation. Please retry your request again later.",
+        "documentation_url" =>
+          "https://docs.github.com/rest/overview/resources-in-the-rest-api#secondary-rate-limits"
+      })
+    end
+
+    test "retries after a secondary-limit 403 and succeeds once the retry clears" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            n = Agent.get_and_update(counter, &{&1, &1 + 1})
+
+            if n == 0 do
+              secondary_limit_response(conn)
+            else
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{"state" => "open", "merged" => false, "html_url" => "u"})
+            end
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok, %{status: :open}} = Github.get(@ref)
+      assert Agent.get(counter, & &1) == 2
+
+      # Retry-After: 1 (seconds) was honored as the backoff delay.
+      assert_receive {:slept, 1_000}
+    end
+
+    test "gives up after exhausting retries and returns the 403 error" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        Agent.update(counter, &(&1 + 1))
+        secondary_limit_response(conn)
+      end)
+
+      assert {:error, %Error{status: 403}} = Github.get(@ref)
+
+      # Bounded retries — not a tight hammer loop against the same endpoint.
+      assert Agent.get(counter, & &1) in 2..4
+    end
+
+    test "a non-secondary-limit 403 (e.g. bad credentials) is not retried" do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        Agent.update(counter, &(&1 + 1))
+
+        conn
+        |> Plug.Conn.put_status(403)
+        |> Req.Test.json(%{"message" => "Bad credentials"})
+      end)
+
+      assert {:error, %Error{status: 403}} = Github.get(@ref)
+      assert Agent.get(counter, & &1) == 1
+      refute_receive {:slept, _}
+    end
+  end
+
   # bd-95lsjb: the MergeQueue reads `changes_requested` + `latest_review_id` from
   # get/1 to drive the auto-revise path. Derived from the reviews get/1 already
   # fetches — no extra HTTP call.
