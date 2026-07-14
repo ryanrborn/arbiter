@@ -136,27 +136,32 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # Tier 2 (bd-6onexk): when the reviewer is running against a real PR-head
   # checkout (`state[:review_cwd]`, set by `Arbiter.Reviews.ExternalReview`),
   # grant it file/grep/bash tool access so it can explore beyond the diff —
-  # the diff becomes the entry point, not the entire context. Mirrors
-  # `Arbiter.Agents.Claude.Security`'s `--dangerously-skip-permissions` +
-  # `--settings` deny-list pattern, but denies only the mutating tools
-  # (Edit/Write/NotebookEdit) plus web access — the reviewer has no business
-  # changing the checkout or reaching the network, but needs Read/Grep/Bash/
-  # Glob. Diff-only reviews (no `review_cwd`) get no extra args, so the
-  # existing non-agentic invocation is byte-for-byte unchanged.
+  # the diff becomes the entry point, not the entire context. Reuses
+  # `Arbiter.Agents.Claude.Security` + `Arbiter.Agents.SecurityPolicy` (the
+  # same seam workers use) rather than an ad-hoc deny list, so the reviewer
+  # gets the full destructive-op baseline plus `network: false` (which denies
+  # `WebFetch`/`WebSearch` *and* `Bash(curl:*)`/`Bash(wget:*)`/etc — the
+  # reviewer runs against untrusted external PR content and has no business
+  # reaching the network at all) on top of denying the mutating tools
+  # (Edit/Write/NotebookEdit) — the reviewer needs Read/Grep/Bash/Glob but not
+  # write access to the checkout. Diff-only reviews (no `review_cwd`) get no
+  # extra args, so the existing non-agentic invocation is byte-for-byte
+  # unchanged.
   defp maybe_add_agentic_args(args, state) do
     case review_cwd(state) do
       nil ->
         args
 
       _cwd ->
-        settings =
-          Jason.encode!(%{
-            "permissions" => %{
-              "deny" => ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
-            }
+        policy =
+          Arbiter.Agents.SecurityPolicy.merge(Arbiter.Agents.SecurityPolicy.base(), %{
+            "permissions" => %{"deny" => ["Edit", "Write", "NotebookEdit"]},
+            "sandbox" => %{"network" => false}
           })
 
-        args ++ ["--dangerously-skip-permissions", "--settings", settings]
+        args ++
+          Arbiter.Agents.Claude.Security.permission_argv(policy) ++
+          Arbiter.Agents.Claude.Security.settings_argv(policy)
     end
   end
 
@@ -178,7 +183,7 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # Release-env vars (ROOTDIR/BINDIR/RELEASE_*) are stripped so a node repo's
   # .nvmrc — if picked up by a shell hook — can't switch the Node runtime out
   # from under the reviewer process.
-  defp invoke_via_stdin(path, args, prompt, cwd \\ nil) do
+  defp invoke_via_stdin(path, args, prompt, cwd) do
     tmp =
       Path.join(
         System.tmp_dir!(),

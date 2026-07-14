@@ -432,7 +432,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       |> maybe_put_check_runner(opts)
       |> maybe_put_tracker_context(opts, workspace)
 
-    result =
+    try do
       case Arbiter.Workflow.run(CodeReview, state) do
         {:ok, final} ->
           # After the verdict posts (or, for report-only, is computed), adopt the
@@ -447,9 +447,11 @@ defmodule Arbiter.Reviews.ExternalReview do
         {:error, _} = err ->
           err
       end
-
-    Checkout.teardown(checkout_path)
-    result
+    after
+      # Clean teardown on both the normal and crash paths — a raise inside
+      # `Arbiter.Workflow.run/2` must not leak the PR-head worktree.
+      Checkout.teardown(checkout_path)
+    end
   end
 
   # Best-effort: resolve the PR's head SHA via the adapter, then hand it to
