@@ -340,6 +340,60 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, %{pipeline: :running}} = Gitlab.get(@ref)
     end
 
+    test "pipeline is :pending when the latest pipeline is still queued/preparing" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => 4, "status" => "preparing"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :pending}} = Gitlab.get(@ref)
+    end
+
+    test "pipeline is :neutral when the latest pipeline is skipped (settled, not CI-still-running, bd-cnytw3)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => 5, "status" => "skipped"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :neutral}} = Gitlab.get(@ref)
+    end
+
+    test "pipeline is :neutral when the latest pipeline is manual (settled, not CI-still-running, bd-cnytw3)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/api/v4/projects/12345/merge_requests/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"iid" => @iid, "state" => "opened"})
+
+          "/api/v4/projects/12345/merge_requests/42/pipelines" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"id" => 6, "status" => "manual"}])
+        end
+      end)
+
+      assert {:ok, %{pipeline: :neutral}} = Gitlab.get(@ref)
+    end
+
     test "pipeline is nil when no pipelines exist" do
       stub(fn conn ->
         case conn.request_path do

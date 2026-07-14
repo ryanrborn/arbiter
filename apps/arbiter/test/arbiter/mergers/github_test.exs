@@ -433,6 +433,37 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, %{pipeline: :running}} = Github.get(@ref)
     end
 
+    test "pipeline is :neutral when all check-runs completed but mixed neutral/skipped (settled, not CI-still-running, bd-cnytw3)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "head" => %{"sha" => "mno345"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/mno345/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"status" => "completed", "conclusion" => "neutral"},
+                %{"status" => "completed", "conclusion" => "skipped"}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %{pipeline: :neutral}} = Github.get(@ref)
+    end
+
     test "pipeline is nil when no check-runs exist" do
       stub(fn conn ->
         case conn.request_path do

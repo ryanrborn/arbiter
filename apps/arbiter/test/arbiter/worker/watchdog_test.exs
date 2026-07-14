@@ -978,6 +978,18 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> StubMerger.merge_count("!ci3") >= 2 end)
       refute Worker.state(pid).status == :failed
     end
+
+    test "attempts merge (does not defer) when pipeline is :neutral — a settled but non-success state, not CI-still-running" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result(:ok)
+      StubMerger.queue_get("!ci4", [%{status: :open, approved: true, pipeline: :neutral}])
+
+      start_watchdog(pid, task_id, "!ci4", auto_merge: true, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!ci4") == 1
+    end
   end
 
   describe "open_mr resilience (bd-91rnwq)" do
