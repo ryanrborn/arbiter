@@ -65,7 +65,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   require Ash.Query
 
   alias Arbiter.Mergers
-  alias Arbiter.Reviews.Record
+  alias Arbiter.Reviews.{Checkout, Record}
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
@@ -398,6 +398,14 @@ defmodule Arbiter.Reviews.ExternalReview do
     report_only = Map.get(opts, :report_only, false)
     ws_config = workspace_config(workspace)
 
+    # Tier 2 (bd-6onexk): best-effort checkout of the PR's actual head commit
+    # into a throwaway worktree, so the reviewer gets real file/grep/bash
+    # access at PR-head instead of only the unified diff. `checkout_path` is
+    # nil when a checkout can't be provisioned (no repo_path, no head_sha, or
+    # the git operations themselves fail) — the Tier-1 diff-only path (the
+    # original `repo_path`) is then unchanged.
+    checkout_path = provision_checkout(adapter, mr_ref, workspace, repo_path)
+
     state =
       %{
         mode: :adapter,
@@ -413,27 +421,72 @@ defmodule Arbiter.Reviews.ExternalReview do
         report_only: report_only,
         # Review scope (bd-5xsp25): explicit override resolved now (doesn't
         # depend on the diff); sensitive-glob auto-escalation is resolved
-        # inside CodeReview once the diff's changed files are known.
+        # inside CodeReview once the diff's changed files are known. Once a
+        # PR-head worktree is provisioned, ConsumerTrace's cross-file grep
+        # runs against it, subsuming the old base-tree limitation.
         scope: ReviewScope.resolve(ws_config, Map.get(opts, :scope), []),
-        repo_path: repo_path,
+        repo_path: checkout_path || repo_path,
         sensitive_globs: sensitive_globs(ws_config)
       }
+      |> maybe_put(:review_cwd, checkout_path)
       |> maybe_put_check_runner(opts)
       |> maybe_put_tracker_context(opts, workspace)
 
-    case Arbiter.Workflow.run(CodeReview, state) do
-      {:ok, final} ->
-        # After the verdict posts (or, for report-only, is computed), adopt the
-        # PR into ReviewPatrol by opening a review_only engagement (Option A).
-        # Best-effort: a failure here never fails the review itself. The
-        # first-pass findings seed the engagement's `posted_findings` so
-        # ReviewPatrol's relevance gate (re-review only when a new commit touches
-        # a previously-flagged file) has something to match against.
-        engagement = maybe_create_engagement(prepared, opts, Map.get(final, :findings) || [])
-        {:ok, result(prepared, final, engagement, report_only)}
+    try do
+      case Arbiter.Workflow.run(CodeReview, state) do
+        {:ok, final} ->
+          # After the verdict posts (or, for report-only, is computed), adopt the
+          # PR into ReviewPatrol by opening a review_only engagement (Option A).
+          # Best-effort: a failure here never fails the review itself. The
+          # first-pass findings seed the engagement's `posted_findings` so
+          # ReviewPatrol's relevance gate (re-review only when a new commit touches
+          # a previously-flagged file) has something to match against.
+          engagement = maybe_create_engagement(prepared, opts, Map.get(final, :findings) || [])
+          {:ok, result(prepared, final, engagement, report_only)}
 
-      {:error, _} = err ->
-        err
+        {:error, _} = err ->
+          err
+      end
+    after
+      # Clean teardown on both the normal and crash paths — a raise inside
+      # `Arbiter.Workflow.run/2` must not leak the PR-head worktree.
+      Checkout.teardown(checkout_path)
+    end
+  end
+
+  # Best-effort: resolve the PR's head SHA via the adapter, then hand it to
+  # `Checkout.provision/2`. Returns the worktree path on success, nil on any
+  # failure (missing repo_path, adapter can't answer `get/1`, git failure) —
+  # never raises, and never blocks the review on a checkout problem.
+  defp provision_checkout(_adapter, _mr_ref, _workspace, nil), do: nil
+  defp provision_checkout(_adapter, _mr_ref, _workspace, ""), do: nil
+
+  defp provision_checkout(adapter, mr_ref, workspace, repo_path) do
+    Mergers.prepare(workspace)
+
+    case head_sha_for(adapter, mr_ref) do
+      sha when is_binary(sha) and sha != "" ->
+        case Checkout.provision(repo_path, sha) do
+          {:ok, path} ->
+            path
+
+          {:error, reason} ->
+            Logger.warning(
+              "ExternalReview: checkout provisioning failed for #{mr_ref}: #{inspect(reason)}"
+            )
+
+            nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp head_sha_for(adapter, mr_ref) do
+    case safe_adapter_call(adapter, :get, [mr_ref]) do
+      {:ok, %{} = info} -> Map.get(info, :head_sha) || Map.get(info, "head_sha")
+      _ -> nil
     end
   end
 
