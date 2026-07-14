@@ -436,6 +436,37 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "DATABASE_PATH isolation for worker child processes (bd-bzsqbu)" do
+    test "child sees a task-scoped DATABASE_PATH, not the inherited live one" do
+      System.put_env("DATABASE_PATH", "/home/ryan/dev/arbiter_dev.sqlite3")
+      on_exit(fn -> System.delete_env("DATABASE_PATH") end)
+
+      {pid, task_id} = start_worker()
+      cwd = tmp_dir!("cs-db-path")
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "echo DATABASE_PATH=$DATABASE_PATH"]
+        )
+
+      eventually(fn ->
+        case Worker.state(pid).meta do
+          %{exit_status: s} when not is_nil(s) -> s
+          _ -> nil
+        end
+      end)
+
+      lines = Worker.state(pid).meta.output_lines
+      db_line = Enum.find(lines, &String.starts_with?(&1, "DATABASE_PATH="))
+
+      refute db_line == "DATABASE_PATH=/home/ryan/dev/arbiter_dev.sqlite3"
+      assert db_line =~ task_id
+      assert db_line =~ ".sqlite3"
+    end
+  end
+
   describe "buffering" do
     test "output_lines is capped at the configured line cap" do
       {pid, _task_id} = start_worker()

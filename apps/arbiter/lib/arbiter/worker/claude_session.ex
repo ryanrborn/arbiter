@@ -875,6 +875,11 @@ defmodule Arbiter.Worker.ClaudeSession do
   # no-op on a plain dev VM (ReleaseEnv.clean_pairs/0 returns [] when no
   # release vars are detected). Caller-explicit `:env` is appended after the
   # cleanup so it can always override specific vars if needed.
+  #
+  # bd-bzsqbu: also prepend a task-scoped DATABASE_PATH override so a worker
+  # that starts its own `mix phx.server` for manual verification writes into
+  # a throwaway sqlite file instead of silently inheriting the coordinator's
+  # own DATABASE_PATH — the same file the live `arbiter.service` uses.
   defp env_pairs(opts, task_id) do
     base =
       case Keyword.fetch(opts, :env) do
@@ -883,10 +888,11 @@ defmodule Arbiter.Worker.ClaudeSession do
       end
 
     release_clean = Arbiter.Worker.ReleaseEnv.clean_pairs()
+    dev_server_clean = Arbiter.Worker.DevServerEnv.pairs(task_id)
 
     case task_id do
       id when is_binary(id) and id != "" ->
-        release_clean ++ base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
+        release_clean ++ dev_server_clean ++ base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
 
       _ ->
         release_clean ++ base
