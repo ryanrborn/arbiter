@@ -2212,6 +2212,27 @@ defmodule Arbiter.Worker.DispatchTest do
       assert Worker.whereis(task.id) == nil
     end
 
+    test "explicit repo slug resolves against a registered key differing only by _/- (bd-6rioa4)",
+         %{ws: ws, repo: repo} do
+      Application.put_env(:arbiter, @env_key, %{
+        "leo-technologies-llc/verus-server" => repo
+      })
+
+      {:ok, task} = Ash.create(Issue, %{title: "underscore slug", workspace_id: ws.id})
+
+      assert {:ok, result} =
+               Dispatch.dispatch(task.id,
+                 repo: "leo-technologies-llc/verus_server",
+                 start_driver: false,
+                 start_claude: true,
+                 claude_command: ["true"],
+                 preflight: false
+               )
+
+      assert is_binary(result.worktree_path)
+      assert File.dir?(result.worktree_path)
+    end
+
     test "dry dispatch (no start_claude) is unaffected — still parks without a repo", %{ws: ws} do
       Application.delete_env(:arbiter, @env_key)
       {:ok, task} = Ash.create(Issue, %{title: "dry dispatch", workspace_id: ws.id})
