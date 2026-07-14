@@ -634,7 +634,11 @@ defmodule Arbiter.Workflows.Conductor do
 
       :error
     else
-      case safe_dispatch(state.dispatcher, task_id, depth: depth, start_claude: true) do
+      dispatch_opts =
+        [depth: depth, start_claude: true]
+        |> maybe_put_repo(member_repo(graph_id, task_id))
+
+      case safe_dispatch(state.dispatcher, task_id, dispatch_opts) do
         {:ok, _result} ->
           :ok
 
@@ -687,6 +691,24 @@ defmodule Arbiter.Workflows.Conductor do
     |> Ash.read!()
     |> Enum.map(& &1.issue_id)
   end
+
+  # bd-69c78q: without a repo opt, `Dispatch.resolve_repo_for_dispatch/2` errors
+  # `{:ambiguous_repo, _}` on every dispatch in a workspace with more than one
+  # configured repo — read straight from the DB (not cached in `State`) so a
+  # `graph_add_directive` repo update mid-run takes effect on the very next
+  # drain, per the module's "everything derived from the DB" contract.
+  defp member_repo(graph_id, issue_id) do
+    GraphMember
+    |> Ash.Query.filter(graph_id == ^graph_id and issue_id == ^issue_id)
+    |> Ash.read!()
+    |> case do
+      [%{repo: repo} | _] -> repo
+      [] -> nil
+    end
+  end
+
+  defp maybe_put_repo(opts, nil), do: opts
+  defp maybe_put_repo(opts, repo), do: Keyword.put(opts, :repo, repo)
 
   defp load_member_issues([]), do: []
 
