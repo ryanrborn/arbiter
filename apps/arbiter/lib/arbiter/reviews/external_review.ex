@@ -419,6 +419,7 @@ defmodule Arbiter.Reviews.ExternalReview do
         sensitive_globs: sensitive_globs(ws_config)
       }
       |> maybe_put_check_runner(opts)
+      |> maybe_put_tracker_context(opts, workspace)
 
     case Arbiter.Workflow.run(CodeReview, state) do
       {:ok, final} ->
@@ -849,6 +850,51 @@ defmodule Arbiter.Reviews.ExternalReview do
       _ ->
         attrs
     end
+  end
+
+  # Fetch the linked tracker ticket (title + description) so `Checks.build_prompt/2`
+  # can fold it into the reviewer prompt (bd-adpwl0) — read-only, best-effort:
+  # a fetch failure (or no `tracker_context_ref` at all) just means no ticket
+  # section in the prompt, never a failed review. Mirrors
+  # `Arbiter.Worker.Dispatch.fetch_tracker_context/2`.
+  defp maybe_put_tracker_context(state, opts, workspace) do
+    case fetch_tracker_context(opts, workspace) do
+      nil -> state
+      ctx -> Map.put(state, :tracker_context, ctx)
+    end
+  end
+
+  defp fetch_tracker_context(opts, workspace) do
+    with ref when is_binary(ref) and ref != "" <- string_opt(opts, :tracker_context_ref),
+         type <- tracker_context_type(opts, workspace),
+         true <- type not in [nil, :none] do
+      adapter = Arbiter.Trackers.for_type(type)
+
+      Arbiter.Trackers.with_workspace(type, workspace, fn ->
+        case adapter.fetch(ref) do
+          {:ok, raw} ->
+            %{
+              ref: ref,
+              type: type,
+              title: adapter.extract_title(raw),
+              description: adapter.extract_description(raw)
+            }
+
+          {:error, reason} ->
+            Logger.warning(
+              "ExternalReview: failed to fetch tracker context #{type}:#{ref}: #{inspect(reason)}"
+            )
+
+            nil
+        end
+      end)
+    else
+      _ -> nil
+    end
+  rescue
+    e ->
+      Logger.warning("ExternalReview: error fetching tracker context: #{Exception.message(e)}")
+      nil
   end
 
   defp tracker_context_type(opts, workspace) do

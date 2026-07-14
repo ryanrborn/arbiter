@@ -589,7 +589,12 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       +  def sign(payload) do
       """
 
-      state = %{mode: :adapter, diff: diff, repo_path: repo, check_runner: fn _diff, _state -> {:ok, []} end}
+      state = %{
+        mode: :adapter,
+        diff: diff,
+        repo_path: repo,
+        check_runner: fn _diff, _state -> {:ok, []} end
+      }
 
       assert {:ok, result} = CodeReview.run_step(:run_checks, state)
       refute Map.has_key?(result, :consumer_refs)
@@ -1191,7 +1196,12 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       state = %{
         mode: :local,
         consumer_refs: [
-          %{identifier: "sign", file: "lib/verus/session.ex", line: 3, snippet: "Verus.Token.sign(payload)"}
+          %{
+            identifier: "sign",
+            file: "lib/verus/session.ex",
+            line: 3,
+            snippet: "Verus.Token.sign(payload)"
+          }
         ]
       }
 
@@ -1215,6 +1225,136 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert {:ok, []} = Checks.run("DIFF", %{mode: :local})
       assert_received {:prompt, prompt}
       refute prompt =~ "consumer"
+    end
+
+    # -- bd-adpwl0: tracker ticket body + PR title/body injection ------------
+
+    test "folds :tracker_context into the reviewer prompt" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      state = %{
+        mode: :adapter,
+        tracker_context: %{
+          ref: "VR-18174",
+          type: :jira,
+          title: "Prompt too long on large PRs",
+          description: "The reviewer chokes on bundled app.js diffs."
+        }
+      }
+
+      assert {:ok, []} = Checks.run("DIFF", state)
+      assert_received {:prompt, prompt}
+      assert prompt =~ "VR-18174"
+      assert prompt =~ "Prompt too long on large PRs"
+      assert prompt =~ "The reviewer chokes on bundled app.js diffs."
+    end
+
+    test "omits the tracker section from the prompt when :tracker_context is absent" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :local})
+      assert_received {:prompt, prompt}
+      refute prompt =~ "Tracker ticket"
+    end
+
+    test "folds the PR title/body from state.pr into the reviewer prompt" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      state = %{
+        mode: :adapter,
+        pr: %{title: "Fix widget overflow", body: "Closes #42 by clamping the widget height."}
+      }
+
+      assert {:ok, []} = Checks.run("DIFF", state)
+      assert_received {:prompt, prompt}
+      assert prompt =~ "Fix widget overflow"
+      assert prompt =~ "Closes #42 by clamping the widget height."
+    end
+
+    test "omits the PR section from the prompt when state.pr has no title/body" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :adapter, pr: %{status: :open}})
+      assert_received {:prompt, prompt}
+      refute prompt =~ "PR description"
+    end
+
+    test "elides generated/lockfile paths from the reviewed diff, with a note of what was dropped" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      diff = """
+      diff --git a/lib/foo.ex b/lib/foo.ex
+      +real change
+      diff --git a/priv/static/app.js b/priv/static/app.js
+      +minified junk
+      diff --git a/package-lock.json b/package-lock.json
+      +lockfile churn
+      diff --git a/mix.lock b/mix.lock
+      +lockfile churn
+      """
+
+      assert {:ok, []} = Checks.run(diff, %{mode: :adapter})
+      assert_received {:prompt, prompt}
+      assert prompt =~ "lib/foo.ex"
+      assert prompt =~ "real change"
+      refute prompt =~ "minified junk"
+      refute prompt =~ "lockfile churn"
+      assert prompt =~ "priv/static/app.js"
+      assert prompt =~ "package-lock.json"
+      assert prompt =~ "mix.lock"
+    end
+
+    test "diff without any excluded paths reaches the reviewer byte-for-byte unchanged" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      diff = "diff --git a/lib/foo.ex b/lib/foo.ex\n+real change\n"
+
+      assert {:ok, []} = Checks.run(diff, %{mode: :local})
+      assert_received {:prompt, prompt}
+      assert prompt =~ diff
+      refute prompt =~ "elided"
     end
 
     # -- bd-dl49fo regression: large-diff E2BIG (MAX_ARG_STRLEN) fix ----------
