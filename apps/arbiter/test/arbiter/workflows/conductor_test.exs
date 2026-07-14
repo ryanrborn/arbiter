@@ -56,8 +56,10 @@ defmodule Arbiter.Workflows.ConductorTest do
     g
   end
 
-  defp add_member(graph, issue) do
-    {:ok, _} = Ash.create(GraphMember, %{graph_id: graph.id, issue_id: issue.id})
+  defp add_member(graph, issue, opts \\ []) do
+    attrs = %{graph_id: graph.id, issue_id: issue.id}
+    attrs = if repo = Keyword.get(opts, :repo), do: Map.put(attrs, "repo", repo), else: attrs
+    {:ok, _} = Ash.create(GraphMember, attrs)
     :ok
   end
 
@@ -224,6 +226,30 @@ defmodule Arbiter.Workflows.ConductorTest do
       # Must dispatch a real agent, not the dry bookkeeping path.
       assert opts[:start_claude] == true
       assert Ash.get!(Graph, g.id).run_state == :running
+    end
+
+    test "threads the member's repo through to the dispatch opts", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a, repo: "tonic_device")
+
+      kickoff(g)
+
+      assert_receive {:dispatched, dispatched_id, opts}
+      assert dispatched_id == a.id
+      assert opts[:repo] == "tonic_device"
+    end
+
+    test "omits :repo when the member has none configured", %{ws: ws} do
+      a = issue(ws)
+      g = graph(ws)
+      add_member(g, a)
+
+      kickoff(g)
+
+      assert_receive {:dispatched, dispatched_id, opts}
+      assert dispatched_id == a.id
+      refute Keyword.has_key?(opts, :repo)
     end
   end
 
