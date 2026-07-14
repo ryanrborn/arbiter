@@ -687,5 +687,22 @@ defmodule Arbiter.Worker.WorktreeTest do
       :ok = commit(wt, "ok.ex", "x\n", "initial")
       assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "nonexistent-branch")
     end
+
+    # bd-4ltc3e: a two-dot `base..HEAD` diff picks up files that changed on
+    # `base` after the branch was cut, even though the branch itself never
+    # touched them. If `base` (e.g. `development`) later gains a commit that
+    # (accidentally) added .mcp.json, EVERY branch forked before that commit
+    # false-trips this gate on its own clean, unrelated work — exactly the
+    # bd-9q966y leak commit manifesting as a false positive elsewhere.
+    test "does not false-trip when the target branch (not the feature branch) carries the injected file",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/target-carries-secret", "main")
+      :ok = commit(wt, "ok.ex", "defmodule OK do end\n", "legit unrelated change")
+
+      # main advances AFTER the fork point with a commit that leaks .mcp.json.
+      :ok = advance_origin_main(repo, ".mcp.json", ~s({"secret": "tok"}), "oops: leaked on main")
+
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
   end
 end
