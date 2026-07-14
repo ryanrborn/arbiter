@@ -222,8 +222,9 @@ defmodule Arbiter.Mergers.Gitlab do
   @impl true
   def link_for(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
-         {:ok, iid} <- iid_from_ref(mr_ref) do
-      "https://#{cfg.host}/#{cfg.project_id}/-/merge_requests/#{iid}"
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, path} <- resolve_project_path(cfg) do
+      "https://#{cfg.host}/#{path}/-/merge_requests/#{iid}"
     else
       _ -> ""
     end
@@ -444,6 +445,53 @@ defmodule Arbiter.Mergers.Gitlab do
       fun.()
     after
       if prev, do: Config.put_active(prev), else: Config.clear()
+    end
+  end
+
+  # ---- Internals: project path resolution --------------------------------
+
+  # Resolves a project_id to a valid browser URL path (namespace/project).
+  # If project_id is numeric, fetches the project details via API to get the
+  # path_with_namespace; otherwise returns project_id as-is (already a path).
+  # Caches the resolved path in the process dict to avoid repeated API calls.
+  defp resolve_project_path(cfg) do
+    cache_key = {:gitlab_project_path, cfg.host, cfg.project_id}
+
+    case Process.get(cache_key) do
+      path when is_binary(path) ->
+        {:ok, path}
+
+      nil ->
+        case resolve_and_cache_project_path(cfg, cache_key) do
+          {:ok, path} -> {:ok, path}
+          :error -> {:ok, cfg.project_id}
+        end
+    end
+  end
+
+  defp resolve_and_cache_project_path(cfg, cache_key) do
+    # Only fetch if project_id is purely numeric
+    case Integer.parse(cfg.project_id) do
+      {_num, ""} ->
+        # project_id is numeric, fetch the path from API
+        try do
+          case request(cfg, :get, "", []) do
+            {:ok, %Req.Response{status: status, body: %{"path_with_namespace" => path}}}
+            when status in 200..299 and is_binary(path) ->
+              Process.put(cache_key, path)
+              {:ok, path}
+
+            _ ->
+              :error
+          end
+        rescue
+          _ -> :error
+        end
+
+      _ ->
+        # project_id is not numeric (already a path), return as-is
+        Process.put(cache_key, cfg.project_id)
+        {:ok, cfg.project_id}
     end
   end
 
