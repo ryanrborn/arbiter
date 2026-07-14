@@ -148,6 +148,54 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       refute html =~ "load_context"
     end
 
+    test "approval badge shows 'CI running' when pipeline is in progress" do
+      # Test the approval_label_default/1 function directly
+      status_with_ci_running = %{
+        status: :open,
+        approved: false,
+        pipeline: :running
+      }
+
+      # The approval_label_default function is private, but we can test through
+      # the approval_label/1 which calls it
+      label = ArbiterWeb.WorkerDetailLive.approval_label(status_with_ci_running)
+      assert label == "Open · CI running"
+    end
+
+    test "approval badge shows 'awaiting approval' when pipeline is settled" do
+      # Test when pipeline is settled (not running)
+      status_awaiting_approval = %{
+        status: :open,
+        approved: false,
+        pipeline: :success
+      }
+
+      label = ArbiterWeb.WorkerDetailLive.approval_label(status_awaiting_approval)
+      assert label == "Open · awaiting approval"
+    end
+
+    test "approval badge color is info for CI running" do
+      status_with_ci_running = %{
+        status: :open,
+        approved: false,
+        pipeline: :running
+      }
+
+      badge_class = ArbiterWeb.WorkerDetailLive.approval_class(status_with_ci_running)
+      assert badge_class == "badge-info"
+    end
+
+    test "approval badge color is warning for awaiting approval" do
+      status_awaiting_approval = %{
+        status: :open,
+        approved: false,
+        pipeline: :success
+      }
+
+      badge_class = ArbiterWeb.WorkerDetailLive.approval_class(status_awaiting_approval)
+      assert badge_class == "badge-warning"
+    end
+
     test "live activity badge advances after mount with no manual lifecycle event",
          %{conn: conn, ws: ws} do
       # Regression for bd-c919xj: meta[:activity] updates on every stream line,
