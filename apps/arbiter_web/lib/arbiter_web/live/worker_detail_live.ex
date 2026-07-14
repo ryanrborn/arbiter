@@ -972,33 +972,41 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # `Watchdog.effective_block_reason/1`, which only reports a block once the MR
   # is approved — so the ordinary pre-approval review window never shows a red
   # "Blocked" badge.
-  defp approval_class(%{status: :merged}), do: "badge-success"
-  defp approval_class(%{status: :closed}), do: "badge-error"
+  def approval_class(%{status: :merged}), do: "badge-success"
+  def approval_class(%{status: :closed}), do: "badge-error"
 
-  defp approval_class(status) when is_map(status) do
+  def approval_class(status) when is_map(status) do
     cond do
       Watchdog.effective_block_reason(status) -> "badge-error"
       Map.get(status, :approved) == true -> "badge-success"
+      Watchdog.ci_pending?(status) -> "badge-info"
       true -> "badge-warning"
     end
   end
 
-  defp approval_class(_), do: "badge-warning"
+  def approval_class(_), do: "badge-warning"
 
-  defp approval_label(%{status: :merged}), do: "Merged"
-  defp approval_label(%{status: :closed}), do: "Closed"
+  def approval_label(%{status: :merged}), do: "Merged"
+  def approval_label(%{status: :closed}), do: "Closed"
 
-  defp approval_label(status) when is_map(status) and not is_struct(status) do
+  def approval_label(status) when is_map(status) and not is_struct(status) do
     case Watchdog.effective_block_reason(status) do
       nil -> approval_label_default(status)
       reason -> block_reason_label(reason)
     end
   end
 
-  defp approval_label(_), do: "Pending"
+  def approval_label(_), do: "Pending"
 
   defp approval_label_default(%{approved: true}), do: "Approved"
-  defp approval_label_default(%{status: :open}), do: "Open · awaiting approval"
+
+  defp approval_label_default(%{status: :open} = status) do
+    if Watchdog.ci_pending?(status) do
+      "Open · CI running"
+    else
+      "Open · awaiting approval"
+    end
+  end
 
   defp approval_label_default(%{status: status}) when is_atom(status),
     do: status |> Atom.to_string() |> String.capitalize()
