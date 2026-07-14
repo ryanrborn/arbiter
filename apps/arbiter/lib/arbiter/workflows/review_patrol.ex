@@ -232,8 +232,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
            :ok <- Mergers.prepare_with_repo(workspace, state.repo) do
         state.workspace_id
         |> open_engagements()
-        |> Enum.map(&process_engagement(&1, adapter, workspace))
-        |> Enum.filter(& &1)
+        |> process_engagements_paced(adapter, workspace)
       else
         # On any failure (missing workspace, unsupported adapter), no-op the
         # cycle but still bump the tick counter below so the patrol is observable.
@@ -281,6 +280,34 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     |> Ash.read!()
   rescue
     _ -> []
+  end
+
+  # Pace GitHub `get()` calls across a tick's engagements so a workspace with
+  # many open engagements doesn't fire a burst of requests within the same
+  # second and trip GitHub's secondary (abuse) rate limit (bd-1yva53). Every
+  # engagement after the first waits a jittered delay first; the first fires
+  # immediately so a single-engagement tick (the common case, and every
+  # existing test) pays no delay at all.
+  @pace_base_ms 300
+  @pace_jitter_ms 200
+
+  defp process_engagements_paced(engagements, adapter, workspace) do
+    engagements
+    |> Enum.with_index()
+    |> Enum.map(fn {engagement, index} ->
+      if index > 0, do: pace_delay()
+      process_engagement(engagement, adapter, workspace)
+    end)
+    |> Enum.filter(& &1)
+  end
+
+  defp pace_delay do
+    ms = @pace_base_ms + :rand.uniform(@pace_jitter_ms)
+
+    case Application.get_env(:arbiter, :review_patrol_pace_sleep_fun) do
+      fun when is_function(fun, 1) -> fun.(ms)
+      _ -> Process.sleep(ms)
+    end
   end
 
   # Returns a tagged outcome for the tick's bookkeeping:
