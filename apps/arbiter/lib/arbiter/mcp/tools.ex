@@ -1788,7 +1788,10 @@ defmodule Arbiter.MCP.Tools do
          {:ok, issue_id} <- require_string(args, "issue_id"),
          {:ok, graph} <- fetch_graph(scope, graph_id),
          {:ok, _issue} <- fetch_task_in_workspace(graph.workspace_id, issue_id) do
-      case Ash.create(GraphMember, %{"graph_id" => graph_id, "issue_id" => issue_id}) do
+      attrs = %{"graph_id" => graph_id, "issue_id" => issue_id}
+      attrs = if repo = fetch_string(args, "repo"), do: Map.put(attrs, "repo", repo), else: attrs
+
+      case Ash.create(GraphMember, attrs) do
         {:ok, member} ->
           Logger.info("[graph_add_directive] directive #{issue_id} added to graph #{graph_id}")
           {:ok, %{graph_id: graph_id, issue_id: issue_id, member_id: member.id}}

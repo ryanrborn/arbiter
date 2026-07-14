@@ -31,7 +31,7 @@ defmodule Arbiter.Tasks.GraphMember do
 
     create :create do
       primary? true
-      accept [:graph_id, :issue_id]
+      accept [:graph_id, :issue_id, :repo]
     end
   end
 
@@ -45,6 +45,15 @@ defmodule Arbiter.Tasks.GraphMember do
 
     attribute :issue_id, :string do
       allow_nil? false
+      public? true
+    end
+
+    # bd-69c78q: the repo this directive dispatches into. Required by the
+    # Conductor's dispatch call in any workspace with more than one
+    # configured repo — see `Arbiter.Worker.Dispatch.resolve_repo_for_dispatch/2`.
+    # nil is valid (and auto-resolves) in single-repo workspaces.
+    attribute :repo, :string do
+      allow_nil? true
       public? true
     end
 

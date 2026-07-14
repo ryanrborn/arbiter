@@ -1228,12 +1228,26 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Add a directive (Issue) to a Graph as a member. " <>
-          "Directives must be in the same workspace as the graph.",
+          "Directives must be in the same workspace as the graph. " <>
+          "In a workspace with more than one configured repo, pass `repo` so the " <>
+          "Conductor can auto-dispatch this directive when it becomes ready — " <>
+          "without it, dispatch fails with `ambiguous_repo` and the directive stays " <>
+          "`ready` forever.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "graph_id" => %{"type" => "string", "description" => "Graph id (required)."},
-          "issue_id" => %{"type" => "string", "description" => "Directive (task) id (required)."}
+          "issue_id" => %{
+            "type" => "string",
+            "description" => "Directive (task) id (required)."
+          },
+          "repo" => %{
+            "type" => "string",
+            "description" =>
+              "Repo this directive dispatches into (optional). Required for auto-dispatch " <>
+                "to succeed in a workspace with more than one configured repo; auto-resolves " <>
+                "when the workspace has exactly one."
+          }
         },
         "required" => ["graph_id", "issue_id"],
         "additionalProperties" => false

@@ -162,6 +162,21 @@ defmodule Arbiter.MCP.GraphToolsTest do
                  "issue_id" => i.id
                })
     end
+
+    test "accepts an optional repo, stored on the membership row", ctx do
+      g = graph(ctx.ws)
+      i = issue(ctx.ws)
+
+      assert {:ok, data} =
+               Tools.graph_add_directive(ctx.coordinator, %{
+                 "graph_id" => g.id,
+                 "issue_id" => i.id,
+                 "repo" => "tonic_device"
+               })
+
+      member = Ash.get!(GraphMember, data.member_id)
+      assert member.repo == "tonic_device"
+    end
   end
 
   # ---- graph_remove_directive ---------------------------------------------
