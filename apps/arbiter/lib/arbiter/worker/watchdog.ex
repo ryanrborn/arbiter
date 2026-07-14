@@ -451,7 +451,33 @@ defmodule Arbiter.Worker.Watchdog do
     {:stop, :normal, state}
   end
 
-  defp apply_outcome(:approved, _result, %{auto_merge: true} = state) do
+  defp apply_outcome(:approved, result, %{auto_merge: true} = state) do
+    if ci_pending?(result) do
+      Logger.info(
+        "Worker.Watchdog: deferring auto-merge for task=#{state.task_id} " <>
+          "mr=#{state.mr_ref}; pipeline still #{inspect(Map.get(result, :pipeline))}, " <>
+          "will retry next poll"
+      )
+
+      reschedule(state)
+    else
+      do_apply_approved_auto_merge(state)
+    end
+  end
+
+  # CI still running/queued for the approved MR's head commit — attempting the
+  # merge right now would just fail against the forge's own not-yet-mergeable
+  # check (bd-cnytw3). `block_reason/1` deliberately collapses this in-progress
+  # state to `nil` (correctly — it's not a genuine block to escalate on), so it
+  # can't tell "genuinely mergeable" apart from "CI in flight"; the raw
+  # `:pipeline` signal both adapters already expose can. `:pending` here means
+  # genuinely queued/in-flight on both adapters — each adapter maps its own
+  # *settled*-but-non-success states (GitHub neutral/skipped/stale check runs,
+  # GitLab skipped/manual pipelines) to `:neutral` instead, so they fall
+  # through to a real merge attempt rather than deferring forever.
+  defp ci_pending?(result), do: Map.get(result, :pipeline) in [:running, :pending]
+
+  defp do_apply_approved_auto_merge(state) do
     case safe_merge(state) do
       :ok ->
         Logger.info(
