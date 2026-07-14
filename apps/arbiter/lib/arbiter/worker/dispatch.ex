@@ -845,9 +845,8 @@ defmodule Arbiter.Worker.Dispatch do
   defp workspace_repo_path(ws_id, repo) do
     case load_workspace_config(ws_id) do
       %{} = config ->
-        repo_path_from_config(
-          get_in(config, ["repo_paths", repo]) || get_in(config, ["rig_paths", repo])
-        )
+        find_repo_path(get_in(config, ["repo_paths"]), repo) ||
+          find_repo_path(get_in(config, ["rig_paths"]), repo)
 
       _ ->
         nil
@@ -857,9 +856,30 @@ defmodule Arbiter.Worker.Dispatch do
   defp repo_path_from_config(raw), do: RepoConfig.repo_path_from_config(raw)
 
   defp application_repo_path(repo) do
-    repo_paths = Application.get_env(:arbiter, :repo_paths, %{})
-    repo_path_from_config(Map.get(repo_paths, repo))
+    find_repo_path(Application.get_env(:arbiter, :repo_paths, %{}), repo)
   end
+
+  # Exact key match first (the common case). When that misses, fall back to a
+  # normalized match (case-insensitive, underscore/hyphen-insensitive) — a
+  # forge slug derived from a repo's actual GitHub name (e.g.
+  # "owner/verus_server") must still resolve against a `repo_paths` entry
+  # registered under a differently-separated key (e.g. "owner/verus-server").
+  # See bd-6rioa4.
+  defp find_repo_path(map, repo) when is_map(map) and is_binary(repo) do
+    case Map.get(map, repo) do
+      nil ->
+        target = RepoConfig.normalize_slug(repo)
+
+        Enum.find_value(map, fn {k, v} ->
+          if RepoConfig.normalize_slug(k) == target, do: repo_path_from_config(v)
+        end)
+
+      raw ->
+        repo_path_from_config(raw)
+    end
+  end
+
+  defp find_repo_path(_map, _repo), do: nil
 
   defp load_workspace_config(ws_id) do
     case Ash.get(Workspace, ws_id) do
