@@ -922,6 +922,64 @@ defmodule Arbiter.Worker.WatchdogTest do
     end
   end
 
+  describe "defers merge attempt while CI is still running (bd-cnytw3)" do
+    test "does not call safe_merge while pipeline is :running, merges once it settles" do
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!ci1", [
+        %{status: :open, approved: true, pipeline: :running},
+        %{status: :open, approved: true, pipeline: :running},
+        %{status: :open, approved: true, pipeline: :running}
+      ])
+
+      start_watchdog(pid, task_id, "!ci1", auto_merge: true, interval_ms: 15)
+
+      # Several poll cycles while CI is still running: no merge attempt, no
+      # completion — the Watchdog must just keep waiting.
+      Process.sleep(120)
+      assert StubMerger.merge_count("!ci1") == 0
+      refute Worker.state(pid).status == :completed
+
+      # CI settles — the next poll attempts (and succeeds at) the merge.
+      StubMerger.queue_get("!ci1", [%{status: :open, approved: true, pipeline: :success}])
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!ci1") == 1
+    end
+
+    test "does not call safe_merge while pipeline is :pending, and does not count it as a merge failure" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :should_not_be_called})
+      StubMerger.queue_get("!ci2", [%{status: :open, approved: true, pipeline: :pending}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!ci2",
+            auto_merge: true,
+            interval_ms: 15,
+            merge_fail_notify_threshold: 2
+          )
+
+          Process.sleep(120)
+        end)
+
+      assert StubMerger.merge_count("!ci2") == 0
+      refute log =~ "consecutive failure"
+      refute Worker.state(pid).status == :failed
+    end
+
+    test "still attempts merge (and counts a real failure) when pipeline has settled" do
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :real_conflict})
+      StubMerger.queue_get("!ci3", [%{status: :open, approved: true, pipeline: :success}])
+
+      start_watchdog(pid, task_id, "!ci3", auto_merge: true, interval_ms: 15)
+
+      wait_until(fn -> StubMerger.merge_count("!ci3") >= 2 end)
+      refute Worker.state(pid).status == :failed
+    end
+  end
+
   describe "open_mr resilience (bd-91rnwq)" do
     test "Worker.open_mr/5 transitions to :awaiting_review on successful MR creation" do
       # Regression guard: open_mr must always reach :awaiting_review when
