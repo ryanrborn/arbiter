@@ -671,6 +671,44 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert Gitlab.link_for(@ref) == "https://gitlab.com/12345/-/merge_requests/42"
     end
 
+    test "resolves numeric project_id to namespace/project path for correct URL" do
+      # Numeric project_id requires API lookup to get the correct path
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/api/v4/projects/68258632"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "id" => 68_258_632,
+              "path_with_namespace" => "ryanborn/vstim",
+              "web_url" => "https://gitlab.com/ryanborn/vstim"
+            })
+
+          _ ->
+            Plug.Conn.send_resp(conn, 404, "Not found")
+        end
+      end)
+
+      Config.put_active(%{
+        "host" => @host,
+        "project_id" => 68_258_632,
+        "credentials_ref" => "env:#{@env_var}"
+      })
+
+      assert Gitlab.link_for(@ref) == "https://gitlab.com/ryanborn/vstim/-/merge_requests/42"
+    end
+
+    test "uses string-form project_id directly without API lookup" do
+      Config.put_active(%{
+        "host" => @host,
+        "project_id" => "mygroup/myproject",
+        "credentials_ref" => "env:#{@env_var}"
+      })
+
+      # No stub needed - this test verifies string-form project_id works without API calls
+      assert Gitlab.link_for(@ref) == "https://gitlab.com/mygroup/myproject/-/merge_requests/42"
+    end
+
     test "returns \"\" when config is missing" do
       Config.clear()
       assert Gitlab.link_for(@ref) == ""
