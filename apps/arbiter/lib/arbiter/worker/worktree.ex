@@ -232,13 +232,19 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
-  # Top-level build-artifact paths that git may report as untracked even though
-  # they should be ignored. Per-task worktrees symlink `deps` (and sometimes
-  # `_build`) to a shared cache; the repo's directory-only `/deps/` `/_build/`
-  # ignore patterns do NOT match a symlink, so `git status --porcelain` emits
-  # `?? deps`. Counting that as "uncommitted" false-fails the commit gate on
-  # genuinely-committed work — the inverse of the bug the gate exists to catch.
-  # See bd-dg0gs6 / #172.
+  # Top-level build-artifact paths that git may report as untracked even
+  # though they should be ignored. `seed_compiled_deps/2` copies `deps` and
+  # `_build/<env>/lib` into every per-task worktree (real `cp -a` copies, not
+  # symlinks — see the "Why copy, not symlink" section on that function's
+  # doc). A real `deps`/`_build` directory should already match the target
+  # repo's own directory-only `/deps/` `/_build/` gitignore patterns, so
+  # `git status --porcelain` shouldn't report them at all. These two entries
+  # are belt-and-suspenders: if a target repo's `.gitignore` doesn't cover
+  # them, or a partial/interrupted seed leaves an unexpected top-level entry,
+  # an untracked `deps`/`_build` root must still not false-fail the commit
+  # gate on genuinely-committed work — the inverse of the bug the gate exists
+  # to catch. See bd-dg0gs6 / #172 (originally filed against a symlink-based
+  # seed that was never actually implemented — see bd-6040y1).
   #
   # `.mcp.json` / `.gemini/` / `.codex/` are Arbiter-injected agent-config files
   # (see bd-9q966y). They are now gitignored via `.git/info/exclude` (written by
@@ -254,8 +260,8 @@ defmodule Arbiter.Worker.Worktree do
   (staged, unstaged, or untracked), else `{:ok, false}`.
 
   Untracked build-artifact roots (`deps`, `_build`) are ignored — see
-  `@ignored_artifact_paths` — so a worktree whose only "change" is a leaked
-  `deps` symlink reads as clean.
+  `@ignored_artifact_paths` — so a worktree whose only "change" is an
+  unexpected `deps`/`_build` root reads as clean.
   """
   @spec has_uncommitted?(path()) :: {:ok, boolean()} | {:error, error_reason()}
   def has_uncommitted?(path) when is_binary(path) do
@@ -647,41 +653,48 @@ defmodule Arbiter.Worker.Worktree do
   defp strip_branch_ref(other), do: other
 
   @doc """
-  Seed the worktree's `_build/<env>/lib/` with pre-compiled dependencies from
-  `source_repo`, so acolytes can run `mix test` without a full dep recompile.
+  Seed the worktree's `deps/` and `_build/<env>/lib/` with the fetched and
+  pre-compiled dependencies from `source_repo`, so acolytes can run `mix
+  test` without a `mix deps.get` network fetch or a full dep recompile.
 
   ## Why copy, not symlink
 
-  Symlinks into the source repo's `_build` are live write-through paths: a dep
-  recompile inside the worktree would write `.beam` files straight into the
-  running server's `_build`, corrupting live artifacts (bd-cwov25). Copying
-  gives the worktree full ownership of its deps; the source repo's `_build` is
-  never touched again.
+  Symlinks into the source repo's `deps`/`_build` are live write-through
+  paths: a `mix deps.get`, a `mix.lock` bump, or a dep recompile inside the
+  worktree would write straight into the source repo's shared directories —
+  corrupting live artifacts (bd-cwov25) or, worse, racing against every other
+  worktree concurrently dispatched against the same source repo. Copying
+  gives the worktree full ownership of its deps; the source repo is never
+  touched again.
 
   ## Implementation
 
   Uses `cp -a --reflink=auto` — a correct full copy on ext4, and automatically
-  a near-free CoW block-level copy on btrfs/xfs if the host ever migrates. The
-  copy is ~1-2s for ~70MB of deps per env, versus minutes for a full recompile.
+  a near-free CoW block-level copy on btrfs/xfs if the host ever migrates.
 
   ## Excluded dirs
 
-  `arbiter`, `arbiter_web`, `arbiter_cli` are skipped — they must compile fresh
-  per-branch in the worktree so cross-branch contamination is impossible
-  (bd-cwov25). All other compiled deps in `_build/<env>/lib/` are copied.
+  `arbiter`, `arbiter_web`, `arbiter_cli` are skipped from the `_build` copy —
+  they must compile fresh per-branch in the worktree so cross-branch
+  contamination is impossible (bd-cwov25). All other compiled deps in
+  `_build/<env>/lib/` are copied. `deps/` itself needs no such filter: it
+  only ever contains fetched dependencies, never the umbrella apps.
 
   ## Envs seeded
 
-  Both `test` and `dev` envs are seeded (acolytes use `test`; some dispatched
-  workers compile in `dev`). A missing source env dir is silently skipped so
-  this function is safe to call on a repo that has never been compiled.
+  Both `test` and `dev` `_build` envs are seeded (acolytes use `test`; some
+  dispatched workers compile in `dev`). `deps/` is env-independent and seeded
+  once. A missing source dir is silently skipped so this function is safe to
+  call on a repo that has never been compiled or had deps fetched.
 
-  Best-effort: failures are swallowed so a `_build` copy issue never blocks
+  Best-effort: failures are swallowed so a seeding issue never blocks
   worktree provisioning.
   """
   @spec seed_compiled_deps(path(), path()) :: :ok
   def seed_compiled_deps(source_repo, worktree_path)
       when is_binary(source_repo) and is_binary(worktree_path) do
+    seed_deps_dir(source_repo, worktree_path)
+
     Enum.each(@seed_envs, fn env ->
       source_lib = Path.join([source_repo, "_build", env, "lib"])
       dest_lib = Path.join([worktree_path, "_build", env, "lib"])
@@ -708,6 +721,30 @@ defmodule Arbiter.Worker.Worktree do
     :ok
   rescue
     _ -> :ok
+  end
+
+  # Copy each top-level deps/<dep> dir from source_repo into worktree_path,
+  # skipping any that already exist in the destination. Mirrors the _build
+  # copy loop above, minus the deps/<name> existence filter (not applicable —
+  # deps/ IS the set of fetched dependencies).
+  defp seed_deps_dir(source_repo, worktree_path) do
+    source_deps = Path.join(source_repo, "deps")
+    dest_deps = Path.join(worktree_path, "deps")
+
+    if File.dir?(source_deps) do
+      File.mkdir_p!(dest_deps)
+
+      source_deps
+      |> File.ls!()
+      |> Enum.each(fn dep ->
+        source_dep = Path.join(source_deps, dep)
+        dest_dep = Path.join(dest_deps, dep)
+
+        unless File.exists?(dest_dep) do
+          System.cmd("cp", ["-a", "--reflink=auto", source_dep, dest_dep], stderr_to_stdout: true)
+        end
+      end)
+    end
   end
 
   # ---- internals ----------------------------------------------------------
