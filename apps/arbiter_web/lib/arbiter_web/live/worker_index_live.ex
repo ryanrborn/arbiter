@@ -14,7 +14,6 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker
-  alias Arbiter.Worker.Watchdog
   alias ArbiterWeb.Paging
 
   @workers_topic "workers"
@@ -244,36 +243,27 @@ defmodule ArbiterWeb.WorkerIndexLive do
 
   defp worker_status_label(other), do: to_string(other)
 
-  # For awaiting_review workers, check if CI is pending to distinguish from
-  # genuinely awaiting human approval. Falls back to standard worker_status_label
-  # for non-awaiting_review workers.
+  # For awaiting_review workers, delegate to approval_class/approval_label to maintain
+  # correct priority order: blocks > approved > ci_pending > default.
   defp awaiting_review_status_label(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
     case Map.get(meta, :last_merger_status) do
-      nil -> "Awaiting review"
       merger_status when is_map(merger_status) ->
-        if Watchdog.ci_pending?(merger_status) do
-          "CI running"
-        else
-          "Awaiting review"
-        end
-      _ -> "Awaiting review"
+        ArbiterWeb.WorkerDetailLive.approval_label(merger_status)
+
+      _ ->
+        "Awaiting review"
     end
   end
 
   defp awaiting_review_status_label(worker), do: worker_status_label(worker.status)
 
-  # For awaiting_review workers, check if CI is pending to use a different badge color.
-  # Falls back to standard worker_status_class for non-awaiting_review workers.
   defp awaiting_review_status_class(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
     case Map.get(meta, :last_merger_status) do
-      nil -> "badge-warning"
       merger_status when is_map(merger_status) ->
-        if Watchdog.ci_pending?(merger_status) do
-          "badge-info"
-        else
-          "badge-warning"
-        end
-      _ -> "badge-warning"
+        ArbiterWeb.WorkerDetailLive.approval_class(merger_status)
+
+      _ ->
+        "badge-warning"
     end
   end
 

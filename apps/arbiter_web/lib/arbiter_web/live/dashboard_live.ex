@@ -909,8 +909,6 @@ defmodule ArbiterWeb.DashboardLive do
     end
   end
 
-  defp merge_status_label_pending(_), do: "In review"
-
   defp merge_status_class(nil), do: "badge-ghost"
 
   defp merge_status_class(status) when is_map(status) do
@@ -935,8 +933,6 @@ defmodule ArbiterWeb.DashboardLive do
       "badge-warning"
     end
   end
-
-  defp merge_status_class_pending(_), do: "badge-warning"
 
   # A blocked merge surfaces the *why* (#354, Phase 1) so an unmergeable PR is
   # never indistinguishable from one merely "in review".
