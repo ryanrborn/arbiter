@@ -298,6 +298,17 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       %{"file" => file, "line" => line, "message" => message, "severity" => severity}
     end
 
+    # A single-hunk diff whose new-file side spans lines 1-20 (context lines
+    # 1-19 + one added line at 20) — wide enough that any test finding at a
+    # small line number lands inside the diff, so CodeReview's diff-scope
+    # guard (bd-2n3qm6) doesn't demote it to the out-of-diff summary.
+    defp wide_diff(file) do
+      context = Enum.map_join(1..19, "\n", &" line#{&1}")
+
+      "diff --git a/#{file} b/#{file}\n--- a/#{file}\n+++ b/#{file}\n" <>
+        "@@ -1,19 +1,20 @@\n#{context}\n+added\n"
+    end
+
     # Bypass the real Claude reviewer: CodeReview.Checks reads this invoker and
     # parses its JSON into findings. The dedupe wrapper in ReviewPatrol then filters.
     defp put_invoker(findings) do
@@ -369,7 +380,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
       ])
 
-      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      diff = wide_diff("lib/a.ex")
       rereview_stub(400, "newsha", diff)
 
       {_pid, name} = start_patrol(ws)
@@ -436,7 +447,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
       ])
 
-      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      diff = wide_diff("lib/a.ex")
       rereview_stub(402, "newsha", diff)
 
       {_pid, name} = start_patrol(ws)
@@ -461,7 +472,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "same bug"}
       ])
 
-      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      diff = wide_diff("lib/a.ex")
       rereview_stub(403, "newsha", diff)
 
       {_pid, name} = start_patrol(ws)
@@ -487,7 +498,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
           posted_findings: [finding("lib/a.ex", 5, "prior issue")]
         })
 
-      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      diff = wide_diff("lib/a.ex")
       rereview_stub(404, "newsha", diff)
 
       {_pid, name} = start_patrol(ws)
@@ -521,7 +532,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
       ])
 
-      diff = "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n+x\n"
+      diff = wide_diff("lib/a.ex")
       rereview_stub(405, "newsha", diff)
 
       {_pid, name} = start_patrol(ws)
@@ -871,7 +882,7 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
         %{"severity" => "error", "file" => "lib/g.ex", "line" => 9, "message" => "new bug"}
       ])
 
-      diff = "diff --git a/lib/g.ex b/lib/g.ex\n--- a/lib/g.ex\n+++ b/lib/g.ex\n@@ -1 +1 @@\n+x\n"
+      diff = wide_diff("lib/g.ex")
 
       test_pid = self()
 

@@ -122,7 +122,10 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
               "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
             conn
             |> Plug.Conn.put_resp_header("content-type", "text/plain")
-            |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+boom\n")
+            |> Plug.Conn.resp(
+              200,
+              "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+            )
 
           conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
             conn
@@ -1153,7 +1156,10 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "text/plain")
-          |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+boom\n")
+          |> Plug.Conn.resp(
+            200,
+            "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+          )
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
           json(conn, %{
@@ -1234,7 +1240,10 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "text/plain")
-          |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+boom\n")
+          |> Plug.Conn.resp(
+            200,
+            "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+          )
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
           json(conn, %{
