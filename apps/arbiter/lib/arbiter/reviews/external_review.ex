@@ -404,7 +404,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     # nil when a checkout can't be provisioned (no repo_path, no head_sha, or
     # the git operations themselves fail) — the Tier-1 diff-only path (the
     # original `repo_path`) is then unchanged.
-    checkout_path = provision_checkout(adapter, mr_ref, workspace, repo_path)
+    {checkout_path, base_ref} = provision_checkout(adapter, mr_ref, workspace, repo_path)
 
     state =
       %{
@@ -429,6 +429,11 @@ defmodule Arbiter.Reviews.ExternalReview do
         sensitive_globs: sensitive_globs(ws_config)
       }
       |> maybe_put(:review_cwd, checkout_path)
+      # bd-5yp6yn: when a checkout was provisioned, route :read_diff through
+      # it (`git diff base_ref..HEAD`) instead of the REST diff endpoint,
+      # which 406s once a PR's diff exceeds GitHub's 20k-line cap.
+      |> maybe_put(:worktree_path, checkout_path)
+      |> maybe_put(:base, checkout_path && base_ref)
       |> maybe_put_check_runner(opts)
       |> maybe_put_tracker_context(opts, workspace)
 
@@ -454,39 +459,45 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
-  # Best-effort: resolve the PR's head SHA via the adapter, then hand it to
-  # `Checkout.provision/2`. Returns the worktree path on success, nil on any
-  # failure (missing repo_path, adapter can't answer `get/1`, git failure) —
-  # never raises, and never blocks the review on a checkout problem.
-  defp provision_checkout(_adapter, _mr_ref, _workspace, nil), do: nil
-  defp provision_checkout(_adapter, _mr_ref, _workspace, ""), do: nil
+  # Best-effort: resolve the PR's head SHA (+ base branch) via the adapter,
+  # then hand the SHA to `Checkout.provision/2`. Returns `{path, base_ref}` on
+  # success, `{nil, nil}` on any failure (missing repo_path, adapter can't
+  # answer `get/1`, git failure) — never raises, and never blocks the review
+  # on a checkout problem.
+  defp provision_checkout(_adapter, _mr_ref, _workspace, nil), do: {nil, nil}
+  defp provision_checkout(_adapter, _mr_ref, _workspace, ""), do: {nil, nil}
 
   defp provision_checkout(adapter, mr_ref, workspace, repo_path) do
     Mergers.prepare(workspace)
 
-    case head_sha_for(adapter, mr_ref) do
-      sha when is_binary(sha) and sha != "" ->
+    case pr_baseline_for(adapter, mr_ref) do
+      {sha, base_ref} when is_binary(sha) and sha != "" ->
         case Checkout.provision(repo_path, sha) do
           {:ok, path} ->
-            path
+            {path, base_ref}
 
           {:error, reason} ->
             Logger.warning(
               "ExternalReview: checkout provisioning failed for #{mr_ref}: #{inspect(reason)}"
             )
 
-            nil
+            {nil, nil}
         end
 
       _ ->
-        nil
+        {nil, nil}
     end
   end
 
-  defp head_sha_for(adapter, mr_ref) do
+  defp pr_baseline_for(adapter, mr_ref) do
     case safe_adapter_call(adapter, :get, [mr_ref]) do
-      {:ok, %{} = info} -> Map.get(info, :head_sha) || Map.get(info, "head_sha")
-      _ -> nil
+      {:ok, %{} = info} ->
+        sha = Map.get(info, :head_sha) || Map.get(info, "head_sha")
+        base_ref = Map.get(info, :base_ref) || Map.get(info, "base_ref")
+        {sha, base_ref}
+
+      _ ->
+        {nil, nil}
     end
   end
 

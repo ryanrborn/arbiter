@@ -275,6 +275,10 @@ defmodule Arbiter.Mergers.Github do
          # PR head commit SHA — ReviewPatrol records this into an engagement's
          # `last_reviewed_sha` so it can detect new commits on later ticks.
          head_sha: head_sha,
+         # The PR's target branch — used to build a local `git diff
+         # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
+         # GitHub's REST diff endpoint 20k-line cap (bd-5yp6yn).
+         base_ref: get_in(pr, ["base", "ref"]),
          # The PR author's login — ReviewPatrol uses this to tell an author's
          # reply on a review thread apart from another reviewer's comment
          # (phase-2 author-reply handling, bd-8fg64x).
