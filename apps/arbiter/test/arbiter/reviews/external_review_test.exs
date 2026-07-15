@@ -368,7 +368,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       clone = Path.join(root, "clone")
       File.mkdir_p!(origin)
 
-      {_, 0} = System.cmd("git", ["init", "-q", origin])
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", origin])
       {_, 0} = System.cmd("git", ["-C", origin, "config", "user.email", "test@example.com"])
       {_, 0} = System.cmd("git", ["-C", origin, "config", "user.name", "Test"])
       File.write!(Path.join(origin, "a.txt"), "a")
@@ -422,7 +422,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
             |> Plug.Conn.put_resp_header("content-type", "application/json")
             |> Plug.Conn.resp(
               200,
-              Jason.encode!(%{"number" => 9, "head" => %{"sha" => head_sha}})
+              Jason.encode!(%{
+                "number" => 9,
+                "head" => %{"sha" => head_sha},
+                "base" => %{"ref" => "main"}
+              })
             )
 
           conn.method == "POST" and conn.request_path =~ ~r{/reviews$} ->
@@ -476,9 +480,67 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       # clone `repo` — while the reviewer was running against it.
       assert b_txt_present?
 
+      # bd-5yp6yn: :read_diff is routed through the checkout, not the REST
+      # diff endpoint — the diff came from `git diff main..HEAD` locally.
+      assert state[:worktree_path] == cwd
+      assert state[:base] == "main"
+      assert state[:diff] =~ "b.txt"
+
       # Best-effort teardown ran after the workflow completed (by the time
       # `review/1` returned to us here).
       refute File.dir?(cwd)
+    end
+
+    test "a REST-diff-hostile stub (would 406 on a >20k-line PR) still completes via the local checkout diff (bd-5yp6yn)" do
+      {repo, head_sha} = checkout_fixture_repo()
+      checkout_ws("er-checkout-406", repo)
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        cond do
+          "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              406,
+              Jason.encode!(%{
+                "message" => "Sorry, the diff exceeded the maximum number of lines (20000)"
+              })
+            )
+
+          conn.method == "GET" and conn.request_path =~ ~r{/repos/octo/widget/pulls/\d+$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "number" => 11,
+                "head" => %{"sha" => head_sha},
+                "base" => %{"ref" => "main"}
+              })
+            )
+
+          conn.method == "POST" and conn.request_path =~ ~r{/reviews$} ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{"id" => 1}))
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, Jason.encode!(%{}))
+        end
+      end)
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "octo/widget#11",
+                 repo: "widget",
+                 check_runner: state_capturing_runner(self())
+               )
+
+      refute result[:error]
+      assert_received {:captured_state, state, _b_txt_present?}
+      assert state[:diff] =~ "b.txt"
     end
 
     test "falls back to the diff-only path (no review_cwd) when checkout can't be provisioned" do

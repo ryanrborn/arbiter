@@ -133,6 +133,33 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def submit_review(_, _, _, _), do: {:ok, %{}}
   end
 
+  # get_diff raises if called — proves :read_diff never touches the REST
+  # diff endpoint when a Tier-2 checkout worktree is present (bd-5yp6yn).
+  defmodule DiffMustNotBeCalled do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: raise("get_diff must not be called when a checkout is present")
+    @impl true
+    def post_inline_comment(_, _, _), do: {:ok, %{}}
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
   defmodule CommentSpy do
     @moduledoc false
     @behaviour Arbiter.Mergers.Merger
@@ -475,6 +502,36 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
     test "missing required keys returns {:error, _}" do
       assert {:error, _} = CodeReview.run_step(:read_diff, %{mode: :local})
+    end
+
+    test "adapter mode with a worktree_path (Tier-2 checkout) reads the diff locally, bypassing the REST diff endpoint" do
+      %{repo: repo} = setup_repo()
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DiffMustNotBeCalled,
+        mr_ref: "#99",
+        worktree_path: repo,
+        base: "main"
+      }
+
+      assert {:ok, %{diff: diff}} = CodeReview.run_step(:read_diff, state)
+      assert diff =~ "added.txt"
+      assert diff =~ "+line one"
+    end
+
+    test "adapter mode with a worktree_path defaults base to \"main\" when unset" do
+      %{repo: repo} = setup_repo()
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DiffMustNotBeCalled,
+        mr_ref: "#99",
+        worktree_path: repo
+      }
+
+      assert {:ok, %{diff: diff}} = CodeReview.run_step(:read_diff, state)
+      assert diff =~ "added.txt"
     end
   end
 

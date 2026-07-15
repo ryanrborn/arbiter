@@ -136,6 +136,10 @@ defmodule Arbiter.Mergers.Gitlab do
              # MR head commit SHA — ReviewPatrol records this into an
              # engagement's `last_reviewed_sha` to detect new commits later.
              head_sha: Map.get(body, "sha"),
+             # The MR's target branch — used to build a local `git diff
+             # base_ref..HEAD` against a Tier-2 checkout worktree, sidestepping
+             # a REST diff size cap (bd-5yp6yn).
+             base_ref: Map.get(body, "target_branch"),
              # MR title/description — folded into the reviewer prompt
              # (bd-adpwl0) so the reviewer sees the author's own account of
              # the change's intent.

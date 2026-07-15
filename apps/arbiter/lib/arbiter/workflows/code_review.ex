@@ -27,7 +27,10 @@ defmodule Arbiter.Workflows.CodeReview do
   ## Steps
 
   1. `:load_pr`       — record branch / load PR metadata (no-op in `:adapter` mode)
-  2. `:read_diff`     — fetch the diff via the adapter (or `git diff` locally)
+  2. `:read_diff`     — fetch the diff via the adapter, or `git diff` locally
+                        when a `:worktree_path` is set (`:local` mode always;
+                        `:adapter` mode when a Tier-2 checkout was provisioned —
+                        bd-5yp6yn, sidesteps GitHub's REST 20k-line diff cap)
   3. `:run_checks`    — invoke the `:check_runner` to produce findings
   4. `:file_findings` — write the review file (local) or post comments (adapter)
   5. `:verdict`       — compute approve / request_changes; finalize
@@ -157,6 +160,22 @@ defmodule Arbiter.Workflows.CodeReview do
 
   def run_step(:read_diff, %{mode: :local, worktree_path: wt} = state) when is_binary(wt) do
     base = Map.get(state, :base, "main")
+
+    case System.cmd("git", ["-C", wt, "diff", "#{base}..HEAD"], stderr_to_stdout: true) do
+      {output, 0} -> {:ok, Map.put(state, :diff, output)}
+      {output, _nonzero} -> {:error, {:git_diff_failed, String.trim(output)}}
+    end
+  rescue
+    e in ErlangError -> {:error, {:git_diff_failed, Exception.message(e)}}
+  end
+
+  # Tier-2 (bd-5yp6yn): a checkout worktree was provisioned alongside the
+  # adapter mr_ref (external PR review). Read the diff locally via `git
+  # diff` instead of the REST diff endpoint — the REST endpoint 406s on
+  # PRs whose diff exceeds GitHub's 20k-line cap, which the local `git
+  # diff` has no equivalent limit on.
+  def run_step(:read_diff, %{mode: :adapter, worktree_path: wt} = state) when is_binary(wt) do
+    base = Map.get(state, :base) || "main"
 
     case System.cmd("git", ["-C", wt, "diff", "#{base}..HEAD"], stderr_to_stdout: true) do
       {output, 0} -> {:ok, Map.put(state, :diff, output)}
