@@ -1032,7 +1032,7 @@ defmodule Arbiter.Mergers.Github do
         :failed
 
       Enum.all?(statuses, &(&1 == "completed")) and
-          Enum.all?(conclusions, &(&1 == "success")) ->
+          Enum.all?(conclusions, &(&1 in ["success", "skipped", "neutral"])) ->
         :success
 
       Enum.any?(statuses, &(&1 in ["in_progress", "queued", "waiting", "requested", "pending"])) ->
