@@ -893,13 +893,23 @@ defmodule ArbiterWeb.DashboardLive do
           :merged -> "Merged"
           :approved -> "Approved"
           :closed -> "Closed / rejected"
-          :pending -> "In review"
+          :pending -> merge_status_label_pending(status)
         end
 
       reason ->
         block_reason_label(reason)
     end
   end
+
+  defp merge_status_label_pending(status) when is_map(status) do
+    if Watchdog.ci_pending?(status) do
+      "CI running"
+    else
+      "In review"
+    end
+  end
+
+  defp merge_status_label_pending(_), do: "In review"
 
   defp merge_status_class(nil), do: "badge-ghost"
 
@@ -910,13 +920,23 @@ defmodule ArbiterWeb.DashboardLive do
           :merged -> "badge-success"
           :approved -> "badge-success"
           :closed -> "badge-error"
-          :pending -> "badge-info"
+          :pending -> merge_status_class_pending(status)
         end
 
       _reason ->
         "badge-error"
     end
   end
+
+  defp merge_status_class_pending(status) when is_map(status) do
+    if Watchdog.ci_pending?(status) do
+      "badge-info"
+    else
+      "badge-warning"
+    end
+  end
+
+  defp merge_status_class_pending(_), do: "badge-warning"
 
   # A blocked merge surfaces the *why* (#354, Phase 1) so an unmergeable PR is
   # never indistinguishable from one merely "in review".
