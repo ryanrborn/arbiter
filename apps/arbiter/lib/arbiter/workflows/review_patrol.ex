@@ -60,6 +60,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       app env, default 5 min). A burst of pushes yields one re-review. We also wait
       for CI to *settle* (not pending/running) before firing.
 
+    * **Review cap** — once `review_count` reaches a configurable ceiling
+      (`config["review_patrol"]["max_reviews"]`, then the `:review_patrol_max_reviews`
+      app env, default 3), ReviewPatrol stops re-reviewing the PR entirely (no diff
+      fetch, no model spend) and instead raises ONE coordinator escalation the first
+      time the cap is hit (`review_cap_escalated`), so a PR that keeps looping (e.g.
+      a re-flagged phantom finding) is capped rather than accumulating reviews
+      indefinitely (bd-ahvk03).
+
     * **New-diff-only** — the re-review diffs `last_reviewed_sha..head_sha` (the
       adapter's compare endpoint), never the whole PR, so comments land only on the
       newly-pushed commits.
@@ -127,6 +135,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # engagement. Overridable per-workspace (config["review_patrol"]["debounce_ms"])
   # and via the :review_patrol_debounce_ms app env.
   @default_debounce_ms 5 * 60_000
+
+  # Default review cap: after this many posted re-reviews on one engagement,
+  # ReviewPatrol stops re-reviewing and escalates once instead of looping.
+  # Overridable per-workspace (config["review_patrol"]["max_reviews"]) and via
+  # the :review_patrol_max_reviews app env.
+  @default_max_reviews 3
 
   # Pipeline statuses that mean CI has NOT settled yet — hold the re-review until
   # the next tick rather than reviewing a diff whose checks are still in flight.
@@ -441,10 +455,80 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
         nil
 
+      review_capped?(engagement, workspace) ->
+        handle_review_cap(engagement, workspace)
+
       true ->
         gate_on_relevance(engagement, pr, adapter, workspace)
     end
   end
+
+  # ---- per-PR review cap (bd-ahvk03) -------------------------------------
+
+  # The cap is checked BEFORE the new diff is even fetched, so a capped
+  # engagement costs nothing beyond the (already-paid) adapter.get/1 call —
+  # no diff fetch, no model spend.
+  defp review_capped?(%Issue{review_count: count}, workspace) do
+    (count || 0) >= max_reviews(workspace)
+  end
+
+  # First tick past the cap: raise exactly ONE coordinator escalation and mark
+  # the engagement so it isn't re-escalated on every subsequent tick. Neither
+  # `last_reviewed_sha` nor `review_count` advance — the engagement is simply
+  # frozen until a human intervenes.
+  defp handle_review_cap(%Issue{review_cap_escalated: true} = _engagement, _workspace), do: nil
+
+  defp handle_review_cap(%Issue{} = engagement, workspace) do
+    escalate_review_cap(engagement, workspace)
+    update_engagement(engagement, %{review_cap_escalated: true})
+
+    Logger.info(
+      "ReviewPatrol: engagement #{engagement.id} hit the review cap " <>
+        "(#{engagement.review_count} reviews); escalated and stopped re-reviewing"
+    )
+
+    {:escalated, engagement.id}
+  end
+
+  # Best-effort human-facing escalation when a PR hits the review cap. A
+  # mailbox hiccup never breaks the tick.
+  defp escalate_review_cap(%Issue{workspace_id: ws_id} = engagement, _workspace)
+       when is_binary(ws_id) do
+    body =
+      "ReviewPatrol has posted #{engagement.review_count} re-review(s) on PR " <>
+        "##{engagement.source_pr} and hit the configured review cap. No further " <>
+        "automatic re-reviews will be posted; the PR likely needs human " <>
+        "intervention (e.g. a recurring finding that keeps re-triggering)."
+
+    _ =
+      safe(fn ->
+        Arbiter.Messages.Message.send_mail(%{
+          kind: :escalation,
+          to_ref: "admiral",
+          from_ref: engagement.id,
+          workspace_id: ws_id,
+          directive_ref: engagement.id,
+          subject: "PR ##{engagement.source_pr} hit the ReviewPatrol review cap",
+          body: body
+        })
+      end)
+
+    :ok
+  end
+
+  defp escalate_review_cap(_engagement, _workspace), do: :ok
+
+  defp max_reviews(%Workspace{config: config}) do
+    case get_in(config || %{}, ["review_patrol", "max_reviews"]) do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> app_max_reviews()
+    end
+  end
+
+  defp max_reviews(_workspace), do: app_max_reviews()
+
+  defp app_max_reviews,
+    do: Application.get_env(:arbiter, :review_patrol_max_reviews, @default_max_reviews)
 
   # Fetch the diff SINCE `last_reviewed_sha` (new-diff-only) and re-review only
   # when it touches a file we previously flagged. A push that touches only
@@ -672,7 +756,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     update_engagement(engagement, %{
       last_reviewed_sha: head,
       last_reviewed_at: now(),
-      posted_findings: merged
+      posted_findings: merged,
+      review_count: (engagement.review_count || 0) + 1
     })
   end
 

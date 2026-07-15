@@ -563,6 +563,104 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
     end
   end
 
+  describe "tick/1 — per-PR review cap (bd-ahvk03)" do
+    test "review_count increments on each posted re-review", %{ws: ws} do
+      eng =
+        engagement(ws, 410, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(410, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _review}
+      assert reload(eng).review_count == 1
+    end
+
+    test "at the cap, ReviewPatrol escalates once instead of re-reviewing", %{ws: ws} do
+      eng =
+        engagement(ws, 411, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          review_count: 3
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(411, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Capped: no diff fetch, no post, no advance — but exactly one escalation.
+      refute_receive {:compare, _path}
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      assert reloaded.last_reviewed_sha == "oldsha"
+      assert reloaded.review_count == 3
+      assert reloaded.review_cap_escalated == true
+      assert ReviewPatrol.state(name).last_rereviewed == []
+      assert ReviewPatrol.state(name).last_escalated == [eng.id]
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "admiral" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+      assert hd(escalations).subject =~ "review cap"
+    end
+
+    test "past the cap and already escalated, subsequent ticks do nothing (no re-escalation)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 412, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          review_count: 5,
+          review_cap_escalated: true
+        })
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(412, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:compare, _path}
+      refute_receive {:submit_review, _}
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "admiral" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert escalations == []
+      assert ReviewPatrol.state(name).last_escalated == []
+    end
+  end
+
   describe "tick/1 — author-reply handling (bd-8fg64x)" do
     # A GraphQL review-thread node: id/path plus a list of {comment_id, author, body}.
     defp thread_node(id, path, comments) do
