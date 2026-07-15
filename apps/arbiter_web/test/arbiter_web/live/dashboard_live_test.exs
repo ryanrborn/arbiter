@@ -446,6 +446,22 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Watchdog checked"
     end
 
+    test "CI-pending shows distinct 'CI running' badge, not 'awaiting approval'",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "ci-pending-task", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, _} = Worker.open_mr(pid, "feature/ci", "Integrate CI", "", merge_opts())
+
+      # Simulate a Watchdog poll: MR is open but pipeline is still running
+      :ok = Worker.record_merger_status(pid, %{status: :open, approved: false, pipeline: :running})
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ task.id
+      assert html =~ "CI running"
+    end
+
     test "the merger type reflects the workspace's gitlab strategy", %{conn: conn} do
       {:ok, gl_ws} =
         Ash.create(Workspace, %{
