@@ -893,11 +893,19 @@ defmodule ArbiterWeb.DashboardLive do
           :merged -> "Merged"
           :approved -> "Approved"
           :closed -> "Closed / rejected"
-          :pending -> "In review"
+          :pending -> merge_status_label_pending(status)
         end
 
       reason ->
         block_reason_label(reason)
+    end
+  end
+
+  defp merge_status_label_pending(status) when is_map(status) do
+    if Watchdog.ci_pending?(status) do
+      "CI running"
+    else
+      "In review"
     end
   end
 
@@ -910,11 +918,19 @@ defmodule ArbiterWeb.DashboardLive do
           :merged -> "badge-success"
           :approved -> "badge-success"
           :closed -> "badge-error"
-          :pending -> "badge-info"
+          :pending -> merge_status_class_pending(status)
         end
 
       _reason ->
         "badge-error"
+    end
+  end
+
+  defp merge_status_class_pending(status) when is_map(status) do
+    if Watchdog.ci_pending?(status) do
+      "badge-info"
+    else
+      "badge-warning"
     end
   end
 

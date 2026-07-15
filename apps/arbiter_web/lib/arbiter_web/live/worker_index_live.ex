@@ -164,8 +164,8 @@ defmodule ArbiterWeb.WorkerIndexLive do
                       {p.task_id}
                     </code>
                   </.link>
-                  <span class={["badge badge-sm shrink-0", worker_status_class(p.status)]}>
-                    {worker_status_label(p.status)}
+                  <span class={["badge badge-sm shrink-0", awaiting_review_status_class(p)]}>
+                    {awaiting_review_status_label(p)}
                   </span>
                 </div>
                 <div class="flex items-center justify-between gap-2 mt-1.5 text-xs text-base-content/60">
@@ -242,4 +242,30 @@ defmodule ArbiterWeb.WorkerIndexLive do
     do: other |> Atom.to_string() |> String.capitalize()
 
   defp worker_status_label(other), do: to_string(other)
+
+  # For awaiting_review workers, delegate to approval_class/approval_label to maintain
+  # correct priority order: blocks > approved > ci_pending > default.
+  defp awaiting_review_status_label(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
+    case Map.get(meta, :last_merger_status) do
+      merger_status when is_map(merger_status) ->
+        ArbiterWeb.WorkerDetailLive.approval_label(merger_status)
+
+      _ ->
+        "Awaiting review"
+    end
+  end
+
+  defp awaiting_review_status_label(worker), do: worker_status_label(worker.status)
+
+  defp awaiting_review_status_class(%{status: :awaiting_review, meta: meta}) when is_map(meta) do
+    case Map.get(meta, :last_merger_status) do
+      merger_status when is_map(merger_status) ->
+        ArbiterWeb.WorkerDetailLive.approval_class(merger_status)
+
+      _ ->
+        "badge-warning"
+    end
+  end
+
+  defp awaiting_review_status_class(worker), do: worker_status_class(worker.status)
 end
