@@ -90,7 +90,7 @@ defmodule Arbiter.Workflows.CodeReview do
 
   alias Arbiter.Mergers
   alias Arbiter.Worker.Worktree
-  alias Arbiter.Workflows.CodeReview.{Checks, ConsumerTrace, LocalMode}
+  alias Arbiter.Workflows.CodeReview.{Checks, ConsumerTrace, DiffScope, LocalMode}
 
   step(:load_pr,
     description: "Record branch (local) or accept adapter mr_ref (adapter)",
@@ -252,11 +252,27 @@ defmodule Arbiter.Workflows.CodeReview do
     findings = Map.get(state, :findings, [])
     opts = adapter_opts(state)
 
+    # Scope findings to the diff (bd-2n3qm6): the Tier-2 reviewer has
+    # read-only file access beyond the diff for context and can (mis)report
+    # a finding on a line/file GitHub's inline-comment API can't resolve —
+    # a 422 there would otherwise fail the whole step and discard every
+    # finding. Only attempt to post findings the diff itself touches; route
+    # the rest to the review summary body via :out_of_diff_findings. A
+    # missing `:diff` key (unit tests exercising this step directly,
+    # bypassing :read_diff) skips scoping and posts everything, unchanged.
+    {in_diff, out_of_scope} = partition_by_diff_scope(findings, state)
+
     # Inline comments are the per-finding artifact; the verdict step posts
     # the single review-level summary via submit_review/4. No separate
     # add_comment call — that would double-post on hosted forges where
     # submit_review already carries a body.
-    post_each_finding(adapter, mr_ref, findings, opts, state)
+    case post_each_finding(adapter, mr_ref, in_diff, opts, state) do
+      {:ok, state, demoted} ->
+        {:ok, Map.update(state, :out_of_diff_findings, out_of_scope ++ demoted, &(&1 ++ out_of_scope ++ demoted))}
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   def run_step(:file_findings, _state),
@@ -288,8 +304,9 @@ defmodule Arbiter.Workflows.CodeReview do
       when is_atom(adapter) and is_binary(mr_ref) do
     prepare_adapter(state)
     findings = Map.get(state, :findings, [])
+    out_of_diff = Map.get(state, :out_of_diff_findings, [])
     verdict = compute_verdict(findings)
-    body = verdict_summary(verdict, findings)
+    body = verdict_summary(verdict, findings) <> out_of_diff_section(out_of_diff)
     opts = adapter_opts(state)
 
     case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, opts]) do
@@ -396,15 +413,62 @@ defmodule Arbiter.Workflows.CodeReview do
     "Requesting changes: #{errors} blocking finding(s) out of #{length(findings)}."
   end
 
+  # Posts each finding inline. A `:validation_failed` (422) response — GitHub
+  # rejecting a (path, line) it can't resolve against the diff (bd-2n3qm6) —
+  # is treated as best-effort: that finding is demoted (returned in the third
+  # tuple slot for the caller to fold into `:out_of_diff_findings`) rather
+  # than halting the step and discarding every other finding + the verdict.
+  # Any other adapter error still halts, unchanged.
+  # A finding on a file/line the diff doesn't touch can't be posted inline
+  # (bd-2n3qm6) — surface it as prose in the review summary instead of
+  # silently dropping it, so the reviewer's out-of-diff observation still
+  # reaches the PR.
+  defp out_of_diff_section([]), do: ""
+
+  defp out_of_diff_section(findings) do
+    lines =
+      Enum.map(findings, fn f ->
+        "- **#{severity_label(f[:severity] || f["severity"])}** " <>
+          "#{finding_file(f)}:#{finding_line(f)} — #{f[:message] || f["message"]}"
+      end)
+
+    "\n\nOut-of-diff findings (context the reviewer explored but that isn't " <>
+      "part of this diff, so it can't be posted inline):\n" <> Enum.join(lines, "\n")
+  end
+
   defp post_each_finding(adapter, mr_ref, findings, opts, state) do
-    Enum.reduce_while(findings, {:ok, state}, fn finding, {:ok, acc} ->
+    findings
+    |> Enum.reduce_while({:ok, state, []}, fn finding, {:ok, acc, demoted} ->
       case safe_adapter_call(adapter, :post_inline_comment, [mr_ref, finding, opts]) do
-        {:ok, response} -> {:cont, {:ok, maybe_capture_path(acc, response)}}
-        :ok -> {:cont, {:ok, acc}}
+        {:ok, response} -> {:cont, {:ok, maybe_capture_path(acc, response), demoted}}
+        :ok -> {:cont, {:ok, acc, demoted}}
+        {:error, %{kind: :validation_failed}} -> {:cont, {:ok, acc, [finding | demoted]}}
         {:error, _} = err -> {:halt, err}
       end
     end)
+    |> case do
+      {:ok, state, demoted} -> {:ok, state, Enum.reverse(demoted)}
+      {:error, _} = err -> err
+    end
   end
+
+  # Which findings the diff itself touches, vs. ones the reviewer flagged
+  # outside it. A state with no `:diff` key (adapter-mode tests that call
+  # `run_step(:file_findings, ...)` directly, never having run `:read_diff`)
+  # skips scoping entirely so existing callers/tests are unaffected.
+  defp partition_by_diff_scope(findings, state) do
+    case Map.fetch(state, :diff) do
+      :error ->
+        {findings, []}
+
+      {:ok, diff} ->
+        scope = DiffScope.build(diff)
+        Enum.split_with(findings, &DiffScope.in_diff?(scope, finding_file(&1), finding_line(&1)))
+    end
+  end
+
+  defp finding_file(finding), do: finding[:file] || finding["file"]
+  defp finding_line(finding), do: finding[:line] || finding["line"]
 
   # Some adapters (Direct) write findings to a local file and return its
   # path. Expose that on the state so callers can locate the artifact.
