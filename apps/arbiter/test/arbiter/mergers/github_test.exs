@@ -458,7 +458,7 @@ defmodule Arbiter.Mergers.GithubTest do
       assert {:ok, %{pipeline: :running}} = Github.get(@ref)
     end
 
-    test "pipeline is :neutral when all check-runs completed but mixed neutral/skipped (settled, not CI-still-running, bd-cnytw3)" do
+    test "pipeline is :success when all check-runs completed with success+skipped mix (bd-5p32kh)" do
       stub(fn conn ->
         case conn.request_path do
           "/repos/octo/widget/pulls/42" ->
@@ -479,14 +479,45 @@ defmodule Arbiter.Mergers.GithubTest do
             |> Plug.Conn.put_status(200)
             |> Req.Test.json(%{
               "check_runs" => [
-                %{"status" => "completed", "conclusion" => "neutral"},
+                %{"status" => "completed", "conclusion" => "success"},
                 %{"status" => "completed", "conclusion" => "skipped"}
               ]
             })
         end
       end)
 
-      assert {:ok, %{pipeline: :neutral}} = Github.get(@ref)
+      assert {:ok, %{pipeline: :success}} = Github.get(@ref)
+    end
+
+    test "pipeline is :success when all check-runs completed with success+neutral mix (bd-5p32kh)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "head" => %{"sha" => "pqr456"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/pqr456/check-runs" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "check_runs" => [
+                %{"status" => "completed", "conclusion" => "success"},
+                %{"status" => "completed", "conclusion" => "neutral"}
+              ]
+            })
+        end
+      end)
+
+      assert {:ok, %{pipeline: :success}} = Github.get(@ref)
     end
 
     test "pipeline is nil when no check-runs exist" do
