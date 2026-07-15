@@ -346,6 +346,53 @@ defmodule Arbiter.Workflows.CodeReviewTest do
     %{repo: repo, tmp: tmp}
   end
 
+  # Mirrors what `Arbiter.Reviews.Checkout.provision/2` actually produces for
+  # a PR targeting a non-default branch: a clone whose only *local* branch
+  # is "main" (the default), with "dolphin" reachable solely as the
+  # remote-tracking ref `origin/dolphin` — Checkout never fetches/creates a
+  # local branch for the base. `dolphin` also gets a commit *after*
+  # "feature/x" branches off it, so two-dot vs three-dot diff semantics
+  # diverge (bd-5yp6yn finding #2).
+  defp setup_repo_with_remote_base do
+    unique = "gte021-remote-base-#{:erlang.unique_integer([:positive])}"
+    tmp = Path.join(System.tmp_dir!(), unique)
+    File.mkdir_p!(tmp)
+
+    origin = Path.join(tmp, "origin")
+    File.mkdir_p!(origin)
+    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", origin])
+    {_, 0} = System.cmd("git", ["-C", origin, "config", "user.email", "test@example.com"])
+    {_, 0} = System.cmd("git", ["-C", origin, "config", "user.name", "Test User"])
+    {_, 0} = System.cmd("git", ["-C", origin, "config", "commit.gpgsign", "false"])
+    File.write!(Path.join(origin, "README.md"), "hello\n")
+    {_, 0} = System.cmd("git", ["-C", origin, "add", "README.md"])
+    {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "initial"])
+
+    {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "-b", "dolphin"])
+
+    {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "-b", "feature/x"])
+    File.write!(Path.join(origin, "added.txt"), "line one\n")
+    {_, 0} = System.cmd("git", ["-C", origin, "add", "added.txt"])
+    {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "add file"])
+    {head_sha, 0} = System.cmd("git", ["-C", origin, "rev-parse", "HEAD"])
+    head_sha = String.trim(head_sha)
+
+    base_extra_commit_file = "base_advanced.txt"
+    {_, 0} = System.cmd("git", ["-C", origin, "checkout", "-q", "dolphin"])
+    File.write!(Path.join(origin, base_extra_commit_file), "advanced\n")
+    {_, 0} = System.cmd("git", ["-C", origin, "add", base_extra_commit_file])
+    {_, 0} = System.cmd("git", ["-C", origin, "commit", "-q", "-m", "base advances"])
+
+    repo = Path.join(tmp, "clone")
+    {_, 0} = System.cmd("git", ["clone", "-q", origin, repo])
+    {_, 0} = System.cmd("git", ["-C", repo, "fetch", "-q", "--no-tags", "origin", head_sha])
+    {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "--detach", head_sha])
+
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    %{repo: repo, tmp: tmp, base_extra_commit_file: base_extra_commit_file}
+  end
+
   # A repo checkout with a function definition (`sign/1`) plus a second file
   # that calls it — used to prove repo-scoped review can trace a consumer a
   # diff-only review would never see.
@@ -520,18 +567,52 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert diff =~ "+line one"
     end
 
-    test "adapter mode with a worktree_path defaults base to \"main\" when unset" do
+    test "adapter mode with a worktree_path falls back to the adapter's REST diff when :base is unset" do
       %{repo: repo} = setup_repo()
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DiffOk,
+        mr_ref: "#42",
+        worktree_path: repo
+      }
+
+      assert {:ok, %{diff: "diff --git a/x b/x\n+hi\n"}} = CodeReview.run_step(:read_diff, state)
+    end
+
+    test "adapter mode with a worktree_path falls back to the adapter's REST diff when :base doesn't resolve in the worktree" do
+      %{repo: repo} = setup_repo()
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.DiffOk,
+        mr_ref: "#42",
+        worktree_path: repo,
+        base: "some-unfetched-branch"
+      }
+
+      assert {:ok, %{diff: "diff --git a/x b/x\n+hi\n"}} = CodeReview.run_step(:read_diff, state)
+    end
+
+    test "adapter mode with a worktree_path resolves a non-default base via origin/<base> and diffs three-dot (merge-base)" do
+      %{repo: repo, base_extra_commit_file: base_extra_commit_file} =
+        setup_repo_with_remote_base()
 
       state = %{
         mode: :adapter,
         adapter: Stubs.DiffMustNotBeCalled,
         mr_ref: "#99",
-        worktree_path: repo
+        worktree_path: repo,
+        base: "dolphin"
       }
 
       assert {:ok, %{diff: diff}} = CodeReview.run_step(:read_diff, state)
       assert diff =~ "added.txt"
+      # Three-dot (merge-base) semantics: a commit landed on "dolphin" after
+      # "feature/x" branched off must NOT show up as a spurious reversal in
+      # the diff (bd-5yp6yn finding #2) — two-dot `dolphin..HEAD` would
+      # include it.
+      refute diff =~ base_extra_commit_file
     end
   end
 

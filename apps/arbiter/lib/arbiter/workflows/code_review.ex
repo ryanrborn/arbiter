@@ -174,12 +174,23 @@ defmodule Arbiter.Workflows.CodeReview do
   # diff` instead of the REST diff endpoint — the REST endpoint 406s on
   # PRs whose diff exceeds GitHub's 20k-line cap, which the local `git
   # diff` has no equivalent limit on.
+  #
+  # `base` is a *bare* branch name from the adapter (e.g. `"dolphin"`); it
+  # only resolves in the worktree when it happens to be the checked-out
+  # local branch. Since `Checkout.provision/2` never fetches the base
+  # branch, the reachable ref is the remote-tracking one, so resolution is
+  # tried as `origin/<base>` first, then the bare name as a last resort.
+  # When `base` is missing/unresolvable, fall back to the adapter's REST
+  # diff rather than guessing a base and silently producing the wrong diff.
   def run_step(:read_diff, %{mode: :adapter, worktree_path: wt} = state) when is_binary(wt) do
-    base = Map.get(state, :base) || "main"
-
-    case System.cmd("git", ["-C", wt, "diff", "#{base}..HEAD"], stderr_to_stdout: true) do
-      {output, 0} -> {:ok, Map.put(state, :diff, output)}
-      {output, _nonzero} -> {:error, {:git_diff_failed, String.trim(output)}}
+    with base when is_binary(base) <- Map.get(state, :base),
+         {:ok, ref} <- resolve_base_ref(wt, base) do
+      case System.cmd("git", ["-C", wt, "diff", "#{ref}...HEAD"], stderr_to_stdout: true) do
+        {output, 0} -> {:ok, Map.put(state, :diff, output)}
+        {output, _nonzero} -> {:error, {:git_diff_failed, String.trim(output)}}
+      end
+    else
+      _ -> read_diff_via_adapter(state)
     end
   rescue
     e in ErlangError -> {:error, {:git_diff_failed, Exception.message(e)}}
@@ -187,13 +198,7 @@ defmodule Arbiter.Workflows.CodeReview do
 
   def run_step(:read_diff, %{mode: :adapter, adapter: adapter, mr_ref: mr_ref} = state)
       when is_atom(adapter) and is_binary(mr_ref) do
-    prepare_adapter(state)
-    opts = adapter_opts(state)
-
-    case safe_adapter_call(adapter, :get_diff, [mr_ref, opts]) do
-      {:ok, diff} when is_binary(diff) -> {:ok, Map.put(state, :diff, diff)}
-      {:error, _} = err -> err
-    end
+    read_diff_via_adapter(state)
   end
 
   def run_step(:read_diff, _state),
@@ -427,5 +432,33 @@ defmodule Arbiter.Workflows.CodeReview do
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp read_diff_via_adapter(%{adapter: adapter, mr_ref: mr_ref} = state)
+       when is_atom(adapter) and is_binary(mr_ref) do
+    prepare_adapter(state)
+    opts = adapter_opts(state)
+
+    case safe_adapter_call(adapter, :get_diff, [mr_ref, opts]) do
+      {:ok, diff} when is_binary(diff) -> {:ok, Map.put(state, :diff, diff)}
+      {:error, _} = err -> err
+    end
+  end
+
+  # `Checkout.provision/2` only fetches the PR head SHA, not the base
+  # branch, so the base is reachable in the worktree as a remote-tracking
+  # ref (`origin/<base>`) rather than a local branch of that name — try
+  # that first, then the bare name as a last resort (e.g. it happens to be
+  # the worktree's checked-out branch).
+  defp resolve_base_ref(wt, base) do
+    ["origin/#{base}", base]
+    |> Enum.find_value(:error, fn ref ->
+      case System.cmd("git", ["-C", wt, "rev-parse", "--verify", "#{ref}^{commit}"],
+             stderr_to_stdout: true
+           ) do
+        {_output, 0} -> {:ok, ref}
+        _ -> nil
+      end
+    end)
   end
 end
