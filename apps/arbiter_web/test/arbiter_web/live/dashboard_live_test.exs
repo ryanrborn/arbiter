@@ -446,6 +446,23 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert html =~ "Watchdog checked"
     end
 
+    test "CI-pending shows distinct 'CI running' badge, not 'awaiting approval'",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "ci-pending-task", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+      :ok = Worker.advance(pid, :integrate)
+      {:ok, _} = Worker.open_mr(pid, "feature/ci", "Integrate CI", "", merge_opts())
+
+      # Simulate a Watchdog poll: MR is open but pipeline is still running
+      :ok =
+        Worker.record_merger_status(pid, %{status: :open, approved: false, pipeline: :running})
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ task.id
+      assert html =~ "CI running"
+    end
+
     test "the merger type reflects the workspace's gitlab strategy", %{conn: conn} do
       {:ok, gl_ws} =
         Ash.create(Workspace, %{
@@ -652,7 +669,10 @@ defmodule ArbiterWeb.DashboardLiveTest do
   end
 
   describe "recent tasks sorting" do
-    test "sorts by status (in_progress first), then priority, then created_at", %{conn: conn, ws: ws} do
+    test "sorts by status (in_progress first), then priority, then created_at", %{
+      conn: conn,
+      ws: ws
+    } do
       # Create issues with mixed statuses, priorities, and creation times.
       # We create them slightly out of order to ensure the sort isn't just
       # relying on creation order or updated_at.
@@ -666,6 +686,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # In-progress task, P2, created second
       {:ok, ip_p2_old} =
         Ash.create(Issue, %{title: "in-progress-p2-old", priority: 2, workspace_id: ws.id})
+
       {:ok, _} = Ash.update(ip_p2_old, %{status: :in_progress})
 
       Process.sleep(10)
@@ -679,6 +700,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # In-progress task, P1, created fourth
       {:ok, ip_p1} =
         Ash.create(Issue, %{title: "in-progress-p1", priority: 1, workspace_id: ws.id})
+
       {:ok, _} = Ash.update(ip_p1, %{status: :in_progress})
 
       Process.sleep(10)
@@ -686,6 +708,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # In-progress task, P3, created fifth
       {:ok, ip_p3} =
         Ash.create(Issue, %{title: "in-progress-p3", priority: 3, workspace_id: ws.id})
+
       {:ok, _} = Ash.update(ip_p3, %{status: :in_progress})
 
       Process.sleep(10)
@@ -704,12 +727,21 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       # Extract the position of each issue in the rendered output
       positions = %{
-        "in-progress-p2-old" => String.contains?(rendered, "in-progress-p2-old") && position_in_string(rendered, "in-progress-p2-old"),
-        "in-progress-p1" => String.contains?(rendered, "in-progress-p1") && position_in_string(rendered, "in-progress-p1"),
-        "in-progress-p3" => String.contains?(rendered, "in-progress-p3") && position_in_string(rendered, "in-progress-p3"),
-        "open-p0" => String.contains?(rendered, "open-p0") && position_in_string(rendered, "open-p0"),
-        "open-p1" => String.contains?(rendered, "open-p1") && position_in_string(rendered, "open-p1"),
-        "open-p3-old" => String.contains?(rendered, "open-p3-old") && position_in_string(rendered, "open-p3-old")
+        "in-progress-p2-old" =>
+          String.contains?(rendered, "in-progress-p2-old") &&
+            position_in_string(rendered, "in-progress-p2-old"),
+        "in-progress-p1" =>
+          String.contains?(rendered, "in-progress-p1") &&
+            position_in_string(rendered, "in-progress-p1"),
+        "in-progress-p3" =>
+          String.contains?(rendered, "in-progress-p3") &&
+            position_in_string(rendered, "in-progress-p3"),
+        "open-p0" =>
+          String.contains?(rendered, "open-p0") && position_in_string(rendered, "open-p0"),
+        "open-p1" =>
+          String.contains?(rendered, "open-p1") && position_in_string(rendered, "open-p1"),
+        "open-p3-old" =>
+          String.contains?(rendered, "open-p3-old") && position_in_string(rendered, "open-p3-old")
       }
 
       # All issues should be present
@@ -737,12 +769,14 @@ defmodule ArbiterWeb.DashboardLiveTest do
       # Within in_progress: P1 < P2 < P3 (by priority ascending)
       assert positions["in-progress-p1"] < positions["in-progress-p2-old"],
              "in-progress-p1 should come before in-progress-p2-old"
+
       assert positions["in-progress-p2-old"] < positions["in-progress-p3"],
              "in-progress-p2-old should come before in-progress-p3"
 
       # Within open: P0 < P1 < P3 (by priority ascending)
       assert positions["open-p0"] < positions["open-p1"],
              "open-p0 should come before open-p1 (open-p0 has recent updated_at, so this proves it's not sorting by updated_at)"
+
       assert positions["open-p1"] < positions["open-p3-old"],
              "open-p1 should come before open-p3-old"
     end
