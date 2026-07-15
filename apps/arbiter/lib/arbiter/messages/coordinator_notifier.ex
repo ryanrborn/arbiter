@@ -16,7 +16,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   Directive-closed events are intentionally **not** posted — too noisy.
 
-  ## Actionable escalations (`acolyte_stopped`, `preflight_failed`)
+  ## Actionable escalations (`worker_stopped`, `preflight_failed`)
 
   A dead/stopped worker (token exhaustion, crash, external kill, auth expiry)
   or a failed pre-flight auth probe is not just dashboard noise — it needs the
@@ -38,9 +38,11 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   ## Configuration
 
-  Gated per-workspace by `workspace.config["admiral_notifications"]`
+  Gated per-workspace by `workspace.config["coordinator_notifications"]`
   (default `true`). Set it to `false` on high-volume workspaces to silence the
-  auto-posts.
+  auto-posts. Workspaces configured before the vernacular rename (bd-2bsahq)
+  may still carry the legacy `"admiral_notifications"` key — it is read as a
+  fallback when the new key is absent, so existing opt-outs keep working.
 
   ## Failure handling
 
@@ -57,7 +59,8 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   alias Arbiter.Messages.Message
   alias Arbiter.Worker.StopReason
 
-  @config_key "admiral_notifications"
+  @config_key "coordinator_notifications"
+  @legacy_config_key "admiral_notifications"
 
   @typedoc """
   The subset of an `Arbiter.Worker` snapshot this module reads. Passing the
@@ -134,9 +137,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   the body spells out the repo, last activity, exit code, and fix. Best-effort,
   returns `:ok`.
   """
-  @spec acolyte_stopped(snapshot(), StopReason.t()) :: :ok
-  def acolyte_stopped(snapshot, %StopReason{} = reason),
-    do: escalate(:acolyte_stopped, snapshot, reason)
+  @spec worker_stopped(snapshot(), StopReason.t()) :: :ok
+  def worker_stopped(snapshot, %StopReason{} = reason),
+    do: escalate(:worker_stopped, snapshot, reason)
 
   @doc """
   Escalate a failed pre-flight auth probe to the coordinator (bd-awi4nw).
@@ -144,7 +147,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   Fired by `Arbiter.Worker.Dispatch` when the agent CLI fails its cheap
   token-validity probe *before* any worker is dispatched — so a wave of spawns
   that would all 401 is refused up front and the operator is told to
-  re-authenticate. Same addressed `:escalation` shape as `acolyte_stopped/2`.
+  re-authenticate. Same addressed `:escalation` shape as `worker_stopped/2`.
   Best-effort, returns `:ok`.
   """
   @spec preflight_failed(snapshot(), StopReason.t()) :: :ok
@@ -158,7 +161,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   (e.g. a transient network/VPN outage during the agent subprocess spawn, or
   a workflow-machine attach failure) — the worker it just registered `:idle`
   is failed rather than left as a silent zombie registration. Same addressed
-  `:escalation` shape as `acolyte_stopped/2` / `preflight_failed/2`.
+  `:escalation` shape as `worker_stopped/2` / `preflight_failed/2`.
   Best-effort, returns `:ok`.
   """
   @spec spawn_failed(snapshot(), StopReason.t()) :: :ok
@@ -170,7 +173,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   Fired by `Arbiter.Agents.CredentialWatchdog` when a periodic liveness probe
   detects that credentials are expired *before* any worker has been dispatched
-  or failed. Unlike `acolyte_stopped/2` and `preflight_failed/2`, this has no
+  or failed. Unlike `worker_stopped/2` and `preflight_failed/2`, this has no
   associated task — it names the adapter that failed instead.
 
   `snapshot` must contain `:workspace_id`; `adapter` is the module whose probe
@@ -653,7 +656,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
   # Actionable escalations are addressed mailbox messages (not broadcast
   # notifications) so they queue in `arb inbox` for the coordinator. They are NOT
-  # gated by the `admiral_notifications` toggle — silencing routine completion
+  # gated by the `coordinator_notifications` toggle — silencing routine completion
   # noise must never silence a "your credentials expired" alarm. A worker with
   # no workspace_id has nowhere to post (Message.workspace_id is required).
   defp escalate(event, %{workspace_id: ws_id} = snapshot, %StopReason{} = reason)
@@ -704,7 +707,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   defp escalation_payload(event, %{task_id: task_id} = snapshot, %StopReason{} = reason) do
     verb =
       case event do
-        :acolyte_stopped -> "stopped"
+        :worker_stopped -> "stopped"
         :preflight_failed -> "pre-flight auth failed"
         :spawn_failed -> "spawn failed"
       end
@@ -713,7 +716,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     lead =
       case event do
-        :acolyte_stopped ->
+        :worker_stopped ->
           "Worker for #{title_for(task_id)} stopped: #{reason.summary}."
 
         :preflight_failed ->
@@ -743,9 +746,9 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   # bd-auma3z: a stopped worker's worktree (committed/uncommitted
   # progress) is preserved, so the operator can continue rather than re-dispatching
   # from scratch. Offer the resume verb right in the escalation. Only for
-  # `:acolyte_stopped` — a `:preflight_failed` refusal happens before any work,
+  # `:worker_stopped` — a `:preflight_failed` refusal happens before any work,
   # so there is no worktree to resume.
-  defp resume_hint(:acolyte_stopped, task_id),
+  defp resume_hint(:worker_stopped, task_id),
     do: "Resume: run `arb worker resume #{task_id}` to continue from the preserved worktree."
 
   # bd-bi5pn0: a spawn failure happens before the agent ever ran, so there is
@@ -855,11 +858,18 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   end
 
   # Default-on: only an explicit `false` disables auto-posts. A missing or
-  # unreadable workspace falls back to enabled.
+  # unreadable workspace falls back to enabled. The new key wins when both are
+  # set; the legacy key is consulted only when the new key is absent, so
+  # workspaces configured before the bd-2bsahq rename keep their opt-out.
   defp enabled?(ws_id) do
     case Ash.get(Workspace, ws_id) do
-      {:ok, %{config: config}} -> Map.get(config || %{}, @config_key, true) != false
-      _ -> true
+      {:ok, %{config: config}} ->
+        config = config || %{}
+        legacy_default = Map.get(config, @legacy_config_key, true)
+        Map.get(config, @config_key, legacy_default) != false
+
+      _ ->
+        true
     end
   rescue
     _ -> true

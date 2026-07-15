@@ -1450,7 +1450,7 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.CoordinatorNotifier.acolyte_stopped(snapshot(new_state), reason)
+    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
     broadcast_worker_failed(new_state)
     new_state
@@ -1648,7 +1648,7 @@ defmodule Arbiter.Worker do
 
     new_state = %State{state | status: :failed, meta: meta}
     record_run_finished(new_state)
-    Arbiter.Messages.CoordinatorNotifier.acolyte_stopped(snapshot(new_state), reason)
+    Arbiter.Messages.CoordinatorNotifier.worker_stopped(snapshot(new_state), reason)
     broadcast_lifecycle(:updated, new_state)
     broadcast_worker_failed(new_state)
     new_state
