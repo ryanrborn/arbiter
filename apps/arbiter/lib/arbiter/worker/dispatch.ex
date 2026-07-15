@@ -1598,7 +1598,7 @@ defmodule Arbiter.Worker.Dispatch do
     If a conflict is SEMANTIC — two changes both rewrote the same predicate or
     invariant such that no mechanical merge can honor both — STOP and escalate:
 
-        arb message admiral "Conflict on #{task.id} needs human review: <one-line why>"
+        arb message coordinator "Conflict on #{task.id} needs human review: <one-line why>"
 
     then print `arb done`. A loud escalation beats a silent miscompile in
     #{target_branch}.

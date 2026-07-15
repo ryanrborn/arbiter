@@ -2676,7 +2676,7 @@ defmodule Arbiter.Worker do
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -2752,7 +2752,7 @@ defmodule Arbiter.Worker do
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -2902,7 +2902,7 @@ defmodule Arbiter.Worker do
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -2934,7 +2934,7 @@ defmodule Arbiter.Worker do
        when is_binary(ws_id) do
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -3295,7 +3295,7 @@ defmodule Arbiter.Worker do
 
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -3886,7 +3886,7 @@ defmodule Arbiter.Worker do
 
     Arbiter.Messages.Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,

@@ -8,7 +8,7 @@ defmodule ArbiterWeb.DashboardLive do
       (Direct/GitLab/GitHub): the workers parked at `:awaiting_review`, each
       with its open MR, approval status, and Watchdog poll activity. Live.
     * Coordinator mailbox — unread mailbox-family messages addressed to the
-      coordinator (`to_ref "admiral"`): completions, failures, escalations,
+      coordinator (`to_ref "coordinator"`): completions, failures, escalations,
       flags, info. Read-acknowledge per message; clear drains the read tail.
       The dashboard counterpart of `arb inbox` / `arb msg`. Live.
     * Notifications feed — recent `:notification` broadcasts (read-only).
@@ -57,8 +57,9 @@ defmodule ArbiterWeb.DashboardLive do
 
   # The coordinator's mailbox recipient — the `to_ref` workers address reports
   # *up* to (completions/failures/escalations/info). Matches `arb inbox` and
-  # the `arb prime` Coordinator Inbox section.
-  @admiral_ref "admiral"
+  # the `arb prime` Coordinator Inbox section. `Message.inbox/2` dual-reads the
+  # legacy `"admiral"` literal during the retirement compat window.
+  @coordinator_ref Arbiter.Messages.Message.coordinator_ref()
 
   # Number of CURRENT (non-closed) directives shown in the dashboard's
   # recent-directives list. The landing shows only this current slice, capped;
@@ -179,9 +180,9 @@ defmodule ArbiterWeb.DashboardLive do
   end
 
   # Drain the read tail of the Coordinator mailbox. Mirrors `arb inbox clear` /
-  # `DELETE /api/messages?to_ref=admiral` — unread mail is left untouched.
+  # `DELETE /api/messages?to_ref=coordinator` — unread mail is left untouched.
   def handle_event("clear_coordinator", _params, socket) do
-    _ = Message.clear_read(@admiral_ref)
+    _ = Message.clear_read(@coordinator_ref)
     {:noreply, refresh_coordinator_inbox(socket)}
   end
 
@@ -603,7 +604,7 @@ defmodule ArbiterWeb.DashboardLive do
   defp refresh_coordinator_inbox(socket) do
     inbox =
       try do
-        Message.inbox(@admiral_ref)
+        Message.inbox(@coordinator_ref)
       rescue
         _ -> []
       end
@@ -1548,7 +1549,7 @@ defmodule ArbiterWeb.DashboardLive do
 
         <%!-- ── D. Coordinator mailbox ───────────────────────────────────── --%>
         <%!-- Unread mailbox-family mail addressed to the coordinator
-             ("admiral"): completions, failures, escalations, flags, info.
+             ("coordinator"): completions, failures, escalations, flags, info.
              Read-acknowledge per message; clear drains the read tail. The
              upward channel of `arb inbox` / `arb msg`, surfaced live. --%>
         <section id="coordinator-mailbox" class="card bg-base-200 border border-base-300 shadow-sm">

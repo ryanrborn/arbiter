@@ -126,7 +126,7 @@ defmodule Arbiter.MCP.Tools do
   return — the structured replacement for `arb message inbox` / `arb inbox`.
   Coordinator only; the worker tier is denied at the catalog level.
 
-  Lists all unread messages where `to_ref == "admiral"` in the workspace and
+  Lists all unread messages where `to_ref == "coordinator"` in the workspace and
   marks each one read, so the dashboard unread count drops to 0. Optional
   `clear: true` also destroys the already-read tail (`Message.clear_read/2`),
   mirroring `arb inbox clear`.
@@ -135,12 +135,12 @@ defmodule Arbiter.MCP.Tools do
   def coordinator_inbox(%Scope{} = scope, args) do
     with {:ok, clear} <- fetch_bool(args, "clear", false),
          {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      messages = Message.inbox("admiral", workspace_id: ws_id)
+      messages = Message.inbox(Message.coordinator_ref(), workspace_id: ws_id)
       _ = Enum.each(messages, &Message.mark_read/1)
 
       {deleted_read, deleted_unread, remaining_unread} =
         if clear do
-          {:ok, dr, du, ru} = Message.clear_read("admiral", workspace_id: ws_id)
+          {:ok, dr, du, ru} = Message.clear_read(Message.coordinator_ref(), workspace_id: ws_id)
           {dr, du, ru}
         else
           {0, 0, 0}
@@ -165,14 +165,14 @@ defmodule Arbiter.MCP.Tools do
   count is unchanged. Coordinator only; the worker tier is denied at the
   catalog level. This is the read-only counterpart to `coordinator_inbox`.
 
-  Lists all unread messages where `to_ref == "admiral"` in the workspace
+  Lists all unread messages where `to_ref == "coordinator"` in the workspace
   without mutating state. Use this for read-only consumers like briefing
   tools that must not affect the coordinator's unread count.
   """
   @spec coordinator_inbox_peek(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def coordinator_inbox_peek(%Scope{} = scope, args) do
     with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
-      messages = Message.inbox("admiral", workspace_id: ws_id)
+      messages = Message.inbox(Message.coordinator_ref(), workspace_id: ws_id)
 
       {:ok,
        %{

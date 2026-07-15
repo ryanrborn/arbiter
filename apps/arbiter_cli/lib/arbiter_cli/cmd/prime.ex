@@ -37,7 +37,7 @@ defmodule ArbiterCli.Cmd.Prime do
   Emits a JSON object with two keys:
 
       {
-        "admiral_inbox": [...],
+        "coordinator_inbox": [...],
         "workspaces": [
           {
             "workspace": {...},
@@ -73,7 +73,7 @@ defmodule ArbiterCli.Cmd.Prime do
 
   defp to_json(sections) do
     %{
-      admiral_inbox: unwrap(sections.admiral_inbox),
+      coordinator_inbox: unwrap(sections.global_coordinator_inbox),
       workspaces: Enum.map(sections.workspaces, &workspace_to_json/1)
     }
   end
@@ -105,7 +105,7 @@ defmodule ArbiterCli.Cmd.Prime do
       end
 
     %{
-      admiral_inbox: gather_admiral_inbox(),
+      global_coordinator_inbox: gather_global_coordinator_inbox(),
       workspaces: workspace_sections
     }
   end
@@ -141,8 +141,8 @@ defmodule ArbiterCli.Cmd.Prime do
 
   # Up to 5 most recent unread messages addressed to the coordinator. The REST
   # index already sorts newest-first, so a take/2 gives "most recent".
-  defp gather_admiral_inbox do
-    case Client.get("/api/messages", to_ref: "admiral", unread: "true") do
+  defp gather_global_coordinator_inbox do
+    case Client.get("/api/messages", to_ref: "coordinator", unread: "true") do
       {:ok, %{"data" => list}} -> {:ok, list}
       {:ok, _} -> {:ok, []}
       {:error, %Client.Error{} = err} -> {:error, err.message}
@@ -176,7 +176,7 @@ defmodule ArbiterCli.Cmd.Prime do
   # ---- render ------------------------------------------------------------
 
   defp emit_text(sections) do
-    maybe_emit_admiral_inbox(sections.admiral_inbox)
+    maybe_emit_global_coordinator_inbox(sections.global_coordinator_inbox)
     Enum.each(sections.workspaces, &emit_workspace_block/1)
   end
 
@@ -230,9 +230,9 @@ defmodule ArbiterCli.Cmd.Prime do
   defp standing_order_line(order), do: "[ ] #{inspect(order)}"
 
   # Omitted entirely when there's no unread coordinator mail.
-  defp maybe_emit_admiral_inbox({:ok, []}), do: :ok
+  defp maybe_emit_global_coordinator_inbox({:ok, []}), do: :ok
 
-  defp maybe_emit_admiral_inbox({:ok, list}) do
+  defp maybe_emit_global_coordinator_inbox({:ok, list}) do
     IO.puts("== Global Coordinator Inbox (#{length(list)} unread) ==")
 
     list
@@ -242,7 +242,7 @@ defmodule ArbiterCli.Cmd.Prime do
     IO.puts("")
   end
 
-  defp maybe_emit_admiral_inbox(_), do: :ok
+  defp maybe_emit_global_coordinator_inbox(_), do: :ok
 
   # Omitted entirely when there's no unread coordinator mail.
   defp maybe_emit_coordinator_inbox({:ok, []}), do: :ok

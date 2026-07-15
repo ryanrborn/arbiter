@@ -26,7 +26,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
   judgement needed. When the conflict is semantic — two waves both
   rewrote the same predicate or both changed a shared invariant — the
   worker escalates via the workspace mailbox (an `:escalation` to
-  `to_ref: "admiral"`) rather than silently failing.
+  `to_ref: "coordinator"`) rather than silently failing.
 
   ## Merger/tracker-agnostic
 
@@ -420,7 +420,7 @@ defmodule Arbiter.Workflows.MergeQueue.ConflictResolver do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: workspace_id,
       directive_ref: task_id,

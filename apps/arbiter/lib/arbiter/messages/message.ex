@@ -15,8 +15,10 @@ defmodule Arbiter.Messages.Message do
       shape changed). A subtype of mailbox.
 
   The remaining kinds are the **coordinator mailbox family** — addressed reports
-  an worker (or the system) sends *up* to the coordinator (`to_ref "admiral"`),
-  surfaced by `arb inbox` and the prime briefing:
+  an worker (or the system) sends *up* to the coordinator (`to_ref
+  "coordinator"`; the legacy `"admiral"` literal is still accepted during the
+  retirement compat window — see `ref_variants/1`), surfaced by `arb inbox` and
+  the prime briefing:
 
     * `:completion` — a directive finished successfully.
     * `:failure` — a directive failed (crash, non-zero exit, aborted run).
@@ -45,6 +47,16 @@ defmodule Arbiter.Messages.Message do
 
   @kinds ~w(notification mailbox direction flag completion failure escalation info)a
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)a
+
+  # The coordinator mailbox address. `"coordinator"` is the canonical wire
+  # literal persisted on `to_ref`/`from_ref`; `"admiral"` is the legacy literal
+  # accepted during the retirement compat window. A data migration rewrites
+  # stored rows, but an in-flight old binary may still write `"admiral"`, so
+  # readers dual-read both via `ref_variants/1`. Drop `@legacy_coordinator_ref`
+  # (and the compat branch of `ref_variants/1`) once no old producer remains.
+  @coordinator_ref "coordinator"
+  @legacy_coordinator_ref "admiral"
+  @coordinator_refs [@coordinator_ref, @legacy_coordinator_ref]
 
   sqlite do
     table "messages"
@@ -100,7 +112,7 @@ defmodule Arbiter.Messages.Message do
     attribute :from_ref, :string do
       public? true
       constraints max_length: 255, trim?: true
-      description ~s(task_id, "admiral", or "system". nil for anonymous events.)
+      description ~s(task_id, "coordinator", or "system". nil for anonymous events.)
     end
 
     attribute :to_ref, :string do
@@ -153,6 +165,28 @@ defmodule Arbiter.Messages.Message do
   @doc "The mailbox-family kinds (addressed, read-acknowledged)."
   def mailbox_kinds, do: @mailbox_kinds
 
+  @doc """
+  The canonical coordinator mailbox literal (`"coordinator"`). Producers address
+  reports *up* to the coordinator with this value.
+  """
+  def coordinator_ref, do: @coordinator_ref
+
+  @doc """
+  Every literal that addresses the coordinator mailbox: the canonical
+  `"coordinator"` plus the legacy `"admiral"` still accepted during the
+  retirement compat window. Readers filter on this set so a row written under
+  either literal is found under either.
+  """
+  def coordinator_refs, do: @coordinator_refs
+
+  @doc """
+  Expand a `to_ref`/`from_ref` into the set of literals that address the same
+  mailbox. Either coordinator literal expands to both variants (dual-read);
+  every other ref matches only itself.
+  """
+  def ref_variants(ref) when ref in @coordinator_refs, do: @coordinator_refs
+  def ref_variants(ref), do: [ref]
+
   # ---- PubSub --------------------------------------------------------------
 
   @doc false
@@ -168,7 +202,7 @@ defmodule Arbiter.Messages.Message do
   def broadcast_new(%{workspace_id: ws_id} = message) when is_binary(ws_id) do
     Phoenix.PubSub.broadcast(Arbiter.PubSub, topic(ws_id), {:new_message, message})
 
-    if Map.get(message, :to_ref) == "admiral" do
+    if Map.get(message, :to_ref) in @coordinator_refs do
       Arbiter.Events.broadcast(ws_id, "inbox", %{
         task_id: Map.get(message, :directive_ref),
         from_ref: Map.get(message, :from_ref),
@@ -273,9 +307,11 @@ defmodule Arbiter.Messages.Message do
   Pass `workspace_id:` to scope.
   """
   def inbox(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
     query =
       __MODULE__
-      |> Ash.Query.filter(to_ref == ^to_ref and is_nil(read_at) and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(to_ref in ^refs and is_nil(read_at) and kind in ^@mailbox_kinds)
       |> Ash.Query.sort(inserted_at: :asc)
 
     query =
@@ -295,9 +331,11 @@ defmodule Arbiter.Messages.Message do
   the deletion. Pass `workspace_id:` to scope to one workspace.
   """
   def clear_read(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
     read_query =
       __MODULE__
-      |> Ash.Query.filter(to_ref == ^to_ref and not is_nil(read_at) and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(to_ref in ^refs and not is_nil(read_at) and kind in ^@mailbox_kinds)
 
     read_query =
       case Keyword.get(opts, :workspace_id) do
@@ -316,7 +354,7 @@ defmodule Arbiter.Messages.Message do
     # Count unread that remain
     unread_query =
       __MODULE__
-      |> Ash.Query.filter(to_ref == ^to_ref and is_nil(read_at) and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(to_ref in ^refs and is_nil(read_at) and kind in ^@mailbox_kinds)
 
     unread_query =
       case Keyword.get(opts, :workspace_id) do
@@ -336,9 +374,11 @@ defmodule Arbiter.Messages.Message do
   to one workspace.
   """
   def clear_all(to_ref, opts \\ []) when is_binary(to_ref) do
+    refs = ref_variants(to_ref)
+
     query =
       __MODULE__
-      |> Ash.Query.filter(to_ref == ^to_ref and kind in ^@mailbox_kinds)
+      |> Ash.Query.filter(to_ref in ^refs and kind in ^@mailbox_kinds)
 
     query =
       case Keyword.get(opts, :workspace_id) do

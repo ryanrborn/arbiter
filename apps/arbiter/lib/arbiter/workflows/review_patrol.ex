@@ -96,7 +96,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       push defers to task D rather than getting an in-thread reply.
 
     * `:flag` — post NOTHING to the PR; raise exactly ONE addressed coordinator
-      escalation (`to_ref: "admiral"`) with the PR link + reply snippet.
+      escalation (`to_ref: "coordinator"`) with the PR link + reply snippet.
 
   Either way we advance `last_seen_comment_id` past the handled reply so it is
   processed (or escalated) exactly once, never per-tick.
@@ -504,7 +504,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       safe(fn ->
         Arbiter.Messages.Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: engagement.id,
           workspace_id: ws_id,
           directive_ref: engagement.id,
@@ -691,7 +691,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       safe(fn ->
         Arbiter.Messages.Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: engagement.id,
           workspace_id: ws_id,
           directive_ref: engagement.id,
@@ -881,7 +881,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   end
 
   # :flag — post NOTHING to the PR. Raise ONE addressed coordinator escalation
-  # (to_ref "admiral") so a human decides whether to reply or re-review. The
+  # (to_ref "coordinator") so a human decides whether to reply or re-review. The
   # cursor advance in the caller dedupes: we escalate a given reply exactly once.
   defp escalate_reply(%Issue{workspace_id: ws_id} = engagement, thread, comment, adapter)
        when is_binary(ws_id) do
@@ -904,7 +904,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       safe(fn ->
         Arbiter.Messages.Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: engagement.id,
           workspace_id: ws_id,
           directive_ref: engagement.id,

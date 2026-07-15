@@ -294,7 +294,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
   end
 
   describe "--json mode" do
-    test "emits a JSON object with admiral_inbox and workspaces array" do
+    test "emits a JSON object with coordinator_inbox and workspaces array" do
       stub_all(
         [%{"id" => "ws-1", "name" => "default", "prefix" => "bd", "config" => %{}}],
         [],
@@ -306,7 +306,7 @@ defmodule ArbiterCli.Cmd.PrimeTest do
 
       {:ok, decoded} = Jason.decode(String.trim(out))
       assert is_map(decoded)
-      assert Map.has_key?(decoded, "admiral_inbox")
+      assert Map.has_key?(decoded, "coordinator_inbox")
       assert Map.has_key?(decoded, "workspaces")
       assert is_list(decoded["workspaces"])
       refute Map.has_key?(decoded, "field_guide_pitfalls")

@@ -552,7 +552,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       safe_call(fn ->
         Arbiter.Messages.Message.send_mail(%{
           kind: :escalation,
-          to_ref: "admiral",
+          to_ref: Arbiter.Messages.Message.coordinator_ref(),
           from_ref: "external_review",
           workspace_id: ws_id,
           directive_ref: String.slice(prepared.mr_ref, 0, 255),

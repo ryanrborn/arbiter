@@ -961,7 +961,7 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       escalations =
         Arbiter.Messages.Message
-        |> Ash.Query.filter(to_ref == "admiral" and directive_ref == ^task.id)
+        |> Ash.Query.filter(to_ref == "coordinator" and directive_ref == ^task.id)
         |> Ash.read!()
 
       assert [%{kind: :escalation}] = escalations
