@@ -1019,7 +1019,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       msgs =
         Arbiter.Messages.Message
-        |> Ash.Query.filter(to_ref == "admiral" and workspace_id == ^ws.id)
+        |> Ash.Query.filter(to_ref == "coordinator" and workspace_id == ^ws.id)
         |> Ash.read!()
 
       assert Enum.any?(msgs, fn m ->

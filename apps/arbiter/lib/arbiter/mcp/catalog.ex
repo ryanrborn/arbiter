@@ -17,8 +17,8 @@ defmodule Arbiter.MCP.Catalog do
   | `task_show` | worker, coordinator | `Ash.get(Issue, id)` + child-progress calcs |
   | `task_ready` | coordinator | `Issue.ready/1` |
   | `inbox_check` | worker, coordinator | `Messages.inbox/2` + `mark_read` |
-  | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (Admiral mailbox) |
-  | `coordinator_inbox_peek` | coordinator | `Messages.inbox/2` read-only (Admiral mailbox, no mark-read) |
+  | `coordinator_inbox` | coordinator | `Messages.inbox/2` + `mark_read` (coordinator mailbox) |
+  | `coordinator_inbox_peek` | coordinator | `Messages.inbox/2` read-only (coordinator mailbox, no mark-read) |
   | `workspace_show` | worker, coordinator | `Ash.get(Workspace, id)` |
   | `task_update_progress` | worker, coordinator | `Ash.update(issue, …, action: :update)` |
 
@@ -167,7 +167,7 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Read (and mark read) the Admiral escalation mailbox for the workspace — the structured " <>
           "replacement for `arb message inbox` / `arb inbox`. Lists all unread messages where " <>
-          "`to_ref == \"admiral\"` and marks them read, so the dashboard unread count drops to 0. " <>
+          "`to_ref == \"coordinator\"` and marks them read, so the dashboard unread count drops to 0. " <>
           "Optional `clear: true` also destroys the already-read tail (mirrors `arb inbox clear`). " <>
           "Coordinator only.",
       input_schema: %{
@@ -188,7 +188,7 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Read-only peek at the Admiral escalation mailbox for the workspace — lists all unread " <>
-          "messages where `to_ref == \"admiral\"` without marking them read or mutating state. " <>
+          "messages where `to_ref == \"coordinator\"` without marking them read or mutating state. " <>
           "Use this for read-only consumers (e.g. briefing tools) that must not affect the " <>
           "coordinator's unread count. Coordinator only.",
       input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},

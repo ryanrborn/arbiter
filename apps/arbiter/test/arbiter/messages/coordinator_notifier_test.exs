@@ -195,7 +195,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ task_id
       assert escalation.subject =~ "credentials expired"
@@ -265,7 +265,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_merge_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ task_id
       assert escalation.subject =~ "merge blocked"
@@ -334,7 +334,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       assert [escalation] = Message.inbox("admiral", workspace_id: ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ "auto-resolve exhausted (2×)"
       assert escalation.body =~ "after 2 auto-resolve attempt"
@@ -375,7 +375,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_await_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.from_ref == task_id
       assert escalation.subject =~ task_id
@@ -439,7 +439,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
 
       escalation = only_tracker_escalation(ws)
       assert escalation.kind == :escalation
-      assert escalation.to_ref == "admiral"
+      assert escalation.to_ref == "coordinator"
       assert escalation.directive_ref == task_id
       assert escalation.subject =~ "tracker sync failed"
       # The provider's real error must be front-and-center

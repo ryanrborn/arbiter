@@ -82,7 +82,7 @@ defmodule ArbiterWeb.MessagesLiveTest do
       assert render(view) =~ "the API contract"
 
       # The direction landed as a real mailbox-family message addressed to the task.
-      assert [%Message{kind: :direction, from_ref: "admiral", body: "check the API contract"}] =
+      assert [%Message{kind: :direction, from_ref: "coordinator", body: "check the API contract"}] =
                Message.inbox(task.id, workspace_id: ws.id)
     end
 

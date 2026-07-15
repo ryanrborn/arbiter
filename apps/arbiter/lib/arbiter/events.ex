@@ -23,7 +23,7 @@ defmodule Arbiter.Events do
     * `Arbiter.Worker.fail_now/2` and `fail_stopped/2` → `:worker_failed`
     * `Arbiter.Worker.broadcast_done/1` → `:worker_done`
     * `Arbiter.Worker.escalate_review_gate/3` → `:review_gate`
-    * `Arbiter.Messages.Message.broadcast_new/1` → `:inbox` (admiral-addressed only)
+    * `Arbiter.Messages.Message.broadcast_new/1` → `:inbox` (coordinator-addressed only)
     * `Arbiter.Tasks.Issue.broadcast_lifecycle/2` → `:task_state`
     * `Arbiter.Reviews.ExternalReview.create_review_record/2` and
       `complete_review_record/3` → `:external_review`

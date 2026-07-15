@@ -94,8 +94,14 @@ defmodule ArbiterWeb.Api.MessageController do
 
   defp filter_eq(query, _field, value) when value in [nil, ""], do: query
   defp filter_eq(query, :kind, value), do: Ash.Query.filter(query, kind == ^value)
-  defp filter_eq(query, :to_ref, value), do: Ash.Query.filter(query, to_ref == ^value)
-  defp filter_eq(query, :from_ref, value), do: Ash.Query.filter(query, from_ref == ^value)
+  # `to_ref`/`from_ref` dual-read the coordinator mailbox during the
+  # admiral→coordinator compat window: either literal matches both stored
+  # variants (`Message.ref_variants/1`); every other ref matches only itself.
+  defp filter_eq(query, :to_ref, value),
+    do: Ash.Query.filter(query, to_ref in ^Message.ref_variants(value))
+
+  defp filter_eq(query, :from_ref, value),
+    do: Ash.Query.filter(query, from_ref in ^Message.ref_variants(value))
 
   defp maybe_unread(query, flag) when flag in ["true", true],
     do: Ash.Query.filter(query, is_nil(read_at))

@@ -32,7 +32,7 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   alias ArbiterCli.{Client, Output}
 
-  @admiral "admiral"
+  @coordinator "coordinator"
   @all_limit 20
   # Kinds the worker (task) path surfaces — addressed, read-acknowledged.
   @mailbox_kinds ~w(mailbox direction flag completion failure escalation info)
@@ -44,8 +44,8 @@ defmodule ArbiterCli.Cmd.Inbox do
       mode = Output.mode(argv)
 
       case Output.drop_json(argv) do
-        [] -> admiral_inbox(true, mode)
-        ["--all"] -> admiral_inbox(false, mode)
+        [] -> coordinator_inbox_view(true, mode)
+        ["--all"] -> coordinator_inbox_view(false, mode)
         ["read", id] -> read_one(id, mode)
         ["read"] -> Output.die("inbox read requires a message id: `arb inbox read <id>`")
         ["clear"] -> clear(false, mode)
@@ -58,11 +58,11 @@ defmodule ArbiterCli.Cmd.Inbox do
 
   # ---- coordinator views ----------------------------------------------------
 
-  defp admiral_inbox(unread_only, mode) do
+  defp coordinator_inbox_view(unread_only, mode) do
     params =
       if unread_only,
-        do: [to_ref: @admiral, unread: "true"],
-        else: [to_ref: @admiral, limit: @all_limit]
+        do: [to_ref: @coordinator, unread: "true"],
+        else: [to_ref: @coordinator, limit: @all_limit]
 
     case Client.get("/api/messages", params) do
       {:ok, %{"data" => list}} -> emit_list(list, mode, coordinator_label(unread_only, list))
@@ -126,7 +126,7 @@ defmodule ArbiterCli.Cmd.Inbox do
     if full_uuid?(token) do
       {:ok, token}
     else
-      case Client.get("/api/messages", to_ref: @admiral, limit: 50) do
+      case Client.get("/api/messages", to_ref: @coordinator, limit: 50) do
         {:ok, %{"data" => list}} -> match_prefix(list, token)
         {:ok, _} -> {:error, "no coordinator message matches id #{inspect(token)}"}
         {:error, err} -> Output.die(err)
@@ -147,7 +147,7 @@ defmodule ArbiterCli.Cmd.Inbox do
   # ---- clear ---------------------------------------------------------------
 
   defp clear(clear_all, mode) do
-    params = [to_ref: @admiral]
+    params = [to_ref: @coordinator]
     params = if clear_all, do: params ++ [all: "true"], else: params
 
     case Client.delete("/api/messages", params) do

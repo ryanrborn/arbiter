@@ -409,7 +409,7 @@ defmodule Arbiter.Workflows.MergeQueueConflictTest do
 
       messages =
         Message
-        |> filter(workspace_id == ^ws.id and to_ref == "admiral" and kind == :escalation)
+        |> filter(workspace_id == ^ws.id and to_ref == "coordinator" and kind == :escalation)
         |> Ash.read!()
 
       assert [msg] = messages

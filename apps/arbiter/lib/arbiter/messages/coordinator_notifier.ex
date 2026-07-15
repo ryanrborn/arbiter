@@ -21,7 +21,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   A dead/stopped worker (token exhaustion, crash, external kill, auth expiry)
   or a failed pre-flight auth probe is not just dashboard noise — it needs the
   operator to *act* (re-authenticate, top up credits, re-dispatch). Those go out as
-  addressed `:escalation` **mailbox** messages (`to_ref: "admiral"`,
+  addressed `:escalation` **mailbox** messages (`to_ref: "coordinator"`,
   `directive_ref: <task>`) so they land in `arb inbox` rather than scrolling off
   the broadcast feed. The classified cause + remediation
   (`Arbiter.Worker.StopReason`) is baked into the subject/body. See bd-awi4nw.
@@ -29,7 +29,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   ## Reconciliation with the task spec
 
   The originating task (bd-25ftl0) imagined dedicated `:completion` / `:failure`
-  kinds and a `to="admiral"` / `directive_ref=task_id` shape. The Message
+  kinds and a `to="coordinator"` / `directive_ref=task_id` shape. The Message
   resource that actually shipped (bd-bduz2k) settled on a leaner taxonomy:
   broadcast `:notification`s (the coordinator feed) vs. addressed mailbox kinds.
   We honour the realised design — every lifecycle auto-post is a
@@ -131,7 +131,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   Escalate a stopped/dead worker to the coordinator (bd-awi4nw).
 
   Unlike the lifecycle `:notification`s above, this is an addressed
-  `:escalation` **mailbox** message (`to_ref: "admiral"`) so it surfaces in
+  `:escalation` **mailbox** message (`to_ref: "coordinator"`) so it surfaces in
   `arb inbox` as an actionable item. The `Arbiter.Worker.StopReason` carries
   the classified cause + remediation; the subject names the task + cause and
   the body spells out the repo, last activity, exit code, and fix. Best-effort,
@@ -225,7 +225,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -276,7 +276,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -303,7 +303,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   `:ci_failed`, `:needs_approval`, `:needs_nonauthor_approval`, `:draft`,
   `:blocked_other`). Unlike the
   broadcast lifecycle notifications, this is an addressed `:escalation` **mailbox**
-  message (`to_ref: "admiral"`) so it lands in `arb inbox` as an actionable item
+  message (`to_ref: "coordinator"`) so it lands in `arb inbox` as an actionable item
   — the whole point of Phase 1 is that a blocked merge never parks silently.
 
   `snapshot` carries `:task_id` + `:workspace_id`; `mr_ref` is the PR/MR ref (may
@@ -331,7 +331,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -387,7 +387,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: Map.get(snapshot, :task_id),
@@ -444,7 +444,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -477,7 +477,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
   indefinitely with nothing in the inbox (the whole incident this addresses).
 
   This surfaces the ready-to-merge PR as an addressed `:escalation` **mailbox**
-  message (`to_ref: "admiral"`) — the same shape as `merge_blocked/3` — so it
+  message (`to_ref: "coordinator"`) — the same shape as `merge_blocked/3` — so it
   lands in `arb inbox` as an actionable item the moment the review passes. A
   block (`merge_blocked/3`) is escalated separately; this fires only when nothing
   is blocking the merge and it is purely awaiting the human decision.
@@ -516,7 +516,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
@@ -665,7 +665,7 @@ defmodule Arbiter.Messages.CoordinatorNotifier do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: Map.get(snapshot, :task_id, "system"),
       workspace_id: ws_id,
       directive_ref: Map.get(snapshot, :task_id),

@@ -352,7 +352,7 @@ defmodule Arbiter.Workflows.MergeQueue.FixPassDispatcher do
     failure, or a failure you cannot reproduce or understand — STOP and escalate
     by running:
 
-        arb message admiral "CI fix-pass on #{task_id} needs human review: <one-line explanation>"
+        arb message coordinator "CI fix-pass on #{task_id} needs human review: <one-line explanation>"
 
     then print `arb done`. Better a loud escalation than a thrashing fix loop.
     """

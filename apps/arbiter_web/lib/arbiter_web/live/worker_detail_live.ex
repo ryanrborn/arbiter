@@ -138,7 +138,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
       {text, ws_id} ->
         case Message.send_mail(%{
                kind: :direction,
-               from_ref: "admiral",
+               from_ref: Message.coordinator_ref(),
                to_ref: task_id,
                workspace_id: ws_id,
                body: text
