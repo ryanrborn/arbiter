@@ -239,6 +239,43 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def submit_review(_, _, _, _), do: {:ok, %{}}
   end
 
+  # Simulates GitHub 422ing one specific (path, line) inline comment — e.g. a
+  # finding whose position resolves per our own diff parsing but GitHub still
+  # rejects (bd-2n3qm6). Every other finding posts fine.
+  defmodule RejectsOneLine do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+    @impl true
+    def post_inline_comment(mr_ref, %{file: "reject.ex"} = finding, _opts) do
+      send(:code_review_test_pid, {:posted_attempt, mr_ref, finding})
+      {:error, %{kind: :validation_failed, status: 422, message: "could not be resolved"}}
+    end
+
+    def post_inline_comment(mr_ref, finding, _opts) do
+      send(:code_review_test_pid, {:posted_attempt, mr_ref, finding})
+      {:ok, %{}}
+    end
+
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
   defmodule VerdictSpy do
     @moduledoc false
     @behaviour Arbiter.Mergers.Merger
@@ -818,6 +855,69 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
       assert {:error, :forbidden} = CodeReview.run_step(:file_findings, state)
     end
+
+    test "findings outside the diff are not posted inline — routed to :out_of_diff_findings" do
+      Process.register(self(), :code_review_test_pid)
+
+      try do
+        diff = """
+        diff --git a/a.ex b/a.ex
+        --- a/a.ex
+        +++ b/a.ex
+        @@ -1,1 +1,2 @@
+         existing
+        +added
+        """
+
+        findings = [
+          %{severity: :error, file: "a.ex", line: 2, message: "in diff"},
+          %{severity: :warning, file: "neighbor.ex", line: 40, message: "read for context only"}
+        ]
+
+        state = %{
+          mode: :adapter,
+          adapter: Stubs.CommentSpy,
+          mr_ref: "#7",
+          diff: diff,
+          findings: findings
+        }
+
+        assert {:ok, result} = CodeReview.run_step(:file_findings, state)
+
+        assert_received {:posted, "#7", %{file: "a.ex", line: 2}}
+        refute_received {:posted, "#7", %{file: "neighbor.ex"}}
+
+        assert [%{file: "neighbor.ex", line: 40}] = result.out_of_diff_findings
+      after
+        Process.unregister(:code_review_test_pid)
+      end
+    end
+
+    test "a 422 from post_inline_comment demotes that finding instead of halting the review" do
+      Process.register(self(), :code_review_test_pid)
+
+      try do
+        findings = [
+          %{severity: :error, file: "reject.ex", line: 1, message: "GitHub rejects this position"},
+          %{severity: :info, file: "ok.ex", line: 2, message: "posts fine"}
+        ]
+
+        state = %{
+          mode: :adapter,
+          adapter: Stubs.RejectsOneLine,
+          mr_ref: "#7",
+          findings: findings
+        }
+
+        assert {:ok, result} = CodeReview.run_step(:file_findings, state)
+
+        assert_received {:posted_attempt, "#7", %{file: "reject.ex"}}
+        assert_received {:posted_attempt, "#7", %{file: "ok.ex"}}
+        assert [%{file: "reject.ex", line: 1}] = result.out_of_diff_findings
+      after
+        Process.unregister(:code_review_test_pid)
+      end
+    end
   end
 
   # =======================================================================
@@ -878,6 +978,24 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       state = %{mode: :adapter, adapter: Stubs.VerdictSpy, mr_ref: "#1", findings: findings}
       assert {:ok, %{verdict: :request_changes}} = CodeReview.run_step(:verdict, state)
       assert_received {:submitted, "#1", :request_changes, _body}
+    end
+
+    test "out-of-diff findings are appended to the review body as prose, not lost" do
+      findings = [%{severity: :warning, file: "a.ex", line: 1, message: "in diff"}]
+      out_of_diff = [%{severity: :error, file: "neighbor.ex", line: 40, message: "flagged context"}]
+
+      state = %{
+        mode: :adapter,
+        adapter: Stubs.VerdictSpy,
+        mr_ref: "#1",
+        findings: findings,
+        out_of_diff_findings: out_of_diff
+      }
+
+      assert {:ok, %{verdict: :approve}} = CodeReview.run_step(:verdict, state)
+      assert_received {:submitted, "#1", :approve, body}
+      assert body =~ "neighbor.ex:40"
+      assert body =~ "flagged context"
     end
   end
 
@@ -1112,7 +1230,10 @@ defmodule Arbiter.Workflows.CodeReviewTest do
 
             conn
             |> Plug.Conn.put_resp_header("content-type", "text/plain")
-            |> Plug.Conn.resp(200, "diff --git a/x.ex b/x.ex\n+hello\n")
+            |> Plug.Conn.resp(
+              200,
+              "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+hello\n"
+            )
 
           # PR get to fetch head SHA for inline comments
           conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
@@ -1654,6 +1775,23 @@ defmodule Arbiter.Workflows.CodeReviewTest do
       assert {:ok, []} = Checks.run("DIFF", %{mode: :adapter, review_cwd: "/some/worktree"})
       assert_received {:prompt, prompt}
       assert prompt =~ "/some/worktree"
+    end
+
+    test "prompt instructs the reviewer to scope findings to the diff, not the checkout (bd-2n3qm6)" do
+      test_pid = self()
+
+      Application.put_env(:arbiter, :code_review_invoker, fn prompt, _state ->
+        send(test_pid, {:prompt, prompt})
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, []} = Checks.run("DIFF", %{mode: :adapter, review_cwd: "/some/worktree"})
+      assert_received {:prompt, prompt}
+
+      assert prompt =~ "report findings ONLY on files and lines that are part of the diff"
+      assert prompt =~ "purely as context"
     end
 
     test "prompt omits tool access section when :review_cwd is absent" do

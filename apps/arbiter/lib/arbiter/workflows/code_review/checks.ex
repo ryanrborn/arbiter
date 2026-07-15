@@ -390,16 +390,25 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # Bash/Glob access at `cwd` and should use it to check real call sites,
   # open neighboring modules, etc. Diff-only reviews (no checkout) get no
   # such note since there is nothing to explore.
+  #
+  # bd-2n3qm6: the checkout is context ONLY. GitHub's inline-comment API
+  # rejects (422s) any finding whose (path, line) isn't part of the diff —
+  # and that 422 previously failed the whole review, discarding every
+  # finding. Findings must stay scoped to the diff; anything the checkout
+  # surfaces about code outside it belongs in prose (the summary), not as a
+  # `findings` entry.
   defp tool_access_section(nil), do: ""
 
   defp tool_access_section(cwd) when is_binary(cwd) do
     """
     You are running with read-only file tools (Read, Grep, Bash, Glob) at \
-    #{cwd}, checked out at the PR's actual head commit. The diff below is \
-    your entry point, not your entire context — use these tools to open \
-    neighboring modules, trace real call sites, and run greps when the diff \
-    alone doesn't tell you enough. You cannot edit or write files in this \
-    checkout.
+    #{cwd}, checked out at the PR's actual head commit. This checkout is \
+    purely as context — to understand call sites, types, and neighboring \
+    code so your review of the diff is well-informed. It is NOT a surface \
+    to review: report findings ONLY on files and lines that are part of \
+    the diff below. An out-of-diff observation is not a `findings` entry — \
+    a finding whose file/line isn't in the diff cannot be posted inline. \
+    You cannot edit or write files in this checkout.
 
     """
   end
