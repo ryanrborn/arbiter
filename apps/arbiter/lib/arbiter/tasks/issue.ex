@@ -104,6 +104,10 @@ defmodule Arbiter.Tasks.Issue do
         :skills
       ]
 
+      # `review_count` / `review_cap_escalated` are deliberately NOT create-accepted:
+      # they default to their non-capped values (0 / false) for a brand-new
+      # engagement, and are only ever advanced by ReviewPatrol's own :update calls.
+
       # Opt-out for `arb create --no-tracker` / `--local-only`. When true, the
       # CreateUpstream hook skips the outbound-create call even when the
       # workspace has a tracker configured.
@@ -153,6 +157,8 @@ defmodule Arbiter.Tasks.Issue do
         :review_automation,
         :last_reviewed_at,
         :posted_findings,
+        :review_count,
+        :review_cap_escalated,
         :skills
       ]
 
@@ -556,6 +562,32 @@ defmodule Arbiter.Tasks.Issue do
       new-commit re-review: the relevance gate (only re-review when the new diff
       touches a file we previously flagged) and unchanged-finding de-dupe (never
       re-post a finding whose file/line/message we already posted).
+      """
+    end
+
+    attribute :review_count, :integer do
+      allow_nil? true
+      public? true
+      default 0
+
+      description """
+      Number of re-reviews ReviewPatrol has posted to this engagement's PR
+      (bd-ahvk03). Incremented on each successful `:auto`-mode re-review;
+      once it reaches the configured cap (`config["review_patrol"]["max_reviews"]`,
+      then the `:review_patrol_max_reviews` app env, default 3) ReviewPatrol
+      stops re-reviewing and escalates once instead of looping.
+      """
+    end
+
+    attribute :review_cap_escalated, :boolean do
+      allow_nil? true
+      public? true
+      default false
+
+      description """
+      Whether ReviewPatrol has already raised the review-cap escalation for
+      this engagement (bd-ahvk03). Set on the first tick that hits the cap so
+      the same PR isn't re-escalated every subsequent tick.
       """
     end
 
