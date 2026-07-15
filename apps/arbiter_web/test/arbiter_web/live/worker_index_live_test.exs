@@ -21,6 +21,9 @@ defmodule ArbiterWeb.WorkerIndexLiveTest.TestMerger do
   def post_inline_comment(_ref, _finding, _opts), do: :ok
   @impl true
   def submit_review(_ref, _verdict, _body, _opts), do: :ok
+  @impl true
+  def list_review_feedback(_ref),
+    do: {:ok, %{changes_requested: false, latest_review_id: nil, feedback: []}}
 end
 
 defmodule ArbiterWeb.WorkerIndexLiveTest do
@@ -47,7 +50,8 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
       adapter: TestMerger,
       workspace: nil,
       auto_merge: false,
-      interval_ms: 600_000
+      interval_ms: 600_000,
+      initial_delay_ms: 600_000
     }
   end
 
@@ -93,7 +97,25 @@ defmodule ArbiterWeb.WorkerIndexLiveTest do
     {:ok, _view, html} = live(conn, ~p"/workers?status=awaiting")
 
     assert html =~ task.id
-    # When CI is not running, should show "Awaiting review"
-    assert html =~ "Awaiting review"
+    # When CI is not running, should show "Open · awaiting approval" with badge-warning
+    assert html =~ "Open · awaiting approval"
+    assert html =~ "badge-warning"
+  end
+
+  test "awaiting review worker with running CI shows CI running badge", %{conn: conn, ws: ws} do
+    {:ok, task} = Ash.create(Issue, %{title: "ci-running-task", workspace_id: ws.id})
+    {:ok, pid} = Worker.start(task_id: task.id, repo: "test/repo", workspace_id: ws.id)
+    :ok = Worker.advance(pid, :integrate)
+    {:ok, _} = Worker.open_mr(pid, "feature/test", "Test", "", merge_opts())
+
+    # Record merger status: MR is open, not approved, but CI is running
+    :ok = Worker.record_merger_status(pid, %{status: :open, approved: false, pipeline: :running})
+
+    {:ok, _view, html} = live(conn, ~p"/workers?status=awaiting")
+
+    assert html =~ task.id
+    # When CI is running, should show "Open · CI running" with badge-info
+    assert html =~ "Open · CI running"
+    assert html =~ "badge-info"
   end
 end
