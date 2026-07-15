@@ -169,7 +169,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
     end
   end
 
-  describe "acolyte_stopped/2 (bd-awi4nw)" do
+  describe "worker_stopped/2 (bd-awi4nw)" do
     alias Arbiter.Worker.StopReason
 
     defp only_escalation(ws) do
@@ -183,7 +183,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["401 invalid authentication credentials"])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{
                    task_id: task_id,
                    workspace_id: ws,
@@ -211,7 +211,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
@@ -225,7 +225,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(137, [])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{task_id: task_id, workspace_id: ws, repo: "r", meta: %{}},
                  reason
                )
@@ -237,7 +237,7 @@ defmodule Arbiter.Messages.CoordinatorNotifierTest do
       reason = StopReason.classify(1, ["boom"])
 
       assert :ok =
-               CoordinatorNotifier.acolyte_stopped(
+               CoordinatorNotifier.worker_stopped(
                  %{task_id: "bd-noworkspace", workspace_id: nil, repo: "r", meta: %{}},
                  reason
                )

@@ -67,11 +67,11 @@ defmodule Arbiter.WorkerNotificationTest do
     assert notification.body =~ "awaiting review"
   end
 
-  test "auto-posts are suppressed when admiral_notifications is disabled" do
+  test "auto-posts are suppressed when coordinator_notifications is disabled" do
     {:ok, workspace} =
       Ash.create(Workspace, %{
         name: uniq("quiet-ws"),
-        config: %{"admiral_notifications" => false}
+        config: %{"coordinator_notifications" => false}
       })
 
     task_id = uniq("bd-quiet")
@@ -83,5 +83,41 @@ defmodule Arbiter.WorkerNotificationTest do
     :ok = Worker.complete(pid, :done)
 
     assert Message.recent_notifications(10, workspace_id: workspace.id) == []
+  end
+
+  test "auto-posts are still suppressed for existing workspaces using the legacy admiral_notifications key" do
+    {:ok, workspace} =
+      Ash.create(Workspace, %{
+        name: uniq("legacy-quiet-ws"),
+        config: %{"admiral_notifications" => false}
+      })
+
+    task_id = uniq("bd-legacy-quiet")
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: workspace.id)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    assert Message.recent_notifications(10, workspace_id: workspace.id) == []
+  end
+
+  test "the new config key wins when both old and new keys are present" do
+    {:ok, workspace} =
+      Ash.create(Workspace, %{
+        name: uniq("mixed-ws"),
+        config: %{"admiral_notifications" => false, "coordinator_notifications" => true}
+      })
+
+    task_id = uniq("bd-mixed")
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: workspace.id)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    assert [_notification] = Message.recent_notifications(10, workspace_id: workspace.id)
   end
 end
