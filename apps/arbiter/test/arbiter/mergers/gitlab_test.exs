@@ -266,6 +266,27 @@ defmodule Arbiter.Mergers.GitlabTest do
               }} = Gitlab.get(@ref)
     end
 
+    test "extracts base_ref (the MR's target branch) for local diffing (bd-5yp6yn)" do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "#{base_path()}/#{@iid}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "iid" => @iid,
+              "state" => "opened",
+              "target_branch" => "dolphin",
+              "sha" => "abc123"
+            })
+
+          conn.request_path == "#{base_path()}/#{@iid}/pipelines" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+        end
+      end)
+
+      assert {:ok, %{base_ref: "dolphin", head_sha: "abc123"}} = Gitlab.get(@ref)
+    end
+
     test "maps merged/closed/locked states and absent approval" do
       stub(fn conn ->
         conn

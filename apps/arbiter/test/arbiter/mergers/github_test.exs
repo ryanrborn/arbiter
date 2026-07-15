@@ -277,6 +277,31 @@ defmodule Arbiter.Mergers.GithubTest do
               }} = Github.get(@ref)
     end
 
+    test "extracts base_ref (the PR's target branch) for local diffing (bd-5yp6yn)" do
+      stub(fn conn ->
+        case conn.request_path do
+          "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "state" => "open",
+              "merged" => false,
+              "html_url" => "u",
+              "base" => %{"ref" => "dolphin"},
+              "head" => %{"sha" => "abc123"}
+            })
+
+          "/repos/octo/widget/pulls/42/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          "/repos/octo/widget/commits/abc123/check-runs" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"check_runs" => []})
+        end
+      end)
+
+      assert {:ok, %{base_ref: "dolphin", head_sha: "abc123"}} = Github.get(@ref)
+    end
+
     test "merged PR is :merged" do
       stub(fn conn ->
         case conn.request_path do
