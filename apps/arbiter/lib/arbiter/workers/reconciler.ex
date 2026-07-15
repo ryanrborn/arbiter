@@ -329,7 +329,7 @@ defmodule Arbiter.Workers.Reconciler do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: "system",
       workspace_id: workspace_id,
       directive_ref: task_id,

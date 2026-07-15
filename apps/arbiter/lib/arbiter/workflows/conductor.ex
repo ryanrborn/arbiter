@@ -880,7 +880,7 @@ defmodule Arbiter.Workflows.Conductor do
 
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: failed_id,
       workspace_id: ws_id,
       directive_ref: failed_id,

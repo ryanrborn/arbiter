@@ -249,7 +249,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   defp escalate_dispatch_failure(task, state, reason) do
     Message.send_mail(%{
       kind: :escalation,
-      to_ref: "admiral",
+      to_ref: Message.coordinator_ref(),
       from_ref: task.id,
       workspace_id: state.workspace_id,
       directive_ref: task.id,

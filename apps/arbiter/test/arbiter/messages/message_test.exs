@@ -149,6 +149,86 @@ defmodule Arbiter.Messages.MessageTest do
     end
   end
 
+  describe "coordinator mailbox literal + admiral→coordinator compat" do
+    test "coordinator_ref/0 is the canonical literal; coordinator_refs/0 covers both" do
+      assert Message.coordinator_ref() == "coordinator"
+      assert "coordinator" in Message.coordinator_refs()
+      assert "admiral" in Message.coordinator_refs()
+    end
+
+    test "ref_variants/1 expands either coordinator literal, passes others through" do
+      assert Enum.sort(Message.ref_variants("coordinator")) == ["admiral", "coordinator"]
+      assert Enum.sort(Message.ref_variants("admiral")) == ["admiral", "coordinator"]
+      assert Message.ref_variants("bd-soren") == ["bd-soren"]
+    end
+
+    test "inbox/2 dual-reads: a legacy \"admiral\" row is visible under \"coordinator\"" do
+      {:ok, _} =
+        Ash.create(Message, %{
+          kind: :completion,
+          from_ref: "bd-soren",
+          to_ref: "admiral",
+          body: "legacy row",
+          workspace_id: @ws
+        })
+
+      assert [%{body: "legacy row"}] = Message.inbox("coordinator", workspace_id: @ws)
+    end
+
+    test "inbox/2 dual-reads: a new \"coordinator\" row is visible under \"admiral\"" do
+      {:ok, _} =
+        Message.send_mail(%{
+          kind: :completion,
+          from_ref: "bd-soren",
+          to_ref: "coordinator",
+          body: "new row",
+          workspace_id: @ws
+        })
+
+      assert [%{body: "new row"}] = Message.inbox("admiral", workspace_id: @ws)
+    end
+
+    test "clear_read/2 with either coordinator literal drains both variants' read tail" do
+      {:ok, legacy} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "legacy", workspace_id: @ws})
+
+      {:ok, current} =
+        Message.send_mail(%{to_ref: "coordinator", kind: :info, body: "current", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(legacy)
+      {:ok, _} = Message.mark_read(current)
+
+      assert {:ok, 2, 0, 0} = Message.clear_read("coordinator", workspace_id: @ws)
+      assert Message.inbox("coordinator", workspace_id: @ws) == []
+    end
+
+    test "clear_all/2 with either coordinator literal removes both variants" do
+      {:ok, _} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "legacy", workspace_id: @ws})
+
+      {:ok, _} =
+        Message.send_mail(%{to_ref: "coordinator", kind: :info, body: "current", workspace_id: @ws})
+
+      assert {:ok, _, _, 0} = Message.clear_all("admiral", workspace_id: @ws)
+      assert Message.inbox("coordinator", workspace_id: @ws) == []
+    end
+
+    test "broadcast_new fires the inbox SSE event for the new coordinator literal" do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Arbiter.Events.pubsub_topic(@ws))
+
+      {:ok, _} =
+        Message.send_mail(%{
+          to_ref: "coordinator",
+          kind: :escalation,
+          from_ref: "bd-soren",
+          body: "needs a decision",
+          workspace_id: @ws
+        })
+
+      assert_receive {:event, %{topic: "inbox"}}
+    end
+  end
+
   describe "PubSub broadcast on clear_read/2" do
     test "broadcasts {:mailbox_cleared, workspace_id} on the workspace topic" do
       Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(@ws))

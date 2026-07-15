@@ -106,7 +106,7 @@ defmodule ArbiterCli.Cmd.Message do
 
     body = %{
       kind: "direction",
-      from_ref: "admiral",
+      from_ref: "coordinator",
       to_ref: task_id,
       body: text,
       workspace_id: workspace_id
