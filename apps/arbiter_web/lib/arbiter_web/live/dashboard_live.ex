@@ -41,6 +41,7 @@ defmodule ArbiterWeb.DashboardLive do
   use ArbiterWeb, :live_view
 
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Reviews.PrState
   alias Arbiter.Reviews.Record, as: ExternalReviewRecord
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
@@ -388,74 +389,23 @@ defmodule ArbiterWeb.DashboardLive do
     |> assign(:review_history_total, total)
   end
 
-  # Records that should have their pr_state re-resolved: running reviews (may
-  # have finished) and open reviews (PR might have been merged/closed). Records
-  # that are completed/failed with a terminal pr_state (merged/closed) are left
-  # alone — the PR won't reopen.
-  defp needs_pr_state_refresh?(%{pr_state: nil}), do: true
-  defp needs_pr_state_refresh?(%{status: :running}), do: true
-  defp needs_pr_state_refresh?(%{pr_state: "open"}), do: true
-  defp needs_pr_state_refresh?(_), do: false
+  # Whether a record's pr_state should be re-resolved. Delegates to the shared
+  # resolver (bd-3jjk0e) so the dashboard, the review-complete path, and the
+  # background poller all agree on which states are terminal vs. retryable —
+  # crucially, `"unknown"` is now retryable (it was a dead-end here before).
+  defp needs_pr_state_refresh?(record), do: PrState.needs_refresh?(record)
 
   # Spawn one fire-and-forget task per record to resolve and persist pr_state.
-  # Each task is independent — a crash in one never affects the panel.
+  # Each task is independent — a crash in one never affects the panel. The
+  # dashboard is only a *reader* of pr_state now; the background poller keeps it
+  # advancing when no one is watching. This opportunistic resolve just gives a
+  # freshly-opened dashboard an immediate update.
   defp spawn_pr_state_resolvers(records, workspaces_by_id) do
     Enum.each(records, fn record ->
-      Task.start(fn ->
-        try do
-          state = resolve_pr_state(record, workspaces_by_id)
-          Ash.update!(record, %{pr_state: state}, action: :update_pr_state)
-        rescue
-          _ -> :ok
-        end
-      end)
+      workspace = Map.get(workspaces_by_id, record.workspace_id)
+      Task.start(fn -> PrState.resolve_and_persist(record, workspace) end)
     end)
   end
-
-  # Resolve the live PR state for a single review record by calling the
-  # appropriate merge adapter. Returns "open" / "merged" / "closed" /
-  # "unknown". Never raises.
-  defp resolve_pr_state(record, workspaces_by_id) do
-    strategy = record.strategy
-    mr_ref = record.pr_ref
-    workspace = Map.get(workspaces_by_id, record.workspace_id)
-
-    cond do
-      strategy in [nil, "", "direct"] ->
-        "unknown"
-
-      is_nil(mr_ref) or mr_ref == "" ->
-        "unknown"
-
-      true ->
-        adapter = Arbiter.Mergers.for_strategy(String.to_atom(strategy))
-        result = call_adapter_get(adapter, workspace, mr_ref)
-
-        case result do
-          {:ok, %{status: :open}} -> "open"
-          {:ok, %{status: :merged}} -> "merged"
-          {:ok, %{status: :closed}} -> "closed"
-          _ -> "unknown"
-        end
-    end
-  rescue
-    _ -> "unknown"
-  end
-
-  # Call adapter.get/1 with the per-process config set up for the workspace.
-  defp call_adapter_get(Arbiter.Mergers.Github, workspace, mr_ref) when not is_nil(workspace) do
-    Arbiter.Mergers.Github.with_workspace(workspace, fn ->
-      Arbiter.Mergers.Github.get(mr_ref)
-    end)
-  end
-
-  defp call_adapter_get(Arbiter.Mergers.Gitlab, workspace, mr_ref) when not is_nil(workspace) do
-    Arbiter.Mergers.Gitlab.with_workspace(workspace, fn ->
-      Arbiter.Mergers.Gitlab.get(mr_ref)
-    end)
-  end
-
-  defp call_adapter_get(_adapter, _workspace, _mr_ref), do: {:error, :unsupported}
 
   # Recent ReviewGate escalations: the durable record of non-approve verdicts
   # (REQUEST_CHANGES / inconclusive), newest first, fleet-wide. Carries the
@@ -2032,10 +1982,15 @@ defmodule ArbiterWeb.DashboardLive do
   defp flow_bar_class(:current), do: "bg-info"
   defp flow_bar_class(:todo), do: "bg-base-300"
 
-  # PR state badge for the Review History panel (bd-dsd67h).
+  # PR state badge for the Review History panel (bd-dsd67h, bd-3jjk0e).
+  # "unknown" is transient/retryable → warning tint; "gone"/"n/a" are terminal
+  # non-retryable sentinels → muted (error for a vanished PR, ghost for no-PR).
   defp pr_state_badge_class("open"), do: "badge-success"
   defp pr_state_badge_class("merged"), do: "badge-primary"
   defp pr_state_badge_class("closed"), do: "badge-ghost"
+  defp pr_state_badge_class("gone"), do: "badge-error"
+  defp pr_state_badge_class("n/a"), do: "badge-ghost"
+  defp pr_state_badge_class("unknown"), do: "badge-warning"
   defp pr_state_badge_class(_), do: "badge-ghost"
 
   # External review status badge (bd-31fh9e).

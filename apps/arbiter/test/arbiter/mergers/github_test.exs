@@ -1600,6 +1600,18 @@ defmodule Arbiter.Mergers.GithubTest do
       Config.clear()
       assert Github.link_for(@ref) =~ "/pull/42"
     end
+
+    # bd-3jjk0e: `parse_mr_ref/1` (exercised here via link_for/1) must tolerate a
+    # leading `github:` strategy prefix, so a prefixed ref still resolves to the
+    # embedded owner/repo instead of parsing "github:octo" as the owner.
+    test "tolerates a leading github: strategy prefix on an embedded ref" do
+      assert Github.link_for("github:octo/widget#42") ==
+               "https://github.com/octo/widget/pull/42"
+    end
+
+    test "tolerates a leading github: strategy prefix on a bare ref" do
+      assert Github.link_for("github:#42") == "https://github.com/octo/widget/pull/42"
+    end
   end
 
   describe "Mergers integration" do

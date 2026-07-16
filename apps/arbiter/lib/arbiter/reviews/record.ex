@@ -9,8 +9,11 @@ defmodule Arbiter.Reviews.Record do
 
   ## Fields
 
-    * `pr_ref`          — the opaque MR ref minted by the adapter (e.g.
-                          `github:owner/repo#42`); stable and adapter-specific.
+    * `pr_ref`          — the opaque MR ref minted by the merge adapter (e.g.
+                          GitHub `owner/repo#42` or `#42`, GitLab `!42`); stable
+                          and adapter-specific. Note this is the *merger* ref
+                          (no `github:`/`gitlab:` tag — those are the *tracker*
+                          conventions), and is fed verbatim back to the adapter.
     * `pr`              — the raw identifier the caller passed (`--pr`), e.g.
                           a GitHub URL or a bare number.
     * `workspace_id`    — FK-like to the Workspace that ran the review.
@@ -261,7 +264,13 @@ defmodule Arbiter.Reviews.Record do
       public? true
       constraints max_length: 64, trim?: true
 
-      description "Resolved PR state: open / merged / closed. Nil until first dashboard render resolves it."
+      description """
+      Resolved PR state (bd-3jjk0e). Live/retryable: nil (never resolved),
+      "open" (may still merge/close), "unknown" (transient failure, retried).
+      Terminal/frozen: "merged", "closed", "gone" (404/deleted PR), "n/a" (no
+      forge PR — direct-strategy or blank ref). Resolved by the background
+      poller and on review completion; the dashboard is a reader.
+      """
     end
 
     attribute :started_at, :utc_datetime_usec do

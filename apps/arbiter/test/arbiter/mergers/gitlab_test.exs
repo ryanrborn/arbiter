@@ -846,6 +846,13 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert :error = Gitlab.parse_ref("!")
       assert :error = Gitlab.parse_ref(%{})
     end
+
+    # bd-3jjk0e: tolerate a leading `gitlab:` strategy prefix so a prefixed ref
+    # still resolves to the underlying iid.
+    test "tolerates a leading gitlab: strategy prefix" do
+      assert {:ok, "!42"} = Gitlab.parse_ref("gitlab:!42")
+      assert {:ok, "!42"} = Gitlab.parse_ref("gitlab:42")
+    end
   end
 
   describe "config_missing" do
