@@ -243,6 +243,20 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
 
       assert render(view) =~ "running tests"
     end
+
+    test "output section has proper phx-hook attribute for auto-scroll", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-scroll", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.report(pid, :output_lines, ["line 1", "line 2"])
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      # The output div should have the colocated hook. Per Phoenix.LiveView.ColocatedHook
+      # convention, the source uses name=".ScrollToBottom" and phx-hook=".ScrollToBottom",
+      # but at render time Phoenix qualifies it to the module path for resolution.
+      assert html =~ ~s(id="worker-output")
+      assert html =~ ~s(phx-hook="ArbiterWeb.WorkerDetailLive.ScrollToBottom")
+    end
   end
 
   defp tool_use_event(name, input) do
