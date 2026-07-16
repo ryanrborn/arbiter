@@ -384,7 +384,7 @@ defmodule ArbiterCli.Cmd.InstallService do
     """
     [Unit]
     Description=Arbiter stack (Postgres + Phoenix)
-    Documentation=https://github.com/penumbral/arbiter
+    Documentation=https://github.com/ryanrborn/arbiter
     #{ordering}
     [Service]
     Type=exec
