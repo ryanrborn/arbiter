@@ -411,7 +411,9 @@ defmodule Arbiter.Mergers.Gitlab do
   def parse_ref(iid) when is_integer(iid) and iid > 0, do: {:ok, ref_for(iid)}
 
   def parse_ref(s) when is_binary(s) do
-    s = String.trim(s)
+    # Tolerate a leading `gitlab:` strategy prefix (bd-3jjk0e) so a prefixed ref
+    # still resolves to the underlying iid.
+    s = s |> String.trim() |> String.replace_prefix("gitlab:", "")
 
     cond do
       String.starts_with?(s, "http://") or String.starts_with?(s, "https://") ->

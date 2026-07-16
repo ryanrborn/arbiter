@@ -65,7 +65,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   require Ash.Query
 
   alias Arbiter.Mergers
-  alias Arbiter.Reviews.{Checkout, Record}
+  alias Arbiter.Reviews.{Checkout, PrState, Record}
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
@@ -154,12 +154,14 @@ defmodule Arbiter.Reviews.ExternalReview do
       case run_workflow(prepared, opts) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
+          resolve_pr_state_on_complete(record, prepared.workspace)
           write_usage_event(record, prepared, result)
           maybe_notify_coordinator(prepared, result, record)
           {:ok, result}
 
         {:error, _} = err ->
           complete_review_record(record, :failed, %{})
+          resolve_pr_state_on_complete(record, prepared.workspace)
           err
       end
     end
@@ -653,6 +655,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       case run_workflow(prepared, opts) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
+          resolve_pr_state_on_complete(record, prepared.workspace)
           write_usage_event(record, prepared, result)
           maybe_notify_coordinator(prepared, result, record)
 
@@ -663,12 +666,31 @@ defmodule Arbiter.Reviews.ExternalReview do
 
         {:error, reason} ->
           complete_review_record(record, :failed, %{})
+          resolve_pr_state_on_complete(record, prepared.workspace)
 
           Logger.warning(
             "ExternalReview: #{prepared.strategy} #{prepared.mr_ref} failed: #{inspect(reason)}"
           )
       end
     end)
+  end
+
+  # Resolve and persist the record's pr_state once the workflow finishes, so the
+  # Review History panel reflects the live PR state without waiting for the
+  # background poller's next tick or a dashboard to be opened (bd-3jjk0e).
+  #
+  # Runs inline: the production callers reach this only from the async workflow
+  # task (`start_async`), so it never blocks a request; running it in that same
+  # process (rather than spawning a grandchild task) keeps it under whatever
+  # forge/DB context the completion write already has. Best-effort — a
+  # slow/failing forge call is swallowed and the background poller retries.
+  defp resolve_pr_state_on_complete(nil, _workspace), do: :ok
+
+  defp resolve_pr_state_on_complete(%Record{} = record, workspace) do
+    PrState.resolve_and_persist(record, workspace)
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp ack(prepared, record) do

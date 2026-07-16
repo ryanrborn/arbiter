@@ -59,6 +59,11 @@ defmodule Arbiter.Application do
       # path: the CLI/MCP call returns a "dispatched" ack immediately while the
       # CodeReview adapter workflow posts findings + a verdict to the PR.
       {Task.Supervisor, name: Arbiter.Reviews.TaskSupervisor},
+      # Periodic background resolver that walks non-terminal ExternalReview
+      # records and refreshes their pr_state (bd-3jjk0e), so the Review History
+      # panel stays accurate even when no dashboard LiveView is open. The
+      # dashboard is a reader of pr_state; this is the writer of record.
+      Arbiter.Reviews.PrStatePoller,
       # Post-spawn connectivity probe for Codex's `.codex/config.toml` MCP config
       # (bd-bi5t54). Codex MCP support has reports of *silent* connect failures —
       # it starts without error but never reaches the MCP server — so a worker
