@@ -819,7 +819,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
               <% else %>
                 <div
                   id="worker-output"
-                  phx-hook="ScrollToBottom"
+                  phx-hook=".ScrollToBottom"
                   class="bg-neutral text-neutral-content font-mono text-xs overflow-x-auto max-h-[28rem] overflow-y-auto"
                 >
                   <div
