@@ -1107,6 +1107,11 @@ defmodule Arbiter.Mergers.Github do
     do: "#{owner}/#{repo}##{number}"
 
   defp parse_mr_ref(mr_ref) do
+    # Tolerate a leading `github:` strategy prefix (bd-3jjk0e): some stored refs
+    # / callers carry the strategy tag, and without stripping it the owner would
+    # parse as "github:owner" and every REST path would 404.
+    mr_ref = String.replace_prefix(mr_ref, "github:", "")
+
     case String.split(mr_ref, "#", parts: 2) do
       ["", num_str] ->
         case parse_pos_int(num_str) do

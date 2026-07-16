@@ -74,6 +74,11 @@ config :arbiter, :credential_warden, enabled: false
 # tests that exercise probe logic inject a :probe_fun stub and enable explicitly.
 config :arbiter, :quota_refresh_probe, enabled: false
 
+# Disable the pr_state background poller in test — it would otherwise hit the
+# forge on a timer. Tests drive `Arbiter.Reviews.PrStatePoller.poll/1`
+# synchronously with a Req.Test stub and start their own disabled instance.
+config :arbiter, :pr_state_poller, enabled: false
+
 # Disable the Codex / Gemini CLI / Antigravity refresh probe in test — there are
 # no real CLIs or endpoints to hit. Tests that exercise the prober inject a
 # :refresh_fun stub and enable explicitly.
