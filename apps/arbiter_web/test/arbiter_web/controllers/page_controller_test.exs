@@ -5,4 +5,12 @@ defmodule ArbiterWeb.PageControllerTest do
     conn = get(conn, ~p"/about")
     assert html_response(conn, 200) =~ "Arbiter"
   end
+
+  test "GET /about displays Arbiter version and git SHA", %{conn: conn} do
+    conn = get(conn, ~p"/about")
+    html = html_response(conn, 200)
+
+    assert html =~ Arbiter.Version.app_version()
+    assert html =~ Arbiter.Version.git_sha()
+  end
 end
