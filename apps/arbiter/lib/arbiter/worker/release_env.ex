@@ -28,7 +28,7 @@ defmodule Arbiter.Worker.ReleaseEnv do
   so `erl`, `erlc`, and `mix` (found via mise shims) resolve to the
   per-worktree toolchain rather than the release's bundled ERTS.
 
-  Called from `Arbiter.Worker.ClaudeSession.env_pairs/2`, which is the single
+  Called from `Arbiter.Worker.ClaudeSession.env_pairs/3`, which is the single
   choke-point for all worker Port.opens (implementer, reviewer, commit-gate
   nudge, resume continuation).
   """
