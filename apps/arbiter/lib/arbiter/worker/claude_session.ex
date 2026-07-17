@@ -122,6 +122,42 @@ defmodule Arbiter.Worker.ClaudeSession do
   def done_regex, do: @done_regex
 
   @doc """
+  Builds the session-config map that every site opening a worker port must
+  stash alongside the port.
+
+  Three sites open ports for the same task — `start/1` here, plus the gate-nudge
+  and auto-resume respawns in `Arbiter.Worker` — and each respawn inherits the
+  original port's `:env`, secrets included. Any field missing from a respawn's
+  map silently degrades that session: a missing `:redact_values` (bd-62d3jh)
+  means the relaunched child can echo a secret straight through `redact_line/2`
+  to the PubSub stream, `worker_runs.output_lines`, and the durable log. This
+  constructor is the single owner of the shape, so a new field can't drift out
+  of two of the three callers.
+
+  ## Options
+
+    * `:provider` / `:model` — routing config for the session's adapter.
+    * `:redact_values` — secret worker env values to scrub from output. Resolved
+      from the task's workspace when omitted; pass the previous session's list
+      on a respawn to skip the redundant DB read.
+  """
+  @spec build_session_config(String.t() | nil, String.t() | nil, keyword()) :: map()
+  def build_session_config(task_id, topic \\ nil, opts \\ []) do
+    %{
+      task_id: task_id,
+      topic: topic || default_topic(task_id),
+      line_cap: @line_cap,
+      done_regex: @done_regex,
+      provider: Keyword.get(opts, :provider),
+      model: Keyword.get(opts, :model),
+      redact_values:
+        Keyword.get_lazy(opts, :redact_values, fn ->
+          Arbiter.Worker.WorkerEnv.secret_values(task_id)
+        end)
+    }
+  end
+
+  @doc """
   Start a Claude (or echo-spike) session in `worktree_path`, streaming output
   into the `:owner` worker.
 
@@ -156,24 +192,26 @@ defmodule Arbiter.Worker.ClaudeSession do
          {:ok, argv} <- resolve_argv(opts),
          {:ok, exec} <- resolve_executable(argv) do
       task_id = task_id_for(owner)
-      topic = Keyword.get(opts, :topic) || default_topic(task_id)
 
-      session_config = %{
-        task_id: task_id,
-        topic: topic,
-        line_cap: @line_cap,
-        done_regex: @done_regex,
-        provider: Keyword.get(opts, :provider),
-        # Pre-resolved model id for adapters whose stream carries none (Gemini).
-        # Claude omits this and learns the model from its `init` event instead.
-        model: Keyword.get(opts, :model)
-      }
+      # One workspace load serves both halves (bd-62d3jh): the pairs go into the
+      # child's env, the secret values into the session's redaction list.
+      {worker_env, redact_values} = Arbiter.Worker.WorkerEnv.resolve(task_id)
+
+      session_config =
+        build_session_config(task_id, Keyword.get(opts, :topic),
+          provider: Keyword.get(opts, :provider),
+          # Pre-resolved model id for adapters whose stream carries none
+          # (Gemini). Claude omits this and learns the model from its `init`
+          # event instead.
+          model: Keyword.get(opts, :model),
+          redact_values: redact_values
+        )
 
       port_args = %{
         exec: exec,
         argv: argv,
         cd: worktree_path,
-        env: env_pairs(opts, task_id)
+        env: env_pairs(opts, task_id, worker_env)
       }
 
       GenServer.call(owner, {:__claude_session_open__, port_args, session_config})
@@ -514,17 +552,36 @@ defmodule Arbiter.Worker.ClaudeSession do
   # lines still accumulate (so snapshot rendering preserves spacing) but skip
   # the PubSub hop — live followers only care about lines with content.
   defp emit_line(%{} = session, line, detect_done?) do
-    unless blank?(line) do
-      broadcast(session, {:worker_output, session.task_id, line})
+    # Redact secret-marked worker env var values (bd-62d3jh) at this single
+    # choke-point: the redacted line is what reaches every human-facing surface
+    # — the live PubSub stream, the capped in-memory buffer that becomes
+    # `worker_runs.output_lines`, and the durable on-disk transcript. Done
+    # detection still runs on the ORIGINAL line so a secret value can never
+    # perturb the "arb done" sentinel match.
+    redacted = redact_line(session, line)
+
+    unless blank?(redacted) do
+      broadcast(session, {:worker_output, session.task_id, redacted})
     end
 
     if detect_done? and Regex.match?(session.done_regex, line) do
       send(self(), {:__claude_session_done__, line})
     end
 
-    append_durable(session, line)
+    append_durable(session, redacted)
 
-    %{session | output_lines: prepend_capped(session.output_lines, line, session.line_cap)}
+    %{session | output_lines: prepend_capped(session.output_lines, redacted, session.line_cap)}
+  end
+
+  # Scrub secret worker env var values from a line. `redact_values` is populated
+  # in `start/1` from the workspace's secret-flagged worker env vars; sessions
+  # without any (tests, workspace-less spawns) carry an empty list and pass the
+  # line through untouched.
+  defp redact_line(session, line) do
+    case Map.get(session, :redact_values) do
+      [_ | _] = values -> Arbiter.Redaction.redact(line, values)
+      _ -> line
+    end
   end
 
   # Append the line to the durable, uncapped per-run transcript when the
@@ -880,7 +937,14 @@ defmodule Arbiter.Worker.ClaudeSession do
   # that starts its own `mix phx.server` for manual verification writes into
   # a throwaway sqlite file instead of silently inheriting the coordinator's
   # own DATABASE_PATH — the same file the live `arbiter.service` uses.
-  defp env_pairs(opts, task_id) do
+  #
+  # `worker_env` is the workspace's user-defined vars (bd-62d3jh), resolved by
+  # the caller so one workspace load serves both it and the session's
+  # `redact_values`. They sit after the release/dev-server cleanups but before
+  # caller-explicit `:env` (agent auth) and the always-last ARB_ACOLYTE_BEAD_ID
+  # guard, so a user var can never clobber the agent's auth or the
+  # self-recursion guard.
+  defp env_pairs(opts, task_id, worker_env) do
     base =
       case Keyword.fetch(opts, :env) do
         {:ok, list} when is_list(list) -> list
@@ -892,7 +956,7 @@ defmodule Arbiter.Worker.ClaudeSession do
 
     case task_id do
       id when is_binary(id) and id != "" ->
-        release_clean ++ dev_server_clean ++ base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
+        release_clean ++ dev_server_clean ++ worker_env ++ base ++ [{"ARB_ACOLYTE_BEAD_ID", id}]
 
       _ ->
         release_clean ++ base

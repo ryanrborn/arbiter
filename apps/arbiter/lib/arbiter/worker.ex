@@ -2012,6 +2012,34 @@ defmodule Arbiter.Worker do
     )
   end
 
+  # Session config for a respawned session (gate nudge, auto-resume). Both
+  # respawns reopen a port on the ORIGINAL spawn's `:env` — secrets included —
+  # so the new session must carry the same `redact_values` or the relaunched
+  # child can echo a secret straight to the output surfaces (bd-62d3jh).
+  # ClaudeSession.build_session_config/3 owns the shape so a respawn can't drift
+  # out of sync with start/1 again.
+  defp session_config_for(%State{} = state, provider, model) do
+    Arbiter.Worker.ClaudeSession.build_session_config(
+      state.task_id,
+      "worker:" <> state.task_id,
+      [provider: provider, model: model] ++ carried_redact_opts(state)
+    )
+  end
+
+  # Reuse the redaction list the prior session already resolved: every session
+  # on this worker is the same task, hence the same workspace, hence the same
+  # secret values — a fresh DB read per respawn would be pure cost. Only when no
+  # prior session carries a list (nothing spawned yet) do we omit the option and
+  # let build_session_config/3 load it.
+  defp carried_redact_opts(%State{claude_sessions: sessions}) do
+    Enum.find_value(sessions, [], fn {_port, session} ->
+      case Map.get(session, :redact_values) do
+        values when is_list(values) -> [redact_values: values]
+        _ -> nil
+      end
+    end)
+  end
+
   # Shared relaunch mechanism for the gate nudges (commit gate bd-ofql8k, notes
   # gate bd-5lc99r). Swaps the nudge prompt into the stashed claude argv, opens
   # a fresh port in the same cwd, and bumps the gate-specific attempt counter so
@@ -2035,14 +2063,7 @@ defmodule Arbiter.Worker do
           "relaunching worker with nudge (attempt #{next_attempts})"
       )
 
-      session_config = %{
-        task_id: state.task_id,
-        topic: "worker:" <> state.task_id,
-        line_cap: Arbiter.Worker.ClaudeSession.line_cap(),
-        done_regex: Arbiter.Worker.ClaudeSession.done_regex(),
-        provider: provider,
-        model: model
-      }
+      session_config = session_config_for(state, provider, model)
 
       now = DateTime.utc_now()
 
@@ -2394,14 +2415,8 @@ defmodule Arbiter.Worker do
       now = DateTime.utc_now()
 
       session =
-        %{
-          task_id: state.task_id,
-          topic: "worker:" <> state.task_id,
-          line_cap: Arbiter.Worker.ClaudeSession.line_cap(),
-          done_regex: Arbiter.Worker.ClaudeSession.done_regex(),
-          provider: provider,
-          model: model
-        }
+        state
+        |> session_config_for(provider, model)
         |> Map.put(:port, port)
         # inject_resume_argv/3 always leaves the prompt inline (the continue
         # prompt is short), so this is always nil — see the parity note in
