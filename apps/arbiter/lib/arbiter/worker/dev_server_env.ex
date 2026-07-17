@@ -13,7 +13,7 @@ defmodule Arbiter.Worker.DevServerEnv do
   sqlite path override (mirrors config/test.exs's tmp-scoped test DB) so any
   dev server a worker starts inside its own worktree lands there instead.
 
-  Called from `Arbiter.Worker.ClaudeSession.env_pairs/2`, the same
+  Called from `Arbiter.Worker.ClaudeSession.env_pairs/3`, the same
   choke-point `Arbiter.Worker.ReleaseEnv` uses.
   """
 

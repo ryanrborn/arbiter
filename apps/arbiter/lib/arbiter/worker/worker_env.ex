@@ -11,14 +11,14 @@ defmodule Arbiter.Worker.WorkerEnv do
   and redacted (`Arbiter.Redaction`) anywhere worker output reaches a human.
 
   This module is the read side of that store, keyed by **task id** — the only
-  workspace handle `Arbiter.Worker.ClaudeSession.env_pairs/2` has at spawn time.
+  workspace handle `Arbiter.Worker.ClaudeSession.env_pairs/3` has at spawn time.
   It mirrors the shape of the sibling env sources it sits beside in that
   pipeline (`Arbiter.Worker.ReleaseEnv.clean_pairs/0`,
   `Arbiter.Worker.DevServerEnv.pairs/1`).
 
   ## Override order
 
-  Wired into `env_pairs/2` as:
+  Wired into `env_pairs/3` as:
 
       release_clean ++ dev_server_clean ++ worker_env ++ caller_env ++ [ARB_ACOLYTE_BEAD_ID]
 
@@ -34,34 +34,48 @@ defmodule Arbiter.Worker.WorkerEnv do
   alias Arbiter.Tasks.Workspace
 
   @doc """
+  Resolves both halves of the store for `task_id` from a **single** workspace
+  load: `{pairs, secret_values}`.
+
+  A spawn needs both — the pairs for the child's Port env, the secret values for
+  the session's redaction list — and both derive from the same workspace, so
+  `Arbiter.Worker.ClaudeSession.start/1` calls this once rather than paying two
+  `Ash.get` round-trips per half.
+
+  Returns `{[], []}` when `task_id` is not a non-empty string, the
+  task/workspace can't be loaded, or no vars are configured — so the caller can
+  splice the result in unconditionally.
+  """
+  @spec resolve(String.t() | nil) :: {[{String.t(), String.t()}], [String.t()]}
+  def resolve(task_id) do
+    case workspace_for(task_id) do
+      %Workspace{} = ws ->
+        {ws |> Workspace.worker_env_map() |> Map.to_list(),
+         Workspace.worker_env_secret_values(ws)}
+
+      nil ->
+        {[], []}
+    end
+  end
+
+  @doc """
   Returns the workspace's user-defined env vars for `task_id` as decrypted
   `{name, value}` pairs, ready to append to a worker's Port env.
 
-  Returns `[]` when `task_id` is not a non-empty string, the task/workspace
-  can't be loaded, or no vars are configured — so the caller can splice the
-  result in unconditionally.
+  Prefer `resolve/1` when you also need the secret values — this is the
+  single-half convenience wrapper.
   """
   @spec pairs(String.t() | nil) :: [{String.t(), String.t()}]
-  def pairs(task_id) do
-    case workspace_for(task_id) do
-      %Workspace{} = ws -> ws |> Workspace.worker_env_map() |> Map.to_list()
-      nil -> []
-    end
-  end
+  def pairs(task_id), do: task_id |> resolve() |> elem(0)
 
   @doc """
   Returns the values of the workspace's **secret-flagged** worker env vars for
   `task_id` — the strings `Arbiter.Redaction` must scrub from worker output.
 
-  Returns `[]` on the same "no context" conditions as `pairs/1`.
+  Prefer `resolve/1` when you also need the pairs.
   """
   @spec secret_values(String.t() | nil) :: [String.t()]
-  def secret_values(task_id) do
-    case workspace_for(task_id) do
-      %Workspace{} = ws -> Workspace.worker_env_secret_values(ws)
-      nil -> []
-    end
-  end
+  def secret_values(task_id), do: task_id |> resolve() |> elem(1)
 
   # Resolve the workspace backing a task id, or nil on any miss. Best-effort:
   # a spawn must never crash because the env store couldn't be read.
