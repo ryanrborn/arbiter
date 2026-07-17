@@ -18,7 +18,7 @@ config :arbiter, :output_log_root, Path.expand("~/dev/arbiter-worker-logs")
 config :arbiter, Arbiter.Repo, stacktrace: true
 
 config :arbiter_web, ArbiterWeb.Endpoint,
-  http: [ip: {0, 0, 0, 0}, port: 4848],
+  http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT") || "4848")],
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
