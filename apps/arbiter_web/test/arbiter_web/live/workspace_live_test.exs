@@ -210,5 +210,64 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.secrets_map(reloaded) == %{}
     end
+
+    test "sets, reveals, toggles, and removes a secret worker env var", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      render_click(view, "open_worker_env_modal", %{})
+
+      html =
+        view
+        |> form("form[phx-submit=set_worker_env]", %{
+          "worker_env" => %{"key" => "API_TOKEN", "value" => "tok-supersecret", "secret" => "true"}
+        })
+        |> render_submit()
+
+      # Stored encrypted with the secret flag; masked (never echoed) in the UI.
+      assert html =~ "API_TOKEN"
+      refute html =~ "tok-supersecret"
+      assert html =~ "••••••••"
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert Workspace.worker_env_map(reloaded) == %{"API_TOKEN" => "tok-supersecret"}
+      assert Workspace.worker_env_keys(reloaded) == [%{name: "API_TOKEN", secret?: true}]
+
+      # Explicit reveal shows the decrypted value.
+      html = render_click(view, "reveal_worker_env", %{"key" => "API_TOKEN"})
+      assert html =~ "tok-supersecret"
+
+      # Toggling to plain flips the flag without touching the value...
+      render_click(view, "toggle_worker_env_secret", %{"key" => "API_TOKEN"})
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert Workspace.worker_env_keys(reloaded) == [%{name: "API_TOKEN", secret?: false}]
+      assert Workspace.worker_env_map(reloaded) == %{"API_TOKEN" => "tok-supersecret"}
+
+      # ...and removal clears it.
+      render_click(view, "rm_worker_env", %{"key" => "API_TOKEN"})
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert Workspace.worker_env_map(reloaded) == %{}
+      assert Workspace.worker_env_keys(reloaded) == []
+    end
+
+    test "rejects an invalid worker env var name", %{conn: conn} do
+      ws = new_workspace()
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      render_click(view, "open_worker_env_modal", %{})
+
+      html =
+        view
+        |> form("form[phx-submit=set_worker_env]", %{
+          "worker_env" => %{"key" => "9-bad", "value" => "v"}
+        })
+        |> render_submit()
+
+      assert html =~ "must match"
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert Workspace.worker_env_map(reloaded) == %{}
+    end
   end
 end

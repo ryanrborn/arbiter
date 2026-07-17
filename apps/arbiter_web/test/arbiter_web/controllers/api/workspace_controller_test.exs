@@ -39,6 +39,28 @@ defmodule ArbiterWeb.Api.WorkspaceControllerTest do
       assert body["name"] == "showme"
     end
 
+    test "exposes worker_env key names + secret flags, never values", %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "we-json",
+          prefix: "wej",
+          worker_env: %{
+            "API_TOKEN" => %{"value" => "tok_supersecret", "secret" => true},
+            "LOG_LEVEL" => %{"value" => "debug", "secret" => false}
+          }
+        })
+
+      body = json_response(get(conn, ~p"/api/workspaces/#{ws.id}"), 200)
+
+      assert body["worker_env"] == [
+               %{"name" => "API_TOKEN", "secret" => true},
+               %{"name" => "LOG_LEVEL", "secret" => false}
+             ]
+
+      # The plaintext value must never appear anywhere in the serialised body.
+      refute Jason.encode!(body) =~ "tok_supersecret"
+    end
+
     test "includes the resolved worker security_posture", %{conn: conn} do
       {:ok, ws} =
         Ash.create(Workspace, %{

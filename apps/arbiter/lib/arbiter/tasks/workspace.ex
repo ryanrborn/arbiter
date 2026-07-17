@@ -70,7 +70,7 @@ defmodule Arbiter.Tasks.Workspace do
   # ArbiterWeb workspace_json.
   cloak do
     vault(Arbiter.Vault)
-    attributes([:secrets])
+    attributes([:secrets, :worker_env])
   end
 
   actions do
@@ -91,7 +91,20 @@ defmodule Arbiter.Tasks.Workspace do
         """
       end
 
+      argument :worker_env, :map do
+        allow_nil? true
+
+        description """
+        Write-only merge-patch of user-defined worker env vars, keyed by env var
+        name. Each value is `%{"value" => string, "secret" => boolean}`; the
+        `secret` flag is optional (defaults false). A key with a `null` value
+        removes it. Values are encrypted at rest; only names + secret flags are
+        ever returned. See `Arbiter.Worker.WorkerEnv`.
+        """
+      end
+
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
+      change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
       change {Arbiter.Tasks.Workspace.Changes.StartMergeQueue, []}
       change {Arbiter.Tasks.Workspace.Changes.StartDispatchQueue, []}
@@ -115,7 +128,19 @@ defmodule Arbiter.Tasks.Workspace do
         """
       end
 
+      argument :worker_env, :map do
+        allow_nil? true
+
+        description """
+        Write-only merge-patch of user-defined worker env vars (see the
+        `:create` action). A key with a `null` value removes it; a per-key map
+        with only a `"secret"` flag toggles the flag without touching the value;
+        omitting the argument leaves all worker env vars untouched.
+        """
+      end
+
       change {Arbiter.Tasks.Workspace.Changes.MergeSecrets, []}
+      change {Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv, []}
       change {Arbiter.Tasks.Workspace.Changes.ValidateConfig, []}
     end
 
@@ -195,6 +220,36 @@ defmodule Arbiter.Tasks.Workspace do
       description "Encrypted tracker/merger credentials. Resolved via credentials_ref \"secret:<key>\"."
     end
 
+    # Encrypted at rest via ash_cloak (see the `cloak` block). At compile time
+    # this attribute is renamed to `encrypted_worker_env` (binary column,
+    # public?: false) and replaced by a decrypting calculation of the same name.
+    # Holds %{String.t() => String.t()} — env var name → value. Write-only: set
+    # through the create/update `worker_env` argument, never serialised. The
+    # secret-vs-plain flag lives separately in `worker_env_meta` (see below), so
+    # `secret?` is purely a presentation/redaction concern — every value is
+    # encrypted regardless.
+    attribute :worker_env, :map do
+      public? false
+      allow_nil? true
+      default %{}
+
+      description "Encrypted user-defined worker subprocess env vars. Injected via Arbiter.Worker.WorkerEnv."
+    end
+
+    # Public companion to `worker_env`: holds ONLY key names and per-key flags
+    # (`%{"NAME" => %{"secret" => boolean}}`), never values. Safe to serialise —
+    # this is what `worker_env_keys/1` and the API/dashboard read so a caller
+    # can see which env vars are configured (and which are masked) without ever
+    # touching the encrypted values. Kept in lockstep with `worker_env` by
+    # `Arbiter.Tasks.Workspace.Changes.MergeWorkerEnv`.
+    attribute :worker_env_meta, :map do
+      public? true
+      allow_nil? false
+      default %{}
+
+      description "Names + secret flags for the workspace's worker env vars (no values)."
+    end
+
     create_timestamp :created_at
     update_timestamp :updated_at
   end
@@ -223,6 +278,66 @@ defmodule Arbiter.Tasks.Workspace do
       _ ->
         %{}
     end
+  end
+
+  @doc """
+  Decrypts and returns the workspace's user-defined worker env vars as a plain
+  `%{name => value}` map.
+
+  Reads the stored `encrypted_worker_env` column (always selected, since it is
+  a plain attribute) and decrypts it with `Arbiter.Vault`. Returns `%{}` when
+  none are set or the column is unloaded.
+
+  This is the internal read path for injecting env vars into worker subprocesses
+  (see `Arbiter.Worker.WorkerEnv`). The values are never serialised; only names
+  + secret flags are exposed via `worker_env_keys/1`.
+  """
+  @spec worker_env_map(t()) :: %{optional(String.t()) => String.t()}
+  def worker_env_map(workspace) do
+    case Map.get(workspace, :encrypted_worker_env) do
+      enc when is_binary(enc) ->
+        enc
+        |> Base.decode64!()
+        |> Arbiter.Vault.decrypt!()
+        |> Ash.Helpers.non_executable_binary_to_term()
+
+      _ ->
+        %{}
+    end
+  end
+
+  @doc """
+  Returns the workspace's worker env var names with their secret flags, sorted
+  by name: `[%{name: String.t(), secret?: boolean()}]`.
+
+  Derived from the public `worker_env_meta` attribute — this never decrypts and
+  never exposes a value, so it is safe for API/dashboard rendering.
+  """
+  @spec worker_env_keys(t()) :: [%{name: String.t(), secret?: boolean()}]
+  def worker_env_keys(workspace) do
+    (Map.get(workspace, :worker_env_meta) || %{})
+    |> Enum.map(fn {name, meta} ->
+      %{name: name, secret?: meta_secret?(meta)}
+    end)
+    |> Enum.sort_by(& &1.name)
+  end
+
+  defp meta_secret?(%{"secret" => true}), do: true
+  defp meta_secret?(_), do: false
+
+  @doc """
+  The subset of `worker_env_map/1` whose keys are flagged secret — the values
+  that must be redacted from worker output (`Arbiter.Redaction`).
+  """
+  @spec worker_env_secret_values(t()) :: [String.t()]
+  def worker_env_secret_values(workspace) do
+    values = worker_env_map(workspace)
+
+    workspace
+    |> worker_env_keys()
+    |> Enum.filter(& &1.secret?)
+    |> Enum.map(&Map.get(values, &1.name))
+    |> Enum.filter(&is_binary/1)
   end
 
   @doc """
