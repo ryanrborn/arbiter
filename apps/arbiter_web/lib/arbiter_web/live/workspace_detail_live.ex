@@ -205,7 +205,11 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
       not Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*$/, key) ->
         {:noreply,
-         assign(socket, :worker_env_error, "Name must match [A-Za-z_][A-Za-z0-9_]* (e.g. API_TOKEN).")}
+         assign(
+           socket,
+           :worker_env_error,
+           "Name must match [A-Za-z_][A-Za-z0-9_]* (e.g. API_TOKEN)."
+         )}
 
       String.trim(value) == "" ->
         {:noreply, assign(socket, :worker_env_error, "Value can't be empty.")}
@@ -243,10 +247,30 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # The key can be gone by the time the click lands (removed in another tab, or
+  # by another operator), so match it explicitly rather than coercing a missing
+  # key into a flag — a stale click is a no-op, not a crash.
   def handle_event("toggle_worker_env_secret", %{"key" => key}, socket) do
-    current = Enum.find(socket.assigns.worker_env_keys, &(&1.name == key))
-    new_flag = not (current && current.secret?)
+    case Enum.find(socket.assigns.worker_env_keys, &(&1.name == key)) do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Worker env var #{key} no longer exists.")}
 
+      %{secret?: secret?} ->
+        toggle_worker_env_secret(socket, key, not secret?)
+    end
+  end
+
+  def handle_event("reveal_worker_env", %{"key" => key}, socket) do
+    {:noreply, update(socket, :revealed_worker_env, &MapSet.put(&1, key))}
+  end
+
+  def handle_event("hide_worker_env", %{"key" => key}, socket) do
+    {:noreply, update(socket, :revealed_worker_env, &MapSet.delete(&1, key))}
+  end
+
+  # ---- Ash write helpers ----
+
+  defp toggle_worker_env_secret(socket, key, new_flag) do
     case set_worker_env(socket.assigns.workspace, %{key => %{"secret" => new_flag}}) do
       {:ok, ws} ->
         {:noreply,
@@ -260,16 +284,6 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
         {:noreply, put_flash(socket, :error, msg)}
     end
   end
-
-  def handle_event("reveal_worker_env", %{"key" => key}, socket) do
-    {:noreply, update(socket, :revealed_worker_env, &MapSet.put(&1, key))}
-  end
-
-  def handle_event("hide_worker_env", %{"key" => key}, socket) do
-    {:noreply, update(socket, :revealed_worker_env, &MapSet.delete(&1, key))}
-  end
-
-  # ---- Ash write helpers ----
 
   defp patch_config(ws, patch, unset_paths) do
     case Ash.update(ws, %{patch: patch, unset_paths: unset_paths}, action: :patch_config) do
@@ -709,8 +723,12 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               required
             />
             <label class="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" name="worker_env[secret]" value="true" class="checkbox checkbox-sm" />
-              Secret — encrypt at rest and redact from logs
+              <input
+                type="checkbox"
+                name="worker_env[secret]"
+                value="true"
+                class="checkbox checkbox-sm"
+              /> Secret — encrypt at rest and redact from logs
             </label>
             <p :if={@worker_env_error} class="text-sm text-error">{@worker_env_error}</p>
             <div class="modal-action">
