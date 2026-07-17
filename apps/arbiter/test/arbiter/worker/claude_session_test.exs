@@ -1108,6 +1108,43 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "secret redaction in the emit path (bd-62d3jh)" do
+    defp redacting_session(topic, redact_values) do
+      %{
+        task_id: "bd-redact",
+        topic: topic,
+        line_cap: ClaudeSession.line_cap(),
+        done_regex: ClaudeSession.done_regex(),
+        output_lines: [],
+        line_buf: "",
+        redact_values: redact_values
+      }
+    end
+
+    test "a secret value is scrubbed from the stored buffer and the PubSub stream" do
+      task_id = "bd-redact"
+      topic = "worker:redact-#{System.unique_integer([:positive])}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, topic)
+
+      session = redacting_session(topic, ["tok_supersecret"])
+      session = ClaudeSession.handle_data(session, "the token is tok_supersecret ok", true)
+
+      # Stored line is redacted.
+      assert session.output_lines == ["the token is [REDACTED] ok"]
+      # Live stream is redacted — the raw secret never hits a subscriber.
+      assert_receive {:worker_output, ^task_id, line}, 2_000
+      assert line == "the token is [REDACTED] ok"
+      refute line =~ "tok_supersecret"
+    end
+
+    test "a session with no redact_values passes lines through unchanged" do
+      topic = "worker:noredact-#{System.unique_integer([:positive])}"
+      session = redacting_session(topic, [])
+      session = ClaudeSession.handle_data(session, "plain tok_supersecret line", true)
+      assert session.output_lines == ["plain tok_supersecret line"]
+    end
+  end
+
   describe "activity_for_event/1" do
     test "system/init reports starting; result reports wrapping up" do
       assert ClaudeSession.activity_for_event(%{"type" => "system", "subtype" => "init"}) ==
