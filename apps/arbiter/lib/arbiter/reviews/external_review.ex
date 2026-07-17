@@ -90,6 +90,9 @@ defmodule Arbiter.Reviews.ExternalReview do
           # greenlight (bd-36qzgx). When unset, resolved from `automation` /
           # workspace policy: a :report_only mode ⇒ report-only.
           report_only: boolean() | nil,
+          # Skip the self-approve guard (bd-7z5pi5): dispatch a review even when
+          # the posting identity has already approved this PR. Default false.
+          force: boolean() | nil,
           # Read-only tracker context (e.g. the ticket the PR implements) carried
           # onto the engagement for re-review intent (#638).
           tracker_context_ref: String.t() | nil,
@@ -147,7 +150,8 @@ defmodule Arbiter.Reviews.ExternalReview do
   def review(opts) do
     opts = Map.new(opts)
 
-    with {:ok, prepared} <- prepare(opts) do
+    with {:ok, prepared} <- prepare(opts),
+         :ok <- guard_self_approved(prepared, opts) do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
 
@@ -179,7 +183,8 @@ defmodule Arbiter.Reviews.ExternalReview do
   def dispatch(opts) do
     opts = Map.new(opts)
 
-    with {:ok, prepared} <- prepare(opts) do
+    with {:ok, prepared} <- prepare(opts),
+         :ok <- guard_self_approved(prepared, opts) do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
       start_async(prepared, opts, record)
@@ -201,6 +206,11 @@ defmodule Arbiter.Reviews.ExternalReview do
         "configure a hosted MR provider (github/gitlab) under config[\"merge\"][\"strategy\"]"
 
   def describe_error({:workspace, msg}) when is_binary(msg), do: msg
+
+  def describe_error({:already_approved, ref}),
+    do:
+      "skipped: #{ref} already has a current approving review from this identity — " <>
+        "pass force: true to review it anyway"
 
   def describe_error(%{__struct__: mod, message: msg}) when is_binary(msg),
     do: "#{inspect(mod)}: #{msg}"
@@ -392,6 +402,25 @@ defmodule Arbiter.Reviews.ExternalReview do
       :ok
     else
       {:error, {:unsupported_strategy, strategy}}
+    end
+  end
+
+  # Guard (bd-7z5pi5): refuse to dispatch/run a review against a PR the posting
+  # identity has ALREADY approved, so a re-dispatch can't stack a second approval
+  # under our own login. Applies in ALL modes; `force: true` overrides. Fails
+  # OPEN — a missing adapter capability (e.g. GitLab has no self_approved?/1) or
+  # any adapter error/raise lets the review proceed, so a transient forge failure
+  # never blocks a legitimate review.
+  defp guard_self_approved(_prepared, %{force: true}), do: :ok
+
+  defp guard_self_approved(%{adapter: adapter, mr_ref: mr_ref}, _opts) do
+    if function_exported?(adapter, :self_approved?, 1) do
+      case safe_call(fn -> adapter.self_approved?(mr_ref) end) do
+        {:ok, true} -> {:error, {:already_approved, mr_ref}}
+        _ -> :ok
+      end
+    else
+      :ok
     end
   end
 
