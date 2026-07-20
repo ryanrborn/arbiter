@@ -432,6 +432,37 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubMerger.merge_count("!ar3") == 0
       refute Worker.state(pid).status == :failed
     end
+
+    test "a flapping behind_base/clear cycle still trips the finite poll ceiling (bd-krg7ci round 2)" do
+      # Each `:behind_base` episode here resolves within a single auto-resolve
+      # pass and never lifts `max_polls` to `:infinity` (unlike the merge-stall
+      # and exhausted-block parks). Before the fix, the block-clear branch reset
+      # `poll_count` to 0 whenever `last_block_reason != nil` — which is also true
+      # right after a *resolved* block, not just a genuinely parked one — so a
+      # lane that kept drifting behind base and catching back up reset the
+      # counter on every cycle and the 30-poll-style ceiling never tripped no
+      # matter how long it flapped. The gate now also requires
+      # `max_polls != base_max_polls` (i.e. the episode actually parked), so a
+      # bounded, always-resolved block leaves `poll_count` monotonic.
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get(
+        "!bb1",
+        List.duplicate(
+          [
+            %{status: :open, approved: true, block_reason: :behind_base},
+            %{status: :open, approved: false}
+          ],
+          8
+        )
+        |> List.flatten()
+      )
+
+      start_watchdog(pid, task_id, "!bb1", auto_merge: true, max_polls: 4, interval_ms: 15)
+
+      wait_until(fn -> Worker.state(pid).status == :failed end, 2_000)
+      assert match?({:awaiting_review_timeout, 4}, Worker.state(pid).meta[:failure_reason])
+    end
   end
 
   describe "auto-resolve :ci_failed (#354 Phase 2a)" do
@@ -987,6 +1018,42 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> StubMerger.merge_count("!sm4") >= 6 end)
       refute Worker.state(pid).status == :failed
       refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+    end
+
+    test "re-notifies every base_max_polls polls instead of latching silent forever (bd-krg7ci round 2)" do
+      # Round-1's indefinite park (max_polls: :infinity once the stall is first
+      # paged) reintroduced permanent silence for a live Watchdog:
+      # `merge_stall_notified` was a hard latch with no live-path reset, so the
+      # coordinator page fired exactly once no matter how long the MR's CI
+      # stayed red afterward — the incident's own primary complaint ("would
+      # have stayed that way indefinitely without a human noticing").
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :ci_must_pass})
+      StubMerger.queue_get("!sm5", [%{status: :open, approved: false}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!sm5",
+            via_review_gate: true,
+            merge_fail_notify_threshold: 3,
+            max_polls: 3,
+            interval_ms: 15
+          )
+
+          # base_max_polls is 3: the first page fires at fail_count 3, the
+          # second re-page is due once poll_count has advanced 3 more polls
+          # past that. Give it comfortably more than 2 * base_max_polls polls.
+          wait_until(fn -> StubMerger.merge_count("!sm5") >= 10 end, 2_000)
+        end)
+
+      occurrences =
+        log
+        |> String.split("paging coordinator for auto-merge stall")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences >= 2
+      refute Worker.state(pid).status == :failed
     end
   end
 

@@ -406,7 +406,8 @@ defmodule Arbiter.Worker.Watchdog do
           merge_fail_count: 0,
           merge_fail_notify_threshold:
             Keyword.get(opts, :merge_fail_notify_threshold, @default_merge_fail_notify_threshold),
-          merge_stall_notified: false
+          merge_stall_notified: false,
+          last_merge_stall_poll: 0
         }
 
         Process.monitor(worker_pid)
@@ -464,7 +465,9 @@ defmodule Arbiter.Worker.Watchdog do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
     sync_tracker_merged(state)
     safe(fn -> Worker.complete(state.worker_pid, :merged) end)
-    {:stop, :normal, %{state | merge_fail_count: 0, merge_stall_notified: false}}
+
+    {:stop, :normal,
+     %{state | merge_fail_count: 0, merge_stall_notified: false, last_merge_stall_poll: 0}}
   end
 
   defp apply_outcome(:closed, _result, state) do
@@ -521,8 +524,18 @@ defmodule Arbiter.Worker.Watchdog do
 
         state = %{state | merge_fail_count: fail_count}
 
+        should_notify =
+          (fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified) or
+            (state.merge_stall_notified and is_integer(state.base_max_polls) and
+               state.poll_count - state.last_merge_stall_poll >= state.base_max_polls)
+
         state =
-          if fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified do
+          if should_notify do
+            Logger.warning(
+              "Worker.Watchdog: paging coordinator for auto-merge stall " <>
+                "(fail_count=#{fail_count}) task=#{state.task_id} mr=#{state.mr_ref}"
+            )
+
             safe(fn ->
               Arbiter.Messages.CoordinatorNotifier.auto_merge_stalled(
                 snapshot(state),
@@ -538,7 +551,17 @@ defmodule Arbiter.Worker.Watchdog do
             # a manual pipeline retry or other out-of-band fix that later makes
             # the MR mergeable is picked back up instead of the worker dying at
             # the finite ceiling first (bd-krg7ci).
-            %{state | merge_stall_notified: true, max_polls: :infinity}
+            #
+            # Re-page every `base_max_polls` polls instead of latching silent
+            # forever after the first page — mirrors `maybe_escalate_unresolved/2`
+            # below, which fixed the identical permanent-silence gap on the block
+            # path (bd-krg7ci round 2).
+            %{
+              state
+              | merge_stall_notified: true,
+                max_polls: :infinity,
+                last_merge_stall_poll: state.poll_count
+            }
           else
             state
           end
@@ -764,22 +787,29 @@ defmodule Arbiter.Worker.Watchdog do
         # episode (bd-krg7ci).
         #
         # Gated on `last_block_reason != nil` (the value from *before* this poll,
-        # i.e. "were we parked on a block a moment ago") rather than on
-        # `max_polls != base_max_polls`: this branch also runs on every ordinary
-        # no-block poll (e.g. pre-approval review) where `poll_count` must keep
-        # climbing toward the finite ceiling, so it must not reset there. It must
-        # also NOT fire for the separate auto-merge-failure stall park
+        # i.e. "were we parked on a block a moment ago") AND `max_polls !=
+        # base_max_polls` (i.e. the episode actually lifted the ceiling to
+        # :infinity). `last_block_reason` alone is set by every auto-resolvable
+        # block — including `:behind_base`/`:ci_failed` episodes that resolve
+        # within the bounded `max_auto_resolve_attempts` and never lift
+        # `max_polls` at all (see `resolve_behind_base/1`,
+        # `resolve_ci_failed/2`) — so a flapping lane that repeatedly enters and
+        # clears a bounded block reset `poll_count` to 0 on every cycle, silently
+        # defeating the finite ceiling for as long as it kept flapping
+        # (bd-krg7ci round 2). Requiring the ceiling to have actually been lifted
+        # restricts the reset to episodes that were genuinely parked.
+        #
+        # This still excludes the separate auto-merge-failure stall park
         # (`do_apply_approved_auto_merge/1`), which lifts `max_polls` to
-        # `:infinity` without ever touching `last_block_reason` — that lift is
-        # unconditional for the rest of the episode; comparing against
-        # `base_max_polls` would have reset it on the very next no-block poll,
-        # undoing the fix immediately.
+        # `:infinity` without ever touching `last_block_reason` — `last_block_reason`
+        # stays `nil` there, so this branch doesn't fire and that lift remains
+        # unconditional for the rest of the episode.
         #
         # `poll_count` resets alongside the restored cap because it's monotonic
         # across the worker's life — restoring a finite cap without resetting the
         # count would trip the ceiling on the very next poll.
         state =
-          if state.last_block_reason != nil do
+          if state.last_block_reason != nil and state.max_polls != state.base_max_polls do
             %{state | max_polls: state.base_max_polls, poll_count: 0, last_escalated_poll: 0}
           else
             state
