@@ -1310,6 +1310,88 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end)
   end
 
+  describe "self-approve guard (bd-7z5pi5)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "review/1 refuses a PR this identity has already approved" do
+      github_ws("er-guard-block")
+      stub_review_flow("arb-bot", "APPROVED")
+
+      assert {:error, {:already_approved, "octo/widget#42"}} =
+               ExternalReview.review(pr: "octo/widget#42")
+    end
+
+    test "dispatch/1 refuses a PR this identity has already approved" do
+      github_ws("er-guard-block-dispatch")
+      stub_review_flow("arb-bot", "APPROVED")
+
+      assert {:error, {:already_approved, "octo/widget#42"}} =
+               ExternalReview.dispatch(pr: "octo/widget#42")
+    end
+
+    test "proceeds when our latest verdict is not an approval (guard fails through)" do
+      github_ws("er-guard-open")
+      stub_review_flow("arb-bot", "CHANGES_REQUESTED")
+      runner = fn _diff, _state -> {:ok, []} end
+
+      assert {:ok, %{mr_ref: "octo/widget#42", verdict: _}} =
+               ExternalReview.review(pr: "octo/widget#42", check_runner: runner)
+    end
+
+    test "force: true runs the review despite an existing self-approval" do
+      github_ws("er-guard-force")
+      stub_review_flow("arb-bot", "APPROVED")
+      runner = fn _diff, _state -> {:ok, []} end
+
+      assert {:ok, %{mr_ref: "octo/widget#42", verdict: _}} =
+               ExternalReview.review(pr: "octo/widget#42", force: true, check_runner: runner)
+    end
+  end
+
+  # Full GitHub stub for a review-flow test: the guard's identity (`/user`) +
+  # reviews lookups (self_login leaving `self_state`), plus the diff / comment /
+  # verdict endpoints the CodeReview workflow drives. Unhandled paths → 404.
+  defp stub_review_flow(self_login, self_state) do
+    Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+      path = conn.request_path
+
+      cond do
+        conn.method == "GET" and path == "/user" ->
+          json(conn, %{"login" => self_login})
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          json(conn, [%{"user" => %{"login" => self_login}, "state" => self_state}])
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and
+            "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept") ->
+          conn
+          |> Plug.Conn.put_resp_content_type("text/plain")
+          |> Plug.Conn.resp(
+            200,
+            "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+          )
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+          json(conn, %{"number" => 42, "head" => %{"sha" => "abc"}, "base" => %{"ref" => "main"}})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          json(conn, %{"id" => 99})
+
+        true ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"}))
+      end
+    end)
+  end
+
   defp json(conn, body) do
     conn
     |> Plug.Conn.put_resp_header("content-type", "application/json")

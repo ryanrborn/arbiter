@@ -516,7 +516,9 @@ defmodule Arbiter.MCP.Catalog do
           "MR adapter — findings + a verdict are posted to the PR, no task or branch required. For a " <>
           "`pr` review, `follow_up` opens a review_only ReviewPatrol engagement after the verdict so " <>
           "the PR is re-reviewed on new commits and its replies handled (defaults on when the " <>
-          "workspace has ReviewPatrol running).",
+          "workspace has ReviewPatrol running). A `pr` review is refused when this identity has " <>
+          "already left a current approving review on the PR (avoids double-posting an approval); " <>
+          "pass `force: true` to override.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -596,6 +598,13 @@ defmodule Arbiter.MCP.Catalog do
                 "auto-escalated to \"repo\" when the diff touches a `sensitive_globs` path " <>
                 "(e.g. auth/signing code) — cross-cutting or security PRs get the deeper pass " <>
                 "without per-dispatch opt-in."
+          },
+          "force" => %{
+            "type" => "boolean",
+            "description" =>
+              "(`pr` only) Skip the self-approve guard: dispatch the review even when this " <>
+                "identity has already left a current approving review on the PR. Default false — " <>
+                "normally such a dispatch is refused so we don't double-post an approval."
           }
         },
         "required" => [],
