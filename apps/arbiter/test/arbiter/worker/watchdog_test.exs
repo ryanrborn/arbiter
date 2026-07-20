@@ -1055,6 +1055,87 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert occurrences >= 2
       refute Worker.state(pid).status == :failed
     end
+
+    test "a block clearing after a merge-stall page doesn't silently disarm the stall park (bd-krg7ci round 3)" do
+      # Reproduces the exact sequence the coordinator's own response to a stall
+      # page produces: the merge-stall park (via `do_apply_approved_auto_merge/1`)
+      # sets `last_block_reason: nil`, so it doesn't look "parked" to the
+      # block-clear restore in `do_maybe_escalate_merge_block/2`. But if the
+      # coordinator then forge-approves in response to the page, a real block
+      # (`:behind_base`) can surface and clear within the same episode — and
+      # before this fix, that clear reset `max_polls` back to the finite base
+      # AND left `merge_stall_notified: true` / `last_merge_stall_poll` stale, so
+      # no further re-page could ever fire (the counters go negative) and the
+      # worker died at the ceiling a few polls later while merges kept failing —
+      # the incident's own failure mode returning via a different door.
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :ci_must_pass})
+
+      StubMerger.queue_get("!bc1", [
+        %{status: :open, approved: false},
+        %{status: :open, approved: false},
+        %{status: :open, approved: false},
+        %{status: :open, approved: true, block_reason: :behind_base},
+        %{status: :open, approved: false}
+      ])
+
+      start_watchdog(pid, task_id, "!bc1",
+        via_review_gate: true,
+        merge_fail_notify_threshold: 1,
+        max_polls: 3,
+        interval_ms: 15
+      )
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          # Well past the finite max_polls ceiling — pre-fix this failed the
+          # worker with {:awaiting_review_timeout, 3} once the block cleared.
+          wait_until(fn -> StubMerger.merge_count("!bc1") >= 10 end, 2_000)
+        end)
+
+      occurrences =
+        log
+        |> String.split("paging coordinator for auto-merge stall")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences >= 2
+      refute Worker.state(pid).status == :failed
+      refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+    end
+
+    test "an :infinity watchdog_max_polls lane still gets a finite re-escalation cadence (bd-krg7ci round 3)" do
+      # `Arbiter.Tasks.Workspace.watchdog_max_polls/1` accepts "infinity", which
+      # can make `base_max_polls == :infinity` even on an auto_merge lane. Before
+      # this fix, `should_notify`'s `is_integer(state.base_max_polls)` guard was
+      # permanently false in that case, so the stall page fired exactly once and
+      # never again no matter how long the MR stayed red — the same
+      # permanent-silence shape round 2 closed, just reachable via config.
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :ci_must_pass})
+      StubMerger.queue_get("!inf1", [%{status: :open, approved: false}])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          start_watchdog(pid, task_id, "!inf1",
+            via_review_gate: true,
+            merge_fail_notify_threshold: 3,
+            max_polls: :infinity,
+            interval_ms: 15
+          )
+
+          wait_until(fn -> StubMerger.merge_count("!inf1") >= 70 end, 2_000)
+        end)
+
+      occurrences =
+        log
+        |> String.split("paging coordinator for auto-merge stall")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences >= 2
+      refute Worker.state(pid).status == :failed
+    end
   end
 
   describe "defers merge attempt while CI is still running (bd-cnytw3)" do
