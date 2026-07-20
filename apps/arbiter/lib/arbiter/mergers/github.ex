@@ -300,6 +300,36 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  @doc """
+  Whether the authenticated token's own identity already has a *current*
+  APPROVED verdict on the PR — i.e. the login this adapter posts reviews under
+  has approved it. Used by the external-review dispatch guard (bd-7z5pi5) to
+  avoid double-posting an approval under our own identity.
+
+  Returns `{:ok, boolean()}` or `{:error, term()}`. When the token's own login
+  can't be resolved (a GitHub App token with no user, a `/user` failure), returns
+  `{:ok, false}` — we can't attribute an approval to ourselves, so we don't block.
+
+  Not part of the `Merger` behaviour: an optional capability the guard probes
+  via `function_exported?/3`, so an adapter without it (e.g. GitLab) fails open.
+  """
+  @spec self_approved?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def self_approved?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, {owner, repo, number}} <- resolve_ref(cfg, mr_ref),
+         {:ok, reviews} <-
+           request(cfg, :get, "/repos/#{owner}/#{repo}/pulls/#{number}/reviews", [])
+           |> handle_json() do
+      case authenticated_login(cfg) do
+        login when is_binary(login) and login != "" ->
+          {:ok, latest_state_for(reviews, login) == "APPROVED"}
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
   @impl true
   def list_review_feedback(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
@@ -906,6 +936,24 @@ defmodule Arbiter.Mergers.Github do
   end
 
   defp review_author(review), do: get_in(review, ["user", "login"])
+
+  # The current (latest) verdict state for a single reviewer login, or nil when
+  # that login left no verdict review. Mirrors `latest_review_states/1` but scoped
+  # to one author: GitHub returns reviews chronologically, so the last verdict
+  # entry for `login` is the current one — a DISMISSED that follows an APPROVED
+  # correctly reads as "not currently approved".
+  defp latest_state_for(reviews, login) when is_list(reviews) and is_binary(login) do
+    reviews
+    |> Enum.filter(&(Map.get(&1, "state") in ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]))
+    |> Enum.filter(&(review_author(&1) == login))
+    |> List.last()
+    |> case do
+      nil -> nil
+      review -> Map.get(review, "state")
+    end
+  end
+
+  defp latest_state_for(_reviews, _login), do: nil
 
   # An opaque debounce handle for the most recent CHANGES_REQUESTED review:
   # its numeric id when present, else its submitted_at timestamp. nil when no
