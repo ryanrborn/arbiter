@@ -968,6 +968,86 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
+  describe "tick/1 — repeated dispatch failure backs off (bd-49ajyt)" do
+    # A persistently-failing follow-up dispatch must escalate ONCE and then
+    # back off — not re-file + re-dispatch + re-escalate every single tick
+    # (the ~25-escalations-in-25-minutes firehose that motivated bd-49ajyt).
+    test "two ticks with an unresolvable repo → ONE escalation, ONE task (not re-fired)",
+         %{ws: _ws} do
+      {:ok, unconfigured_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-backoff-#{System.unique_integer([:positive])}",
+          prefix: "ppb#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "backoff-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/backoff-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 95, "title" => "no repo path", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/backoff-repo/pulls/95/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/backoff-repo/pulls/95/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      name = String.to_atom("PRPatrol_backoff_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/backoff-repo",
+           workspace_id: unconfigured_ws.id,
+           interval_ms: 60_000,
+           name: name}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      # Tick twice — the retry backoff window (>= interval_ms) has not elapsed
+      # between them, so the second tick must NOT re-dispatch.
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+
+      tasks =
+        Issue
+        |> Ash.Query.filter(source_pr == "95")
+        |> Ash.read!()
+
+      assert length(tasks) == 1, "expected exactly one follow-up task, got #{length(tasks)}"
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          to_ref == "coordinator" and workspace_id == ^unconfigured_ws.id and
+            kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1,
+             "expected exactly one escalation, got #{length(escalations)}"
+    end
+  end
+
   describe "tick/1 — zombie follow-up does not permanently block dedup (bd-bi5pn0)" do
     # Simulates a pre-existing zombie from the old bare-Worker.start bug (or
     # any future dispatch crash between registration and worktree
