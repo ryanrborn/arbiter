@@ -967,5 +967,16 @@ defmodule ArbiterWeb.DashboardLiveTest do
       link = "https://gitlab.com/group/subgroup/project-456/-/merge_requests/15"
       assert ArbiterWeb.DashboardLive.extract_repo_name(link, "gitlab") == "project-456"
     end
+
+    test "renders plain identifier for bare numeric GitLab project path" do
+      record = %{
+        pr: "221",
+        pr_ref: "!221",
+        link: "https://gitlab.com/55399962/-/merge_requests/221",
+        strategy: "gitlab"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "221"
+    end
   end
 end
