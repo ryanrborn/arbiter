@@ -526,8 +526,8 @@ defmodule Arbiter.Worker.Watchdog do
 
         should_notify =
           (fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified) or
-            (state.merge_stall_notified and is_integer(state.base_max_polls) and
-               state.poll_count - state.last_merge_stall_poll >= state.base_max_polls)
+            (state.merge_stall_notified and
+               state.poll_count - state.last_merge_stall_poll >= escalation_cadence(state))
 
         state =
           if should_notify do
@@ -808,9 +808,29 @@ defmodule Arbiter.Worker.Watchdog do
         # `poll_count` resets alongside the restored cap because it's monotonic
         # across the worker's life — restoring a finite cap without resetting the
         # count would trip the ceiling on the very next poll.
+        #
+        # Also clear the merge-stall latches (`merge_stall_notified`,
+        # `merge_fail_count`, `last_merge_stall_poll`) here. They can be stale
+        # from an *earlier* part of the same episode: the coordinator's own
+        # response to a stall page can forge-approve the MR, which surfaces a
+        # real block (e.g. `:behind_base`) that then clears and hits this
+        # branch. Left stale, `last_merge_stall_poll` sits above the reset
+        # `poll_count`, so `poll_count - last_merge_stall_poll` in
+        # `do_apply_approved_auto_merge/1` goes negative and can never reach the
+        # re-notify cadence again — silently disarming the stall park and
+        # reproducing the exact incident this whole fix targets (bd-krg7ci
+        # round 3). Mirrors what the `:merged` clause already does on success.
         state =
           if state.last_block_reason != nil and state.max_polls != state.base_max_polls do
-            %{state | max_polls: state.base_max_polls, poll_count: 0, last_escalated_poll: 0}
+            %{
+              state
+              | max_polls: state.base_max_polls,
+                poll_count: 0,
+                last_escalated_poll: 0,
+                merge_stall_notified: false,
+                merge_fail_count: 0,
+                last_merge_stall_poll: 0
+            }
           else
             state
           end
@@ -980,33 +1000,35 @@ defmodule Arbiter.Worker.Watchdog do
 
   # Re-page periodically while parked instead of latching silent forever: once
   # `unresolved_escalated` is set, only skip re-escalating until `poll_count`
-  # has advanced `base_max_polls` polls past the last page. This keeps a block
-  # that never resolves loudly visible — the indefinite park added by
+  # has advanced `escalation_cadence/1` polls past the last page. This keeps a
+  # block that never resolves loudly visible — the indefinite park added by
   # `handle_block/3` must not turn a one-time page into permanent silence
   # (bd-krg7ci).
-  defp maybe_escalate_unresolved(
-         %{
-           unresolved_escalated: true,
-           poll_count: count,
-           last_escalated_poll: last,
-           base_max_polls: cap
-         } = state,
-         _reason
-       )
-       when is_integer(cap) and count - last < cap do
-    state
+  defp maybe_escalate_unresolved(%{unresolved_escalated: true} = state, reason) do
+    if state.poll_count - state.last_escalated_poll >= escalation_cadence(state) do
+      escalate_unresolved_block(state, reason)
+      %{state | last_escalated_poll: state.poll_count}
+    else
+      state
+    end
   end
-
-  defp maybe_escalate_unresolved(
-         %{unresolved_escalated: true, base_max_polls: :infinity} = state,
-         _reason
-       ),
-       do: state
 
   defp maybe_escalate_unresolved(state, reason) do
     escalate_unresolved_block(state, reason)
     %{state | unresolved_escalated: true, last_escalated_poll: state.poll_count}
   end
+
+  # The cadence (in polls) at which a parked lane re-pages the coordinator
+  # (`maybe_escalate_unresolved/2`, `do_apply_approved_auto_merge/1`). Normally
+  # the configured ceiling itself, but a lane can have `base_max_polls:
+  # :infinity` (`Arbiter.Tasks.Workspace.watchdog_max_polls/1` accepts the
+  # string `"infinity"`) — falling back to the ordinary auto_merge default
+  # there keeps such a lane from parking indefinitely *and* paging exactly
+  # once, which is the same permanent-silence shape this whole fix targets,
+  # just reachable via config rather than an auto-resolve exhaustion
+  # (bd-krg7ci round 3).
+  defp escalation_cadence(%{base_max_polls: n}) when is_integer(n), do: n
+  defp escalation_cadence(_state), do: @default_max_polls_auto
 
   defp escalate_unresolved_block(state, reason) do
     Logger.warning(
