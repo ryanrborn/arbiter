@@ -789,4 +789,154 @@ defmodule ArbiterWeb.DashboardLiveTest do
       [_] -> nil
     end
   end
+
+  describe "PR identifier prefixing" do
+    test "extracts repo name from GitHub links" do
+      link = "https://github.com/myorg/awesome-repo/pull/42"
+      assert ArbiterWeb.DashboardLive.extract_repo_name(link, "github") == "awesome-repo"
+    end
+
+    test "extracts repo name from GitLab links with simple project path" do
+      link = "https://gitlab.com/mygroup/my-project/-/merge_requests/99"
+      assert ArbiterWeb.DashboardLive.extract_repo_name(link, "gitlab") == "my-project"
+    end
+
+    test "extracts project name from GitLab links with nested group paths" do
+      link = "https://gitlab.internal/group1/subgroup2/nested-project/-/merge_requests/15"
+      assert ArbiterWeb.DashboardLive.extract_repo_name(link, "gitlab") == "nested-project"
+    end
+
+    test "returns nil for empty link" do
+      assert ArbiterWeb.DashboardLive.extract_repo_name("", "github") == nil
+      assert ArbiterWeb.DashboardLive.extract_repo_name("", "gitlab") == nil
+    end
+
+    test "returns nil for unparseable GitHub link" do
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://github.com/invalid", "github") == nil
+    end
+
+    test "returns nil for unparseable GitLab link" do
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://gitlab.com/invalid", "gitlab") == nil
+    end
+
+    test "returns nil for direct strategy" do
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://example.com/pr/123", "direct") == nil
+    end
+
+    test "returns nil for unknown strategy" do
+      assert ArbiterWeb.DashboardLive.extract_repo_name("https://example.com/pr/123", "unknown") == nil
+    end
+  end
+
+  describe "format_pr_identifier" do
+    test "formats GitHub PR with repo prefix" do
+      record = %{
+        pr: "42",
+        pr_ref: "#42",
+        link: "https://github.com/myorg/my-repo/pull/42",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-repo#42"
+    end
+
+    test "formats GitLab MR with repo prefix" do
+      record = %{
+        pr: "99",
+        pr_ref: "!99",
+        link: "https://gitlab.com/mygroup/my-project/-/merge_requests/99",
+        strategy: "gitlab"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-project!99"
+    end
+
+    test "formats GitLab MR with nested project path" do
+      record = %{
+        pr: "15",
+        pr_ref: "!15",
+        link: "https://gitlab.internal/group1/subgroup2/nested-project/-/merge_requests/15",
+        strategy: "gitlab"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "nested-project!15"
+    end
+
+    test "falls back to unprefixed when link is empty" do
+      record = %{
+        pr: "123",
+        pr_ref: "#123",
+        link: "",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "123"
+    end
+
+    test "falls back to unprefixed when link is nil" do
+      record = %{
+        pr: "456",
+        pr_ref: "!456",
+        link: nil,
+        strategy: "gitlab"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "456"
+    end
+
+    test "falls back to unprefixed for direct strategy" do
+      record = %{
+        pr: "789",
+        pr_ref: "789",
+        link: "https://example.com/pr/789",
+        strategy: "direct"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "789"
+    end
+
+    test "uses pr_ref when pr is nil and extracts bare number" do
+      record = %{
+        pr: nil,
+        pr_ref: "my-repo#42",
+        link: "https://github.com/myorg/my-repo/pull/42",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-repo#42"
+    end
+
+    test "extracts number from URL-valued pr field" do
+      record = %{
+        pr: "https://github.com/leo/verus_sigv4/pull/5",
+        pr_ref: "#5",
+        link: "https://github.com/leo/verus_sigv4/pull/5",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "verus_sigv4#5"
+    end
+
+    test "handles pr_ref in bare format with sigil" do
+      record = %{
+        pr: nil,
+        pr_ref: "#42",
+        link: "https://github.com/myorg/my-repo/pull/42",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-repo#42"
+    end
+
+    test "rejects placeholder owner/repo in GitHub link" do
+      record = %{
+        pr: "42",
+        pr_ref: "#42",
+        link: "https://github.com/owner/repo/pull/42",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "42"
+    end
+  end
 end
