@@ -468,7 +468,7 @@ defmodule Arbiter.Worker.WatchdogTest do
       assert StubFixPassDispatcher.call_count() == 2
     end
 
-    test "keeps parking (does not fail the worker) past max_polls once auto-resolve is exhausted and escalated" do
+    test "resumes and merges once a stalled PR goes green after auto-resolve is exhausted (bd-krg7ci)" do
       {pid, task_id} = running_worker()
       # A CI failure that never clears on its own (e.g. an infra flake the fix-pass
       # can't touch, later fixed by a manual pipeline retry outside Arbiter). Once
@@ -480,24 +480,34 @@ defmodule Arbiter.Worker.WatchdogTest do
       # attempts and tripped the ordinary auto_merge `max_polls` ceiling, which
       # failed the worker and stopped the Watchdog for good — reproducing the
       # live incident (bd-krg7ci) where a green, approved MR sat unmerged forever
-      # because nothing was left watching it.
+      # because nothing was left watching it. The acceptance behavior isn't just
+      # "doesn't die" — it's "picks the PR back up and merges it" once the block
+      # clears, so this asserts the actual merge happens, not just survival.
       StubMerger.queue_get("!cf3", [%{status: :open, approved: true, block_reason: :ci_failed}])
 
       start_watchdog(pid, task_id, "!cf3",
         auto_merge: true,
         max_auto_resolve_attempts: 1,
         max_polls: 3,
+        interval_ms: 15,
         fix_pass_dispatcher: StubFixPassDispatcher,
         workspace: test_workspace()
       )
 
       wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
 
-      # Let well more than `max_polls` intervals elapse after exhaustion.
+      # Let well more than `max_polls` intervals elapse after exhaustion — the
+      # worker must still be alive to pick up the eventual green state.
       Process.sleep(150)
-
       refute Worker.state(pid).status == :failed
       refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+
+      # The out-of-band fix lands (a manual pipeline retry makes the MR green).
+      StubMerger.queue_get("!cf3", [%{status: :open, approved: true}])
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).meta.result == :merged
+      assert StubMerger.merge_count("!cf3") >= 1
     end
   end
 
@@ -951,6 +961,32 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> Worker.state(pid).status == :completed end)
       assert Worker.state(pid).meta.result == :merged
       _ = {call_count, wpid}
+    end
+
+    test "keeps polling past max_polls once the stall notification fires (bd-krg7ci)" do
+      # Reproduces the reported incident's actual failure path: a via_review_gate
+      # MR with red CI (no forge-level approved: true) hits
+      # `do_apply_approved_auto_merge/1` directly — not `handle_block/3` — because
+      # `effective_outcome/2` forces :approved for a gate-approved MR regardless of
+      # the raw `approved` flag. Before this fix, that path's finite `max_polls`
+      # ceiling was never lifted, so the worker still died at the ceiling even
+      # after the coordinator had been paged.
+      {pid, task_id} = running_worker()
+      StubMerger.set_merge_result({:error, :ci_must_pass})
+      StubMerger.queue_get("!sm4", [%{status: :open, approved: false}])
+
+      start_watchdog(pid, task_id, "!sm4",
+        via_review_gate: true,
+        merge_fail_notify_threshold: 3,
+        max_polls: 3,
+        interval_ms: 15
+      )
+
+      # Well past 3 poll intervals — the ordinary auto_merge ceiling would have
+      # failed the worker here pre-fix.
+      wait_until(fn -> StubMerger.merge_count("!sm4") >= 6 end)
+      refute Worker.state(pid).status == :failed
+      refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
     end
   end
 

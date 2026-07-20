@@ -39,8 +39,17 @@ defmodule Arbiter.Worker.Watchdog do
 
   Each attempt increments a per-episode counter; after `max_auto_resolve_attempts`
   (default 2) the Watchdog stops retrying and escalates with the reason + attempt
-  count. The remaining reasons (`:conflict`, `:needs_approval`, `:draft`,
-  `:blocked_other`) keep the Phase 1 behaviour: escalate once and park.
+  count, and lifts its poll ceiling (`max_polls`) to `:infinity` so it parks and
+  keeps watching indefinitely instead of dying at the finite auto_merge ceiling —
+  an out-of-band fix (e.g. a manual pipeline retry) that later makes the MR
+  mergeable is picked back up on a later poll rather than being missed because
+  the only process watching the MR already exited (bd-krg7ci). The lifted
+  ceiling is restored once the block clears (`poll_count` resets with it), and
+  the exhausted-retry escalation itself re-fires periodically (every
+  `base_max_polls` polls) while parked, so a block that never resolves keeps
+  paging the coordinator instead of going silent after the first page. The
+  remaining reasons (`:conflict`, `:needs_approval`, `:draft`, `:blocked_other`)
+  keep the Phase 1 behaviour: escalate once and park.
 
   ## Non-author-approval block (bd-c3lchp)
 
@@ -332,6 +341,11 @@ defmodule Arbiter.Worker.Watchdog do
           via_review_gate: via_review_gate,
           interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
           max_polls: Keyword.get(opts, :max_polls, default_max_polls),
+          # The configured ceiling as passed at start (before any indefinite-park
+          # lift). Restored into `max_polls` once a block episode clears, and used
+          # as the re-escalation cadence while parked (bd-krg7ci) — see
+          # `maybe_escalate_unresolved/2` and the `nil`-reason recovery branch.
+          base_max_polls: Keyword.get(opts, :max_polls, default_max_polls),
           poll_count: 0,
           watch_pipeline: watch_pipeline,
           last_pipeline: nil,
@@ -345,8 +359,16 @@ defmodule Arbiter.Worker.Watchdog do
           max_auto_resolve_attempts: max_auto_resolve_attempts,
           fix_pass_dispatcher: fix_pass_dispatcher,
           # Latches the exhausted-retry escalation so it fires once per block
-          # episode rather than on every subsequent poll (#354, Phase 2a).
+          # episode rather than on every subsequent poll (#354, Phase 2a). While
+          # parked indefinitely (max_polls lifted to :infinity) the latch is
+          # periodically cleared — see `last_escalated_poll` — so a block that
+          # never resolves keeps paging instead of going silent forever.
           unresolved_escalated: false,
+          # poll_count at which `unresolved_escalated` was last set. While parked
+          # indefinitely, re-escalate every `base_max_polls` polls so a stuck MR
+          # keeps surfacing to the coordinator instead of polling silently
+          # forever after the one-time page (bd-krg7ci).
+          last_escalated_poll: 0,
           # Fired once when an approved MR is parked without auto-merge, so the
           # external tracker moves to its "approved, awaiting merge" status
           # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
@@ -510,7 +532,13 @@ defmodule Arbiter.Worker.Watchdog do
               )
             end)
 
-            %{state | merge_stall_notified: true}
+            # The coordinator has been paged — this is no longer the silent
+            # "should auto-merge quickly or something's broken" case the ordinary
+            # ceiling guards against. Lift it to an indefinite park-and-watch so
+            # a manual pipeline retry or other out-of-band fix that later makes
+            # the MR mergeable is picked back up instead of the worker dying at
+            # the finite ceiling first (bd-krg7ci).
+            %{state | merge_stall_notified: true, max_polls: :infinity}
           else
             state
           end
@@ -727,6 +755,36 @@ defmodule Arbiter.Worker.Watchdog do
   defp do_maybe_escalate_merge_block(state, result) do
     case effective_block_reason(result) do
       nil ->
+        # The block cleared. Besides resetting the per-episode latches, restore
+        # the configured poll ceiling *if a block episode was actually parked*:
+        # `handle_block/3` and `handle_nonauthor_approval/2` set `max_polls:
+        # :infinity` together with a non-nil `last_block_reason` while parked, and
+        # leaving that lift in place after the episode resolves would make the
+        # worker immortal for the rest of its life instead of just for that one
+        # episode (bd-krg7ci).
+        #
+        # Gated on `last_block_reason != nil` (the value from *before* this poll,
+        # i.e. "were we parked on a block a moment ago") rather than on
+        # `max_polls != base_max_polls`: this branch also runs on every ordinary
+        # no-block poll (e.g. pre-approval review) where `poll_count` must keep
+        # climbing toward the finite ceiling, so it must not reset there. It must
+        # also NOT fire for the separate auto-merge-failure stall park
+        # (`do_apply_approved_auto_merge/1`), which lifts `max_polls` to
+        # `:infinity` without ever touching `last_block_reason` — that lift is
+        # unconditional for the rest of the episode; comparing against
+        # `base_max_polls` would have reset it on the very next no-block poll,
+        # undoing the fix immediately.
+        #
+        # `poll_count` resets alongside the restored cap because it's monotonic
+        # across the worker's life — restoring a finite cap without resetting the
+        # count would trip the ceiling on the very next poll.
+        state =
+          if state.last_block_reason != nil do
+            %{state | max_polls: state.base_max_polls, poll_count: 0, last_escalated_poll: 0}
+          else
+            state
+          end
+
         state = %{
           state
           | last_block_reason: nil,
@@ -890,11 +948,34 @@ defmodule Arbiter.Worker.Watchdog do
     safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
   end
 
-  defp maybe_escalate_unresolved(%{unresolved_escalated: true} = state, _reason), do: state
+  # Re-page periodically while parked instead of latching silent forever: once
+  # `unresolved_escalated` is set, only skip re-escalating until `poll_count`
+  # has advanced `base_max_polls` polls past the last page. This keeps a block
+  # that never resolves loudly visible — the indefinite park added by
+  # `handle_block/3` must not turn a one-time page into permanent silence
+  # (bd-krg7ci).
+  defp maybe_escalate_unresolved(
+         %{
+           unresolved_escalated: true,
+           poll_count: count,
+           last_escalated_poll: last,
+           base_max_polls: cap
+         } = state,
+         _reason
+       )
+       when is_integer(cap) and count - last < cap do
+    state
+  end
+
+  defp maybe_escalate_unresolved(
+         %{unresolved_escalated: true, base_max_polls: :infinity} = state,
+         _reason
+       ),
+       do: state
 
   defp maybe_escalate_unresolved(state, reason) do
     escalate_unresolved_block(state, reason)
-    %{state | unresolved_escalated: true}
+    %{state | unresolved_escalated: true, last_escalated_poll: state.poll_count}
   end
 
   defp escalate_unresolved_block(state, reason) do
