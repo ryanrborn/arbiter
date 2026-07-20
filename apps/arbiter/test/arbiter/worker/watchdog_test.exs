@@ -467,6 +467,38 @@ defmodule Arbiter.Worker.WatchdogTest do
       Process.sleep(120)
       assert StubFixPassDispatcher.call_count() == 2
     end
+
+    test "keeps parking (does not fail the worker) past max_polls once auto-resolve is exhausted and escalated" do
+      {pid, task_id} = running_worker()
+      # A CI failure that never clears on its own (e.g. an infra flake the fix-pass
+      # can't touch, later fixed by a manual pipeline retry outside Arbiter). Once
+      # the bounded fix-pass retries are exhausted, the Watchdog escalates to the
+      # coordinator and MUST keep polling indefinitely — same as the
+      # needs_nonauthor_approval park — so a later out-of-band fix (a manual
+      # pipeline retry making the MR green again) still gets picked up. Before the
+      # fix, the shared `poll_count` kept climbing across the auto-resolve
+      # attempts and tripped the ordinary auto_merge `max_polls` ceiling, which
+      # failed the worker and stopped the Watchdog for good — reproducing the
+      # live incident (bd-krg7ci) where a green, approved MR sat unmerged forever
+      # because nothing was left watching it.
+      StubMerger.queue_get("!cf3", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!cf3",
+        auto_merge: true,
+        max_auto_resolve_attempts: 1,
+        max_polls: 3,
+        fix_pass_dispatcher: StubFixPassDispatcher,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+
+      # Let well more than `max_polls` intervals elapse after exhaustion.
+      Process.sleep(150)
+
+      refute Worker.state(pid).status == :failed
+      refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+    end
   end
 
   describe "conflict auto-resolve (#354, Phase 2b)" do
