@@ -895,7 +895,7 @@ defmodule ArbiterWeb.DashboardLiveTest do
       assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "789"
     end
 
-    test "uses pr_ref when pr is nil" do
+    test "uses pr_ref when pr is nil and extracts bare number" do
       record = %{
         pr: nil,
         pr_ref: "my-repo#42",
@@ -903,7 +903,40 @@ defmodule ArbiterWeb.DashboardLiveTest do
         strategy: "github"
       }
 
-      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-repo#my-repo#42"
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-repo#42"
+    end
+
+    test "extracts number from URL-valued pr field" do
+      record = %{
+        pr: "https://github.com/leo/verus_sigv4/pull/5",
+        pr_ref: "#5",
+        link: "https://github.com/leo/verus_sigv4/pull/5",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "verus_sigv4#5"
+    end
+
+    test "handles pr_ref in bare format with sigil" do
+      record = %{
+        pr: nil,
+        pr_ref: "#42",
+        link: "https://github.com/myorg/my-repo/pull/42",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "my-repo#42"
+    end
+
+    test "rejects placeholder owner/repo in GitHub link" do
+      record = %{
+        pr: "42",
+        pr_ref: "#42",
+        link: "https://github.com/owner/repo/pull/42",
+        strategy: "github"
+      }
+
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "42"
     end
   end
 end

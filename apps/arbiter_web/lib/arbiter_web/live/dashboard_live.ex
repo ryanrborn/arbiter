@@ -2021,13 +2021,16 @@ defmodule ArbiterWeb.DashboardLive do
   # GitHub: https://github.com/owner/repo/pull/number → repo
   # GitLab: https://host/path/-/merge_requests/iid → last segment before /-/merge_requests/
   # Returns nil for empty links, unparseable links, or non-github/gitlab strategies.
+  # Rejects the "owner/repo" placeholder that appears when Config.active_repo_slug() is nil.
+  @doc false
   def extract_repo_name("", _strategy), do: nil
   def extract_repo_name(nil, _strategy), do: nil
   def extract_repo_name(_link, strategy) when strategy not in ["github", "gitlab"], do: nil
 
   def extract_repo_name(link, "github") when is_binary(link) do
-    case Regex.run(~r{github\.com/[^/]+/([^/]+)/pull/}, link) do
-      [_full, repo] -> repo
+    case Regex.run(~r{github\.com/([^/]+)/([^/]+)/pull/}, link) do
+      [_full, "owner", "repo"] -> nil
+      [_full, _owner, repo] -> repo
       nil -> nil
     end
   end
@@ -2041,24 +2044,42 @@ defmodule ArbiterWeb.DashboardLive do
 
   def extract_repo_name(_link, _strategy), do: nil
 
+  # Extract trailing number from PR/MR identifier.
+  # Handles bare numbers, URLs, and formatted refs like "#42" or "my-repo#42".
+  # Returns nil if no trailing number can be extracted.
+  @doc false
+  def pr_number(identifier) when is_binary(identifier) do
+    case Regex.run(~r{(\d+)\s*$}, identifier) do
+      [_full, num] -> num
+      nil -> nil
+    end
+  end
+
+  def pr_number(_identifier), do: nil
+
   # Format PR identifier with optional repo prefix.
   # Returns "repo#number" for GitHub, "repo!number" for GitLab.
-  # Falls back to unprefixed identifier if repo can't be derived.
+  # Falls back to unprefixed identifier if repo can't be derived or number can't be extracted.
+  @doc false
   def format_pr_identifier(pr_record) do
     identifier = pr_record.pr || pr_record.pr_ref
+    number = pr_number(identifier)
     repo = extract_repo_name(pr_record.link, pr_record.strategy)
 
-    case {repo, pr_record.strategy} do
-      {nil, _} ->
+    case {repo, number, pr_record.strategy} do
+      {_, nil, _} ->
         identifier
 
-      {repo_name, "github"} ->
-        "#{repo_name}##{identifier}"
+      {nil, _, _} ->
+        identifier
 
-      {repo_name, "gitlab"} ->
-        "#{repo_name}!#{identifier}"
+      {repo_name, num, "github"} ->
+        "#{repo_name}##{num}"
 
-      {_, _} ->
+      {repo_name, num, "gitlab"} ->
+        "#{repo_name}!#{num}"
+
+      {_, _, _} ->
         identifier
     end
   end
