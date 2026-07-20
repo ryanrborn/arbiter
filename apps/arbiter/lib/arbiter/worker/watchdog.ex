@@ -761,9 +761,17 @@ defmodule Arbiter.Worker.Watchdog do
 
       # Bounded retries exhausted: escalate (once) with the reason + attempt
       # count and park — stop auto-resolving so a human / Phase 2b takes over.
+      # Lift max_polls to :infinity (mirrors handle_nonauthor_approval below):
+      # the coordinator has now been paged, so this is no longer the silent
+      # "should auto-merge quickly or something's broken" case the ordinary
+      # ceiling guards against — it's an indefinite park-and-watch for an
+      # out-of-band fix (e.g. a manual pipeline retry). Without this, the
+      # shared poll_count kept climbing across the auto-resolve attempts and
+      # eventually tripped the ordinary ceiling anyway, failing the worker and
+      # killing the only process still watching the MR (bd-krg7ci).
       state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
         state = maybe_escalate_unresolved(state, reason)
-        reschedule(%{state | last_block_reason: reason})
+        reschedule(%{state | last_block_reason: reason, max_polls: :infinity})
 
       true ->
         auto_resolve(reason, result, state)
