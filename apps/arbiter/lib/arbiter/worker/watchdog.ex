@@ -39,8 +39,17 @@ defmodule Arbiter.Worker.Watchdog do
 
   Each attempt increments a per-episode counter; after `max_auto_resolve_attempts`
   (default 2) the Watchdog stops retrying and escalates with the reason + attempt
-  count. The remaining reasons (`:conflict`, `:needs_approval`, `:draft`,
-  `:blocked_other`) keep the Phase 1 behaviour: escalate once and park.
+  count, and lifts its poll ceiling (`max_polls`) to `:infinity` so it parks and
+  keeps watching indefinitely instead of dying at the finite auto_merge ceiling —
+  an out-of-band fix (e.g. a manual pipeline retry) that later makes the MR
+  mergeable is picked back up on a later poll rather than being missed because
+  the only process watching the MR already exited (bd-krg7ci). The lifted
+  ceiling is restored once the block clears (`poll_count` resets with it), and
+  the exhausted-retry escalation itself re-fires periodically (every
+  `base_max_polls` polls) while parked, so a block that never resolves keeps
+  paging the coordinator instead of going silent after the first page. The
+  remaining reasons (`:conflict`, `:needs_approval`, `:draft`, `:blocked_other`)
+  keep the Phase 1 behaviour: escalate once and park.
 
   ## Non-author-approval block (bd-c3lchp)
 
@@ -332,12 +341,29 @@ defmodule Arbiter.Worker.Watchdog do
           via_review_gate: via_review_gate,
           interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
           max_polls: Keyword.get(opts, :max_polls, default_max_polls),
+          # The configured ceiling as passed at start (before any indefinite-park
+          # lift). Restored into `max_polls` once a block episode clears, and used
+          # as the re-escalation cadence while parked (bd-krg7ci) — see
+          # `maybe_escalate_unresolved/2` and the `nil`-reason recovery branch.
+          base_max_polls: Keyword.get(opts, :max_polls, default_max_polls),
           poll_count: 0,
           watch_pipeline: watch_pipeline,
           last_pipeline: nil,
           # The last merge-block reason we escalated, so a blocked merge is
           # surfaced once per reason rather than on every poll (#354, Phase 1).
           last_block_reason: nil,
+          # The reason a genuine indefinite park is in effect, set alongside
+          # `max_polls: :infinity` by `handle_nonauthor_approval/2` and the
+          # exhausted-retry branch of `handle_block/3`, and cleared only once
+          # that specific episode is confirmed resolved (bd-krg7ci round 4).
+          # Unlike `last_block_reason` — which the adapters can transiently stop
+          # emitting for reasons unrelated to the park actually clearing (CI
+          # going red/running collapses `:needs_nonauthor_approval` to `nil`;
+          # an approval dismissal collapses any approval-gated reason to `nil`)
+          # — `park_reason` only clears on a poll that shows the PR genuinely
+          # approved and unblocked, so a signal lapse can't revoke a park that's
+          # still needed. See `do_maybe_escalate_merge_block/2`.
+          park_reason: nil,
           # Consecutive auto-resolve attempts for the current block episode
           # (#354, Phase 2a). Reset to 0 when the block clears. After
           # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
@@ -345,8 +371,16 @@ defmodule Arbiter.Worker.Watchdog do
           max_auto_resolve_attempts: max_auto_resolve_attempts,
           fix_pass_dispatcher: fix_pass_dispatcher,
           # Latches the exhausted-retry escalation so it fires once per block
-          # episode rather than on every subsequent poll (#354, Phase 2a).
+          # episode rather than on every subsequent poll (#354, Phase 2a). While
+          # parked indefinitely (max_polls lifted to :infinity) the latch is
+          # periodically cleared — see `last_escalated_poll` — so a block that
+          # never resolves keeps paging instead of going silent forever.
           unresolved_escalated: false,
+          # poll_count at which `unresolved_escalated` was last set. While parked
+          # indefinitely, re-escalate every `base_max_polls` polls so a stuck MR
+          # keeps surfacing to the coordinator instead of polling silently
+          # forever after the one-time page (bd-krg7ci).
+          last_escalated_poll: 0,
           # Fired once when an approved MR is parked without auto-merge, so the
           # external tracker moves to its "approved, awaiting merge" status
           # (e.g. Jira VR -> Pending Merge) instead of every poll. (bd-c4cfuv)
@@ -384,7 +418,8 @@ defmodule Arbiter.Worker.Watchdog do
           merge_fail_count: 0,
           merge_fail_notify_threshold:
             Keyword.get(opts, :merge_fail_notify_threshold, @default_merge_fail_notify_threshold),
-          merge_stall_notified: false
+          merge_stall_notified: false,
+          last_merge_stall_poll: 0
         }
 
         Process.monitor(worker_pid)
@@ -442,7 +477,9 @@ defmodule Arbiter.Worker.Watchdog do
     Logger.info("Worker.Watchdog: MR #{state.mr_ref} merged for task=#{state.task_id}")
     sync_tracker_merged(state)
     safe(fn -> Worker.complete(state.worker_pid, :merged) end)
-    {:stop, :normal, %{state | merge_fail_count: 0, merge_stall_notified: false}}
+
+    {:stop, :normal,
+     %{state | merge_fail_count: 0, merge_stall_notified: false, last_merge_stall_poll: 0}}
   end
 
   defp apply_outcome(:closed, _result, state) do
@@ -499,8 +536,18 @@ defmodule Arbiter.Worker.Watchdog do
 
         state = %{state | merge_fail_count: fail_count}
 
+        should_notify =
+          (fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified) or
+            (state.merge_stall_notified and
+               state.poll_count - state.last_merge_stall_poll >= escalation_cadence(state))
+
         state =
-          if fail_count >= state.merge_fail_notify_threshold and not state.merge_stall_notified do
+          if should_notify do
+            Logger.warning(
+              "Worker.Watchdog: paging coordinator for auto-merge stall " <>
+                "(fail_count=#{fail_count}) task=#{state.task_id} mr=#{state.mr_ref}"
+            )
+
             safe(fn ->
               Arbiter.Messages.CoordinatorNotifier.auto_merge_stalled(
                 snapshot(state),
@@ -510,7 +557,23 @@ defmodule Arbiter.Worker.Watchdog do
               )
             end)
 
-            %{state | merge_stall_notified: true}
+            # The coordinator has been paged — this is no longer the silent
+            # "should auto-merge quickly or something's broken" case the ordinary
+            # ceiling guards against. Lift it to an indefinite park-and-watch so
+            # a manual pipeline retry or other out-of-band fix that later makes
+            # the MR mergeable is picked back up instead of the worker dying at
+            # the finite ceiling first (bd-krg7ci).
+            #
+            # Re-page every `base_max_polls` polls instead of latching silent
+            # forever after the first page — mirrors `maybe_escalate_unresolved/2`
+            # below, which fixed the identical permanent-silence gap on the block
+            # path (bd-krg7ci round 2).
+            %{
+              state
+              | merge_stall_notified: true,
+                max_polls: :infinity,
+                last_merge_stall_poll: state.poll_count
+            }
           else
             state
           end
@@ -712,7 +775,12 @@ defmodule Arbiter.Worker.Watchdog do
   # poll sees `:approved` and auto-merges (or, on a manual lane, a human merges).
   defp handle_nonauthor_approval(state, result) do
     state = debounce_escalate_block(state, :needs_nonauthor_approval)
-    apply_outcome(effective_outcome(state, result), result, %{state | max_polls: :infinity})
+
+    apply_outcome(
+      effective_outcome(state, result),
+      result,
+      %{state | max_polls: :infinity, park_reason: :needs_nonauthor_approval}
+    )
   end
 
   defp route_merge_block(%{auto_resolve_conflict: true} = state, result) do
@@ -727,6 +795,82 @@ defmodule Arbiter.Worker.Watchdog do
   defp do_maybe_escalate_merge_block(state, result) do
     case effective_block_reason(result) do
       nil ->
+        # The block cleared. Besides resetting the per-episode latches, restore
+        # the configured poll ceiling *if a block episode was actually parked
+        # AND that specific park is confirmed resolved*: `handle_block/3` and
+        # `handle_nonauthor_approval/2` set `max_polls: :infinity` together with
+        # `park_reason` while parked, and leaving that lift in place after the
+        # episode resolves would make the worker immortal for the rest of its
+        # life instead of just for that one episode (bd-krg7ci).
+        #
+        # Gated on `state.park_reason != nil` (i.e. a genuine indefinite park is
+        # in effect) AND the *current* poll showing the PR genuinely approved
+        # with no raw block reason. Deliberately NOT gated on
+        # `effective_block_reason(result) == nil` alone (that's merely the guard
+        # of the enclosing `case` and is satisfied by *any* unapproved PR, since
+        # `effective_block_reason/1` suppresses pre-approval blocks) — doing so
+        # let a signal lapse masquerade as resolution and revoke a park that was
+        # still needed (bd-krg7ci round 4):
+        #
+        #   * `:needs_nonauthor_approval` park — the adapters only emit this
+        #     narrow reason while CI is green; as soon as CI goes red
+        #     (`github.ex`, `gitlab.ex`) or starts running (`gitlab.ex` maps
+        #     `ci_still_running`/`ci_must_pass` to `nil`), the reason vanishes
+        #     even though the PR is still unapproved, which used to restore the
+        #     finite ceiling and let the ordinary auto_merge timeout fail the
+        #     worker out from under a PR still awaiting the same human.
+        #   * exhausted-block park (e.g. `:ci_failed`) — dismissing the PR's
+        #     approval (standard branch-protection behavior on a new commit
+        #     push) also collapses `effective_block_reason/1` to `nil` even
+        #     though the underlying block was never actually resolved.
+        #
+        # Requiring `classify(result) == :approved and block_reason(result) ==
+        # nil` on the poll that clears the park means only a poll that shows the
+        # PR genuinely mergeable — not just "the gated reason isn't visible right
+        # now" — can revoke it. A lane that repeatedly enters and clears a
+        # *bounded* block (e.g. `:behind_base`/`:ci_failed` resolving within
+        # `max_auto_resolve_attempts`, which never sets `park_reason`) still
+        # never trips this branch, so the finite ceiling stays monotonic for
+        # those flapping episodes too (bd-krg7ci round 2).
+        #
+        # This still excludes the separate auto-merge-failure stall park
+        # (`do_apply_approved_auto_merge/1`), which lifts `max_polls` to
+        # `:infinity` without ever touching `park_reason` — `park_reason` stays
+        # `nil` there, so this branch doesn't fire and that lift remains
+        # unconditional for the rest of the episode.
+        #
+        # `poll_count` resets alongside the restored cap because it's monotonic
+        # across the worker's life — restoring a finite cap without resetting the
+        # count would trip the ceiling on the very next poll.
+        #
+        # Also clear the merge-stall latches (`merge_stall_notified`,
+        # `merge_fail_count`, `last_merge_stall_poll`) here. They can be stale
+        # from an *earlier* part of the same episode: the coordinator's own
+        # response to a stall page can forge-approve the MR, which surfaces a
+        # real block (e.g. `:behind_base`) that then clears and hits this
+        # branch. Left stale, `last_merge_stall_poll` sits above the reset
+        # `poll_count`, so `poll_count - last_merge_stall_poll` in
+        # `do_apply_approved_auto_merge/1` goes negative and can never reach the
+        # re-notify cadence again — silently disarming the stall park and
+        # reproducing the exact incident this whole fix targets (bd-krg7ci
+        # round 3). Mirrors what the `:merged` clause already does on success.
+        state =
+          if state.park_reason != nil and classify(result) == :approved and
+               block_reason(result) == nil do
+            %{
+              state
+              | max_polls: state.base_max_polls,
+                poll_count: 0,
+                last_escalated_poll: 0,
+                merge_stall_notified: false,
+                merge_fail_count: 0,
+                last_merge_stall_poll: 0,
+                park_reason: nil
+            }
+          else
+            state
+          end
+
         state = %{
           state
           | last_block_reason: nil,
@@ -761,9 +905,17 @@ defmodule Arbiter.Worker.Watchdog do
 
       # Bounded retries exhausted: escalate (once) with the reason + attempt
       # count and park — stop auto-resolving so a human / Phase 2b takes over.
+      # Lift max_polls to :infinity (mirrors handle_nonauthor_approval below):
+      # the coordinator has now been paged, so this is no longer the silent
+      # "should auto-merge quickly or something's broken" case the ordinary
+      # ceiling guards against — it's an indefinite park-and-watch for an
+      # out-of-band fix (e.g. a manual pipeline retry). Without this, the
+      # shared poll_count kept climbing across the auto-resolve attempts and
+      # eventually tripped the ordinary ceiling anyway, failing the worker and
+      # killing the only process still watching the MR (bd-krg7ci).
       state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
         state = maybe_escalate_unresolved(state, reason)
-        reschedule(%{state | last_block_reason: reason})
+        reschedule(%{state | last_block_reason: reason, max_polls: :infinity, park_reason: reason})
 
       true ->
         auto_resolve(reason, result, state)
@@ -882,12 +1034,37 @@ defmodule Arbiter.Worker.Watchdog do
     safe(fn -> state.fix_pass_dispatcher.dispatch(args) end)
   end
 
-  defp maybe_escalate_unresolved(%{unresolved_escalated: true} = state, _reason), do: state
+  # Re-page periodically while parked instead of latching silent forever: once
+  # `unresolved_escalated` is set, only skip re-escalating until `poll_count`
+  # has advanced `escalation_cadence/1` polls past the last page. This keeps a
+  # block that never resolves loudly visible — the indefinite park added by
+  # `handle_block/3` must not turn a one-time page into permanent silence
+  # (bd-krg7ci).
+  defp maybe_escalate_unresolved(%{unresolved_escalated: true} = state, reason) do
+    if state.poll_count - state.last_escalated_poll >= escalation_cadence(state) do
+      escalate_unresolved_block(state, reason)
+      %{state | last_escalated_poll: state.poll_count}
+    else
+      state
+    end
+  end
 
   defp maybe_escalate_unresolved(state, reason) do
     escalate_unresolved_block(state, reason)
-    %{state | unresolved_escalated: true}
+    %{state | unresolved_escalated: true, last_escalated_poll: state.poll_count}
   end
+
+  # The cadence (in polls) at which a parked lane re-pages the coordinator
+  # (`maybe_escalate_unresolved/2`, `do_apply_approved_auto_merge/1`). Normally
+  # the configured ceiling itself, but a lane can have `base_max_polls:
+  # :infinity` (`Arbiter.Tasks.Workspace.watchdog_max_polls/1` accepts the
+  # string `"infinity"`) — falling back to the ordinary auto_merge default
+  # there keeps such a lane from parking indefinitely *and* paging exactly
+  # once, which is the same permanent-silence shape this whole fix targets,
+  # just reachable via config rather than an auto-resolve exhaustion
+  # (bd-krg7ci round 3).
+  defp escalation_cadence(%{base_max_polls: n}) when is_integer(n), do: n
+  defp escalation_cadence(_state), do: @default_max_polls_auto
 
   defp escalate_unresolved_block(state, reason) do
     Logger.warning(
