@@ -938,5 +938,34 @@ defmodule ArbiterWeb.DashboardLiveTest do
 
       assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "42"
     end
+
+    test "rejects numeric project ID in GitLab link (raw ID instead of project path)" do
+      record = %{
+        pr: "221",
+        pr_ref: "!221",
+        link: "https://gitlab.com/mygroup/55399962/-/merge_requests/221",
+        strategy: "gitlab"
+      }
+
+      # Should fall back to unprefixed since project segment is purely numeric
+      assert ArbiterWeb.DashboardLive.format_pr_identifier(record) == "221"
+    end
+  end
+
+  describe "extract_repo_name with numeric project IDs" do
+    test "returns nil for GitLab link with purely numeric project ID" do
+      link = "https://gitlab.com/mygroup/55399962/-/merge_requests/221"
+      assert ArbiterWeb.DashboardLive.extract_repo_name(link, "gitlab") == nil
+    end
+
+    test "returns project name for GitLab link with alphanumeric project path" do
+      link = "https://gitlab.com/mygroup/project-123/-/merge_requests/99"
+      assert ArbiterWeb.DashboardLive.extract_repo_name(link, "gitlab") == "project-123"
+    end
+
+    test "returns project name for GitLab nested groups with alphanumeric project" do
+      link = "https://gitlab.com/group/subgroup/project-456/-/merge_requests/15"
+      assert ArbiterWeb.DashboardLive.extract_repo_name(link, "gitlab") == "project-456"
+    end
   end
 end
