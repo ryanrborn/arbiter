@@ -1059,7 +1059,8 @@ defmodule Arbiter.MCP.Tools do
     with :ok <- ensure_can_dispatch(scope),
          :ok <- ensure_dispatch_depth(scope),
          {:ok, ws_ref} <- authorized_workspace(scope, args),
-         {:ok, follow_up} <- fetch_optional_bool(args, "follow_up") do
+         {:ok, follow_up} <- fetch_optional_bool(args, "follow_up"),
+         {:ok, force} <- fetch_optional_bool(args, "force") do
       opts =
         [
           pr: pr,
@@ -1070,6 +1071,7 @@ defmodule Arbiter.MCP.Tools do
           tracker_context_type: fetch_string(args, "tracker_context_type")
         ]
         |> maybe_put_kw(:follow_up, follow_up)
+        |> maybe_put_kw(:force, force)
         |> maybe_put_kw(:scope, fetch_string(args, "scope"))
 
       case Arbiter.Reviews.ExternalReview.dispatch(opts) do

@@ -1921,6 +1921,87 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "self_approved?/1" do
+    test "true when the token's own login has a current APPROVED verdict" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"user" => %{"login" => "arb-bot"}, "state" => "APPROVED"}])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, true} = Github.self_approved?(@ref)
+    end
+
+    test "false when our latest verdict is DISMISSED after an earlier APPROVED" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"user" => %{"login" => "arb-bot"}, "state" => "APPROVED"},
+              %{"user" => %{"login" => "arb-bot"}, "state" => "DISMISSED"}
+            ])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, false} = Github.self_approved?(@ref)
+    end
+
+    test "false when only a different reviewer approved" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => "arb-bot"})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"user" => %{"login" => "coworker"}, "state" => "APPROVED"}])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, false} = Github.self_approved?(@ref)
+    end
+
+    test "false (fail open) when the token's own login can't be resolved" do
+      stub(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+
+          {"GET", "/repos/octo/widget/pulls/42/reviews"} ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"user" => %{"login" => "arb-bot"}, "state" => "APPROVED"}])
+
+          _ ->
+            conn |> Plug.Conn.put_status(404) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert {:ok, false} = Github.self_approved?(@ref)
+    end
+  end
+
   # Minimal git repo whose `origin` remote is set to the given URL, so
   # RepoResolver.from_remote/1 can derive {owner, repo}.
   defp tmp_git_repo(origin_url) do
