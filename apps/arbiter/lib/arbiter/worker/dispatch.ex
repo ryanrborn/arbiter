@@ -53,6 +53,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Agents.Preflight
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Messages.CoordinatorNotifier
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.RepoConfig
@@ -826,8 +827,75 @@ defmodule Arbiter.Worker.Dispatch do
   defp resolve_repo_path(_task, nil), do: nil
 
   defp resolve_repo_path(%Issue{workspace_id: ws_id}, repo) when is_binary(repo) do
-    workspace_repo_path(ws_id, repo) || application_repo_path(repo)
+    workspace_repo_path(ws_id, repo) || application_repo_path(repo) ||
+      slug_repo_path(ws_id, repo)
   end
+
+  # Reverse resolution (bd-49ajyt): PRPatrol/ReviewPatrol dispatch a follow-up
+  # with the PR's GitHub `owner/repo` slug as the `:repo` opt, but a multi-repo
+  # workspace's `repo_paths`/`rig_paths` map is keyed by *rig name* (e.g.
+  # "client"), not by slug — so the direct + normalized key lookups above miss
+  # (a rig name never normalizes to an `owner/repo` slug) and dispatch used to
+  # fail `{:repo_not_found}`, spinning PRPatrol in a 1/min escalation loop.
+  #
+  # When the requested repo looks like an `owner/repo` slug that no key
+  # matched, resolve it the same way `PRPatrolSupervisor` derives its patrol
+  # repos: read each registered rig's `origin` remote and match its derived
+  # slug. This only runs on the miss path (both direct lookups returned nil)
+  # and only for slug-shaped repos, so a normal rig-name dispatch never pays
+  # the git cost. Covers client↔verus-client, server↔verus_server, and the
+  # other leotech rigs where rig name ≠ slug.
+  defp slug_repo_path(_ws_id, repo) when not is_binary(repo), do: nil
+
+  defp slug_repo_path(ws_id, repo) do
+    if String.contains?(repo, "/") do
+      target = RepoConfig.normalize_slug(repo)
+
+      ws_id
+      |> candidate_repo_paths()
+      |> Enum.find_value(fn path ->
+        case RepoResolver.from_remote(path) do
+          {:ok, {owner, name}} ->
+            if RepoConfig.normalize_slug("#{owner}/#{name}") == target, do: path
+
+          _ ->
+            nil
+        end
+      end)
+    end
+  end
+
+  # All locally-checked-out rig paths registered for this workspace (config
+  # `repo_paths`/`rig_paths`) plus the global Application `:repo_paths`,
+  # deduplicated. The values are paths to git checkouts whose `origin` remote
+  # `slug_repo_path/2` can resolve.
+  defp candidate_repo_paths(ws_id) do
+    ws_paths =
+      case load_workspace_config(ws_id) do
+        %{} = config ->
+          [get_in(config, ["repo_paths"]), get_in(config, ["rig_paths"])]
+          |> Enum.flat_map(&config_repo_paths/1)
+
+        _ ->
+          []
+      end
+
+    app_paths =
+      :arbiter
+      |> Application.get_env(:repo_paths, %{})
+      |> config_repo_paths()
+
+    (ws_paths ++ app_paths) |> Enum.uniq()
+  end
+
+  defp config_repo_paths(map) when is_map(map) do
+    map
+    |> Map.values()
+    |> Enum.map(&repo_path_from_config/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp config_repo_paths(_), do: []
 
   # Resolve the integration branch — the branch the worktree is cut from and
   # the one the completed branch merges back into. Delegates to the shared

@@ -213,6 +213,61 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  # bd-49ajyt: PRPatrol/ReviewPatrol dispatch a follow-up with the PR's GitHub
+  # "owner/repo" slug as the :repo opt, but a multi-repo workspace's
+  # repo_paths/rig_paths map is keyed by *rig name* (e.g. "client"), not by
+  # slug. The direct + normalized key lookup misses (a rig name never
+  # normalizes to an owner/repo slug), so dispatch used to fail
+  # {:repo_not_found}, spinning PRPatrol in a 1/min escalation loop. Dispatch
+  # must resolve the slug the same way PRPatrolSupervisor derives patrol repos:
+  # by reading each registered rig's `origin` remote.
+  describe "owner/repo slug resolves against a rig-name-keyed registry (bd-49ajyt)" do
+    # Init a git repo whose `origin` remote is a GitHub slug (SSH form). Not
+    # fetched here (provision_worktree: false), so the remote need not exist.
+    defp seed_repo_with_github_origin!(tmp, sub, slug) do
+      repo = Path.join(tmp, sub)
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", "git@github.com:#{slug}.git"])
+      repo
+    end
+
+    setup %{ws: ws} do
+      tmp = Path.join(System.tmp_dir!(), "disp-slug-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf(tmp) end)
+
+      # Registry keyed by rig NAME "client"; the rig's origin resolves to the
+      # differently-named slug "leo-technologies-llc/verus-client".
+      rig_path = seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
+
+      {:ok, ws} =
+        Ash.update(ws, %{config: %{"repo_paths" => %{"client" => rig_path}}},
+          action: :update
+        )
+
+      {:ok, ws: ws, tmp: tmp}
+    end
+
+    test "a slug whose rig name differs resolves + dispatches (not {:repo_not_found})",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "slug dispatch", workspace_id: ws.id})
+
+      # If the slug resolves, dispatch gets past the repo guard and fails later
+      # at worktree provisioning (:missing_worktree) — the same distinguishable
+      # outcome the bd-bi5pn0 tests rely on. The pre-fix behavior was
+      # {:error, {:repo_not_found, "leo-technologies-llc/verus-client"}}.
+      assert {:error, :missing_worktree} =
+               Dispatch.dispatch(task.id,
+                 repo: "leo-technologies-llc/verus-client",
+                 start_driver: false,
+                 start_claude: true,
+                 provision_worktree: false,
+                 preflight: false
+               )
+    end
+  end
+
   describe "pre-flight auth check (bd-awi4nw)" do
     alias Arbiter.Messages.Message
 

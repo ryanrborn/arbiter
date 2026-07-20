@@ -76,6 +76,10 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   @default_interval_ms 60_000
 
+  # Cap the exponential dispatch-failure backoff so a permanently-broken repo
+  # eventually retries about once an hour instead of never (bd-49ajyt).
+  @max_backoff_ms 60 * 60_000
+
   defstruct [
     :repo,
     :workspace_id,
@@ -85,6 +89,11 @@ defmodule Arbiter.Workflows.PRPatrol do
     ticks: 0,
     last_dispatched: %{},
     last_tick_at: nil,
+    # PR number => %{count: n, retry_at: DateTime} — tracks consecutive
+    # follow-up dispatch failures per PR so a persistent failure escalates
+    # ONCE and then exponential-backs-off, instead of re-filing + re-escalating
+    # every tick (bd-49ajyt). Cleared as soon as a dispatch succeeds.
+    dispatch_failures: %{},
     # Test-only escape hatch merged into the Dispatch.dispatch/2 opts (e.g.
     # `claude_command:` to avoid spawning a real `claude` subprocess).
     # Production never sets this — it always defaults to [].
@@ -165,22 +174,29 @@ defmodule Arbiter.Workflows.PRPatrol do
         _ -> nil
       end
 
-    result =
+    # Thread state through each PR so per-PR dispatch-failure backoff records
+    # (bd-49ajyt) accumulate across the tick and survive into the next one.
+    dispatched_state =
       with %Workspace{} <- workspace,
            adapter when not is_nil(adapter) <- resolve_adapter(workspace),
            true <- function_exported?(adapter, :list_open, 0),
            :ok <- Mergers.prepare_with_repo(workspace, state.repo),
            {:ok, mrs} <- adapter.list_open() do
-        Enum.each(mrs, &maybe_dispatch(&1, %{state | workspace: workspace}, adapter))
-        :ok
+        Enum.reduce(mrs, %{state | workspace: workspace}, fn mr, acc ->
+          maybe_dispatch(mr, acc, adapter)
+        end)
       else
         # On any failure (missing workspace, unsupported adapter, API error),
         # still bump the tick counter so callers can detect the patrol is alive.
-        _ -> :noop
+        _ -> %{state | workspace: workspace}
       end
 
-    _ = result
-    %{state | ticks: state.ticks + 1, last_tick_at: DateTime.utc_now(), workspace: workspace}
+    %{
+      dispatched_state
+      | ticks: dispatched_state.ticks + 1,
+        last_tick_at: DateTime.utc_now(),
+        workspace: workspace
+    }
   end
 
   defp resolve_adapter(workspace) do
@@ -201,15 +217,18 @@ defmodule Arbiter.Workflows.PRPatrol do
     ArgumentError -> nil
   end
 
+  # Returns the (possibly updated) patrol state. `backing_off?/2` short-circuits
+  # before any forge calls so a PR whose dispatch keeps failing is parked for
+  # the backoff window instead of re-filed every tick (bd-49ajyt).
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
-    with true <- author_allowed?(mr, state.workspace),
+    with false <- backing_off?(pr_number, state),
+         true <- author_allowed?(mr, state.workspace),
          {reason, extra_protocol} when is_binary(reason) <- actionable_reason(adapter, mr_ref),
          false <- deduped?(pr_number, state.workspace_id) do
       task = create_follow_up(mr, state, reason, extra_protocol)
-      dispatch_follow_up(task, state)
-      :ok
+      dispatch_follow_up(task, pr_number, state)
     else
-      _ -> :noop
+      _ -> state
     end
   end
 
@@ -224,26 +243,73 @@ defmodule Arbiter.Workflows.PRPatrol do
   # Dispatch.dispatch/2 already enqueued the intent in DispatchQueue for
   # automatic re-drain, and closing the task here would make that later
   # re-dispatch fail at ensure_not_closed.
-  defp dispatch_follow_up(task, state) do
+  defp dispatch_follow_up(task, pr_number, state) do
     opts = Keyword.merge([repo: state.repo, start_claude: true], state.dispatch_opts)
 
     case Dispatch.dispatch(task.id, opts) do
       {:ok, _result} ->
-        :ok
+        clear_dispatch_failure(pr_number, state)
 
       {:error, {:quota_held, _task_id}} ->
-        :ok
+        clear_dispatch_failure(pr_number, state)
 
       {:error, reason} ->
-        Logger.warning(
-          "PRPatrol: dispatch failed for follow-up #{task.id} (PR #{task.source_pr}): " <>
-            inspect(reason) <> " — closing and escalating"
-        )
-
-        escalate_dispatch_failure(task, state, reason)
-        Ash.update(task, %{reason: "PRPatrol dispatch failed: #{inspect(reason)}"}, action: :close)
-        :ok
+        record_dispatch_failure(task, pr_number, state, reason)
     end
+  end
+
+  # A follow-up whose dispatch fails is closed immediately (rather than left as
+  # a zombie `:idle` registration). Previously that also freed `deduped?/2` for
+  # an immediate refile on the very next tick — a persistent failure therefore
+  # re-filed + re-escalated once a minute forever (bd-49ajyt spammed ~25
+  # escalations on verus-client#3282). Now the failure is recorded per PR: we
+  # escalate only on the FIRST failure of a streak, and `backing_off?/2` parks
+  # the PR for an exponentially-growing window before the next retry.
+  defp record_dispatch_failure(task, pr_number, state, reason) do
+    prior = Map.get(state.dispatch_failures, pr_number)
+    count = if prior, do: prior.count + 1, else: 1
+
+    Logger.warning(
+      "PRPatrol: dispatch failed for follow-up #{task.id} (PR #{task.source_pr}): " <>
+        inspect(reason) <> " — closing" <>
+        if(count == 1, do: " and escalating", else: " (backing off, already escalated)")
+    )
+
+    if count == 1, do: escalate_dispatch_failure(task, state, reason)
+
+    Ash.update(task, %{reason: "PRPatrol dispatch failed: #{inspect(reason)}"}, action: :close)
+
+    retry_at = DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
+
+    %{
+      state
+      | dispatch_failures:
+          Map.put(state.dispatch_failures, pr_number, %{count: count, retry_at: retry_at})
+    }
+  end
+
+  defp clear_dispatch_failure(pr_number, state) do
+    %{state | dispatch_failures: Map.delete(state.dispatch_failures, pr_number)}
+  end
+
+  # True while a PR is inside its post-failure backoff window: the follow-up
+  # dispatch failed and the next retry is still in the future. Once the window
+  # elapses the PR is eligible for one more retry attempt.
+  defp backing_off?(pr_number, state) do
+    case Map.get(state.dispatch_failures, pr_number) do
+      %{retry_at: %DateTime{} = retry_at} ->
+        DateTime.compare(DateTime.utc_now(), retry_at) == :lt
+
+      _ ->
+        false
+    end
+  end
+
+  # Exponential backoff: interval, 2×interval, 4×interval, … capped at
+  # @max_backoff_ms. `count` is the consecutive-failure count (>= 1).
+  defp backoff_ms(count, interval_ms) do
+    base = if is_integer(interval_ms) and interval_ms > 0, do: interval_ms, else: @default_interval_ms
+    min(base * Integer.pow(2, count - 1), @max_backoff_ms)
   end
 
   defp escalate_dispatch_failure(task, state, reason) do
