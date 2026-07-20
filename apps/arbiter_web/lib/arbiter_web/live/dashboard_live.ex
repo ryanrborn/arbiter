@@ -1424,14 +1424,14 @@ defmodule ArbiterWeb.DashboardLive do
                         class="link link-secondary text-xs truncate block"
                         title={r.pr_ref}
                       >
-                        {r.pr || r.pr_ref}
+                        {format_pr_identifier(r)}
                       </a>
                       <code
                         :if={!r.link || r.link == ""}
                         class="text-xs truncate block"
                         title={r.pr_ref}
                       >
-                        {r.pr || r.pr_ref}
+                        {format_pr_identifier(r)}
                       </code>
                       <span class="badge badge-ghost badge-xs font-mono mt-0.5">
                         {r.strategy || "?"}
@@ -2016,4 +2016,50 @@ defmodule ArbiterWeb.DashboardLive do
   defp kind_border_class(:completion), do: "border-success"
   defp kind_border_class(:info), do: "border-info"
   defp kind_border_class(_), do: "border-base-300"
+
+  # Extract repo name from PR/MR link based on strategy.
+  # GitHub: https://github.com/owner/repo/pull/number → repo
+  # GitLab: https://host/path/-/merge_requests/iid → last segment before /-/merge_requests/
+  # Returns nil for empty links, unparseable links, or non-github/gitlab strategies.
+  def extract_repo_name("", _strategy), do: nil
+  def extract_repo_name(nil, _strategy), do: nil
+  def extract_repo_name(_link, strategy) when strategy not in ["github", "gitlab"], do: nil
+
+  def extract_repo_name(link, "github") when is_binary(link) do
+    case Regex.run(~r{github\.com/[^/]+/([^/]+)/pull/}, link) do
+      [_full, repo] -> repo
+      nil -> nil
+    end
+  end
+
+  def extract_repo_name(link, "gitlab") when is_binary(link) do
+    case Regex.run(~r{(https?://[^/]+/.*/)([^/]+)/-/merge_requests/}, link) do
+      [_full, _path, project] -> project
+      nil -> nil
+    end
+  end
+
+  def extract_repo_name(_link, _strategy), do: nil
+
+  # Format PR identifier with optional repo prefix.
+  # Returns "repo#number" for GitHub, "repo!number" for GitLab.
+  # Falls back to unprefixed identifier if repo can't be derived.
+  def format_pr_identifier(pr_record) do
+    identifier = pr_record.pr || pr_record.pr_ref
+    repo = extract_repo_name(pr_record.link, pr_record.strategy)
+
+    case {repo, pr_record.strategy} do
+      {nil, _} ->
+        identifier
+
+      {repo_name, "github"} ->
+        "#{repo_name}##{identifier}"
+
+      {repo_name, "gitlab"} ->
+        "#{repo_name}!#{identifier}"
+
+      {_, _} ->
+        identifier
+    end
+  end
 end
