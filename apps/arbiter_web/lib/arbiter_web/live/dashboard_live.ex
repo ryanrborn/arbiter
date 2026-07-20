@@ -2037,7 +2037,8 @@ defmodule ArbiterWeb.DashboardLive do
 
   def extract_repo_name(link, "gitlab") when is_binary(link) do
     case Regex.run(~r{(https?://[^/]+/.*/)([^/]+)/-/merge_requests/}, link) do
-      [_full, _path, project] -> project
+      [_full, _path, project] ->
+        if Regex.match?(~r{^\d+$}, project), do: nil, else: project
       nil -> nil
     end
   end
