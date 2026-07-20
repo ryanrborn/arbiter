@@ -381,6 +381,36 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> Worker.state(pid).status == :completed end)
       assert StubMerger.merge_count("!na2") >= 1
     end
+
+    test "a lapsed :needs_nonauthor_approval signal does not revoke the park while still unapproved (bd-krg7ci round 4)" do
+      # The adapters only emit :needs_nonauthor_approval while CI is green. If CI
+      # later goes red (or starts running again), the adapter stops emitting the
+      # narrow reason even though the PR is still unapproved — the raw signal
+      # simply vanishes, it doesn't mean a human approved. Before the fix this
+      # nil block_reason satisfied the ceiling-restore branch, dropping
+      # `max_polls` back to its finite base and letting the ordinary auto_merge
+      # ceiling fail the worker out from under a PR still awaiting the same
+      # human reviewer.
+      {pid, task_id} = running_worker()
+
+      StubMerger.queue_get("!na3", [
+        %{status: :open, approved: false, block_reason: :needs_nonauthor_approval},
+        %{status: :open, approved: false, block_reason: nil}
+      ])
+
+      start_watchdog(pid, task_id, "!na3",
+        auto_merge: true,
+        max_polls: 2,
+        interval_ms: 15,
+        workspace: test_workspace()
+      )
+
+      # Let well more than `max_polls` intervals elapse after the signal lapses.
+      Process.sleep(150)
+
+      refute Worker.state(pid).status == :failed
+      refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+    end
   end
 
   describe "auto-resolve :behind_base (#354 Phase 2a)" do
@@ -539,6 +569,46 @@ defmodule Arbiter.Worker.WatchdogTest do
       wait_until(fn -> Worker.state(pid).status == :completed end)
       assert Worker.state(pid).meta.result == :merged
       assert StubMerger.merge_count("!cf3") >= 1
+    end
+
+    test "an approval dismissal after exhausted-block park does not revoke the park (bd-krg7ci round 4)" do
+      # Standard branch-protection behaviour dismisses the existing approval on a
+      # new commit push — a common way to retrigger CI after the flake this task
+      # is about. Before the fix, the dismissal made `effective_block_reason/1`
+      # collapse to `nil` (it's gated on `approved: true`), which satisfied the
+      # ceiling-restore branch even though the underlying :ci_failed episode was
+      # never actually resolved, letting the worker die at the restored finite
+      # ceiling with the PR still red and parked.
+      {pid, task_id} = running_worker()
+      StubMerger.queue_get("!cf4", [%{status: :open, approved: true, block_reason: :ci_failed}])
+
+      start_watchdog(pid, task_id, "!cf4",
+        auto_merge: true,
+        max_auto_resolve_attempts: 1,
+        max_polls: 3,
+        interval_ms: 15,
+        fix_pass_dispatcher: StubFixPassDispatcher,
+        workspace: test_workspace()
+      )
+
+      wait_until(fn -> StubFixPassDispatcher.call_count() >= 1 end)
+
+      # Let the retry budget actually exhaust and the park kick in (mirrors the
+      # "resumes and merges" test above) before simulating the dismissal, so
+      # this test exercises the park-revocation bug rather than racing ahead of
+      # the park ever being established.
+      Process.sleep(60)
+      refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
+
+      # The approval gets dismissed by the push that retriggered CI — the PR is
+      # still effectively blocked (CI hasn't gone green yet), just unapproved now.
+      StubMerger.queue_get("!cf4", [%{status: :open, approved: false, block_reason: nil}])
+
+      # Let well more than `max_polls` intervals elapse after the dismissal.
+      Process.sleep(150)
+
+      refute Worker.state(pid).status == :failed
+      refute match?({:awaiting_review_timeout, _}, Worker.state(pid).meta[:failure_reason])
     end
   end
 

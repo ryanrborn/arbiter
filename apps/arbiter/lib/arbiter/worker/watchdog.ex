@@ -352,6 +352,18 @@ defmodule Arbiter.Worker.Watchdog do
           # The last merge-block reason we escalated, so a blocked merge is
           # surfaced once per reason rather than on every poll (#354, Phase 1).
           last_block_reason: nil,
+          # The reason a genuine indefinite park is in effect, set alongside
+          # `max_polls: :infinity` by `handle_nonauthor_approval/2` and the
+          # exhausted-retry branch of `handle_block/3`, and cleared only once
+          # that specific episode is confirmed resolved (bd-krg7ci round 4).
+          # Unlike `last_block_reason` — which the adapters can transiently stop
+          # emitting for reasons unrelated to the park actually clearing (CI
+          # going red/running collapses `:needs_nonauthor_approval` to `nil`;
+          # an approval dismissal collapses any approval-gated reason to `nil`)
+          # — `park_reason` only clears on a poll that shows the PR genuinely
+          # approved and unblocked, so a signal lapse can't revoke a park that's
+          # still needed. See `do_maybe_escalate_merge_block/2`.
+          park_reason: nil,
           # Consecutive auto-resolve attempts for the current block episode
           # (#354, Phase 2a). Reset to 0 when the block clears. After
           # `max_auto_resolve_attempts` the Watchdog escalates instead of retrying.
@@ -763,7 +775,12 @@ defmodule Arbiter.Worker.Watchdog do
   # poll sees `:approved` and auto-merges (or, on a manual lane, a human merges).
   defp handle_nonauthor_approval(state, result) do
     state = debounce_escalate_block(state, :needs_nonauthor_approval)
-    apply_outcome(effective_outcome(state, result), result, %{state | max_polls: :infinity})
+
+    apply_outcome(
+      effective_outcome(state, result),
+      result,
+      %{state | max_polls: :infinity, park_reason: :needs_nonauthor_approval}
+    )
   end
 
   defp route_merge_block(%{auto_resolve_conflict: true} = state, result) do
@@ -779,30 +796,47 @@ defmodule Arbiter.Worker.Watchdog do
     case effective_block_reason(result) do
       nil ->
         # The block cleared. Besides resetting the per-episode latches, restore
-        # the configured poll ceiling *if a block episode was actually parked*:
-        # `handle_block/3` and `handle_nonauthor_approval/2` set `max_polls:
-        # :infinity` together with a non-nil `last_block_reason` while parked, and
-        # leaving that lift in place after the episode resolves would make the
-        # worker immortal for the rest of its life instead of just for that one
-        # episode (bd-krg7ci).
+        # the configured poll ceiling *if a block episode was actually parked
+        # AND that specific park is confirmed resolved*: `handle_block/3` and
+        # `handle_nonauthor_approval/2` set `max_polls: :infinity` together with
+        # `park_reason` while parked, and leaving that lift in place after the
+        # episode resolves would make the worker immortal for the rest of its
+        # life instead of just for that one episode (bd-krg7ci).
         #
-        # Gated on `last_block_reason != nil` (the value from *before* this poll,
-        # i.e. "were we parked on a block a moment ago") AND `max_polls !=
-        # base_max_polls` (i.e. the episode actually lifted the ceiling to
-        # :infinity). `last_block_reason` alone is set by every auto-resolvable
-        # block — including `:behind_base`/`:ci_failed` episodes that resolve
-        # within the bounded `max_auto_resolve_attempts` and never lift
-        # `max_polls` at all (see `resolve_behind_base/1`,
-        # `resolve_ci_failed/2`) — so a flapping lane that repeatedly enters and
-        # clears a bounded block reset `poll_count` to 0 on every cycle, silently
-        # defeating the finite ceiling for as long as it kept flapping
-        # (bd-krg7ci round 2). Requiring the ceiling to have actually been lifted
-        # restricts the reset to episodes that were genuinely parked.
+        # Gated on `state.park_reason != nil` (i.e. a genuine indefinite park is
+        # in effect) AND the *current* poll showing the PR genuinely approved
+        # with no raw block reason. Deliberately NOT gated on
+        # `effective_block_reason(result) == nil` alone (that's merely the guard
+        # of the enclosing `case` and is satisfied by *any* unapproved PR, since
+        # `effective_block_reason/1` suppresses pre-approval blocks) — doing so
+        # let a signal lapse masquerade as resolution and revoke a park that was
+        # still needed (bd-krg7ci round 4):
+        #
+        #   * `:needs_nonauthor_approval` park — the adapters only emit this
+        #     narrow reason while CI is green; as soon as CI goes red
+        #     (`github.ex`, `gitlab.ex`) or starts running (`gitlab.ex` maps
+        #     `ci_still_running`/`ci_must_pass` to `nil`), the reason vanishes
+        #     even though the PR is still unapproved, which used to restore the
+        #     finite ceiling and let the ordinary auto_merge timeout fail the
+        #     worker out from under a PR still awaiting the same human.
+        #   * exhausted-block park (e.g. `:ci_failed`) — dismissing the PR's
+        #     approval (standard branch-protection behavior on a new commit
+        #     push) also collapses `effective_block_reason/1` to `nil` even
+        #     though the underlying block was never actually resolved.
+        #
+        # Requiring `classify(result) == :approved and block_reason(result) ==
+        # nil` on the poll that clears the park means only a poll that shows the
+        # PR genuinely mergeable — not just "the gated reason isn't visible right
+        # now" — can revoke it. A lane that repeatedly enters and clears a
+        # *bounded* block (e.g. `:behind_base`/`:ci_failed` resolving within
+        # `max_auto_resolve_attempts`, which never sets `park_reason`) still
+        # never trips this branch, so the finite ceiling stays monotonic for
+        # those flapping episodes too (bd-krg7ci round 2).
         #
         # This still excludes the separate auto-merge-failure stall park
         # (`do_apply_approved_auto_merge/1`), which lifts `max_polls` to
-        # `:infinity` without ever touching `last_block_reason` — `last_block_reason`
-        # stays `nil` there, so this branch doesn't fire and that lift remains
+        # `:infinity` without ever touching `park_reason` — `park_reason` stays
+        # `nil` there, so this branch doesn't fire and that lift remains
         # unconditional for the rest of the episode.
         #
         # `poll_count` resets alongside the restored cap because it's monotonic
@@ -821,7 +855,8 @@ defmodule Arbiter.Worker.Watchdog do
         # reproducing the exact incident this whole fix targets (bd-krg7ci
         # round 3). Mirrors what the `:merged` clause already does on success.
         state =
-          if state.last_block_reason != nil and state.max_polls != state.base_max_polls do
+          if state.park_reason != nil and classify(result) == :approved and
+               block_reason(result) == nil do
             %{
               state
               | max_polls: state.base_max_polls,
@@ -829,7 +864,8 @@ defmodule Arbiter.Worker.Watchdog do
                 last_escalated_poll: 0,
                 merge_stall_notified: false,
                 merge_fail_count: 0,
-                last_merge_stall_poll: 0
+                last_merge_stall_poll: 0,
+                park_reason: nil
             }
           else
             state
@@ -879,7 +915,7 @@ defmodule Arbiter.Worker.Watchdog do
       # killing the only process still watching the MR (bd-krg7ci).
       state.auto_resolve_attempts >= state.max_auto_resolve_attempts ->
         state = maybe_escalate_unresolved(state, reason)
-        reschedule(%{state | last_block_reason: reason, max_polls: :infinity})
+        reschedule(%{state | last_block_reason: reason, max_polls: :infinity, park_reason: reason})
 
       true ->
         auto_resolve(reason, result, state)
