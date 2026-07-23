@@ -1011,25 +1011,37 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   # The engagement's automation stance (task B). Re-resolved from the workspace's
   # LIVE `review_automation.repo_overrides[rig_name]` on every tick (bd-3cpcw2):
-  # a repo override is author-independent and always wins, so this is checked
-  # fresh — never just trusted from `engagement.review_automation` — meaning a
-  # repo flipped to `report_only`/`flag` immediately stops an in-flight
-  # engagement from auto-posting, instead of only gating NEW dispatches. When
-  # no override applies to this repo, we fall back to the mode captured at
-  # dispatch time (the `auto_authors`/`default` resolution, which still needs
-  # the PR author and isn't re-derived here). A missing/unresolvable value is
-  # treated conservatively as `:flag` — matching `ReviewAutomation`'s default —
-  # so ReviewPatrol never auto-posts against an engagement that was never
-  # opted into automatic re-review.
+  # a repo override is author-independent and is checked fresh — never just
+  # trusted from `engagement.review_automation` — meaning a repo flipped to
+  # `report_only`/`flag` immediately stops an in-flight engagement from
+  # auto-posting, instead of only gating NEW dispatches. When no override
+  # applies to this repo, we fall back to the mode captured at dispatch time
+  # (the `auto_authors`/`default` resolution, which still needs the PR author
+  # and isn't re-derived here). A missing/unresolvable value is treated
+  # conservatively as `:flag` — matching `ReviewAutomation`'s default — so
+  # ReviewPatrol never auto-posts against an engagement that was never opted
+  # into automatic re-review.
+  #
+  # The live override and the stored (dispatch-time) mode can disagree in
+  # either direction — e.g. a coordinator can dispatch `worker_review` with an
+  # explicit hard `automation: "report_only"` override even on a repo whose
+  # `repo_overrides` says `auto` (the explicit dispatch arg wins per
+  # `Tools.resolve_review_automation_mode/2`), which is stored as `:report_only`
+  # on the engagement. We must never let a *more permissive* live override
+  # widen that back out to auto-posting — only a downgrade (more restrictive)
+  # should take immediate effect. So we take the more restrictive of the two,
+  # never the more permissive:
   #
   #   :auto        — re-review AND post to the PR.
   #   :report_only — re-review but post NOTHING; report proposed comments to the
   #                  coordinator to greenlight (infra default, bd-36qzgx).
   #   :flag        — do NOT review; surface new commits / replies as a flag.
   defp automation_mode(%Issue{} = engagement, workspace, rig_name) do
+    stored = stored_automation_mode(engagement)
+
     case ReviewAutomation.repo_override_mode(workspace_config(workspace), rig_name) do
-      mode when mode in [:auto, :report_only, :flag] -> mode
-      nil -> stored_automation_mode(engagement)
+      mode when mode in [:auto, :report_only, :flag] -> most_restrictive(stored, mode)
+      nil -> stored
     end
   end
 
@@ -1039,6 +1051,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp stored_automation_mode(%Issue{review_automation: :auto}), do: :auto
   defp stored_automation_mode(%Issue{review_automation: :report_only}), do: :report_only
   defp stored_automation_mode(_engagement), do: :flag
+
+  # Pick whichever of the two modes posts/reviews less — never let a live
+  # repo-override widen posting behavior beyond what was captured at dispatch.
+  defp most_restrictive(a, b), do: Enum.max_by([a, b], &restriction_rank/1)
+
+  defp restriction_rank(:auto), do: 0
+  defp restriction_rank(:report_only), do: 1
+  defp restriction_rank(:flag), do: 2
 
   # Reverse `state.repo` (the "owner/repo" string this patrol was started with,
   # from `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare rig/repo-config
