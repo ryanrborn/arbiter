@@ -564,13 +564,21 @@ defmodule Arbiter.Worker.Dispatch do
   #                      windowed overage spend + fire one alert per threshold
   #                      crossing, then allow.
   #
+  # The gate is provider-aware (bd-2mpo3f): it consults the quota snapshot of the
+  # provider this dispatch will ACTUALLY run on — `AnthropicQuota` for Claude,
+  # `CodexQuota` for Codex, `GoogleQuota` for Gemini CLI / Antigravity — so an
+  # out-of-quota Codex or Gemini dispatch is held exactly like an out-of-quota
+  # Anthropic one instead of being spawned into a rate-limited CLI.
+  #
   # Fail-open guards: skipped on the drain re-dispatch (`skip_quota_gate: true`),
-  # when the proxy is disabled (no quota data — e.g. test), and for a task with
-  # no workspace. A nil snapshot is handled inside each gate impl.
+  # for a task with no workspace, and — for Claude only — when the Anthropic
+  # proxy is disabled, since that proxy is the sole source of `AnthropicQuota`
+  # rows (e.g. in test). Codex/Google snapshots come from `Quota.CloudProbe`, not
+  # the proxy, so their gating does not depend on that flag. A nil snapshot is
+  # handled inside each gate impl.
   defp maybe_quota_gate(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :skip_quota_gate, false) == true -> :ok
-      not Arbiter.Quota.proxy_enabled?() -> :ok
       not is_binary(task.workspace_id) -> :ok
       true -> run_quota_gate(task, opts)
     end
@@ -578,15 +586,56 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp run_quota_gate(%Issue{workspace_id: ws_id} = task, opts) do
     workspace = load_workspace(task)
+    provider = quota_gate_provider(task, workspace, opts)
+
+    if quota_gate_applies?(provider) do
+      apply_quota_gate(task, workspace, provider, ws_id, opts)
+    else
+      :ok
+    end
+  rescue
+    e ->
+      # A bug in the gate must never wedge dispatch — fail open.
+      require Logger
+      Logger.warning("Dispatch: quota gate crashed for #{task.id}: #{Exception.message(e)}")
+      :ok
+  end
+
+  # Claude's snapshot only exists when the local Anthropic proxy is capturing
+  # headers; every other provider is fed by the periodic CloudProbe.
+  defp quota_gate_applies?(:claude), do: Arbiter.Quota.proxy_enabled?()
+  defp quota_gate_applies?(_provider), do: true
+
+  # Which provider this dispatch will run on. Mirrors `start_agent/4`'s
+  # resolution order so the gate reads the same provider the worker is spawned
+  # with: the `:agent_adapter` test seam, then an explicit `:agent_type`
+  # override, then the workspace's routing policy. Falls back to :claude — the
+  # historical (Anthropic-only) behaviour — if resolution raises.
+  defp quota_gate_provider(%Issue{} = task, workspace, opts) do
+    case Keyword.get(opts, :agent_adapter) do
+      mod when is_atom(mod) and not is_nil(mod) ->
+        String.to_existing_atom(mod.provider())
+
+      _ ->
+        case Keyword.get(opts, :agent_type) do
+          type when is_atom(type) and not is_nil(type) -> type
+          _ -> Routing.choose(task, workspace, %{}).type
+        end
+    end
+  rescue
+    _ -> :claude
+  end
+
+  defp apply_quota_gate(%Issue{} = task, workspace, provider, ws_id, opts) do
     gate = Arbiter.Quota.gate_for_workspace(workspace)
-    quota = safe_quota_latest(ws_id)
+    quota = safe_quota_latest(ws_id, provider)
 
     case gate.check(task, quota, workspace, opts) do
       :allow ->
         :ok
 
       {:hold, reason} ->
-        case Arbiter.Workflows.DispatchQueue.hold(ws_id, task.id, opts, reason) do
+        case Arbiter.Workflows.DispatchQueue.hold(ws_id, task.id, opts, reason, provider) do
           :ok ->
             {:error, {:quota_held, task.id}}
 
@@ -606,16 +655,10 @@ defmodule Arbiter.Worker.Dispatch do
         _ = Arbiter.Workflows.DispatchQueue.record_overage(ws_id, task, spend_usd)
         :ok
     end
-  rescue
-    e ->
-      # A bug in the gate must never wedge dispatch — fail open.
-      require Logger
-      Logger.warning("Dispatch: quota gate crashed for #{task.id}: #{Exception.message(e)}")
-      :ok
   end
 
-  defp safe_quota_latest(ws_id) do
-    Arbiter.Quota.latest(ws_id, "claude")
+  defp safe_quota_latest(ws_id, provider) do
+    Arbiter.Quota.latest_for_provider(ws_id, provider)
   rescue
     _ -> nil
   catch
