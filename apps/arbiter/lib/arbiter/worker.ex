@@ -702,7 +702,11 @@ defmodule Arbiter.Worker do
   # everything else writes `:work`. Missing fields are fine — we record what
   # we have rather than dropping the row.
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
-    usage = Arbiter.Worker.ClaudeSession.usage_summary(session)
+    usage =
+      session
+      |> Arbiter.Worker.ClaudeSession.usage_summary()
+      |> maybe_reconcile_usage_from_disk(session, state)
+
     role = Map.get(state.meta || %{}, :role)
 
     step =
@@ -768,6 +772,89 @@ defmodule Arbiter.Worker do
       )
 
       :error
+  end
+
+  # bd-au3xrq: fallback/audit path. The primary usage numbers come from the
+  # CLI's terminal `result` event on stdout. When a Claude agent is killed or
+  # crashes before that event, `usage` carries no token counts — but the CLI
+  # has been persisting every turn's usage to an on-disk session JSONL that
+  # survives the death. Reconcile the missing tokens from that file
+  # (`Arbiter.Usage.ClaudeSessionFile`, deduped by message.id). Strictly
+  # additive: we only reach for disk when stdout gave us no `tokens_in`, and
+  # only for Claude sessions. Cost stays nil (the file carries no dollar
+  # figure) — tokens are the ask.
+  defp maybe_reconcile_usage_from_disk(usage, session, %State{} = state) do
+    provider =
+      Map.get(session, :provider) ||
+        provider_for(Map.get(usage, :model) || Map.get(session, :model))
+
+    cond do
+      # Non-Claude adapters have their own on-stream usage; nothing to read here.
+      provider not in [nil, "claude"] ->
+        usage
+
+      # Happy path already recorded tokens — never second-guess it.
+      not is_nil(Map.get(usage, :tokens_in)) ->
+        usage
+
+      true ->
+        session_id = Map.get(usage, :session_id) || Map.get(state.meta || %{}, :session_id)
+        config_dir = Map.get(state.meta || %{}, :config_dir)
+
+        case Arbiter.Usage.ClaudeSessionFile.usage_for(config_dir, session_id) do
+          {:ok, %{message_count: n} = totals} when n > 0 ->
+            Logger.info(
+              "Worker.record_usage_event: reconciled #{n} msgs of usage from on-disk " <>
+                "session JSONL for task=#{state.task_id} session=#{session_id}"
+            )
+
+            merge_disk_totals(usage, totals)
+
+          _ ->
+            # No file / not locatable / no assistant usage — keep the row as-is
+            # (nil tokens) rather than fabricating zeros. Graceful degradation.
+            usage
+        end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.maybe_reconcile_usage_from_disk/3 raised for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      usage
+  end
+
+  # Overlay deduped on-disk token totals onto the (token-less) usage map. Model
+  # is only backfilled if the stream never reported one; cost is left untouched
+  # (nil). `raw` is tagged so the ledger row is auditable as disk-reconciled.
+  defp merge_disk_totals(usage, totals) do
+    usage
+    |> Map.put(:tokens_in, totals.tokens_in)
+    |> Map.put(:tokens_out, totals.tokens_out)
+    |> Map.put(:cache_creation_tokens, totals.cache_creation_tokens)
+    |> Map.put(:cache_read_tokens, totals.cache_read_tokens)
+    |> maybe_put_model(totals.model)
+    |> Map.put(:raw, reconciled_raw(Map.get(usage, :raw), totals))
+  end
+
+  defp maybe_put_model(usage, nil), do: usage
+
+  defp maybe_put_model(usage, model) do
+    case Map.get(usage, :model) do
+      existing when is_binary(existing) and existing != "" -> usage
+      _ -> Map.put(usage, :model, model)
+    end
+  end
+
+  defp reconciled_raw(existing, totals) do
+    base = if is_map(existing), do: existing, else: %{}
+
+    Map.put(base, "arb_usage_source", %{
+      "reconciled_from" => "session_jsonl",
+      "message_count" => totals.message_count
+    })
   end
 
   # Map a model name to a provider key. Currently every model we see is
@@ -977,14 +1064,32 @@ defmodule Arbiter.Worker do
       # the worker with a nudge prompt when arb-done arrives with uncommitted
       # work, without round-tripping through the workspace-aware Dispatch builder
       # that does not know how to swap the prompt mid-session.
+      # bd-au3xrq: stash the coordinates the on-disk session-JSONL fallback needs.
+      # `config_dir` is the effective CLAUDE_CONFIG_DIR this spawn ran under (from
+      # the injected env, else the inherited default); `cwd` is the worktree the
+      # CLI derives its project-slug from. `session_id` lands later (init event,
+      # via sync_session_meta) — together they root
+      # `<config_dir>/projects/<slug>/<session_id>.jsonl`.
+      config_dir = effective_config_dir(port_args)
+
       meta =
         (state.meta || %{})
         |> Map.put(:claude_session, true)
         |> Map.put(:claude_spawn, pristine_args)
         |> Map.delete(:resume_session_id)
+        |> Map.put(:config_dir, config_dir)
+        |> Map.put(:cwd, Map.get(port_args, :cd))
 
       new_state = %State{state | claude_sessions: sessions, meta: meta}
       new_state = sync_session_meta(new_state, port)
+
+      # Persist config_dir onto the run row now, at dispatch, so a node that dies
+      # mid-run still leaves the reconciler enough to find the JSONL. Claude-only:
+      # a Gemini/Codex run has no Claude session file to reconcile against.
+      if config_dir && new_state.run_id &&
+           Map.get(session_config, :provider) in [nil, "claude"] do
+        stamp_run_session_coords(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
+      end
 
       {:reply, {:ok, port}, new_state}
     rescue
@@ -1243,6 +1348,18 @@ defmodule Arbiter.Worker do
         model = session_model || Map.get(session, :model)
         had_model? = not is_nil(Map.get(meta, :model))
 
+        # bd-au3xrq: the CLI's `init` event puts the session id on the usage map.
+        # Surface it into meta and stamp it onto the run the first time it lands,
+        # early in the run, so the on-disk JSONL is locatable even if the worker
+        # later dies without a clean usage row.
+        session_id =
+          case Map.get(session, :usage) do
+            %{} = usage -> Map.get(usage, :session_id)
+            _ -> nil
+          end
+
+        had_session_id? = not is_nil(Map.get(meta, :session_id))
+
         meta =
           meta
           |> Map.put(:output_lines, Enum.reverse(session.output_lines))
@@ -1252,11 +1369,16 @@ defmodule Arbiter.Worker do
           |> maybe_put(:exited_at, session.exited_at)
           |> maybe_put(:model, model)
           |> maybe_put(:provider, Map.get(session, :provider))
+          |> maybe_put(:session_id, session_id)
 
         new_state = %State{state | meta: meta}
 
         if new_activity != old_activity do
           broadcast_lifecycle(:updated, new_state)
+        end
+
+        if not had_session_id? and not is_nil(session_id) and not is_nil(new_state.run_id) do
+          stamp_run_session_coords(new_state.run_id, %{session_id: session_id}, new_state.task_id)
         end
 
         # Race-condition patch: if the worker already terminated (fail_now/complete_now
@@ -1284,6 +1406,41 @@ defmodule Arbiter.Worker do
     end
   rescue
     e -> log_run_warning("backfill_model", task_id, e)
+  end
+
+  # bd-au3xrq: best-effort stamp of the on-disk session-JSONL coordinates
+  # (`session_id` / `config_dir`) onto the run row. Same swallow-and-log
+  # discipline as backfill_run_model — a DB hiccup must never crash the worker.
+  defp stamp_run_session_coords(run_id, fields, task_id) when is_map(fields) do
+    with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
+         {:ok, _updated} <- Ash.update(run, fields, action: :update) do
+      :ok
+    else
+      {:error, reason} -> log_run_warning("stamp_session_coords", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("stamp_session_coords", task_id, e)
+  end
+
+  # The effective CLAUDE_CONFIG_DIR a spawn ran under: the value injected into
+  # this spawn's env (workers isolate into `~/.cache/arbiter/acolyte-claude`),
+  # else the inherited `$CLAUDE_CONFIG_DIR`, else Claude's `~/.claude` default.
+  # port_args.env is the pre-charlist binary-pair list built by
+  # `Arbiter.Worker.ClaudeSession.env_pairs/3`.
+  defp effective_config_dir(%{env: env}) when is_list(env) do
+    case List.keyfind(env, "CLAUDE_CONFIG_DIR", 0) do
+      {_k, dir} when is_binary(dir) and dir != "" -> dir
+      _ -> inherited_config_dir()
+    end
+  end
+
+  defp effective_config_dir(_port_args), do: inherited_config_dir()
+
+  defp inherited_config_dir do
+    case System.get_env("CLAUDE_CONFIG_DIR") do
+      dir when is_binary(dir) and dir != "" -> dir
+      _ -> Path.expand("~/.claude")
+    end
   end
 
   defp maybe_put(map, _key, nil), do: map

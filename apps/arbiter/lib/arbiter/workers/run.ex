@@ -73,7 +73,9 @@ defmodule Arbiter.Workers.Run do
         :failure_reason,
         :resumed_from_run_id,
         :mr_ref,
-        :merger_url
+        :merger_url,
+        :session_id,
+        :config_dir
       ]
     end
 
@@ -90,7 +92,9 @@ defmodule Arbiter.Workers.Run do
         :failure_reason,
         :task_title,
         :mr_ref,
-        :merger_url
+        :merger_url,
+        :session_id,
+        :config_dir
       ]
     end
   end
@@ -198,6 +202,29 @@ defmodule Arbiter.Workers.Run do
       public? true
       constraints max_length: 2000, trim?: true
       description "Clickable link for mr_ref, resolved at record time (best-effort)."
+    end
+
+    # bd-au3xrq: identifying coordinates for this run's Claude Code on-disk
+    # session JSONL (`<config_dir>/projects/<slug>/<session_id>.jsonl`), captured
+    # so `Arbiter.Usage.ClaudeSessionFile` can reconcile token usage from disk
+    # when the primary stdout path missed it (agent killed/crashed before the
+    # terminal `result` event, or the node died mid-run). Both nullable: a
+    # non-Claude run, or one that died before its `system/init` event, has no
+    # session id to record.
+    attribute :session_id, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+
+      description "Claude Code session id (== CLAUDE_CODE_SESSION_ID == the on-disk " <>
+                    "session JSONL filename). Nullable; set once the session's init event lands."
+    end
+
+    attribute :config_dir, :string do
+      public? true
+      constraints max_length: 2000, trim?: true
+
+      description "Effective CLAUDE_CONFIG_DIR the worker spawned under (workers use an " <>
+                    "isolated dir, not ~/.claude). Roots the on-disk session JSONL lookup."
     end
 
     create_timestamp :inserted_at

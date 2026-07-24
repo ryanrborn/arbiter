@@ -117,6 +117,124 @@ defmodule Arbiter.Workers.ReconcilerTest do
     assert surviving == []
   end
 
+  # ---- on-disk usage backfill for node-crash orphans (bd-au3xrq) -------
+
+  alias Arbiter.Usage.ClaudeSessionFile
+  alias Arbiter.Usage.Event
+
+  defp usage_events_for(run_id) do
+    Event
+    |> Ash.Query.filter(worker_run_id == ^run_id)
+    |> Ash.read!()
+  end
+
+  defp write_session_jsonl!(config_dir, cwd, session_id) do
+    slug = ClaudeSessionFile.project_slug(cwd)
+    dir = Path.join([config_dir, "projects", slug])
+    File.mkdir_p!(dir)
+
+    # msg-1 duplicated (streaming re-emit) → deduped totals input=15/output=300/
+    # cache_read=3000/cache_creation=110 across 2 messages.
+    lines = [
+      ~s({"type":"system","subtype":"init","session_id":"#{session_id}","model":"claude-opus-4-8"}),
+      ~s({"type":"assistant","message":{"id":"msg-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
+      ~s({"type":"assistant","message":{"id":"msg-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
+      ~s({"type":"assistant","message":{"id":"msg-2","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":2000,"cache_creation_input_tokens":60}}})
+    ]
+
+    File.write!(Path.join(dir, session_id <> ".jsonl"), Enum.join(lines, "\n") <> "\n")
+  end
+
+  defp tmp_dir!(tag) do
+    dir = Path.join(System.tmp_dir!(), "#{tag}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+    dir
+  end
+
+  test "backfills a Usage.Event from the on-disk JSONL for an orphaned run with no usage row" do
+    task_id = "bd-crash-#{System.unique_integer([:positive])}"
+    session_id = "crash-sess-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-cwd")
+    config_dir = tmp_dir!("recon-cfg")
+    write_session_jsonl!(config_dir, cwd, session_id)
+
+    run =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        status: :running,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    assert usage_events_for(run.id) == []
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert reload(task_id).status == :failed
+
+    assert [ev] = usage_events_for(run.id)
+    assert ev.tokens_in == 15
+    assert ev.tokens_out == 300
+    assert ev.cache_read_tokens == 3000
+    assert ev.cache_creation_tokens == 110
+    assert ev.cost_usd == nil
+    assert ev.provider == "claude"
+    assert ev.session_id == session_id
+    assert ev.step == :work
+  end
+
+  test "does not write a second Usage.Event when one already exists for the run" do
+    task_id = "bd-crash-dup-#{System.unique_integer([:positive])}"
+    session_id = "crash-dup-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-dup-cwd")
+    config_dir = tmp_dir!("recon-dup-cfg")
+    write_session_jsonl!(config_dir, cwd, session_id)
+
+    run =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        status: :running,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    # The stdout path already recorded a row for this run.
+    {:ok, _existing} =
+      Ash.create(Event, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        step: :work,
+        tokens_in: 999,
+        worker_run_id: run.id,
+        occurred_at: DateTime.utc_now()
+      })
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert [ev] = usage_events_for(run.id)
+    assert ev.tokens_in == 999, "existing row must not be duplicated or overwritten"
+  end
+
+  test "orphaned run without session coordinates is swept but writes no usage row" do
+    task_id = "bd-crash-nocoord-#{System.unique_integer([:positive])}"
+    run = create_run(task_id, :running)
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert reload(task_id).status == :failed
+    assert usage_events_for(run.id) == []
+  end
+
   # ---- reconcile_open_pr_tasks (bd-crqku8 regression) -------------------
 
   defp create_workspace do
