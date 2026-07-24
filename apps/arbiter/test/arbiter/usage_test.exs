@@ -431,6 +431,228 @@ defmodule Arbiter.UsageTest do
       assert ev.step == :work
     end
 
+    test "claude session killed before its result event backfills tokens from on-disk JSONL" do
+      task_id = "bd-cs-disk-#{System.unique_integer([:positive])}"
+      session_id = "disk-sess-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-disk-cwd")
+      config_dir = tmp_dir!("usage-disk-cfg")
+
+      # The on-disk session JSONL the CLI persists regardless of how the process
+      # died. Two consecutive assistant lines share message.id "m-1" (streaming
+      # re-emit) so the reader must dedupe: deduped totals are input=1500,
+      # output=600, cache_creation=50, cache_read=100.
+      #
+      # The reader is bounded by `since: session.started_at` (a `--resume`d file
+      # can hold an earlier run's turns). In production the CLI appends these
+      # lines *during* the session; the test has to pre-seed the file, so the
+      # turns are stamped just ahead of the spawn to model that same ordering.
+      # An earlier turn (`m-0`) sits before the spawn, standing in for a prior
+      # run sharing the file — it must NOT be billed to this row.
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(cwd)
+      session_dir = Path.join([config_dir, "projects", slug])
+      File.mkdir_p!(session_dir)
+
+      before_spawn = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_iso8601()
+      during = DateTime.utc_now() |> DateTime.add(60, :second) |> DateTime.to_iso8601()
+
+      disk_lines = [
+        ~s({"type":"system","subtype":"init","session_id":"#{session_id}","model":"claude-opus-4-8"}),
+        ~s({"type":"assistant","timestamp":"#{before_spawn}","message":{"id":"m-0","model":"claude-opus-4-8","usage":{"input_tokens":999000,"output_tokens":999000}}}),
+        ~s({"type":"assistant","timestamp":"#{during}","message":{"id":"m-1","model":"claude-opus-4-8","usage":{"input_tokens":1500,"output_tokens":600,"cache_creation_input_tokens":50,"cache_read_input_tokens":100}}}),
+        ~s({"type":"assistant","timestamp":"#{during}","message":{"id":"m-1","model":"claude-opus-4-8","usage":{"input_tokens":1500,"output_tokens":600,"cache_creation_input_tokens":50,"cache_read_input_tokens":100}}})
+      ]
+
+      File.write!(
+        Path.join(session_dir, session_id <> ".jsonl"),
+        Enum.join(disk_lines, "\n") <> "\n"
+      )
+
+      # The worker's own stdout: an init event carrying the session_id, then the
+      # process exits WITHOUT a terminal `result` event (killed/crashed) — so the
+      # stdout path records no tokens and the disk fallback must kick in.
+      events = [
+        %{
+          "type" => "system",
+          "subtype" => "init",
+          "model" => "claude-opus-4-8",
+          "session_id" => session_id
+        },
+        %{
+          "type" => "assistant",
+          "message" => %{"content" => [%{"type" => "text", "text" => "working"}]}
+        }
+      ]
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          env: [{"CLAUDE_CONFIG_DIR", config_dir}]
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(task_id == ^task_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      # Tokens reconciled from disk (deduped and bounded to this session's own
+      # window — the pre-spawn `m-0` turn is another run's and stays out), cost
+      # intentionally left nil.
+      assert ev.tokens_in == 1500
+      assert ev.tokens_out == 600
+      assert ev.cache_creation_tokens == 50
+      assert ev.cache_read_tokens == 100
+      assert ev.cost_usd == nil
+      assert ev.model == "claude-opus-4-8"
+      assert ev.provider == "claude"
+      assert ev.session_id == session_id
+      assert ev.step == :work
+    end
+
+    test "a second session with no init of its own never borrows the first session's file" do
+      # record_usage_event/3 fires once per port exit, and a worker can run
+      # several sessions (a nudge relaunch, bd-ofql8k). meta[:session_id] is
+      # worker-global, so after session 1 it still holds session 1's id. If
+      # session 2 dies before its own `init` event, falling back to meta would
+      # read session 1's JSONL and write session 1's tokens a second time — a
+      # duplicate of an already-billed session. Session 2 must record no tokens.
+      task_id = "bd-cs-2sess-#{System.unique_integer([:positive])}"
+      session_id = "twosess-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-2sess-cwd")
+      config_dir = tmp_dir!("usage-2sess-cfg")
+
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(cwd)
+      session_dir = Path.join([config_dir, "projects", slug])
+      File.mkdir_p!(session_dir)
+      during = DateTime.utc_now() |> DateTime.add(60, :second) |> DateTime.to_iso8601()
+
+      File.write!(
+        Path.join(session_dir, session_id <> ".jsonl"),
+        ~s({"type":"assistant","timestamp":"#{during}","message":{"id":"s1-m1","model":"claude-opus-4-8","usage":{"input_tokens":4242,"output_tokens":777}}}) <>
+          "\n"
+      )
+
+      # Session 1: init (carrying the session id) + a clean terminal result, so
+      # the stdout path records its own row and meta[:session_id] is set.
+      session_1 = [
+        %{
+          "type" => "system",
+          "subtype" => "init",
+          "model" => "claude-opus-4-8",
+          "session_id" => session_id
+        },
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "total_cost_usd" => 0.11,
+          "usage" => %{"input_tokens" => 4242, "output_tokens" => 777}
+        }
+      ]
+
+      {:ok, _port1} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, session_1),
+          env: [{"CLAUDE_CONFIG_DIR", config_dir}]
+        )
+
+      wait_until(fn ->
+        Event |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!() |> length() == 1
+      end)
+
+      # Session 2: killed before any init — no session id of its own.
+      {:ok, _port2} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "echo starting; echo arb done"],
+          env: [{"CLAUDE_CONFIG_DIR", config_dir}]
+        )
+
+      rows =
+        wait_until(fn ->
+          case Event |> Ash.Query.filter(task_id == ^task_id) |> Ash.read!() do
+            [_, _] = rows -> rows
+            _ -> nil
+          end
+        end)
+
+      assert length(rows) == 2
+
+      billed = Enum.filter(rows, &(&1.tokens_in == 4242))
+      assert length(billed) == 1, "session 1's tokens must be billed exactly once"
+
+      second = Enum.find(rows, &(&1.session_id == nil))
+      assert second, "session 2 has no session id of its own"
+      assert second.tokens_in == nil
+      assert second.tokens_out == nil
+    end
+
+    test "persisted config_dir is the one the child actually ran under, not a workspace override" do
+      # ClaudeSession.env_pairs/3 orders the env `worker_env ++ caller_env`, and
+      # the OS applies it last-wins — the invariant WorkerEnv documents ("caller
+      # env always wins", naming CLAUDE_CONFIG_DIR as its example). A workspace
+      # that defines its own CLAUDE_CONFIG_DIR must therefore NOT be what we
+      # persist: the run row would point at a directory holding no session file
+      # and the fallback would silently never fire for that whole workspace.
+      decoy = tmp_dir!("usage-cfg-decoy")
+      real = tmp_dir!("usage-cfg-real")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "usage-cfgdir-#{System.unique_integer([:positive])}",
+          prefix: "uc#{System.unique_integer([:positive])}",
+          worker_env: %{"CLAUDE_CONFIG_DIR" => %{"value" => decoy, "secret" => false}}
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "config dir ordering", workspace_id: ws.id})
+
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "arbiter", workspace_id: ws.id)
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-cfgdir-cwd")
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: ["sh", "-c", "echo CFG=$CLAUDE_CONFIG_DIR; echo arb done"],
+          env: [{"CLAUDE_CONFIG_DIR", real}]
+        )
+
+      run =
+        wait_until(fn ->
+          Arbiter.Workers.Run
+          |> Ash.Query.filter(task_id == ^task.id)
+          |> Ash.read!()
+          |> Enum.find(&(&1.config_dir != nil))
+        end)
+
+      assert run.config_dir == real
+
+      # And that really is where the child ran — the workspace value lost.
+      lines = Worker.state(pid).meta.output_lines
+      assert "CFG=#{real}" in lines
+    end
+
     test "review_gate reviewer session writes a :review row" do
       reviewer_id = "bd-reviewer-#{System.unique_integer([:positive])}#review"
 

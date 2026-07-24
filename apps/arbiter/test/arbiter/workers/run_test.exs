@@ -51,6 +51,21 @@ defmodule Arbiter.Workers.RunTest do
                })
     end
 
+    test "persists session_id and config_dir at create (bd-au3xrq)" do
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: "bd-sess",
+          repo: "arbiter",
+          status: :running,
+          started_at: DateTime.utc_now(),
+          session_id: "11111111-2222-3333-4444-555555555555",
+          config_dir: "/home/ryan/.cache/arbiter/acolyte-claude"
+        })
+
+      assert run.session_id == "11111111-2222-3333-4444-555555555555"
+      assert run.config_dir == "/home/ryan/.cache/arbiter/acolyte-claude"
+    end
+
     test "rejects an unknown status" do
       assert {:error, %Ash.Error.Invalid{}} =
                Ash.create(Run, %{
@@ -93,6 +108,28 @@ defmodule Arbiter.Workers.RunTest do
       assert updated.status == :completed
       assert updated.exit_code == 0
       assert updated.output_lines == ["hello", "world"]
+    end
+
+    test "backfills session_id and config_dir on update (bd-au3xrq)" do
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: "bd-sess-upd",
+          repo: "arbiter",
+          status: :running,
+          started_at: DateTime.utc_now()
+        })
+
+      assert run.session_id == nil
+      assert run.config_dir == nil
+
+      {:ok, updated} =
+        Ash.update(run, %{
+          session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          config_dir: "/tmp/cfg"
+        })
+
+      assert updated.session_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+      assert updated.config_dir == "/tmp/cfg"
     end
   end
 
