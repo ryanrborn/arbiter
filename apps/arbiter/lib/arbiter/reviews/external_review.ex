@@ -408,9 +408,9 @@ defmodule Arbiter.Reviews.ExternalReview do
   # Guard (bd-7z5pi5): refuse to dispatch/run a review against a PR the posting
   # identity has ALREADY approved, so a re-dispatch can't stack a second approval
   # under our own login. Applies in ALL modes; `force: true` overrides. Fails
-  # OPEN — a missing adapter capability (e.g. GitLab has no self_approved?/1) or
-  # any adapter error/raise lets the review proceed, so a transient forge failure
-  # never blocks a legitimate review.
+  # OPEN — an adapter without this optional capability, or any adapter
+  # error/raise, lets the review proceed, so a transient forge failure never
+  # blocks a legitimate review.
   defp guard_self_approved(_prepared, %{force: true}), do: :ok
 
   defp guard_self_approved(%{adapter: adapter, mr_ref: mr_ref}, _opts) do
