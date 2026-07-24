@@ -86,6 +86,7 @@ defmodule Arbiter.Worker.StopReason do
           | :killed
           | :spawn_exec_failed
           | :crashed
+          | :stream_schema_drift
           | :exited_without_done
           | :stalled
           | :missing_worktree
@@ -152,6 +153,12 @@ defmodule Arbiter.Worker.StopReason do
     | receive[ _]timeout
   /ix
 
+  # bd-80kdgy: the marker an agent stream parser emits when it meets an event
+  # vocabulary it doesn't know (see `Arbiter.Agents.Codex.Stream`). Its presence
+  # means the transcript is incomplete by construction, so whatever the exit
+  # status says about the run is not trustworthy.
+  @schema_drift_signature ~r/unrecognized[ _]stream[ _]event/i
+
   @doc """
   Classify a stop from the subprocess exit status and captured output.
 
@@ -208,6 +215,27 @@ defmodule Arbiter.Worker.StopReason do
           remediation:
             "Transient network blip between the harness proxy and Anthropic. " <>
               "Auto-resuming the session — if retries are exhausted, check proxy logs.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      # Ordered after the provider-error signatures (a real 401/429 still reads
+      # off raw stderr and is the better diagnosis) but ahead of :stalled and
+      # :exited_without_done. Both of those would otherwise mis-explain drift:
+      # an unparsed stream renders no output, so the no-output watchdog trips,
+      # and the run exits 0 having "never signalled done" — and both remediations
+      # say "re-dispatch", which reproduces the failure exactly.
+      Regex.match?(@schema_drift_signature, haystack) ->
+        %__MODULE__{
+          category: :stream_schema_drift,
+          summary:
+            "the agent CLI emitted a --json event schema this Arbiter build does not " <>
+              "understand — the transcript, token usage, and `arb done` detection for this " <>
+              "run are all incomplete, so a clean exit here means nothing",
+          remediation:
+            "This is a harness bug, not a task failure — re-dispatching will fail " <>
+              "identically. Pin the agent CLI to a known-good version or update the " <>
+              "provider's stream parser (Arbiter.Agents.*.Stream) to the new vocabulary.",
           exit_status: exit_status,
           signal: signal
         }
@@ -319,6 +347,7 @@ defmodule Arbiter.Worker.StopReason do
         :killed -> "killed by signal #{reason.signal}"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
+        :stream_schema_drift -> "agent CLI stream schema not understood (harness bug)"
         :exited_without_done -> "exited without completing"
         :stalled -> "stalled (no output)"
         :missing_worktree -> "no worktree provisioned (nothing to integrate)"
