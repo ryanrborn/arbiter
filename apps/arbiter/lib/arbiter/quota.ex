@@ -117,6 +117,57 @@ defmodule Arbiter.Quota do
     end
   end
 
+  # Quota-provider code for each dispatchable agent type / provider alias. The
+  # gate resolves the provider a dispatch will actually run on and reads that
+  # provider's snapshot table through `latest_for_provider/2` (bd-2mpo3f).
+  @provider_codes %{
+    "claude" => "claude",
+    "anthropic" => "claude",
+    "codex" => "codex",
+    "openai" => "codex",
+    "gemini" => "gemini_cli",
+    "gemini_cli" => "gemini_cli",
+    "antigravity" => "antigravity"
+  }
+
+  @doc """
+  The latest persisted quota snapshot for `workspace_id` on `provider`, read
+  from that provider's own table (bd-2mpo3f):
+
+    * `:claude` → `AnthropicQuota` (proxy header capture)
+    * `:codex` → `CodexQuota` (`Arbiter.Quota.CloudProbe` / `Quota.Codex.fetch/2`)
+    * `:gemini` / `:antigravity` → `GoogleQuota` (`Arbiter.Quota.CloudCode`)
+
+  Accepts the agent-type atom (`:claude` / `:codex` / `:gemini`) or the quota
+  provider code string. Returns `nil` for an unknown provider or when nothing
+  has been captured yet — the gate's fail-open input.
+  """
+  @spec latest_for_provider(String.t(), atom() | String.t()) :: struct() | nil
+  def latest_for_provider(workspace_id, provider) when is_binary(workspace_id) do
+    case provider_code(provider) do
+      "claude" -> latest(workspace_id, "claude")
+      "codex" -> Arbiter.Quota.Codex.latest(workspace_id, "codex")
+      code when code in ["gemini_cli", "antigravity"] -> CloudCode.latest(workspace_id, code)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  def latest_for_provider(_workspace_id, _provider), do: nil
+
+  @doc """
+  Canonical quota provider code for an agent type / provider alias, or `nil`
+  when the provider has no tracked quota. `:gemini` and `:antigravity` both
+  resolve into the Google Cloud Code table under distinct codes.
+  """
+  @spec provider_code(atom() | String.t() | nil) :: String.t() | nil
+  def provider_code(provider) when is_atom(provider) and not is_nil(provider),
+    do: provider_code(Atom.to_string(provider))
+
+  def provider_code(provider) when is_binary(provider), do: Map.get(@provider_codes, provider)
+  def provider_code(_), do: nil
+
   # ---- capture -----------------------------------------------------------
 
   @doc """
