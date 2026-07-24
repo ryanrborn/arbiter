@@ -218,7 +218,7 @@ defmodule ArbiterWeb.UsageLive do
                 </div>
                 <div
                   class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden"
-                  title={quota_tooltip_5h(quota.utilization_5h, quota.reset_5h_at)}
+                  title={quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)}
                 >
                   <div
                     :if={quota.utilization_5h}
@@ -226,9 +226,9 @@ defmodule ArbiterWeb.UsageLive do
                     style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
                   />
                   <.quota_marker
-                    :if={quota_elapsed_pct_5h(quota.reset_5h_at)}
-                    pct={quota_elapsed_pct_5h(quota.reset_5h_at)}
-                    label={quota_tooltip_5h(quota.utilization_5h, quota.reset_5h_at)}
+                    :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
+                    pct={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
+                    label={quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)}
                   />
                 </div>
                 <div class="flex justify-center text-xs font-mono text-base-content/50">
@@ -252,7 +252,7 @@ defmodule ArbiterWeb.UsageLive do
                 </div>
                 <div
                   class="relative w-full h-3 rounded-full bg-base-content/10 overflow-hidden"
-                  title={quota_tooltip_7d(quota.utilization_7d, quota.reset_7d_at)}
+                  title={quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)}
                 >
                   <div
                     :if={quota.utilization_7d}
@@ -260,9 +260,9 @@ defmodule ArbiterWeb.UsageLive do
                     style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
                   />
                   <.quota_marker
-                    :if={quota_elapsed_pct_7d(quota.reset_7d_at)}
-                    pct={quota_elapsed_pct_7d(quota.reset_7d_at)}
-                    label={quota_tooltip_7d(quota.utilization_7d, quota.reset_7d_at)}
+                    :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
+                    pct={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
+                    label={quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)}
                   />
                 </div>
                 <div class="flex justify-center text-xs font-mono text-base-content/50">
