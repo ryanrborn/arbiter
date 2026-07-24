@@ -419,6 +419,40 @@ defmodule ArbiterWeb.CoreComponents do
   end
 
   @doc """
+  A thin vertical tick marking a position (e.g. time-elapsed) across a usage
+  bar (bd-d8wo5m). Meant to sit alongside a usage-fill div inside the same
+  `relative` container, as a neutral reference line that doesn't compete with
+  the fill's severity coloring.
+
+  `@compact` renders a plain 1px line for small bars (topbar); the non-compact
+  variant adds a halo so the line stays visible against filled or unfilled
+  bar territory in both light and dark mode.
+
+  ## Examples
+
+      <.quota_marker pct={50} label="50% of window elapsed (2.5h into 5h)" />
+      <.quota_marker pct={50} label="..." compact />
+  """
+  attr :pct, :integer, required: true, doc: "marker position, 0-100"
+  attr :label, :string, required: true, doc: "text-accessible description of the marker position"
+  attr :compact, :boolean, default: false
+
+  def quota_marker(assigns) do
+    ~H"""
+    <div
+      class={[
+        "absolute inset-y-0 w-px -translate-x-1/2 pointer-events-none",
+        @compact && "bg-base-content/70",
+        !@compact && "bg-base-content ring-1 ring-base-100"
+      ]}
+      style={"left: #{@pct}%"}
+      role="img"
+      aria-label={@label}
+    />
+    """
+  end
+
+  @doc """
   Renders a [Heroicon](https://heroicons.com).
 
   Heroicons come in three styles – outline, solid, and mini.
