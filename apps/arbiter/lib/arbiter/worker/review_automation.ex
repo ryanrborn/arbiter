@@ -58,6 +58,23 @@ defmodule Arbiter.Worker.ReviewAutomation do
   end
 
   @doc """
+  Look up ONLY the repo/rig override for `rig_name` — the highest-precedence,
+  author-independent gate — without falling through to `auto_authors`/`default`.
+  Returns `nil` when no override is configured for `rig_name` (or `rig_name` is
+  `nil`/blank), `ws_config` is `nil`/`%{}`, etc.
+
+  Used by `ReviewPatrol` (bd-3cpcw2) to re-check a repo's override live on every
+  tick — independent of the PR author, which isn't always known at tick time —
+  so flipping a repo to `report_only`/`flag` takes effect immediately on
+  already-open engagements, instead of only on new dispatches.
+  """
+  @spec repo_override_mode(map() | nil, String.t() | nil) :: mode() | nil
+  def repo_override_mode(ws_config, rig_name) do
+    block = ws_config && Map.get(ws_config, "review_automation")
+    repo_override(block, rig_name)
+  end
+
+  @doc """
   Coerce a free-form mode string/atom into a valid `mode()`, or `nil` when it
   isn't one of the recognized values. Accepts the `"propose"` alias for
   `:report_only` and the `"notify"` alias for `:flag`.

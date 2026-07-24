@@ -518,6 +518,100 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert length(flags) == 1
     end
 
+    test "a live repo_override downgrade to report_only overrides a grandfathered :auto engagement (bd-3cpcw2)",
+         %{ws: ws} do
+      # The engagement was opened while the repo was `auto` (grandfathered), but
+      # the workspace config now downgrades this repo to `report_only`.
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config:
+            Map.put(ws.config, "review_automation", %{
+              "default" => "auto",
+              "repo_overrides" => %{"repo" => "report_only"}
+            })
+        })
+
+      eng =
+        engagement(ws, 406, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(406, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # The diff was read (relevance gate passed) …
+      assert_receive {:compare, _path}
+      # … but NOTHING was posted to the PR — the live repo_override wins over
+      # the engagement's grandfathered :auto mode.
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and to_ref == "coordinator")
+        |> Ash.read!()
+
+      assert Enum.any?(escalations, &(&1.subject =~ "Report-only re-review"))
+      assert ReviewPatrol.state(name).last_reported == [eng.id]
+      assert ReviewPatrol.state(name).last_rereviewed == []
+    end
+
+    test "a live repo_override of :auto does NOT widen a stored report_only engagement back to auto-posting (bd-3cpcw2)",
+         %{ws: ws} do
+      # The repo's live override is permissive (`auto`), but this engagement
+      # was dispatched with an explicit hard `report_only` gate — e.g. a
+      # sensitive PR the coordinator deliberately opted out of auto-posting.
+      # The live override must never win in the *permissive* direction.
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config:
+            Map.put(ws.config, "review_automation", %{
+              "default" => "auto",
+              "repo_overrides" => %{"repo" => "auto"}
+            })
+        })
+
+      eng =
+        engagement(ws, 407, %{
+          review_automation: :report_only,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(407, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:compare, _path}
+      # Still nothing posted — the stored (more restrictive) mode wins.
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and to_ref == "coordinator")
+        |> Ash.read!()
+
+      assert Enum.any?(escalations, &(&1.subject =~ "Report-only re-review"))
+      assert ReviewPatrol.state(name).last_reported == [eng.id]
+      assert ReviewPatrol.state(name).last_rereviewed == []
+    end
+
     test "report_only mode re-reviews but posts NOTHING, reporting to the coordinator",
          %{ws: ws} do
       eng =

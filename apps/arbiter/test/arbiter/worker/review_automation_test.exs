@@ -170,6 +170,38 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
     end
   end
 
+  describe "repo_override_mode/2 (bd-3cpcw2)" do
+    @config %{
+      "review_automation" => %{
+        "default" => "auto",
+        "auto_authors" => ["alice"],
+        "repo_overrides" => %{
+          "voice_biometrics" => "report_only",
+          "fast_lane" => "auto"
+        }
+      }
+    }
+
+    test "returns the configured override for a repo with one" do
+      assert ReviewAutomation.repo_override_mode(@config, "voice_biometrics") == :report_only
+      assert ReviewAutomation.repo_override_mode(@config, "fast_lane") == :auto
+    end
+
+    test "returns nil for a repo with no override, ignoring auto_authors/default" do
+      assert ReviewAutomation.repo_override_mode(@config, "backend") == nil
+    end
+
+    test "returns nil for nil/blank rig_name" do
+      assert ReviewAutomation.repo_override_mode(@config, nil) == nil
+      assert ReviewAutomation.repo_override_mode(@config, "") == nil
+    end
+
+    test "returns nil for nil/empty config" do
+      assert ReviewAutomation.repo_override_mode(nil, "voice_biometrics") == nil
+      assert ReviewAutomation.repo_override_mode(%{}, "voice_biometrics") == nil
+    end
+  end
+
   describe "normalize/1" do
     test "recognizes the three modes and their aliases" do
       assert ReviewAutomation.normalize("auto") == :auto
