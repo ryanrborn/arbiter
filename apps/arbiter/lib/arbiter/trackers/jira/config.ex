@@ -26,7 +26,12 @@ defmodule Arbiter.Trackers.Jira.Config do
           "open" => "To Do",
           "in_progress" => "In Progress",
           "pr_opened" => "In Code Review",
-          "approved_unmerged" => "Pending Merge",
+          # Unmapped by default (bd-al6v70): on LeoTech's VR workflow "Pending
+          # Merge" means intentionally held from merging, not "review passed,
+          # awaiting merge" — arbiter must not auto-transition into it under
+          # the operator's identity. A workspace that wants the old behavior
+          # can still opt in with an explicit override here.
+          "approved_unmerged" => "",
           "merged" => "Code Complete",
           # `:closed` targets the terminal status. On LeoTech's VR (Verus)
           # workflow this is "Done"; the path runs In Code Review -> Code
@@ -84,7 +89,8 @@ defmodule Arbiter.Trackers.Jira.Config do
     open: "To Do",
     in_progress: "In Progress",
     pr_opened: "In Code Review",
-    approved_unmerged: "Pending Merge",
+    # Unmapped by default (bd-al6v70) — see the moduledoc note above.
+    approved_unmerged: "",
     merged: "Code Complete",
     closed: "Done"
   }
