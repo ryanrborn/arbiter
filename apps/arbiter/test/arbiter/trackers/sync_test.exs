@@ -4,7 +4,10 @@ defmodule Arbiter.Trackers.SyncTest do
   (`Arbiter.Trackers.Sync`) — the layer that drives the real VR workflow:
 
     * PR-open -> In Code Review + a PR-link comment + a remote link.
-    * ReviewGate-approved-but-parked -> Pending Merge.
+    * ReviewGate-approved-but-unmerged is a no-op by default (bd-al6v70):
+      LeoTech's "Pending Merge" means intentionally held from merging, not
+      "review passed" — arbiter must not auto-transition into it. A
+      workspace may still opt in via an explicit status_map override.
     * A genuine sync failure surfaces loudly as an escalation (the
       VR-17911 silent-failure regression guard).
 
@@ -204,7 +207,22 @@ defmodule Arbiter.Trackers.SyncTest do
   end
 
   describe "lifecycle/3 :approved_unmerged" do
-    test "transitions an approved-but-parked ticket to Pending Merge" do
+    test "is a silent no-op by default (bd-al6v70): LeoTech's Pending Merge is a human-driven hold, not a review-passed state" do
+      ws = jira_workspace(%{})
+      issue = jira_issue(ws)
+
+      Req.Test.stub(Arbiter.Trackers.Jira.HTTP, fn conn ->
+        flunk(
+          "no Jira HTTP call expected for an unmapped lifecycle event, got #{conn.method} #{conn.request_path}"
+        )
+      end)
+
+      assert :ok = Sync.lifecycle(issue, :approved_unmerged)
+
+      assert escalations_for(ws.id) == []
+    end
+
+    test "when a workspace explicitly opts in via status_map override, still transitions to Pending Merge" do
       test_pid = self()
       ws = jira_workspace(%{"approved_unmerged" => "Pending Merge"})
       issue = jira_issue(ws)
