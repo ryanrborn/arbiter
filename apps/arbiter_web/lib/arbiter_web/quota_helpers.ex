@@ -70,23 +70,35 @@ defmodule ArbiterWeb.QuotaHelpers do
   @doc """
   Fraction of the 5h window elapsed so far, as a 0-100 integer — the
   time-elapsed marker position on the 5h usage bars. `nil` when there's no
-  `reset_5h_at` to derive a window from (marker isn't rendered).
+  `reset_5h_at` to derive a window from (marker isn't rendered), or when
+  `provider` isn't `"claude"` — the fixed 5h/7d window shape is Anthropic-
+  specific (Codex's `reset_5h_at` slot is a session reset, Gemini CLI's has
+  no time window at all; see bd-d8wo5m review round 1).
   """
-  def quota_elapsed_pct_5h(reset_at), do: elapsed_pct(reset_at, @five_hours_seconds)
+  def quota_elapsed_pct_5h("claude", reset_at), do: elapsed_pct(reset_at, @five_hours_seconds)
+  def quota_elapsed_pct_5h(_provider, _reset_at), do: nil
 
-  @doc "Same as `quota_elapsed_pct_5h/1`, for the 7d window."
-  def quota_elapsed_pct_7d(reset_at), do: elapsed_pct(reset_at, @seven_days_seconds)
+  @doc "Same as `quota_elapsed_pct_5h/2`, for the 7d window."
+  def quota_elapsed_pct_7d("claude", reset_at), do: elapsed_pct(reset_at, @seven_days_seconds)
+  def quota_elapsed_pct_7d(_provider, _reset_at), do: nil
 
   @doc """
   Hover-tooltip / aria-label text for a 5h usage bar, stating both the
   usage-fill and time-elapsed numbers in words, e.g.
   `"62% quota used · 50% of window elapsed (2.5h into 5h)"`. `nil` when
-  there's no `reset_5h_at` to derive a window from.
+  there's no `reset_5h_at` to derive a window from, or when `provider` isn't
+  `"claude"`.
   """
-  def quota_tooltip_5h(utilization, reset_at), do: tooltip(utilization, reset_at, @five_hours_seconds)
+  def quota_tooltip_5h("claude", utilization, reset_at),
+    do: tooltip(utilization, reset_at, @five_hours_seconds)
 
-  @doc "Same as `quota_tooltip_5h/2`, for the 7d window."
-  def quota_tooltip_7d(utilization, reset_at), do: tooltip(utilization, reset_at, @seven_days_seconds)
+  def quota_tooltip_5h(_provider, _utilization, _reset_at), do: nil
+
+  @doc "Same as `quota_tooltip_5h/3`, for the 7d window."
+  def quota_tooltip_7d("claude", utilization, reset_at),
+    do: tooltip(utilization, reset_at, @seven_days_seconds)
+
+  def quota_tooltip_7d(_provider, _utilization, _reset_at), do: nil
 
   defp elapsed_pct(nil, _window_seconds), do: nil
 

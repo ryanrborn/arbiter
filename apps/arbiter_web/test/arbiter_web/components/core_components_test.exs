@@ -17,14 +17,14 @@ defmodule ArbiterWeb.CoreComponentsTest do
       html = render_component(&quota_marker/1, pct: 33, label: "elapsed", compact: true)
 
       assert html =~ "left: 33%"
-      refute html =~ "shadow-"
+      refute html =~ "ring-"
     end
 
-    test "non-compact variant adds a light/dark halo" do
+    test "non-compact variant adds a halo that flips with the base-100 theme token" do
       html = render_component(&quota_marker/1, pct: 33, label: "elapsed")
 
-      assert html =~ "shadow-"
-      assert html =~ "dark:shadow-"
+      assert html =~ "ring-1"
+      assert html =~ "ring-base-100"
     end
   end
 end

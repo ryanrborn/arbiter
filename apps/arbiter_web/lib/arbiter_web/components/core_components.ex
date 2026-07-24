@@ -443,8 +443,7 @@ defmodule ArbiterWeb.CoreComponents do
       class={[
         "absolute inset-y-0 w-px -translate-x-1/2 pointer-events-none",
         @compact && "bg-base-content/70",
-        !@compact &&
-          "bg-base-content shadow-[0_0_0_1px_rgba(255,255,255,0.85)] dark:shadow-[0_0_0_1px_rgba(0,0,0,0.85)]"
+        !@compact && "bg-base-content ring-1 ring-base-100"
       ]}
       style={"left: #{@pct}%"}
       role="img"
