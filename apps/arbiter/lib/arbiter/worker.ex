@@ -798,10 +798,21 @@ defmodule Arbiter.Worker do
         usage
 
       true ->
-        session_id = Map.get(usage, :session_id) || Map.get(state.meta || %{}, :session_id)
+        # Strictly THIS session's id, off THIS session's `init` event. Never
+        # `meta[:session_id]`: meta is worker-global and record_usage_event/3
+        # fires once per port exit, so on a nudge relaunch (bd-ofql8k) meta can
+        # still hold the *previous* session's id — reading that file would bill
+        # this row for a session already in the ledger. If this session never
+        # got an `init`, we simply don't reconcile.
+        session_id = Map.get(usage, :session_id)
         config_dir = Map.get(state.meta || %{}, :config_dir)
 
-        case Arbiter.Usage.ClaudeSessionFile.usage_for(config_dir, session_id) do
+        # `--resume` appends to the same <sid>.jsonl, and a nudge relaunch reuses
+        # the session too, so the file can hold turns from before this port ever
+        # opened. Bound the read to this session's own lifetime.
+        since = Map.get(session, :started_at)
+
+        case Arbiter.Usage.ClaudeSessionFile.usage_for(config_dir, session_id, since: since) do
           {:ok, %{message_count: n} = totals} when n > 0 ->
             Logger.info(
               "Worker.record_usage_event: reconciled #{n} msgs of usage from on-disk " <>
@@ -853,7 +864,8 @@ defmodule Arbiter.Worker do
 
     Map.put(base, "arb_usage_source", %{
       "reconciled_from" => "session_jsonl",
-      "message_count" => totals.message_count
+      "message_count" => totals.message_count,
+      "skipped_before_since" => totals.skipped_before_since
     })
   end
 
@@ -1426,9 +1438,15 @@ defmodule Arbiter.Worker do
   # this spawn's env (workers isolate into `~/.cache/arbiter/acolyte-claude`),
   # else the inherited `$CLAUDE_CONFIG_DIR`, else Claude's `~/.claude` default.
   # port_args.env is the pre-charlist binary-pair list built by
-  # `Arbiter.Worker.ClaudeSession.env_pairs/3`.
+  # `Arbiter.Worker.ClaudeSession.env_pairs/3`, which appends the caller/agent
+  # env AFTER the workspace's user-defined worker env — and the OS applies the
+  # list last-wins, the invariant `Arbiter.Worker.WorkerEnv` documents ("caller
+  # env always wins", naming CLAUDE_CONFIG_DIR as its example). So scan from the
+  # END: the first match from the front could be a workspace-level override that
+  # the child never actually runs under, which would send `locate/2` to a
+  # directory holding no session file and silently disable the fallback.
   defp effective_config_dir(%{env: env}) when is_list(env) do
-    case List.keyfind(env, "CLAUDE_CONFIG_DIR", 0) do
+    case env |> Enum.reverse() |> List.keyfind("CLAUDE_CONFIG_DIR", 0) do
       {_k, dir} when is_binary(dir) and dir != "" -> dir
       _ -> inherited_config_dir()
     end

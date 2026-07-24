@@ -128,21 +128,37 @@ defmodule Arbiter.Workers.ReconcilerTest do
     |> Ash.read!()
   end
 
-  defp write_session_jsonl!(config_dir, cwd, session_id) do
+  # The reader is bounded by `since: run.started_at`, so the fixture's turns
+  # carry timestamps. Runs in these tests start "now"; the turns are stamped an
+  # hour ahead so they fall inside the run's window (in production the CLI
+  # appends them while the run is live — the test has to seed the file first).
+  # `at` lets a test place turns BEFORE a run's start, which is the shape
+  # `--resume` leaves behind (one file, two runs).
+  defp write_session_jsonl!(config_dir, cwd, session_id, opts \\ []) do
     slug = ClaudeSessionFile.project_slug(cwd)
     dir = Path.join([config_dir, "projects", slug])
     File.mkdir_p!(dir)
 
+    at =
+      Keyword.get_lazy(opts, :at, fn ->
+        DateTime.utc_now() |> DateTime.add(3600, :second)
+      end)
+      |> DateTime.to_iso8601()
+
     # msg-1 duplicated (streaming re-emit) → deduped totals input=15/output=300/
     # cache_read=3000/cache_creation=110 across 2 messages.
+    prefix = Keyword.get(opts, :prefix, "msg")
+
     lines = [
       ~s({"type":"system","subtype":"init","session_id":"#{session_id}","model":"claude-opus-4-8"}),
-      ~s({"type":"assistant","message":{"id":"msg-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
-      ~s({"type":"assistant","message":{"id":"msg-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
-      ~s({"type":"assistant","message":{"id":"msg-2","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":2000,"cache_creation_input_tokens":60}}})
+      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"#{prefix}-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
+      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"#{prefix}-1","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}),
+      ~s({"type":"assistant","timestamp":"#{at}","message":{"id":"#{prefix}-2","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":2000,"cache_creation_input_tokens":60}}})
     ]
 
-    File.write!(Path.join(dir, session_id <> ".jsonl"), Enum.join(lines, "\n") <> "\n")
+    path = Path.join(dir, session_id <> ".jsonl")
+    File.write!(path, Enum.join(lines, "\n") <> "\n", [:append])
+    path
   end
 
   defp tmp_dir!(tag) do
@@ -223,6 +239,72 @@ defmodule Arbiter.Workers.ReconcilerTest do
 
     assert [ev] = usage_events_for(run.id)
     assert ev.tokens_in == 999, "existing row must not be duplicated or overwritten"
+  end
+
+  test "a resumed run sharing its parent's session file is billed only for its own turns" do
+    # `Dispatch.resume_session/2` opens a NEW run row but re-spawns with
+    # `--resume <sid>`, and the CLI appends to the SAME <sid>.jsonl. Summing the
+    # whole file would bill the resumed run for everything its parent already
+    # spent (observed in the production ledger at ~100x the child's real usage),
+    # and usage_event_exists?/1 can't catch it — it is keyed on the child's id.
+    task_id = "bd-resume-#{System.unique_integer([:positive])}"
+    session_id = "resume-sess-#{System.unique_integer([:positive])}"
+    cwd = tmp_dir!("recon-resume-cwd")
+    config_dir = tmp_dir!("recon-resume-cfg")
+
+    parent_started = DateTime.utc_now() |> DateTime.add(-3 * 3600, :second)
+
+    parent =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        # Terminal: the parent exited cleanly and the stdout path billed it.
+        status: :completed,
+        started_at: parent_started,
+        session_id: session_id,
+        config_dir: config_dir,
+        output_lines: []
+      })
+
+    # The parent's turns, written to the shared file before the child ever ran.
+    slug = ClaudeSessionFile.project_slug(cwd)
+    session_dir = Path.join([config_dir, "projects", slug])
+    File.mkdir_p!(session_dir)
+
+    parent_ts = parent_started |> DateTime.add(60, :second) |> DateTime.to_iso8601()
+
+    File.write!(
+      Path.join(session_dir, session_id <> ".jsonl"),
+      ~s({"type":"assistant","timestamp":"#{parent_ts}","message":{"id":"parent-1","model":"claude-opus-4-8","usage":{"input_tokens":34660,"output_tokens":104392}}}) <>
+        "\n"
+    )
+
+    child =
+      Ash.create!(Run, %{
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-reconcile",
+        status: :running,
+        started_at: DateTime.utc_now(),
+        session_id: session_id,
+        config_dir: config_dir,
+        resumed_from_run_id: parent.id,
+        output_lines: []
+      })
+
+    # The child's own turns, appended to the same file after it started.
+    write_session_jsonl!(config_dir, cwd, session_id, prefix: "child")
+
+    assert {:ok, 1} = Reconciler.reconcile_orphaned_runs()
+
+    assert [ev] = usage_events_for(child.id)
+    assert ev.tokens_in == 15, "must not inherit the parent run's 34_660 input tokens"
+    assert ev.tokens_out == 300, "must not inherit the parent run's 104_392 output tokens"
+    assert ev.raw["arb_usage_source"]["skipped_before_since"] == 1
+
+    # The parent (terminal) is untouched by the sweep and gains no row.
+    assert usage_events_for(parent.id) == []
   end
 
   test "orphaned run without session coordinates is swept but writes no usage row" do
