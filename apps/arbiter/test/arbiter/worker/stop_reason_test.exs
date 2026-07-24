@@ -176,6 +176,36 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  # bd-80kdgy: codex 0.142.5 changed `exec --json`'s schema, so every event fell
+  # through the parser's catch-all. The run exited 0 with an empty transcript and
+  # was reported as a clean, no-diff success. The parser now emits a visible
+  # drift marker; classify/2 must turn that marker into a HARNESS-bug verdict,
+  # because "re-dispatch" (the :exited_without_done remediation) would fail
+  # identically forever.
+  describe "classify/2 — agent stream schema drift (bd-80kdgy)" do
+    test "a clean exit whose transcript is drift warnings is a harness bug" do
+      lines = [
+        "⚠ codex: unrecognized stream event \"thread.started\" — this Arbiter build " <>
+          "does not understand your codex CLI's --json schema"
+      ]
+
+      reason = StopReason.classify(0, lines)
+      assert reason.category == :stream_schema_drift
+      assert reason.summary =~ "schema"
+      assert reason.remediation =~ "harness"
+      assert StopReason.label(reason) =~ "schema"
+    end
+
+    test "drift outranks the generic exited-without-done verdict" do
+      refute StopReason.classify(0, ["⚠ codex: unrecognized stream event \"turn.started\""]).category ==
+               :exited_without_done
+    end
+
+    test "a normal clean exit is still :exited_without_done" do
+      assert StopReason.classify(0, ["all finished"]).category == :exited_without_done
+    end
+  end
+
   describe "label/1 and to_map/1" do
     test "label is a compact one-liner with the exit code" do
       assert StopReason.classify(1, ["401"]) |> StopReason.label() ==
