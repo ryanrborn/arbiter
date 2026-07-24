@@ -107,11 +107,20 @@ defmodule ArbiterWeb.Layouts do
         </span>
         <div class="flex items-center gap-1.5">
           <span class="text-base-content/40 w-4 shrink-0">5h</span>
-          <div class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+          <div
+            class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
+            title={quota_tooltip_5h(quota.utilization_5h, quota.reset_5h_at)}
+          >
             <div
               :if={quota.utilization_5h}
               class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
               style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
+            />
+            <.quota_marker
+              :if={quota_elapsed_pct_5h(quota.reset_5h_at)}
+              pct={quota_elapsed_pct_5h(quota.reset_5h_at)}
+              label={quota_tooltip_5h(quota.utilization_5h, quota.reset_5h_at)}
+              compact
             />
           </div>
           <span class="text-base-content/60 tabular-nums w-12">
@@ -120,11 +129,20 @@ defmodule ArbiterWeb.Layouts do
         </div>
         <div class="flex items-center gap-1.5">
           <span class="text-base-content/40 w-4 shrink-0">7d</span>
-          <div class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+          <div
+            class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
+            title={quota_tooltip_7d(quota.utilization_7d, quota.reset_7d_at)}
+          >
             <div
               :if={quota.utilization_7d}
               class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
               style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
+            />
+            <.quota_marker
+              :if={quota_elapsed_pct_7d(quota.reset_7d_at)}
+              pct={quota_elapsed_pct_7d(quota.reset_7d_at)}
+              label={quota_tooltip_7d(quota.utilization_7d, quota.reset_7d_at)}
+              compact
             />
           </div>
           <span class="text-base-content/60 tabular-nums w-12">
@@ -234,11 +252,20 @@ defmodule ArbiterWeb.Layouts do
                   </span>
                   <div class="flex items-center gap-1.5">
                     <span class="text-base-content/40 w-4 shrink-0">5h</span>
-                    <div class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+                    <div
+                      class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
+                      title={quota_tooltip_5h(quota.utilization_5h, quota.reset_5h_at)}
+                    >
                       <div
                         :if={quota.utilization_5h}
                         class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
                         style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
+                      />
+                      <.quota_marker
+                        :if={quota_elapsed_pct_5h(quota.reset_5h_at)}
+                        pct={quota_elapsed_pct_5h(quota.reset_5h_at)}
+                        label={quota_tooltip_5h(quota.utilization_5h, quota.reset_5h_at)}
+                        compact
                       />
                     </div>
                     <span class="text-base-content/60 tabular-nums w-12 text-right">
@@ -247,11 +274,20 @@ defmodule ArbiterWeb.Layouts do
                   </div>
                   <div class="flex items-center gap-1.5">
                     <span class="text-base-content/40 w-4 shrink-0">7d</span>
-                    <div class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden">
+                    <div
+                      class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
+                      title={quota_tooltip_7d(quota.utilization_7d, quota.reset_7d_at)}
+                    >
                       <div
                         :if={quota.utilization_7d}
                         class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
                         style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
+                      />
+                      <.quota_marker
+                        :if={quota_elapsed_pct_7d(quota.reset_7d_at)}
+                        pct={quota_elapsed_pct_7d(quota.reset_7d_at)}
+                        label={quota_tooltip_7d(quota.utilization_7d, quota.reset_7d_at)}
+                        compact
                       />
                     </div>
                     <span class="text-base-content/60 tabular-nums w-12 text-right">
