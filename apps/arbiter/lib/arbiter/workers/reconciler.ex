@@ -411,12 +411,19 @@ defmodule Arbiter.Workers.Reconciler do
   # run whose stdout path DID land a row is never double-counted. Cost stays nil
   # (the JSONL carries no dollar figure). Any failure logs and is swallowed:
   # backfilling the ledger must never break the boot-time sweep.
+  #
+  # `since: run.started_at` is load-bearing, not decoration: a session-level
+  # resume (`Dispatch.resume_session/2`) opens a NEW run row but re-spawns with
+  # `--resume <sid>`, and the CLI appends to the SAME <sid>.jsonl. Reading the
+  # whole file would bill this run for every token the parent run already spent
+  # (and `usage_event_exists?/1` can't catch it — it's keyed on this run's id).
+  # The cutoff bounds the read to this run's own turns.
   defp maybe_backfill_usage_from_disk(%Run{session_id: sid, config_dir: cfg} = run)
        when is_binary(sid) and sid != "" and is_binary(cfg) and cfg != "" do
     if usage_event_exists?(run.id) do
       :ok
     else
-      case ClaudeSessionFile.usage_for(cfg, sid) do
+      case ClaudeSessionFile.usage_for(cfg, sid, since: run.started_at) do
         {:ok, %{message_count: n} = totals} when n > 0 ->
           write_reconciled_usage(run, totals)
 
@@ -465,7 +472,8 @@ defmodule Arbiter.Workers.Reconciler do
         "arb_usage_source" => %{
           "reconciled_from" => "session_jsonl",
           "via" => "reconciler",
-          "message_count" => totals.message_count
+          "message_count" => totals.message_count,
+          "skipped_before_since" => totals.skipped_before_since
         }
       }
     }
