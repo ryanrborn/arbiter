@@ -368,6 +368,31 @@ defmodule Arbiter.Mergers.Gitlab do
     end
   end
 
+  @spec self_approved?(String.t()) :: {:ok, boolean()} | {:error, term()}
+  def self_approved?(mr_ref) when is_binary(mr_ref) do
+    with {:ok, cfg} <- Config.resolve(),
+         {:ok, iid} <- iid_from_ref(mr_ref),
+         {:ok, approvals} <-
+           request(cfg, :get, "/merge_requests/#{iid}/approvals", [])
+           |> handle_json() do
+      case authenticated_username(cfg) do
+        name when is_binary(name) and name != "" ->
+          {:ok, approved_by_username?(approvals, name)}
+
+        _ ->
+          {:ok, false}
+      end
+    end
+  end
+
+  defp approved_by_username?(%{"approved_by" => approved_by}, username) do
+    approved_by
+    |> List.wrap()
+    |> Enum.any?(fn entry -> get_in(entry, ["user", "username"]) == username end)
+  end
+
+  defp approved_by_username?(_approvals, _username), do: false
+
   @impl true
   def list_open do
     with {:ok, cfg} <- Config.resolve(),

@@ -1215,4 +1215,67 @@ defmodule Arbiter.Mergers.GitlabTest do
       assert {:ok, []} = Gitlab.list_open_review_threads(@ref)
     end
   end
+
+  describe "self_approved?/1" do
+    defp approvals_get(approved_by, viewer_username) do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "#{base_path()}/#{@iid}/approvals" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"approved_by" => approved_by})
+
+          conn.request_path == "/api/v4/user" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"username" => viewer_username})
+        end
+      end)
+
+      Gitlab.self_approved?(@ref)
+    end
+
+    test "own username present in approved_by → {:ok, true}" do
+      approved_by = [%{"user" => %{"username" => "fleet-bot"}}]
+
+      assert {:ok, true} = approvals_get(approved_by, "fleet-bot")
+    end
+
+    test "only a different user approved → {:ok, false}" do
+      approved_by = [%{"user" => %{"username" => "a-human"}}]
+
+      assert {:ok, false} = approvals_get(approved_by, "fleet-bot")
+    end
+
+    test "own identity unresolvable → {:ok, false} (fails open)" do
+      stub(fn conn ->
+        cond do
+          conn.request_path == "#{base_path()}/#{@iid}/approvals" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"approved_by" => [%{"user" => %{"username" => "fleet-bot"}}]})
+
+          conn.request_path == "/api/v4/user" ->
+            conn |> Plug.Conn.put_status(401) |> Req.Test.json(%{"message" => "unauthorized"})
+        end
+      end)
+
+      assert {:ok, false} = Gitlab.self_approved?(@ref)
+    end
+
+    test "approvals fetch hard-fails → {:error, _}" do
+      stub(fn conn ->
+        assert conn.request_path == "#{base_path()}/#{@iid}/approvals"
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "boom"})
+      end)
+
+      assert {:error, %Error{}} = Gitlab.self_approved?(@ref)
+    end
+
+    test "no active config → {:error, %Error{kind: :config_missing}}" do
+      Config.clear()
+
+      assert {:error, %Error{kind: :config_missing}} = Gitlab.self_approved?(@ref)
+    end
+  end
 end
