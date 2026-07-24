@@ -987,6 +987,172 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  # bd-80kdgy: the exact stdout of a live `codex exec --json` run on codex-cli
+  # 0.142.5, which replaced the `event_msg` vocabulary with thread/turn/item.
+  # Before the fix every one of these lines decoded fine and then matched no
+  # format clause, so the run produced a ZERO-line transcript, zero usage, and
+  # never saw `arb done` — yet still exited 0 and looked like a clean success.
+  describe "codex 0.142.5 thread/turn/item stream" do
+    @codex_0_142_5_events [
+      %{"type" => "thread.started", "thread_id" => "019f95ae-eb2a-7e30-ad7a-13502ef33e09"},
+      %{"type" => "turn.started"},
+      %{
+        "type" => "item.completed",
+        "item" => %{
+          "id" => "item_0",
+          "type" => "agent_message",
+          "text" => "I'll read `a.txt` now and then return its contents."
+        }
+      },
+      %{
+        "type" => "item.started",
+        "item" => %{
+          "id" => "item_1",
+          "type" => "command_execution",
+          "command" => "/usr/bin/zsh -lc 'cat a.txt'",
+          "aggregated_output" => "",
+          "exit_code" => nil,
+          "status" => "in_progress"
+        }
+      },
+      %{
+        "type" => "item.completed",
+        "item" => %{
+          "id" => "item_1",
+          "type" => "command_execution",
+          "command" => "/usr/bin/zsh -lc 'cat a.txt'",
+          "aggregated_output" => "hi\n",
+          "exit_code" => 0,
+          "status" => "completed"
+        }
+      },
+      %{
+        "type" => "turn.completed",
+        "usage" => %{
+          "input_tokens" => 20_900,
+          "cached_input_tokens" => 14_592,
+          "output_tokens" => 126,
+          "reasoning_output_tokens" => 42
+        }
+      }
+    ]
+
+    test "the run is transcribed instead of vanishing" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("codex-v2-transcript")
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, @codex_0_142_5_events),
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      wait_for_exit(pid)
+      lines = Worker.state(pid).meta.output_lines
+
+      assert Enum.any?(lines, &String.contains?(&1, "codex session started"))
+      assert Enum.any?(lines, &String.contains?(&1, "I'll read"))
+      assert Enum.any?(lines, &String.contains?(&1, "cat a.txt"))
+      assert Enum.any?(lines, &String.contains?(&1, "codex session complete"))
+      refute Enum.any?(lines, &String.contains?(&1, "unrecognized"))
+    end
+
+    # The ticket's `model: null` symptom: no codex `--json` schema names the
+    # model the CLI chose, so the ledger can only carry the id Arbiter resolved
+    # at spawn time. Assert it survives the whole session pipeline, not just
+    # `Stream.usage_fields/2`.
+    test "the usage summary carries real tokens and the pre-resolved model" do
+      session =
+        ClaudeSession.build_session_config("bd-80kdgy", "worker:bd-80kdgy",
+          provider: "codex",
+          model: "gpt-5-codex",
+          redact_values: []
+        )
+        |> Map.merge(%{line_buf: "", output_lines: [], exit_status: nil, exited_at: nil})
+
+      session =
+        Enum.reduce(@codex_0_142_5_events, session, fn event, acc ->
+          ClaudeSession.handle_data(acc, Jason.encode!(event), true)
+        end)
+
+      usage = ClaudeSession.usage_summary(session)
+
+      assert usage[:model] == "gpt-5-codex"
+      assert usage[:session_id] == "019f95ae-eb2a-7e30-ad7a-13502ef33e09"
+      assert usage[:tokens_in] > 0
+      assert usage[:tokens_out] > 0
+    end
+
+    test "arb done in an item.completed agent_message completes the worker" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("codex-v2-done")
+
+      events =
+        @codex_0_142_5_events ++
+          [
+            %{
+              "type" => "item.completed",
+              "item" => %{"id" => "item_2", "type" => "agent_message", "text" => "hi\n\narb done"}
+            }
+          ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      status =
+        eventually(fn ->
+          case Worker.state(pid) do
+            %{status: :completed} = s -> s.status
+            _ -> nil
+          end
+        end)
+
+      assert status == :completed
+    end
+
+    test "arb done inside a command_execution result does NOT complete" do
+      {pid, _task_id} = start_worker()
+      cwd = tmp_dir!("codex-v2-toolresult")
+      :ok = Worker.advance(pid, :implement)
+
+      events = [
+        %{
+          "type" => "item.completed",
+          "item" => %{
+            "type" => "command_execution",
+            "command" => "grep -r 'arb done' .",
+            "aggregated_output" => "match: 'arb done' in claude_session.ex",
+            "exit_code" => 0,
+            "status" => "completed"
+          }
+        },
+        %{"type" => "turn.completed", "usage" => %{"input_tokens" => 1, "output_tokens" => 1}}
+      ]
+
+      {:ok, _port} =
+        ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          provider: "codex",
+          model: "gpt-5-codex"
+        )
+
+      wait_for_exit(pid)
+
+      refute Worker.state(pid).status == :completed
+    end
+  end
+
   describe "concurrent workers" do
     test "each worker sees only its own output" do
       {pid_a, task_a} = start_worker()
