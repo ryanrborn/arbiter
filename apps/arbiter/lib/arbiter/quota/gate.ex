@@ -5,8 +5,9 @@ defmodule Arbiter.Quota.Gate do
   The gate is the single choke point the fleet dispatcher
   (`Arbiter.Worker.Dispatch.dispatch/2`) consults before mutating any task
   state, so a near-cap decision covers every dispatch path at once. It reads the
-  workspace's latest Anthropic quota snapshot (bd-5boun6) and decides what to do
-  when the workspace nears / crosses the 5h cap:
+  latest quota snapshot for the workspace **and the provider this dispatch will
+  actually run on** (bd-2mpo3f) and decides what to do when that provider nears
+  / crosses its primary window cap:
 
     * `:allow` — dispatch proceeds normally (there is headroom, or we are
       failing open because no snapshot exists).
@@ -28,20 +29,37 @@ defmodule Arbiter.Quota.Gate do
   (per-workspace > global > `:throttle`) and the `:arbiter, :quota` `:gate`
   app-env override (the kill switch / test injection seam).
 
-  A `nil` quota snapshot (proxy disabled, or nothing captured yet) MUST
+  ## Providers (bd-2mpo3f)
+
+  Every helper here takes a *snapshot* rather than an `AnthropicQuota` row:
+  `Arbiter.Quota.Gate.Snapshot.normalize/1` projects `AnthropicQuota` (Claude),
+  `CodexQuota` (Codex) and `GoogleQuota` (Gemini CLI / Antigravity) onto one
+  provider-neutral shape — primary-window `utilization`, past-plan `status`,
+  `reset_at` / `captured_at` — so the same near-cap semantics apply to all four
+  providers without the gate knowing any provider's field names. The caller
+  (`Arbiter.Worker.Dispatch`) resolves which provider the dispatch will run on
+  and reads that provider's row via `Arbiter.Quota.latest_for_provider/2`.
+
+  A `nil` quota snapshot (probe disabled, or nothing captured yet) MUST
   fail open — every implementation returns `:allow` so dispatch never
   deadlocks on missing quota data.
   """
 
-  alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
 
   @type decision :: :allow | {:hold, term()} | {:overage, float()}
 
+  @typedoc """
+  Any persisted provider quota row (`AnthropicQuota` / `CodexQuota` /
+  `GoogleQuota`), an already-normalized `Snapshot`, or `nil`.
+  """
+  @type quota_source :: struct() | nil
+
   @callback check(
               task :: Issue.t() | nil,
-              quota :: AnthropicQuota.t() | nil,
+              quota :: quota_source(),
               workspace :: Workspace.t() | nil,
               opts :: keyword()
             ) :: decision()
@@ -82,75 +100,87 @@ defmodule Arbiter.Quota.Gate do
   end
 
   @doc """
-  Whether the snapshot's 5h window has already elapsed and can no longer be
+  Whether the snapshot's primary window has already elapsed and can no longer be
   trusted for gate decisions. Returns `false` for `nil` (nil is handled as
   fail-open by both `over_cap?/2` and `in_overage?/2`).
 
   A snapshot is stale when either:
-    * `reset_5h_at` is set and lies in the past — the window has rolled, so
-      `utilization_5h` / `status_5h` no longer reflect the current window.
+    * `reset_at` is set and lies in the past — the window has rolled (Anthropic
+      5h, Codex session, Google representative model), so `utilization` /
+      `status` no longer reflect the current window.
     * `captured_at` is more than 5 hours ago — the snapshot is too old to
-      throttle on even if `reset_5h_at` is absent.
+      throttle on even if `reset_at` is absent.
   """
-  @spec stale?(AnthropicQuota.t() | nil) :: boolean()
-  def stale?(nil), do: false
+  @spec stale?(quota_source()) :: boolean()
+  def stale?(quota), do: quota |> Snapshot.normalize() |> snapshot_stale?()
 
-  def stale?(%AnthropicQuota{} = quota) do
+  defp snapshot_stale?(nil), do: false
+
+  defp snapshot_stale?(%Snapshot{} = snapshot) do
     now = DateTime.utc_now()
 
     reset_elapsed =
-      match?(%DateTime{}, quota.reset_5h_at) and
-        DateTime.compare(quota.reset_5h_at, now) == :lt
+      match?(%DateTime{}, snapshot.reset_at) and
+        DateTime.compare(snapshot.reset_at, now) == :lt
 
     too_old =
-      match?(%DateTime{}, quota.captured_at) and
-        DateTime.diff(now, quota.captured_at, :second) >= 18_000
+      match?(%DateTime{}, snapshot.captured_at) and
+        DateTime.diff(now, snapshot.captured_at, :second) >= 18_000
 
     reset_elapsed or too_old
   end
 
   @doc """
-  Whether the snapshot indicates the workspace is at/over the 5h cap.
+  Whether the snapshot indicates the provider is at/over its primary-window cap.
 
-  True when the 5h status is anything other than `"allowed"` OR utilization has
-  reached the configured threshold. A `nil` snapshot is never "over cap" (fail
-  open). A stale snapshot (5h window already elapsed) is treated as nil —
-  fail open. Shared by both gate implementations.
+  True when the provider's status is anything other than `"allowed"` (Anthropic
+  `status_5h`, Codex `limit_reached`) OR utilization has reached the configured
+  threshold. A `nil` snapshot is never "over cap" (fail open). A stale snapshot
+  (window already elapsed) is treated as nil — fail open. Shared by both gate
+  implementations.
   """
-  @spec over_cap?(AnthropicQuota.t() | nil, Workspace.t() | nil) :: boolean()
-  def over_cap?(nil, _workspace), do: false
+  @spec over_cap?(quota_source(), Workspace.t() | nil) :: boolean()
+  def over_cap?(quota, workspace) do
+    case Snapshot.normalize(quota) do
+      nil ->
+        false
 
-  def over_cap?(%AnthropicQuota{} = quota, workspace) do
-    if stale?(quota) do
-      false
-    else
-      status_not_allowed?(quota.status_5h) or
-        utilization_over?(quota.utilization_5h, threshold(workspace))
+      %Snapshot{} = snapshot ->
+        if snapshot_stale?(snapshot) do
+          false
+        else
+          status_not_allowed?(snapshot.status) or
+            utilization_over?(snapshot.utilization, threshold(workspace))
+        end
     end
   end
 
   @doc """
-  Whether the snapshot indicates *genuine paid overage* — Anthropic's
-  `overage_status == "in_overage"`, or the 5h window is past-plan
-  (`status_5h != "allowed"`). Used by `Continue` to decide when to tag overage
-  spend.
+  Whether the snapshot indicates *genuine past-plan usage* — Anthropic's
+  `overage_status == "in_overage"`, or the primary window is past-plan
+  (`status != "allowed"`; for Codex that is `limit_reached`). Used by `Continue`
+  to decide when to tag overage spend.
 
   Deliberately does NOT key on the throttle threshold (`over_cap?/2`): crossing
-  `utilization_5h >= throttle_threshold` while still `status_5h == "allowed"`
-  means we are near the cap, not past the plan. Tagging overage there would
-  record overage spend — and fire the overage alert — before the account is
-  actually paying overage (reviewer round 1, finding 2).
+  `utilization >= throttle_threshold` while still `"allowed"` means we are near
+  the cap, not past the plan. Tagging overage there would record overage spend —
+  and fire the overage alert — before the account is actually paying overage
+  (reviewer round 1, finding 2).
 
-  A stale snapshot (5h window already elapsed) is treated as nil — fail open.
+  A stale snapshot (window already elapsed) is treated as nil — fail open.
   """
-  @spec in_overage?(AnthropicQuota.t() | nil, Workspace.t() | nil) :: boolean()
-  def in_overage?(nil, _workspace), do: false
+  @spec in_overage?(quota_source(), Workspace.t() | nil) :: boolean()
+  def in_overage?(quota, _workspace) do
+    case Snapshot.normalize(quota) do
+      nil ->
+        false
 
-  def in_overage?(%AnthropicQuota{} = quota, _workspace) do
-    if stale?(quota) do
-      false
-    else
-      quota.overage_status == "in_overage" or status_not_allowed?(quota.status_5h)
+      %Snapshot{} = snapshot ->
+        if snapshot_stale?(snapshot) do
+          false
+        else
+          snapshot.overage_status == "in_overage" or status_not_allowed?(snapshot.status)
+        end
     end
   end
 

@@ -40,12 +40,18 @@ defmodule Arbiter.Workflows.QuotaGate do
     @moduledoc """
     Simple threshold quota gate (C4 of #482).
 
-    Reads the latest captured Anthropic quota snapshot for the workspace from
-    the DB (written by the proxy on every `/v1/messages` response) and applies
-    a two-condition hold:
+    Reads the latest captured quota snapshot for the workspace's **default agent
+    provider** (bd-2mpo3f) — `AnthropicQuota` for Claude, `CodexQuota` for Codex,
+    `GoogleQuota` for Gemini CLI — normalizes it via
+    `Arbiter.Quota.Gate.Snapshot`, and applies a two-condition hold on the
+    primary window:
 
-      1. `status_5h` is not `nil` and not `"allowed"`.
-      2. `utilization_5h` is not `nil` and exceeds the configured ceiling.
+      1. `status` is not `nil` and not `"allowed"` (for Codex, `limit_reached`).
+      2. `utilization` is not `nil` and exceeds the configured ceiling.
+
+    A per-task provider override (`agent_type:` on `dispatch/2`) is not visible
+    here — this clamp is a per-workspace concurrency cap, and the authoritative
+    per-dispatch decision is `Arbiter.Quota.Gate` at the `dispatch/2` seam.
 
     Returns `:unlimited` when either condition does not hold (either the quota
     is fine, or no snapshot has been captured yet — assume OK). Returns `0`
@@ -94,16 +100,35 @@ defmodule Arbiter.Workflows.QuotaGate do
     defp throttle_headroom(ws_id) do
       ceiling = Application.get_env(:arbiter, :conductor_quota_ceiling, @default_ceiling)
 
-      case Arbiter.Quota.latest(ws_id) do
+      ws_id
+      |> Arbiter.Quota.latest_for_provider(workspace_provider(ws_id))
+      |> Arbiter.Quota.Gate.Snapshot.normalize()
+      |> case do
         nil ->
           :unlimited
 
-        quota ->
-          status_ok? = quota.status_5h in [nil, "allowed"]
-          utilization_ok? = is_nil(quota.utilization_5h) or quota.utilization_5h <= ceiling
+        snapshot ->
+          status_ok? = snapshot.status in [nil, "allowed"]
+          utilization_ok? = is_nil(snapshot.utilization) or snapshot.utilization <= ceiling
 
           if status_ok? and utilization_ok?, do: :unlimited, else: 0
       end
+    end
+
+    # The workspace's default agent provider — the one the Conductor's members
+    # will be dispatched on absent a per-dispatch override. Best-effort: any load
+    # failure falls back to :claude (the historical behaviour).
+    defp workspace_provider(""), do: :claude
+
+    defp workspace_provider(ws_id) do
+      case Ash.get(Arbiter.Tasks.Workspace, ws_id) do
+        {:ok, ws} -> String.to_existing_atom(Arbiter.Agents.for_workspace(ws).provider())
+        _ -> :claude
+      end
+    rescue
+      _ -> :claude
+    catch
+      :exit, _ -> :claude
     end
 
     # Whether the workspace's resolved quota mode is :continue. Best-effort: any

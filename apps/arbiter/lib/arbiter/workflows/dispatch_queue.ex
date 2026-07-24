@@ -42,7 +42,8 @@ defmodule Arbiter.Workflows.DispatchQueue do
 
     * `:dispatcher` → `:arbiter, :dispatch_queue_dispatcher` → `Arbiter.Worker.Dispatch`
       — the module whose `dispatch/2` drains held intents. Tests pass a stub.
-    * `:quota_reader` → `Arbiter.Quota` — supplies `latest/2` snapshots on drain.
+    * `:quota_reader` → `Arbiter.Quota` — supplies `latest_for_provider/2`
+      snapshots on drain (one per distinct provider held).
     * `:notifier` → `Arbiter.Messages.CoordinatorNotifier` — the overage-alert channel.
     * `:auto_subscribe` (default `true`) — subscribe to the `quota:<ws>` topic.
   """
@@ -55,13 +56,19 @@ defmodule Arbiter.Workflows.DispatchQueue do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Workflows.DispatchQueueSupervisor
 
-  @typedoc "A held dispatch intent."
+  @typedoc """
+  A held dispatch intent. `provider` is the agent type the dispatch resolved to
+  (`:claude` / `:codex` / `:gemini`) — the drain re-checks each item against
+  *that* provider's quota snapshot (bd-2mpo3f), so a Codex hold is not gated on
+  Anthropic headroom and vice versa.
+  """
   @type item :: %{
           task_id: String.t(),
           opts: keyword(),
           priority: non_neg_integer(),
           opened_at: DateTime.t(),
-          reason: term()
+          reason: term(),
+          provider: atom()
         }
 
   defmodule State do
@@ -94,14 +101,20 @@ defmodule Arbiter.Workflows.DispatchQueue do
   HOLD a dispatch intent for `workspace_id` (the `:throttle` path). Resolves —
   starting if necessary — the workspace's queue and enqueues the intent.
 
+  `provider` is the agent type the held dispatch resolved to; the drain re-checks
+  the intent against that provider's quota snapshot (bd-2mpo3f). Defaults to
+  `:claude`.
+
   Returns `:ok` on enqueue, `{:error, reason}` if the queue can't be reached (the
   caller then fails open and dispatches, rather than dropping the work).
   """
-  @spec hold(String.t(), String.t(), keyword(), term()) :: :ok | {:error, term()}
-  def hold(workspace_id, task_id, opts, reason)
+  @spec hold(String.t(), String.t(), keyword(), term(), atom()) :: :ok | {:error, term()}
+  def hold(workspace_id, task_id, opts, reason, provider \\ :claude)
+
+  def hold(workspace_id, task_id, opts, reason, provider)
       when is_binary(workspace_id) and is_binary(task_id) do
     with {:ok, pid} <- DispatchQueueSupervisor.ensure_started(workspace_id) do
-      GenServer.call(pid, {:hold, task_id, opts, reason})
+      GenServer.call(pid, {:hold, task_id, opts, reason, provider})
     end
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
@@ -109,7 +122,7 @@ defmodule Arbiter.Workflows.DispatchQueue do
     :exit, r -> {:error, {:exit, r}}
   end
 
-  def hold(_workspace_id, _task_id, _opts, _reason), do: {:error, :no_workspace}
+  def hold(_workspace_id, _task_id, _opts, _reason, _provider), do: {:error, :no_workspace}
 
   @doc """
   Record windowed overage `spend_usd` for `workspace_id` (the `:continue` path)
@@ -192,12 +205,12 @@ defmodule Arbiter.Workflows.DispatchQueue do
   end
 
   @impl true
-  def handle_call({:hold, task_id, opts, reason}, _from, %State{} = state) do
+  def handle_call({:hold, task_id, opts, reason, provider}, _from, %State{} = state) do
     state =
       if already_held?(state, task_id) do
         state
       else
-        item = new_item(state, task_id, opts, reason)
+        item = new_item(state, task_id, opts, reason, provider)
         %{state | items: [item | state.items]}
       end
 
@@ -264,7 +277,11 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp maybe_drain(%State{items: []} = state), do: state
 
   defp maybe_drain(%State{} = state) do
-    quota = safe_latest(state)
+    # One snapshot read per distinct provider held in this queue (bd-2mpo3f) —
+    # a Codex hold must be re-checked against CodexQuota, not AnthropicQuota, or
+    # it would drain on Anthropic's headroom (or never drain at all, since a
+    # Codex-only install has no Anthropic snapshot).
+    snapshots = provider_snapshots(state)
     gate = Arbiter.Quota.gate_for_workspace(state.workspace)
 
     # Partition (fast: a pure gate check per item) into those the gate still
@@ -275,7 +292,9 @@ defmodule Arbiter.Workflows.DispatchQueue do
     {to_dispatch, keep} =
       state.items
       |> Enum.sort_by(&queue_order_key/1)
-      |> Enum.split_with(fn _item ->
+      |> Enum.split_with(fn item ->
+        quota = Map.get(snapshots, item_provider(item))
+
         case gate.check(nil, quota, state.workspace, []) do
           {:hold, _} -> false
           _allow_or_overage -> true
@@ -325,34 +344,43 @@ defmodule Arbiter.Workflows.DispatchQueue do
     :exit, r -> {:error, {:exit, r}}
   end
 
-  defp safe_latest(%State{quota_reader: reader, workspace_id: ws_id}) do
-    reader.latest(ws_id, "claude")
+  # `%{provider_atom => snapshot_row | nil}` for every provider currently held.
+  defp provider_snapshots(%State{items: items} = state) do
+    items
+    |> Enum.map(&item_provider/1)
+    |> Enum.uniq()
+    |> Map.new(&{&1, safe_latest(state, &1)})
+  end
+
+  defp safe_latest(%State{quota_reader: reader, workspace_id: ws_id}, provider) do
+    reader.latest_for_provider(ws_id, provider)
   rescue
     _ -> nil
   catch
     :exit, _ -> nil
   end
 
-  # (Re)arm the deterministic reset-drain timer from the latest snapshot's
-  # `reset_5h_at`. No-op when nothing is queued or no reset time is known.
+  # (Re)arm the deterministic reset-drain timer from the earliest primary-window
+  # reset across the providers currently held — whichever provider frees up first
+  # should wake the queue. No-op when nothing is queued or no reset time is known.
   defp schedule_reset_drain(%State{items: []} = state), do: cancel_reset_timer(state)
 
   defp schedule_reset_drain(%State{} = state) do
     state = cancel_reset_timer(state)
 
-    case safe_latest(state) do
-      %{reset_5h_at: %DateTime{} = reset} ->
+    case next_reset_at(state) do
+      %DateTime{} = reset ->
         delay = DateTime.diff(reset, DateTime.utc_now(), :millisecond)
 
         if delay > 0 do
           ref = Process.send_after(self(), :drain_on_reset, delay)
           %{state | reset_timer_ref: ref}
         else
-          # reset_5h_at is already in the past — the window has rolled. Do NOT
+          # The reset time is already in the past — the window has rolled. Do NOT
           # re-arm against a past time or a held-items cycle becomes a hot loop.
           # The staleness check in Gate.over_cap?/in_overage? now fails open for
           # stale snapshots, so the next drain trigger (PubSub quota_updated or
-          # a new hold/4 call that re-reads the snapshot) will clear any queued
+          # a new hold/5 call that re-reads the snapshot) will clear any queued
           # items.
           state
         end
@@ -360,6 +388,18 @@ defmodule Arbiter.Workflows.DispatchQueue do
       _ ->
         state
     end
+  end
+
+  defp next_reset_at(%State{} = state) do
+    state
+    |> provider_snapshots()
+    |> Map.values()
+    |> Enum.map(&Arbiter.Quota.Gate.Snapshot.normalize/1)
+    |> Enum.flat_map(fn
+      %{reset_at: %DateTime{} = reset} -> [reset]
+      _ -> []
+    end)
+    |> Enum.min_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
   end
 
   defp cancel_reset_timer(%State{reset_timer_ref: nil} = state), do: state
@@ -414,14 +454,28 @@ defmodule Arbiter.Workflows.DispatchQueue do
   defp already_held?(%State{items: items}, task_id),
     do: Enum.any?(items, &(&1.task_id == task_id))
 
-  defp new_item(%State{} = state, task_id, opts, reason) do
+  defp new_item(%State{} = state, task_id, opts, reason, provider) do
     %{
       task_id: task_id,
       opts: opts,
       priority: task_priority(state, task_id),
       opened_at: DateTime.utc_now(),
-      reason: reason
+      reason: reason,
+      provider: provider
     }
+  end
+
+  # The provider a held intent was gated on. Items enqueued before this field
+  # existed (or by a caller that omitted it) read as :claude — the historical
+  # Anthropic-only behaviour.
+  defp item_provider(item) do
+    case Map.get(item, :provider) do
+      p when is_atom(p) and not is_nil(p) -> p
+      p when is_binary(p) and p != "" -> String.to_existing_atom(p)
+      _ -> :claude
+    end
+  rescue
+    ArgumentError -> :claude
   end
 
   # Task priority (0 = P0 highest … 4 = P4 lowest) for the queue order key.
