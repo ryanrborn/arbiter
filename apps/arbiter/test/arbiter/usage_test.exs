@@ -431,6 +431,83 @@ defmodule Arbiter.UsageTest do
       assert ev.step == :work
     end
 
+    test "claude session killed before its result event backfills tokens from on-disk JSONL" do
+      task_id = "bd-cs-disk-#{System.unique_integer([:positive])}"
+      session_id = "disk-sess-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-usage")
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-disk-cwd")
+      config_dir = tmp_dir!("usage-disk-cfg")
+
+      # The on-disk session JSONL the CLI persists regardless of how the process
+      # died. Two consecutive assistant lines share message.id "m-1" (streaming
+      # re-emit) so the reader must dedupe: deduped totals are input=1500,
+      # output=600, cache_creation=50, cache_read=100.
+      slug = Arbiter.Usage.ClaudeSessionFile.project_slug(cwd)
+      session_dir = Path.join([config_dir, "projects", slug])
+      File.mkdir_p!(session_dir)
+
+      disk_lines = [
+        ~s({"type":"system","subtype":"init","session_id":"#{session_id}","model":"claude-opus-4-8"}),
+        ~s({"type":"assistant","message":{"id":"m-1","model":"claude-opus-4-8","usage":{"input_tokens":1500,"output_tokens":600,"cache_creation_input_tokens":50,"cache_read_input_tokens":100}}}),
+        ~s({"type":"assistant","message":{"id":"m-1","model":"claude-opus-4-8","usage":{"input_tokens":1500,"output_tokens":600,"cache_creation_input_tokens":50,"cache_read_input_tokens":100}}})
+      ]
+
+      File.write!(
+        Path.join(session_dir, session_id <> ".jsonl"),
+        Enum.join(disk_lines, "\n") <> "\n"
+      )
+
+      # The worker's own stdout: an init event carrying the session_id, then the
+      # process exits WITHOUT a terminal `result` event (killed/crashed) — so the
+      # stdout path records no tokens and the disk fallback must kick in.
+      events = [
+        %{
+          "type" => "system",
+          "subtype" => "init",
+          "model" => "claude-opus-4-8",
+          "session_id" => session_id
+        },
+        %{
+          "type" => "assistant",
+          "message" => %{"content" => [%{"type" => "text", "text" => "working"}]}
+        }
+      ]
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events),
+          env: [{"CLAUDE_CONFIG_DIR", config_dir}]
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(task_id == ^task_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      # Tokens reconciled from disk (deduped), cost intentionally left nil.
+      assert ev.tokens_in == 1500
+      assert ev.tokens_out == 600
+      assert ev.cache_creation_tokens == 50
+      assert ev.cache_read_tokens == 100
+      assert ev.cost_usd == nil
+      assert ev.model == "claude-opus-4-8"
+      assert ev.provider == "claude"
+      assert ev.session_id == session_id
+      assert ev.step == :work
+    end
+
     test "review_gate reviewer session writes a :review row" do
       reviewer_id = "bd-reviewer-#{System.unique_integer([:positive])}#review"
 

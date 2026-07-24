@@ -36,6 +36,8 @@ defmodule Arbiter.Workers.Reconciler do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
+  alias Arbiter.Usage.ClaudeSessionFile
+  alias Arbiter.Usage.Event
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Run
@@ -386,7 +388,12 @@ defmodule Arbiter.Workers.Reconciler do
     }
 
     case Ash.update(run, attrs, action: :update) do
-      {:ok, _updated} ->
+      {:ok, updated} ->
+        # bd-au3xrq: a node that died mid-run left no usage row (the worker
+        # never reached its own record_usage_event). If this run captured its
+        # Claude session coordinates, reconcile the token ledger from the
+        # on-disk session JSONL that survived the crash.
+        maybe_backfill_usage_from_disk(updated)
         true
 
       {:error, reason} ->
@@ -395,6 +402,91 @@ defmodule Arbiter.Workers.Reconciler do
         )
 
         false
+    end
+  end
+
+  # Best-effort on-disk usage backfill for a just-reconciled orphan. Only fires
+  # when the run recorded a `session_id` + `config_dir` (Claude runs past their
+  # `init` event) AND no `Arbiter.Usage.Event` already exists for the run — so a
+  # run whose stdout path DID land a row is never double-counted. Cost stays nil
+  # (the JSONL carries no dollar figure). Any failure logs and is swallowed:
+  # backfilling the ledger must never break the boot-time sweep.
+  defp maybe_backfill_usage_from_disk(%Run{session_id: sid, config_dir: cfg} = run)
+       when is_binary(sid) and sid != "" and is_binary(cfg) and cfg != "" do
+    if usage_event_exists?(run.id) do
+      :ok
+    else
+      case ClaudeSessionFile.usage_for(cfg, sid) do
+        {:ok, %{message_count: n} = totals} when n > 0 ->
+          write_reconciled_usage(run, totals)
+
+        _ ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Workers.Reconciler: usage backfill raised for task=#{run.task_id}: #{Exception.message(e)}"
+      )
+
+      :ok
+  end
+
+  defp maybe_backfill_usage_from_disk(%Run{}), do: :ok
+
+  defp usage_event_exists?(run_id) do
+    Event
+    |> Ash.Query.filter(worker_run_id == ^run_id)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> Kernel.!=([])
+  end
+
+  defp write_reconciled_usage(%Run{} = run, totals) do
+    step = if run.worker_type == :review, do: :review, else: :work
+
+    attrs = %{
+      task_id: run.task_id,
+      workspace_id: run.workspace_id,
+      repo: run.repo,
+      step: step,
+      model: run.model || totals.model,
+      provider: "claude",
+      tokens_in: totals.tokens_in,
+      tokens_out: totals.tokens_out,
+      cache_creation_tokens: totals.cache_creation_tokens,
+      cache_read_tokens: totals.cache_read_tokens,
+      cost_usd: nil,
+      worker_run_id: run.id,
+      session_id: run.session_id,
+      occurred_at: DateTime.utc_now(),
+      raw: %{
+        "arb_usage_source" => %{
+          "reconciled_from" => "session_jsonl",
+          "via" => "reconciler",
+          "message_count" => totals.message_count
+        }
+      }
+    }
+
+    case Ash.create(Event, attrs) do
+      {:ok, _ev} ->
+        Logger.info(
+          "Workers.Reconciler: reconciled usage from on-disk session JSONL for " <>
+            "task=#{run.task_id} run=#{run.id} (#{totals.message_count} msgs, " <>
+            "#{totals.tokens_in} in / #{totals.tokens_out} out)"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Workers.Reconciler: could not write reconciled usage for task=#{run.task_id}: " <>
+            "#{inspect(reason)}"
+        )
+
+        :ok
     end
   end
 end
