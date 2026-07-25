@@ -259,6 +259,110 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     end
   end
 
+  describe "retry / resume" do
+    test "a failed worker offers a Retry action", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-failed", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+
+      assert html =~ ~s(phx-click="open_retry")
+      assert html =~ "Retry"
+    end
+
+    test "a running worker offers no Retry action", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-running", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "r")
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      refute html =~ ~s(phx-click="open_retry")
+    end
+
+    test "an unregistered worker still offers Retry when the task exists",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-gone", workspace_id: ws.id})
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      assert html =~ ~s(phx-click="open_retry")
+    end
+
+    test "no Retry for a task that doesn't exist at all", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/workers/no-such-task")
+      refute html =~ ~s(phx-click="open_retry")
+    end
+
+    # `Dispatch.resume/2` refuses a closed issue outright, so offering the
+    # button would only ever produce an error flash.
+    test "no Retry for a closed issue", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-closed", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, ~p"/workers/#{task.id}")
+      refute html =~ ~s(phx-click="open_retry")
+    end
+
+    test "the Retry modal warns about API credits before re-spawning",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-retry-modal", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      html = view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+
+      assert html =~ ~s(id="worker-retry-modal")
+      assert html =~ "API credits"
+    end
+
+    # Confirming runs the same `Dispatch.resume/2` path `arb worker resume`
+    # uses. This task has no preserved worktree, so it fails there — before
+    # any agent is spawned — and the reason is surfaced to the operator.
+    #
+    # Resume runs in start_async/3 (same reason dispatch does — a provider CLI
+    # auth preflight is far too long to hold the LiveView process for), so the
+    # click only shows the pending state and the outcome lands after.
+    test "confirming retry runs the real resume path and surfaces its error",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-retry-run", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+
+      pending = render_click(view, "retry")
+      assert pending =~ ~s(id="worker-retry-pending")
+
+      html = render_async(view)
+
+      # The modal stays open with the reason inline, rather than closing and
+      # leaving the operator to catch a flash.
+      assert html =~ "Retry failed"
+      assert html =~ ~s(id="worker-retry-modal")
+      refute html =~ ~s(id="worker-retry-pending")
+    end
+
+    test "a second retry click while one is in flight does not spend credits twice",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-retry-double", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+
+      render_click(view, "retry")
+      # Still pending — the guard clause drops this one on the floor rather
+      # than starting a second resume.
+      render_click(view, "retry")
+
+      assert render_async(view) =~ "Retry failed"
+    end
+  end
+
   defp tool_use_event(name, input) do
     Jason.encode!(%{
       "type" => "assistant",

@@ -16,6 +16,7 @@ defmodule ArbiterWeb.Api.IssueController do
 
   use ArbiterWeb, :controller
 
+  alias Arbiter.Tasks.Dedup
   alias Arbiter.Tasks.Issue
   require Ash.Query
 
@@ -121,56 +122,15 @@ defmodule ArbiterWeb.Api.IssueController do
     end
   end
 
-  defp dedup_check(_attrs, true), do: :ok
-
-  defp dedup_check(attrs, false) do
-    with :ok <- check_local_dedup(attrs) do
-      check_tracker_dedup(attrs)
-    end
+  # Delegates to `Arbiter.Tasks.Dedup` so the dashboard's create form applies
+  # the same rule (bd-2cv4ws).
+  defp dedup_check(attrs, force?) do
+    Dedup.check(attrs["title"], attrs["workspace_id"],
+      force: force?,
+      skip_upstream_create: attrs["skip_upstream_create"] == true,
+      tracker_ref: attrs["tracker_ref"]
+    )
   end
-
-  defp check_local_dedup(%{"title" => title, "workspace_id" => workspace_id})
-       when is_binary(title) and is_binary(workspace_id) do
-    norm = normalize_title(title)
-
-    query =
-      Issue
-      |> Ash.Query.new()
-      |> Ash.Query.filter(status in [:open, :in_progress] and workspace_id == ^workspace_id)
-
-    case Ash.read(query) do
-      {:ok, issues} ->
-        matches = Enum.filter(issues, &(normalize_title(&1.title) == norm))
-        if matches == [], do: :ok, else: {:local_dup, matches}
-
-      {:error, _} ->
-        :ok
-    end
-  end
-
-  defp check_local_dedup(_attrs), do: :ok
-
-  defp check_tracker_dedup(%{"skip_upstream_create" => true}), do: :ok
-  defp check_tracker_dedup(%{"tracker_ref" => ref}) when is_binary(ref) and ref != "", do: :ok
-
-  defp check_tracker_dedup(%{"title" => title, "workspace_id" => workspace_id})
-       when is_binary(title) and is_binary(workspace_id) do
-    case Ash.get(Arbiter.Tasks.Workspace, workspace_id) do
-      {:ok, workspace} ->
-        case Arbiter.Trackers.search_by_title_for_workspace(workspace, title) do
-          {:ok, []} -> :ok
-          {:ok, matches} -> {:tracker_dup, matches}
-          _ -> :ok
-        end
-
-      {:error, _} ->
-        :ok
-    end
-  end
-
-  defp check_tracker_dedup(_attrs), do: :ok
-
-  defp normalize_title(title), do: title |> String.downcase() |> String.trim()
 
   # The task was created locally but the upstream create (or write-back of
   # the returned ref) failed. We return 502 Bad Gateway so the CLI exits
