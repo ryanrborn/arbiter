@@ -153,6 +153,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ResumeContext
+  alias Arbiter.Worker.StopReason
 
   # Default ceiling on how long we wait for a reviewer / implementer pass before
   # escalating as timed out. Real Claude work can take a while; tests override.
@@ -194,6 +195,26 @@ defmodule Arbiter.Worker.ReviewGate do
   # Defensive cap on the escalation diff so a huge branch can't bloat the
   # Admiral's mailbox row beyond reason.
   @diff_cap_bytes 50_000
+
+  # StopReason categories that mean the reviewer/implementer subprocess died for
+  # an infrastructure reason (expired credentials, exhausted credits/quota, rate
+  # limiting, a gateway blip, an exec failure, or an unrecognized stream schema)
+  # rather than genuinely finishing without printing a verdict (bd-b2glhm). A
+  # verdict re-prompt against the SAME broken environment fails identically — it
+  # just burns the re-prompt budget and reports a generic "no parseable VERDICT
+  # line" that masks the real cause. Deliberately excludes `:crashed` and
+  # `:exited_without_done`: those have no specific signature, so a re-prompt may
+  # still be worth trying (a near-miss on the reviewer's part, not a known
+  # infra failure).
+  @infra_failure_categories [
+    :auth_expired,
+    :credit_exhausted,
+    :rate_limited,
+    :gateway_error,
+    :spawn_exec_failed,
+    :stream_schema_drift,
+    :killed
+  ]
 
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
@@ -594,8 +615,8 @@ defmodule Arbiter.Worker.ReviewGate do
   # finished implementer closes the round and triggers the next reviewer pass.
   # (Each worker worker also self-completes on its own `arb done`; either way
   # the exit is our reliable "transcript done" signal.)
-  def handle_info({:worker_exited, id, _status}, %{current_id: id, phase: :reviewing} = state) do
-    case attempt_finish(state) do
+  def handle_info({:worker_exited, id, status}, %{current_id: id, phase: :reviewing} = state) do
+    case attempt_finish(state, status) do
       {:done, state} -> {:stop, :normal, state}
       {:reprompt, state} -> {:noreply, state}
       {:revise, state} -> {:noreply, state}
@@ -688,12 +709,23 @@ defmodule Arbiter.Worker.ReviewGate do
   # escalating as inconclusive. Returns `{:done, state}` to stop, `{:reprompt,
   # state}` to wait on a verdict follow-up, or `{:revise, state}` to wait on an
   # implementer.
-  defp attempt_finish(%{reported?: true} = state), do: {:done, state}
+  defp attempt_finish(%{reported?: true} = state, _status), do: {:done, state}
 
-  defp attempt_finish(state) do
+  defp attempt_finish(state, status) do
     case parse_verdict(Enum.reverse(state.lines)) do
       :no_verdict ->
-        maybe_reprompt(state, :no_verdict)
+        case classify_stop(status, state.lines) do
+          %StopReason{category: category} = reason when category in @infra_failure_categories ->
+            Logger.warning(
+              "ReviewGate: reviewer for task=#{state.task_id} died of an infrastructure " <>
+                "failure (#{category}); escalating without a re-prompt"
+            )
+
+            {:done, finish(state, {:no_verdict, infra_failure_message(reason)})}
+
+          _ ->
+            maybe_reprompt(state, :no_verdict)
+        end
 
       {:approve, _} = verdict ->
         {:done, finish(state, verdict)}
@@ -919,6 +951,29 @@ defmodule Arbiter.Worker.ReviewGate do
 
         {%{state | thread: state.thread ++ [entry]}, new_sha}
     end
+  end
+
+  # ---- infrastructure-failure classification (bd-b2glhm) ------------------
+
+  # Classify why the reviewer's subprocess exited, using the same signature
+  # matching the main Worker uses to detect auth expiry / credit exhaustion /
+  # rate limiting / etc (`Arbiter.Worker.StopReason`). `state.lines` is
+  # newest-first (each line is prepended as captured); `classify/2` only scans
+  # the tail so order doesn't matter, but reverse for consistency with the rest
+  # of this module.
+  defp classify_stop(status, lines) when is_integer(status) do
+    StopReason.classify(status, Enum.reverse(lines))
+  end
+
+  defp classify_stop(_status, _lines), do: nil
+
+  # Human-actionable inconclusive message for a reviewer that died of a known
+  # infrastructure failure rather than genuinely finishing without a verdict —
+  # names the real cause and remediation instead of the generic "no parseable
+  # VERDICT line" message, which gave no signal that re-authenticating (or
+  # waiting out a rate limit) would fix it.
+  defp infra_failure_message(%StopReason{} = reason) do
+    "Reviewer subprocess failed: #{reason.summary}. #{reason.remediation}"
   end
 
   # ---- verdict re-prompt (bd-8v8ays) -------------------------------------
