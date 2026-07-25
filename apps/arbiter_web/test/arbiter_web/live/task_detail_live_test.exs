@@ -174,4 +174,184 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       refute html =~ "Prior MRs"
     end
   end
+
+  describe "edit" do
+    test "the Edit button opens the modal and saving writes the fields", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "before", workspace_id: ws.id, priority: 3})
+
+      {:ok, view, html} = live(conn, ~p"/tasks/#{task.id}")
+      refute html =~ ~s(id="task-edit-modal")
+
+      html = view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+      assert html =~ ~s(id="task-edit-modal")
+
+      html =
+        view
+        |> form("#task-edit-form", %{
+          "task" => %{
+            "title" => "after",
+            "status" => "in_progress",
+            "priority" => "1",
+            "difficulty" => "4",
+            "issue_type" => "chore",
+            "assignee" => "ada",
+            "target_branch" => "release/x",
+            "description" => "rewritten body",
+            "acceptance" => "it works"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "after"
+      assert html =~ "rewritten body"
+      refute html =~ ~s(id="task-edit-modal")
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.title == "after"
+      assert reloaded.status == :in_progress
+      assert reloaded.priority == 1
+      assert reloaded.difficulty == 4
+      assert reloaded.issue_type == :chore
+      assert reloaded.assignee == "ada"
+      assert reloaded.target_branch == "release/x"
+      assert reloaded.acceptance == "it works"
+    end
+
+    test "a blank title is refused and the modal stays open", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "keep-me", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-edit-form", %{"task" => %{"title" => "  "}})
+        |> render_submit()
+
+      assert html =~ "Title can&#39;t be empty."
+      assert html =~ ~s(id="task-edit-modal")
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.title == "keep-me"
+    end
+
+    test "a closed task offers no Edit action", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "done", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      refute html =~ ~s(phx-click="open_edit")
+    end
+  end
+
+  describe "close" do
+    test "closing with a reason closes the task and records the reason",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "closeable", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="open_close"])) |> render_click()
+      assert html =~ ~s(id="task-close-modal")
+
+      html =
+        view
+        |> form("#task-close-form", %{"close" => %{"reason" => "superseded by bd-other"}})
+        |> render_submit()
+
+      assert html =~ "closed"
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :closed
+      assert reloaded.closed_at
+    end
+
+    test "an already-closed task offers no Close action", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "already", workspace_id: ws.id})
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      refute html =~ ~s(phx-click="open_close")
+    end
+  end
+
+  describe "dispatch" do
+    test "no dispatch action while a worker is already running", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "busy", workspace_id: ws.id})
+      {:ok, _pid} = Worker.start(task_id: task.id, repo: "test/repo")
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+      refute html =~ ~s(phx-click="open_dispatch")
+    end
+
+    test "the Dispatch button opens a modal that warns about API credits",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "dispatchable", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      assert html =~ ~s(id="task-dispatch-modal")
+      assert html =~ "API credits"
+    end
+
+    # The acknowledgement checkbox IS the confirmation step: submitting without
+    # it must not reach Dispatch at all (no credits spent, task untouched).
+    test "dispatch without the acknowledgement is refused", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "unacked", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-dispatch-form", %{
+          "dispatch" => %{"provider" => "claude", "repo" => "", "acknowledge" => "false"}
+        })
+        |> render_submit()
+
+      assert html =~ "Confirm you understand"
+      assert html =~ ~s(id="task-dispatch-modal")
+
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.status == :open
+    end
+
+    # With the acknowledgement ticked the real dispatch path runs. This
+    # workspace has no repos configured, so it fails at repo resolution —
+    # before any agent is spawned — which is exactly the proof the LiveView
+    # calls the same Dispatch entry point the CLI/MCP use.
+    test "an acknowledged dispatch reaches the real dispatch path", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "acked", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-dispatch-form", %{
+          "dispatch" => %{"provider" => "claude", "repo" => "", "acknowledge" => "true"}
+        })
+        |> render_submit()
+
+      assert html =~ "Dispatch failed"
+      assert html =~ "repo"
+    end
+
+    # The provider select can only offer known agents, so this guards the
+    # hand-rolled POST: an unknown provider must never reach Dispatch.
+    test "an unknown provider is rejected loudly", %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "bad-provider", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      html =
+        render_submit(view, "dispatch", %{
+          "dispatch" => %{"provider" => "kodex", "repo" => "", "acknowledge" => "true"}
+        })
+
+      assert html =~ "kodex"
+    end
+  end
 end
