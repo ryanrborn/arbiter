@@ -4,10 +4,29 @@ defmodule ArbiterWeb.TaskDetailLive do
   any active worker, dependency edges, and recent audit-log versions
   into one page. Re-renders on `:task_lifecycle` and `:worker_lifecycle`
   events so the page stays current.
+
+  Three operator actions live here, each behind its own hand-rolled modal
+  (the `WorkspaceDetailLive` pattern), all writing through the same domain
+  calls the CLI/MCP use:
+
+    * **Edit** — the fields an operator authors: title, status (open ⇄
+      in_progress), priority, difficulty, type, assignee, target branch,
+      description and acceptance. Deliberately NOT editable here: `notes` /
+      `qa_notes` / `deployment_notes` / `pr_body` (worker-authored
+      deliverables — a stray dashboard edit would clobber a run's output),
+      and the tracker/PR linkage fields (`tracker_ref`, `pr_ref`,
+      `source_pr`), which are owned by the tracker and merge-queue
+      machinery. Those stay `arb update` territory.
+    * **Close** — the `:close` action, with an optional reason.
+    * **Dispatch** — `Arbiter.Worker.Dispatch.dispatch/2`, offered only when
+      no worker is attached and the task is open. It spends real API
+      credits, so the modal requires an explicit acknowledgement checkbox
+      before the server will call dispatch at all.
   """
 
   use ArbiterWeb, :live_view
 
+  alias Arbiter.Agents
   alias Arbiter.Mergers
   alias Arbiter.Tasks.Dependency
   alias Arbiter.Tasks.Issue
@@ -16,8 +35,10 @@ defmodule ArbiterWeb.TaskDetailLive do
   alias Arbiter.Trackers
   alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ReviewGate
   alias Arbiter.Workers.Run
+  alias ArbiterWeb.TaskForm
   require Ash.Query
   require Logger
 
@@ -39,6 +60,18 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:worker_label, "worker")
      |> assign(:workspace_label, "workspace")
      |> assign(:rig_label, "repo")
+     |> assign(:edit_modal, false)
+     |> assign(:edit_error, nil)
+     |> assign(:close_modal, false)
+     |> assign(:close_error, nil)
+     |> assign(:dispatch_modal, false)
+     |> assign(:dispatch_error, nil)
+     |> assign(:repo_options, [])
+     |> assign(:priority_options, TaskForm.priority_options())
+     |> assign(:difficulty_options, TaskForm.difficulty_options())
+     |> assign(:issue_type_options, TaskForm.issue_type_options())
+     |> assign(:status_options, TaskForm.editable_status_options())
+     |> assign(:provider_options, provider_options())
      |> refresh_all()}
   end
 
@@ -62,6 +95,225 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   def handle_info({:worker_lifecycle, _event, _snap}, socket), do: {:noreply, socket}
   def handle_info(_, socket), do: {:noreply, socket}
+
+  # ---- edit ----
+
+  @impl true
+  def handle_event("open_edit", _params, socket) do
+    {:noreply, assign(socket, edit_modal: true, edit_error: nil)}
+  end
+
+  def handle_event("cancel_edit", _params, socket) do
+    {:noreply, assign(socket, edit_modal: false, edit_error: nil)}
+  end
+
+  def handle_event("save_edit", %{"task" => params}, socket) do
+    task = socket.assigns.task
+
+    with %Issue{} <- task,
+         {:ok, title} <- fetch_title(params),
+         {:ok, priority} <- fetch_priority(params, task.priority),
+         {:ok, difficulty} <- fetch_difficulty(params) do
+      attrs =
+        %{
+          title: title,
+          priority: priority,
+          difficulty: difficulty,
+          description: TaskForm.trimmed(params["description"]),
+          acceptance: TaskForm.trimmed(params["acceptance"]),
+          assignee: TaskForm.trimmed(params["assignee"]),
+          target_branch: TaskForm.trimmed(params["target_branch"])
+        }
+        |> put_given(:status, params["status"])
+        |> put_given(:issue_type, params["issue_type"])
+
+      case Ash.update(task, attrs) do
+        {:ok, _updated} ->
+          {:noreply,
+           socket
+           |> assign(edit_modal: false, edit_error: nil)
+           |> put_flash(:info, "Updated #{socket.assigns.issue_label}.")
+           |> refresh_all()}
+
+        {:error, err} ->
+          {:noreply, assign(socket, :edit_error, TaskForm.error_message(err))}
+      end
+    else
+      {:error, message} -> {:noreply, assign(socket, :edit_error, message)}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  # ---- close ----
+
+  def handle_event("open_close", _params, socket) do
+    {:noreply, assign(socket, close_modal: true, close_error: nil)}
+  end
+
+  def handle_event("cancel_close", _params, socket) do
+    {:noreply, assign(socket, close_modal: false, close_error: nil)}
+  end
+
+  def handle_event("close_task", params, socket) do
+    reason = params |> Map.get("close", %{}) |> Map.get("reason") |> TaskForm.trimmed()
+
+    case socket.assigns.task do
+      %Issue{} = task ->
+        case Ash.update(task, %{reason: reason}, action: :close) do
+          {:ok, _closed} ->
+            {:noreply,
+             socket
+             |> assign(close_modal: false, close_error: nil)
+             |> put_flash(:info, "Closed #{socket.assigns.issue_label}.")
+             |> refresh_all()}
+
+          {:error, err} ->
+            {:noreply, assign(socket, :close_error, TaskForm.error_message(err))}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # ---- dispatch ----
+  #
+  # Dispatch spends real API credits, so the modal is the confirmation step:
+  # the operator picks a provider + repo AND ticks the acknowledgement. An
+  # un-acknowledged submit is refused here, before `Dispatch.dispatch/2` is
+  # ever called.
+
+  def handle_event("open_dispatch", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(dispatch_modal: true, dispatch_error: nil)
+     |> assign(:repo_options, repo_options(socket.assigns.workspace))}
+  end
+
+  def handle_event("cancel_dispatch", _params, socket) do
+    {:noreply, assign(socket, dispatch_modal: false, dispatch_error: nil)}
+  end
+
+  def handle_event("dispatch", %{"dispatch" => params}, socket) do
+    with :ok <- ensure_acknowledged(params["acknowledge"]),
+         {:ok, opts} <- dispatch_opts(params) do
+      case Dispatch.dispatch(socket.assigns.task_id, opts) do
+        {:ok, _result} ->
+          {:noreply,
+           socket
+           |> assign(dispatch_modal: false, dispatch_error: nil)
+           |> put_flash(:info, "Dispatched a #{socket.assigns.worker_label}.")
+           |> refresh_all()}
+
+        {:error, reason} ->
+          {:noreply,
+           assign(socket, :dispatch_error, "Dispatch failed: #{dispatch_failure(reason)}")}
+      end
+    else
+      {:error, message} -> {:noreply, assign(socket, :dispatch_error, message)}
+    end
+  end
+
+  # ---- form helpers ----
+
+  defp fetch_title(params) do
+    case TaskForm.trimmed(params["title"]) do
+      nil -> {:error, "Title can't be empty."}
+      title -> {:ok, title}
+    end
+  end
+
+  defp fetch_priority(params, current) do
+    case TaskForm.parse_int(params["priority"]) do
+      {:ok, nil} -> {:ok, current}
+      {:ok, priority} -> {:ok, priority}
+      :error -> {:error, "Priority must be a number 0–4."}
+    end
+  end
+
+  defp fetch_difficulty(params) do
+    case TaskForm.parse_int(params["difficulty"]) do
+      {:ok, difficulty} -> {:ok, difficulty}
+      :error -> {:error, "Difficulty must be a number 0–4."}
+    end
+  end
+
+  # Only send an enum-ish field when the form actually supplied one — a
+  # partial POST must not blank out `status` or `issue_type`.
+  defp put_given(attrs, key, value) do
+    case TaskForm.trimmed(value) do
+      nil -> attrs
+      given -> Map.put(attrs, key, given)
+    end
+  end
+
+  defp ensure_acknowledged(value) when value in ["true", true], do: :ok
+
+  defp ensure_acknowledged(_),
+    do: {:error, "Confirm you understand this spends API credits before dispatching."}
+
+  # Mirrors `ArbiterWeb.Api.WorkerController.dispatch_opts/1`: a blank provider
+  # means "use the workspace's configured agent", a named one overrides it, and
+  # an unrecognized one is a hard error rather than a silent fallback
+  # (bd-dcvo3n).
+  defp dispatch_opts(params) do
+    with {:ok, agent_opts} <- provider_opts(params["provider"]) do
+      repo = TaskForm.trimmed(params["repo"])
+
+      {:ok, Enum.reject([repo: repo] ++ agent_opts, fn {_k, v} -> is_nil(v) end)}
+    end
+  end
+
+  defp provider_opts(provider) do
+    case TaskForm.trimmed(provider) do
+      nil ->
+        {:ok, [start_claude: true]}
+
+      given ->
+        if given in Agents.valid_agent_types() do
+          {:ok, [start_claude: true, agent_type: String.to_existing_atom(given)]}
+        else
+          {:error,
+           "Unknown provider #{inspect(given)} — valid providers: " <>
+             Enum.join(Agents.valid_agent_types(), ", ") <> "."}
+        end
+    end
+  end
+
+  defp provider_options do
+    [{"Workspace default", ""}] ++ Enum.map(Agents.valid_agent_types(), &{&1, &1})
+  end
+
+  # The repo names this task could be dispatched against: its workspace's
+  # `repo_paths` (legacy `rig_paths`) plus the application-env fallback, the
+  # same two sources `Dispatch` itself resolves against.
+  defp repo_options(workspace) do
+    app_repos = :arbiter |> Application.get_env(:repo_paths, %{}) |> Map.keys()
+
+    ws_repos =
+      case workspace do
+        %Workspace{config: %{"repo_paths" => paths}} when is_map(paths) -> Map.keys(paths)
+        %Workspace{config: %{"rig_paths" => paths}} when is_map(paths) -> Map.keys(paths)
+        _ -> []
+      end
+
+    names = (ws_repos ++ app_repos) |> Enum.uniq() |> Enum.sort()
+
+    [{"Workspace default", ""}] ++ Enum.map(names, &{&1, &1})
+  end
+
+  defp dispatch_failure(:no_repo_configured),
+    do:
+      "no repo is configured for this workspace — add one to the workspace's " <>
+        "repo_paths config (or :arbiter, :repo_paths) first."
+
+  defp dispatch_failure({:repo_not_found, repo}),
+    do: "repo #{inspect(repo)} isn't in any configured repo_paths."
+
+  defp dispatch_failure({:ambiguous_repo, repos}),
+    do: "several repos are configured (#{Enum.join(repos, ", ")}) — pick one explicitly."
+
+  defp dispatch_failure(reason), do: inspect(reason)
 
   # ---- data ----
 
@@ -277,29 +529,50 @@ defmodule ArbiterWeb.TaskDetailLive do
             </div>
           </div>
 
-          <span
-            id="live-indicator"
-            class={[
-              "badge badge-sm gap-1.5 transition-colors duration-200 shrink-0",
-              if(@live, do: "badge-success", else: "badge-warning")
-            ]}
-            title={
-              if @live,
-                do: "WebSocket connected — updates arrive in real time",
-                else: "Static render — refresh the page to reconnect"
-            }
-          >
-            <%= if @live do %>
-              <span class="relative flex h-2 w-2">
-                <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-content opacity-75">
+          <div class="flex flex-col items-end gap-2 shrink-0">
+            <span
+              id="live-indicator"
+              class={[
+                "badge badge-sm gap-1.5 transition-colors duration-200 shrink-0",
+                if(@live, do: "badge-success", else: "badge-warning")
+              ]}
+              title={
+                if @live,
+                  do: "WebSocket connected — updates arrive in real time",
+                  else: "Static render — refresh the page to reconnect"
+              }
+            >
+              <%= if @live do %>
+                <span class="relative flex h-2 w-2">
+                  <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-success-content opacity-75">
+                  </span>
+                  <span class="relative inline-flex h-2 w-2 rounded-full bg-success-content"></span>
                 </span>
-                <span class="relative inline-flex h-2 w-2 rounded-full bg-success-content"></span>
-              </span>
-              live
-            <% else %>
-              <.icon name="hero-exclamation-triangle" class="size-3" /> stale (refresh)
-            <% end %>
-          </span>
+                live
+              <% else %>
+                <.icon name="hero-exclamation-triangle" class="size-3" /> stale (refresh)
+              <% end %>
+            </span>
+
+            <%!-- Operator actions. A closed issue is terminal here: reopening
+                 it is `arb update` territory, not a dashboard button. --%>
+            <div :if={@task && @task.status != :closed} class="flex items-center gap-2">
+              <.button phx-click="open_edit" class="btn btn-sm">
+                <.icon name="hero-pencil-square" class="size-4" /> Edit
+              </.button>
+              <.button
+                :if={is_nil(@worker)}
+                phx-click="open_dispatch"
+                variant="primary"
+                class="btn btn-sm btn-primary"
+              >
+                <.icon name="hero-rocket-launch" class="size-4" /> Dispatch
+              </.button>
+              <.button phx-click="open_close" class="btn btn-sm btn-ghost text-error">
+                <.icon name="hero-x-circle" class="size-4" /> Close
+              </.button>
+            </div>
+          </div>
         </div>
 
         <%= if @task do %>
@@ -823,6 +1096,181 @@ defmodule ArbiterWeb.TaskDetailLive do
             <.icon name="hero-arrow-left" class="size-4" /> Back to dashboard
           </.link>
         </div>
+      </div>
+
+      <%!-- Edit modal. Worker-authored fields (notes/qa_notes/deployment_notes/
+           pr_body) and tracker/PR linkage are deliberately absent — see the
+           moduledoc. --%>
+      <div :if={@edit_modal && @task} class="modal modal-open" id="task-edit-modal">
+        <div class="modal-box max-w-2xl">
+          <h3 class="font-semibold text-lg mb-3">Edit {@issue_label}</h3>
+          <.form
+            for={%{}}
+            as={:task}
+            id="task-edit-form"
+            phx-submit="save_edit"
+            class="grid sm:grid-cols-2 gap-x-4"
+          >
+            <div class="sm:col-span-2">
+              <.input name="task[title]" label="Title" value={@task.title} />
+            </div>
+            <.input
+              type="select"
+              name="task[status]"
+              label="Status"
+              options={@status_options}
+              value={to_string(@task.status)}
+            />
+            <.input
+              type="select"
+              name="task[issue_type]"
+              label="Type"
+              options={@issue_type_options}
+              value={to_string(@task.issue_type)}
+            />
+            <.input
+              type="select"
+              name="task[priority]"
+              label="Priority"
+              options={@priority_options}
+              value={to_string(@task.priority)}
+            />
+            <.input
+              type="select"
+              name="task[difficulty]"
+              label="Difficulty"
+              options={@difficulty_options}
+              value={if @task.difficulty, do: to_string(@task.difficulty), else: ""}
+            />
+            <.input
+              name="task[assignee]"
+              label="Assignee (optional)"
+              value={@task.assignee || ""}
+              placeholder="who owns this"
+            />
+            <.input
+              name="task[target_branch]"
+              label="Target branch (optional)"
+              value={@task.target_branch || ""}
+              placeholder="defaults to the repo's main"
+            />
+            <div class="sm:col-span-2">
+              <.input
+                type="textarea"
+                name="task[description]"
+                label="Description"
+                value={@task.description || ""}
+                rows="6"
+              />
+            </div>
+            <div class="sm:col-span-2">
+              <.input
+                type="textarea"
+                name="task[acceptance]"
+                label="Acceptance"
+                value={@task.acceptance || ""}
+                rows="4"
+              />
+            </div>
+            <p :if={@edit_error} class="sm:col-span-2 text-sm text-error">{@edit_error}</p>
+            <div class="sm:col-span-2 modal-action">
+              <.button type="button" phx-click="cancel_edit" class="btn btn-sm btn-ghost">
+                Cancel
+              </.button>
+              <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+                Save
+              </.button>
+            </div>
+          </.form>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_edit"></div>
+      </div>
+
+      <%!-- Close modal --%>
+      <div :if={@close_modal && @task} class="modal modal-open" id="task-close-modal">
+        <div class="modal-box">
+          <h3 class="font-semibold text-lg mb-3">Close {@issue_label}</h3>
+          <p class="text-sm text-base-content/70 mb-3">
+            Closing <code class="text-xs">{@task_id}</code>
+            takes it out of the routing pool. The reason is recorded in the audit log.
+          </p>
+          <.form for={%{}} as={:close} id="task-close-form" phx-submit="close_task" class="space-y-2">
+            <.input
+              type="textarea"
+              name="close[reason]"
+              label="Reason (optional)"
+              value=""
+              rows="3"
+              placeholder="Why is this being closed? e.g. superseded by bd-other"
+            />
+            <p :if={@close_error} class="text-sm text-error">{@close_error}</p>
+            <div class="modal-action">
+              <.button type="button" phx-click="cancel_close" class="btn btn-sm btn-ghost">
+                Cancel
+              </.button>
+              <.button type="submit" class="btn btn-sm btn-error">Close it</.button>
+            </div>
+          </.form>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_close"></div>
+      </div>
+
+      <%!-- Dispatch modal. The acknowledgement checkbox IS the confirmation
+           step — the server refuses an un-acknowledged submit. --%>
+      <div :if={@dispatch_modal && @task} class="modal modal-open" id="task-dispatch-modal">
+        <div class="modal-box">
+          <h3 class="font-semibold text-lg mb-1">Dispatch a {@worker_label}</h3>
+          <p class="text-sm text-base-content/70 mb-3">
+            Spawns an agent on <code class="text-xs">{@task_id}</code> in a fresh worktree.
+          </p>
+
+          <div role="alert" class="alert alert-warning py-2 mb-3">
+            <.icon name="hero-exclamation-triangle" class="size-5 shrink-0" />
+            <span class="text-sm">
+              This spends real <strong>API credits</strong>
+              and may open a pull request. There is no undo beyond stopping the {@worker_label}.
+            </span>
+          </div>
+
+          <.form
+            for={%{}}
+            as={:dispatch}
+            id="task-dispatch-form"
+            phx-submit="dispatch"
+            class="space-y-2"
+          >
+            <.input
+              type="select"
+              name="dispatch[provider]"
+              label="Provider"
+              options={@provider_options}
+              value=""
+            />
+            <.input
+              type="select"
+              name="dispatch[repo]"
+              label="Repo"
+              options={@repo_options}
+              value=""
+            />
+            <.input
+              type="checkbox"
+              name="dispatch[acknowledge]"
+              label="I understand this spends API credits."
+              value={false}
+            />
+            <p :if={@dispatch_error} class="text-sm text-error">{@dispatch_error}</p>
+            <div class="modal-action">
+              <.button type="button" phx-click="cancel_dispatch" class="btn btn-sm btn-ghost">
+                Cancel
+              </.button>
+              <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+                Dispatch
+              </.button>
+            </div>
+          </.form>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_dispatch"></div>
       </div>
     </Layouts.app>
     """
