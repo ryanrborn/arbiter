@@ -957,10 +957,27 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # Classify why the reviewer's subprocess exited, using the same signature
   # matching the main Worker uses to detect auth expiry / credit exhaustion /
-  # rate limiting / etc (`Arbiter.Worker.StopReason`). `state.lines` is
-  # newest-first (each line is prepended as captured); `classify/2` only scans
-  # the tail so order doesn't matter, but reverse for consistency with the rest
-  # of this module.
+  # rate limiting / etc (`Arbiter.Worker.StopReason`). `classify/2` scans the
+  # *last* 80 entries (see its `@doc` and `signature_haystack/1`), so it must
+  # be handed oldest-first; `state.lines` is newest-first, hence the reverse.
+  #
+  # On a clean exit (status 0) the reviewer's own review prose is on the wire,
+  # and the infra signatures (`/login`, `401`, `unauthorized`, `rate limit`,
+  # `expired`, ...) are broad enough to appear in ordinary review text about
+  # auth/quota code — including this very module's fixtures. Misclassifying
+  # that as an infra failure would skip the verdict re-prompt and fabricate a
+  # "re-authenticate" diagnosis for a reviewer that simply omitted its VERDICT
+  # line. So on exit 0 we only trust `:stream_schema_drift`, whose marker is
+  # harness-emitted (unparseable stream schema), not model prose, and so can't
+  # collide with review text. A non-zero exit means the subprocess genuinely
+  # failed, so the full classification applies there.
+  defp classify_stop(0, lines) do
+    case StopReason.classify(0, Enum.reverse(lines)) do
+      %StopReason{category: :stream_schema_drift} = reason -> reason
+      _ -> nil
+    end
+  end
+
   defp classify_stop(status, lines) when is_integer(status) do
     StopReason.classify(status, Enum.reverse(lines))
   end

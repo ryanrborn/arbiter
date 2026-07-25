@@ -41,6 +41,10 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
   @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
+  @no_verdict_auth_prose Path.expand(
+                           "../../fixtures/review_no_verdict_auth_prose.sh",
+                           __DIR__
+                         )
 
   # ---- pure verdict parsing ------------------------------------------------
 
@@ -953,6 +957,49 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "did not expect a re-prompt run row for an auth-expiry crash"
+    end
+
+    # bd-b2glhm round 2: a reviewer that exits 0 (finished cleanly) but merely
+    # omitted its VERDICT line must still get a re-prompt, even when its review
+    # prose happens to contain infra-failure signature words ("/login", "401",
+    # "retry after backoff"). The infra classifier must not run against an
+    # exit-0 subprocess's own output — only a genuine non-zero failure (or the
+    # harness-emitted :stream_schema_drift marker) should skip the re-prompt.
+    test "a reviewer that exits 0 without a verdict is re-prompted even if its prose mentions auth/retry",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@no_verdict_auth_prose],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      # The re-prompt WAS attempted — its run row exists — instead of being
+      # skipped by a false-positive infra-failure classification.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "expected a re-prompt to have been attempted despite the auth/retry-flavored prose"
     end
 
     # bd-3y2mda: a REQUEST_CHANGES verdict with NO findings is useless (the
