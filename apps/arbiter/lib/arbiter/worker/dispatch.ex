@@ -1037,11 +1037,23 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Enumerate all repo names that have a resolvable path, drawn from:
-  #   1. The task's workspace config `repo_paths` map (or legacy `rig_paths`).
-  #   2. The global Application env `:repo_paths` map.
-  # Both sources are combined, de-duplicated, and sorted.
-  defp all_available_repos(%Issue{workspace_id: ws_id}) do
+  @doc """
+  Enumerate all repo names this task could be dispatched against — every name
+  that has a **resolvable** path, drawn from:
+
+    1. The task's workspace config `repo_paths` map (or legacy `rig_paths`).
+    2. The global Application env `:repo_paths` map.
+
+  Both sources are combined, de-duplicated, and sorted. Entries whose
+  configured path doesn't resolve (moved or deleted directory) are dropped, so
+  a caller offering these as choices can't offer one that would later fail
+  with `{:repo_not_found, repo}`.
+
+  Public so the dashboard's dispatch modal can populate its repo select from
+  the same list dispatch itself resolves against (bd-2cv4ws).
+  """
+  @spec all_available_repos(Issue.t()) :: [String.t()]
+  def all_available_repos(%Issue{workspace_id: ws_id}) do
     ws_repos =
       case load_workspace_config(ws_id) do
         %{"repo_paths" => rp} when is_map(rp) ->

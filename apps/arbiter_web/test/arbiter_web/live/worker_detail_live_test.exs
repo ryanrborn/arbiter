@@ -320,6 +320,10 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
     # Confirming runs the same `Dispatch.resume/2` path `arb worker resume`
     # uses. This task has no preserved worktree, so it fails there — before
     # any agent is spawned — and the reason is surfaced to the operator.
+    #
+    # Resume runs in start_async/3 (same reason dispatch does — a provider CLI
+    # auth preflight is far too long to hold the LiveView process for), so the
+    # click only shows the pending state and the outcome lands after.
     test "confirming retry runs the real resume path and surfaces its error",
          %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "pd-retry-run", workspace_id: ws.id})
@@ -329,10 +333,33 @@ defmodule ArbiterWeb.WorkerDetailLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
       view |> element(~s(button[phx-click="open_retry"])) |> render_click()
 
-      html = render_click(view, "retry")
+      pending = render_click(view, "retry")
+      assert pending =~ ~s(id="worker-retry-pending")
 
+      html = render_async(view)
+
+      # The modal stays open with the reason inline, rather than closing and
+      # leaving the operator to catch a flash.
       assert html =~ "Retry failed"
-      refute html =~ ~s(id="worker-retry-modal")
+      assert html =~ ~s(id="worker-retry-modal")
+      refute html =~ ~s(id="worker-retry-pending")
+    end
+
+    test "a second retry click while one is in flight does not spend credits twice",
+         %{conn: conn, ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "pd-retry-double", workspace_id: ws.id})
+      {:ok, pid} = Worker.start(task_id: task.id, repo: "r")
+      :ok = Worker.fail(pid, :boom)
+
+      {:ok, view, _html} = live(conn, ~p"/workers/#{task.id}")
+      view |> element(~s(button[phx-click="open_retry"])) |> render_click()
+
+      render_click(view, "retry")
+      # Still pending — the guard clause drops this one on the floor rather
+      # than starting a second resume.
+      render_click(view, "retry")
+
+      assert render_async(view) =~ "Retry failed"
     end
   end
 

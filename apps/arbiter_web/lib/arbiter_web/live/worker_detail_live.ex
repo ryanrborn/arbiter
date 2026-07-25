@@ -48,6 +48,8 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:workspace_label, "workspace")
       |> assign(:pr_label, "pull request")
       |> assign(:retry_modal, false)
+      |> assign(:retry_error, nil)
+      |> assign(:retrying, false)
       |> refresh_all()
       |> seed_output_lines()
 
@@ -126,29 +128,31 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # the modal is the confirmation step — the button only opens it.
 
   def handle_event("open_retry", _params, socket) do
-    {:noreply, assign(socket, :retry_modal, true)}
+    {:noreply, assign(socket, retry_modal: true, retry_error: nil)}
   end
 
   def handle_event("cancel_retry", _params, socket) do
-    {:noreply, assign(socket, :retry_modal, false)}
+    {:noreply, assign(socket, retry_modal: false, retry_error: nil)}
   end
 
+  # A second click while one is in flight would spend credits twice.
+  def handle_event("retry", _params, %{assigns: %{retrying: true}} = socket) do
+    {:noreply, socket}
+  end
+
+  # `Dispatch.resume/2` runs the same expensive path dispatch does — provider
+  # auth preflight (a CLI shell-out), quota gating, and an agent spawn. Running
+  # it inline would block the LiveView process for the whole of it, stalling
+  # queued `:worker_lifecycle` / `:worker_output` messages and risking the
+  # client giving up before the result lands. Run it async and hold the modal
+  # in a pending state instead.
   def handle_event("retry", _params, socket) do
-    socket = assign(socket, :retry_modal, false)
+    task_id = socket.assigns.task_id
 
-    case Dispatch.resume(socket.assigns.task_id) do
-      {:ok, _result} ->
-        {:noreply,
-         socket
-         |> put_flash(
-           :info,
-           "Resumed #{socket.assigns.task_id} with a fresh #{socket.assigns.worker_label}."
-         )
-         |> refresh_all()}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Retry failed: #{resume_failure(reason)}")}
-    end
+    {:noreply,
+     socket
+     |> assign(retrying: true, retry_error: nil)
+     |> start_async(:retry, fn -> Dispatch.resume(task_id) end)}
   end
 
   def handle_event("compose_change", %{"body" => body}, socket) do
@@ -194,6 +198,36 @@ defmodule ArbiterWeb.WorkerDetailLive do
   def handle_event("mark_read", %{"id" => id}, socket) do
     _ = Message.mark_read(id)
     {:noreply, refresh_mailbox(socket)}
+  end
+
+  # ---- async results ----
+
+  @impl true
+  def handle_async(:retry, {:ok, {:ok, _result}}, socket) do
+    {:noreply,
+     socket
+     |> assign(retrying: false, retry_modal: false, retry_error: nil)
+     |> put_flash(
+       :info,
+       "Resumed #{socket.assigns.task_id} with a fresh #{socket.assigns.worker_label}."
+     )
+     |> refresh_all()}
+  end
+
+  def handle_async(:retry, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:retrying, false)
+     |> assign(:retry_error, "Retry failed: #{resume_failure(reason)}")
+     |> refresh_all()}
+  end
+
+  def handle_async(:retry, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:retrying, false)
+     |> assign(:retry_error, "Retry crashed: #{inspect(reason)}")
+     |> refresh_all()}
   end
 
   # ---- data ----
@@ -1042,12 +1076,32 @@ defmodule ArbiterWeb.WorkerDetailLive do
             </span>
           </div>
 
+          <p
+            :if={@retrying}
+            id="worker-retry-pending"
+            class="text-sm text-base-content/70 flex items-center gap-2 mb-2"
+          >
+            <span class="loading loading-spinner loading-xs"></span>
+            Resuming — checking provider auth and quota, then attaching a fresh agent. Don't close this tab.
+          </p>
+          <p :if={@retry_error} class="text-sm text-error mb-2">{@retry_error}</p>
+
           <div class="modal-action">
-            <.button type="button" phx-click="cancel_retry" class="btn btn-sm btn-ghost">
+            <.button
+              type="button"
+              phx-click="cancel_retry"
+              class="btn btn-sm btn-ghost"
+              disabled={@retrying}
+            >
               Cancel
             </.button>
-            <.button phx-click="retry" variant="primary" class="btn btn-sm btn-primary">
-              Retry
+            <.button
+              phx-click="retry"
+              variant="primary"
+              class="btn btn-sm btn-primary"
+              disabled={@retrying}
+            >
+              {if @retrying, do: "Resuming…", else: "Retry"}
             </.button>
           </div>
         </div>
