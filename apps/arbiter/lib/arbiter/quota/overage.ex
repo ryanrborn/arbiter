@@ -14,6 +14,7 @@ defmodule Arbiter.Quota.Overage do
   """
 
   alias Arbiter.Quota.AnthropicQuota
+  alias Arbiter.Quota.Gate.Snapshot
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Usage
 
@@ -24,7 +25,7 @@ defmodule Arbiter.Quota.Overage do
   overage indicator and alert threshold compare against. Returns `0.0` on any
   read error so accounting never disrupts dispatch.
   """
-  @spec windowed_spend(Workspace.t() | nil, AnthropicQuota.t() | nil) :: float()
+  @spec windowed_spend(Workspace.t() | nil, Snapshot.t() | AnthropicQuota.t() | nil) :: float()
   def windowed_spend(workspace, quota) do
     ws_id = workspace && workspace.id
 
@@ -48,10 +49,20 @@ defmodule Arbiter.Quota.Overage do
 
   @doc """
   Start of the current 5h window as a `DateTime`. Derived from the snapshot's
-  `reset_5h_at` (window opens 5h before it resets); falls back to `now - 5h`.
+  primary-window reset (the window opens 5h before it resets); falls back to
+  `now - 5h`.
+
+  Accepts a normalized `Arbiter.Quota.Gate.Snapshot` (any provider) as well as a
+  raw `AnthropicQuota` row. The 5h span is Anthropic's; for Codex / Google —
+  which have no paid-overage passthrough — this is only ever the accounting
+  window for the alert figure, so the trailing-5h approximation is deliberate.
   """
-  @spec window_start(AnthropicQuota.t() | nil) :: DateTime.t()
+  @spec window_start(Snapshot.t() | AnthropicQuota.t() | nil) :: DateTime.t()
   def window_start(%AnthropicQuota{reset_5h_at: %DateTime{} = reset}) do
+    DateTime.add(reset, -@five_hours_seconds, :second)
+  end
+
+  def window_start(%Snapshot{reset_at: %DateTime{} = reset}) do
     DateTime.add(reset, -@five_hours_seconds, :second)
   end
 
