@@ -18,6 +18,7 @@ defmodule ArbiterWeb.WorkerDetailLive do
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
+  alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.Watchdog
   alias Arbiter.Workers.Run
   alias Arbiter.Usage.Event, as: UsageEvent
@@ -46,6 +47,9 @@ defmodule ArbiterWeb.WorkerDetailLive do
       |> assign(:repo_label, "repo")
       |> assign(:workspace_label, "workspace")
       |> assign(:pr_label, "pull request")
+      |> assign(:retry_modal, false)
+      |> assign(:retry_error, nil)
+      |> assign(:retrying, false)
       |> refresh_all()
       |> seed_output_lines()
 
@@ -116,6 +120,41 @@ defmodule ArbiterWeb.WorkerDetailLive do
     end
   end
 
+  # ---- retry / resume ----
+  #
+  # The dashboard equivalent of `arb worker resume`: re-attach a *fresh* agent
+  # to the task's preserved worktree, briefed with a git-derived summary of
+  # what the stopped run already did. Like dispatch, it spends API credits, so
+  # the modal is the confirmation step — the button only opens it.
+
+  def handle_event("open_retry", _params, socket) do
+    {:noreply, assign(socket, retry_modal: true, retry_error: nil)}
+  end
+
+  def handle_event("cancel_retry", _params, socket) do
+    {:noreply, assign(socket, retry_modal: false, retry_error: nil)}
+  end
+
+  # A second click while one is in flight would spend credits twice.
+  def handle_event("retry", _params, %{assigns: %{retrying: true}} = socket) do
+    {:noreply, socket}
+  end
+
+  # `Dispatch.resume/2` runs the same expensive path dispatch does — provider
+  # auth preflight (a CLI shell-out), quota gating, and an agent spawn. Running
+  # it inline would block the LiveView process for the whole of it, stalling
+  # queued `:worker_lifecycle` / `:worker_output` messages and risking the
+  # client giving up before the result lands. Run it async and hold the modal
+  # in a pending state instead.
+  def handle_event("retry", _params, socket) do
+    task_id = socket.assigns.task_id
+
+    {:noreply,
+     socket
+     |> assign(retrying: true, retry_error: nil)
+     |> start_async(:retry, fn -> Dispatch.resume(task_id) end)}
+  end
+
   def handle_event("compose_change", %{"body" => body}, socket) do
     {:noreply, assign(socket, :compose_body, body)}
   end
@@ -159,6 +198,36 @@ defmodule ArbiterWeb.WorkerDetailLive do
   def handle_event("mark_read", %{"id" => id}, socket) do
     _ = Message.mark_read(id)
     {:noreply, refresh_mailbox(socket)}
+  end
+
+  # ---- async results ----
+
+  @impl true
+  def handle_async(:retry, {:ok, {:ok, _result}}, socket) do
+    {:noreply,
+     socket
+     |> assign(retrying: false, retry_modal: false, retry_error: nil)
+     |> put_flash(
+       :info,
+       "Resumed #{socket.assigns.task_id} with a fresh #{socket.assigns.worker_label}."
+     )
+     |> refresh_all()}
+  end
+
+  def handle_async(:retry, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:retrying, false)
+     |> assign(:retry_error, "Retry failed: #{resume_failure(reason)}")
+     |> refresh_all()}
+  end
+
+  def handle_async(:retry, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:retrying, false)
+     |> assign(:retry_error, "Retry crashed: #{inspect(reason)}")
+     |> refresh_all()}
   end
 
   # ---- data ----
@@ -228,6 +297,40 @@ defmodule ArbiterWeb.WorkerDetailLive do
   # row is gone (worker outlived its Issue, or a fresh ad-hoc run).
   defp workspace_id(%{assigns: %{task: %Issue{workspace_id: ws}}}) when is_binary(ws), do: ws
   defp workspace_id(_socket), do: nil
+
+  # Statuses where the worker is still working the task. `Dispatch.resume/2`
+  # refuses these outright (stop it first), so we don't offer the action.
+  @active_statuses [
+    :idle,
+    :resuming,
+    :running,
+    :awaiting,
+    :awaiting_review_gate,
+    :awaiting_review
+  ]
+
+  # Retry is offered when the task exists and no worker is actively working it
+  # — a failed/stopped snapshot, or no snapshot at all (the node restarted, but
+  # the worktree may well still be on disk).
+  defp retryable?(nil, _snapshot), do: false
+  defp retryable?(%Issue{status: :closed}, _snapshot), do: false
+  defp retryable?(%Issue{}, nil), do: true
+  defp retryable?(%Issue{}, %{status: status}), do: status not in @active_statuses
+  defp retryable?(_task, _snapshot), do: false
+
+  defp resume_failure(:no_outpost),
+    do:
+      "the worktree for this task is gone, so there's nothing to resume — " <>
+        "dispatch a fresh worker from the issue page instead."
+
+  defp resume_failure(:repo_unknown),
+    do: "no repo could be resolved for this task — dispatch it explicitly instead."
+
+  defp resume_failure({:acolyte_active, status}),
+    do: "a worker is still active (#{status}) — stop it first."
+
+  defp resume_failure({:task_closed, _id}), do: "the issue is closed."
+  defp resume_failure(reason), do: inspect(reason)
 
   defp refresh_snapshot(socket) do
     snap =
@@ -545,6 +648,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
                       <.icon name="hero-stop-circle" class="size-4" /> Stop {@worker_label}
                     </button>
                   <% end %>
+                  <button
+                    :if={retryable?(@task, @snapshot)}
+                    phx-click="open_retry"
+                    class="btn btn-sm btn-primary gap-1.5 transition-all duration-200 active:scale-95"
+                  >
+                    <.icon name="hero-arrow-path" class="size-4" /> Retry
+                  </button>
                 </div>
               </div>
             </div>
@@ -851,6 +961,13 @@ defmodule ArbiterWeb.WorkerDetailLive do
               <p class="text-xs text-base-content/50">
                 It may have stopped, or the Phoenix node was restarted since it ran.
               </p>
+              <button
+                :if={retryable?(@task, @snapshot)}
+                phx-click="open_retry"
+                class="btn btn-sm btn-primary gap-1.5 mt-2"
+              >
+                <.icon name="hero-arrow-path" class="size-4" /> Retry
+              </button>
             </div>
           </section>
         <% end %>
@@ -937,6 +1054,58 @@ defmodule ArbiterWeb.WorkerDetailLive do
             <.icon name="hero-arrow-left" class="size-4" /> Back to dashboard
           </.link>
         </div>
+      </div>
+
+      <%!-- Retry modal. Confirming re-spawns an agent, so this is the
+           confirmation step for a credit-spending action — same contract as
+           the dispatch modal on the issue page. --%>
+      <div :if={@retry_modal} class="modal modal-open" id="worker-retry-modal">
+        <div class="modal-box">
+          <h3 class="font-semibold text-lg mb-1">Retry {@task_id}</h3>
+          <p class="text-sm text-base-content/70 mb-3">
+            Attaches a <strong>fresh</strong>
+            agent to the preserved worktree, briefed with a summary of what the
+            stopped run already committed — it continues rather than starting over.
+          </p>
+
+          <div role="alert" class="alert alert-warning py-2 mb-3">
+            <.icon name="hero-exclamation-triangle" class="size-5 shrink-0" />
+            <span class="text-sm">
+              This spends real <strong>API credits</strong>. If the worktree is gone,
+              the retry is refused rather than silently starting from scratch.
+            </span>
+          </div>
+
+          <p
+            :if={@retrying}
+            id="worker-retry-pending"
+            class="text-sm text-base-content/70 flex items-center gap-2 mb-2"
+          >
+            <span class="loading loading-spinner loading-xs"></span>
+            Resuming — checking provider auth and quota, then attaching a fresh agent. Don't close this tab.
+          </p>
+          <p :if={@retry_error} class="text-sm text-error mb-2">{@retry_error}</p>
+
+          <div class="modal-action">
+            <.button
+              type="button"
+              phx-click="cancel_retry"
+              class="btn btn-sm btn-ghost"
+              disabled={@retrying}
+            >
+              Cancel
+            </.button>
+            <.button
+              phx-click="retry"
+              variant="primary"
+              class="btn btn-sm btn-primary"
+              disabled={@retrying}
+            >
+              {if @retrying, do: "Resuming…", else: "Retry"}
+            </.button>
+          </div>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_retry"></div>
       </div>
     </Layouts.app>
     """
