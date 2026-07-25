@@ -40,6 +40,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @revise Path.expand("../../fixtures/revise.sh", __DIR__)
   @revise_huge Path.expand("../../fixtures/revise_huge.sh", __DIR__)
   @timeout_retry Path.expand("../../fixtures/review_timeout_retry.sh", __DIR__)
+  @auth_expired Path.expand("../../fixtures/review_auth_expired.sh", __DIR__)
 
   # ---- pure verdict parsing ------------------------------------------------
 
@@ -903,6 +904,55 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "expected a re-prompt to have been attempted before escalating"
+    end
+
+    # bd-b2glhm: a reviewer subprocess that dies from an infrastructure failure
+    # (here, expired credentials) never gets far enough to print a VERDICT line.
+    # Re-prompting it is pointless — the same expired credentials doom the retry
+    # identically — so the ReviewGate must recognize the failure signature from
+    # the exit status/output and escalate immediately with the real reason,
+    # rather than burning a re-prompt and reporting the generic "no parseable
+    # VERDICT line, even after a verdict re-prompt" message that masks the cause.
+    test "a reviewer that crashes on auth expiry escalates with the real reason, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@auth_expired],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_inconclusive
+
+      escalations = Message.inbox("admiral", workspace_id: ws.id)
+      escalation = Enum.find(escalations, &(&1.directive_ref == task.id))
+      assert escalation, "expected an escalation for the task"
+      assert escalation.body =~ "credentials expired"
+
+      # No re-prompt run row: retrying against the same expired credentials
+      # would fail identically, so the gate must not waste an attempt on it.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt run row for an auth-expiry crash"
     end
 
     # bd-3y2mda: a REQUEST_CHANGES verdict with NO findings is useless (the
