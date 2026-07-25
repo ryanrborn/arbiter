@@ -48,6 +48,23 @@ defmodule ArbiterWeb.TaskForm do
   """
   def editable_status_options, do: [{"open", "open"}, {"in_progress", "in_progress"}]
 
+  @doc """
+  The value to render for `key`, preferring what the operator last submitted.
+
+  LiveView only preserves the currently-focused input across a re-render; every
+  other field is morphed back to whatever the server rendered. So on a rejected
+  submit the form re-renders from the stashed params, falling back to `default`
+  (blank for a create form, the persisted attribute for an edit form) when the
+  field wasn't submitted at all. A submitted `""` is kept as `""` — the
+  operator deliberately cleared it.
+  """
+  def value(params, key, default \\ "") do
+    case Map.get(params || %{}, key) do
+      nil -> default
+      submitted -> submitted
+    end
+  end
+
   @doc "Trim a form string, returning `nil` for blank."
   def trimmed(nil), do: nil
 

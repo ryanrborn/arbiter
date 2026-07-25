@@ -236,6 +236,33 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert reloaded.title == "keep-me"
     end
 
+    # LiveView preserves only the focused input across a re-render, so a
+    # rejected save used to snap every other field back to the persisted
+    # record — losing a freshly-rewritten description.
+    test "a rejected save re-renders what was typed", %{conn: conn, ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "keep-me",
+          description: "the old body",
+          workspace_id: ws.id
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      view |> element(~s(button[phx-click="open_edit"])) |> render_click()
+
+      html =
+        view
+        |> form("#task-edit-form", %{
+          "task" => %{"title" => "  ", "description" => "a rewritten body worth keeping"}
+        })
+        |> render_submit()
+
+      # Only the edit textarea can be the source of this string — the page
+      # body still renders the (unchanged) persisted description.
+      assert html =~ "a rewritten body worth keeping"
+      assert html =~ ~s(id="task-edit-modal")
+    end
+
     test "a closed task offers no Edit action", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "done", workspace_id: ws.id})
       {:ok, _} = Ash.update(task, %{}, action: :close)
@@ -321,21 +348,58 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
     # workspace has no repos configured, so it fails at repo resolution —
     # before any agent is spawned — which is exactly the proof the LiveView
     # calls the same Dispatch entry point the CLI/MCP use.
+    #
+    # Dispatch runs in start_async/3 (it shells out to the provider CLI for the
+    # auth preflight, so it must not block the LiveView process), hence the
+    # submit itself only shows the pending state and the outcome lands after.
     test "an acknowledged dispatch reaches the real dispatch path", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "acked", workspace_id: ws.id})
 
       {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
       view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
 
-      html =
+      pending =
         view
         |> form("#task-dispatch-form", %{
           "dispatch" => %{"provider" => "claude", "repo" => "", "acknowledge" => "true"}
         })
         |> render_submit()
 
+      assert pending =~ ~s(id="task-dispatch-pending")
+
+      html = render_async(view)
+
       assert html =~ "Dispatch failed"
       assert html =~ "repo"
+      refute html =~ ~s(id="task-dispatch-pending")
+    end
+
+    # The dropdown must not offer a repo `Dispatch` would then reject with
+    # {:repo_not_found, repo} — after the operator has already acknowledged the
+    # credit spend. `Dispatch.all_available_repos/1` is the single source of
+    # truth for both lists.
+    test "the repo dropdown omits repo_paths entries that can't resolve a path",
+         %{conn: conn} do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "repo-ws-#{System.unique_integer([:positive])}",
+          prefix: "rpo",
+          config: %{
+            "repo_paths" => %{
+              "resolvable-repo" => "/tmp/arb-resolvable",
+              # A real config shape that carries no usable path.
+              "pathless-repo" => %{"target_branch" => "main"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "repo-choices", workspace_id: ws.id})
+
+      {:ok, view, _html} = live(conn, ~p"/tasks/#{task.id}")
+      html = view |> element(~s(button[phx-click="open_dispatch"])) |> render_click()
+
+      assert html =~ "resolvable-repo"
+      refute html =~ "pathless-repo"
     end
 
     # The provider select can only offer known agents, so this guards the

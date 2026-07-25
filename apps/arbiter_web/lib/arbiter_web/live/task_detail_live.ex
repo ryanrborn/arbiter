@@ -21,7 +21,10 @@ defmodule ArbiterWeb.TaskDetailLive do
     * **Dispatch** — `Arbiter.Worker.Dispatch.dispatch/2`, offered only when
       no worker is attached and the task is open. It spends real API
       credits, so the modal requires an explicit acknowledgement checkbox
-      before the server will call dispatch at all.
+      before the server will call dispatch at all. Dispatch runs in
+      `start_async/3`, not inline: it shells out to the provider CLI for the
+      auth preflight, gates on quota, provisions a worktree and spawns the
+      agent, which is far too long to hold the LiveView process for.
   """
 
   use ArbiterWeb, :live_view
@@ -62,10 +65,14 @@ defmodule ArbiterWeb.TaskDetailLive do
      |> assign(:rig_label, "repo")
      |> assign(:edit_modal, false)
      |> assign(:edit_error, nil)
+     |> assign(:edit_params, %{})
      |> assign(:close_modal, false)
      |> assign(:close_error, nil)
+     |> assign(:close_params, %{})
      |> assign(:dispatch_modal, false)
      |> assign(:dispatch_error, nil)
+     |> assign(:dispatch_params, %{})
+     |> assign(:dispatching, false)
      |> assign(:repo_options, [])
      |> assign(:priority_options, TaskForm.priority_options())
      |> assign(:difficulty_options, TaskForm.difficulty_options())
@@ -100,15 +107,19 @@ defmodule ArbiterWeb.TaskDetailLive do
 
   @impl true
   def handle_event("open_edit", _params, socket) do
-    {:noreply, assign(socket, edit_modal: true, edit_error: nil)}
+    {:noreply, assign(socket, edit_modal: true, edit_error: nil, edit_params: %{})}
   end
 
   def handle_event("cancel_edit", _params, socket) do
-    {:noreply, assign(socket, edit_modal: false, edit_error: nil)}
+    {:noreply, assign(socket, edit_modal: false, edit_error: nil, edit_params: %{})}
   end
 
   def handle_event("save_edit", %{"task" => params}, socket) do
     task = socket.assigns.task
+
+    # Keep what was typed so a rejected save re-renders it rather than
+    # snapping every field back to the persisted record.
+    socket = assign(socket, :edit_params, params)
 
     with %Issue{} <- task,
          {:ok, title} <- fetch_title(params),
@@ -131,7 +142,7 @@ defmodule ArbiterWeb.TaskDetailLive do
         {:ok, _updated} ->
           {:noreply,
            socket
-           |> assign(edit_modal: false, edit_error: nil)
+           |> assign(edit_modal: false, edit_error: nil, edit_params: %{})
            |> put_flash(:info, "Updated #{socket.assigns.issue_label}.")
            |> refresh_all()}
 
@@ -147,15 +158,17 @@ defmodule ArbiterWeb.TaskDetailLive do
   # ---- close ----
 
   def handle_event("open_close", _params, socket) do
-    {:noreply, assign(socket, close_modal: true, close_error: nil)}
+    {:noreply, assign(socket, close_modal: true, close_error: nil, close_params: %{})}
   end
 
   def handle_event("cancel_close", _params, socket) do
-    {:noreply, assign(socket, close_modal: false, close_error: nil)}
+    {:noreply, assign(socket, close_modal: false, close_error: nil, close_params: %{})}
   end
 
   def handle_event("close_task", params, socket) do
-    reason = params |> Map.get("close", %{}) |> Map.get("reason") |> TaskForm.trimmed()
+    close_params = Map.get(params, "close", %{})
+    reason = close_params |> Map.get("reason") |> TaskForm.trimmed()
+    socket = assign(socket, :close_params, close_params)
 
     case socket.assigns.task do
       %Issue{} = task ->
@@ -163,7 +176,7 @@ defmodule ArbiterWeb.TaskDetailLive do
           {:ok, _closed} ->
             {:noreply,
              socket
-             |> assign(close_modal: false, close_error: nil)
+             |> assign(close_modal: false, close_error: nil, close_params: %{})
              |> put_flash(:info, "Closed #{socket.assigns.issue_label}.")
              |> refresh_all()}
 
@@ -186,32 +199,66 @@ defmodule ArbiterWeb.TaskDetailLive do
   def handle_event("open_dispatch", _params, socket) do
     {:noreply,
      socket
-     |> assign(dispatch_modal: true, dispatch_error: nil)
-     |> assign(:repo_options, repo_options(socket.assigns.workspace))}
+     |> assign(dispatch_modal: true, dispatch_error: nil, dispatch_params: %{})
+     |> assign(:repo_options, repo_options(socket.assigns.task))}
   end
 
   def handle_event("cancel_dispatch", _params, socket) do
-    {:noreply, assign(socket, dispatch_modal: false, dispatch_error: nil)}
+    {:noreply, assign(socket, dispatch_modal: false, dispatch_error: nil, dispatch_params: %{})}
   end
 
+  # A second submit while one is in flight would spend credits twice.
+  def handle_event("dispatch", _params, %{assigns: %{dispatching: true}} = socket) do
+    {:noreply, socket}
+  end
+
+  # `Dispatch.dispatch/2` shells out to the provider CLI for the auth preflight,
+  # gates on quota, provisions a worktree and spawns the agent — seconds to tens
+  # of seconds. Blocking the LiveView process on that would stall queued
+  # lifecycle messages and risk the client giving up mid-dispatch, leaving the
+  # operator unsure whether credits were spent. So it runs in `start_async/3`
+  # with the modal held open in a pending state until the result lands.
   def handle_event("dispatch", %{"dispatch" => params}, socket) do
+    socket = assign(socket, :dispatch_params, params)
+    task_id = socket.assigns.task_id
+
     with :ok <- ensure_acknowledged(params["acknowledge"]),
          {:ok, opts} <- dispatch_opts(params) do
-      case Dispatch.dispatch(socket.assigns.task_id, opts) do
-        {:ok, _result} ->
-          {:noreply,
-           socket
-           |> assign(dispatch_modal: false, dispatch_error: nil)
-           |> put_flash(:info, "Dispatched a #{socket.assigns.worker_label}.")
-           |> refresh_all()}
-
-        {:error, reason} ->
-          {:noreply,
-           assign(socket, :dispatch_error, "Dispatch failed: #{dispatch_failure(reason)}")}
-      end
+      {:noreply,
+       socket
+       |> assign(dispatching: true, dispatch_error: nil)
+       |> start_async(:dispatch, fn -> Dispatch.dispatch(task_id, opts) end)}
     else
       {:error, message} -> {:noreply, assign(socket, :dispatch_error, message)}
     end
+  end
+
+  @impl true
+  def handle_async(:dispatch, {:ok, {:ok, _result}}, socket) do
+    {:noreply,
+     socket
+     |> assign(dispatching: false, dispatch_modal: false)
+     |> assign(dispatch_error: nil, dispatch_params: %{})
+     |> put_flash(:info, "Dispatched a #{socket.assigns.worker_label}.")
+     |> refresh_all()}
+  end
+
+  def handle_async(:dispatch, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:dispatching, false)
+     |> assign(:dispatch_error, "Dispatch failed: #{dispatch_failure(reason)}")
+     |> refresh_all()}
+  end
+
+  # The task/worktree may have been left half-provisioned, so refresh rather
+  # than assuming nothing happened.
+  def handle_async(:dispatch, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(:dispatching, false)
+     |> assign(:dispatch_error, "Dispatch crashed: #{inspect(reason)}")
+     |> refresh_all()}
   end
 
   # ---- form helpers ----
@@ -284,23 +331,16 @@ defmodule ArbiterWeb.TaskDetailLive do
     [{"Workspace default", ""}] ++ Enum.map(Agents.valid_agent_types(), &{&1, &1})
   end
 
-  # The repo names this task could be dispatched against: its workspace's
-  # `repo_paths` (legacy `rig_paths`) plus the application-env fallback, the
-  # same two sources `Dispatch` itself resolves against.
-  defp repo_options(workspace) do
-    app_repos = :arbiter |> Application.get_env(:repo_paths, %{}) |> Map.keys()
-
-    ws_repos =
-      case workspace do
-        %Workspace{config: %{"repo_paths" => paths}} when is_map(paths) -> Map.keys(paths)
-        %Workspace{config: %{"rig_paths" => paths}} when is_map(paths) -> Map.keys(paths)
-        _ -> []
-      end
-
-    names = (ws_repos ++ app_repos) |> Enum.uniq() |> Enum.sort()
-
-    [{"Workspace default", ""}] ++ Enum.map(names, &{&1, &1})
+  # The repo names this task could be dispatched against. Delegated to
+  # `Dispatch.all_available_repos/1` rather than re-derived from the workspace
+  # config, so the dropdown can't offer a repo whose configured path no longer
+  # resolves — dispatch would reject it with `{:repo_not_found, repo}` after
+  # the operator had already acknowledged the credit spend.
+  defp repo_options(%Issue{} = task) do
+    [{"Workspace default", ""}] ++ Enum.map(Dispatch.all_available_repos(task), &{&1, &1})
   end
+
+  defp repo_options(_), do: [{"Workspace default", ""}]
 
   defp dispatch_failure(:no_repo_configured),
     do:
@@ -1112,46 +1152,56 @@ defmodule ArbiterWeb.TaskDetailLive do
             class="grid sm:grid-cols-2 gap-x-4"
           >
             <div class="sm:col-span-2">
-              <.input name="task[title]" label="Title" value={@task.title} />
+              <.input
+                name="task[title]"
+                label="Title"
+                value={TaskForm.value(@edit_params, "title", @task.title)}
+              />
             </div>
             <.input
               type="select"
               name="task[status]"
               label="Status"
               options={@status_options}
-              value={to_string(@task.status)}
+              value={TaskForm.value(@edit_params, "status", to_string(@task.status))}
             />
             <.input
               type="select"
               name="task[issue_type]"
               label="Type"
               options={@issue_type_options}
-              value={to_string(@task.issue_type)}
+              value={TaskForm.value(@edit_params, "issue_type", to_string(@task.issue_type))}
             />
             <.input
               type="select"
               name="task[priority]"
               label="Priority"
               options={@priority_options}
-              value={to_string(@task.priority)}
+              value={TaskForm.value(@edit_params, "priority", to_string(@task.priority))}
             />
             <.input
               type="select"
               name="task[difficulty]"
               label="Difficulty"
               options={@difficulty_options}
-              value={if @task.difficulty, do: to_string(@task.difficulty), else: ""}
+              value={
+                TaskForm.value(
+                  @edit_params,
+                  "difficulty",
+                  if(@task.difficulty, do: to_string(@task.difficulty), else: "")
+                )
+              }
             />
             <.input
               name="task[assignee]"
               label="Assignee (optional)"
-              value={@task.assignee || ""}
+              value={TaskForm.value(@edit_params, "assignee", @task.assignee || "")}
               placeholder="who owns this"
             />
             <.input
               name="task[target_branch]"
               label="Target branch (optional)"
-              value={@task.target_branch || ""}
+              value={TaskForm.value(@edit_params, "target_branch", @task.target_branch || "")}
               placeholder="defaults to the repo's main"
             />
             <div class="sm:col-span-2">
@@ -1159,7 +1209,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 type="textarea"
                 name="task[description]"
                 label="Description"
-                value={@task.description || ""}
+                value={TaskForm.value(@edit_params, "description", @task.description || "")}
                 rows="6"
               />
             </div>
@@ -1168,7 +1218,7 @@ defmodule ArbiterWeb.TaskDetailLive do
                 type="textarea"
                 name="task[acceptance]"
                 label="Acceptance"
-                value={@task.acceptance || ""}
+                value={TaskForm.value(@edit_params, "acceptance", @task.acceptance || "")}
                 rows="4"
               />
             </div>
@@ -1199,7 +1249,7 @@ defmodule ArbiterWeb.TaskDetailLive do
               type="textarea"
               name="close[reason]"
               label="Reason (optional)"
-              value=""
+              value={TaskForm.value(@close_params, "reason")}
               rows="3"
               placeholder="Why is this being closed? e.g. superseded by bd-other"
             />
@@ -1244,28 +1294,49 @@ defmodule ArbiterWeb.TaskDetailLive do
               name="dispatch[provider]"
               label="Provider"
               options={@provider_options}
-              value=""
+              value={TaskForm.value(@dispatch_params, "provider")}
+              disabled={@dispatching}
             />
             <.input
               type="select"
               name="dispatch[repo]"
               label="Repo"
               options={@repo_options}
-              value=""
+              value={TaskForm.value(@dispatch_params, "repo")}
+              disabled={@dispatching}
             />
             <.input
               type="checkbox"
               name="dispatch[acknowledge]"
               label="I understand this spends API credits."
-              value={false}
+              value={TaskForm.value(@dispatch_params, "acknowledge", false)}
+              disabled={@dispatching}
             />
+            <p
+              :if={@dispatching}
+              id="task-dispatch-pending"
+              class="text-sm text-base-content/70 flex items-center gap-2"
+            >
+              <span class="loading loading-spinner loading-xs"></span>
+              Dispatching — checking provider auth and quota, provisioning the worktree, spawning the agent. Don't close this tab.
+            </p>
             <p :if={@dispatch_error} class="text-sm text-error">{@dispatch_error}</p>
             <div class="modal-action">
-              <.button type="button" phx-click="cancel_dispatch" class="btn btn-sm btn-ghost">
+              <.button
+                type="button"
+                phx-click="cancel_dispatch"
+                class="btn btn-sm btn-ghost"
+                disabled={@dispatching}
+              >
                 Cancel
               </.button>
-              <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
-                Dispatch
+              <.button
+                type="submit"
+                variant="primary"
+                class="btn btn-sm btn-primary"
+                disabled={@dispatching}
+              >
+                {if @dispatching, do: "Dispatching…", else: "Dispatch"}
               </.button>
             </div>
           </.form>
