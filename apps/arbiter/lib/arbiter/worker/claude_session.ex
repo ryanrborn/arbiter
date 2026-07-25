@@ -413,13 +413,38 @@ defmodule Arbiter.Worker.ClaudeSession do
 
   # Codex streams assistant output as `agent_message_delta` chunks too, so the
   # sentinel can straddle a delta boundary the same way Gemini's can. Mirror the
-  # rolling-buffer safety net for codex sessions.
+  # rolling-buffer safety net for codex sessions, across both wire schemas
+  # (bd-80kdgy).
   defp scan_split_done(%{provider: "codex", split_done_fired: true} = session, _event),
     do: session
 
-  defp scan_split_done(%{provider: "codex"} = session, %{"type" => type} = event)
+  defp scan_split_done(%{provider: "codex"} = session, event) do
+    case codex_assistant_text(event) do
+      nil -> session
+      text -> scan_codex_done(session, text)
+    end
+  end
+
+  defp scan_split_done(session, _event), do: session
+
+  # Assistant text carried by either codex wire schema: the legacy
+  # `agent_message`/`agent_message_delta` events, or the 0.142.5+
+  # `item.completed` envelope around an `agent_message` item (bd-80kdgy).
+  defp codex_assistant_text(%{"type" => type} = event)
        when type in ["agent_message", "agent_message_delta"] do
-    text = event["message"] || event["delta"] || ""
+    event["message"] || event["delta"] || ""
+  end
+
+  defp codex_assistant_text(%{"type" => "item.completed", "item" => %{} = item}) do
+    case item do
+      %{"type" => "agent_message", "text" => text} when is_binary(text) -> text
+      _ -> nil
+    end
+  end
+
+  defp codex_assistant_text(_event), do: nil
+
+  defp scan_codex_done(session, text) do
     buf = scan_tail(Map.get(session, :split_done_buf, "") <> text)
     session = Map.put(session, :split_done_buf, buf)
 
@@ -430,8 +455,6 @@ defmodule Arbiter.Worker.ClaudeSession do
       session
     end
   end
-
-  defp scan_split_done(session, _event), do: session
 
   # Keep only the last 256 graphemes — enough to span a sentinel split across a
   # chunk boundary without growing unbounded on a long turn.
