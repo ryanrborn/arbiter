@@ -257,6 +257,99 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
     end
   end
 
+  # ---- bd-1j5x6u: VERIFICATION: PARTIAL disclosure on the coordinator-dispatched
+  # path (bd-4te55l's High finding, never actually fixed on this path) ---------
+
+  describe "VERIFICATION: PARTIAL disclosure (bd-1j5x6u)" do
+    test "APPROVE disclosing VERIFICATION: PARTIAL is NOT honored: treated as REQUEST_CHANGES, never merges" do
+      # The dangerous half of the original gap: an unverified APPROVE must not
+      # merge unverified code. Mirrors the safe fail-closed default.
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-810"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: APPROVE",
+          "looks good, but I gave up waiting on mix test",
+          "VERIFICATION: PARTIAL — abandoned mix test wait"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      assert Worker.state(pid).status == :failed
+      assert StubMerger.merge_count("pr-810") == 0
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+      assert String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
+    end
+
+    test "APPROVE disclosing VERIFICATION: FULL still completes normally (no false positive)" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-811"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: APPROVE",
+          "looks good",
+          "VERIFICATION: FULL"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+
+      assert Worker.state(pid).status == :completed
+      assert StubMerger.merge_count("pr-811") == 0
+    end
+
+    test "REQUEST_CHANGES disclosing VERIFICATION: PARTIAL fails as before, findings carry the warning banner" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-812"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:12 missing guard",
+          "VERIFICATION: PARTIAL — abandoned mix test wait"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      assert Worker.state(pid).status == :failed
+      assert StubMerger.merge_count("pr-812") == 0
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+      assert String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
+    end
+
+    test "REQUEST_CHANGES disclosing VERIFICATION: FULL carries no warning banner" do
+      ws = new_workspace()
+      task = new_task(ws)
+      {:ok, task} = Ash.update(task, %{pr_ref: "pr-813"}, action: :update)
+
+      pid =
+        start_reviewer(task, [
+          "VERDICT: REQUEST_CHANGES",
+          "- [high] lib/foo.ex:12 missing guard",
+          "VERIFICATION: FULL"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :failed end)
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+      refute String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION")
+    end
+  end
+
   # ---- no-verdict path -------------------------------------------------------
 
   describe "no parseable verdict" do
