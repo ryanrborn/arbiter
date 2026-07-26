@@ -1865,11 +1865,26 @@ defmodule Arbiter.Worker do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 
     case Arbiter.Worker.ReviewGate.parse_verdict(output_lines) do
-      {:approve, _findings} ->
+      {:approve, findings} ->
+        # bd-4te55l: this coordinator-dispatched `worker_review` path has no
+        # ReviewGate GenServer / retry loop to re-prompt against, so unlike
+        # `Arbiter.Worker.ReviewGate`'s own reviewing loop it can't spend a
+        # verdict-retry budget on a fresh pass. Satisfy acceptance option (b)
+        # instead: warn loudly and merge exactly as before — the log line is
+        # the coordinator-facing signal that this approval was issued without
+        # full verification.
+        if Arbiter.Worker.ReviewGate.partial_verification?(findings) do
+          Logger.warning(
+            "Worker: review_only task=#{state.task_id}: reviewer disclosed " <>
+              "VERIFICATION: PARTIAL on an APPROVE (gave up on verification before " <>
+              "finalizing); proceeding to merge anyway — no retry loop on this path"
+          )
+        end
+
         trigger_watchdog_on_approval(state)
 
       {:request_changes, findings} ->
-        park_rejected(state, :request_changes, findings)
+        park_rejected(state, :request_changes, mark_if_unverified(state, findings))
 
       :no_verdict ->
         case derive_verdict_from_adapter(state) do
@@ -1887,11 +1902,31 @@ defmodule Arbiter.Worker do
                 "derived REQUEST_CHANGES from adapter-submitted review"
             )
 
-            park_rejected(state, :request_changes, findings)
+            park_rejected(state, :request_changes, mark_if_unverified(state, findings))
 
           :no_verdict ->
             park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
         end
+    end
+  end
+
+  # bd-4te55l: a REQUEST_CHANGES disclosing `VERIFICATION: PARTIAL` on this
+  # coordinator-dispatched `worker_review` path (no ReviewGate GenServer, no
+  # retry budget to re-prompt against) is marked with the same banner
+  # `Arbiter.Worker.ReviewGate.handle_partial_verification/2` uses on its own
+  # reviewing loop, so `park_rejected/3` carries the warning into the parked
+  # task's notes for the coordinator/implementer to weight accordingly.
+  defp mark_if_unverified(%State{} = state, findings) do
+    if Arbiter.Worker.ReviewGate.partial_verification?(findings) do
+      Logger.warning(
+        "Worker: review_only task=#{state.task_id}: reviewer disclosed VERIFICATION: PARTIAL " <>
+          "(gave up on verification before finalizing); marking findings as unverified " <>
+          "— no retry loop on this path"
+      )
+
+      Arbiter.Worker.ReviewGate.unverified_banner(findings)
+    else
+      findings
     end
   end
 
