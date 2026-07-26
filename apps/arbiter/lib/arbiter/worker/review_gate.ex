@@ -153,6 +153,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ResumeContext
+  alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.StopReason
 
   # Default ceiling on how long we wait for a reviewer / implementer pass before
@@ -218,12 +219,6 @@ defmodule Arbiter.Worker.ReviewGate do
 
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
-
-  # bd-4te55l: a reviewer that abandons verification (e.g. gives up waiting on
-  # `mix test`) before finalizing must disclose it via this marker rather than
-  # silently posting findings as if they were fully confirmed. See
-  # `partial_verification?/1` and `handle_partial_verification/2`.
-  @verification_partial ~r/^\s*VERIFICATION:\s*PARTIAL\b/im
 
   @type verdict ::
           {:approve, String.t()} | {:request_changes, String.t()} | :no_verdict
@@ -764,9 +759,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # obviously-broken empty/no-verdict cases). `review_prompt/1` requires the
   # reviewer to mark this explicitly rather than silently flushing candidate
   # findings drafted before verification completed.
-  defp partial_verification?(findings) when is_binary(findings) do
-    Regex.match?(@verification_partial, findings)
-  end
+  defp partial_verification?(findings), do: ReviewVerification.partial?(findings)
 
   # Whether a REQUEST_CHANGES verdict carries actionable findings. `findings`
   # spans from the `VERDICT:` line onward (see `findings_from/2`); strip that
@@ -1159,21 +1152,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # payload — impossible to miss, unlike a verdict accepted silently at face
   # value.
   defp unverified_banner(findings) when is_binary(findings) do
-    case String.split(findings, "\n", parts: 2) do
-      [verdict_line, rest] ->
-        verdict_line <> "\n\n" <> unverified_banner_text() <> "\n\n" <> rest
-
-      [verdict_line] ->
-        verdict_line <> "\n\n" <> unverified_banner_text()
-    end
-  end
-
-  defp unverified_banner_text do
-    "⚠️ ISSUED WITHOUT FULL VERIFICATION — the reviewer disclosed `VERIFICATION: PARTIAL` " <>
-      "(it abandoned test/build verification, e.g. gave up waiting on a test run, before " <>
-      "finalizing this verdict) and a re-prompt for a fully-verified pass did not resolve it. " <>
-      "Weight the findings below accordingly: confirm each one against the CURRENT diff " <>
-      "before acting — do not assume they were freshly re-checked."
+    ReviewVerification.prepend_banner(findings)
   end
 
   # ---- reporting ----------------------------------------------------------
@@ -1803,16 +1782,7 @@ defmodule Arbiter.Worker.ReviewGate do
     your VERDICT based on the diff alone and note that live test verification
     was unavailable — do not wait indefinitely for output that will not arrive.
 
-    *** DO NOT draft findings early and flush them unchanged once a wait is
-    abandoned. A finding is only valid if you can point to the CURRENT diff (not
-    a memory of it, not a prior review round's text) and show the problem is
-    still there. Before including ANY finding — especially one that echoes
-    something you (or a prior round) already flagged — re-open the CURRENT file
-    at the cited line and confirm the problem is still present RIGHT NOW. If the
-    code has already been fixed, DROP the finding; re-flagging already-fixed
-    code as broken is worse than no finding at all — it wastes an implementer
-    round on nothing.
-
+    #{ReviewVerification.anti_stale_reflag_block()}
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
         VERDICT: APPROVE
@@ -1825,19 +1795,7 @@ defmodule Arbiter.Worker.ReviewGate do
     structured review content — no roleplay persona, character, or theatrical
     flourish.
 
-    Immediately after your findings, print exactly one of:
-
-        VERIFICATION: FULL
-        VERIFICATION: PARTIAL — <one-line reason>
-
-    Use `VERIFICATION: FULL` only if every finding above was freshly confirmed
-    against the CURRENT diff (and, if you ran them, tests/build completed and you
-    read their real output). Use `VERIFICATION: PARTIAL` if you gave up on any
-    check (e.g. abandoned a slow `mix test` wait) before finalizing — name what
-    you couldn't confirm. This is not optional and is not a formality: a verdict
-    marked PARTIAL is re-verified or clearly flagged before anyone acts on it, so
-    mark it honestly rather than defaulting to FULL.
-
+    #{ReviewVerification.disclosure_block()}
     Then print, on a line by itself:
 
         arb done

@@ -1615,6 +1615,27 @@ defmodule Arbiter.Worker.DispatchTest do
       refute review_prompt =~ "existing PR"
     end
 
+    test "review prompt requires the VERIFICATION disclosure and forbids stale re-flags (bd-1j5x6u)",
+         %{ws: ws} do
+      # bd-4te55l's High finding: the coordinator-dispatched `worker_review` path
+      # (this review_prompt/2, consumed by Worker.route_reviewer_completion/1)
+      # never got the VERIFICATION: FULL/PARTIAL disclosure protocol that
+      # ReviewGate's own in-band round loop got. Same coverage as
+      # ReviewGate.review_prompt/1's equivalent test.
+      {:ok, task} = Ash.create(Issue, %{title: "review task", workspace_id: ws.id})
+
+      prompt = Dispatch.prompt_for_task(task, review: true)
+
+      assert prompt =~ "VERIFICATION: FULL",
+             "review_prompt must require the reviewer to disclose full verification"
+
+      assert prompt =~ "VERIFICATION: PARTIAL",
+             "review_prompt must give the reviewer a way to disclose partial verification"
+
+      assert prompt =~ "re-open the CURRENT file",
+             "review_prompt must require re-confirming findings against the current diff, not memory"
+    end
+
     test "includes worktree isolation section when worktree_path is given (bd-cwov25)",
          %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "coding task", workspace_id: ws.id})

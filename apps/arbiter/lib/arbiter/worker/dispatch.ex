@@ -65,6 +65,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.ResumeContext
+  alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
@@ -2072,12 +2073,18 @@ defmodule Arbiter.Worker.Dispatch do
     before printing `arb done`. Do not signal done while any background task
     is still running.
 
+    #{ReviewVerification.anti_stale_reflag_block()}
     After you post the review to the tracker, print your conclusion on its
     own line, EXACTLY one of:
 
         VERDICT: APPROVE
         VERDICT: REQUEST_CHANGES
 
+    If you REQUEST_CHANGES you MUST have posted an ENUMERATED list of concrete
+    findings through the tracker CLI — each with a severity, a location, and a
+    suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid.
+
+    #{ReviewVerification.disclosure_block()}
     Then print, on a line by itself:
 
         arb done
