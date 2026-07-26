@@ -1359,6 +1359,58 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Worker.state(pid).meta.review_gate_findings =~ "ISSUED WITHOUT FULL VERIFICATION"
     end
+
+    # bd-4te55l round 2 finding 3b: the APPROVE-side sibling of the
+    # REQUEST_CHANGES test above (line ~1281) — an unverified APPROVE must
+    # re-prompt, then (retry budget exhausted) merge anyway but with the
+    # warning banner durably recorded in the thread, not silently.
+    test "an APPROVE disclosing VERIFICATION: PARTIAL twice merges anyway with a clear warning banner in the thread",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        # Both passes disclose VERIFICATION: PARTIAL on an APPROVE — the retry
+        # budget (1) is exhausted after the re-prompt, so the gate must proceed
+        # with the unverified approval rather than looping forever or merging
+        # silently with no record.
+        review_command: [@partial_verification, "APPROVE_PARTIAL", "PARTIAL"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 1
+
+      # The re-prompt WAS attempted before proceeding with the unverified approve.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "expected a re-prompt to have been attempted before proceeding"
+
+      thread = Message.thread(task.id, workspace_id: ws.id)
+
+      assert Enum.any?(thread, fn msg ->
+               msg.subject =~ "APPROVE (unverified)" and
+                 msg.body =~ "ISSUED WITHOUT FULL VERIFICATION"
+             end),
+             "expected the durable thread to record the unverified-approve banner, not just an app log line"
+    end
   end
 
   # ---- Stage 2: the revise-and-rediscuss loop (bd-3jm700) ------------------
@@ -1683,6 +1735,43 @@ defmodule Arbiter.Worker.ReviewGateTest do
       refute findings_section =~ "VERDICT: REQUEST_CHANGES"
       refute findings_section =~ "arb done"
       assert findings_section =~ "1. fix it"
+    end
+
+    # bd-4te55l round 2 finding 4: only the TRAILING `VERIFICATION:` disclosure
+    # line is scaffolding to strip — a legitimate finding that quotes the
+    # marker in its own prose (e.g. reviewing this very mechanism) must survive
+    # into the implementer's revise prompt.
+    test "clean_findings/1 strips only the trailing VERIFICATION disclosure, not a finding quoting the marker",
+         %{ws: ws} do
+      task = new_task(ws, %{description: "the directive"})
+
+      state = %{
+        task_id: task.id,
+        branch: "feature/rev",
+        target_branch: "main",
+        worktree_path: nil,
+        round: 1
+      }
+
+      findings =
+        "VERDICT: REQUEST_CHANGES\n" <>
+          "1. [low] review_gate.ex:791 omitting `VERIFICATION: PARTIAL` bypasses the guard\n" <>
+          "VERIFICATION: FULL"
+
+      prompt = ReviewGate.revise_prompt(state, findings)
+
+      findings_section =
+        prompt
+        |> String.split("Reviewer findings (round 1):")
+        |> Enum.at(1)
+        |> String.split("For EACH finding")
+        |> Enum.at(0)
+
+      assert findings_section =~ "omitting `VERIFICATION: PARTIAL` bypasses the guard",
+             "a finding that quotes the marker in prose must not be stripped"
+
+      refute findings_section =~ "VERIFICATION: FULL",
+             "the trailing disclosure line itself must still be stripped"
     end
   end
 
@@ -2412,16 +2501,44 @@ defmodule Arbiter.Worker.ReviewGateTest do
              "review_prompt must require re-confirming findings against the current diff, not memory"
     end
 
-    test "verdict_reprompt_prompt/2 :unverified names the partial-verification disclosure and demands a fresh check",
+    test "verdict_reprompt_prompt/2 {:unverified, :request_changes} names the partial-verification disclosure and demands a fresh check",
          %{ws: ws} do
       task = new_task(ws)
-      prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), :unverified)
+
+      prompt =
+        ReviewGate.verdict_reprompt_prompt(state_for(task, ws), {:unverified, :request_changes})
+
+      assert prompt =~ "VERDICT: REQUEST_CHANGES` but",
+             "the request_changes re-prompt must say a REQUEST_CHANGES preceded it, not fabricate an APPROVE"
 
       assert prompt =~ "VERIFICATION: PARTIAL",
              "the :unverified re-prompt must name what the prior pass disclosed"
 
       assert prompt =~ "DROP that finding",
              "the :unverified re-prompt must instruct dropping findings no longer present in the diff"
+
+      # Still carries the base review context (falls through to review_prompt/1).
+      assert prompt =~ "VERDICT: APPROVE"
+      assert prompt =~ "VERDICT: REQUEST_CHANGES"
+    end
+
+    # bd-4te55l round 2 finding 2: an unverified APPROVE re-prompt must not tell
+    # the fresh reviewer a nonexistent REQUEST_CHANGES (with nonexistent stale
+    # findings) preceded it — that misstates the record and primes the fresh
+    # mind toward REQUEST_CHANGES.
+    test "verdict_reprompt_prompt/2 {:unverified, :approve} says APPROVE preceded it, not REQUEST_CHANGES",
+         %{ws: ws} do
+      task = new_task(ws)
+      prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), {:unverified, :approve})
+
+      assert prompt =~ "VERDICT: APPROVE` but disclosed",
+             "the approve re-prompt must say an APPROVE preceded it"
+
+      refute prompt =~ "returned `VERDICT: REQUEST_CHANGES`",
+             "the approve re-prompt must not fabricate a REQUEST_CHANGES that never happened"
+
+      assert prompt =~ "VERIFICATION: PARTIAL",
+             "the :unverified re-prompt must name what the prior pass disclosed"
 
       # Still carries the base review context (falls through to review_prompt/1).
       assert prompt =~ "VERDICT: APPROVE"
@@ -2461,6 +2578,42 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       prompt = ReviewGate.review_prompt(state)
       assert prompt =~ "ASYNC TOOLS"
+    end
+  end
+
+  # bd-4te55l round 2 finding 3c: direct unit coverage of the disclosure
+  # resolution (last VERIFICATION: line wins, not any-line match) and of the
+  # findings-cleaning helpers now sharing that same last-line semantics
+  # (round 2 finding 4).
+  describe "partial_verification?/1 and findings-cleaning line semantics (bd-4te55l)" do
+    test "a finding that quotes the marker in prose, followed by a real FULL disclosure, resolves to false" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      - [medium] review_gate.ex:791 the prompt says `VERIFICATION: PARTIAL` is not optional
+      VERIFICATION: FULL
+      """
+
+      refute ReviewGate.partial_verification?(findings),
+             "must resolve from the LAST VERIFICATION: line, not any line that merely quotes the marker"
+    end
+
+    test "a trailing PARTIAL disclosure resolves to true" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      - [high] feature.txt:1 stale contract id on error
+      VERIFICATION: PARTIAL — mix test abandoned, verified via code reading only
+      """
+
+      assert ReviewGate.partial_verification?(findings)
+    end
+
+    test "no disclosure at all resolves to false (fail-open, not escalated)" do
+      findings = """
+      VERDICT: REQUEST_CHANGES
+      - [high] feature.txt:1 stale contract id on error
+      """
+
+      refute ReviewGate.partial_verification?(findings)
     end
   end
 

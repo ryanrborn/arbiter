@@ -20,17 +20,23 @@ if [ -f "$marker" ]; then
   if [ "$retry" = "APPROVE" ]; then
     echo "VERDICT: APPROVE"
     echo "on a closer read the change is fine"
+    echo "VERIFICATION: FULL"
     echo "arb done"
   else
     echo "VERDICT: REQUEST_CHANGES"
+    echo "VERIFICATION: FULL"
     echo "arb done"
     echo "⚙ claude session success · 95.2s · \$0.8231"
   fi
 else
   # First pass: a verdict with no findings at all, plus the real session-stats
-  # footer that the harness appends (bd-3n1j8m regression).
+  # footer that the harness appends (bd-3n1j8m regression). Discloses
+  # VERIFICATION: FULL (bd-4te55l round 2 finding 3) so the empty-findings
+  # guard is exercised under the new protocol, not bypassed by omitting the
+  # disclosure entirely.
   : > "$marker"
   echo "VERDICT: REQUEST_CHANGES"
+  echo "VERIFICATION: FULL"
   echo "arb done"
   echo "⚙ claude session success · 183.5s · \$1.1489"
 fi

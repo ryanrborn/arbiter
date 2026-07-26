@@ -746,6 +746,7 @@ defmodule Arbiter.Worker.ReviewGate do
         if partial_verification?(findings) do
           handle_partial_verification_approve(state, findings)
         else
+          warn_if_undisclosed(state, "APPROVE", findings)
           {:done, finish(state, verdict)}
         end
 
@@ -763,6 +764,7 @@ defmodule Arbiter.Worker.ReviewGate do
             handle_partial_verification(state, findings)
 
           true ->
+            warn_if_undisclosed(state, "REQUEST_CHANGES", findings)
             handle_reject(state, findings)
         end
     end
@@ -789,6 +791,18 @@ defmodule Arbiter.Worker.ReviewGate do
   """
   @spec partial_verification?(String.t()) :: boolean()
   def partial_verification?(findings) when is_binary(findings) do
+    verification_disclosure(findings) == "PARTIAL"
+  end
+
+  # Resolves the LAST `VERIFICATION:` line in `findings` to its disclosed value
+  # ("FULL" / "PARTIAL"), or `nil` when no disclosure line is present at all.
+  # `partial_verification?/1` collapses "no disclosure" and "disclosed FULL"
+  # to the same `false` (a fail-open default — bd-4te55l round 2 finding 6:
+  # omitting the line entirely bypasses the guard exactly like a reviewer
+  # under time pressure simply not printing it). Callers that need to tell
+  # those two apart (to log non-compliance) use this instead.
+  @spec verification_disclosure(String.t()) :: String.t() | nil
+  defp verification_disclosure(findings) when is_binary(findings) do
     findings
     |> String.split("\n")
     |> Enum.reverse()
@@ -798,7 +812,21 @@ defmodule Arbiter.Worker.ReviewGate do
         nil -> nil
       end
     end)
-    |> Kernel.==("PARTIAL")
+  end
+
+  # bd-4te55l round 2 finding 6: make missing disclosure measurable. A
+  # REQUEST_CHANGES/APPROVE with no `VERIFICATION:` line at all fails open
+  # (treated as fully verified) — not necessarily worth escalating handling
+  # for on its own, but silent non-compliance with a "not optional" prompt
+  # instruction should at least show up in the logs.
+  defp warn_if_undisclosed(state, verb, findings) do
+    if is_nil(verification_disclosure(findings)) do
+      Logger.warning(
+        "ReviewGate: reviewer for task=#{state.task_id} returned #{verb} with no " <>
+          "VERIFICATION: FULL|PARTIAL disclosure line at all — treated as fully " <>
+          "verified by default, but this is non-compliant with the prompt"
+      )
+    end
   end
 
   # Whether a REQUEST_CHANGES verdict carries actionable findings. `findings`
@@ -816,19 +844,18 @@ defmodule Arbiter.Worker.ReviewGate do
       |> String.split("\n")
       # Drop the matched `VERDICT:` line itself (always first in `findings`).
       |> Enum.drop(1)
+      # Strip only the trailing `VERIFICATION: FULL|PARTIAL` disclosure line
+      # (bd-4te55l round 2 finding 4) — matching `partial_verification?/1`'s
+      # last-line-only semantics, so a legitimate finding that merely quotes
+      # the marker in prose isn't silently dropped here too.
+      |> drop_trailing_verification_line()
       |> Enum.reject(fn line ->
         # Strip synthesized session-stats footers appended by the harness
         # (e.g. "⚙ claude session success · 183.5s · $1.1489") — both the
-        # Claude and Gemini agent variants use the ⚙ glyph as a prefix. Also
-        # strip the mandatory `VERIFICATION: FULL|PARTIAL` disclosure line
-        # (bd-4te55l) — it is protocol scaffolding, not a finding, and at 16+
-        # characters it would otherwise satisfy @min_findings_chars on its own,
-        # letting a zero-findings REQUEST_CHANGES through the empty-findings
-        # guard (bd-3y2mda).
+        # Claude and Gemini agent variants use the ⚙ glyph as a prefix.
         String.trim(line) == "" or
           Regex.match?(~r/\barb done\b/, line) or
-          Regex.match?(~r/^\s*⚙/, line) or
-          Regex.match?(@verification_line, line)
+          Regex.match?(~r/^\s*⚙/, line)
       end)
       |> Enum.join("\n")
       |> String.trim()
@@ -849,11 +876,27 @@ defmodule Arbiter.Worker.ReviewGate do
     # The first line is always `VERDICT: REQUEST_CHANGES` — drop it; the
     # implementer prompt already states the reviewer requested changes.
     |> Enum.drop(1)
-    |> Enum.reject(fn line ->
-      Regex.match?(~r/^\s*arb done\s*$/i, line) or Regex.match?(@verification_line, line)
-    end)
+    # Same last-line-only semantics as `findings_present?/1` above and
+    # `partial_verification?/1` (bd-4te55l round 2 finding 4).
+    |> drop_trailing_verification_line()
+    |> Enum.reject(fn line -> Regex.match?(~r/^\s*arb done\s*$/i, line) end)
     |> Enum.join("\n")
     |> String.trim()
+  end
+
+  # Remove the LAST line matching `@verification_line`, not any matching line
+  # — a finding that quotes the `VERIFICATION:` marker in its own prose (e.g.
+  # a review of this very mechanism) must survive; only the trailing protocol
+  # disclosure should be stripped. Reverses, drops the first match found from
+  # the end, then reverses back.
+  defp drop_trailing_verification_line(lines) do
+    case Enum.split_while(Enum.reverse(lines), &(not Regex.match?(@verification_line, &1))) do
+      {after_match, [_disclosure | before_match]} ->
+        Enum.reverse(before_match) ++ Enum.reverse(after_match)
+
+      {all, []} ->
+        Enum.reverse(all)
+    end
   end
 
   # A REQUEST_CHANGES verdict with the round budget exhausted: record the final
@@ -1164,7 +1207,7 @@ defmodule Arbiter.Worker.ReviewGate do
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
-           verdict_reprompt_prompt(state, :unverified),
+           verdict_reprompt_prompt(state, {:unverified, :request_changes}),
            state.command
          ) do
       {:ok, state} ->
@@ -1217,7 +1260,7 @@ defmodule Arbiter.Worker.ReviewGate do
            %{state | retries_left: budget - 1},
            retry_id,
            :reviewer,
-           verdict_reprompt_prompt(state, :unverified),
+           verdict_reprompt_prompt(state, {:unverified, :approve}),
            state.command
          ) do
       {:ok, state} ->
@@ -1965,10 +2008,45 @@ defmodule Arbiter.Worker.ReviewGate do
   re-supplies the full review context, prefixed with an instruction naming exactly
   what went wrong so it isn't repeated. Public for inspection in tests.
   """
-  @spec verdict_reprompt_prompt(map(), :no_verdict | :empty_findings | :unverified) :: String.t()
+  @spec verdict_reprompt_prompt(
+          map(),
+          :no_verdict
+          | :empty_findings
+          | {:unverified, :approve}
+          | {:unverified, :request_changes}
+        ) :: String.t()
   def verdict_reprompt_prompt(state, reason \\ :no_verdict)
 
-  def verdict_reprompt_prompt(state, :unverified) do
+  def verdict_reprompt_prompt(state, {:unverified, :approve}) do
+    """
+    A prior review pass of this diff returned `VERDICT: APPROVE` but disclosed
+    `VERIFICATION: PARTIAL` — it approved without completing verification (e.g.
+    abandoned waiting on a test run) before finalizing. An unverified APPROVE is
+    the more dangerous half of this failure mode: it lands unverified code on
+    the target branch rather than merely costing an implementer round, so this
+    re-check matters even though there were no findings to restate.
+
+    This time:
+
+      * Either wait for any verification you start to actually finish, or use a
+        bounded `timeout N ...` wrapper and read its real output — do not draft
+        findings while a check is still pending and finalize them regardless of
+        whether it completes.
+      * For EACH finding you are about to make, re-open the CURRENT file at the
+        cited line and confirm the problem is still present in THIS diff RIGHT
+        NOW. Do not carry forward a finding from a prior round's text (or from
+        memory) without this fresh check — if the code has already been fixed,
+        DROP that finding; re-flagging already-fixed code is invalid.
+      * Finish with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` followed by
+        the enumerated findings, then end with `VERIFICATION: FULL` once you
+        have done this. Only write `VERIFICATION: PARTIAL` again if you are
+        honestly still unable to complete verification — and if so, say exactly
+        what could not be confirmed.
+
+    """ <> review_prompt(state)
+  end
+
+  def verdict_reprompt_prompt(state, {:unverified, :request_changes}) do
     """
     A prior review pass of this diff returned `VERDICT: REQUEST_CHANGES` but
     disclosed `VERIFICATION: PARTIAL` — it gave up on verification (e.g.
