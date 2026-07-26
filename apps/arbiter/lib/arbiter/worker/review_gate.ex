@@ -219,6 +219,12 @@ defmodule Arbiter.Worker.ReviewGate do
   @verdict_approve ~r/^\s*VERDICT:\s*APPROVE\b/im
   @verdict_request_changes ~r/^\s*VERDICT:\s*(REQUEST_CHANGES|REJECT)\b/im
 
+  # bd-4te55l: a reviewer that abandons verification (e.g. gives up waiting on
+  # `mix test`) before finalizing must disclose it via this marker rather than
+  # silently posting findings as if they were fully confirmed. See
+  # `partial_verification?/1` and `handle_partial_verification/2`.
+  @verification_partial ~r/^\s*VERIFICATION:\s*PARTIAL\b/im
+
   @type verdict ::
           {:approve, String.t()} | {:request_changes, String.t()} | :no_verdict
 
@@ -736,12 +742,30 @@ defmodule Arbiter.Worker.ReviewGate do
         # wasted (bd-3y2mda). Treat it as malformed and re-prompt for findings
         # (capped, shares the verdict-retry budget) rather than entering the revise
         # loop with empty hands.
-        if findings_present?(findings) do
-          handle_reject(state, findings)
-        else
-          maybe_reprompt(state, :empty_findings)
+        cond do
+          not findings_present?(findings) ->
+            maybe_reprompt(state, :empty_findings)
+
+          partial_verification?(findings) ->
+            handle_partial_verification(state, findings)
+
+          true ->
+            handle_reject(state, findings)
         end
     end
+  end
+
+  # bd-4te55l: whether the reviewer's own findings disclose that it abandoned
+  # verification (e.g. gave up waiting on a test run) before finalizing. A
+  # reviewer that pattern-matches/recalls a prior round's findings rather than
+  # re-confirming them against the CURRENT diff produces a verdict that LOOKS
+  # legitimate (real findings text, real severities) but may be substantively
+  # wrong — the harder case `docs/reviewgate.md` didn't yet cover (unlike the
+  # obviously-broken empty/no-verdict cases). `review_prompt/1` requires the
+  # reviewer to mark this explicitly rather than silently flushing candidate
+  # findings drafted before verification completed.
+  defp partial_verification?(findings) when is_binary(findings) do
+    Regex.match?(@verification_partial, findings)
   end
 
   # Whether a REQUEST_CHANGES verdict carries actionable findings. `findings`
@@ -1068,6 +1092,88 @@ defmodule Arbiter.Worker.ReviewGate do
        {:no_verdict,
         "Reviewer produced no parseable VERDICT line, even after a verdict re-prompt."}
      )}
+  end
+
+  # ---- partial-verification guard (bd-4te55l) ------------------------------
+
+  # A REQUEST_CHANGES verdict disclosed `VERIFICATION: PARTIAL`: the reviewer
+  # itself says it did not finish confirming its findings against the current
+  # diff/tests before finalizing. Give it one more chance (shares the same
+  # verdict-retry budget as the no-verdict/empty-findings re-prompts) to
+  # actually complete verification with a fresh mind and fresh context. If the
+  # budget is exhausted (or the retry can't be spawned), do NOT silently accept
+  # the unverified findings at face value — proceed into the normal
+  # accept/escalate path, but with a loud warning banner prepended so the
+  # thread, the revise prompt, and any escalation payload all surface that this
+  # verdict was issued without full verification (satisfies acceptance option
+  # (b): the coordinator/implementer can weight it accordingly).
+  defp handle_partial_verification(%{retries_left: budget} = state, findings) when budget > 0 do
+    stop_acolyte(state)
+
+    review_id_for_reprompt =
+      if state.round > 1 do
+        reviewer_round_id(state.review_id, state.round)
+      else
+        state.review_id
+      end
+
+    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
+
+    case launch_acolyte(
+           %{state | retries_left: budget - 1},
+           retry_id,
+           :reviewer,
+           verdict_reprompt_prompt(state, :unverified),
+           state.command
+         ) do
+      {:ok, state} ->
+        Logger.info(
+          "ReviewGate: reviewer for task=#{state.task_id} disclosed partial verification; " <>
+            "re-prompting for a fully-verified pass (attempt #{state.attempt})"
+        )
+
+        {:reprompt, state}
+
+      {:error, spawn_error} ->
+        Logger.warning(
+          "ReviewGate: partial-verification re-prompt failed to spawn for task=#{state.task_id}: " <>
+            "#{inspect(spawn_error)}; proceeding with the unverified findings, clearly marked"
+        )
+
+        handle_reject(state, unverified_banner(findings))
+    end
+  end
+
+  defp handle_partial_verification(state, findings) do
+    Logger.warning(
+      "ReviewGate: reviewer for task=#{state.task_id} disclosed partial verification and the " <>
+        "re-prompt budget is exhausted; proceeding with the unverified findings, clearly marked"
+    )
+
+    handle_reject(state, unverified_banner(findings))
+  end
+
+  # Prepend a warning banner to the findings, right after the `VERDICT:` line
+  # (always first, per `findings_from/2`), so it travels with the findings into
+  # the durable thread, the implementer's revise prompt, and any escalation
+  # payload — impossible to miss, unlike a verdict accepted silently at face
+  # value.
+  defp unverified_banner(findings) when is_binary(findings) do
+    case String.split(findings, "\n", parts: 2) do
+      [verdict_line, rest] ->
+        verdict_line <> "\n\n" <> unverified_banner_text() <> "\n\n" <> rest
+
+      [verdict_line] ->
+        verdict_line <> "\n\n" <> unverified_banner_text()
+    end
+  end
+
+  defp unverified_banner_text do
+    "⚠️ ISSUED WITHOUT FULL VERIFICATION — the reviewer disclosed `VERIFICATION: PARTIAL` " <>
+      "(it abandoned test/build verification, e.g. gave up waiting on a test run, before " <>
+      "finalizing this verdict) and a re-prompt for a fully-verified pass did not resolve it. " <>
+      "Weight the findings below accordingly: confirm each one against the CURRENT diff " <>
+      "before acting — do not assume they were freshly re-checked."
   end
 
   # ---- reporting ----------------------------------------------------------
@@ -1697,6 +1803,16 @@ defmodule Arbiter.Worker.ReviewGate do
     your VERDICT based on the diff alone and note that live test verification
     was unavailable — do not wait indefinitely for output that will not arrive.
 
+    *** DO NOT draft findings early and flush them unchanged once a wait is
+    abandoned. A finding is only valid if you can point to the CURRENT diff (not
+    a memory of it, not a prior review round's text) and show the problem is
+    still there. Before including ANY finding — especially one that echoes
+    something you (or a prior round) already flagged — re-open the CURRENT file
+    at the cited line and confirm the problem is still present RIGHT NOW. If the
+    code has already been fixed, DROP the finding; re-flagging already-fixed
+    code as broken is worse than no finding at all — it wastes an implementer
+    round on nothing.
+
     When you have decided, print your verdict on its own line, EXACTLY one of:
 
         VERDICT: APPROVE
@@ -1707,7 +1823,22 @@ defmodule Arbiter.Worker.ReviewGate do
     suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid and
     will be rejected: the implementer would have nothing to act on. Output only
     structured review content — no roleplay persona, character, or theatrical
-    flourish. Then print, on a line by itself:
+    flourish.
+
+    Immediately after your findings, print exactly one of:
+
+        VERIFICATION: FULL
+        VERIFICATION: PARTIAL — <one-line reason>
+
+    Use `VERIFICATION: FULL` only if every finding above was freshly confirmed
+    against the CURRENT diff (and, if you ran them, tests/build completed and you
+    read their real output). Use `VERIFICATION: PARTIAL` if you gave up on any
+    check (e.g. abandoned a slow `mix test` wait) before finalizing — name what
+    you couldn't confirm. This is not optional and is not a formality: a verdict
+    marked PARTIAL is re-verified or clearly flagged before anyone acts on it, so
+    mark it honestly rather than defaulting to FULL.
+
+    Then print, on a line by itself:
 
         arb done
     """
@@ -1721,8 +1852,38 @@ defmodule Arbiter.Worker.ReviewGate do
   re-supplies the full review context, prefixed with an instruction naming exactly
   what went wrong so it isn't repeated. Public for inspection in tests.
   """
-  @spec verdict_reprompt_prompt(map(), :no_verdict | :empty_findings) :: String.t()
+  @spec verdict_reprompt_prompt(map(), :no_verdict | :empty_findings | :unverified) :: String.t()
   def verdict_reprompt_prompt(state, reason \\ :no_verdict)
+
+  def verdict_reprompt_prompt(state, :unverified) do
+    """
+    A prior review pass of this diff returned `VERDICT: REQUEST_CHANGES` but
+    disclosed `VERIFICATION: PARTIAL` — it gave up on verification (e.g.
+    abandoned waiting on a test run) before finalizing, so its findings may
+    restate stale observations rather than problems confirmed in the CURRENT
+    diff. This is a common, costly failure: findings drafted early get flushed
+    unchanged once a wait is abandoned, including findings from an EARLIER
+    review round that the code has since fixed.
+
+    This time:
+
+      * Either wait for any verification you start to actually finish, or use a
+        bounded `timeout N ...` wrapper and read its real output — do not draft
+        findings while a check is still pending and finalize them regardless of
+        whether it completes.
+      * For EACH finding you are about to make, re-open the CURRENT file at the
+        cited line and confirm the problem is still present in THIS diff RIGHT
+        NOW. Do not carry forward a finding from a prior round's text (or from
+        memory) without this fresh check — if the code has already been fixed,
+        DROP that finding; re-flagging already-fixed code is invalid.
+      * Finish with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES` followed by
+        the enumerated findings, then end with `VERIFICATION: FULL` once you
+        have done this. Only write `VERIFICATION: PARTIAL` again if you are
+        honestly still unable to complete verification — and if so, say exactly
+        what could not be confirmed.
+
+    """ <> review_prompt(state)
+  end
 
   def verdict_reprompt_prompt(state, :empty_findings) do
     """
@@ -1953,6 +2114,12 @@ defmodule Arbiter.Worker.ReviewGate do
     implementer has addressed your prior findings. Re-review the UPDATED diff. For
     each prior finding, decide whether to ACCEPT the fix/rebuttal or HOLD THE
     LINE, then issue a fresh verdict on the current state of the branch.
+
+    *** For EACH prior finding you are tempted to HOLD THE LINE on, re-open the
+    CURRENT file at the cited location first — do not hold the line from memory
+    of the prior round's text. If the implementer's diff already addresses it,
+    ACCEPT it and say so; restating a prior finding verbatim against code that
+    has since changed is a false re-flag, not a legitimate hold.
 
     Prior discussion (oldest first):
 
