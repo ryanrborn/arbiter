@@ -2072,11 +2072,39 @@ defmodule Arbiter.Worker.Dispatch do
     before printing `arb done`. Do not signal done while any background task
     is still running.
 
+    NOTE: If you run tests or any build command, wrap it with a hard timeout so
+    a cold compilation pass cannot exhaust the reviewer session — e.g.
+    `timeout 120 mix test`. If the command times out or fails to compile, issue
+    your VERDICT based on the diff alone and note that live test verification
+    was unavailable — do not wait indefinitely for output that will not arrive.
+
+    *** DO NOT draft findings early and flush them unchanged once a wait is
+    abandoned. A finding is only valid if you can point to the CURRENT diff (not
+    a memory of it, not a prior review round's text) and show the problem is
+    still there. Before including ANY finding — especially one that echoes
+    something already flagged in a prior round — re-open the CURRENT file at the
+    cited line and confirm the problem is still present RIGHT NOW. If the code
+    has already been fixed, DROP the finding; re-flagging already-fixed code as
+    broken is worse than no finding at all — it wastes an implementer round on
+    nothing.
+
     After you post the review to the tracker, print your conclusion on its
     own line, EXACTLY one of:
 
         VERDICT: APPROVE
         VERDICT: REQUEST_CHANGES
+
+    Immediately after your verdict, print exactly one of:
+
+        VERIFICATION: FULL
+        VERIFICATION: PARTIAL — <one-line reason>
+
+    Use `VERIFICATION: FULL` only if every finding above was freshly confirmed
+    against the CURRENT diff (and, if you ran them, tests/build completed and
+    you read their real output). Use `VERIFICATION: PARTIAL` if you gave up on
+    any check (e.g. abandoned a slow `mix test` wait) before finalizing — name
+    what you couldn't confirm. This is not optional and is not a formality: mark
+    it honestly rather than defaulting to FULL.
 
     Then print, on a line by itself:
 
