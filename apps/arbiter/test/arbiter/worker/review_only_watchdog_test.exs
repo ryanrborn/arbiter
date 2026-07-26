@@ -206,6 +206,40 @@ defmodule Arbiter.Worker.ReviewOnlyWatchdogTest do
 
       assert Worker.state(pid).status == :completed
     end
+
+    # bd-4te55l round 2 finding 1: this coordinator-dispatched path has no
+    # ReviewGate GenServer / retry loop to re-prompt against, so unlike the
+    # full ReviewGate loop it can't spend a verdict-retry budget on a fresh
+    # pass — it must still durably record the unverified-approve banner into
+    # the task's notes (like the sibling REQUEST_CHANGES path does via
+    # park_rejected/3), not just log an app-log line no coordinator reads.
+    # The APPROVE half is the strictly more dangerous one: it lands unverified
+    # code rather than costing a round.
+    test "an APPROVE disclosing VERIFICATION: PARTIAL still merges (no retry loop here) but records the unverified banner in task notes" do
+      ws = new_workspace()
+      task = new_task(ws)
+
+      pid =
+        start_reviewer(task, [
+          "Tests are still running. Let me wait a bit more.",
+          "VERDICT: APPROVE",
+          "looks fine based on the diff alone",
+          "VERIFICATION: PARTIAL — mix test abandoned before finalizing"
+        ])
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> Worker.state(pid).status == :completed end)
+      assert Worker.state(pid).status == :completed
+
+      {:ok, updated_task} = Ash.get(Issue, task.id)
+
+      assert String.contains?(updated_task.notes || "", "ReviewGate verdict: APPROVE"),
+             "expected the APPROVE verdict to be durably recorded in task notes"
+
+      assert String.contains?(updated_task.notes || "", "ISSUED WITHOUT FULL VERIFICATION"),
+             "expected the unverified-approve banner to be durably recorded, not just app-logged"
+    end
   end
 
   # ---- REQUEST_CHANGES path --------------------------------------------------

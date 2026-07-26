@@ -1870,14 +1870,22 @@ defmodule Arbiter.Worker do
         # ReviewGate GenServer / retry loop to re-prompt against, so unlike
         # `Arbiter.Worker.ReviewGate`'s own reviewing loop it can't spend a
         # verdict-retry budget on a fresh pass. Satisfy acceptance option (b)
-        # instead: warn loudly and merge exactly as before — the log line is
-        # the coordinator-facing signal that this approval was issued without
-        # full verification.
+        # instead: warn loudly AND (round 2 finding 1) durably record the mark
+        # the same way the sibling REQUEST_CHANGES clause below does via
+        # `park_rejected/3` → `record_review_gate_outcome/3` — an unverified
+        # APPROVE lands unverified code, the strictly more dangerous half, so
+        # it must not get a weaker record than the REQUEST_CHANGES case.
         if Arbiter.Worker.ReviewGate.partial_verification?(findings) do
           Logger.warning(
             "Worker: review_only task=#{state.task_id}: reviewer disclosed " <>
               "VERIFICATION: PARTIAL on an APPROVE (gave up on verification before " <>
               "finalizing); proceeding to merge anyway — no retry loop on this path"
+          )
+
+          record_review_gate_outcome(
+            state,
+            :approve,
+            Arbiter.Worker.ReviewGate.unverified_banner(findings)
           )
         end
 
@@ -1888,11 +1896,19 @@ defmodule Arbiter.Worker do
 
       :no_verdict ->
         case derive_verdict_from_adapter(state) do
-          {:approve, _} ->
+          {:approve, findings} ->
             Logger.info(
               "Worker: review_only task=#{state.task_id}: no VERDICT sentinel in stdout; " <>
                 "derived APPROVE from adapter-submitted review"
             )
+
+            if Arbiter.Worker.ReviewGate.partial_verification?(findings) do
+              record_review_gate_outcome(
+                state,
+                :approve,
+                Arbiter.Worker.ReviewGate.unverified_banner(findings)
+              )
+            end
 
             trigger_watchdog_on_approval(state)
 

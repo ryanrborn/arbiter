@@ -77,6 +77,21 @@ If you see that banner, don't take the findings at face value: check each
 cited `file:line` against the current diff yourself before acting on it (or
 telling the implementer to "fix" something already fixed).
 
+This banner isn't only a REQUEST_CHANGES thing. An unverified **APPROVE** is
+the more dangerous half of the same failure mode — it lands unverified code
+on the target branch instead of merely costing an implementer round — so it
+gets the same re-prompt-then-mark treatment, and the same banner is recorded
+against the task (subject `... APPROVE (unverified) ...`) if the re-prompt
+still can't confirm the work.
+
+The banner can also show up via the coordinator-dispatched `worker_review`
+path (`arb worker review`, no fleet-authored PR flow) rather than the normal
+ReviewGate loop. That path has no retry budget to spend on a re-prompt — there
+is only ever one pass — so a `VERIFICATION: PARTIAL` disclosure there is
+marked directly into the task's notes on the first pass, with no re-prompt
+attempted first. Treat the banner the same way regardless of which path
+produced it: as a signal to verify the findings yourself before trusting them.
+
 ## Escalations after the round cap need your judgment, not a default
 
 When the round cap is hit, the honest failure modes are "the reviewer kept
