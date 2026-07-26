@@ -94,6 +94,7 @@ defmodule Arbiter.Worker do
 
   alias Arbiter.Worker.PRTemplate
   alias Arbiter.Worker.Registry, as: PRegistry
+  alias Arbiter.Worker.ReviewVerification
 
   @typedoc "Lifecycle status — distinct from `Issue.status`."
   @type status ::
@@ -1865,11 +1866,11 @@ defmodule Arbiter.Worker do
     output_lines = Map.get(state.meta || %{}, :output_lines, [])
 
     case Arbiter.Worker.ReviewGate.parse_verdict(output_lines) do
-      {:approve, _findings} ->
-        trigger_watchdog_on_approval(state)
+      {:approve, findings} ->
+        route_approve_verdict(state, findings)
 
       {:request_changes, findings} ->
-        park_rejected(state, :request_changes, findings)
+        route_request_changes_verdict(state, findings)
 
       :no_verdict ->
         case derive_verdict_from_adapter(state) do
@@ -1892,6 +1893,41 @@ defmodule Arbiter.Worker do
           :no_verdict ->
             park_rejected(state, :no_verdict, "Reviewer produced no parseable VERDICT line.")
         end
+    end
+  end
+
+  # bd-1j5x6u: mirror ReviewGate's partial-verification guard (bd-4te55l) on the
+  # coordinator-dispatched `worker_review` path. An APPROVE that discloses
+  # `VERIFICATION: PARTIAL` is the more dangerous half of the gap — an unverified
+  # approve merges unverified code — so unlike ReviewGate's own APPROVE path
+  # (which has no such check), this path fails closed: a partially-verified
+  # APPROVE is NOT honored as an approve. It is treated as REQUEST_CHANGES (never
+  # merges) with the loud banner prepended, so the coordinator sees exactly why
+  # the reviewer's approval was not trusted and can re-dispatch a review once
+  # verification can actually complete.
+  defp route_approve_verdict(%State{} = state, findings) do
+    if ReviewVerification.partial?(findings) do
+      Logger.warning(
+        "Worker: review_only task=#{state.task_id}: reviewer returned VERDICT: APPROVE but " <>
+          "disclosed VERIFICATION: PARTIAL; not honoring the approve — treating as " <>
+          "REQUEST_CHANGES so unverified code cannot merge"
+      )
+
+      park_rejected(state, :request_changes, ReviewVerification.prepend_banner(findings))
+    else
+      trigger_watchdog_on_approval(state)
+    end
+  end
+
+  # A REQUEST_CHANGES disclosing VERIFICATION: PARTIAL still blocks the merge
+  # either way (park_rejected never merges), but the banner is prepended so the
+  # findings are clearly marked as possibly-stale before the coordinator/
+  # implementer acts on them (bd-4te55l via bd-1j5x6u).
+  defp route_request_changes_verdict(%State{} = state, findings) do
+    if ReviewVerification.partial?(findings) do
+      park_rejected(state, :request_changes, ReviewVerification.prepend_banner(findings))
+    else
+      park_rejected(state, :request_changes, findings)
     end
   end
 
