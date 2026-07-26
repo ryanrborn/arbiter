@@ -32,6 +32,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
   @reviewer Path.expand("../../fixtures/review_verdict.sh", __DIR__)
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
+  @partial_verification Path.expand("../../fixtures/review_partial_verification.sh", __DIR__)
   @empty_findings Path.expand("../../fixtures/review_empty_findings.sh", __DIR__)
   @rounds Path.expand("../../fixtures/review_rounds.sh", __DIR__)
   @rounds_empty_mid Path.expand("../../fixtures/review_rounds_empty_mid.sh", __DIR__)
@@ -1232,6 +1233,134 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  # ---- partial-verification guard (bd-4te55l) ------------------------------
+  #
+  # A reviewer that abandons verification (e.g. gives up waiting on `mix test`)
+  # before finalizing can still produce a well-formed REQUEST_CHANGES — real
+  # findings, real severities — that is nonetheless substantively wrong because
+  # some findings merely restate an earlier round's text against code that has
+  # since been fixed. The reviewer discloses this via `VERIFICATION: PARTIAL`;
+  # ReviewGate must not accept it at face value.
+  describe "partial-verification guard (bd-4te55l)" do
+    test "a REQUEST_CHANGES disclosing VERIFICATION: PARTIAL is re-prompted; a fully-verified APPROVE on re-prompt merges",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@partial_verification, "APPROVE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 1
+
+      # The re-prompt ran as a distinct follow-up reviewer, proving the partial
+      # verdict was NOT accepted at face value on the first pass.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "expected a distinct re-prompt reviewer run row"
+    end
+
+    test "a REQUEST_CHANGES disclosing VERIFICATION: PARTIAL twice proceeds with a clear warning banner, not silently",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        # Both passes disclose VERIFICATION: PARTIAL — the retry budget (1) is
+        # exhausted after the re-prompt, so the gate must proceed with the
+        # unverified findings rather than looping forever or silently accepting.
+        review_command: [@partial_verification, "PARTIAL"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+
+      findings = Worker.state(pid).meta.review_gate_findings
+
+      assert findings =~ "ISSUED WITHOUT FULL VERIFICATION",
+             "the unverified findings must carry a clear warning banner, not be accepted silently"
+
+      # The re-prompt WAS attempted before proceeding with the marked findings.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "expected a re-prompt to have been attempted before proceeding"
+    end
+
+    test "a fully-verified REQUEST_CHANGES (no VERIFICATION: PARTIAL) is honored on the first pass, no re-prompt",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_command: [@reviewer, "REQUEST_CHANGES"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+
+      # No partial-verification disclosure → no re-prompt burned on it.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "did not expect a re-prompt when the reviewer never disclosed partial verification"
+
+      refute Worker.state(pid).meta.review_gate_findings =~ "ISSUED WITHOUT FULL VERIFICATION"
+    end
+  end
+
   # ---- Stage 2: the revise-and-rediscuss loop (bd-3jm700) ------------------
 
   describe "revise-and-rediscuss loop" do
@@ -2266,6 +2395,37 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert prompt =~ "VERDICT based on the diff alone",
              "review_prompt must instruct the reviewer to fall back to diff-only VERDICT when tests cannot complete"
+    end
+
+    test "review_prompt/1 requires the VERIFICATION disclosure and forbids stale re-flags (bd-4te55l)",
+         %{ws: ws} do
+      task = new_task(ws)
+      prompt = ReviewGate.review_prompt(state_for(task, ws))
+
+      assert prompt =~ "VERIFICATION: FULL",
+             "review_prompt must require the reviewer to disclose full verification"
+
+      assert prompt =~ "VERIFICATION: PARTIAL",
+             "review_prompt must give the reviewer a way to disclose partial verification"
+
+      assert prompt =~ "re-open the CURRENT file",
+             "review_prompt must require re-confirming findings against the current diff, not memory"
+    end
+
+    test "verdict_reprompt_prompt/2 :unverified names the partial-verification disclosure and demands a fresh check",
+         %{ws: ws} do
+      task = new_task(ws)
+      prompt = ReviewGate.verdict_reprompt_prompt(state_for(task, ws), :unverified)
+
+      assert prompt =~ "VERIFICATION: PARTIAL",
+             "the :unverified re-prompt must name what the prior pass disclosed"
+
+      assert prompt =~ "DROP that finding",
+             "the :unverified re-prompt must instruct dropping findings no longer present in the diff"
+
+      # Still carries the base review context (falls through to review_prompt/1).
+      assert prompt =~ "VERDICT: APPROVE"
+      assert prompt =~ "VERDICT: REQUEST_CHANGES"
     end
 
     test "nil workspace_id defaults to the Claude async block" do

@@ -59,6 +59,24 @@ no PR and no diff, that's the "empty branch" failure mode above, not a
 legitimate no-review completion — `issue_type` is the signal for which case
 you're actually looking at.
 
+## A REQUEST_CHANGES can be well-formed and still wrong — check for the PARTIAL-verification banner
+
+The "empty branch" case above is an obviously-broken verdict. A harder case:
+the reviewer produces real findings (real severities, real `file:line`s) but
+some of them merely restate an EARLIER round's findings against code that has
+since been fixed — the reviewer gave up mid-verification (e.g. abandoned a
+slow `mix test` wait) and flushed candidate findings it had drafted before the
+wait, without re-confirming them against the current diff.
+
+The reviewer is required to disclose this via a `VERIFICATION: PARTIAL` line.
+When it does, ReviewGate re-prompts once for a fully-verified pass; if that
+still comes back partial (or can't be spawned), the verdict proceeds but with
+a `⚠️ ISSUED WITHOUT FULL VERIFICATION` banner prepended to the findings —
+visible in the mailbox thread, the revise prompt, and any escalation payload.
+If you see that banner, don't take the findings at face value: check each
+cited `file:line` against the current diff yourself before acting on it (or
+telling the implementer to "fix" something already fixed).
+
 ## Escalations after the round cap need your judgment, not a default
 
 When the round cap is hit, the honest failure modes are "the reviewer kept
