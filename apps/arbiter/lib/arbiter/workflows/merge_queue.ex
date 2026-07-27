@@ -538,9 +538,15 @@ defmodule Arbiter.Workflows.MergeQueue do
 
     worktree_path = state.worktree_module.worktree_path(branch)
 
+    # bd-636thc: routes through Mergers.open_with_retry/6 rather than calling
+    # state.adapter.open/4 directly — the same "already exists" retry the
+    # worker's own finalize path (Worker.safe_open/5) gets, so this auto-merge
+    # / MergeQueue path can't bypass the graceful-adoption logic either.
     with {:ok, _} <- push_worktree_branch(state.worktree_module, worktree_path, branch),
          {:ok, mr_ref} when is_binary(mr_ref) <-
-           state.adapter.open(branch, title, description, %{target_branch: base}) do
+           Mergers.open_with_retry(state.adapter, branch, title, description, %{
+             target_branch: base
+           }) do
       item =
         new_item(task.id, strategy,
           mr_ref: mr_ref,
