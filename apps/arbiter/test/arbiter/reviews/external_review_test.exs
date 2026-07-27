@@ -1112,6 +1112,163 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       engagement = Ash.get!(Issue, result.engagement)
       assert engagement.review_automation == :report_only
     end
+
+    # bd-887swr: the greenlight path had no DiffScope check at all — a selected
+    # comment whose (path, line) isn't in the diff 422s and `{:halt, err}`
+    # aborts every remaining comment. These tests cover the fix.
+
+    test "proposed comments are labeled in_diff at report_only time" do
+      ws = github_ws("er-ro-label")
+      events = :ets.new(:ro_label_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-label", author: "coworker")
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "x.ex", line: 1, message: "in diff"},
+           %{severity: :warning, file: "nope.ex", line: 5, message: "not in diff"}
+         ]}
+      end
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert [pc0, pc1] = rec.proposed_comments
+      assert pc0["file"] == "x.ex" and pc0["in_diff"] == true
+      assert pc1["file"] == "nope.ex" and pc1["in_diff"] == false
+    end
+
+    test "greenlight select: all posts the in-diff subset, skips the out-of-diff one, and still submits the verdict" do
+      ws = github_ws("er-gl-mixed")
+      events = :ets.new(:gl_mixed_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-mixed", author: "coworker")
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "x.ex", line: 1, message: "in diff"},
+           %{severity: :warning, file: "nope.ex", line: 5, message: "not in diff"}
+         ]}
+      end
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert {:ok, gl} = ExternalReview.greenlight(record_id: rec.id, select: "all")
+
+      # The in-diff comment posted; the out-of-diff one was skipped, not
+      # attempted — and it did NOT halt/abort the batch.
+      assert gl.posted == 1
+      assert gl.selected == 2
+      assert gl.skipped == 1
+      assert gl.verdict_posted == true
+
+      posted_files = :ets.lookup(events, :comment) |> Enum.map(fn {:comment, p} -> p["path"] end)
+      assert posted_files == ["x.ex"]
+
+      # The verdict still posted (a review), and its body surfaces the
+      # skipped comment rather than silently dropping it.
+      assert [{:review, review}] = :ets.lookup(events, :review)
+      assert review["body"] =~ "1 finding(s) posted"
+      assert review["body"] =~ "nope.ex:5"
+
+      reloaded = Ash.get!(Record, rec.id)
+      assert reloaded.greenlight_status == :posted
+    end
+
+    test "an adapter error on a middle comment does not prevent later comments from posting" do
+      ws = github_ws("er-gl-midfail")
+      events = :ets.new(:gl_midfail_events, [:public, :duplicate_bag])
+
+      stub_report_only_with_post_failure(events,
+        head_sha: "sha-midfail",
+        author: "coworker",
+        fail_path: "y.ex"
+      )
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "x.ex", line: 1, message: "one"},
+           %{severity: :warning, file: "y.ex", line: 2, message: "two — this post 500s"},
+           %{severity: :info, file: "a.ex", line: 1, message: "three"}
+         ]}
+      end
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert {:ok, gl} = ExternalReview.greenlight(record_id: rec.id, select: "all")
+
+      # x.ex and a.ex posted despite y.ex (the middle comment) failing — no halt.
+      assert gl.posted == 2
+      assert gl.skipped == 1
+
+      posted_files = :ets.lookup(events, :comment) |> Enum.map(fn {:comment, p} -> p["path"] end)
+      assert Enum.sort(posted_files) == ["a.ex", "x.ex"]
+      refute "y.ex" in posted_files
+
+      # The verdict still posted, once, after every comment was attempted.
+      assert [_] = :ets.lookup(events, :review)
+    end
+
+    test "the greenlight verdict summary reports the posted count, not the proposed count" do
+      ws = github_ws("er-gl-count")
+      events = :ets.new(:gl_count_events, [:public, :duplicate_bag])
+      stub_report_only(events, head_sha: "sha-count", author: "coworker")
+
+      runner = fn _diff, _state ->
+        {:ok,
+         [
+           %{severity: :error, file: "a.ex", line: 1, message: "one"},
+           %{severity: :warning, file: "b.ex", line: 2, message: "two"},
+           %{severity: :info, file: "c.ex", line: 3, message: "three"}
+         ]}
+      end
+
+      assert {:ok, _} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 automation: "report_only",
+                 follow_up: false,
+                 check_runner: runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.finding_count == 3
+
+      # Greenlight only #0 and #2 (2 of the 3 proposed).
+      assert {:ok, gl} = ExternalReview.greenlight(record_id: rec.id, select: [0, 2])
+      assert gl.posted == 2
+
+      assert [{:review, review}] = :ets.lookup(events, :review)
+      assert review["body"] =~ "2 finding(s) posted"
+      refute review["body"] =~ "3 finding(s)"
+    end
   end
 
   # A check runner that always reports one finding (so a request_changes verdict
@@ -1227,6 +1384,17 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
   # Like stub_full_review but records every POST comment / POST review into
   # `events` so a report-only test can assert ZERO writes, and a greenlight test
   # can assert exactly the approved subset posted.
+  # Diff covering every file the report_only/greenlight tests reference
+  # (bd-887swr: greenlight now diff-scopes against the *current* diff, so the
+  # stub must actually cover each test's proposed-comment files/lines).
+  defp report_only_diff do
+    "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n" <>
+      "diff --git a/y.ex b/y.ex\n--- a/y.ex\n+++ b/y.ex\n@@ -0,0 +1,2 @@\n+one\n+two\n" <>
+      "diff --git a/a.ex b/a.ex\n--- a/a.ex\n+++ b/a.ex\n@@ -0,0 +1 @@\n+one\n" <>
+      "diff --git a/b.ex b/b.ex\n--- a/b.ex\n+++ b/b.ex\n@@ -0,0 +1,2 @@\n+one\n+two\n" <>
+      "diff --git a/c.ex b/c.ex\n--- a/c.ex\n+++ b/c.ex\n@@ -0,0 +1,3 @@\n+one\n+two\n+three\n"
+  end
+
   defp stub_report_only(events, opts) do
     head_sha = Keyword.fetch!(opts, :head_sha)
     author = Keyword.get(opts, :author, "coworker")
@@ -1240,10 +1408,7 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "text/plain")
-          |> Plug.Conn.resp(
-            200,
-            "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
-          )
+          |> Plug.Conn.resp(200, report_only_diff())
 
         conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
           json(conn, %{
@@ -1264,6 +1429,99 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
           {:ok, body, conn} = Plug.Conn.read_body(conn)
           :ets.insert(events, {:comment, Jason.decode!(body)})
           json(conn, %{"id" => :rand.uniform(100_000)})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          :ets.insert(events, {:review, Jason.decode!(body)})
+          json(conn, %{"id" => 99})
+
+        conn.method == "POST" and path == "/graphql" ->
+          json(conn, %{
+            "data" => %{
+              "repository" => %{
+                "pullRequest" => %{
+                  "reviewThreads" => %{
+                    "nodes" => [
+                      %{
+                        "id" => "T1",
+                        "isResolved" => false,
+                        "path" => "x.ex",
+                        "line" => 1,
+                        "comments" => %{
+                          "nodes" => [
+                            %{
+                              "databaseId" => max_comment_id,
+                              "author" => %{"login" => author},
+                              "body" => "please look"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          })
+
+        true ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(
+            404,
+            Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
+          )
+      end
+    end)
+  end
+
+  # Like stub_report_only, but the inline-comment POST 500s for one specific
+  # file path (`opts[:fail_path]`) and succeeds (recording into `events`) for
+  # every other — so a test can prove a mid-batch adapter error doesn't halt
+  # posting of the comments after it (bd-887swr).
+  defp stub_report_only_with_post_failure(events, opts) do
+    head_sha = Keyword.fetch!(opts, :head_sha)
+    author = Keyword.get(opts, :author, "coworker")
+    fail_path = Keyword.fetch!(opts, :fail_path)
+    max_comment_id = Keyword.get(opts, :max_comment_id, 1)
+
+    Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+      path = conn.request_path
+      diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+      cond do
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "text/plain")
+          |> Plug.Conn.resp(200, report_only_diff())
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+          json(conn, %{
+            "number" => 42,
+            "state" => "open",
+            "head" => %{"sha" => head_sha},
+            "user" => %{"login" => author},
+            "html_url" => "https://github.com/octo/widget/pull/42"
+          })
+
+        conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+          json(conn, [])
+
+        conn.method == "GET" and path =~ ~r{/commits/.+/check-runs$} ->
+          json(conn, %{"check_runs" => []})
+
+        conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+          {:ok, raw, conn} = Plug.Conn.read_body(conn)
+          decoded = Jason.decode!(raw)
+
+          if decoded["path"] == fail_path do
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(500, Jason.encode!(%{"message" => "internal error"}))
+          else
+            :ets.insert(events, {:comment, decoded})
+            json(conn, %{"id" => :rand.uniform(100_000)})
+          end
 
         conn.method == "POST" and path == "/repos/octo/widget/pulls/42/reviews" ->
           {:ok, body, conn} = Plug.Conn.read_body(conn)
