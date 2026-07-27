@@ -280,4 +280,75 @@ defmodule Arbiter.MCP.AgentConfigTest do
       assert count == 1, "expected .mcp.json to appear exactly once, got #{count} occurrences"
     end
   end
+
+  # bd-bhrji9: every test above uses a plain `git init` repo, where `--git-dir`
+  # and `--git-common-dir` are identical. Real dispatches never run in one of
+  # those — `Arbiter.Worker.Worktree.create/3` always provisions a *linked*
+  # `git worktree add` worktree, where they differ. This describe block is the
+  # regression case: it would have caught the original bug (`add_to_git_exclude/2`
+  # resolving `--git-dir` — the worktree-PRIVATE admin dir — instead of
+  # `--git-common-dir`, silently writing an `info/exclude` file git never reads
+  # for ignore purposes, so `git add -A` staged `.mcp.json` anyway).
+  describe "git exclude on a real linked worktree (bd-bhrji9)" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "mcp-gitexcl-wt-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp)
+
+      repo = Path.join(tmp, "repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "test@example.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "Test"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "hello\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "initial"])
+
+      wt = Path.join(tmp, "wt")
+
+      {_, 0} =
+        System.cmd("git", ["-C", repo, "worktree", "add", wt, "-b", "feat"],
+          stderr_to_stdout: true
+        )
+
+      # Confirm the fixture actually exercises the divergent case — a linked
+      # worktree where git-dir != git-common-dir. If this ever coincides, the
+      # test below would pass vacuously.
+      {git_dir, 0} = System.cmd("git", ["-C", wt, "rev-parse", "--git-dir"])
+      {common_dir, 0} = System.cmd("git", ["-C", wt, "rev-parse", "--git-common-dir"])
+      assert String.trim(git_dir) != String.trim(common_dir)
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      {:ok, wt: wt, common_dir: String.trim(common_dir)}
+    end
+
+    test "write/3 for :claude excludes .mcp.json in the repo's common info/exclude, not the worktree-private one",
+         %{wt: wt, common_dir: common_dir} do
+      assert :ok =
+               AgentConfig.write(:claude, wt,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-linked-worktree"
+               )
+
+      common_exclude = Path.join([common_dir, "info", "exclude"])
+      assert File.exists?(common_exclude)
+      assert File.read!(common_exclude) =~ ".mcp.json"
+    end
+
+    test "git add -A does NOT stage .mcp.json in a linked worktree after write/3", %{wt: wt} do
+      assert :ok =
+               AgentConfig.write(:claude, wt,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-linked-worktree-add"
+               )
+
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-A"])
+
+      {status_out, 0} =
+        System.cmd("git", ["-C", wt, "status", "--porcelain"], stderr_to_stdout: true)
+
+      refute status_out =~ ".mcp.json",
+             "expected .mcp.json to be excluded from git staging in a linked worktree, got:\n#{status_out}"
+    end
+  end
 end

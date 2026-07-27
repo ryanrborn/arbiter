@@ -60,21 +60,33 @@ defmodule Arbiter.MCP.AgentConfig do
 
   # ---- Git exclude ---------------------------------------------------------
 
-  # Append `paths` to the worktree's `.git/info/exclude` file so that `git add -A`
+  # Append `paths` to the repo's `info/exclude` file so that `git add -A`
   # cannot stage token-bearing agent config regardless of the target repo's tracked
-  # `.gitignore`. The info/exclude is local to the worktree — it is NOT committed —
-  # so it works on any contributor repo without touching the repo's own gitignore.
+  # `.gitignore`. `info/exclude` is never committed — so it works on any
+  # contributor repo without touching the repo's own gitignore.
   #
-  # `git rev-parse --git-dir` returns the worktree's git dir. For a linked worktree
-  # this is `.git/worktrees/<leaf>` (relative to the main repo); for a plain clone
-  # it's `.git`. We resolve it to an absolute path so File.write/mkdir_p work
-  # regardless of cwd.
+  # bd-bhrji9: MUST resolve `--git-common-dir`, NOT `--git-dir`. For a linked
+  # worktree (the real production topology — every dispatch runs in one via
+  # `Arbiter.Worker.Worktree.create/3`), `--git-dir` returns the worktree-PRIVATE
+  # administrative directory (`<main-repo>/.git/worktrees/<leaf>`), but git only
+  # ever reads ignore patterns from `info/exclude` under the repo's COMMON dir
+  # (`<main-repo>/.git`) — `info/exclude` is not one of the handful of files
+  # (HEAD, index, logs/HEAD, ...) that are worktree-specific. Writing to the
+  # `--git-dir` path (the bd-9q966y original fix) silently produces a file git
+  # never consults: `git check-ignore` reports the path as NOT ignored and
+  # `git add -A` happily stages it, even though the "exclude" file looks
+  # populated on disk. This was invisible in `agent_config_test.exs` because
+  # those tests use a plain `git init` repo (git-dir == common-dir there) —
+  # never a real `git worktree add` worktree. Resolving common-dir also means
+  # one write protects every worktree of that repo, not just the current one.
   #
   # Best-effort: any error is silently swallowed — a missing git repo or a
   # read-only info dir must never block a dispatch.
   @spec add_to_git_exclude(Path.t(), [String.t()]) :: :ok
   def add_to_git_exclude(worktree, paths) when is_binary(worktree) and is_list(paths) do
-    case System.cmd("git", ["-C", worktree, "rev-parse", "--git-dir"], stderr_to_stdout: true) do
+    case System.cmd("git", ["-C", worktree, "rev-parse", "--git-common-dir"],
+           stderr_to_stdout: true
+         ) do
       {raw, 0} ->
         git_dir = String.trim(raw)
 

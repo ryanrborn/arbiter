@@ -72,35 +72,55 @@ defmodule Arbiter.Worker.Worktree do
       when is_binary(repo_path) and is_binary(branch_name) and is_binary(base_branch) do
     path = worktree_path(branch_name)
 
-    cond do
-      File.dir?(path) ->
-        case current_branch(path) do
-          {:ok, ^branch_name} ->
+    result =
+      cond do
+        File.dir?(path) ->
+          case current_branch(path) do
+            {:ok, ^branch_name} ->
+              {:ok, path}
+
+            {:ok, _other} ->
+              {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
+
+            {:error, _} = err ->
+              err
+          end
+
+        true ->
+          File.mkdir_p!(Path.dirname(path))
+
+          with :ok <- ensure_origin_remote(repo_path),
+               :ok <- fetch_origin_branch(repo_path, base_branch),
+               :ok <- ensure_origin_ref(repo_path, base_branch),
+               {:ok, _stdout} <-
+                 run_git(
+                   ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
+                   cd: repo_path
+                 ) do
+            :ok = seed_compiled_deps(repo_path, path)
             {:ok, path}
+          end
+      end
 
-          {:ok, _other} ->
-            {:error, {:git_failed, "worktree exists at #{path} on a different branch"}}
-
-          {:error, _} = err ->
-            err
-        end
-
-      true ->
-        File.mkdir_p!(Path.dirname(path))
-
-        with :ok <- ensure_origin_remote(repo_path),
-             :ok <- fetch_origin_branch(repo_path, base_branch),
-             :ok <- ensure_origin_ref(repo_path, base_branch),
-             {:ok, _stdout} <-
-               run_git(
-                 ["worktree", "add", path, "-b", branch_name, "origin/" <> base_branch],
-                 cd: repo_path
-               ) do
-          :ok = seed_compiled_deps(repo_path, path)
-          {:ok, path}
-        end
+    with {:ok, wt_path} <- result do
+      _ = ensure_arbiter_exclude(wt_path)
+      {:ok, wt_path}
     end
   end
+
+  # bd-bhrji9: `.arbiter/INBOX` (Arbiter.Messages.WorktreeDelivery) is written
+  # into the worktree out-of-band, whenever a coordinator/sibling message
+  # arrives — independent of, and not gated by, MCP config injection
+  # (`Arbiter.MCP.inject_config?/0`). It never got the same `info/exclude`
+  # protection bd-9q966y gave `.mcp.json`/`.gemini/`/`.codex/`, since it predates
+  # that fix and lives in a different module entirely. Excluding it here, once
+  # per worktree at creation, guarantees the entry exists before any message can
+  # ever be delivered — regardless of MCP provider or whether config injection
+  # is enabled. Best-effort: `add_to_git_exclude/2` already swallows its own
+  # errors so a git hiccup never blocks worktree provisioning.
+  @spec ensure_arbiter_exclude(path()) :: :ok
+  defp ensure_arbiter_exclude(path),
+    do: Arbiter.MCP.AgentConfig.add_to_git_exclude(path, [".arbiter/"])
 
   defp ensure_origin_remote(repo_path) do
     case run_git(["remote", "get-url", "origin"], cd: repo_path) do
@@ -247,13 +267,18 @@ defmodule Arbiter.Worker.Worktree do
   # seed that was never actually implemented — see bd-6040y1).
   #
   # `.mcp.json` / `.gemini/` / `.codex/` are Arbiter-injected agent-config files
-  # (see bd-9q966y). They are now gitignored via `.git/info/exclude` (written by
-  # `Arbiter.MCP.AgentConfig.write/3`), so they should never appear in `git
-  # status` output. Keeping them here is belt-and-suspenders: if the exclude was
-  # not written, an untracked instance must not false-fail the gate.
-  # The commit gate separately checks `has_injected_config_in_commits?/2` to catch
-  # the harder case where one of these files was explicitly staged and committed.
-  @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/)
+  # (see bd-9q966y). `.arbiter/` is the Admiral/coordinator mailbox delivery
+  # directory (`Arbiter.Messages.WorktreeDelivery`, bd-bhrji9) — not a secret,
+  # but equally an out-of-band Arbiter artifact that must never land in a
+  # contributor commit. All four are gitignored via `info/exclude` (written by
+  # `Arbiter.MCP.AgentConfig.write/3` / `add_to_git_exclude/2`, called from
+  # `Arbiter.Worker.Worktree.create/3` for `.arbiter/`), so they should never
+  # appear in `git status` output. Keeping them here is belt-and-suspenders: if
+  # the exclude was not written, an untracked instance must not false-fail the
+  # gate. The commit gate separately checks `has_injected_config_in_commits?/2`
+  # to catch the harder case where one of these files was explicitly staged and
+  # committed.
+  @ignored_artifact_paths ~w(deps deps/ _build _build/ .hex .hex/ .mcp.json .gemini/ .codex/ .arbiter .arbiter/)
 
   @doc """
   Return `{:ok, true}` if the worktree at `path` has any uncommitted changes
@@ -320,20 +345,24 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
-  # Arbiter-injected agent-config paths that must NEVER appear in a committed diff.
-  # These files carry per-spawn bearer tokens. Each entry is either a filename
-  # (exact match) or a directory prefix (ends with "/", matches any path within it).
-  @injected_config_patterns ~w(.mcp.json .gemini/ .codex/)
+  # Arbiter-injected paths that must NEVER appear in a committed diff. `.mcp.json`
+  # / `.gemini/` / `.codex/` carry per-spawn bearer tokens (bd-9q966y); `.arbiter/`
+  # is the coordinator/sibling mailbox delivery directory (bd-bhrji9) — not a
+  # secret, but an out-of-band Arbiter artifact that must equally never reach a
+  # contributor commit. Each entry is either a filename (exact match) or a
+  # directory prefix (ends with "/", matches any path within it).
+  @injected_config_patterns ~w(.mcp.json .gemini/ .codex/ .arbiter/)
 
   @doc """
   Return `{:ok, true}` if the branch's own committed diff (relative to its
   merge-base with `base_ref`, NOT a literal `base_ref..HEAD` two-dot diff)
-  contains any Arbiter-injected agent-config file (`.mcp.json`, `.gemini/`,
-  `.codex/`), else `{:ok, false}`.
+  contains any Arbiter-injected path (`.mcp.json`, `.gemini/`, `.codex/`,
+  `.arbiter/`), else `{:ok, false}`.
 
-  These files carry per-spawn bearer tokens and must NEVER appear in commits. This
-  check is the commit-gate backstop (bd-9q966y) for the case where `.git/info/exclude`
-  protection was bypassed and the file was explicitly staged and committed.
+  These paths must NEVER appear in commits: the first three carry per-spawn
+  bearer tokens; `.arbiter/` is the mailbox delivery directory. This check is the
+  commit-gate backstop (bd-9q966y) for the case where `info/exclude` protection
+  was bypassed and the file was explicitly staged and committed.
 
   Uses `merge_base/2` (bd-4ltc3e) rather than diffing straight against
   `base_ref`'s current tip: a literal `base_ref..HEAD` diff also picks up

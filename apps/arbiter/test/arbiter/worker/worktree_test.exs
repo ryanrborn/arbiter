@@ -704,5 +704,100 @@ defmodule Arbiter.Worker.WorktreeTest do
 
       assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "main")
     end
+
+    # bd-bhrji9: regression — `.arbiter/INBOX` (written by
+    # Arbiter.Messages.WorktreeDelivery, predates bd-9q966y by ~9 days) was never
+    # added to this pattern list, so a worker committing it slipped straight past
+    # the commit gate and was only caught by a downstream ReviewGate round.
+    test "returns true when .arbiter/INBOX is in the committed diff (force-added, bypassing exclude)",
+         %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/secret-arbiter-inbox", "main")
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/INBOX"), "[2026-07-27] some direction\n---\n")
+      # `Worktree.create/3` now excludes `.arbiter/` on its own (bd-bhrji9), so a
+      # plain `git add` refuses an ignored path — force it, simulating the "add
+      # flags bypassed the exclude" case the commit gate exists to backstop.
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-f", ".arbiter/INBOX"])
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "oops: inbox file"])
+
+      assert {:ok, true} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
+  end
+
+  describe "create/3 excludes .arbiter/ (bd-bhrji9)" do
+    test "adds .arbiter/ to the repo's (common-dir) info/exclude on creation", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/arbiter-excl", "main")
+
+      {common_dir, 0} = System.cmd("git", ["-C", wt, "rev-parse", "--git-common-dir"])
+      exclude_path = Path.join([String.trim(common_dir), "info", "exclude"])
+      exclude_content = File.read!(exclude_path)
+      assert exclude_content =~ ".arbiter/"
+    end
+
+    test "git add -A does NOT stage .arbiter/INBOX after creation", %{repo: repo} do
+      {:ok, wt} = Worktree.create(repo, "feature/arbiter-excl-add", "main")
+
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/INBOX"), "[2026-07-27] direction\n---\n")
+
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-A"])
+
+      {status_out, 0} =
+        System.cmd("git", ["-C", wt, "status", "--porcelain"], stderr_to_stdout: true)
+
+      refute status_out =~ ".arbiter",
+             "expected .arbiter/ to be excluded from git staging, got:\n#{status_out}"
+    end
+  end
+
+  # bd-bhrji9: reproduces the exact failure conditions from the incident —
+  # a contributor repo with NO tracked .gitignore for either injected path,
+  # a worktree provisioned via the real Worktree.create/3 + AgentConfig.write/3
+  # + WorktreeDelivery.write_inbox/3 paths (not hand-rolled fixtures), and a
+  # worker committing with a blunt `git add -A && git commit`. Neither
+  # `.mcp.json` nor `.arbiter/INBOX` may end up in the resulting commit.
+  describe "end-to-end regression (bd-bhrji9): worker git add -A must never sweep injected files" do
+    test "no .gitignore in the repo, git add -A + commit -> neither .mcp.json nor .arbiter/ land in the commit",
+         %{repo: repo} do
+      refute File.exists?(Path.join(repo, ".gitignore"))
+
+      {:ok, wt} = Worktree.create(repo, "feature/e2e-no-gitignore", "main")
+
+      # Same two injection points a live dispatch exercises: the per-spawn MCP
+      # config (Arbiter.MCP.AgentConfig.write/3) and the Admiral/coordinator
+      # mailbox delivery (Arbiter.Messages.WorktreeDelivery.write_inbox/3, via
+      # its private write_inbox — exercised directly here since it needs a
+      # running worker registry to resolve worktree_path).
+      assert :ok =
+               Arbiter.MCP.AgentConfig.write(:claude, wt,
+                 mcp_url: "http://127.0.0.1:4848/mcp",
+                 scope_token: "tok-e2e-regression"
+               )
+
+      File.mkdir_p!(Path.join(wt, ".arbiter"))
+      File.write!(Path.join(wt, ".arbiter/INBOX"), "[2026-07-27T00:00:00Z]\ndirection\n---\n")
+
+      # The worker's own source-code contribution.
+      File.write!(Path.join(wt, "app.ex"), "defmodule App do end\n")
+
+      {_, 0} = System.cmd("git", ["-C", wt, "add", "-A"])
+      {_, 0} = System.cmd("git", ["-C", wt, "config", "user.email", "worker@example.com"])
+      {_, 0} = System.cmd("git", ["-C", wt, "config", "user.name", "Worker"])
+      {_, 0} = System.cmd("git", ["-C", wt, "config", "commit.gpgsign", "false"])
+      {_, 0} = System.cmd("git", ["-C", wt, "commit", "-q", "-m", "add app"])
+
+      {committed, 0} =
+        System.cmd("git", ["-C", wt, "diff", "--name-only", "main..HEAD", "--"])
+
+      refute committed =~ ".mcp.json",
+             "expected .mcp.json absent from the commit, got:\n#{committed}"
+
+      refute committed =~ ".arbiter",
+             "expected .arbiter/ absent from the commit, got:\n#{committed}"
+
+      assert committed =~ "app.ex"
+
+      assert {:ok, false} = Worktree.has_injected_config_in_commits?(wt, "main")
+    end
   end
 end
