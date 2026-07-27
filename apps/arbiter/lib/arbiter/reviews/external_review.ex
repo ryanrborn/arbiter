@@ -69,6 +69,7 @@ defmodule Arbiter.Reviews.ExternalReview do
   alias Arbiter.Tasks.{Issue, RepoConfig, Workspace}
   alias Arbiter.Worker.{ReviewAutomation, ReviewScope}
   alias Arbiter.Workflows.{CodeReview, ReviewPatrolSupervisor}
+  alias Arbiter.Workflows.CodeReview.DiffScope
 
   @task_supervisor Arbiter.Reviews.TaskSupervisor
 
@@ -258,28 +259,40 @@ defmodule Arbiter.Reviews.ExternalReview do
     proposed = record.proposed_comments || []
     selected = select_comments(proposed, opts)
     adapter_opts = adapter_opts(repo_path)
-    post_verdict? = Map.get(opts, :post_verdict, selected != [])
 
-    with {:ok, posted} <- post_selected_comments(adapter, mr_ref, selected, adapter_opts),
-         {:ok, verdict_posted} <-
-           maybe_submit_verdict(adapter, mr_ref, record, post_verdict?, adapter_opts) do
-      mark_greenlit(record, selected)
+    # bd-887swr: mirror the auto path's diff-scope net (partition_by_diff_scope
+    # in code_review.ex) on the greenlight path too. Never halts — a comment
+    # that can't be posted (out-of-diff, or any adapter error including a 422)
+    # is skipped and reported, so the rest of the selection still lands.
+    {:ok, %{posted: posted, skipped: skipped}} =
+      post_selected_comments(adapter, mr_ref, selected, adapter_opts)
 
-      Logger.info(
-        "ExternalReview.greenlight: #{mr_ref} posted #{length(posted)}/#{length(proposed)} " <>
-          "proposed comment(s)#{if verdict_posted, do: " + verdict", else: ""}"
-      )
+    post_verdict? = Map.get(opts, :post_verdict, posted != [])
 
-      {:ok,
-       %{
-         mr_ref: mr_ref,
-         posted: length(posted),
-         selected: length(selected),
-         proposed: length(proposed),
-         verdict_posted: verdict_posted,
-         verdict: record.verdict,
-         link: safe_link(adapter, mr_ref)
-       }}
+    case maybe_submit_verdict(adapter, mr_ref, record, posted, skipped, post_verdict?, adapter_opts) do
+      {:ok, verdict_posted} ->
+        mark_greenlit(record, posted)
+
+        Logger.info(
+          "ExternalReview.greenlight: #{mr_ref} posted #{length(posted)}/#{length(proposed)} " <>
+            "proposed comment(s)#{if skipped != [], do: ", #{length(skipped)} skipped", else: ""}" <>
+            "#{if verdict_posted, do: " + verdict", else: ""}"
+        )
+
+        {:ok,
+         %{
+           mr_ref: mr_ref,
+           posted: length(posted),
+           selected: length(selected),
+           proposed: length(proposed),
+           skipped: length(skipped),
+           verdict_posted: verdict_posted,
+           verdict: record.verdict,
+           link: safe_link(adapter, mr_ref)
+         }}
+
+      {:error, _} = err ->
+        err
     end
   end
 
@@ -320,29 +333,71 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
+  # Post the coordinator-selected comments, skipping (never halting on) any
+  # comment the diff doesn't cover — the exact `bd-2n3qm6` net the auto path
+  # gets via `partition_by_diff_scope/2`, applied here because the greenlight
+  # path is otherwise the *only* posting path with no diff-scope check
+  # (bd-887swr). Returns `{:ok, %{posted: [...], skipped: [%{comment:, reason:}]}}`
+  # — `skipped` entries are never silently dropped: `reason` is either
+  # `:out_of_diff` (never attempted — the diff doesn't cover it) or `{:error,
+  # _}` (the adapter rejected it, including a validation_failed 422 on a
+  # comment that looked in-diff against a stale scope). Every comment is
+  # attempted/classified independently, so one bad comment can't stop the rest
+  # from posting.
+  defp post_selected_comments(_adapter, _mr_ref, [], _adapter_opts),
+    do: {:ok, %{posted: [], skipped: []}}
+
   defp post_selected_comments(adapter, mr_ref, selected, adapter_opts) do
-    Enum.reduce_while(selected, {:ok, []}, fn comment, {:ok, acc} ->
-      case safe_adapter_call(adapter, :post_inline_comment, [
-             mr_ref,
-             to_finding(comment),
-             adapter_opts
-           ]) do
-        {:ok, resp} -> {:cont, {:ok, [resp | acc]}}
-        :ok -> {:cont, {:ok, acc}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
+    {in_diff, out_of_diff} = diff_partition(adapter, mr_ref, selected, adapter_opts)
+
+    {posted, failed} =
+      Enum.reduce(in_diff, {[], []}, fn comment, {posted_acc, failed_acc} ->
+        case safe_adapter_call(adapter, :post_inline_comment, [
+               mr_ref,
+               to_finding(comment),
+               adapter_opts
+             ]) do
+          {:ok, _resp} -> {[comment | posted_acc], failed_acc}
+          :ok -> {[comment | posted_acc], failed_acc}
+          {:error, _} = err -> {posted_acc, [%{comment: comment, reason: err} | failed_acc]}
+        end
+      end)
+
+    skipped =
+      Enum.map(out_of_diff, &%{comment: &1, reason: :out_of_diff}) ++ Enum.reverse(failed)
+
+    {:ok, %{posted: Enum.reverse(posted), skipped: skipped}}
   end
 
-  defp maybe_submit_verdict(_adapter, _mr_ref, _record, false, _opts), do: {:ok, false}
+  # Split `selected` into (in-diff, out-of-diff) against the PR's *current*
+  # diff, fetched fresh via the adapter — the stored `"in_diff"` label on each
+  # proposed comment reflects the diff at review time, which may have drifted
+  # by greenlight time (new commits pushed). When the diff can't be fetched at
+  # all, fail safe: treat every selected comment as out-of-diff rather than
+  # risk a 422 against an unknown scope.
+  defp diff_partition(adapter, mr_ref, selected, adapter_opts) do
+    case safe_adapter_call(adapter, :get_diff, [mr_ref, adapter_opts]) do
+      {:ok, diff} when is_binary(diff) ->
+        scope = DiffScope.build(diff)
+        Enum.split_with(selected, &DiffScope.in_diff?(scope, comment_file(&1), comment_line(&1)))
 
-  defp maybe_submit_verdict(adapter, mr_ref, %Record{} = record, true, adapter_opts) do
+      _ ->
+        {[], selected}
+    end
+  end
+
+  defp comment_file(c), do: c["file"] || c[:file]
+  defp comment_line(c), do: c["line"] || c[:line]
+
+  defp maybe_submit_verdict(_adapter, _mr_ref, _record, _posted, _skipped, false, _opts),
+    do: {:ok, false}
+
+  defp maybe_submit_verdict(adapter, mr_ref, %Record{} = record, posted, skipped, true, adapter_opts) do
     verdict = record.verdict || :approve
-    finding_count = record.finding_count || 0
 
     body =
-      "Greenlit review (#{finding_count} finding(s)) — recommendation: " <>
-        String.upcase(to_string(verdict)) <> "."
+      "Greenlit review (#{length(posted)} finding(s) posted) — recommendation: " <>
+        String.upcase(to_string(verdict)) <> "." <> skipped_section(skipped)
 
     case safe_adapter_call(adapter, :submit_review, [mr_ref, verdict, body, adapter_opts]) do
       {:ok, _} -> {:ok, true}
@@ -351,10 +406,27 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
-  # Record the outcome: :posted when we posted at least one comment, :none when
-  # the coordinator approved nothing.
-  defp mark_greenlit(%Record{} = record, selected) do
-    status = if selected == [], do: :none, else: :posted
+  defp skipped_section([]), do: ""
+
+  defp skipped_section(skipped) do
+    lines =
+      Enum.map(skipped, fn %{comment: c, reason: reason} ->
+        "- #{comment_file(c)}:#{comment_line(c)} — #{skip_reason_label(reason)}"
+      end)
+
+    "\n\nNot posted (#{length(skipped)}):\n" <> Enum.join(lines, "\n")
+  end
+
+  defp skip_reason_label(:out_of_diff),
+    do: "outside the current diff (can't post an inline comment there)"
+
+  defp skip_reason_label({:error, reason}), do: "failed to post: #{inspect(reason)}"
+
+  # Record the outcome: :posted when at least one comment actually posted,
+  # :none when nothing did — whether because the coordinator approved nothing,
+  # or every approved comment was skipped as out-of-diff / failed to post.
+  defp mark_greenlit(%Record{} = record, posted) do
+    status = if posted == [], do: :none, else: :posted
 
     case Ash.update(record, %{greenlight_status: status}, action: :greenlight) do
       {:ok, _} -> :ok
@@ -654,9 +726,22 @@ defmodule Arbiter.Reviews.ExternalReview do
         "line" => c[:line] || c["line"],
         "severity" => to_string(c[:severity] || c["severity"] || ""),
         "message" => c[:message] || c["message"],
-        "body" => c[:body] || c["body"]
+        "body" => c[:body] || c["body"],
+        # bd-887swr: whether CodeReview's :file_findings step found this
+        # comment's (file, line) inside the diff at review time — lets a
+        # coordinator triage postability before greenlighting without diffing
+        # the PR by hand. `nil` (rather than defaulting to a boolean) for
+        # comments persisted before this label existed.
+        "in_diff" => proposed_in_diff(c)
       }
     end)
+  end
+
+  defp proposed_in_diff(c) do
+    case Map.fetch(c, :in_diff) do
+      {:ok, v} -> v
+      :error -> Map.get(c, "in_diff")
+    end
   end
 
   defp safe_adapter_call(adapter, fun, args) do

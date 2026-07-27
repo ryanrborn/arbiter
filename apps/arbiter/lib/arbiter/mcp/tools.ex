@@ -1370,6 +1370,8 @@ defmodule Arbiter.MCP.Tools do
   end
 
   defp serialize_external_review(%Arbiter.Reviews.Record{} = r, opts \\ []) do
+    proposed = r.proposed_comments || []
+
     base = %{
       id: r.id,
       pr_ref: r.pr_ref,
@@ -1380,7 +1382,14 @@ defmodule Arbiter.MCP.Tools do
       status: r.status,
       mode: r.mode,
       greenlight_status: r.greenlight_status,
-      proposed_count: length(r.proposed_comments || []),
+      proposed_count: length(proposed),
+      # bd-887swr: in/out-of-diff breakdown of the proposed comments, so a
+      # coordinator can see how many are postable without fetching the full
+      # `proposed_comments` list (external_review_show) or diffing the PR by
+      # hand. Comments persisted before the "in_diff" label existed count
+      # toward neither.
+      in_diff_count: Enum.count(proposed, &(&1["in_diff"] == true)),
+      out_of_diff_count: Enum.count(proposed, &(&1["in_diff"] == false)),
       verdict: r.verdict,
       finding_count: r.finding_count,
       findings_summary: r.findings_summary,
@@ -1395,7 +1404,7 @@ defmodule Arbiter.MCP.Tools do
     }
 
     if Keyword.get(opts, :proposed_comments, false) do
-      Map.put(base, :proposed_comments, r.proposed_comments || [])
+      Map.put(base, :proposed_comments, proposed)
     else
       base
     end

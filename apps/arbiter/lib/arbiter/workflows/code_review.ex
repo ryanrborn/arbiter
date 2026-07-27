@@ -236,12 +236,19 @@ defmodule Arbiter.Workflows.CodeReview do
   end
 
   # Report-only: capture the per-finding proposed comment text and post NOTHING.
-  # This clause must precede the posting clause below.
+  # This clause must precede the posting clause below. Each proposed comment is
+  # labeled `:in_diff` (bd-887swr) — same `DiffScope` check the posting path
+  # runs — so a coordinator can triage which proposed comments are postable
+  # before greenlighting, without diffing the PR by hand.
   def run_step(:file_findings, %{mode: :adapter, report_only: true} = state) do
+    scope = diff_scope_for(state)
+
     proposed =
       state
       |> Map.get(:findings, [])
-      |> Enum.map(&proposed_comment/1)
+      |> Enum.map(fn finding ->
+        Map.put(proposed_comment(finding), :in_diff, finding_in_diff?(scope, finding))
+      end)
 
     {:ok, Map.put(state, :proposed_comments, proposed)}
   end
@@ -457,15 +464,29 @@ defmodule Arbiter.Workflows.CodeReview do
   # `run_step(:file_findings, ...)` directly, never having run `:read_diff`)
   # skips scoping entirely so existing callers/tests are unaffected.
   defp partition_by_diff_scope(findings, state) do
-    case Map.fetch(state, :diff) do
-      :error ->
-        {findings, []}
-
-      {:ok, diff} ->
-        scope = DiffScope.build(diff)
-        Enum.split_with(findings, &DiffScope.in_diff?(scope, finding_file(&1), finding_line(&1)))
+    case diff_scope_for(state) do
+      nil -> {findings, []}
+      scope -> Enum.split_with(findings, &finding_in_diff?(scope, &1))
     end
   end
+
+  # The diff scope for `state`, or `nil` when no `:diff` key is present (unit
+  # tests exercising a step directly, bypassing `:read_diff`) — callers treat
+  # `nil` as "scoping skipped", not "empty diff".
+  defp diff_scope_for(state) do
+    case Map.fetch(state, :diff) do
+      {:ok, diff} -> DiffScope.build(diff)
+      :error -> nil
+    end
+  end
+
+  # `nil` scope (scoping skipped) treats every finding as in-diff, matching
+  # `partition_by_diff_scope/2`'s pre-bd-887swr behavior for callers with no
+  # `:diff` key.
+  defp finding_in_diff?(nil, _finding), do: true
+
+  defp finding_in_diff?(scope, finding),
+    do: DiffScope.in_diff?(scope, finding_file(finding), finding_line(finding))
 
   defp finding_file(finding), do: finding[:file] || finding["file"]
   defp finding_line(finding), do: finding[:line] || finding["line"]
