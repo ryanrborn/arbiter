@@ -1258,8 +1258,11 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   List recent ExternalReview audit records for a workspace (bd-31fh9e, bd-bs5b12).
-  Coordinator only. Returns records newest-first wrapped under the :data key
-  (consistent with other /api collection endpoints). Optional `limit` (default 20,
+  Coordinator only. Returns records newest-first wrapped under the :external_reviews key
+  (consistent with other MCP list tools: tasks, workers, skills). Note: the REST
+  endpoint `GET /api/external_reviews` uses the :data key instead — this deliberate
+  asymmetry is intentional (Option 3 in bd-bs5b12): each transport follows its own
+  convention for consistency within that transport. Optional `limit` (default 20,
   max 200), `status` filter, and `workspace` (resolved the same way as
   `worker_list`/`task_ready` — explicit arg, then the installation default).
   """
@@ -1282,7 +1285,7 @@ defmodule Arbiter.MCP.Tools do
         |> Ash.read!()
         |> Enum.map(&serialize_external_review/1)
 
-      {:ok, %{data: records, count: length(records)}}
+      {:ok, %{external_reviews: records, count: length(records)}}
     end
   rescue
     e -> {:error, {:internal, "external_review_list failed: #{Exception.message(e)}"}}

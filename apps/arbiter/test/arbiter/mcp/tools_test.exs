@@ -2146,7 +2146,7 @@ defmodule Arbiter.MCP.ToolsTest do
     end
 
     test "with no `workspace` arg, lists only the scope's own workspace", ctx do
-      assert {:ok, %{data: records}} =
+      assert {:ok, %{external_reviews: records}} =
                Tools.external_review_list(ctx.coordinator, %{})
 
       assert Enum.any?(records, &(&1.id == ctx.here.id))
@@ -2156,7 +2156,7 @@ defmodule Arbiter.MCP.ToolsTest do
     test "passing `workspace:` scopes the list to that workspace", ctx do
       agnostic = %Scope{tier: :coordinator, workspace_id: nil, can_dispatch: true}
 
-      assert {:ok, %{data: records}} =
+      assert {:ok, %{external_reviews: records}} =
                Tools.external_review_list(agnostic, %{"workspace" => ctx.other_ws.name})
 
       assert Enum.any?(records, &(&1.id == ctx.there.id))
