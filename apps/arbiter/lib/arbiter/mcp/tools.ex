@@ -1257,8 +1257,12 @@ defmodule Arbiter.MCP.Tools do
   # ---- external_review_list -----------------------------------------------
 
   @doc """
-  List recent ExternalReview audit records for a workspace (bd-31fh9e, bd-dmy4pk).
-  Coordinator only. Returns records newest-first. Optional `limit` (default 20,
+  List recent ExternalReview audit records for a workspace (bd-31fh9e, bd-bs5b12).
+  Coordinator only. Returns records newest-first wrapped under the :external_reviews key
+  (consistent with other MCP list tools: tasks, workers, skills). Note: the REST
+  endpoint `GET /api/external_reviews` uses the :data key instead — this deliberate
+  asymmetry is intentional (Option 3 in bd-bs5b12): each transport follows its own
+  convention for consistency within that transport. Optional `limit` (default 20,
   max 200), `status` filter, and `workspace` (resolved the same way as
   `worker_list`/`task_ready` — explicit arg, then the installation default).
   """

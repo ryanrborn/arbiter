@@ -1,10 +1,13 @@
 defmodule ArbiterWeb.Api.ExternalReviewController do
   @moduledoc """
-  REST endpoint for the ExternalReview audit ledger (bd-31fh9e).
+  REST endpoint for the ExternalReview audit ledger (bd-31fh9e, bd-bs5b12).
 
   Route:
 
-    * `GET /api/external_reviews` — list recent records, newest first.
+    * `GET /api/external_reviews` — list recent records, newest first, wrapped under the "data" key.
+      Returns: `{"data": [...]}` (consistent with other /api collection endpoints).
+      Note: the MCP `external_review_list` tool uses "external_reviews" instead (deliberate
+      asymmetry — each transport follows its own convention per bd-bs5b12 Option 3).
       Optional query params:
         * `workspace_id` — restrict to one workspace.
         * `status`       — filter by `running` | `completed` | `failed`.
