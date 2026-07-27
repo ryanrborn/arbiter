@@ -548,10 +548,15 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(wt, ".claude/skills/not-selected/SKILL.md"))
 
       # The skills tree is git-excluded so a worker's `git add -A` can't commit
-      # it. A linked worktree's `.git` is a gitfile; the exclude is written under
-      # the per-worktree git dir (`--git-dir`), matching AgentConfig's helper.
-      {git_dir, 0} = System.cmd("git", ["-C", wt, "rev-parse", "--git-dir"])
-      exclude = File.read!(Path.expand(Path.join([String.trim(git_dir), "info", "exclude"]), wt))
+      # it. A linked worktree's `.git` is a gitfile; git only ever reads
+      # `info/exclude` from the repo's COMMON dir (`--git-common-dir`), NOT the
+      # worktree-private admin dir (`--git-dir`) — see bd-bhrji9 — so that's
+      # where AgentConfig.add_to_git_exclude/2 writes it.
+      {common_dir, 0} = System.cmd("git", ["-C", wt, "rev-parse", "--git-common-dir"])
+
+      exclude =
+        File.read!(Path.expand(Path.join([String.trim(common_dir), "info", "exclude"]), wt))
+
       assert exclude =~ ".claude/skills/"
     end
 
