@@ -114,5 +114,32 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
       assert String.contains?(response_body, "\\n"),
              "Response should contain escaped newlines (\\n) in the JSON"
     end
+
+    test "REST and MCP envelope consistency (bd-bs5b12)", %{conn: conn} do
+      # Both REST and MCP should return the same envelope key for external_reviews
+      _rec =
+        insert_record!(%{
+          finding_count: 1,
+          findings_summary: "test finding"
+        })
+
+      # REST endpoint should return data key
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      {:ok, rest_parsed} = Jason.decode(conn.resp_body)
+      assert Map.has_key?(rest_parsed, "data"), "REST should return 'data' key"
+      assert is_list(rest_parsed["data"]), "REST data should be a list"
+      assert length(rest_parsed["data"]) == 1
+
+      # MCP tool should also return data key (not external_reviews)
+      {:ok, mcp_result} =
+        Arbiter.MCP.Tools.external_review_list(
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: @ws, can_dispatch: true},
+          %{}
+        )
+
+      assert Map.has_key?(mcp_result, :data), "MCP should return :data key, got: #{inspect(Map.keys(mcp_result))}"
+      assert is_list(mcp_result.data), "MCP data should be a list"
+      assert length(mcp_result.data) == 1
+    end
   end
 end
