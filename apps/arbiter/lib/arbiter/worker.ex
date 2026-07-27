@@ -3920,8 +3920,13 @@ defmodule Arbiter.Worker do
   defp maybe_default(map, _key, nil), do: map
   defp maybe_default(map, key, value), do: Map.put_new(map, key, value)
 
+  # bd-636thc: routes through Mergers.open_with_retry/6 rather than calling
+  # adapter.open/4 directly, so a transient "already exists" 422 (the
+  # adapter's own single-shot adoption lookup missing a PR that genuinely
+  # exists — e.g. right after this same run's own pre-review PR-open,
+  # bd-129xh4) gets one more chance to adopt instead of failing the run.
   defp safe_open(adapter, branch, title, description, open_opts) do
-    adapter.open(branch, title, description, open_opts)
+    Arbiter.Mergers.open_with_retry(adapter, branch, title, description, open_opts)
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   catch

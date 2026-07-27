@@ -149,4 +149,85 @@ defmodule Arbiter.Mergers do
 
     :ok
   end
+
+  @doc """
+  Calls `adapter.open/4`, retrying when the failure is a 409/422 "an open
+  PR/MR already exists for this branch" (bd-636thc).
+
+  `Github.open/4` and `Gitlab.open/4` are each already idempotent on their
+  own: a look-before-create check, and (on a 409/422) a single reactive
+  fallback lookup that adopts the existing open PR/MR instead of failing
+  (bd-8rrn9t / bd-8iad6a). That single-shot lookup can still transiently miss
+  a PR that is genuinely open — e.g. right after a burst of review-related
+  API traffic — exhausting the adapter's own retry and bubbling a raw
+  "already exists" error up to the caller even though the PR is sitting
+  right there.
+
+  This wraps a bounded retry *around the whole `open/4` call* (not just the
+  lookup inside it), giving the adoption lookup another shot end to end.
+  Every caller that can open an MR for a task's own branch (`Worker.safe_open/5`
+  and `MergeQueue.open_mr_for/4`) routes through this so none of them bypass
+  the adoption logic the other already benefits from.
+
+  Any other error (an unrelated 422, a network failure, …) returns
+  immediately on the first attempt — this only retries the specific
+  "already exists" case.
+  """
+  @spec open_with_retry(adapter, String.t(), String.t(), String.t() | nil, map(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def open_with_retry(adapter, branch, title, description, opts, retry_opts \\ [])
+      when is_atom(adapter) and is_binary(branch) and is_map(opts) do
+    attempts = Keyword.get(retry_opts, :attempts, 3)
+    delay_ms = Keyword.get(retry_opts, :delay_ms, 200)
+    do_open_with_retry(adapter, branch, title, description, opts, attempts, delay_ms)
+  end
+
+  defp do_open_with_retry(adapter, branch, title, description, opts, attempts, delay_ms) do
+    case adapter.open(branch, title, description, opts) do
+      {:ok, mr_ref} = ok when is_binary(mr_ref) ->
+        ok
+
+      {:error, reason} = err ->
+        if attempts > 1 and already_open_error?(reason) do
+          Process.sleep(delay_ms)
+          do_open_with_retry(adapter, branch, title, description, opts, attempts - 1, delay_ms)
+        else
+          err
+        end
+
+      other ->
+        other
+    end
+  end
+
+  @doc """
+  Whether `reason` — an adapter error struct returned by `open/4` — represents
+  "an open PR/MR already exists for this branch", GitHub's and GitLab's
+  phrasing for the same 409/422 condition. Used to decide whether a failed
+  `open/4` call is worth retrying (see `open_with_retry/6`).
+  """
+  @spec already_open_error?(term()) :: boolean()
+  def already_open_error?(%{status: status, raw: raw}) when status in [409, 422] do
+    already_open_message?(raw)
+  end
+
+  def already_open_error?(_), do: false
+
+  defp already_open_message?(%{"errors" => errors}) when is_list(errors) do
+    Enum.any?(errors, &already_open_message?/1)
+  end
+
+  defp already_open_message?(%{"message" => messages}) when is_list(messages) do
+    Enum.any?(messages, &already_open_message?/1)
+  end
+
+  defp already_open_message?(%{"message" => msg}) when is_binary(msg) do
+    already_open_message?(msg)
+  end
+
+  defp already_open_message?(msg) when is_binary(msg) do
+    String.contains?(String.downcase(msg), "already exists")
+  end
+
+  defp already_open_message?(_), do: false
 end
