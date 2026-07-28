@@ -1047,7 +1047,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     case automation_mode(engagement, workspace, rig_name) do
       :auto -> run_rereview(engagement, head, adapter, workspace, opts)
       :report_only -> report_rereview(engagement, head, adapter, workspace, opts)
-      :flag -> flag_new_commits(engagement, head, workspace)
+      # :off (bd-7opdaf) is a hard opt-out — never dispatch a reviewer, same
+      # non-dispatching behavior as :flag (surface a flag, don't review).
+      mode when mode in [:flag, :off] -> flag_new_commits(engagement, head, workspace)
     end
   end
 
@@ -1312,9 +1314,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         :auto ->
           dispatch_reply(engagement, thread, comment, adapter, workspace)
 
-        # report-only and flag both post NOTHING to the PR — escalate the reply
-        # to the coordinator and let a human decide (bd-36qzgx).
-        mode when mode in [:report_only, :flag] ->
+        # report-only, flag, and off all post NOTHING to the PR — escalate the
+        # reply to the coordinator and let a human decide (bd-36qzgx, bd-7opdaf).
+        mode when mode in [:report_only, :flag, :off] ->
           escalate_reply(engagement, thread, comment, adapter)
       end
 
@@ -1493,7 +1495,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # either direction — e.g. a coordinator can dispatch `worker_review` with an
   # explicit hard `automation: "report_only"` override even on a repo whose
   # `repo_overrides` says `auto` (the explicit dispatch arg wins per
-  # `Tools.resolve_review_automation_mode/2`), which is stored as `:report_only`
+  # `Tools.guard_review_automation/3`), which is stored as `:report_only`
   # on the engagement. We must never let a *more permissive* live override
   # widen that back out to auto-posting — only a downgrade (more restrictive)
   # should take immediate effect. So we take the more restrictive of the two,
@@ -1503,11 +1505,16 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   #   :report_only — re-review but post NOTHING; report proposed comments to the
   #                  coordinator to greenlight (infra default, bd-36qzgx).
   #   :flag        — do NOT review; surface new commits / replies as a flag.
+  #   :off         — hard opt-out (bd-7opdaf): never dispatch a reviewer at
+  #                  all. Same non-dispatching behavior as :flag, but ranked
+  #                  MORE restrictive so a repo flipped to :off downgrades an
+  #                  in-flight engagement immediately, exactly like the
+  #                  existing report_only downgrade.
   defp automation_mode(%Issue{} = engagement, workspace, rig_name) do
     stored = stored_automation_mode(engagement)
 
     case ReviewAutomation.repo_override_mode(workspace_config(workspace), rig_name) do
-      mode when mode in [:auto, :report_only, :flag] -> most_restrictive(stored, mode)
+      mode when mode in [:auto, :report_only, :flag, :off] -> most_restrictive(stored, mode)
       nil -> stored
     end
   end
@@ -1517,6 +1524,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   defp stored_automation_mode(%Issue{review_automation: :auto}), do: :auto
   defp stored_automation_mode(%Issue{review_automation: :report_only}), do: :report_only
+  defp stored_automation_mode(%Issue{review_automation: :off}), do: :off
   defp stored_automation_mode(_engagement), do: :flag
 
   # Pick whichever of the two modes posts/reviews less — never let a live
@@ -1526,12 +1534,13 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp restriction_rank(:auto), do: 0
   defp restriction_rank(:report_only), do: 1
   defp restriction_rank(:flag), do: 2
+  defp restriction_rank(:off), do: 3
 
   # Reverse `state.repo` (the "owner/repo" string this patrol was started with,
   # from `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare rig/repo-config
   # name that `review_automation.repo_overrides` is keyed by (bd-3cpcw2) — the
   # same identifier `worker_review`'s `args["repo"]` uses at dispatch time
-  # (`Arbiter.Mcp.Tools.resolve_review_automation_mode/2`).
+  # (`Arbiter.Mcp.Tools.guard_review_automation/3`).
   #
   # Single-repo workspaces: `merge.config.repo` IS that bare name directly.
   # Multi-repo workspaces: find the `repo_paths`/`rig_paths` entry whose git

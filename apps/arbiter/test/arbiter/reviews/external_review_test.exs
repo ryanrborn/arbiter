@@ -1577,6 +1577,58 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       "diff --git a/c.ex b/c.ex\n--- a/c.ex\n+++ b/c.ex\n@@ -0,0 +1,3 @@\n+one\n+two\n+three\n"
   end
 
+  # Like stub_report_only, but parametrized over owner/repo/number/head_sha so a
+  # test can dispatch against an arbitrary repo (bd-7opdaf Part 1 regression) —
+  # stub_report_only itself only ever answers for "octo/widget#42".
+  defp stub_report_only_for(events, owner, repo, number, head_sha) do
+    prefix = "/repos/#{owner}/#{repo}/pulls/#{number}"
+
+    Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+      path = conn.request_path
+      diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+      cond do
+        conn.method == "GET" and path == prefix and diff? ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "text/plain")
+          |> Plug.Conn.resp(200, report_only_diff())
+
+        conn.method == "GET" and path == prefix ->
+          json(conn, %{
+            "number" => number,
+            "state" => "open",
+            "head" => %{"sha" => head_sha},
+            "user" => %{"login" => "coworker"},
+            "html_url" => "https://github.com/#{owner}/#{repo}/pull/#{number}"
+          })
+
+        conn.method == "GET" and path == "#{prefix}/reviews" ->
+          json(conn, [])
+
+        conn.method == "GET" and path =~ ~r{/commits/.+/check-runs$} ->
+          json(conn, %{"check_runs" => []})
+
+        conn.method == "POST" and path == "#{prefix}/comments" ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          :ets.insert(events, {:comment, Jason.decode!(body)})
+          json(conn, %{"id" => :rand.uniform(100_000)})
+
+        conn.method == "POST" and path == "#{prefix}/reviews" ->
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          :ets.insert(events, {:review, Jason.decode!(body)})
+          json(conn, %{"id" => 99})
+
+        true ->
+          conn
+          |> Plug.Conn.put_resp_header("content-type", "application/json")
+          |> Plug.Conn.resp(
+            404,
+            Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
+          )
+      end
+    end)
+  end
+
   defp stub_report_only(events, opts) do
     head_sha = Keyword.fetch!(opts, :head_sha)
     author = Keyword.get(opts, :author, "coworker")
@@ -1789,6 +1841,295 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
 
       assert {:ok, %{mr_ref: "octo/widget#42", verdict: _}} =
                ExternalReview.review(pr: "octo/widget#42", force: true, check_runner: runner)
+    end
+  end
+
+  describe "prepare/1 — rig_name resolution from the pr slug (bd-7opdaf Part 1)" do
+    test "derives rig_name from an owner/repo#N slug when repo: is omitted" do
+      ws = github_ws("er-rig-slug")
+
+      assert {:ok, prepared} =
+               ExternalReview.prepare(
+                 pr: "leo-technologies-llc/voice_biometrics#450",
+                 workspace: ws.name
+               )
+
+      assert prepared.rig_name == "voice_biometrics"
+    end
+
+    test "derives rig_name from a full forge URL when repo: is omitted" do
+      ws = github_ws("er-rig-url")
+
+      assert {:ok, prepared} =
+               ExternalReview.prepare(
+                 pr: "https://github.com/leo-technologies-llc/atlas/pull/1549",
+                 workspace: ws.name
+               )
+
+      assert prepared.rig_name == "atlas"
+    end
+
+    test "an explicit repo: arg still wins over the parsed pr slug" do
+      ws = github_ws("er-rig-explicit")
+
+      assert {:ok, prepared} =
+               ExternalReview.prepare(
+                 pr: "leo-technologies-llc/voice_biometrics#450",
+                 repo: "explicit_repo",
+                 workspace: ws.name
+               )
+
+      assert prepared.rig_name == "explicit_repo"
+    end
+
+    test "rig_name is nil for a bare PR number with no repo: or checkout" do
+      ws = github_ws("er-rig-bare")
+
+      assert {:ok, prepared} = ExternalReview.prepare(pr: "42", workspace: ws.name)
+      assert prepared.rig_name == nil
+    end
+  end
+
+  describe "dispatch/1 — repo_overrides resolved on the pr: path (bd-7opdaf Part 1 regression)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "every configured repo_overrides entry resolves to its own mode when repo: is omitted" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-multi-repo-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{}},
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{
+                "atlas" => "report_only",
+                "voice_biometrics" => "report_only",
+                "fast_lane" => "auto",
+                "watched_repo" => "flag"
+              }
+            }
+          }
+        })
+
+      for {repo, expected_mode} <- [
+            {"atlas", :report_only},
+            {"voice_biometrics", :report_only},
+            {"fast_lane", :auto},
+            {"watched_repo", :auto}
+          ] do
+        # `pr:` is a fully-qualified "owner/repo#N" slug with NO explicit `repo:`
+        # arg — exactly the shape that silently fell back to :auto before the fix,
+        # regardless of what repo_overrides said (bd-7opdaf).
+        assert {:ok, ack} =
+                 ExternalReview.dispatch(
+                   pr: "leo-technologies-llc/#{repo}#1",
+                   workspace: ws.name
+                 )
+
+        assert ack.mode == expected_mode,
+               "expected #{repo} to resolve to #{inspect(expected_mode)}, got #{inspect(ack.mode)}"
+      end
+    end
+
+    test "a report_only repo can never post to the PR via the pr: path" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-report-only-guard-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"credentials_ref" => "env:#{@env_var}"}
+            },
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"voice_biometrics" => "report_only"}
+            }
+          }
+        })
+
+      events = :ets.new(:ro_guard_events, [:public, :duplicate_bag])
+      stub_report_only_for(events, "leo-technologies-llc", "voice_biometrics", 1, "sha-guard")
+
+      assert {:ok, result} =
+               ExternalReview.review(
+                 pr: "leo-technologies-llc/voice_biometrics#1",
+                 workspace: ws.name,
+                 check_runner: one_finding()
+               )
+
+      assert result.mode == :report_only
+      assert result.report_only == true
+      assert :ets.lookup(events, :comment) == []
+      assert :ets.lookup(events, :review) == []
+    end
+  end
+
+  describe "automation :off guard (bd-7opdaf Part 2)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+      on_exit(fn -> System.delete_env(@env_var) end)
+      :ok
+    end
+
+    test "dispatch/1 refuses an off-gated repo_override before spawning anything" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-repo-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{}},
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      assert {:error, {:automation_off, "quiet_repo", :repo_override}} =
+               ExternalReview.dispatch(
+                 pr: "leo-technologies-llc/quiet_repo#1",
+                 workspace: ws.name
+               )
+
+      assert [] = records_for(ws.id, "leo-technologies-llc/quiet_repo#1")
+    end
+
+    test "review/1 refuses an off-gated repo_override before spawning anything" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-repo-ws2",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{}},
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      assert {:error, {:automation_off, "quiet_repo", :repo_override}} =
+               ExternalReview.review(pr: "leo-technologies-llc/quiet_repo#1", workspace: ws.name)
+    end
+
+    test "a workspace default of off refuses every repo" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-default-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{}},
+            "review_automation" => %{"default" => "off"}
+          }
+        })
+
+      # A bare PR number with no repo:/repo_paths — rig_name genuinely can't be
+      # resolved, so the default applies with no repo name to report.
+      assert {:error, {:automation_off, nil, :default}} =
+               ExternalReview.dispatch(pr: "1", workspace: ws.name)
+    end
+
+    test "an explicit automation: \"off\" argument refuses even an :auto policy" do
+      ws = github_ws("er-off-explicit")
+
+      assert {:error, {:automation_off, "widget", :explicit}} =
+               ExternalReview.dispatch(pr: "octo/widget#1", automation: "off", workspace: ws.name)
+    end
+
+    test "force: true overrides the off refusal, mirroring the self-approve guard" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-force-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{}},
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      assert {:ok, ack} =
+               ExternalReview.dispatch(
+                 pr: "leo-technologies-llc/quiet_repo#1",
+                 workspace: ws.name,
+                 force: true
+               )
+
+      assert ack.status == "dispatched"
+    end
+
+    test "force: true with an explicit automation: \"off\" argument dispatches instead of raising" do
+      ws = github_ws("er-off-explicit-force")
+
+      assert {:ok, ack} =
+               ExternalReview.dispatch(
+                 pr: "octo/widget#1",
+                 automation: "off",
+                 force: true,
+                 workspace: ws.name
+               )
+
+      assert ack.status == "dispatched"
+    end
+
+    test "an auto_authors exception is honored on the pr: path under a default: off policy" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-auto-authors-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"credentials_ref" => "env:#{@env_var}"}
+            },
+            "review_automation" => %{"default" => "off", "auto_authors" => ["trusted_dev"]}
+          }
+        })
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/leo-technologies-llc/quiet_repo/pulls/1"} ->
+            json(conn, %{
+              "number" => 1,
+              "user" => %{"login" => "trusted_dev"},
+              "head" => %{"sha" => "abc"},
+              "base" => %{"ref" => "main"}
+            })
+
+          {"GET", "/repos/leo-technologies-llc/quiet_repo/pulls/1/reviews"} ->
+            json(conn, [])
+
+          _ ->
+            Plug.Conn.resp(conn, 404, "")
+        end
+      end)
+
+      # Without the author resolved, this would refuse via `:default` even
+      # though `auto_authors` should make it `:auto` for this PR's author.
+      assert {:ok, ack} =
+               ExternalReview.dispatch(
+                 pr: "leo-technologies-llc/quiet_repo#1",
+                 workspace: ws.name
+               )
+
+      assert ack.status == "dispatched"
+    end
+
+    test "describe_error names the repo and the config key responsible" do
+      msg =
+        ExternalReview.describe_error({:automation_off, "voice_biometrics", :repo_override})
+
+      assert msg =~ "voice_biometrics"
+      assert msg =~ "repo_overrides"
+      assert msg =~ "force: true"
     end
   end
 

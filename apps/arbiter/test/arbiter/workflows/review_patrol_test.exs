@@ -735,6 +735,64 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert length(flags) == 1
     end
 
+    test "off mode surfaces a flag instead of re-reviewing, same as flag (bd-7opdaf)", %{ws: ws} do
+      eng =
+        engagement(ws, 409, %{
+          review_automation: :off,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(409, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # No review posted — same hard-restriction behavior as :flag.
+      refute_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_flagged == [eng.id]
+
+      flags =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(directive_ref == ^eng.id and kind == :flag)
+        |> Ash.read!()
+
+      assert length(flags) == 1
+    end
+
+    test "a live repo_override downgrade to :off overrides a grandfathered :auto engagement (bd-7opdaf)",
+         %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config:
+            Map.put(ws.config, "review_automation", %{
+              "default" => "auto",
+              "repo_overrides" => %{"repo" => "off"}
+            })
+        })
+
+      eng =
+        engagement(ws, 410, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub(410, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # A live :off downgrade is MORE restrictive than the grandfathered :auto —
+      # it takes effect immediately, same as the existing report_only downgrade.
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_flagged == [eng.id]
+    end
+
     test "a live repo_override downgrade to report_only overrides a grandfathered :auto engagement (bd-3cpcw2)",
          %{ws: ws} do
       # The engagement was opened while the repo was `auto` (grandfathered), but

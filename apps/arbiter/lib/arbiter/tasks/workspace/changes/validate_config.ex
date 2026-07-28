@@ -329,8 +329,10 @@ defmodule Arbiter.Tasks.Workspace.Changes.ValidateConfig do
   end
 
   # "auto" (review + post), "report_only"/"propose" (review + report, await
-  # greenlight — infra default, bd-36qzgx), "flag"/"notify" (escalate, no review).
-  @valid_automation_modes ~w[auto report_only propose flag notify]
+  # greenlight — infra default, bd-36qzgx), "flag"/"notify" (escalate, no
+  # review), "off"/"never"/"disabled" (hard opt-out: refuse to dispatch a
+  # reviewer at all, bd-7opdaf).
+  @valid_automation_modes ~w[auto report_only propose flag notify off never disabled]
 
   @doc "Valid `review_automation.default` / `repo_overrides` value strings."
   @spec valid_review_automation_modes() :: [String.t()]
