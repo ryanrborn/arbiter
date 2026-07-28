@@ -21,6 +21,8 @@ defmodule ArbiterWeb.Api.SkillJSON do
       id: skill.id,
       name: skill.name,
       body: skill.body,
+      workspace_id: skill.workspace_id,
+      scope: if(is_nil(skill.workspace_id), do: "global", else: "workspace"),
       metadata: skill.metadata || %{},
       activation_mode: skill.activation_mode,
       code_only: skill.code_only,

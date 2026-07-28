@@ -79,8 +79,13 @@ defmodule Arbiter.Skills.Selection do
     * `:workspace` — the task's `%Workspace{}` or a raw config map. `nil` →
       no workspace/repo layers (task layer only).
     * `:repo`      — the resolved repo name, for the repo layer. `nil` → skip.
+    * `:workspace_id` — the dispatch workspace id, used to resolve each name
+      with shadowing precedence (a workspace-scoped skill beats the global —
+      `Arbiter.Skills.resolve_skill/2`). Defaults to the id of the `:workspace`
+      struct when one is given; `nil` resolves globals only (unchanged
+      behaviour). Ignored when an explicit `:loader` is supplied.
     * `:loader`    — test seam: `(name -> {:ok, %Skill{}} | {:error, _})`.
-      Defaults to `Arbiter.Skills.get_skill_by_name/1`.
+      Defaults to a workspace-aware resolver keyed on `:workspace_id`.
 
   Returns a list of `%{skill: %Skill{}, activation: :always_on | :situational}`
   in stable (resolution) order, de-duplicated by skill name. Unknown skill
@@ -89,9 +94,11 @@ defmodule Arbiter.Skills.Selection do
   @spec resolve(keyword()) :: [resolved()]
   def resolve(opts) do
     task = Keyword.fetch!(opts, :task)
-    config = workspace_config(Keyword.get(opts, :workspace))
+    workspace = Keyword.get(opts, :workspace)
+    config = workspace_config(workspace)
     repo = Keyword.get(opts, :repo)
-    loader = Keyword.get(opts, :loader, &Skills.get_skill_by_name/1)
+    workspace_id = Keyword.get(opts, :workspace_id, workspace_id_from(workspace))
+    loader = Keyword.get(opts, :loader, &Skills.resolve_skill(&1, workspace_id))
 
     {names, overrides} = effective_names(config, repo, task)
 
@@ -272,6 +279,11 @@ defmodule Arbiter.Skills.Selection do
   defp workspace_config(%Workspace{}), do: %{}
   defp workspace_config(%{} = config), do: config
   defp workspace_config(_), do: %{}
+
+  # The workspace id drives shadowing resolution. Only a `%Workspace{}` carries
+  # one; a raw config map (external_review / tests) has no id → globals only.
+  defp workspace_id_from(%Workspace{id: id}), do: id
+  defp workspace_id_from(_), do: nil
 
   defp task_skills(%Issue{skills: %{} = skills}), do: skills
   defp task_skills(_), do: %{}

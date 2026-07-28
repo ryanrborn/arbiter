@@ -172,4 +172,40 @@ defmodule Arbiter.Skills.SelectionTest do
       assert names(resolved) == ["debug"]
     end
   end
+
+  describe "workspace-scoped shadowing at the selection layer (bd-9j6is7)" do
+    setup %{ws: ws} do
+      # Shadow the global `debug` with a workspace-scoped body for `ws`.
+      {:ok, scoped} =
+        Skills.create_skill(%{name: "debug", body: "# scoped debug", workspace_id: ws.id})
+
+      {:ok, other} = Ash.create(Workspace, %{name: "other-ws", prefix: "ot"})
+      %{scoped: scoped, other: other}
+    end
+
+    test "the dispatch workspace resolves its scoped skill body", %{ws: ws} do
+      {:ok, ws} =
+        Ash.update(ws, %{patch: %{"skills" => %{"workspace" => ["debug"]}}}, action: :patch_config)
+
+      [%{skill: skill}] = Selection.resolve(task: task(ws), workspace: ws, repo: nil)
+      assert skill.body == "# scoped debug"
+      assert skill.workspace_id == ws.id
+    end
+
+    test "another workspace still resolves the global body", %{other: other} do
+      config = %{"skills" => %{"workspace" => ["debug"]}}
+
+      # Pass the other workspace's id explicitly (config-map form carries none).
+      [%{skill: skill}] =
+        Selection.resolve(
+          task: task(other),
+          workspace: config,
+          workspace_id: other.id,
+          repo: nil
+        )
+
+      assert skill.body == "# Debug"
+      assert skill.workspace_id == nil
+    end
+  end
 end

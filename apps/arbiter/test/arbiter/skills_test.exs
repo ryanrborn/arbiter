@@ -156,7 +156,12 @@ defmodule Arbiter.SkillsTest do
     end
   end
 
-  test "the resource is not workspace-scoped (no workspace_id attribute)" do
-    refute :workspace_id in (Skill |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name))
+  test "the resource is workspace-scopable (workspace_id attribute, nil = global)" do
+    # bd-9j6is7: skills gained an optional workspace_id; nil is a global skill
+    # (the original behaviour), preserved as the create default.
+    assert :workspace_id in (Skill |> Ash.Resource.Info.attributes() |> Enum.map(& &1.name))
+
+    {:ok, skill} = Skills.create_skill(%{name: "global-by-default", body: "x"})
+    assert skill.workspace_id == nil
   end
 end

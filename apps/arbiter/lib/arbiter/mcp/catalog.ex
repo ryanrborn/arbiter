@@ -1156,19 +1156,26 @@ defmodule Arbiter.MCP.Catalog do
       name: "skill_create",
       tiers: @coordinator,
       description:
-        "Create a system-wide skill (a reusable markdown instruction module arbiter " <>
-          "materializes into a worker's worktree). NOT workspace-scoped — one definition is " <>
-          "shared across the whole system. `name` (unique, kebab-case) and `body` (markdown) " <>
-          "are required; optional `metadata` object, `activation_mode` " <>
-          "(always_on|situational, default situational), and `code_only` (bool, default " <>
-          "false). Returns the created skill, plus a non-fatal `warning` when the name " <>
-          "collides with a bundled skill.",
+        "Create a skill (a reusable markdown instruction module arbiter materializes into a " <>
+          "worker's worktree). Scope with the optional `workspace` arg: omit it for a GLOBAL " <>
+          "skill shared by every workspace (default), or name a workspace to create a " <>
+          "workspace-scoped skill that shadows a same-named global there. `name` (unique " <>
+          "within the scope, kebab-case) and `body` (markdown) are required; optional " <>
+          "`metadata` object, `activation_mode` (always_on|situational, default situational), " <>
+          "and `code_only` (bool, default false). The paper-trail version records the calling " <>
+          "actor. Returns the created skill (with `scope`/`workspace_id`), plus a non-fatal " <>
+          "`warning` when the name collides with a bundled skill.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "name" => %{
             "type" => "string",
             "description" => "Unique kebab-case name; the /<name> slash command. Required."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workspace (id or name) to scope the skill to. Omit for a global skill."
           },
           "body" => %{
             "type" => "string",
@@ -1201,16 +1208,24 @@ defmodule Arbiter.MCP.Catalog do
       name: "skill_update",
       tiers: @coordinator,
       description:
-        "Update a system-wide skill identified by `skill` (its id or name). Any subset of " <>
-          "`name` / `body` / `metadata` / `activation_mode` / `code_only` may be supplied. " <>
-          "Returns the updated skill, plus a non-fatal `warning` when the (new) name " <>
-          "collides with a bundled skill.",
+        "Update a skill identified by `skill` (its id, or its name resolved within the " <>
+          "`workspace` scope with a scoped skill shadowing the global). Any subset of " <>
+          "`name` / `body` / `metadata` / `activation_mode` / `code_only` may be supplied; a " <>
+          "skill's workspace scope is fixed at creation and cannot be changed here. The " <>
+          "prior `body` is preserved as a paper-trail version (restorable), and the version " <>
+          "records the calling actor. Returns the updated skill, plus a non-fatal `warning` " <>
+          "when the (new) name collides with a bundled skill.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "skill" => %{
             "type" => "string",
             "description" => "Skill id or name to update. Required."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workspace (id or name) that scopes a name lookup. Omit to target a global skill."
           },
           "name" => %{"type" => "string", "description" => "New kebab-case name (optional)."},
           "body" => %{"type" => "string", "description" => "New markdown body (optional)."},
@@ -1254,17 +1269,34 @@ defmodule Arbiter.MCP.Catalog do
       name: "skill_list",
       tiers: @both,
       description:
-        "List all system-wide skills (name, metadata, activation_mode, code_only — no " <>
-          "`body`), ordered by name. Same registry as `skill_create`/materialization; use " <>
-          "`skill_get` to fetch a body.",
-      input_schema: %{"type" => "object", "properties" => %{}, "additionalProperties" => false},
+        "List skills (name, scope/workspace_id, metadata, activation_mode, code_only — no " <>
+          "`body`), ordered by name. Scoped to what the caller may see: a worker sees its " <>
+          "own workspace's effective set (globals overlaid by that workspace's scoped " <>
+          "skills, scoped winning on a name clash); a coordinator sees every skill, or the " <>
+          "effective set for a given `workspace`. Same registry as " <>
+          "`skill_create`/materialization; use `skill_get` to fetch a body.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workspace (id or name) to list the effective set for. Coordinator " <>
+                "only; a worker is always scoped to its own workspace."
+          }
+        },
+        "additionalProperties" => false
+      },
       handler: &Tools.skill_list/2
     },
     %{
       name: "skill_get",
       tiers: @both,
       description:
-        "Fetch one system-wide skill's full markdown body by `skill` (its id or name). " <>
+        "Fetch one skill's full markdown body by `skill` (its id, or its name resolved " <>
+          "within the caller's workspace scope — a workspace-scoped skill shadows the " <>
+          "global). A worker may only read a global skill or one scoped to its own " <>
+          "workspace; a coordinator may read any, or scope a name lookup with `workspace`. " <>
           "Lets the coordinator (not worktree-isolated, so it can't rely on materialization) " <>
           "or any agent pull a skill body on demand from the same registry.",
       input_schema: %{
@@ -1273,6 +1305,11 @@ defmodule Arbiter.MCP.Catalog do
           "skill" => %{
             "type" => "string",
             "description" => "Skill id or name to fetch. Required."
+          },
+          "workspace" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workspace (id or name) that scopes a name lookup. Coordinator only."
           }
         },
         "required" => ["skill"],

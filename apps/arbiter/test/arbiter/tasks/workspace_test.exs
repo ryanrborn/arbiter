@@ -3,6 +3,8 @@ defmodule Arbiter.Tasks.WorkspaceTest do
 
   alias Arbiter.Tasks.Workspace
 
+  require Ash.Query
+
   describe "create/2" do
     test "succeeds with minimal valid attrs (name only); config defaults to empty map" do
       assert {:ok, ws} = Ash.create(Workspace, %{name: "minimal"})
@@ -705,6 +707,57 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert Workspace.pr_patrol_resolve_human_threads?(%Workspace{
                config: %{"pr_patrol" => %{"resolve_human_threads" => false}}
              }) == false
+    end
+  end
+
+  describe "paper_trail version history (bd-9j6is7)" do
+    test "each create/update/patch_config produces a version row" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "versioned", prefix: "ve"})
+      {:ok, ws} = Ash.update(ws, %{description: "now described"})
+
+      {:ok, _} =
+        Ash.update(ws, %{patch: %{"standing_orders" => "be careful"}}, action: :patch_config)
+
+      versions =
+        Workspace.Version
+        |> Ash.Query.filter(version_source_id == ^ws.id)
+        |> Ash.read!()
+
+      assert length(versions) == 3
+    end
+
+    test "config is snapshotted and the actor is recorded on each version" do
+      {:ok, ws} = Ash.create(Workspace, %{name: "actor-ws", prefix: "ac", actor: "cli"})
+
+      {:ok, _} =
+        Ash.update(ws, %{patch: %{"standing_orders" => "v1"}, actor: "coordinator"},
+          action: :patch_config
+        )
+
+      versions =
+        Workspace.Version
+        |> Ash.Query.filter(version_source_id == ^ws.id)
+        |> Ash.Query.sort(version_inserted_at: :asc)
+        |> Ash.read!()
+
+      assert Enum.map(versions, & &1.actor) == ["cli", "coordinator"]
+      # The config snapshot on the latest version carries the standing order.
+      assert List.last(versions).config["standing_orders"] == "v1"
+    end
+
+    test "encrypted secrets never appear in a version's change diff" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{name: "sec-ws", prefix: "se", secrets: %{"TOKEN" => "hunter2"}})
+
+      version =
+        Workspace.Version
+        |> Ash.Query.filter(version_source_id == ^ws.id)
+        |> Ash.read!()
+        |> List.first()
+
+      refute inspect(version.changes) =~ "hunter2"
+      # Action inputs are not stored on workspace versions (they carry secrets).
+      refute Map.has_key?(version, :version_action_inputs)
     end
   end
 end
