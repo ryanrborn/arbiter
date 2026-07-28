@@ -1457,8 +1457,8 @@ defmodule Arbiter.Mergers.Github do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, to_string(body)}
 
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error, http_error(status, body)}
+      {:ok, %Req.Response{status: status, body: body} = resp} ->
+        {:error, http_error(status, body, resp)}
 
       {:error, exception} ->
         {:error, transport_error(exception)}
@@ -1571,16 +1571,16 @@ defmodule Arbiter.Mergers.Github do
   defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
     do: {:ok, body}
 
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
+  defp handle_json({:ok, %Req.Response{status: status, body: body} = resp}),
+    do: {:error, http_error(status, body, resp)}
 
   defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
 
   # For callbacks that only care about success vs failure (merge/close/comment).
   defp expect_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
 
-  defp expect_ok({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
+  defp expect_ok({:ok, %Req.Response{status: status, body: body} = resp}),
+    do: {:error, http_error(status, body, resp)}
 
   defp expect_ok({:error, exception}), do: {:error, transport_error(exception)}
 
@@ -1593,18 +1593,42 @@ defmodule Arbiter.Mergers.Github do
     ]
   end
 
-  defp http_error(status, body) do
+  # `resp` is the full `%Req.Response{}` when available (so rate-limit headers
+  # can be read) — omitted at call sites that only destructured status/body
+  # before GitHub's rate-limit shape mattered there (bd-1m8k7d).
+  defp http_error(status, body, resp \\ nil) do
     %Error{
-      kind: kind_for_status(status),
+      kind: classify_kind(status, body),
       status: status,
       message: error_message(body, status),
-      raw: body
+      raw: body,
+      retry_after_ms: rate_limit_retry_after_ms(status, resp)
     }
   end
 
+  # A 429 is always a rate limit. A 403 is a rate limit only when the body
+  # says so — otherwise it's a scope/permission `:forbidden` (bad credentials,
+  # missing PR access, …). This distinguishes ReviewPatrol's target failure
+  # (primary quota exhaustion, "API rate limit exceeded for user ID …", and
+  # the secondary/abuse "you have exceeded a secondary rate limit…") from an
+  # ordinary auth failure that a workspace-level backoff would only delay
+  # surfacing (bd-1m8k7d).
+  defp classify_kind(429, _body), do: :rate_limited
+
+  defp classify_kind(403, body),
+    do: if(rate_limited_body?(body), do: :rate_limited, else: :forbidden)
+
+  defp classify_kind(status, _body), do: kind_for_status(status)
+
+  defp rate_limited_body?(%{"message" => msg}) when is_binary(msg) do
+    msg = String.downcase(msg)
+    String.contains?(msg, "rate limit") or String.contains?(msg, "abuse detection")
+  end
+
+  defp rate_limited_body?(_), do: false
+
   defp kind_for_status(400), do: :validation_failed
   defp kind_for_status(401), do: :unauthenticated
-  defp kind_for_status(403), do: :forbidden
   defp kind_for_status(404), do: :not_found
   defp kind_for_status(405), do: :not_mergeable
   defp kind_for_status(409), do: :conflict
@@ -1614,6 +1638,31 @@ defmodule Arbiter.Mergers.Github do
 
   defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
+
+  # How long to wait before the next rate-limited request, per GitHub's own
+  # headers rather than a guess: `Retry-After` (seconds) when present — GitHub
+  # sends this on the secondary/abuse limit — else `x-ratelimit-reset` (unix
+  # epoch seconds), which the primary quota limit always sends instead. `resp`
+  # is `nil` at call sites that never captured the full response; those simply
+  # get no retry hint (the caller falls back to its own backoff policy).
+  defp rate_limit_retry_after_ms(status, %Req.Response{} = resp) when status in [403, 429] do
+    case retry_after_seconds(resp) do
+      seconds when is_integer(seconds) -> seconds * 1_000
+      nil -> reset_retry_after_ms(resp)
+    end
+  end
+
+  defp rate_limit_retry_after_ms(_status, _resp), do: nil
+
+  defp reset_retry_after_ms(%Req.Response{} = resp) do
+    with [v | _] <- Req.Response.get_header(resp, "x-ratelimit-reset"),
+         {epoch, _} <- Integer.parse(v) do
+      ms = (epoch - System.os_time(:second)) * 1_000
+      if ms > 0, do: ms, else: nil
+    else
+      _ -> nil
+    end
+  end
 
   defp transport_error(%{reason: reason} = exception) do
     %Error{

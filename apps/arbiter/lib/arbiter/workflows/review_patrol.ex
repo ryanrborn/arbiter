@@ -118,6 +118,42 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   Test convenience: `tick/1` forces a synchronous patrol cycle without waiting
   for the next interval.
+
+  ## Rate-limit circuit breaker (bd-1m8k7d)
+
+  Every open engagement costs one `adapter.get/1` call per tick — with no
+  guard, a workspace with many open engagements linearly scales forge traffic,
+  and once the forge starts returning rate-limit errors, ReviewPatrol kept
+  polling at full rate: the retry traffic itself sustained the outage (900
+  failed calls in 7 minutes was observed against GitHub's secondary limit).
+
+  `process_engagements_paced/5` now recognizes a rate-limited adapter error
+  (a 429, or any error whose `kind` is `:rate_limited` — GitHub sets this for
+  both primary quota and secondary/abuse 403s) and counts *consecutive*
+  occurrences. Once the count reaches `rate_limit_trip_threshold/1`
+  (`config["review_patrol"]["rate_limit_trip_threshold"]`, then
+  `:review_patrol_rate_limit_trip_threshold` app env, default 3), the tick
+  stops processing the REMAINING engagements immediately — bounding the
+  request burst to the threshold regardless of how many engagements are open —
+  and the whole patrol (every engagement in this workspace/repo) is paused
+  until a computed `paused_until`:
+
+    * When the triggering error carries `retry_after_ms` (from GitHub's
+      `Retry-After` or `x-ratelimit-reset` header), that value is honored
+      directly — we sleep until the forge itself says the limit clears,
+      rather than re-probing.
+    * Otherwise we fall back to an exponential backoff
+      (`@rate_limit_base_backoff_ms * 2^(backoff_level - 1)`, capped at
+      `@rate_limit_max_backoff_ms`) that grows on each successive trip and
+      resets once a tick completes without tripping.
+
+  While paused, `do_tick/1` short-circuits before resolving the adapter or
+  reading a single engagement — zero forge calls, not even one per
+  engagement — and logs (and escalates to the coordinator, exactly once per
+  trip) the aggregate deferred count rather than a line per engagement per
+  cycle. The pause is workspace/repo-scoped (this GenServer's own state),
+  matching where the forge's rate limit itself is scoped: account-wide, not
+  per-PR.
   """
 
   use GenServer
@@ -148,6 +184,19 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # the next tick rather than reviewing a diff whose checks are still in flight.
   @unsettled_ci [:running, :pending]
 
+  # Consecutive rate-limited `adapter.get/1` responses (within one tick) that
+  # trip the circuit breaker (bd-1m8k7d). Overridable per-workspace
+  # (config["review_patrol"]["rate_limit_trip_threshold"]) and via the
+  # :review_patrol_rate_limit_trip_threshold app env.
+  @default_rate_limit_trip_threshold 3
+
+  # Fallback exponential backoff when the triggering error carries no
+  # Retry-After / x-ratelimit-reset hint: base * 2^(backoff_level - 1),
+  # capped at the max. Grows on each successive trip; resets to level 0 the
+  # next time a tick completes without tripping.
+  @rate_limit_base_backoff_ms 60_000
+  @rate_limit_max_backoff_ms 30 * 60_000
+
   defstruct [
     :repo,
     :workspace_id,
@@ -161,7 +210,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     last_flagged: [],
     last_replied: [],
     last_escalated: [],
-    last_tick_at: nil
+    last_tick_at: nil,
+    # Workspace/repo-scoped rate-limit circuit breaker state (bd-1m8k7d):
+    # %{paused_until: nil | DateTime.t(), backoff_level: non_neg_integer()}.
+    # While paused_until is in the future, do_tick/1 makes zero forge calls.
+    rate_limit: %{paused_until: nil, backoff_level: 0}
   ]
 
   # ---- public API ----
@@ -221,7 +274,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          last_flagged: state.last_flagged,
          last_replied: state.last_replied,
          last_escalated: state.last_escalated,
-         last_tick_at: state.last_tick_at
+         last_tick_at: state.last_tick_at,
+         rate_limit_paused_until: state.rate_limit.paused_until
        }, state}
 
   @impl true
@@ -241,34 +295,55 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         _ -> nil
       end
 
-    outcomes =
-      with %Workspace{} <- workspace,
-           adapter when not is_nil(adapter) <- resolve_adapter(workspace),
-           true <- function_exported?(adapter, :get, 1),
-           :ok <- Mergers.prepare_with_repo(workspace, state.repo) do
-        rig_name = rig_name_for_repo(workspace, state.repo)
+    now = clock_now()
 
-        state.workspace_id
-        |> open_engagements()
-        |> process_engagements_paced(adapter, workspace, rig_name)
-      else
-        # On any failure (missing workspace, unsupported adapter), no-op the
-        # cycle but still bump the tick counter below so the patrol is observable.
-        _ -> []
-      end
+    if paused?(state.rate_limit, now) do
+      # Circuit open: make ZERO forge calls (not even a first one) until the
+      # pause elapses (bd-1m8k7d) — nothing to log per-tick beyond the one
+      # aggregate line + escalation already emitted when the circuit tripped.
+      %{
+        state
+        | ticks: state.ticks + 1,
+          last_tick_at: now,
+          workspace: workspace,
+          last_terminated: [],
+          last_rereviewed: [],
+          last_reported: [],
+          last_flagged: [],
+          last_replied: [],
+          last_escalated: []
+      }
+    else
+      {outcomes, rate_limit} =
+        with %Workspace{} <- workspace,
+             adapter when not is_nil(adapter) <- resolve_adapter(workspace),
+             true <- function_exported?(adapter, :get, 1),
+             :ok <- Mergers.prepare_with_repo(workspace, state.repo) do
+          rig_name = rig_name_for_repo(workspace, state.repo)
 
-    %{
-      state
-      | ticks: state.ticks + 1,
-        last_tick_at: DateTime.utc_now(),
-        last_terminated: for({:terminated, id} <- outcomes, do: id),
-        last_rereviewed: for({:rereviewed, id} <- outcomes, do: id),
-        last_reported: for({:reported, id} <- outcomes, do: id),
-        last_flagged: for({:flagged, id} <- outcomes, do: id),
-        last_replied: for({:replied, id} <- outcomes, do: id),
-        last_escalated: for({:escalated, id} <- outcomes, do: id),
-        workspace: workspace
-    }
+          state.workspace_id
+          |> open_engagements()
+          |> process_engagements_paced(adapter, workspace, rig_name, state.rate_limit)
+        else
+          # On any failure (missing workspace, unsupported adapter), no-op the
+          # cycle but still bump the tick counter below so the patrol is observable.
+          _ -> {[], state.rate_limit}
+        end
+
+      %{
+        state
+        | ticks: state.ticks + 1,
+          last_tick_at: now,
+          last_terminated: for({:terminated, id} <- outcomes, do: id),
+          last_rereviewed: for({:rereviewed, id} <- outcomes, do: id),
+          last_reported: for({:reported, id} <- outcomes, do: id),
+          last_flagged: for({:flagged, id} <- outcomes, do: id),
+          last_replied: for({:replied, id} <- outcomes, do: id),
+          last_escalated: for({:escalated, id} <- outcomes, do: id),
+          workspace: workspace,
+          rate_limit: rate_limit
+      }
+    end
   end
 
   defp resolve_adapter(workspace) do
@@ -309,14 +384,51 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   @pace_base_ms 300
   @pace_jitter_ms 200
 
-  defp process_engagements_paced(engagements, adapter, workspace, rig_name) do
-    engagements
-    |> Enum.with_index()
-    |> Enum.map(fn {engagement, index} ->
-      if index > 0, do: pace_delay()
-      process_engagement(engagement, adapter, workspace, rig_name)
-    end)
-    |> Enum.filter(& &1)
+  # Poll each engagement in order, pacing between calls, but stop firing new
+  # `adapter.get/1` calls the moment `@rate_limit_trip_threshold` CONSECUTIVE
+  # rate-limited responses are seen (bd-1m8k7d) — bounding the request burst
+  # to the threshold regardless of how many engagements are still open. On
+  # trip, the remaining (unprocessed) engagements are deferred and the whole
+  # workspace/repo is paused; see `trip_circuit/4`. A run that completes
+  # without tripping resets the circuit (any prior backoff level forgotten).
+  defp process_engagements_paced(engagements, adapter, workspace, rig_name, rate_limit) do
+    threshold = rate_limit_trip_threshold(workspace)
+    total = length(engagements)
+
+    {outcomes, _consecutive, tripped_at} =
+      engagements
+      |> Enum.with_index()
+      |> Enum.reduce_while({[], 0, nil}, fn {engagement, index}, {outcomes, consecutive, _} ->
+        if index > 0, do: pace_delay()
+
+        result = fetch_pr_result(engagement, adapter)
+
+        case rate_limit_signal(result) do
+          {:rate_limited, retry_after_ms} ->
+            consecutive = consecutive + 1
+
+            if consecutive >= threshold do
+              {:halt, {outcomes, consecutive, {index, retry_after_ms}}}
+            else
+              {:cont, {outcomes, consecutive, nil}}
+            end
+
+          :ok ->
+            outcome = process_engagement_result(engagement, result, adapter, workspace, rig_name)
+            {:cont, {[outcome | outcomes], 0, nil}}
+        end
+      end)
+
+    outcomes = outcomes |> Enum.reverse() |> Enum.filter(& &1)
+
+    case tripped_at do
+      nil ->
+        {outcomes, %{rate_limit | paused_until: nil, backoff_level: 0}}
+
+      {index, retry_after_ms} ->
+        deferred = total - (index + 1)
+        {outcomes, trip_circuit(rate_limit, workspace, retry_after_ms, deferred)}
+    end
   end
 
   defp pace_delay do
@@ -325,6 +437,129 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     case Application.get_env(:arbiter, :review_patrol_pace_sleep_fun) do
       fun when is_function(fun, 1) -> fun.(ms)
       _ -> Process.sleep(ms)
+    end
+  end
+
+  # ---- rate-limit circuit breaker (bd-1m8k7d) -----------------------------
+
+  # `adapter.get/1` result → `{:rate_limited, retry_after_ms | nil}` when the
+  # error is a forge rate limit (429, or any error whose `kind` is
+  # `:rate_limited` — GitHub sets this for both primary-quota and
+  # secondary/abuse 403s), else `:ok` (success, or any other error kind, which
+  # is still logged/no-op'd per-engagement exactly as before). Duck-typed on
+  # `:kind`/`:status`/`:retry_after_ms` so any adapter's error struct works,
+  # not just GitHub's.
+  defp rate_limit_signal({:error, reason}) when is_map(reason) do
+    if Map.get(reason, :kind) == :rate_limited or Map.get(reason, :status) == 429 do
+      {:rate_limited, Map.get(reason, :retry_after_ms)}
+    else
+      :ok
+    end
+  end
+
+  defp rate_limit_signal(_result), do: :ok
+
+  # The `adapter.get/1` call, skipped entirely when the engagement has no
+  # usable source_pr — mirrors the guard the old `process_engagement/4` used
+  # so an invalid ref never reaches the forge (and never counts toward the
+  # rate-limit trip).
+  defp fetch_pr_result(%Issue{source_pr: source_pr}, adapter)
+       when is_binary(source_pr) and source_pr != "" do
+    adapter.get(source_pr)
+  end
+
+  defp fetch_pr_result(_engagement, _adapter), do: {:ok, :skipped}
+
+  # Trip the circuit: compute how long to pause (honoring the triggering
+  # error's retry hint when present, else an exponential fallback that grows
+  # on each successive trip), log ONE aggregate line (never one per
+  # engagement), and raise ONE coordinator escalation. Best-effort — a
+  # mailbox hiccup never breaks the tick.
+  defp trip_circuit(rate_limit, workspace, retry_after_ms, deferred_count) do
+    backoff_level = rate_limit.backoff_level + 1
+    pause_ms = rate_limit_pause_ms(retry_after_ms, backoff_level)
+    paused_until = DateTime.add(clock_now(), pause_ms, :millisecond)
+
+    Logger.warning(
+      "ReviewPatrol: workspace #{workspace_ref(workspace)} hit the rate-limit trip threshold; " <>
+        "pausing ALL polling until #{DateTime.to_iso8601(paused_until)} " <>
+        "(#{deferred_count} engagement(s) deferred this tick, retry_after=#{inspect(retry_after_ms)}ms)"
+    )
+
+    escalate_rate_limit(workspace, paused_until, deferred_count)
+
+    %{rate_limit | paused_until: paused_until, backoff_level: backoff_level}
+  end
+
+  defp rate_limit_pause_ms(retry_after_ms, _backoff_level)
+       when is_integer(retry_after_ms) and retry_after_ms > 0 do
+    min(retry_after_ms, @rate_limit_max_backoff_ms)
+  end
+
+  defp rate_limit_pause_ms(_retry_after_ms, backoff_level) do
+    min(
+      @rate_limit_base_backoff_ms * Integer.pow(2, backoff_level - 1),
+      @rate_limit_max_backoff_ms
+    )
+  end
+
+  defp escalate_rate_limit(%Workspace{id: ws_id} = workspace, paused_until, deferred_count) do
+    ref = "review_patrol_rate_limit:#{ws_id}"
+
+    body =
+      "ReviewPatrol hit a sustained forge rate limit polling workspace #{workspace_ref(workspace)} " <>
+        "and is pausing ALL polling for this workspace until #{DateTime.to_iso8601(paused_until)} " <>
+        "(#{deferred_count} open engagement(s) deferred this tick). No further requests will be " <>
+        "made until then; the backoff grows automatically if the limit is still in effect once " <>
+        "polling resumes."
+
+    _ =
+      safe(fn ->
+        Arbiter.Messages.Message.send_mail(%{
+          kind: :escalation,
+          to_ref: Arbiter.Messages.Message.coordinator_ref(),
+          from_ref: ref,
+          workspace_id: ws_id,
+          directive_ref: ref,
+          subject: "ReviewPatrol paused — forge rate limit",
+          body: body
+        })
+      end)
+
+    :ok
+  end
+
+  defp escalate_rate_limit(_workspace, _paused_until, _deferred_count), do: :ok
+
+  defp workspace_ref(%Workspace{id: id, name: name}), do: "#{id} (#{name})"
+  defp workspace_ref(_workspace), do: "?"
+
+  defp paused?(%{paused_until: %DateTime{} = at}, now), do: DateTime.compare(now, at) == :lt
+  defp paused?(_rate_limit, _now), do: false
+
+  defp rate_limit_trip_threshold(%Workspace{config: config}) do
+    case get_in(config || %{}, ["review_patrol", "rate_limit_trip_threshold"]) do
+      n when is_integer(n) and n > 0 -> n
+      _ -> app_rate_limit_trip_threshold()
+    end
+  end
+
+  defp rate_limit_trip_threshold(_workspace), do: app_rate_limit_trip_threshold()
+
+  defp app_rate_limit_trip_threshold,
+    do:
+      Application.get_env(
+        :arbiter,
+        :review_patrol_rate_limit_trip_threshold,
+        @default_rate_limit_trip_threshold
+      )
+
+  # Overridable in tests (`Application.put_env(:arbiter, :review_patrol_clock_fun, fun)`)
+  # so pause-window expiry can be exercised without a real sleep.
+  defp clock_now do
+    case Application.get_env(:arbiter, :review_patrol_clock_fun) do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> DateTime.utc_now()
     end
   end
 
@@ -339,14 +574,15 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   #   nil               — nothing actionable (first-sighting SHA record, no
   #                        advance, guard suppressed, no new replies, or an
   #                        adapter error)
-  defp process_engagement(
+  defp process_engagement_result(
          %Issue{source_pr: source_pr} = engagement,
+         result,
          adapter,
          workspace,
          rig_name
        )
        when is_binary(source_pr) and source_pr != "" do
-    case adapter.get(source_pr) do
+    case result do
       {:ok, %{status: status}} when status in [:merged, :closed] ->
         case terminate_engagement(engagement, status) do
           nil -> nil
@@ -369,7 +605,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     end
   end
 
-  defp process_engagement(_engagement, _adapter, _workspace, _rig_name), do: nil
+  defp process_engagement_result(_engagement, _result, _adapter, _workspace, _rig_name), do: nil
 
   # An open source PR. First sighting (last_reviewed_sha unset) → record the head
   # SHA and stop. If the head advanced, consider a new-commit re-review under the
