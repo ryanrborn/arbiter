@@ -120,11 +120,22 @@ defmodule ArbiterWeb.Api.ClaimController do
     }
   end
 
+  defp serialize_action({:drift, task_id, reason}) do
+    %{
+      action: "drift",
+      task_id: task_id,
+      reason: reason
+    }
+  end
+
   defp serialize_result({:created, task}),
     do: %{outcome: "created", task: IssueJSON.data(task)}
 
   defp serialize_result({:closed, task}),
     do: %{outcome: "closed", task: IssueJSON.data(task)}
+
+  defp serialize_result({:drifted, task}),
+    do: %{outcome: "drifted", task: IssueJSON.data(task)}
 
   defp serialize_result({:error, action, reason}) do
     %{

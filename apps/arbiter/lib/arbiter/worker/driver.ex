@@ -347,9 +347,7 @@ defmodule Arbiter.Worker.Driver do
 
   defp close_task(task_id, close_upstream \\ false) do
     with {:ok, task} <- Ash.get(Issue, task_id) do
-      attrs =
-        %{}
-        |> then(fn a -> if close_upstream, do: Map.put(a, :close_upstream, true), else: a end)
+      attrs = %{close_upstream: close_upstream}
 
       case Ash.update(task, attrs, action: :close) do
         {:ok, _} ->

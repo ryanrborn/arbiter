@@ -201,7 +201,8 @@ defmodule Arbiter.Tasks.DecommissionSweep do
 
   defp close_task(task_id, reason) do
     with {:ok, task} <- Ash.get(Issue, task_id),
-         {:ok, _} <- Ash.update(task, %{reason: reason}, action: :close) do
+         {:ok, _} <-
+           Ash.update(task, %{reason: reason, close_upstream: false}, action: :close) do
       :ok
     else
       {:error, err} -> {:error, err}

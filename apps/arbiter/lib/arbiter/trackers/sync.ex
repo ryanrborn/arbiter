@@ -105,10 +105,36 @@ defmodule Arbiter.Trackers.Sync do
     end
   end
 
-  defp do_transition(issue, event) do
+  # Bounded retries with backoff for a rate-limited tracker (bd-2wilou): a
+  # transient 403/429 used to be treated as a genuine failure and escalated
+  # immediately, stranding the transition (a `closed` transition dropped this
+  # way is exactly how tasks accumulate open upstream issues after the local
+  # close already succeeded). Honors the adapter's `retry_after_ms` (GitHub's
+  # `Retry-After` / `x-ratelimit-reset`) when present, else falls back to
+  # exponential backoff. Only `:rate_limited` gets this treatment — every
+  # other error kind still fails (or escalates) on the first attempt.
+  @max_rate_limit_retries 3
+  @base_rate_limit_backoff_ms 1_000
+  @max_rate_limit_backoff_ms 30_000
+
+  defp do_transition(issue, event), do: do_transition(issue, event, 0)
+
+  defp do_transition(issue, event, attempt) do
     case Trackers.transition(issue, event) do
       :ok ->
         :ok
+
+      {:error, %{kind: :rate_limited} = reason} when attempt < @max_rate_limit_retries ->
+        wait_ms = rate_limit_wait_ms(reason, attempt)
+
+        Logger.warning(
+          "Trackers.Sync: rate-limited syncing task=#{issue.id} tracker=#{issue.tracker_type} " <>
+            "on #{event} (attempt #{attempt + 1}/#{@max_rate_limit_retries}) — " <>
+            "retrying in #{wait_ms}ms: #{describe(reason)}"
+        )
+
+        sleep(wait_ms)
+        do_transition(issue, event, attempt + 1)
 
       {:error, %{kind: :validation_failed} = reason} ->
         # A validation_failed can be a race: e.g. GitHub auto-closed the issue via a
@@ -130,6 +156,9 @@ defmodule Arbiter.Trackers.Sync do
 
       {:error, reason} ->
         if loud?(reason) do
+          # Reaches here for a `:rate_limited` error once retries are exhausted
+          # too — `loud?/1` treats it like any other non-benign kind, so it
+          # still escalates (deduplicated) rather than dropping silently.
           notify_failure(issue, event, reason)
           {:error, reason}
         else
@@ -140,6 +169,31 @@ defmodule Arbiter.Trackers.Sync do
 
           :ok
         end
+    end
+  end
+
+  # Prefer the adapter's own retry hint (GitHub's `Retry-After` or
+  # `x-ratelimit-reset`, surfaced as `retry_after_ms`); fall back to
+  # exponential backoff with jitter when the adapter didn't supply one.
+  defp rate_limit_wait_ms(reason, attempt) do
+    case Map.get(reason, :retry_after_ms) do
+      ms when is_integer(ms) and ms > 0 -> min(ms, @max_rate_limit_backoff_ms)
+      _ -> backoff_ms(attempt)
+    end
+  end
+
+  defp backoff_ms(attempt) do
+    base = @base_rate_limit_backoff_ms * Integer.pow(2, attempt)
+    jitter = :rand.uniform(div(base, 4) + 1)
+    min(base + jitter, @max_rate_limit_backoff_ms)
+  end
+
+  # Overridable in tests (`Application.put_env(:arbiter, :tracker_sync_retry_sleep_fun, fun)`)
+  # so rate-limit backoff never actually blocks the test suite.
+  defp sleep(ms) do
+    case Application.get_env(:arbiter, :tracker_sync_retry_sleep_fun) do
+      fun when is_function(fun, 1) -> fun.(ms)
+      _ -> Process.sleep(ms)
     end
   end
 
@@ -394,6 +448,13 @@ defmodule Arbiter.Trackers.Sync do
   defp log_hint(%{kind: :forbidden}), do: ""
   defp log_hint(%{kind: :server_error}), do: ""
   defp log_hint(%{kind: :network}), do: ""
+
+  # This escalates only after `@max_rate_limit_retries` retries with backoff
+  # were already exhausted (see `do_transition/3`) — a status_map hint would
+  # be actively misleading here.
+  defp log_hint(%{kind: :rate_limited}),
+    do:
+      "The tracker's rate limit did not clear within the retry budget — check the workspace's remaining quota."
 
   # No path through the graph IS a config-mismatch — keep the hint.
   defp log_hint(%{kind: :no_transition_path}),

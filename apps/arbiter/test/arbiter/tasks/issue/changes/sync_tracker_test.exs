@@ -82,7 +82,7 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
   end
 
   describe ":close on a github-tracked task" do
-    test "does NOT close the upstream issue by default" do
+    test "closes the upstream issue BY DEFAULT (bd-2wilou)" do
       forwarding_stub()
       ws = github_workspace()
 
@@ -95,6 +95,25 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
         })
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.status == :closed
+
+      expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
+      assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
+    end
+
+    test "does NOT close the upstream issue when close_upstream: false is explicit" do
+      forwarding_stub()
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "tracked",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: false}, action: :close)
       assert closed.status == :closed
 
       refute_receive {:github, :patch, _, _}
@@ -286,6 +305,115 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
       assert closed.status == :closed
+    end
+  end
+
+  describe "rate-limited tracker sync retries with backoff (bd-2wilou)" do
+    setup do
+      # No real sleeping in the test suite — the retry loop still runs, but
+      # each backoff is a no-op.
+      Application.put_env(:arbiter, :tracker_sync_retry_sleep_fun, fn _ms -> :ok end)
+      on_exit(fn -> Application.delete_env(:arbiter, :tracker_sync_retry_sleep_fun) end)
+      :ok
+    end
+
+    test "a transient 403 rate-limit on the closed transition is retried, and the close is eventually propagated" do
+      test_pid = self()
+      {:ok, agent} = Agent.start_link(fn -> %{attempts: 0, closed?: false} end)
+
+      # GET reports "open" until the PATCH actually succeeds, then "closed" —
+      # so the post-transition verify (`verify_and_close/1`) sees the real
+      # state instead of firing a spurious extra follow-up PATCH. The first
+      # two PATCH attempts hit GitHub's primary rate limit (403 body); the
+      # third succeeds.
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            state = if Agent.get(agent, & &1.closed?), do: "closed", else: "open"
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => state, "labels" => []})
+
+          "PATCH" ->
+            attempt =
+              Agent.get_and_update(agent, fn s ->
+                {s.attempts, %{s | attempts: s.attempts + 1}}
+              end)
+
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:github, :patch, attempt, Jason.decode!(body)})
+
+            if attempt < 2 do
+              conn
+              |> Plug.Conn.put_resp_header("retry-after", "0")
+              |> Plug.Conn.put_status(403)
+              |> Req.Test.json(%{"message" => "API rate limit exceeded for user ID 238"})
+            else
+              Agent.update(agent, fn s -> %{s | closed?: true} end)
+
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{"number" => 36, "state" => "closed"})
+            end
+        end
+      end)
+
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "rate-limited-close",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      # Local close succeeds immediately regardless of the upstream retries.
+      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.status == :closed
+
+      assert_receive {:github, :patch, 0, %{"state" => "closed"}}
+      assert_receive {:github, :patch, 1, %{"state" => "closed"}}
+      assert_receive {:github, :patch, 2, %{"state" => "closed"}}
+      refute_receive {:github, :patch, 3, _}
+    end
+
+    test "escalates once after the retry budget is exhausted (still doesn't fail the local close)" do
+      Req.Test.stub(Arbiter.Trackers.GitHub.HTTP, fn conn ->
+        case conn.method do
+          "GET" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"number" => 36, "state" => "open", "labels" => []})
+
+          "PATCH" ->
+            conn
+            |> Plug.Conn.put_resp_header("retry-after", "0")
+            |> Plug.Conn.put_status(429)
+            |> Req.Test.json(%{"message" => "You have exceeded a secondary rate limit"})
+        end
+      end)
+
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "rate-limited-forever",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.status == :closed
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.read!()
+        |> Enum.filter(&(&1.workspace_id == ws.id and &1.kind == :escalation))
+
+      assert length(escalations) == 1
     end
   end
 
@@ -653,8 +781,9 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
           workspace_id: ws.id
         })
 
-      # Close locally without syncing upstream (the default).
-      {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      # Close locally without syncing upstream (simulates a caller that closed
+      # before the tracker sync existed / explicitly opted out at the time).
+      {:ok, closed} = Ash.update(issue, %{close_upstream: false}, action: :close)
       closed_at = closed.closed_at
 
       forwarding_stub()
