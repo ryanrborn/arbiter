@@ -55,6 +55,23 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       (`posted_findings`). A push that touches only unrelated files is not our
       concern and does NOT trigger a re-review.
 
+    * **Sticky approval** (bd-4po0nv) — once the operator identity holds a
+      CURRENT approving review on the PR (`adapter.self_approved?/1`, the same
+      optional capability the external-review dispatch guard uses, bd-7z5pi5),
+      a push does NOT trigger a re-review unless it *invalidates* that
+      approval. Invalidating means the new diff touches at least one file that
+      is neither a doc file nor a test file with a substantive (non-
+      formatting-only) change — see `invalidating_diff?/1`. A doc-only,
+      test-only, formatting-only, or rebase/merge-only push (nothing
+      substantive in the new diff) is declined: the decision is appended to
+      the engagement's `notes` (so "approval is sticky" reads as a deliberate
+      decision rather than ReviewPatrol going quiet) and `last_reviewed_sha`
+      still advances, so the same push is never re-evaluated. Adapters without
+      `self_approved?/1`, or a call that errors, fail OPEN — this gate never
+      applies and behavior is unchanged from before this feature. Colleagues
+      can still get a response after an approval stands via the author-reply
+      path below (no new commits required).
+
     * **Debounce** — at most one re-review per configurable window
       (`config["review_patrol"]["debounce_ms"]`, then the `:review_patrol_debounce_ms`
       app env, default 5 min). A burst of pushes yields one re-review. We also wait
@@ -66,7 +83,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       fetch, no model spend) and instead raises ONE coordinator escalation the first
       time the cap is hit (`review_cap_escalated`), so a PR that keeps looping (e.g.
       a re-flagged phantom finding) is capped rather than accumulating reviews
-      indefinitely (bd-ahvk03).
+      indefinitely (bd-ahvk03). `review_count` is a backstop only — sticky
+      approval above is what stops *routine* re-review; the cap exists for the
+      case where re-review keeps legitimately re-triggering (e.g. a recurring
+      finding). The escalation is claimed atomically (`claim_review_cap_escalation/1`,
+      a single `UPDATE ... WHERE review_cap_escalated = false`) rather than via
+      a plain read-then-write, so it fires exactly once per trip even under
+      concurrent evaluation of the same engagement (bd-4po0nv: a read-then-write
+      race was observed to emit 7 identical escalations for one trip within ~3s).
 
     * **New-diff-only** — the re-review diffs `last_reviewed_sha..head_sha` (the
       adapter's compare endpoint), never the whole PR, so comments land only on the
@@ -210,6 +234,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     last_flagged: [],
     last_replied: [],
     last_escalated: [],
+    last_declined: [],
     last_tick_at: nil,
     # Workspace/repo-scoped rate-limit circuit breaker state (bd-1m8k7d):
     # %{paused_until: nil | DateTime.t(), backoff_level: non_neg_integer()}.
@@ -274,6 +299,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          last_flagged: state.last_flagged,
          last_replied: state.last_replied,
          last_escalated: state.last_escalated,
+         last_declined: state.last_declined,
          last_tick_at: state.last_tick_at,
          rate_limit_paused_until: state.rate_limit.paused_until
        }, state}
@@ -311,7 +337,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           last_reported: [],
           last_flagged: [],
           last_replied: [],
-          last_escalated: []
+          last_escalated: [],
+          last_declined: []
       }
     else
       {outcomes, rate_limit} =
@@ -340,6 +367,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           last_flagged: for({:flagged, id} <- outcomes, do: id),
           last_replied: for({:replied, id} <- outcomes, do: id),
           last_escalated: for({:escalated, id} <- outcomes, do: id),
+          last_declined: for({:declined, id} <- outcomes, do: id),
           workspace: workspace,
           rate_limit: rate_limit
       }
@@ -571,6 +599,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   #   {:flagged, id}    — :flag mode surfaced new commits as a mailbox flag
   #   {:replied, id}    — :auto mode dispatched a reply to an author reply
   #   {:escalated, id}  — :flag mode escalated an author reply to the coordinator
+  #   {:declined, id}   — sticky approval (bd-4po0nv): the operator identity
+  #                        currently holds an approving review and the new push
+  #                        was non-invalidating, so no re-review was conducted
   #   nil               — nothing actionable (first-sighting SHA record, no
   #                        advance, guard suppressed, no new replies, or an
   #                        adapter error)
@@ -722,18 +753,62 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   # the engagement so it isn't re-escalated on every subsequent tick. Neither
   # `last_reviewed_sha` nor `review_count` advance — the engagement is simply
   # frozen until a human intervenes.
+  #
+  # The escalate-then-mark ordering used to be a plain read-then-write: two
+  # ticks landing on the same capped engagement within the same window (e.g. a
+  # crash-restart loop, or duplicate patrol processes) could both read
+  # `review_cap_escalated: false` and both escalate before either write
+  # committed — observed as 7 identical escalations for one trip within ~3s
+  # (bd-4po0nv). `claim_review_cap_escalation/1` closes that window: it flips
+  # the flag false->true via a single atomic `UPDATE ... WHERE` statement, so
+  # only the caller that actually performs the flip proceeds to escalate.
   defp handle_review_cap(%Issue{review_cap_escalated: true} = _engagement, _workspace), do: nil
 
   defp handle_review_cap(%Issue{} = engagement, workspace) do
-    escalate_review_cap(engagement, workspace)
-    update_engagement(engagement, %{review_cap_escalated: true})
+    if claim_review_cap_escalation(engagement) do
+      escalate_review_cap(engagement, workspace)
 
-    Logger.info(
-      "ReviewPatrol: engagement #{engagement.id} hit the review cap " <>
-        "(#{engagement.review_count} reviews); escalated and stopped re-reviewing"
-    )
+      Logger.info(
+        "ReviewPatrol: engagement #{engagement.id} hit the review cap " <>
+          "(#{engagement.review_count} reviews); escalated and stopped re-reviewing"
+      )
 
-    {:escalated, engagement.id}
+      {:escalated, engagement.id}
+    else
+      nil
+    end
+  end
+
+  # Atomically claim the review-cap escalation for one engagement: a single
+  # `UPDATE issues SET review_cap_escalated = true WHERE id = ? AND
+  # review_cap_escalated = false` — so at most one caller can ever observe
+  # `records != []` for a given trip, even when multiple callers evaluate the
+  # same capped engagement concurrently.
+  #
+  # Goes straight to Ecto (`Repo.update_all/2`) rather than `Ash.bulk_update/4`:
+  # the `:update` action carries a custom `Change` (status-guard logic) that
+  # doesn't implement the atomic optimizer, so Ash's bulk update falls back to
+  # a read-then-per-record-update strategy that reopens the exact race this
+  # is closing. A single Ecto `UPDATE ... WHERE` bypasses action changes
+  # entirely — safe here because the claim touches only this one boolean
+  # bookkeeping column, nothing that other `:update` change logic guards.
+  defp claim_review_cap_escalation(%Issue{id: id}) do
+    import Ecto.Query
+
+    # Schemaless query against the raw "issues" table — Ecto can't infer the
+    # column's type without a schema, so `type/2` casts pin both sides to
+    # :boolean explicitly (otherwise the driver has been observed persisting
+    # the literal string "true" instead of a proper boolean).
+    query =
+      from(i in "issues",
+        where: i.id == ^id and i.review_cap_escalated == type(^false, :boolean),
+        update: [set: [review_cap_escalated: type(^true, :boolean)]]
+      )
+
+    {count, _} = Arbiter.Repo.update_all(query, [])
+    count == 1
+  rescue
+    _ -> false
   end
 
   # Best-effort human-facing escalation when a PR hits the review cap. A
@@ -791,15 +866,20 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
     case fetch_new_diff(adapter, engagement.source_pr, opts) do
       {:ok, diff} ->
-        if relevant?(engagement.posted_findings, diff) do
-          act_on_new_commits(engagement, pr.head_sha, adapter, workspace, opts, rig_name)
-        else
-          Logger.info(
-            "ReviewPatrol: new commits on engagement #{engagement.id} touch no previously-" <>
-              "flagged file; skipping re-review"
-          )
+        cond do
+          not relevant?(engagement.posted_findings, diff) ->
+            Logger.info(
+              "ReviewPatrol: new commits on engagement #{engagement.id} touch no previously-" <>
+                "flagged file; skipping re-review"
+            )
 
-          nil
+            nil
+
+          sticky_approval_blocks?(engagement, diff, adapter) ->
+            decline_for_sticky_approval(engagement, pr.head_sha)
+
+          true ->
+            act_on_new_commits(engagement, pr.head_sha, adapter, workspace, opts, rig_name)
         end
 
       {:error, reason} ->
@@ -811,6 +891,157 @@ defmodule Arbiter.Workflows.ReviewPatrol do
         nil
     end
   end
+
+  # ---- sticky approval (bd-4po0nv) ---------------------------------------
+  #
+  # Once the operator identity holds a CURRENT approving review on the PR,
+  # ReviewPatrol stops auto-re-reviewing on every push — a colleague iterating
+  # on their own PR should not collect a fresh approval from us per commit.
+  # Re-review resumes only when the new commits are *invalidating*: they alter
+  # non-test, non-doc code (the heuristic below), or the diff is otherwise
+  # substantive rather than pure reformatting. A doc-only, test-only,
+  # formatting-only, or rebase/merge-only push (no substantive file in the new
+  # diff) never trips this — it's declined and the decision is recorded on the
+  # engagement so "approval is sticky" reads as a decision, not as ReviewPatrol
+  # going quiet/broken.
+  #
+  # `self_approved?/1` is an OPTIONAL adapter capability (already used by the
+  # external-review dispatch guard, bd-7z5pi5) that reports whether the
+  # authenticated (fleet) identity currently holds an APPROVED verdict — dup
+  # state, dismissals, and superseding CHANGES_REQUESTED reviews are already
+  # resolved by the adapter. Adapters without it (or a call that errors) fail
+  # OPEN here: sticky approval never applies, so behavior is unchanged from
+  # before this feature for those adapters.
+  defp sticky_approval_blocks?(%Issue{source_pr: source_pr}, diff, adapter) do
+    operator_currently_approved?(adapter, source_pr) and not invalidating_diff?(diff)
+  end
+
+  defp operator_currently_approved?(adapter, source_pr) do
+    if function_exported?(adapter, :self_approved?, 1) do
+      case safe(fn -> adapter.self_approved?(source_pr) end) do
+        {:ok, true} -> true
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  # Advance the cursor (so the same push isn't re-evaluated every tick) and
+  # append a note to the engagement recording the decision — "approval stands"
+  # is a deliberate outcome, distinguishable from ReviewPatrol silently doing
+  # nothing / being broken.
+  defp decline_for_sticky_approval(%Issue{} = engagement, head) do
+    note =
+      "[#{DateTime.to_iso8601(now())}] ReviewPatrol: approval stands — new commits (head " <>
+        "#{head}) were doc/test/formatting/rebase-only; declined to re-review (bd-4po0nv)."
+
+    update_engagement(engagement, %{
+      last_reviewed_sha: head,
+      last_reviewed_at: now(),
+      notes: append_note(engagement.notes, note)
+    })
+
+    Logger.info(
+      "ReviewPatrol: engagement #{engagement.id} approval stands; declined re-review on " <>
+        "non-invalidating push to #{head}"
+    )
+
+    {:declined, engagement.id}
+  end
+
+  defp append_note(nil, note), do: note
+  defp append_note("", note), do: note
+  defp append_note(existing, note) when is_binary(existing), do: existing <> "\n" <> note
+
+  # Whether the new diff *invalidates* a standing approval: true when it
+  # touches at least one file that is neither a doc file nor a test file with
+  # a substantive (non-formatting-only) change. An empty diff (rebase/merge
+  # with no content delta) has no such file, so it's never invalidating.
+  defp invalidating_diff?(diff) when is_binary(diff) do
+    diff
+    |> diff_lines_by_file()
+    |> Enum.any?(fn {file, lines} ->
+      not doc_or_test_file?(file) and not formatting_only_lines?(lines)
+    end)
+  end
+
+  defp invalidating_diff?(_diff), do: false
+
+  # Group a unified diff's added/removed content lines by the file they belong
+  # to. The "current file" switches on each `+++ b/…` header (which follows
+  # `--- a/…` in every hunk), so this works regardless of whether a `diff
+  # --git` header is present.
+  defp diff_lines_by_file(diff) do
+    diff
+    |> String.split("\n")
+    |> Enum.reduce({nil, %{}}, fn line, {current_file, acc} ->
+      cond do
+        String.starts_with?(line, "+++ ") ->
+          case file_from_diff_line(line) do
+            [f] -> {f, Map.put_new(acc, f, [])}
+            [] -> {nil, acc}
+          end
+
+        String.starts_with?(line, "--- ") ->
+          {current_file, acc}
+
+        is_binary(current_file) and content_line?(line) ->
+          {current_file, Map.update(acc, current_file, [line], &[line | &1])}
+
+        true ->
+          {current_file, acc}
+      end
+    end)
+    |> elem(1)
+  end
+
+  defp content_line?(line) do
+    (String.starts_with?(line, "+") or String.starts_with?(line, "-")) and
+      not String.starts_with?(line, "+++") and not String.starts_with?(line, "---")
+  end
+
+  @doc_path_regex ~r{(^|/)docs?/}i
+  @doc_ext_regex ~r/\.(md|markdown|txt|rst|adoc)$/i
+  @doc_name_regex ~r{(^|/)(README|CHANGELOG|LICENSE|CONTRIBUTING|NOTICE)(\.[^/]*)?$}i
+  @test_path_regex ~r{(^|/)(tests?|specs?|__tests__)/}i
+  @test_name_regex ~r/(_test\.\w+|_spec\.\w+|\.test\.\w+|\.spec\.\w+)$/i
+
+  defp doc_or_test_file?(file) do
+    doc_file?(file) or test_file?(file)
+  end
+
+  defp doc_file?(file) do
+    Regex.match?(@doc_path_regex, file) or Regex.match?(@doc_ext_regex, file) or
+      Regex.match?(@doc_name_regex, file)
+  end
+
+  defp test_file?(file) do
+    Regex.match?(@test_path_regex, file) or Regex.match?(@test_name_regex, file)
+  end
+
+  # A file's change is formatting-only when its added and removed content
+  # lines are the same multiset once whitespace-normalized — i.e. every line
+  # that changed only had its whitespace rearranged, nothing semantic.
+  defp formatting_only_lines?(lines) do
+    {added, removed} =
+      Enum.reduce(lines, {[], []}, fn line, {add, rem} ->
+        cond do
+          String.starts_with?(line, "+") ->
+            {[normalize_ws(String.trim_leading(line, "+")) | add], rem}
+
+          String.starts_with?(line, "-") ->
+            {add, [normalize_ws(String.trim_leading(line, "-")) | rem]}
+
+          true ->
+            {add, rem}
+        end
+      end)
+
+    Enum.sort(added) == Enum.sort(removed)
+  end
+
+  defp normalize_ws(s), do: s |> String.trim() |> String.replace(~r/\s+/, " ")
 
   defp act_on_new_commits(engagement, head, adapter, workspace, opts, rig_name) do
     case automation_mode(engagement, workspace, rig_name) do
