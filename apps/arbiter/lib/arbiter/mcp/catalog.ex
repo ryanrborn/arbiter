@@ -826,6 +826,30 @@ defmodule Arbiter.MCP.Catalog do
       handler: &Tools.external_review_show/2
     },
     %{
+      name: "review_gate_rounds_list",
+      tiers: @coordinator,
+      description:
+        "List internal ReviewGate round outcomes for a task (bd-aqyjuc): one row per reviewer " <>
+          "or implementer pass, oldest-first. Each row carries the round number, role " <>
+          "(review/impl), verdict (approve/request_changes, nil for impl), findings text, " <>
+          "finding count, the model that ran the pass, its cost, and whether it converged — " <>
+          "so a round-1 rejection followed by a round-2 approval is visible as two distinct " <>
+          "rows instead of collapsing into the task's terminal outcome. Backfill is out of " <>
+          "scope; rows only exist for ReviewGate runs from 2026-07-28 onward.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Task whose ReviewGate rounds to list (required)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.review_gate_rounds_list/2
+    },
+    %{
       name: "review_greenlight",
       tiers: @coordinator,
       description:

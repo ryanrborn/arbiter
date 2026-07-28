@@ -148,13 +148,16 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Usage.Event, as: UsageEvent
   alias Arbiter.Worker
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewVerification
   alias Arbiter.Worker.StopReason
+  alias Arbiter.Workers.Run
 
   # Default ceiling on how long we wait for a reviewer / implementer pass before
   # escalating as timed out. Real Claude work can take a while; tests override.
@@ -728,7 +731,8 @@ defmodule Arbiter.Worker.ReviewGate do
             maybe_reprompt(state, :no_verdict)
         end
 
-      {:approve, _} = verdict ->
+      {:approve, findings} = verdict ->
+        record_round(state, :review, :approve, findings, converged: true)
         {:done, finish(state, verdict)}
 
       {:request_changes, findings} ->
@@ -812,6 +816,7 @@ defmodule Arbiter.Worker.ReviewGate do
   # findings into the thread, then escalate to Darth Gnosis with the FULL
   # transcript + unresolved findings + current diff.
   defp handle_reject(%{round: round, max_rounds: max} = state, findings) when round >= max do
+    record_round(state, :review, :request_changes, findings, converged: false)
     state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
 
     Logger.info(
@@ -823,7 +828,10 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # Rounds remain: post the findings to the implementer and spawn a fresh
   # implementer mind to address them on the same branch.
-  defp handle_reject(state, findings), do: enter_revise(state, findings)
+  defp handle_reject(state, findings) do
+    record_round(state, :review, :request_changes, findings, converged: false)
+    enter_revise(state, findings)
+  end
 
   # Stage 2: post the reviewer's findings to the implementer over the mailbox,
   # then spawn a fresh implementer worker (same branch/worktree) to fix or rebut
@@ -884,6 +892,7 @@ defmodule Arbiter.Worker.ReviewGate do
         do: "(implementer produced no output)",
         else: cap_transcript(response)
 
+    record_round(state, :impl, nil, response, converged: false)
     state = record_thread(state, :implementer, "Round #{state.round} response", response)
 
     # bd-1mksks: detect whether the revise implementer committed new changes.
@@ -1194,6 +1203,127 @@ defmodule Arbiter.Worker.ReviewGate do
 
     report(state, {:request_changes, payload})
     {:stop, :normal, %{state | reported?: true}}
+  end
+
+  # ---- structured round outcomes (bd-aqyjuc) -------------------------------
+
+  # Persist one row to `Arbiter.ReviewGate.Round` for a reviewer or implementer
+  # pass that reached a genuine, actionable outcome. Best-effort: a DB hiccup
+  # never breaks the loop (mirrors `persist_message/4`). `role: :review` rows
+  # get `verdict` + `finding_count`; `role: :impl` rows always have `verdict:
+  # nil` and `finding_count: nil` (implementers don't issue verdicts).
+  defp record_round(state, role, verdict, findings, opts) do
+    converged = Keyword.fetch!(opts, :converged)
+    {run_id, reviewer_model, cost_usd} = pass_usage(state.current_id)
+
+    attrs = %{
+      task_id: state.task_id,
+      run_id: run_id,
+      round: state.round,
+      role: role,
+      verdict: verdict,
+      findings: findings,
+      finding_count: if(role == :review, do: count_findings(findings), else: nil),
+      reviewer_model: reviewer_model,
+      cost_usd: cost_usd,
+      converged: converged
+    }
+
+    case Ash.create(Round, attrs) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReviewGate: record_round/5 swallowed for task=#{state.task_id}: #{inspect(reason)}"
+        )
+
+        :error
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "ReviewGate: record_round/5 raised for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      :error
+  end
+
+  # Best-effort lookup of the run id / model / cost for the pass that just
+  # exited, keyed by its synthetic worker id (`state.current_id` — e.g.
+  # "<task>#review" or "<task>#review#impl1"). The Workers.Run row is created
+  # at spawn time (no race). The Usage.Event row is written by `Arbiter.Worker`
+  # in the same handler that broadcasts the exit we're reacting to, so it can
+  # occasionally not be visible yet; a couple of short retries cover the common
+  # case while keeping this a bounded, best-effort read (nil is an accepted
+  # outcome elsewhere in the codebase — see `Arbiter.Usage.Event`).
+  defp pass_usage(nil), do: {nil, nil, nil}
+
+  defp pass_usage(pass_id) when is_binary(pass_id) do
+    run_id = latest_run_id(pass_id)
+    {model, cost_usd} = latest_usage(pass_id, 3)
+    {run_id, model, cost_usd}
+  end
+
+  defp latest_run_id(task_id) do
+    require Ash.Query
+
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Run{id: id} -> id
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp latest_usage(_task_id, 0), do: {nil, nil}
+
+  defp latest_usage(task_id, attempts_left) do
+    require Ash.Query
+
+    UsageEvent
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(occurred_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %UsageEvent{model: model, cost_usd: cost_usd} ->
+        {model, cost_usd}
+
+      _ ->
+        Process.sleep(20)
+        latest_usage(task_id, attempts_left - 1)
+    end
+  rescue
+    _ -> {nil, nil}
+  end
+
+  # Best-effort count of enumerated findings (numbered or bulleted list-item
+  # lines) in a reviewer's findings text. Falls back to 1 for a non-empty,
+  # unstructured findings body and 0 for a blank one — mirrors the
+  # `findings_present?/1` heuristic used to decide whether a REQUEST_CHANGES
+  # verdict is actionable at all.
+  @finding_item ~r/^\s*(?:[-*]|\d+[.)])\s+\S/
+  defp count_findings(nil), do: nil
+
+  defp count_findings(findings) when is_binary(findings) do
+    items =
+      findings
+      |> String.split("\n")
+      |> Enum.count(&Regex.match?(@finding_item, &1))
+
+    cond do
+      items > 0 -> items
+      String.trim(findings) == "" -> 0
+      true -> 1
+    end
   end
 
   # ---- the persisted thread ----------------------------------------------
