@@ -239,6 +239,44 @@ defmodule Arbiter.Workflows.CodeReviewTest.Stubs do
     def submit_review(_, _, _, _), do: {:ok, %{}}
   end
 
+  # Posts the first finding, then hard-fails (a non-422 error, e.g. GitHub's
+  # secondary rate limit) on the second — never attempting the third. Used to
+  # verify the salvage path only retains findings that never made it to the PR
+  # (bd-2o4b8f).
+  defmodule FailsOnSecondFinding do
+    @moduledoc false
+    @behaviour Arbiter.Mergers.Merger
+    @impl true
+    def open(_, _, _, _), do: {:error, :unused}
+    @impl true
+    def get(_), do: {:ok, %{}}
+    @impl true
+    def merge(_), do: :ok
+    @impl true
+    def close(_), do: :ok
+    @impl true
+    def add_comment(_, _), do: :ok
+    @impl true
+    def request_review(_, _), do: :ok
+    @impl true
+    def link_for(_), do: ""
+    @impl true
+    def get_diff(_, _), do: {:ok, ""}
+
+    @impl true
+    def post_inline_comment(mr_ref, %{file: "boom.ex"} = _finding, _opts) do
+      {:error, :forbidden}
+    end
+
+    def post_inline_comment(mr_ref, finding, _opts) do
+      send(:code_review_test_pid, {:posted, mr_ref, finding})
+      {:ok, %{}}
+    end
+
+    @impl true
+    def submit_review(_, _, _, _), do: {:ok, %{}}
+  end
+
   # Simulates GitHub 422ing one specific (path, line) inline comment — e.g. a
   # finding whose position resolves per our own diff parsing but GitHub still
   # rejects (bd-2n3qm6). Every other finding posts fine.
@@ -845,15 +883,60 @@ defmodule Arbiter.Workflows.CodeReviewTest do
                CodeReview.run_step(:file_findings, state)
     end
 
-    test "post_inline_comment error halts and propagates" do
+    # bd-2o4b8f: a hard post failure must not discard the review's findings —
+    # they're salvaged into the error so the caller (ExternalReview) can
+    # persist them for a later `greenlight/1` instead of losing the work.
+    test "post_inline_comment error halts, but salvages the unposted finding + a verdict" do
       state = %{
         mode: :adapter,
         adapter: Stubs.FailingComment,
         mr_ref: "#1",
-        findings: [%{severity: :info, file: "a", line: 1, message: "x"}]
+        findings: [%{severity: :error, file: "a", line: 1, message: "x"}]
       }
 
-      assert {:error, :forbidden} = CodeReview.run_step(:file_findings, state)
+      assert {:error, {:post_failed, :forbidden, salvage}} =
+               CodeReview.run_step(:file_findings, state)
+
+      assert salvage.verdict == :request_changes
+      assert [%{file: "a", line: 1, message: "x"}] = salvage.findings
+
+      assert [%{file: "a", line: 1, body: body, in_diff: true}] = salvage.proposed_comments
+      assert body =~ "x"
+    end
+
+    test "when some findings post before a hard failure, only the unposted ones are salvaged" do
+      Process.register(self(), :code_review_test_pid)
+
+      try do
+        findings = [
+          %{severity: :info, file: "posts.ex", line: 1, message: "fine"},
+          %{severity: :error, file: "boom.ex", line: 2, message: "kaboom"},
+          %{severity: :warning, file: "never-attempted.ex", line: 3, message: "unreached"}
+        ]
+
+        state = %{
+          mode: :adapter,
+          adapter: Stubs.FailsOnSecondFinding,
+          mr_ref: "#7",
+          findings: findings
+        }
+
+        assert {:error, {:post_failed, :forbidden, salvage}} =
+                 CodeReview.run_step(:file_findings, state)
+
+        assert_received {:posted, "#7", %{file: "posts.ex"}}
+        refute_received {:posted, "#7", %{file: "boom.ex"}}
+        refute_received {:posted, "#7", %{file: "never-attempted.ex"}}
+
+        # The already-posted finding must NOT reappear — re-posting it via a
+        # later greenlight would duplicate the comment already on the PR.
+        assert Enum.map(salvage.proposed_comments, & &1.file) == [
+                 "boom.ex",
+                 "never-attempted.ex"
+               ]
+      after
+        Process.unregister(:code_review_test_pid)
+      end
     end
 
     test "findings outside the diff are not posted inline — routed to :out_of_diff_findings" do

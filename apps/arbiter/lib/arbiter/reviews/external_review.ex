@@ -164,8 +164,8 @@ defmodule Arbiter.Reviews.ExternalReview do
           maybe_notify_coordinator(prepared, result, record)
           {:ok, result}
 
-        {:error, _} = err ->
-          complete_review_record(record, :failed, %{})
+        {:error, reason} = err ->
+          complete_failed_review(record, reason)
           resolve_pr_state_on_complete(record, prepared.workspace)
           err
       end
@@ -779,7 +779,7 @@ defmodule Arbiter.Reviews.ExternalReview do
           )
 
         {:error, reason} ->
-          complete_review_record(record, :failed, %{})
+          complete_failed_review(record, reason)
           resolve_pr_state_on_complete(record, prepared.workspace)
 
           Logger.warning(
@@ -787,6 +787,34 @@ defmodule Arbiter.Reviews.ExternalReview do
           )
       end
     end)
+  end
+
+  # A `:file_findings` failure that salvaged findings (bd-2o4b8f) persists as
+  # :completed_unposted with the retained findings/verdict/proposed_comments —
+  # recoverable via `greenlight/1`. Any other failure (e.g. `:read_diff`, where
+  # nothing was computed yet) remains a plain :failed with nothing to keep.
+  defp complete_failed_review(record, reason) do
+    case post_failed_salvage(reason) do
+      nil -> complete_review_record(record, :failed, %{})
+      salvage -> complete_review_record(record, :completed_unposted, salvage_result(salvage))
+    end
+  end
+
+  defp post_failed_salvage({:file_findings, {:post_failed, _adapter_error, salvage}}),
+    do: salvage
+
+  defp post_failed_salvage(_reason), do: nil
+
+  defp salvage_result(%{findings: findings} = salvage) do
+    %{
+      findings_list: findings,
+      findings: length(findings),
+      verdict: Map.get(salvage, :verdict),
+      proposed_comments: Map.get(salvage, :proposed_comments) || [],
+      engagement: nil,
+      check_usage: %{},
+      report_only: true
+    }
   end
 
   # Resolve and persist the record's pr_state once the workflow finishes, so the
@@ -1259,6 +1287,10 @@ defmodule Arbiter.Reviews.ExternalReview do
         tokens_out: Map.get(usage, :tokens_out)
       }
       |> maybe_put_proposed(report_only, Map.get(result, :proposed_comments) || [])
+      # A salvaged :completed_unposted record starts life needing a
+      # greenlight, same as a fresh :report_only review — awaits
+      # `greenlight/1` to post the retained findings once the forge recovers.
+      |> maybe_put(:greenlight_status, if(status == :completed_unposted, do: :pending, else: nil))
 
     case Ash.update(record, attrs, action: :complete) do
       {:ok, updated} ->
