@@ -424,5 +424,141 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
       conn = get(conn, ~p"/api/workers/bd-never-#{System.unique_integer([:positive])}/log")
       assert json_response(conn, 404)
     end
+
+    test "?run_id= reads a specific run's transcript, independent of which run is latest",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-multirun-#{System.unique_integer([:positive])}"
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, failed_run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, _latest} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      {:ok, handle} = OutputLog.open(failed_run.id)
+      OutputLog.append(handle, "the failed attempt's learning signal")
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/log?run_id=#{failed_run.id}")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == failed_run.id
+      assert data["lines"] == ["the failed attempt's learning signal"]
+    end
+
+    test "accepts a ReviewGate synthetic task_id (reviewer corpus, bd-cuy75r)",
+         %{conn: conn, ws: ws} do
+      base_id = "bd-synth-#{System.unique_integer([:positive])}"
+      review_id = base_id <> "#review"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          worker_type: :review,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(run.id)
+      OutputLog.append(handle, "reviewer verdict")
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{review_id}/log")
+      data = json_response(conn, 200)["data"]
+
+      assert data["task_id"] == review_id
+      assert data["lines"] == ["reviewer verdict"]
+    end
+  end
+
+  describe "GET /api/workers/:task_id/run_log_list (bd-cuy75r)" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pol-runlog-ctrl-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:arbiter, :output_log_root)
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    test "enumerates the base task's own runs plus its synthetic children",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-corpus-#{System.unique_integer([:positive])}"
+
+      {:ok, author_run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          worker_type: :main,
+          status: :completed,
+          started_at: DateTime.add(DateTime.utc_now(), -20, :second)
+        })
+
+      {:ok, review_run} =
+        Ash.create(Run, %{
+          task_id: task_id <> "#review",
+          repo: "arbiter",
+          workspace_id: ws.id,
+          worker_type: :review,
+          status: :completed,
+          started_at: DateTime.add(DateTime.utc_now(), -10, :second)
+        })
+
+      {:ok, unrelated} =
+        Ash.create(Run, %{
+          task_id: "bd-unrelated-#{System.unique_integer([:positive])}",
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = OutputLog.open(review_run.id)
+      OutputLog.append(handle, "line a")
+      OutputLog.append(handle, "line b")
+      OutputLog.close(handle)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/run_log_list")
+      entries = json_response(conn, 200)["data"]
+
+      ids = Enum.map(entries, & &1["run_id"])
+      assert author_run.id in ids
+      assert review_run.id in ids
+      refute unrelated.id in ids
+
+      review_entry = Enum.find(entries, &(&1["run_id"] == review_run.id))
+      assert review_entry["transcript_exists"] == true
+      assert review_entry["line_count"] == 2
+
+      author_entry = Enum.find(entries, &(&1["run_id"] == author_run.id))
+      assert author_entry["transcript_exists"] == false
+      assert author_entry["line_count"] == 0
+    end
   end
 end

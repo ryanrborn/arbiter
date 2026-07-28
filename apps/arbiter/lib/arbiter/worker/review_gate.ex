@@ -278,6 +278,20 @@ defmodule Arbiter.Worker.ReviewGate do
   def reviewer_task_id(task_id) when is_binary(task_id), do: task_id <> "#review"
 
   @doc """
+  Strip any synthetic-id suffix (`#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
+  `#t<N>`, or a chain of these e.g. `#review#t2`) back to the authoring task
+  id. Every synthetic id built by this module (`reviewer_task_id/1`,
+  `reprompt_task_id/2`, `reviewer_round_id/2`, `implementer_task_id/2`,
+  `timeout_retry_id/2`) is `<base> <> "#" <> suffix`, so splitting on the
+  first `#` recovers the base regardless of which suffix was appended. A
+  plain task id (no `#`) is returned unchanged.
+  """
+  @spec base_task_id(String.t()) :: String.t()
+  def base_task_id(task_id) when is_binary(task_id) do
+    task_id |> String.split("#", parts: 2) |> List.first()
+  end
+
+  @doc """
   The default revise-and-rediscuss round cap for a task's difficulty level.
 
   | Difficulty | Label    | Default rounds |
