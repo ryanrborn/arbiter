@@ -24,7 +24,7 @@ A review engagement is an `Issue` record with:
 |---|---|
 | `review_only` | `true` — hard boundary keeping SyncTracker from writing the upstream ticket |
 | `source_pr` | The PR ref (e.g. `"42"` for the GitHub PR number) |
-| `review_automation` | `:auto`, `:report_only`, or `:flag` — controls re-review and reply behaviour (see "Automation modes") |
+| `review_automation` | `:auto`, `:report_only`, `:flag`, or `:off` — controls re-review and reply behaviour (see "Automation modes") |
 | `last_reviewed_sha` | The last commit SHA we reviewed; nil on first sighting |
 | `last_reviewed_at` | When the last re-review or first review fired |
 | `posted_findings` | JSON array of `{file, line, message, severity}` — the findings we posted |
@@ -45,9 +45,9 @@ by a colleague.
 
 ---
 
-## Automation modes (`auto` vs `report_only` vs `flag`)
+## Automation modes (`auto` vs `report_only` vs `flag` vs `off`)
 
-Every engagement — and every one-shot external review — resolves to one of three
+Every engagement — and every one-shot external review — resolves to one of four
 automation modes. The mode decides **whether findings get posted to the PR** and
 **who greenlights them**:
 
@@ -56,10 +56,13 @@ automation modes. The mode decides **whether findings get posted to the PR** and
 | `:auto` | yes | **yes** — inline comments + verdict | Fully autonomous review. Used for authors/repos the fleet is trusted to comment on directly (`auto_authors`, or a `repo_overrides` set to `auto`). |
 | `:report_only` (alias `propose`) | yes | **no** | Human-in-the-loop. The reviewer runs the full review — reads the diff, computes findings + a recommended verdict — but posts **nothing**. It surfaces the findings and the exact **per-finding proposed comment text** to the coordinator mailbox (and, for the first pass, onto the `ExternalReview` audit record). A coordinator then **greenlights** which comments actually post. This is the required default for infra repos (`atlas`, `verus-infrastructure`). |
 | `:flag` (alias `notify`) | **no** | no | Pure escalation. Do NOT review — just raise a mailbox flag/escalation so a human notices the new commits or reply and decides what to do. The "ping me, don't review" stance. |
+| `:off` (aliases `never`, `disabled`) | **no** | no | Hard opt-out (bd-7opdaf). `worker_review` **refuses to dispatch at all** — no agent spawned, no tokens spent, nothing posted — unless `force: true` is passed for a deliberate one-off. An in-flight ReviewPatrol engagement downgraded live to `:off` behaves like `:flag` (surface, never post). Stricter than `:flag`, which still requires the guard to accept the initial dispatch. |
 
 The distinction is deliberate: `report_only` **reviews and reports**, whereas
-`flag` **only pings** (it never reads the diff). Infra review is `report_only`,
-not `flag` — the earlier `flag`-for-infra wiring was corrected in bd-36qzgx.
+`flag` **only pings** (it never reads the diff), and `off` **refuses the dispatch
+outright** — it's the only mode that can reject a `worker_review` call before an
+agent is even spawned. Infra review is `report_only`, not `flag` — the earlier
+`flag`-for-infra wiring was corrected in bd-36qzgx.
 
 ### Greenlighting a report-only review
 
@@ -246,24 +249,28 @@ Without this, author-reply handling is conservatively skipped.
 workspace. Resolution order (most-specific wins):
 
 1. **Per-dispatch override** — the `automation` argument to `worker_review` always wins
-   (`auto` | `report_only` / `propose` | `flag` / `notify`).
+   (`auto` | `report_only` / `propose` | `flag` / `notify` | `off` / `never` / `disabled`).
 2. **Per-repo override** — `review_automation.repo_overrides[rig_name]` hard-gates a
    specific repo regardless of PR author.
 3. **Author list** — if the PR author is in `auto_authors`, the mode is `:auto`.
 4. **Default** — `review_automation.default` (`:flag` when unset).
 
-The three accepted mode values are `auto`, `report_only` (alias `propose`), and
-`flag` (alias `notify`) — see "Automation modes" above for what each does.
+The four accepted mode values are `auto`, `report_only` (alias `propose`), `flag`
+(alias `notify`), and `off` (aliases `never`/`disabled`) — see "Automation modes"
+above for what each does. A resolved `off` refuses the `worker_review` dispatch
+before any agent spawns; `force: true` overrides a single dispatch, mirroring the
+self-approve guard.
 
 ```bash
 # Authors who get automatic re-reviews and threaded replies (auto: review + post)
 arb config set review_automation.auto_authors '["alice","bob"]'
 
-# Default stance for authors NOT in the list: "auto" | "report_only" | "flag" (default: "flag")
+# Default stance for authors NOT in the list: "auto" | "report_only" | "flag" | "off" (default: "flag")
 arb config set review_automation.default "report_only"
 
-# Hard-gate specific repos regardless of author — infra is review-and-report-only
-arb config set review_automation.repo_overrides '{"atlas": "report_only", "verus-infrastructure": "report_only"}'
+# Hard-gate specific repos regardless of author — infra is review-and-report-only,
+# and a repo the fleet must never touch is a hard "off"
+arb config set review_automation.repo_overrides '{"atlas": "report_only", "verus-infrastructure": "report_only", "voice_biometrics": "off"}'
 ```
 
 Authors in `auto_authors` get `:auto` mode (automatic re-reviews and threaded

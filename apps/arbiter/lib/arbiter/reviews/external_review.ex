@@ -134,10 +134,36 @@ defmodule Arbiter.Reviews.ExternalReview do
          mr_ref: mr_ref,
          repo_path: repo_path,
          pr: pr,
+         rig_name: rig_name(Map.get(opts, :repo), mr_ref),
          link: safe_link(adapter, mr_ref)
        }}
     end
   end
+
+  # The repo/rig name `review_automation.repo_overrides` is keyed by — the same
+  # bare name `worker_review`'s `args["repo"]` uses (bd-3cpcw2). An explicit
+  # `repo:` opt always wins; otherwise (bd-7opdaf Part 1) it's parsed out of the
+  # resolved `mr_ref` itself, since a `pr:` dispatch is very often a fully-
+  # qualified "owner/repo#N" slug/URL with NO separate `repo:` arg — before this
+  # fallback, that shape silently resolved `rig_name` to `nil` and every
+  # `repo_overrides` entry was skipped regardless of what the config said.
+  defp rig_name(repo, _mr_ref) when is_binary(repo) and repo != "", do: repo
+  defp rig_name(_repo, mr_ref), do: rig_name_from_mr_ref(mr_ref)
+
+  # Only GitHub's adapter embeds "owner/repo" in `mr_ref` (e.g. "octo/widget#42",
+  # optionally "github:owner/repo#N" — bd-3jjk0e); GitLab's is a bare "!<iid>"
+  # with no repo embedded, so this simply returns nil there (unchanged, existing
+  # behavior — GitLab workspaces are single-project and gate via `repo:`).
+  defp rig_name_from_mr_ref(mr_ref) when is_binary(mr_ref) do
+    mr_ref = String.replace_prefix(mr_ref, "github:", "")
+
+    case Regex.run(~r{^[^/\s#]+/([^/\s#]+)#\d+$}, mr_ref) do
+      [_, repo] -> repo
+      _ -> nil
+    end
+  end
+
+  defp rig_name_from_mr_ref(_mr_ref), do: nil
 
   @doc """
   Run an external review **synchronously** and return the verdict.
@@ -152,7 +178,8 @@ defmodule Arbiter.Reviews.ExternalReview do
     opts = Map.new(opts)
 
     with {:ok, prepared} <- prepare(opts),
-         :ok <- guard_self_approved(prepared, opts) do
+         :ok <- guard_self_approved(prepared, opts),
+         :ok <- guard_automation_off(prepared, opts) do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
 
@@ -185,7 +212,8 @@ defmodule Arbiter.Reviews.ExternalReview do
     opts = Map.new(opts)
 
     with {:ok, prepared} <- prepare(opts),
-         :ok <- guard_self_approved(prepared, opts) do
+         :ok <- guard_self_approved(prepared, opts),
+         :ok <- guard_automation_off(prepared, opts) do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
       start_async(prepared, opts, record)
@@ -212,6 +240,27 @@ defmodule Arbiter.Reviews.ExternalReview do
     do:
       "skipped: #{ref} already has a current approving review from this identity — " <>
         "pass force: true to review it anyway"
+
+  def describe_error({:automation_off, rig_name, :repo_override}) when is_binary(rig_name),
+    do:
+      "review_automation is \"off\" for #{rig_name} " <>
+        "(review_automation.repo_overrides[#{inspect(rig_name)}]); refusing to dispatch a " <>
+        "reviewer — pass force: true to override"
+
+  def describe_error({:automation_off, rig_name, :explicit}),
+    do:
+      "review_automation was explicitly set to \"off\" for #{rig_name || "this PR"} " <>
+        "(the automation argument); refusing to dispatch a reviewer — pass force: true to override"
+
+  def describe_error({:automation_off, rig_name, :default}) when is_binary(rig_name),
+    do:
+      "review_automation is \"off\" by default for #{rig_name} (review_automation.default); " <>
+        "refusing to dispatch a reviewer — pass force: true to override"
+
+  def describe_error({:automation_off, _rig_name, :default}),
+    do:
+      "review_automation is \"off\" by default for this workspace (review_automation.default); " <>
+        "refusing to dispatch a reviewer — pass force: true to override"
 
   def describe_error(%{__struct__: mod, message: msg}) when is_binary(msg),
     do: "#{inspect(mod)}: #{msg}"
@@ -512,6 +561,31 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
+  # Guard (bd-7opdaf): refuse to dispatch/run a review against a repo whose
+  # resolved review_automation mode is :off — a hard opt-out, modeled directly
+  # on `guard_self_approved/2` above. Logs the resolved mode + its source
+  # (explicit / repo_override / default) on EVERY dispatch, off or not, so a
+  # wrong mode is visible immediately instead of after reviews have posted.
+  # `force: true` overrides, exactly like the self-approve guard.
+  defp guard_automation_off(prepared, opts) do
+    config = workspace_config(prepared.workspace)
+    rig_name = Map.get(prepared, :rig_name)
+
+    {mode, source} =
+      ReviewAutomation.resolve_with_source(config, nil, rig_name, Map.get(opts, :automation))
+
+    Logger.info(
+      "ExternalReview: resolved review_automation=#{mode} (source: #{source}) for " <>
+        "#{prepared.mr_ref}#{if rig_name, do: " [#{rig_name}]", else: ""}"
+    )
+
+    cond do
+      mode != :off -> :ok
+      Map.get(opts, :force) == true -> :ok
+      true -> {:error, {:automation_off, rig_name, source}}
+    end
+  end
+
   defp run_workflow(prepared, opts) do
     %{adapter: adapter, mr_ref: mr_ref, workspace: workspace, repo_path: repo_path} = prepared
     report_only = Map.get(opts, :report_only, false)
@@ -645,7 +719,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
           nil ->
             config = workspace_config(prepared.workspace)
-            ReviewAutomation.resolve(config, nil, Map.get(opts, :repo)) == :report_only
+            ReviewAutomation.resolve(config, nil, Map.get(prepared, :rig_name)) == :report_only
         end
     end
   end
@@ -1046,7 +1120,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     # trigger a re-review) + the PR author (for automation-mode resolution).
     {head_sha, pr_author} = fetch_pr_baseline(adapter, mr_ref)
     watermark = fetch_comment_watermark(adapter, mr_ref)
-    mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(opts, :repo))
+    mode = resolve_automation(opts, prepared.workspace, pr_author, Map.get(prepared, :rig_name))
 
     case create_engagement_issue(prepared, opts, mode, head_sha, watermark, findings) do
       {:ok, issue} ->

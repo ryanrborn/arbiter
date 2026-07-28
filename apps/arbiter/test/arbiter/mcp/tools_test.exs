@@ -1464,6 +1464,82 @@ defmodule Arbiter.MCP.ToolsTest do
       {:ok, reloaded} = Ash.get(Issue, task.id)
       assert reloaded.review_automation == :report_only
     end
+
+    test "worker_review: an :off repo_override refuses before dispatch, no persist (bd-7opdaf)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-ws",
+          prefix: "raof",
+          config: %{
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "off review", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(coordinator, %{
+                 "task_id" => task.id,
+                 "repo" => "quiet_repo",
+                 "with_claude" => false
+               })
+
+      assert msg =~ "quiet_repo"
+      assert msg =~ "repo_overrides"
+      assert msg =~ "force"
+
+      # No agent spawned, nothing persisted — review_automation stays unset.
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == nil
+    end
+
+    test "worker_review: an explicit automation: \"off\" refuses regardless of policy (bd-7opdaf)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "explicit off review", workspace_id: ctx.ws.id})
+
+      assert {:error, {:invalid, msg}} =
+               Tools.worker_review(ctx.coordinator, %{
+                 "task_id" => task.id,
+                 "automation" => "off",
+                 "with_claude" => false
+               })
+
+      assert msg =~ "off"
+    end
+
+    test "worker_review: force: true overrides an :off repo_override refusal (bd-7opdaf)" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-force-ws",
+          prefix: "raoff",
+          config: %{
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"quiet_repo" => "off"}
+            }
+          }
+        })
+
+      {:ok, task} = Ash.create(Issue, %{title: "off review forced", workspace_id: ws.id})
+      coordinator = %Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
+
+      _result =
+        Tools.worker_review(coordinator, %{
+          "task_id" => task.id,
+          "repo" => "quiet_repo",
+          "force" => true,
+          "with_claude" => false
+        })
+
+      # force bypasses the refusal — dispatch proceeds (fails later on no-worktree
+      # in this test env, which is expected and irrelevant here).
+      {:ok, reloaded} = Ash.get(Issue, task.id)
+      assert reloaded.review_automation == :off
+    end
   end
 
   describe "review_greenlight/2 (bd-36qzgx)" do

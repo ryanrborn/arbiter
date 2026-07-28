@@ -212,10 +212,95 @@ defmodule Arbiter.Worker.ReviewAutomationTest do
       assert ReviewAutomation.normalize(:report_only) == :report_only
     end
 
+    test "recognizes :off and its aliases (bd-7opdaf)" do
+      assert ReviewAutomation.normalize("off") == :off
+      assert ReviewAutomation.normalize("never") == :off
+      assert ReviewAutomation.normalize("disabled") == :off
+      assert ReviewAutomation.normalize(:off) == :off
+    end
+
     test "returns nil for anything unrecognized" do
       assert ReviewAutomation.normalize(nil) == nil
       assert ReviewAutomation.normalize("nonsense") == nil
       assert ReviewAutomation.normalize(42) == nil
+    end
+  end
+
+  describe "resolve — :off mode (bd-7opdaf)" do
+    test "a repo_override of off resolves to :off regardless of author" do
+      config = %{
+        "review_automation" => %{
+          "default" => "auto",
+          "auto_authors" => ["alice"],
+          "repo_overrides" => %{"voice_biometrics" => "off"}
+        }
+      }
+
+      assert ReviewAutomation.resolve(config, "alice", "voice_biometrics") == :off
+      assert ReviewAutomation.resolve(config, nil, "voice_biometrics") == :off
+    end
+
+    test "a default of off applies when no repo_override / author match" do
+      config = %{"review_automation" => %{"default" => "off"}}
+      assert ReviewAutomation.resolve(config, "charlie", "backend") == :off
+    end
+
+    test "the never/disabled aliases resolve to :off" do
+      config = %{
+        "review_automation" => %{
+          "default" => "auto",
+          "repo_overrides" => %{"a" => "never", "b" => "disabled"}
+        }
+      }
+
+      assert ReviewAutomation.resolve(config, "alice", "a") == :off
+      assert ReviewAutomation.resolve(config, "alice", "b") == :off
+    end
+
+    test "repo_override_mode/2 returns :off for an off-gated repo" do
+      config = %{
+        "review_automation" => %{"repo_overrides" => %{"voice_biometrics" => "off"}}
+      }
+
+      assert ReviewAutomation.repo_override_mode(config, "voice_biometrics") == :off
+    end
+  end
+
+  describe "resolve_with_source/4 (bd-7opdaf)" do
+    @src_config %{
+      "review_automation" => %{
+        "default" => "flag",
+        "auto_authors" => ["alice"],
+        "repo_overrides" => %{"voice_biometrics" => "off", "atlas" => "report_only"}
+      }
+    }
+
+    test "an explicit mode always wins with source :explicit" do
+      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "backend", "auto") ==
+               {:auto, :explicit}
+
+      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "voice_biometrics", "off") ==
+               {:off, :explicit}
+    end
+
+    test "a repo_override wins with source :repo_override when no explicit mode is given" do
+      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "voice_biometrics", nil) ==
+               {:off, :repo_override}
+
+      assert ReviewAutomation.resolve_with_source(@src_config, "coworker", "atlas", nil) ==
+               {:report_only, :repo_override}
+    end
+
+    test "falls through to auto_authors/default with source :default" do
+      assert ReviewAutomation.resolve_with_source(@src_config, "alice", "backend", nil) ==
+               {:auto, :default}
+
+      assert ReviewAutomation.resolve_with_source(@src_config, "charlie", "backend", nil) ==
+               {:flag, :default}
+    end
+
+    test "defaults to :flag/:default with no config at all" do
+      assert ReviewAutomation.resolve_with_source(nil, nil, nil, nil) == {:flag, :default}
     end
   end
 end
