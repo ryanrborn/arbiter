@@ -486,7 +486,7 @@ defmodule Arbiter.Workflows.CodeReview do
       Enum.map(remaining_in_diff, &Map.put(proposed_comment(&1), :in_diff, true)) ++
         Enum.map(out_of_scope, &Map.put(proposed_comment(&1), :in_diff, false))
 
-    %{findings: findings, verdict: compute_verdict(findings), proposed_comments: proposed}
+    %{findings: findings, verdict: compute_verdict(findings), proposed_comments: proposed, check_usage: Map.get(state, :check_usage, %{})}
   end
 
   # Which findings the diff itself touches, vs. ones the reviewer flagged

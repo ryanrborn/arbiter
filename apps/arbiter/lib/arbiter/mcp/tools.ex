@@ -1403,6 +1403,8 @@ defmodule Arbiter.MCP.Tools do
       tokens_out: r.tokens_out,
       dispatched_by: r.dispatched_by,
       engagement_id: r.engagement_id,
+      failure_stage: r.failure_stage,
+      failure_reason: r.failure_reason,
       started_at: iso_dt(r.started_at),
       completed_at: iso_dt(r.completed_at)
     }

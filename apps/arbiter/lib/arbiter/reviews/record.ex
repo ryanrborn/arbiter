@@ -104,7 +104,9 @@ defmodule Arbiter.Reviews.Record do
         :dispatched_by,
         :engagement_id,
         :started_at,
-        :completed_at
+        :completed_at,
+        :failure_stage,
+        :failure_reason
       ]
     end
 
@@ -126,7 +128,9 @@ defmodule Arbiter.Reviews.Record do
         :tokens_in,
         :tokens_out,
         :engagement_id,
-        :completed_at
+        :completed_at,
+        :failure_stage,
+        :failure_reason
       ]
     end
 
@@ -292,6 +296,18 @@ defmodule Arbiter.Reviews.Record do
     attribute :completed_at, :utc_datetime_usec do
       public? true
       description "When the workflow finished; nil while running."
+    end
+
+    attribute :failure_stage, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+      description "Stage where the review failed: read_diff, file_findings, agent, tracker_context. Nil if not failed."
+    end
+
+    attribute :failure_reason, :string do
+      public? true
+      constraints max_length: 4096, trim?: true
+      description "Normalized error reason: error kind, status, and message. Nil if not failed."
     end
 
     create_timestamp :inserted_at
