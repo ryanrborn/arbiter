@@ -634,6 +634,84 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  # bd-1m8k7d: ReviewPatrol's workspace-level circuit breaker needs to tell a
+  # rate-limit response (403 primary/secondary, or 429) apart from an ordinary
+  # 403 (bad credentials, missing scope) — and needs to know how long the
+  # forge itself says to wait, when it says so.
+  describe "rate-limit error classification (bd-1m8k7d)" do
+    setup do
+      # Isolate from the bounded in-request secondary-limit retry (bd-1yva53):
+      # these tests assert on the terminal Error, not the retry mechanics.
+      Application.put_env(:arbiter, :github_retry_sleep_fun, fn _ms -> :ok end)
+      on_exit(fn -> Application.delete_env(:arbiter, :github_retry_sleep_fun) end)
+      :ok
+    end
+
+    test "a 429 is classified :rate_limited" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(429) |> Req.Test.json(%{"message" => "Too Many Requests"})
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, status: 429}} = Github.get(@ref)
+    end
+
+    test "a primary-quota 403 (\"API rate limit exceeded\") is classified :rate_limited, not :forbidden" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(403)
+        |> Req.Test.json(%{
+          "message" =>
+            "API rate limit exceeded for user ID 238055253. (But here's the good news:...)"
+        })
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, status: 403}} = Github.get(@ref)
+    end
+
+    test "an ordinary 403 (bad credentials) stays :forbidden, not :rate_limited" do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => "Bad credentials"})
+      end)
+
+      assert {:error, %Error{kind: :forbidden, status: 403}} = Github.get(@ref)
+    end
+
+    test "retry_after_ms is populated from the Retry-After header (seconds -> ms)" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "5")
+        |> Plug.Conn.put_status(429)
+        |> Req.Test.json(%{"message" => "Too Many Requests"})
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: 5_000}} = Github.get(@ref)
+    end
+
+    test "retry_after_ms falls back to x-ratelimit-reset (epoch seconds -> ms until then)" do
+      reset_at = System.os_time(:second) + 30
+
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("x-ratelimit-reset", Integer.to_string(reset_at))
+        |> Plug.Conn.put_status(403)
+        |> Req.Test.json(%{"message" => "API rate limit exceeded for user ID 1."})
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: ms}} = Github.get(@ref)
+      assert ms in 25_000..30_000
+    end
+
+    test "retry_after_ms is nil when neither header is present" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(403)
+        |> Req.Test.json(%{"message" => "API rate limit exceeded."})
+      end)
+
+      assert {:error, %Error{kind: :rate_limited, retry_after_ms: nil}} = Github.get(@ref)
+    end
+  end
+
   # bd-95lsjb: the MergeQueue reads `changes_requested` + `latest_review_id` from
   # get/1 to drive the auto-revise path. Derived from the reviews get/1 already
   # fetches — no extra HTTP call.

@@ -1212,4 +1212,187 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert reload(eng).status == :closed
     end
   end
+
+  describe "tick/1 — rate-limit circuit breaker (bd-1m8k7d)" do
+    setup do
+      # Never actually sleep for the pace delay, nor for GitHub's own
+      # in-request secondary-limit retry (bd-1yva53) — a Retry-After header
+      # trips both, and this suite is only exercising ReviewPatrol's
+      # workspace-level circuit breaker.
+      Application.put_env(:arbiter, :review_patrol_pace_sleep_fun, fn _ms -> :ok end)
+      Application.put_env(:arbiter, :github_retry_sleep_fun, fn _ms -> :ok end)
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :review_patrol_pace_sleep_fun)
+        Application.delete_env(:arbiter, :github_retry_sleep_fun)
+      end)
+
+      :ok
+    end
+
+    defp count_calls(fun) do
+      counter = :counters.new(1, [])
+
+      stub(fn conn ->
+        :counters.add(counter, 1, 1)
+        fun.(conn)
+      end)
+
+      counter
+    end
+
+    defp rate_limited_403(conn, opts \\ []) do
+      conn =
+        Enum.reduce(Keyword.get(opts, :headers, []), conn, fn {k, v}, conn ->
+          Plug.Conn.put_resp_header(conn, k, v)
+        end)
+
+      message = Keyword.get(opts, :message, "API rate limit exceeded for user ID 12345.")
+
+      conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => message})
+    end
+
+    test "sustained 403s trip the circuit after N consecutive hits — total calls stay bounded, not linear in open-engagement count",
+         %{ws: ws} do
+      engs = for n <- 900..919, do: engagement(ws, n)
+      counter = count_calls(&rate_limited_403/1)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Default trip threshold is 3 — regardless of 20 open engagements, only
+      # 3 `get/1` calls should have fired before the circuit broke.
+      assert :counters.get(counter, 1) == 3
+      assert length(engs) == 20
+
+      assert ReviewPatrol.state(name).last_terminated == []
+      assert %DateTime{} = ReviewPatrol.state(name).rate_limit_paused_until
+    end
+
+    test "while paused, subsequent ticks make ZERO forge calls", %{ws: ws} do
+      for n <- 920..929, do: engagement(ws, n)
+      counter = count_calls(&rate_limited_403/1)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+      assert :counters.get(counter, 1) == 3
+
+      assert :ok = ReviewPatrol.tick(name)
+      assert :ok = ReviewPatrol.tick(name)
+      # No further calls while the circuit is open.
+      assert :counters.get(counter, 1) == 3
+    end
+
+    test "exactly one coordinator escalation is raised per trip, not one per tick while paused",
+         %{ws: ws} do
+      for n <- 930..939, do: engagement(ws, n)
+      _counter = count_calls(&rate_limited_403/1)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+      assert :ok = ReviewPatrol.tick(name)
+      assert :ok = ReviewPatrol.tick(name)
+
+      escalations =
+        Arbiter.Messages.Message.coordinator_ref()
+        |> Arbiter.Messages.Message.inbox(workspace_id: ws.id)
+        |> Enum.filter(&(&1.subject == "ReviewPatrol paused — forge rate limit"))
+
+      assert length(escalations) == 1
+    end
+
+    test "polling resumes once the pause window elapses", %{ws: ws} do
+      clock_offset = :counters.new(1, [])
+
+      Application.put_env(:arbiter, :review_patrol_clock_fun, fn ->
+        DateTime.add(DateTime.utc_now(), :counters.get(clock_offset, 1), :second)
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :review_patrol_clock_fun) end)
+
+      # 3 engagements — enough to hit the default trip threshold in one tick.
+      engs = for n <- [940, 941, 942], do: engagement(ws, n)
+      rate_limited = count_calls(&rate_limited_403/1)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+      assert :counters.get(rate_limited, 1) == 3
+      assert %DateTime{} = ReviewPatrol.state(name).rate_limit_paused_until
+
+      # Still within the pause window: no new calls at all.
+      assert :ok = ReviewPatrol.tick(name)
+      assert :counters.get(rate_limited, 1) == 3
+
+      # Fast-forward the virtual clock well past the (no-Retry-After) default
+      # backoff window, then let the forge succeed.
+      :counters.put(clock_offset, 1, 3600)
+
+      stub(fn conn ->
+        cond do
+          Enum.any?(engs, &(conn.request_path == "/repos/owner/repo/pulls/#{&1.source_pr}")) ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{"merged" => true, "html_url" => "x"})
+
+          Enum.any?(
+            engs,
+            &(conn.request_path == "/repos/owner/repo/pulls/#{&1.source_pr}/reviews")
+          ) ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      assert :ok = ReviewPatrol.tick(name)
+      assert Enum.all?(engs, &(reload(&1).status == :closed))
+      assert ReviewPatrol.state(name).rate_limit_paused_until == nil
+    end
+
+    test "a 429 also trips the circuit", %{ws: ws} do
+      for n <- 950..959, do: engagement(ws, n)
+
+      counter =
+        count_calls(fn conn ->
+          conn |> Plug.Conn.put_status(429) |> Req.Test.json(%{"message" => "Too Many Requests"})
+        end)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert :counters.get(counter, 1) == 3
+      assert %DateTime{} = ReviewPatrol.state(name).rate_limit_paused_until
+    end
+
+    test "honors a Retry-After header instead of guessing a backoff", %{ws: ws} do
+      for n <- 960..969, do: engagement(ws, n)
+
+      count_calls(fn conn -> rate_limited_403(conn, headers: [{"retry-after", "5"}]) end)
+
+      {_pid, name} = start_patrol(ws)
+      before = DateTime.utc_now()
+      assert :ok = ReviewPatrol.tick(name)
+
+      paused_until = ReviewPatrol.state(name).rate_limit_paused_until
+      # Honoring Retry-After: 5 means the pause is ~5s out, not the (much
+      # longer) default exponential backoff.
+      assert DateTime.diff(paused_until, before, :millisecond) in 4_000..7_000
+    end
+
+    test "a non-rate-limit error (e.g. a plain 500) never trips the circuit", %{ws: ws} do
+      for n <- 970..979, do: engagement(ws, n)
+
+      counter =
+        count_calls(fn conn -> conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{}) end)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      # Every engagement was attempted — a 500 isn't a rate limit, so the
+      # circuit breaker never engages.
+      assert :counters.get(counter, 1) == 10
+      assert ReviewPatrol.state(name).rate_limit_paused_until == nil
+    end
+  end
 end
