@@ -1448,6 +1448,52 @@ defmodule Arbiter.MCP.Tools do
     e -> {:error, {:internal, "external_review_show failed: #{Exception.message(e)}"}}
   end
 
+  # ---- review_gate_rounds_list ---------------------------------------------
+
+  @doc """
+  List `Arbiter.ReviewGate.Round` rows for a task (bd-aqyjuc): one row per
+  ReviewGate reviewer or implementer pass, oldest-first, so a round-1 rejection
+  and a round-2 approval surface as two distinct rows rather than being
+  collapsed into the task's terminal outcome. Coordinator only. Requires
+  `task_id`. Backfill is out of scope — rows only exist for ReviewGate runs
+  from 2026-07-28 onward.
+  """
+  @spec review_gate_rounds_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def review_gate_rounds_list(%Scope{} = _scope, args) do
+    require Ash.Query
+    alias Arbiter.ReviewGate.Round
+
+    with {:ok, task_id} <- require_string(args, "task_id") do
+      rounds =
+        Round
+        |> Ash.Query.filter(task_id == ^task_id)
+        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.read!()
+        |> Enum.map(&serialize_review_gate_round/1)
+
+      {:ok, %{rounds: rounds, count: length(rounds)}}
+    end
+  rescue
+    e -> {:error, {:internal, "review_gate_rounds_list failed: #{Exception.message(e)}"}}
+  end
+
+  defp serialize_review_gate_round(%Arbiter.ReviewGate.Round{} = r) do
+    %{
+      id: r.id,
+      task_id: r.task_id,
+      run_id: r.run_id,
+      round: r.round,
+      role: r.role,
+      verdict: r.verdict,
+      findings: r.findings,
+      finding_count: r.finding_count,
+      reviewer_model: r.reviewer_model,
+      cost_usd: r.cost_usd,
+      converged: r.converged,
+      inserted_at: iso(r.inserted_at)
+    }
+  end
+
   # ---- review_greenlight --------------------------------------------------
 
   @doc """

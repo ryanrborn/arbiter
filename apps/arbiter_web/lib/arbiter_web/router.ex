@@ -113,6 +113,9 @@ defmodule ArbiterWeb.Router do
     # External review audit records (bd-31fh9e)
     get("/external_reviews", ExternalReviewController, :index)
 
+    # Internal ReviewGate structured round outcomes (bd-aqyjuc)
+    get("/review_gate_rounds", ReviewGateRoundController, :index)
+
     # Anthropic quota snapshot (captured by the local proxy)
     get("/quota", QuotaController, :show)
 

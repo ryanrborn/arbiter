@@ -2483,6 +2483,58 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "review_gate_rounds_list/2 (bd-aqyjuc)" do
+    test "returns rounds for a task, oldest-first, distinguishing round-1 reject from round-2 approve",
+         ctx do
+      {:ok, _r1} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 1,
+          role: :review,
+          verdict: :request_changes,
+          findings: "VERDICT: REQUEST_CHANGES\n1. fix the thing",
+          finding_count: 1,
+          reviewer_model: "claude-sonnet-5",
+          cost_usd: 0.12,
+          converged: false
+        })
+
+      {:ok, _r2} =
+        Ash.create(Arbiter.ReviewGate.Round, %{
+          task_id: ctx.task.id,
+          round: 2,
+          role: :review,
+          verdict: :approve,
+          findings: "VERDICT: APPROVE",
+          finding_count: 0,
+          reviewer_model: "claude-sonnet-5",
+          cost_usd: 0.09,
+          converged: true
+        })
+
+      assert {:ok, %{rounds: rounds, count: 2}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => ctx.task.id})
+
+      assert [round1, round2] = rounds
+      assert round1.round == 1
+      assert round1.verdict == :request_changes
+      assert round1.converged == false
+      assert round2.round == 2
+      assert round2.verdict == :approve
+      assert round2.converged == true
+    end
+
+    test "requires task_id", ctx do
+      assert {:error, {:invalid, msg}} = Tools.review_gate_rounds_list(ctx.coordinator, %{})
+      assert msg =~ "task_id"
+    end
+
+    test "an unknown task_id returns an empty list", ctx do
+      assert {:ok, %{rounds: [], count: 0}} =
+               Tools.review_gate_rounds_list(ctx.coordinator, %{"task_id" => "no-such-task"})
+    end
+  end
+
   describe "workspace-agnostic coordinator" do
     setup ctx do
       # A coordinator token with no bound workspace (workspace_id: nil) — the
