@@ -46,11 +46,14 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
     pid =
       start_supervised!(
-        {ReviewPatrol,
-         Keyword.merge(
-           [repo: "owner/repo", workspace_id: ws.id, interval_ms: 60_000, name: name],
-           opts
-         )}
+        Supervisor.child_spec(
+          {ReviewPatrol,
+           Keyword.merge(
+             [repo: "owner/repo", workspace_id: ws.id, interval_ms: 60_000, name: name],
+             opts
+           )},
+          id: name
+        )
       )
 
     Req.Test.allow(@stub_name, self(), pid)
@@ -367,6 +370,58 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       end)
     end
 
+    # Like `rereview_stub/3`, but the PR carries a `reviews` list (used both by
+    # `adapter.get/1`'s own approved/changes_requested calc and by
+    # `self_approved?/1`'s identity-scoped lookup) and serves `GET /user` so
+    # `self_approved?/1` can resolve the authenticated login (bd-4po0nv).
+    defp rereview_stub_with_reviews(number, head, diff, reviews, our_login) do
+      test_pid = self()
+
+      stub(fn conn ->
+        path = conn.request_path
+
+        cond do
+          conn.method == "GET" and path == "/user" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"login" => our_login})
+
+          conn.method == "GET" and String.starts_with?(path, "/repos/owner/repo/compare/") ->
+            send(test_pid, {:compare, path})
+
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(200, diff)
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "number" => number,
+              "state" => "open",
+              "head" => %{"sha" => head},
+              "html_url" => "x"
+            })
+
+          conn.method == "GET" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(reviews)
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/comments" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:inline_comment, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          conn.method == "POST" and path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:submit_review, Jason.decode!(body)})
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{"id" => 99})
+
+          true ->
+            conn
+            |> Plug.Conn.put_status(500)
+            |> Req.Test.json(%{"message" => "unhandled #{path}"})
+        end
+      end)
+    end
+
     test "a push touching a previously-flagged file triggers exactly one re-review", %{ws: ws} do
       eng =
         engagement(ws, 400, %{
@@ -431,6 +486,168 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert reload(eng).last_reviewed_sha == "oldsha"
       assert ReviewPatrol.state(name).last_rereviewed == []
+    end
+
+    test "sticky approval: operator identity currently approved + formatting-only push → declines, no re-review",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 420, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      # Whitespace-only change to the previously-flagged file: relevant?
+      # (touches lib/a.ex) but not invalidating (formatting-only).
+      diff =
+        "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n" <>
+          "-  def foo do\n+def foo do\n"
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(420, "newsha", diff, reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:compare, _path}
+      refute_receive {:inline_comment, _}
+      refute_receive {:submit_review, _}
+
+      reloaded = reload(eng)
+      # Cursor advances (the push was considered and declined) but no review
+      # was posted, and the decision is visible on the engagement.
+      assert reloaded.last_reviewed_sha == "newsha"
+      assert reloaded.review_count == 0
+      assert reloaded.notes =~ "approval stands"
+      assert ReviewPatrol.state(name).last_rereviewed == []
+      assert ReviewPatrol.state(name).last_declined == [eng.id]
+    end
+
+    test "sticky approval: operator identity currently approved + substantive code push → still re-reviews",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 421, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(421, "newsha", diff, reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:inline_comment, _}
+      assert_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+      assert ReviewPatrol.state(name).last_declined == []
+    end
+
+    test "sticky approval: no current operator approval → substantive push re-reviews as before",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 422, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      diff = wide_diff("lib/a.ex")
+      rereview_stub_with_reviews(422, "newsha", diff, [], "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+    end
+
+    test "sticky approval: operator approved + test-only push → declines, no re-review",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 423, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("test/a_test.exs", 5, "prior issue")]
+        })
+
+      diff =
+        "diff --git a/test/a_test.exs b/test/a_test.exs\n--- a/test/a_test.exs\n" <>
+          "+++ b/test/a_test.exs\n@@ -1 +1,2 @@\n context\n+assert 1 == 1\n"
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(423, "newsha", diff, reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_declined == [eng.id]
+    end
+
+    test "sticky approval: operator approved + doc-only push → declines, no re-review",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 424, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("docs/guide.md", 5, "prior issue")]
+        })
+
+      diff =
+        "diff --git a/docs/guide.md b/docs/guide.md\n--- a/docs/guide.md\n" <>
+          "+++ b/docs/guide.md\n@@ -1 +1,2 @@\n context\n+a whole new paragraph\n"
+
+      reviews = [%{"user" => %{"login" => "botreviewer"}, "state" => "APPROVED"}]
+      rereview_stub_with_reviews(424, "newsha", diff, reviews, "botreviewer")
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      refute_receive {:submit_review, _}
+      assert reload(eng).last_reviewed_sha == "newsha"
+      assert ReviewPatrol.state(name).last_declined == [eng.id]
+    end
+
+    test "sticky approval: self_approved?/1 unresolvable (no /user route) falls open — a formatting-only push still re-reviews",
+         %{ws: ws} do
+      _eng =
+        engagement(ws, 425, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")]
+        })
+
+      diff =
+        "diff --git a/lib/a.ex b/lib/a.ex\n--- a/lib/a.ex\n+++ b/lib/a.ex\n@@ -1 +1 @@\n" <>
+          "-  def foo do\n+def foo do\n"
+
+      # `rereview_stub/3` has no `/user` route and no APPROVED review, so
+      # `self_approved?/1` degrades to false — sticky approval never applies,
+      # and even a formatting-only push falls through to a normal re-review.
+      put_invoker([
+        %{"severity" => "error", "file" => "lib/a.ex", "line" => 10, "message" => "new bug"}
+      ])
+
+      rereview_stub(425, "newsha", diff)
+
+      {_pid, name} = start_patrol(ws)
+      assert :ok = ReviewPatrol.tick(name)
+
+      assert_receive {:submit_review, _}
+      assert ReviewPatrol.state(name).last_declined == []
     end
 
     test "debounce: a re-review inside the window is suppressed", %{ws: ws} do
@@ -752,6 +969,43 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
       assert escalations == []
       assert ReviewPatrol.state(name).last_escalated == []
+    end
+
+    test "concurrent cap evaluations for the same engagement escalate exactly once (bd-4po0nv)",
+         %{ws: ws} do
+      eng =
+        engagement(ws, 413, %{
+          review_automation: :auto,
+          last_reviewed_sha: "oldsha",
+          posted_findings: [finding("lib/a.ex", 5, "prior issue")],
+          review_count: 3
+        })
+
+      pr_stub(413, %{
+        "number" => 413,
+        "state" => "open",
+        "head" => %{"sha" => "newsha"},
+        "html_url" => "x"
+      })
+
+      # 7 independent patrol processes all evaluating the SAME engagement row
+      # concurrently — reproducing the observed real-world burst (7 identical
+      # escalations for one cap trip within ~3s) without relying on timing.
+      patrols = for _ <- 1..7, do: start_patrol(ws)
+
+      patrols
+      |> Enum.map(fn {_pid, name} -> Task.async(fn -> ReviewPatrol.tick(name) end) end)
+      |> Task.await_many()
+
+      escalations =
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          directive_ref == ^eng.id and to_ref == "coordinator" and kind == :escalation
+        )
+        |> Ash.read!()
+
+      assert length(escalations) == 1
+      assert reload(eng).review_cap_escalated == true
     end
   end
 
