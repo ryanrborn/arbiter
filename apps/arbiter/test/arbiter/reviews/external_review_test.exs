@@ -883,6 +883,149 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
+  # bd-2o4b8f: a `file_findings` post failure (e.g. GitHub's secondary rate
+  # limit outlasting the adapter's own retries) must not discard a review that
+  # already read the diff and computed findings + a verdict — those are
+  # recoverable via `greenlight/1`, not gone.
+  describe "review/1 — file_findings post failure retains findings (bd-2o4b8f)" do
+    setup do
+      System.put_env(@env_var, "test-token")
+
+      Application.put_env(:arbiter, :github_retry_sleep_fun, fn _ms -> :ok end)
+
+      on_exit(fn ->
+        System.delete_env(@env_var)
+        Application.delete_env(:arbiter, :github_retry_sleep_fun)
+      end)
+
+      :ok
+    end
+
+    defp stub_forge_forbidden_on_comment_post(head_sha) do
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        path = conn.request_path
+        diff? = "application/vnd.github.v3.diff" in Plug.Conn.get_req_header(conn, "accept")
+
+        cond do
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" and diff? ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/plain")
+            |> Plug.Conn.resp(
+              200,
+              "diff --git a/x.ex b/x.ex\n--- a/x.ex\n+++ b/x.ex\n@@ -0,0 +1 @@\n+boom\n"
+            )
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42" ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              200,
+              Jason.encode!(%{
+                "number" => 42,
+                "state" => "open",
+                "head" => %{"sha" => head_sha},
+                "html_url" => "https://github.com/octo/widget/pull/42"
+              })
+            )
+
+          conn.method == "GET" and path == "/repos/octo/widget/pulls/42/reviews" ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(200, "[]")
+
+          # The forge's secondary rate limit (bd-1yva53): a 403 that outlasts
+          # the adapter's own bounded retries.
+          conn.method == "POST" and path == "/repos/octo/widget/pulls/42/comments" ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(
+              403,
+              Jason.encode!(%{
+                "message" =>
+                  "You have exceeded a secondary rate limit and have been temporarily blocked."
+              })
+            )
+
+          true ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{path}"}))
+        end
+      end)
+    end
+
+    test "persists a :completed_unposted record with the findings + verdict retained" do
+      ws = github_ws("er-postfail-1")
+      stub_forge_forbidden_on_comment_post("sha-postfail-1")
+
+      assert {:error, _reason} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert rec.status == :completed_unposted
+      assert rec.verdict == :request_changes
+      assert rec.finding_count == 1
+      assert rec.greenlight_status == :pending
+      assert [%{"file" => "x.ex", "line" => 1}] = rec.proposed_comments
+      assert String.contains?(rec.findings_summary || "", "x.ex")
+    end
+
+    # Contrast with the cheap failure mode: a `read_diff` failure has no
+    # findings to retain, and must remain a plain :failed record.
+    test "a read_diff failure (nothing computed yet) stays a plain :failed record" do
+      ws = github_ws("er-postfail-2")
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.resp(500, Jason.encode!(%{"message" => "boom"}))
+      end)
+
+      assert {:error, _reason} =
+               ExternalReview.review(pr: "octo/widget#42", workspace: ws.name, follow_up: false)
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert rec.status == :failed
+      assert is_nil(rec.verdict)
+      assert is_nil(rec.finding_count)
+      assert is_nil(rec.greenlight_status)
+      assert rec.proposed_comments == []
+    end
+
+    test "the salvaged record is re-postable via greenlight/1 once the forge recovers" do
+      ws = github_ws("er-postfail-3")
+      stub_forge_forbidden_on_comment_post("sha-postfail-3")
+
+      assert {:error, _reason} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: one_finding()
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+      assert rec.status == :completed_unposted
+
+      # The forge recovers — comments and reviews now succeed.
+      stub_full_review(head_sha: "sha-postfail-3", author: "dev", max_comment_id: 1)
+
+      assert {:ok, gl} = ExternalReview.greenlight(record_id: rec.id, select: "all")
+      assert gl.posted == 1
+      assert gl.verdict_posted == true
+
+      reloaded = Ash.get!(Record, rec.id)
+      assert reloaded.greenlight_status == :posted
+    end
+  end
+
   describe "review/1 — external_review event broadcast (bd-6f9u6z)" do
     setup do
       System.put_env(@env_var, "test-token")

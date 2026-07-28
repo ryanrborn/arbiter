@@ -277,8 +277,17 @@ defmodule Arbiter.Workflows.CodeReview do
       {:ok, state, demoted} ->
         {:ok, Map.update(state, :out_of_diff_findings, out_of_scope ++ demoted, &(&1 ++ out_of_scope ++ demoted))}
 
-      {:error, _} = err ->
-        err
+      # bd-2o4b8f: a hard adapter error (e.g. a 403 secondary rate limit that
+      # outlasted the adapter's own retries) must not discard the completed
+      # review — the diff was already read and the findings already computed.
+      # Findings not yet posted (the one that just failed + everything after
+      # it, plus anything the diff-scope partition routed out-of-diff) are
+      # salvaged into `proposed_comments` so `ExternalReview.greenlight/1` can
+      # post them once the forge is healthy again. Findings already posted
+      # before the failure are NOT re-included here, so a later greenlight
+      # can't double-post them.
+      {:error, reason, remaining_in_diff} ->
+        {:error, {:post_failed, reason, salvage_unposted(state, remaining_in_diff, out_of_scope)}}
     end
   end
 
@@ -443,20 +452,41 @@ defmodule Arbiter.Workflows.CodeReview do
       "part of this diff, so it can't be posted inline):\n" <> Enum.join(lines, "\n")
   end
 
+  # Returns `{:ok, state, demoted}` when every finding was attempted (posted or
+  # demoted as out-of-diff), or `{:error, reason, remaining}` on a hard adapter
+  # error — `remaining` is the failing finding plus every finding after it that
+  # was never attempted, so the caller can salvage them (bd-2o4b8f) instead of
+  # discarding the whole review.
   defp post_each_finding(adapter, mr_ref, findings, opts, state) do
     findings
-    |> Enum.reduce_while({:ok, state, []}, fn finding, {:ok, acc, demoted} ->
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, state, []}, fn {finding, idx}, {:ok, acc, demoted} ->
       case safe_adapter_call(adapter, :post_inline_comment, [mr_ref, finding, opts]) do
         {:ok, response} -> {:cont, {:ok, maybe_capture_path(acc, response), demoted}}
         :ok -> {:cont, {:ok, acc, demoted}}
         {:error, %{kind: :validation_failed}} -> {:cont, {:ok, acc, [finding | demoted]}}
-        {:error, _} = err -> {:halt, err}
+        {:error, err} -> {:halt, {:error, err, Enum.drop(findings, idx)}}
       end
     end)
     |> case do
       {:ok, state, demoted} -> {:ok, state, Enum.reverse(demoted)}
-      {:error, _} = err -> err
+      {:error, _reason, _remaining} = err -> err
     end
+  end
+
+  # Build the salvage payload for a `:file_findings` post failure: every
+  # finding that never made it to the PR (still-to-post in-diff findings +
+  # whatever the diff-scope partition routed out-of-diff) becomes a
+  # `proposed_comment`, and the verdict is computed from the full finding set
+  # so it reflects the whole review, not just the unposted remainder.
+  defp salvage_unposted(state, remaining_in_diff, out_of_scope) do
+    findings = Map.get(state, :findings, [])
+
+    proposed =
+      Enum.map(remaining_in_diff, &Map.put(proposed_comment(&1), :in_diff, true)) ++
+        Enum.map(out_of_scope, &Map.put(proposed_comment(&1), :in_diff, false))
+
+    %{findings: findings, verdict: compute_verdict(findings), proposed_comments: proposed}
   end
 
   # Which findings the diff itself touches, vs. ones the reviewer flagged

@@ -20,7 +20,12 @@ defmodule Arbiter.Reviews.Record do
     * `strategy`        — merge strategy: `"github"` / `"gitlab"` / `"direct"`.
     * `link`            — human-friendly URL to the PR on the forge (best-effort).
     * `status`          — `:running` while in flight, `:completed` on success,
-                          `:failed` when the workflow errors.
+                          `:completed_unposted` when the review ran to completion
+                          but posting to the forge failed and exhausted retries
+                          (findings + verdict are retained in `proposed_comments`
+                          for `Arbiter.Reviews.ExternalReview.greenlight/1` —
+                          bd-2o4b8f), `:failed` when the workflow errors before
+                          anything was computed (e.g. reading the diff).
     * `verdict`         — `:approve` or `:request_changes` (nil while running
                           or when the workflow failed before reaching the verdict
                           step).
@@ -53,7 +58,12 @@ defmodule Arbiter.Reviews.Record do
     data_layer: AshSqlite.DataLayer
 
   @verdicts ~w(approve request_changes)a
-  @statuses ~w(running completed failed)a
+  # bd-2o4b8f: :completed_unposted — the review ran to completion (findings +
+  # verdict computed) but posting to the forge failed and exhausted retries.
+  # Distinct from :failed (nothing computed) and :completed (posted
+  # successfully): `proposed_comments` carries the unposted findings so
+  # `Arbiter.Reviews.ExternalReview.greenlight/1` can post them later.
+  @statuses ~w(running completed completed_unposted failed)a
   @modes ~w(auto report_only)a
   @greenlight_statuses ~w(pending posted none)a
 

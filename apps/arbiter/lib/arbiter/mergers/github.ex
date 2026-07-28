@@ -1468,11 +1468,11 @@ defmodule Arbiter.Mergers.Github do
   # ---- Internals: HTTP -----------------------------------------------------
 
   # Bounded retries for GitHub's *secondary* (abuse) rate limit — a transient,
-  # burst-triggered 403 distinct from primary quota exhaustion (bd-1yva53).
-  # ReviewPatrol's per-tick poll of every open engagement is the main source of
-  # these bursts; retrying here (rather than in every caller) also covers
-  # mid-review adapter calls (get_diff, post_inline_comment, …) so a single
-  # secondary-limit 403 no longer fails an entire CodeReview run.
+  # burst-triggered 403/429 distinct from primary quota exhaustion (bd-1yva53,
+  # bd-2o4b8f). ReviewPatrol's per-tick poll of every open engagement is the
+  # main source of these bursts; retrying here (rather than in every caller)
+  # also covers mid-review adapter calls (get_diff, post_inline_comment, …) so
+  # a single secondary-limit 403/429 no longer fails an entire CodeReview run.
   @max_secondary_retries 2
   @base_backoff_ms 250
   @max_backoff_ms 5_000
@@ -1496,7 +1496,7 @@ defmodule Arbiter.Mergers.Github do
 
   defp perform_request(full_opts, attempt) do
     case Req.request(full_opts) do
-      {:ok, %Req.Response{status: 403} = resp} = result ->
+      {:ok, %Req.Response{status: status} = resp} = result when status in [403, 429] ->
         if attempt < @max_secondary_retries and secondary_rate_limited?(resp) do
           Logger.info(
             "GitHub: secondary rate limit hit (attempt #{attempt + 1}); backing off before retry"
