@@ -1837,6 +1837,204 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:error, {:not_found, _}} =
                Tools.worker_log(ctx.coordinator, %{"task_id" => foreign.id})
     end
+
+    test "run_id: reads a specific run's transcript, independent of which run is latest", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "multi-run", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, failed_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, latest} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(failed_run.id)
+      Arbiter.Worker.OutputLog.append(handle, "the failed attempt's learning signal")
+      Arbiter.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Arbiter.Worker.OutputLog.path_for(failed_run.id)) end)
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"run_id" => failed_run.id})
+
+      assert data.run_id == failed_run.id
+      assert data.task_id == task.id
+      assert data.lines == ["the failed attempt's learning signal"]
+      refute data.run_id == latest.id
+    end
+
+    test "run_id: not-found for a run in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wl-run-other", prefix: "wlro"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      {:ok, foreign_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: foreign.id,
+          repo: "arbiter",
+          workspace_id: other_ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_log(ctx.coordinator, %{"run_id" => foreign_run.id})
+    end
+
+    test "task_id: accepts a ReviewGate synthetic id (reviewer corpus, bd-cuy75r)", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "reviewed task", workspace_id: ctx.ws.id})
+      review_id = task.id <> "#review"
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          worker_type: :review,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(run.id)
+      Arbiter.Worker.OutputLog.append(handle, "reviewer verdict")
+      Arbiter.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Arbiter.Worker.OutputLog.path_for(run.id)) end)
+
+      assert {:ok, data} = Tools.worker_log(ctx.coordinator, %{"task_id" => review_id})
+
+      assert data.task_id == review_id
+      assert data.lines == ["reviewer verdict"]
+    end
+  end
+
+  describe "worker_runs/2 with ReviewGate synthetic ids (bd-cuy75r)" do
+    test "resolves auth against the base task while matching the synthetic id's own runs", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "reviewed task", workspace_id: ctx.ws.id})
+      review_id = task.id <> "#review"
+
+      {:ok, _author_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          worker_type: :main,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, review_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: review_id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          worker_type: :review,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      assert {:ok, %{runs: [only]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => review_id})
+
+      assert only.id == review_run.id
+    end
+
+    test "not-found when the base task is in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wr-synth-other", prefix: "wrso"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => foreign.id <> "#review"})
+    end
+  end
+
+  describe "run_log_list/2 (bd-cuy75r)" do
+    test "enumerates the base task's own runs plus its synthetic children", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "full corpus", workspace_id: ctx.ws.id})
+
+      {:ok, author_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          worker_type: :main,
+          status: :completed,
+          model: "sonnet",
+          started_at: DateTime.add(DateTime.utc_now(), -30, :second)
+        })
+
+      {:ok, review_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id <> "#review",
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          worker_type: :review,
+          status: :completed,
+          model: "opus",
+          started_at: DateTime.add(DateTime.utc_now(), -20, :second)
+        })
+
+      {:ok, reprompt_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id <> "#review#t2",
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          worker_type: :review,
+          status: :failed,
+          started_at: DateTime.add(DateTime.utc_now(), -10, :second)
+        })
+
+      {:ok, unrelated} = Ash.create(Issue, %{title: "unrelated", workspace_id: ctx.ws.id})
+
+      {:ok, _unrelated_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: unrelated.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now()
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(review_run.id)
+      Arbiter.Worker.OutputLog.append(handle, "line a")
+      Arbiter.Worker.OutputLog.append(handle, "line b")
+      Arbiter.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Arbiter.Worker.OutputLog.path_for(review_run.id)) end)
+
+      assert {:ok, %{runs: runs}} = Tools.run_log_list(ctx.coordinator, %{"task_id" => task.id})
+
+      ids = Enum.map(runs, & &1.run_id)
+      assert Enum.sort(ids) == Enum.sort([author_run.id, review_run.id, reprompt_run.id])
+
+      review_entry = Enum.find(runs, &(&1.run_id == review_run.id))
+      assert review_entry.transcript_exists == true
+      assert review_entry.line_count == 2
+      assert review_entry.worker_type == "review"
+      assert review_entry.task_id == task.id <> "#review"
+
+      author_entry = Enum.find(runs, &(&1.run_id == author_run.id))
+      assert author_entry.transcript_exists == false
+      assert author_entry.line_count == 0
+    end
+
+    test "not-found when the task is in another workspace", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "rll-other", prefix: "rllo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.run_log_list(ctx.coordinator, %{"task_id" => foreign.id})
+    end
   end
 
   describe "usage_summarize/2" do
