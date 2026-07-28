@@ -861,7 +861,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       verdict: Map.get(salvage, :verdict),
       proposed_comments: Map.get(salvage, :proposed_comments) || [],
       engagement: nil,
-      check_usage: %{},
+      check_usage: Map.get(salvage, :check_usage, %{}),
       report_only: true
     }
   end

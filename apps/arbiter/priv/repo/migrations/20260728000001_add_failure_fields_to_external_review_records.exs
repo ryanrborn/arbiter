@@ -14,7 +14,7 @@ defmodule Arbiter.Repo.Migrations.AddFailureFieldsToExternalReviewRecords do
   def up do
     alter table(:external_review_records) do
       add :failure_stage, :string
-      add :failure_reason, :string
+      add :failure_reason, :text
     end
   end
 
