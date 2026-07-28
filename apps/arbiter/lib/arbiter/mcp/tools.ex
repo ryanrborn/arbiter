@@ -43,6 +43,7 @@ defmodule Arbiter.MCP.Tools do
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Worker.ReviewAutomation
+  alias Arbiter.Worker.ReviewGate
   alias Arbiter.Trackers
   alias Arbiter.Usage
   alias Arbiter.Workflows.Conductor
@@ -1215,13 +1216,18 @@ defmodule Arbiter.MCP.Tools do
   each entry is a run summary (no `output_lines` — fetch a single run's full
   output via `worker_log` for the transcript). Optional `limit` (default 20,
   max 200).
+
+  `task_id` may be a synthetic ReviewGate id (`<base>#review`, `#r<N>`,
+  `#impl<N>`, `#v<N>`, `#t<N>`) — those are not `issues` rows, so the
+  authorization check resolves to the base task while the run lookup keeps
+  the full synthetic id, surfacing the reviewer/re-prompt corpus.
   """
   @spec worker_runs(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_runs(%Scope{} = scope, args) do
     require Ash.Query
 
     with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id),
+         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
          {:ok, limit} <- parse_bounded_limit(args, "limit", 20, 200) do
       runs =
         Arbiter.Workers.Run
@@ -1237,36 +1243,76 @@ defmodule Arbiter.MCP.Tools do
   # ---- worker_log ------------------------------------------------------------
 
   @doc """
-  Full, uncapped durable transcript of a task's most recent run (`arb worker
-  log <task-id>`) — the audit source of record, retaining every line however
-  long the run. `exists` distinguishes "no file yet / never captured" (false,
-  empty `lines`) from "captured but empty" (true, empty `lines`). Not-found
-  only when no run has ever been recorded for the task.
+  Full, uncapped durable transcript of one run — the audit source of record,
+  retaining every line however long the run. Two ways to select the run:
+
+    * `run_id:` — that exact run, independent of which run is latest for its
+      task. This is the only way to reach a superseded/failed attempt once a
+      later run exists for the same task.
+    * `task_id:` (no `run_id`) — the task's most recent run (`arb worker log
+      <task-id>`), unchanged from prior behaviour. `task_id` may be a
+      synthetic ReviewGate id (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`,
+      `#t<N>`); the authorization check resolves it to the base task while
+      the run lookup keeps the full synthetic id.
+
+  `exists` distinguishes "no file yet / never captured" (false, empty
+  `lines`) from "captured but empty" (true, empty `lines`). Not-found when no
+  matching run exists (or, for `run_id`, when it belongs to another workspace).
   """
   @spec worker_log(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def worker_log(%Scope{} = scope, args) do
+    case fetch_string(args, "run_id") do
+      nil -> worker_log_by_task(scope, args)
+      run_id -> worker_log_by_run_id(scope, args, run_id)
+    end
+  end
+
+  defp worker_log_by_task(scope, args) do
     with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
-         {:ok, _task} <- fetch_task(scope, args, task_id) do
+         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)) do
       case latest_run(task_id) do
-        %Arbiter.Workers.Run{} = run ->
-          {exists, lines} =
-            case Arbiter.Worker.OutputLog.read_lines(run.id) do
-              {:ok, lines} -> {true, lines}
-              {:error, _} -> {false, []}
-            end
+        %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_log(run)}
+        nil -> {:error, {:not_found, "no worker run found for task #{task_id}"}}
+      end
+    end
+  end
 
-          {:ok,
-           %{
-             task_id: run.task_id,
-             run_id: run.id,
-             path: Arbiter.Worker.OutputLog.path_for(run.id),
-             exists: exists,
-             line_count: length(lines),
-             lines: lines
-           }}
+  defp worker_log_by_run_id(scope, args, run_id) do
+    with {:ok, run} <- fetch_run(scope, args, run_id) do
+      {:ok, serialize_worker_log(run)}
+    end
+  end
 
-        nil ->
-          {:error, {:not_found, "no worker run found for task #{task_id}"}}
+  defp serialize_worker_log(%Arbiter.Workers.Run{} = run) do
+    {exists, lines} =
+      case Arbiter.Worker.OutputLog.read_lines(run.id) do
+        {:ok, lines} -> {true, lines}
+        {:error, _} -> {false, []}
+      end
+
+    %{
+      task_id: run.task_id,
+      run_id: run.id,
+      path: Arbiter.Worker.OutputLog.path_for(run.id),
+      exists: exists,
+      line_count: length(lines),
+      lines: lines
+    }
+  end
+
+  # Fetch a single `Arbiter.Workers.Run` by id, enforcing workspace isolation
+  # the same way `fetch_task/3` does for `issues` rows. Not-found (rather than
+  # unauthorized) on a cross-workspace hit so existence doesn't leak.
+  defp fetch_run(scope, args, run_id) do
+    with {:ok, target_ws} <- authorized_workspace(scope, args) do
+      case Ash.get(Arbiter.Workers.Run, run_id) do
+        {:ok, %Arbiter.Workers.Run{} = run} ->
+          if workspace_match?(run.workspace_id, target_ws),
+            do: {:ok, run},
+            else: {:error, {:not_found, "run #{run_id} not found"}}
+
+        _ ->
+          {:error, {:not_found, "run #{run_id} not found"}}
       end
     end
   end
@@ -1287,6 +1333,57 @@ defmodule Arbiter.MCP.Tools do
       failure_reason: run.failure_reason
     }
   end
+
+  # ---- run_log_list -----------------------------------------------------
+
+  @doc """
+  Enumerate every run recorded for a task **and its ReviewGate synthetic
+  children** (`<task_id>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`),
+  newest first — the whole retrievable transcript corpus for a task in one
+  call. Unlike `worker_runs` (exact `task_id` match only), this matches the
+  task id itself plus anything prefixed `<task_id>#`, so a single call
+  surfaces the reviewer/re-prompt corpus alongside the author's own runs.
+
+  Each entry reports `transcript_exists` so a missing durable log is
+  distinguishable from an empty one without a separate `worker_log` call.
+  `task_id` must be the base task (a plain `issues` id) — pass it
+  un-suffixed even to reach synthetic runs.
+  """
+  @spec run_log_list(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def run_log_list(%Scope{} = scope, args) do
+    require Ash.Query
+
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)),
+         {:ok, limit} <- parse_bounded_limit(args, "limit", 200, 1000) do
+      prefix = task_id <> "#"
+
+      runs =
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
+        |> Ash.Query.sort(started_at: :desc)
+        |> Ash.Query.limit(limit)
+        |> Ash.read!()
+
+      {:ok, %{runs: Enum.map(runs, &serialize_run_log_entry/1)}}
+    end
+  end
+
+  defp serialize_run_log_entry(%Arbiter.Workers.Run{} = run) do
+    %{
+      run_id: run.id,
+      task_id: run.task_id,
+      worker_type: to_str(run.worker_type),
+      status: to_str(run.status),
+      model: run.model,
+      started_at: iso(run.started_at),
+      transcript_exists: File.regular?(Arbiter.Worker.OutputLog.path_for(run.id)),
+      line_count: run.id |> Arbiter.Worker.OutputLog.read_lines() |> line_count_of()
+    }
+  end
+
+  defp line_count_of({:ok, lines}), do: length(lines)
+  defp line_count_of({:error, _}), do: 0
 
   # ---- external_review_list -----------------------------------------------
 

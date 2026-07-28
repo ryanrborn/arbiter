@@ -30,6 +30,13 @@ defmodule ArbiterWeb.Api.WorkerController do
     * `POST /api/workers/:task_id/stop`   — :stop (terminate worker cleanly)
     * `GET  /api/workers/:task_id/log`    — :log (full, uncapped durable
       transcript of the task's most recent run; the audit source of record).
+      `task_id` may be a ReviewGate synthetic id (`<base>#review`, `#r<N>`,
+      `#impl<N>`, `#v<N>`, `#t<N>`, percent-encoded in the path). Pass
+      `?run_id=` to read that exact run instead of the task's latest.
+    * `GET  /api/workers/:task_id/run_log_list` — :run_log_list. Every run
+      for `task_id` plus its ReviewGate synthetic children, newest first,
+      with `transcript_exists`/`line_count` (no full transcript — use
+      `:log` for that).
   """
 
   use ArbiterWeb, :controller
@@ -299,36 +306,83 @@ defmodule ArbiterWeb.Api.WorkerController do
 
   def stop(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
 
-  # Full, uncapped durable transcript for the task's most recent run. Resolves
-  # the latest `Run` row, then reads its on-disk transcript via `OutputLog`.
-  # `exists` distinguishes "no file yet / never captured" (false, lines [])
-  # from "captured but empty" (true, lines []). 404 only when no run exists.
+  # Full, uncapped durable transcript of one run. With a `run_id` query param,
+  # reads that exact run — independent of which run is latest for its task,
+  # the only way to reach a superseded/failed attempt once a later run
+  # exists. Without it, resolves the task's most recent `Run` row (unchanged
+  # behaviour). `exists` distinguishes "no file yet / never captured" (false,
+  # lines []) from "captured but empty" (true, lines []). 404 when no
+  # matching run exists.
+  def log(conn, %{"task_id" => task_id, "run_id" => run_id})
+      when is_binary(task_id) and task_id != "" and is_binary(run_id) and run_id != "" do
+    case Ash.get(Run, run_id) do
+      {:ok, %Run{} = run} -> json(conn, %{data: render_log(run)})
+      _ -> {:error, :not_found}
+    end
+  end
+
   def log(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
     case latest_run(task_id) do
-      %Run{} = run ->
-        {exists, lines} =
-          case OutputLog.read_lines(run.id) do
-            {:ok, lines} -> {true, lines}
-            {:error, _} -> {false, []}
-          end
-
-        json(conn, %{
-          data: %{
-            task_id: run.task_id,
-            run_id: run.id,
-            path: OutputLog.path_for(run.id),
-            exists: exists,
-            line_count: length(lines),
-            lines: lines
-          }
-        })
-
-      nil ->
-        {:error, :not_found}
+      %Run{} = run -> json(conn, %{data: render_log(run)})
+      nil -> {:error, :not_found}
     end
   end
 
   def log(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
+
+  defp render_log(%Run{} = run) do
+    {exists, lines} =
+      case OutputLog.read_lines(run.id) do
+        {:ok, lines} -> {true, lines}
+        {:error, _} -> {false, []}
+      end
+
+    %{
+      task_id: run.task_id,
+      run_id: run.id,
+      path: OutputLog.path_for(run.id),
+      exists: exists,
+      line_count: length(lines),
+      lines: lines
+    }
+  end
+
+  # Every run recorded for `task_id` AND its ReviewGate synthetic children
+  # (`<task_id>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`), newest first
+  # — the whole retrievable transcript corpus for a task in one call. Unlike
+  # `:index`'s `task_id` filter (exact match only), this also matches
+  # anything prefixed `<task_id>#`. `transcript_exists` distinguishes a
+  # missing durable log from an empty one without a separate `:log` call.
+  def run_log_list(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+    prefix = task_id <> "#"
+
+    runs =
+      Run
+      |> Ash.Query.filter(task_id == ^task_id or string_starts_with(task_id, ^prefix))
+      |> Ash.Query.sort(started_at: :desc)
+      |> Ash.read!()
+
+    json(conn, %{data: Enum.map(runs, &render_run_log_entry/1)})
+  end
+
+  def run_log_list(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
+
+  defp render_run_log_entry(%Run{} = run) do
+    %{
+      run_id: run.id,
+      task_id: run.task_id,
+      worker_type: run.worker_type && to_string(run.worker_type),
+      status: run.status && to_string(run.status),
+      model: run.model,
+      started_at: run.started_at && DateTime.to_iso8601(run.started_at),
+      transcript_exists: File.regular?(OutputLog.path_for(run.id)),
+      line_count:
+        case OutputLog.read_lines(run.id) do
+          {:ok, lines} -> length(lines)
+          {:error, _} -> 0
+        end
+    }
+  end
 
   # Map request params onto `Dispatch.dispatch/2` opts.
   #
