@@ -1293,13 +1293,15 @@ defmodule Arbiter.Worker.Dispatch do
         workspace = load_workspace(task)
         :ok = Agents.prepare(workspace, :agent)
 
-        # Order matters: apply the provider (agent_type) override *first* so it
-        # can strip the routed, provider-specific model, then let an explicit
-        # `--model` override win on top of the resolved provider.
+        # Order matters: apply the provider (agent_type) override first so it
+        # can strip the routed, provider-specific model, then the bd-8cn795
+        # thrash auto-escalation (a *default*, not an override), then let an
+        # explicit `--model` override win on top of everything.
         choice =
           task
           |> Routing.choose(workspace, %{})
           |> apply_agent_type_override(Keyword.get(opts, :agent_type))
+          |> maybe_escalate_context_window(task.id)
           |> apply_model_override(Keyword.get(opts, :model))
 
         adapter = Agents.for_type(choice.type)
@@ -1398,6 +1400,51 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   defp apply_model_override(choice, _), do: choice
+
+  # bd-8cn795: a task whose most recent run died with `:context_thrash` (the
+  # Claude CLI's "Autocompact is thrashing" loop detector) will die identically
+  # on a plain retry — the working set that overflowed the window hasn't
+  # changed. Auto-escalate the redispatch to a 1M-context model so the
+  # Admiral/coordinator doesn't have to remember to pass a manual `model:`
+  # override every time. This is a *default*, not an override: it's applied
+  # before `apply_model_override/2`, so an explicit `opts[:model]` still wins.
+  @context_window_escalation_model "claude-sonnet-5[1m]"
+
+  defp maybe_escalate_context_window(choice, task_id) do
+    if thrashed_last_run?(task_id) do
+      %{choice | config: Map.put(choice.config || %{}, "model", @context_window_escalation_model)}
+    else
+      choice
+    end
+  end
+
+  # The dispatch call that's asking has already created ITS OWN `:running` Run
+  # row for this attempt (the worker creates it on init, before
+  # `build_agent_session_opts` ever runs) — so "the last run" as of this check
+  # is always the in-flight one, never the prior failure we're trying to
+  # detect. Look at the most recent *:failed* run instead.
+  defp thrashed_last_run?(task_id) do
+    case latest_failed_run(task_id) do
+      %Run{} = run ->
+        StopReason.classify(run.exit_code, run.output_lines || []).category == :context_thrash
+
+      nil ->
+        false
+    end
+  end
+
+  defp latest_failed_run(task_id) when is_binary(task_id) do
+    Run
+    |> Ash.Query.filter(task_id == ^task_id and status == :failed)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+  rescue
+    _ -> nil
+  end
+
+  defp latest_failed_run(_), do: nil
 
   # A `:agent_type` opt on `Dispatch.dispatch/2` is an explicit per-dispatch provider
   # override — the workspace may default to :claude but the caller wants :gemini
@@ -1746,6 +1793,26 @@ defmodule Arbiter.Worker.Dispatch do
     Arbiter.Skills.Materializer.prompt_section(Keyword.get(opts, :resolved_skills, []))
   end
 
+  # bd-8cn795: whole-file reads of large modules (or a large PR body / API
+  # dump piped straight into context) refill the window faster than
+  # autocompact can shed it, tripping the CLI's own thrash detector
+  # ("Autocompact is thrashing...") and aborting the session before any real
+  # work happens. This is deterministic for a given file set, so the fix has
+  # to be read discipline, not a retry. Shared between the work and review
+  # prompts since both failure instances (bd-3cpcw2, lt-5jhqs8) were reads,
+  # not writes.
+  defp read_discipline_section do
+    """
+    READ DISCIPLINE — avoid whole-file reads of large modules: they refill
+    the context window faster than autocompact can shed it and can abort your
+    session mid-task ("Autocompact is thrashing"). Prefer grep/symbol search
+    to locate the relevant span first, then read a bounded offset+limit range
+    rather than the entire file. For a large `gh`/API command's output, pipe
+    it to a file and read bounded slices rather than dumping it whole into
+    context.
+    """
+  end
+
   defp base_work_prompt(%Issue{} = task, opts) do
     worktree_path = Keyword.get(opts, :worktree_path)
 
@@ -1779,7 +1846,8 @@ defmodule Arbiter.Worker.Dispatch do
     #{task.acceptance || "(none)"}
     #{prior_review_findings_section(task)}
     Your current directory is a fresh git worktree on a per-task branch.
-    #{isolation_section}#{skills_section(opts)}
+    #{isolation_section}
+    #{read_discipline_section()}#{skills_section(opts)}
     Work the task to completion: load context, design, implement, test,
     commit on this branch, and push it.
 
@@ -1855,6 +1923,7 @@ defmodule Arbiter.Worker.Dispatch do
     If the work genuinely requires inspecting code you may read files, but do not
     author a branch or open a PR.
 
+    #{read_discipline_section()}
     Your job:
       1. Do the investigation / ops work the directive describes.
       2. Write your findings to the directive's `notes` field by calling the
@@ -2052,6 +2121,7 @@ defmodule Arbiter.Worker.Dispatch do
     no per-task branch and no worktree was provisioned — this is a review-only
     directive.
 
+    #{read_discipline_section()}
     Steps:
       1. Read the PR/MR diff via the configured tracker's CLI (`gh pr diff
          <ref>` for GitHub, `glab mr diff <ref>` for GitLab, `git diff` for

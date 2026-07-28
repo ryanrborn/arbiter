@@ -228,7 +228,10 @@ defmodule Arbiter.Worker.DispatchTest do
       repo = Path.join(tmp, sub)
       File.mkdir_p!(repo)
       {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
-      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", "git@github.com:#{slug}.git"])
+
+      {_, 0} =
+        System.cmd("git", ["-C", repo, "remote", "add", "origin", "git@github.com:#{slug}.git"])
+
       repo
     end
 
@@ -242,9 +245,7 @@ defmodule Arbiter.Worker.DispatchTest do
       rig_path = seed_repo_with_github_origin!(tmp, "client", "leo-technologies-llc/verus-client")
 
       {:ok, ws} =
-        Ash.update(ws, %{config: %{"repo_paths" => %{"client" => rig_path}}},
-          action: :update
-        )
+        Ash.update(ws, %{config: %{"repo_paths" => %{"client" => rig_path}}}, action: :update)
 
       {:ok, ws: ws, tmp: tmp}
     end
@@ -795,7 +796,12 @@ defmodule Arbiter.Worker.DispatchTest do
       # check fails fast with a connection-refused error, exercising the
       # verify_connection/1 wiring end to end.
       prior_url = Application.get_env(:arbiter, Arbiter.MCP)
-      Application.put_env(:arbiter, Arbiter.MCP, Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp"))
+
+      Application.put_env(
+        :arbiter,
+        Arbiter.MCP,
+        Keyword.put(prior_url, :url, "http://127.0.0.1:1/mcp")
+      )
 
       on_exit(fn ->
         Application.delete_env(:arbiter, :worktree_root)
@@ -1194,6 +1200,136 @@ defmodule Arbiter.Worker.DispatchTest do
       args = wait_for_argv!(argv_file)
       assert "--model" in args
       assert "haiku" in args
+    end
+
+    test "redispatch after a :context_thrash failure auto-escalates to the 1M model (bd-8cn795)",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "thrash-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "twt"))
+      Application.put_env(:arbiter, :repo_paths, %{"t/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "large module fix", workspace_id: ws.id})
+
+      # A prior run for this exact task already died with the autocompact-thrash
+      # signature — no manual `model:` override is passed on this redispatch.
+      {:ok, _prior_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "t/repo",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: DateTime.utc_now(),
+          exit_code: 1,
+          output_lines: [
+            "reading apps/arbiter/lib/arbiter/workflows/review_patrol.ex",
+            "Autocompact is thrashing: the context refilled to the limit within 3 " <>
+              "turns of the previous compact, 3 times in a row"
+          ]
+        })
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "t/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      args = wait_for_argv!(argv_file)
+      assert "--model" in args
+      assert "claude-sonnet-5[1m]" in args
+    end
+
+    test "a clean prior run does NOT auto-escalate the model (bd-8cn795)",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "clean-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "cwt2"))
+      Application.put_env(:arbiter, :repo_paths, %{"c2/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "ordinary fix", workspace_id: ws.id})
+
+      {:ok, _prior_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "c2/repo",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: DateTime.utc_now(),
+          exit_code: 1,
+          output_lines: ["some other unrelated crash"]
+        })
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "c2/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      args = wait_for_argv!(argv_file)
+      refute "claude-sonnet-5[1m]" in args
+    end
+
+    test "an explicit :model opt still wins over the thrash auto-escalation (bd-8cn795)",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "override-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "owt"))
+      Application.put_env(:arbiter, :repo_paths, %{"o/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "large module fix 2", workspace_id: ws.id})
+
+      {:ok, _prior_run} =
+        Ash.create(Run, %{
+          task_id: task.id,
+          task_title: task.title,
+          repo: "o/repo",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: DateTime.utc_now(),
+          exit_code: 1,
+          output_lines: ["autocompact is thrashing"]
+        })
+
+      {:ok, _result} =
+        Dispatch.dispatch(task.id,
+          repo: "o/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          model: "opus"
+        )
+
+      args = wait_for_argv!(argv_file)
+      assert "--model" in args
+      assert "opus" in args
+      refute "claude-sonnet-5[1m]" in args
     end
   end
 
@@ -1660,6 +1796,31 @@ defmodule Arbiter.Worker.DispatchTest do
       prompt = Dispatch.prompt_for_task(task, [])
 
       refute prompt =~ "FILESYSTEM ISOLATION"
+    end
+
+    test "work prompt carries read-discipline guidance against context thrash (bd-8cn795)",
+         %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "coding task", workspace_id: ws.id})
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      assert prompt =~ "grep",
+             "work prompt must steer workers toward grep/symbol search before reading a file"
+
+      assert prompt =~ "bounded",
+             "work prompt must call out bounded offset/limit reads over whole-file reads"
+
+      assert prompt =~ "whole-file reads",
+             "work prompt must explicitly discourage whole-file reads of large modules"
+    end
+
+    test "review prompt carries the same read-discipline guidance (bd-8cn795)", %{ws: ws} do
+      {:ok, task} = Ash.create(Issue, %{title: "review task", workspace_id: ws.id})
+
+      prompt = Dispatch.prompt_for_task(task, review: true)
+
+      assert prompt =~ "grep"
+      assert prompt =~ "bounded"
     end
   end
 
