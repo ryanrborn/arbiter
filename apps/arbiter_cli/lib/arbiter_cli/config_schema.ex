@@ -22,7 +22,7 @@ defmodule ArbiterCli.ConfigSchema do
   @security_modes ~w(auto strict bypass)
   @sandbox_filesystems ~w(worktree none)
   @safe_default_categories ~w(no_destructive_fs no_force_push no_secret_reads no_outside_writes no_pr_create)
-  @review_automation_modes ~w(auto report_only propose flag notify)
+  @review_automation_modes ~w(auto report_only propose flag notify off never disabled)
   @quota_modes ~w(throttle continue)
 
   @doc false
@@ -130,7 +130,9 @@ defmodule ArbiterCli.ConfigSchema do
 
     review_automation  (map)
       default          one of: #{Enum.join(@review_automation_modes, ", ")}
-                       (report_only is an alias of propose; flag is an alias of notify)
+                       (report_only is an alias of propose; flag is an alias of notify;
+                        off is an alias of never/disabled — refuses to dispatch a
+                        reviewer at all, force: true overrides a single dispatch)
       auto_authors     list of strings — PR authors that always get "auto"
       repo_overrides   map, repo name -> one of the modes above
 

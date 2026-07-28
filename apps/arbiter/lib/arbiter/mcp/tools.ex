@@ -950,7 +950,9 @@ defmodule Arbiter.MCP.Tools do
          {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
          {:ok, task} <- fetch_task(scope, args, task_id),
          {:ok, task} <- maybe_set_tracker_context(task, args),
-         {:ok, _} <- persist_review_automation(task, scope, args) do
+         {:ok, force} <- fetch_bool(args, "force", false),
+         {:ok, mode} <- guard_review_automation(scope, args, force),
+         {:ok, _} <- persist_review_automation(task, mode) do
       opts =
         scope
         |> dispatch_opts(args)
@@ -964,35 +966,66 @@ defmodule Arbiter.MCP.Tools do
     end
   end
 
-  # Resolve and persist the review_automation mode on the engagement task.
+  # Resolve the review_automation mode (+ its source, logged for visibility —
+  # bd-7opdaf) and refuse the dispatch outright when it resolves to `:off`,
+  # UNLESS `force: true` is passed — mirrors the external (`pr:`) path's
+  # `guard_automation_off/2` in `Arbiter.Reviews.ExternalReview`. No task is
+  # touched and no worker is spawned when this refuses.
   #
   # Resolution order (most-specific wins):
   #   1. An explicit `automation` arg passed to `worker_review` — hard override.
   #   2. The workspace's `review_automation.repo_overrides[repo]` — per-repo hard gate.
   #   3. The workspace's `review_automation.auto_authors` list, then `default`.
   #   4. No config → :flag (conservative: never auto-post unless explicitly trusted).
-  #
-  # The result is written to `task.review_automation` so the ReviewPatrol poller
-  # can read it from the task without re-loading workspace config on each cycle.
-  defp persist_review_automation(task, scope, args) do
-    mode = resolve_review_automation_mode(scope, args)
+  defp guard_review_automation(scope, args, force) do
+    pr_author = fetch_string(args, "pr_author")
+    rig_name = fetch_string(args, "repo")
+    ws_config = load_workspace_config(scope.workspace_id)
+    explicit = fetch_string(args, "automation")
 
-    case Ash.update(task, %{review_automation: mode}) do
-      {:ok, updated} -> {:ok, updated}
-      {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
+    {mode, source} =
+      ReviewAutomation.resolve_with_source(ws_config, pr_author, rig_name, explicit)
+
+    Logger.info(
+      "worker_review(task_id): resolved review_automation=#{mode} (source: #{source})" <>
+        if(rig_name, do: " [#{rig_name}]", else: "")
+    )
+
+    cond do
+      mode != :off -> {:ok, mode}
+      force -> {:ok, mode}
+      true -> {:error, {:invalid, automation_off_message(rig_name, source)}}
     end
   end
 
-  defp resolve_review_automation_mode(scope, args) do
-    case ReviewAutomation.normalize(fetch_string(args, "automation")) do
-      mode when mode in [:auto, :report_only, :flag] ->
-        mode
+  defp automation_off_message(rig_name, :repo_override) when is_binary(rig_name) do
+    "review_automation is \"off\" for #{rig_name} " <>
+      "(review_automation.repo_overrides[#{inspect(rig_name)}]); refusing to dispatch a " <>
+      "reviewer — pass force: true to override"
+  end
 
-      nil ->
-        pr_author = fetch_string(args, "pr_author")
-        rig_name = fetch_string(args, "repo")
-        ws_config = load_workspace_config(scope.workspace_id)
-        ReviewAutomation.resolve(ws_config, pr_author, rig_name)
+  defp automation_off_message(rig_name, :explicit) do
+    "review_automation was explicitly set to \"off\" for #{rig_name || "this task"} " <>
+      "(the automation argument); refusing to dispatch a reviewer — pass force: true to override"
+  end
+
+  defp automation_off_message(rig_name, :default) when is_binary(rig_name) do
+    "review_automation is \"off\" by default for #{rig_name} (review_automation.default); " <>
+      "refusing to dispatch a reviewer — pass force: true to override"
+  end
+
+  defp automation_off_message(_rig_name, :default) do
+    "review_automation is \"off\" by default for this workspace (review_automation.default); " <>
+      "refusing to dispatch a reviewer — pass force: true to override"
+  end
+
+  # Persist the (already-guarded) review_automation mode on the engagement
+  # task, so the ReviewPatrol poller can read it from the task without
+  # re-loading workspace config on each cycle.
+  defp persist_review_automation(task, mode) do
+    case Ash.update(task, %{review_automation: mode}) do
+      {:ok, updated} -> {:ok, updated}
+      {:error, err} -> {:error, {:invalid, ash_error_message(err)}}
     end
   end
 

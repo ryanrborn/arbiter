@@ -526,7 +526,7 @@ defmodule Arbiter.Tasks.Issue do
     attribute :review_automation, :atom do
       allow_nil? true
       public? true
-      constraints one_of: [:auto, :report_only, :flag]
+      constraints one_of: [:auto, :report_only, :flag, :off]
 
       description """
       Engagement automation mode for ReviewPatrol:
@@ -535,6 +535,9 @@ defmodule Arbiter.Tasks.Issue do
                        proposed comments to the coordinator to greenlight (infra
                        default, bd-36qzgx).
         :flag        — surface new commits / replies as a flag; do not review.
+        :off         — hard opt-out (bd-7opdaf): never re-review, never post,
+                       never flag. A worker_review dispatch that would resolve
+                       to :off is refused up front unless force: true.
       Nullable; the effective default is resolved from workspace policy (task B).
       """
     end

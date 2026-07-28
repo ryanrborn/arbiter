@@ -517,8 +517,9 @@ defmodule Arbiter.MCP.Catalog do
           "`pr` review, `follow_up` opens a review_only ReviewPatrol engagement after the verdict so " <>
           "the PR is re-reviewed on new commits and its replies handled (defaults on when the " <>
           "workspace has ReviewPatrol running). A `pr` review is refused when this identity has " <>
-          "already left a current approving review on the PR (avoids double-posting an approval); " <>
-          "pass `force: true` to override.",
+          "already left a current approving review on the PR (avoids double-posting an approval), " <>
+          "or when the resolved review_automation mode is \"off\" (a hard opt-out repo/workspace " <>
+          "policy) — pass `force: true` to override either refusal.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -571,14 +572,27 @@ defmodule Arbiter.MCP.Catalog do
           },
           "automation" => %{
             "type" => "string",
-            "enum" => ["auto", "report_only", "propose", "flag", "notify"],
+            "enum" => [
+              "auto",
+              "report_only",
+              "propose",
+              "flag",
+              "notify",
+              "off",
+              "never",
+              "disabled"
+            ],
             "description" =>
               "Override the workspace review_automation policy: \"auto\" = review AND post to the " <>
                 "PR; \"report_only\" (alias \"propose\") = review fully but post NOTHING — surface " <>
                 "findings + proposed comments to the coordinator to greenlight (infra default, " <>
                 "human-in-the-loop); \"flag\" (alias \"notify\") = do not review, just flag new " <>
-                "commits/replies. When omitted, the mode is resolved from the workspace policy using " <>
-                "the PR author (the actual author for a `pr` review; `pr_author` for a task review)."
+                "commits/replies; \"off\" (aliases \"never\"/\"disabled\") = hard opt-out — refuse " <>
+                "to dispatch a reviewer at all, no agent spawned, nothing posted (pass `force: true` " <>
+                "to override a single dispatch). When omitted, the mode is resolved from the " <>
+                "workspace policy using the PR author (the actual author for a `pr` review; " <>
+                "`pr_author` for a task review) or the workspace's `review_automation.repo_overrides` " <>
+                "for `repo`."
           },
           "pr_author" => %{
             "type" => "string",
@@ -602,9 +616,11 @@ defmodule Arbiter.MCP.Catalog do
           "force" => %{
             "type" => "boolean",
             "description" =>
-              "(`pr` only) Skip the self-approve guard: dispatch the review even when this " <>
-                "identity has already left a current approving review on the PR. Default false — " <>
-                "normally such a dispatch is refused so we don't double-post an approval."
+              "Skip the self-approve guard (`pr` only: dispatch even when this identity has " <>
+                "already left a current approving review on the PR) AND/OR the review_automation " <>
+                "\"off\" guard (`pr` and `task_id`: dispatch even when the resolved mode is " <>
+                "\"off\"/\"never\"/\"disabled\"). Default false — normally such a dispatch is " <>
+                "refused so we don't double-post an approval or ignore a hard opt-out."
           }
         },
         "required" => [],

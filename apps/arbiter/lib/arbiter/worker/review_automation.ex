@@ -26,6 +26,11 @@ defmodule Arbiter.Worker.ReviewAutomation do
       commits / author replies to the coordinator mailbox so a human decides
       whether to act. Accepts the alias `"notify"`. (Historically the only
       non-`:auto` mode; kept for the rare "ping me, don't review" case.)
+    * `:off`         — a hard opt-out (bd-7opdaf): refuse to dispatch a
+      reviewer against this repo at all — no agent spawned, nothing posted,
+      not even a flag/notify. Accepts the aliases `"never"` / `"disabled"`.
+      Modeled on the self-approve guard: `force: true` overrides a single
+      dispatch. Stricter than `:flag`, which still tracks new commits/replies.
 
   ## Workspace config shape
 
@@ -39,7 +44,15 @@ defmodule Arbiter.Worker.ReviewAutomation do
       }
   """
 
-  @type mode :: :auto | :report_only | :flag
+  @type mode :: :auto | :report_only | :flag | :off
+
+  @typedoc """
+  Where a resolved mode came from, most-specific first (bd-7opdaf):
+  `:explicit` (a per-dispatch `automation` arg), `:repo_override`
+  (`review_automation.repo_overrides[rig_name]`), or `:default` (the
+  `auto_authors`/`default` fallback).
+  """
+  @type source :: :explicit | :repo_override | :default
 
   @doc """
   Resolve the automation mode for a PR author given a workspace config map.
@@ -77,16 +90,49 @@ defmodule Arbiter.Worker.ReviewAutomation do
   @doc """
   Coerce a free-form mode string/atom into a valid `mode()`, or `nil` when it
   isn't one of the recognized values. Accepts the `"propose"` alias for
-  `:report_only` and the `"notify"` alias for `:flag`.
+  `:report_only`, the `"notify"` alias for `:flag`, and the `"never"` /
+  `"disabled"` aliases for `:off` (bd-7opdaf).
   """
   @spec normalize(term()) :: mode() | nil
-  def normalize(m) when m in [:auto, :report_only, :flag], do: m
+  def normalize(m) when m in [:auto, :report_only, :flag, :off], do: m
   def normalize("auto"), do: :auto
   def normalize("report_only"), do: :report_only
   def normalize("propose"), do: :report_only
   def normalize("flag"), do: :flag
   def normalize("notify"), do: :flag
+  def normalize("off"), do: :off
+  def normalize("never"), do: :off
+  def normalize("disabled"), do: :off
   def normalize(_), do: nil
+
+  @doc """
+  Resolve the automation mode AND where it came from (bd-7opdaf) — used to log
+  the resolved mode's provenance at dispatch time, so a wrong mode is visible
+  immediately instead of after reviews have posted.
+
+  - `explicit` — a raw `automation` arg/string; normalized internally. When it
+    normalizes to a valid mode, it wins outright with source `:explicit`.
+  - Otherwise resolution falls through to `repo_overrides[rig_name]`
+    (`:repo_override`), then `auto_authors`/`default` (`:default`) — the same
+    precedence as `resolve/3`.
+  """
+  @spec resolve_with_source(map() | nil, String.t() | nil, String.t() | nil, term()) ::
+          {mode(), source()}
+  def resolve_with_source(ws_config, pr_author, rig_name, explicit \\ nil) do
+    case normalize(explicit) do
+      mode when not is_nil(mode) ->
+        {mode, :explicit}
+
+      nil ->
+        block = ws_config && Map.get(ws_config, "review_automation")
+
+        case repo_override(block, rig_name) do
+          nil when is_map(block) -> {resolve_by_author(block, pr_author), :default}
+          nil -> {:flag, :default}
+          mode -> {mode, :repo_override}
+        end
+    end
+  end
 
   defp resolve_from_block(nil, _author, _rig), do: :flag
 
