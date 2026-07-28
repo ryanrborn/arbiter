@@ -45,8 +45,9 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   NOT invoked. For modern follow-ups `tracker_type: :none` would already
   short-circuit it, but for legacy tasks with `tracker_type: :github` the
   `tracker_ref` is a merged-PR number, and transitioning a merged PR returns
-  `Validation Failed` (bd-ci2jl2 hazard). Closing via `close_upstream: false`
-  (the default) avoids any upstream write-back.
+  `Validation Failed` (bd-ci2jl2 hazard). Closing via an explicit
+  `close_upstream: false` (bd-2wilou flipped the `:close` action's default to
+  `true`) avoids any upstream write-back.
 
   ## Idempotency
 
@@ -323,7 +324,7 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
         "(tracker=#{task.tracker_type} source_pr=#{task.source_pr} tracker_ref=#{task.tracker_ref})"
     )
 
-    case Ash.update(task, %{}, action: :close) do
+    case Ash.update(task, %{close_upstream: false}, action: :close) do
       {:ok, _} ->
         Logger.info("MergedPRFinalizer: closed follow-up task=#{task.id}")
 

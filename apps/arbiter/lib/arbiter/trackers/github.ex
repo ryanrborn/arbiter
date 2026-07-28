@@ -841,16 +841,16 @@ defmodule Arbiter.Trackers.GitHub do
   defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,
     do: {:ok, body}
 
-  defp handle_json({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
+  defp handle_json({:ok, %Req.Response{status: status, body: body} = resp}),
+    do: {:error, http_error(status, body, resp)}
 
   defp handle_json({:error, exception}), do: {:error, transport_error(exception)}
 
   # For callbacks that only care about success vs failure (transition/update).
   defp expect_ok({:ok, %Req.Response{status: status}}) when status in 200..299, do: :ok
 
-  defp expect_ok({:ok, %Req.Response{status: status, body: body}}),
-    do: {:error, http_error(status, body)}
+  defp expect_ok({:ok, %Req.Response{status: status, body: body} = resp}),
+    do: {:error, http_error(status, body, resp)}
 
   defp expect_ok({:error, exception}), do: {:error, transport_error(exception)}
 
@@ -863,14 +863,35 @@ defmodule Arbiter.Trackers.GitHub do
     ]
   end
 
-  defp http_error(status, body) do
+  # `resp` is the full `%Req.Response{}` when available, so rate-limit headers
+  # can be read to compute `retry_after_ms` (bd-2wilou — mirrors the same
+  # classification `Arbiter.Mergers.Github.Error` already does for the merger
+  # path, bd-1m8k7d).
+  defp http_error(status, body, resp \\ nil) do
     %Error{
-      kind: kind_for_status(status),
+      kind: classify_kind(status, body),
       status: status,
       message: error_message(body, status),
-      raw: body
+      raw: body,
+      retry_after_ms: rate_limit_retry_after_ms(status, resp)
     }
   end
+
+  # A 429 is always a rate limit. A 403 is a rate limit only when the body
+  # says so — otherwise it's an ordinary scope/permission `:forbidden`.
+  defp classify_kind(429, _body), do: :rate_limited
+
+  defp classify_kind(403, body),
+    do: if(rate_limited_body?(body), do: :rate_limited, else: :forbidden)
+
+  defp classify_kind(status, _body), do: kind_for_status(status)
+
+  defp rate_limited_body?(%{"message" => msg}) when is_binary(msg) do
+    msg = String.downcase(msg)
+    String.contains?(msg, "rate limit") or String.contains?(msg, "abuse detection")
+  end
+
+  defp rate_limited_body?(_), do: false
 
   defp kind_for_status(400), do: :validation_failed
   defp kind_for_status(401), do: :unauthenticated
@@ -882,6 +903,41 @@ defmodule Arbiter.Trackers.GitHub do
 
   defp error_message(%{"message" => msg}, _status) when is_binary(msg), do: msg
   defp error_message(_, status), do: "HTTP #{status}"
+
+  # `Retry-After` (seconds) when GitHub sends it (secondary/abuse limit), else
+  # `x-ratelimit-reset` (unix epoch seconds), which the primary quota limit
+  # always sends instead.
+  defp rate_limit_retry_after_ms(status, %Req.Response{} = resp) when status in [403, 429] do
+    case retry_after_seconds(resp) do
+      seconds when is_integer(seconds) -> seconds * 1_000
+      nil -> reset_retry_after_ms(resp)
+    end
+  end
+
+  defp rate_limit_retry_after_ms(_status, _resp), do: nil
+
+  defp retry_after_seconds(%Req.Response{} = resp) do
+    case Req.Response.get_header(resp, "retry-after") do
+      [v | _] ->
+        case Integer.parse(v) do
+          {seconds, _} -> seconds
+          :error -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp reset_retry_after_ms(%Req.Response{} = resp) do
+    with [v | _] <- Req.Response.get_header(resp, "x-ratelimit-reset"),
+         {epoch, _} <- Integer.parse(v) do
+      ms = (epoch - System.os_time(:second)) * 1_000
+      if ms > 0, do: ms, else: nil
+    else
+      _ -> nil
+    end
+  end
 
   defp transport_error(%{reason: reason} = exception) do
     %Error{

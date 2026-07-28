@@ -651,14 +651,15 @@ defmodule Arbiter.MCP.Tools do
 
   @doc """
   Close a task in the scope's workspace via the `:close` action (sets status,
-  runs the worker/worktree teardown, and optionally syncs the close upstream
-  when `close_upstream: true`). Coordinator only.
+  runs the worker/worktree teardown, and syncs the close upstream by default
+  when the task carries a `tracker_ref`). Pass `close_upstream: false` to leave
+  the linked tracker issue open. Coordinator only.
   """
   @spec task_close(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def task_close(%Scope{} = scope, args) do
     with {:ok, id} <- resolve_task_id(scope, args),
          {:ok, issue} <- fetch_task(scope, args, id),
-         {:ok, close_upstream} <- fetch_bool(args, "close_upstream", false) do
+         {:ok, close_upstream} <- fetch_bool(args, "close_upstream", true) do
       attrs =
         %{close_upstream: close_upstream}
         |> maybe_put(:reason, fetch_string(args, "reason"))
