@@ -6,14 +6,18 @@ defmodule Arbiter.MCP.SkillToolsTest do
   alias Arbiter.MCP.Tools
   alias Arbiter.Skills
 
-  setup do
-    coordinator = %Scope{
-      tier: :coordinator,
-      workspace_id: "ws-#{System.unique_integer([:positive])}"
-    }
+  alias Arbiter.Tasks.Workspace
 
-    worker = %Scope{tier: :worker, workspace_id: "ws-1", task_id: "bd-1"}
-    {:ok, coordinator: coordinator, worker: worker}
+  setup do
+    # A real workspace so worker-tier scope resolution (which filters the uuid
+    # `workspace_id` column) has a castable id. The coordinator is
+    # workspace-agnostic (workspace_id nil) so it sees the whole registry — the
+    # prior "list everything" semantics these tests assert.
+    {:ok, ws} = Ash.create(Workspace, %{name: "skill-tools-ws", prefix: "st"})
+
+    coordinator = %Scope{tier: :coordinator, workspace_id: nil}
+    worker = %Scope{tier: :worker, workspace_id: ws.id, task_id: "bd-1"}
+    {:ok, coordinator: coordinator, worker: worker, ws: ws}
   end
 
   describe "skill_create/2" do
@@ -163,6 +167,84 @@ defmodule Arbiter.MCP.SkillToolsTest do
 
       assert {:ok, result} = Catalog.call(wk, "skill_get", %{"skill" => "catalog-get"})
       assert result.body == "body"
+    end
+  end
+
+  describe "workspace scoping (bd-9j6is7)" do
+    test "skill_create is global by default, scoped when a workspace is named", %{
+      coordinator: sc,
+      ws: ws
+    } do
+      assert {:ok, global} = Tools.skill_create(sc, %{"name" => "tdd", "body" => "# global"})
+      assert global.scope == "global"
+      assert global.workspace_id == nil
+
+      assert {:ok, scoped} =
+               Tools.skill_create(sc, %{
+                 "name" => "tdd",
+                 "body" => "# scoped",
+                 "workspace" => ws.name
+               })
+
+      assert scoped.scope == "workspace"
+      assert scoped.workspace_id == ws.id
+    end
+
+    test "a worker sees globals plus its own workspace's scoped skills, shadowed", %{
+      coordinator: sc,
+      worker: wk,
+      ws: ws
+    } do
+      {:ok, _} = Tools.skill_create(sc, %{"name" => "tdd", "body" => "# global"})
+
+      {:ok, _} =
+        Tools.skill_create(sc, %{"name" => "tdd", "body" => "# ws body", "workspace" => ws.id})
+
+      # skill_get for the worker resolves the scoped body (shadows the global).
+      assert {:ok, got} = Tools.skill_get(wk, %{"skill" => "tdd"})
+      assert got.body == "# ws body"
+
+      # skill_list for the worker returns the effective set (one "tdd", scoped).
+      assert {:ok, %{skills: [only]}} = Tools.skill_list(wk, %{})
+      assert only.name == "tdd"
+      assert only.workspace_id == ws.id
+    end
+
+    test "a worker cannot read another workspace's scoped skill", %{coordinator: sc, worker: wk} do
+      {:ok, other} = Ash.create(Workspace, %{name: "other-ws", prefix: "ow"})
+
+      {:ok, _} =
+        Tools.skill_create(sc, %{
+          "name" => "secret",
+          "body" => "# other",
+          "workspace" => other.id
+        })
+
+      # The worker (bound to a different workspace) sees neither a global nor a
+      # scoped "secret" — it is invisible outside its owning workspace.
+      assert {:error, {:not_found, _}} = Tools.skill_get(wk, %{"skill" => "secret"})
+      assert {:ok, %{count: 0}} = Tools.skill_list(wk, %{})
+    end
+
+    test "a worker naming another workspace is rejected", %{worker: wk} do
+      {:ok, other} = Ash.create(Workspace, %{name: "elsewhere", prefix: "el"})
+
+      assert {:error, {:unauthorized, _}} =
+               Tools.skill_list(wk, %{"workspace" => other.id})
+    end
+
+    test "the MCP actor label is recorded on the version", %{coordinator: sc} do
+      {:ok, skill} = Tools.skill_create(sc, %{"name" => "tracked", "body" => "# v1"})
+      {:ok, _} = Tools.skill_update(sc, %{"skill" => "tracked", "body" => "# v2"})
+
+      actors =
+        skill.id
+        |> Skills.skill_versions()
+        |> Enum.map(& &1.actor)
+
+      # Both writes came from the coordinator scope.
+      assert Enum.all?(actors, &(&1 == "coordinator"))
+      assert length(actors) == 2
     end
   end
 end
