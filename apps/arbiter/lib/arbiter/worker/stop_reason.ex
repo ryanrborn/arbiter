@@ -31,6 +31,15 @@ defmodule Arbiter.Worker.StopReason do
       session was healthy, the transport layer dropped the request.
       Remediation: auto-resume — the session context is intact, a retry should
       succeed once connectivity recovers.
+    * `:context_thrash` — the agent CLI's own autocompact loop detector fired
+      ("Autocompact is thrashing: the context refilled to the limit within N
+      turns of the previous compact, N times in a row") and the session
+      aborted before doing any real work (bd-8cn795). Distinct from a generic
+      `:crashed`: the cause is a working set too large for the model's
+      context window (whole-file reads of several 500-1100+ line modules, or
+      a huge PR body / API dump), not a task or agent bug. Retrying
+      identically reproduces it — the remediation is a bigger context window
+      or narrower reads, not a re-dispatch.
     * `:killed` — terminated by a signal (the `sh` wrapper reports `128 + N`).
       External kill, OOM, host restart.
     * `:spawn_exec_failed` — non-zero exit with **zero captured output** at
@@ -83,6 +92,7 @@ defmodule Arbiter.Worker.StopReason do
           | :credit_exhausted
           | :rate_limited
           | :gateway_error
+          | :context_thrash
           | :killed
           | :spawn_exec_failed
           | :crashed
@@ -159,6 +169,14 @@ defmodule Arbiter.Worker.StopReason do
   # status says about the run is not trustworthy.
   @schema_drift_signature ~r/unrecognized[ _]stream[ _]event/i
 
+  # bd-8cn795: the Claude CLI's own autocompact-loop detector. Fires when the
+  # context refills to the limit within a few turns of the previous compact,
+  # several times in a row — a deterministic function of the task's working
+  # set (whole-file reads of large modules), not a transient blip. Matched
+  # loosely on "autocompact" + "thrash" rather than the exact N/N wording so a
+  # future CLI phrasing tweak doesn't silently fall through to :crashed.
+  @context_thrash_signature ~r/autocompact[^\n]{0,20}thrash/i
+
   @doc """
   Classify a stop from the subprocess exit status and captured output.
 
@@ -215,6 +233,21 @@ defmodule Arbiter.Worker.StopReason do
           remediation:
             "Transient network blip between the harness proxy and Anthropic. " <>
               "Auto-resuming the session — if retries are exhausted, check proxy logs.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
+      Regex.match?(@context_thrash_signature, haystack) ->
+        %__MODULE__{
+          category: :context_thrash,
+          summary:
+            "agent's context window thrashed (autocompact refilled immediately, several " <>
+              "cycles in a row) before completing any work — the task's working set is too " <>
+              "large for this model's context window",
+          remediation:
+            "Deterministic for this task's file set — retrying identically will fail the " <>
+              "same way. Re-dispatch on a 1M-context model (e.g. claude-sonnet-5[1m]), or " <>
+              "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
           exit_status: exit_status,
           signal: signal
         }
@@ -344,6 +377,7 @@ defmodule Arbiter.Worker.StopReason do
         :credit_exhausted -> "credits exhausted"
         :rate_limited -> "rate-limited"
         :gateway_error -> "gateway error (proxy/upstream)"
+        :context_thrash -> "context window thrashed (autocompact loop)"
         :killed -> "killed by signal #{reason.signal}"
         :spawn_exec_failed -> "spawn failed (no output — exec error)"
         :crashed -> "crashed"
