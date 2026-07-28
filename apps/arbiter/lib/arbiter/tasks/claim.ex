@@ -33,11 +33,13 @@ defmodule Arbiter.Tasks.Claim do
   @type action ::
           {:create, ref :: String.t(), summary :: map()}
           | {:close, issue_id :: String.t(), reason :: String.t()}
+          | {:drift, issue_id :: String.t(), reason :: String.t()}
 
   @typedoc "Outcome of applying a single planned action."
   @type action_result ::
           {:created, Issue.t()}
           | {:closed, Issue.t()}
+          | {:drifted, Issue.t()}
           | {:error, action(), term()}
 
   @doc """
@@ -83,11 +85,16 @@ defmodule Arbiter.Tasks.Claim do
   end
 
   @doc """
-  Build a reconcile plan for the workspace. Two directions:
+  Build a reconcile plan for the workspace. Three kinds of action:
 
     * issue assigned to viewer + open + no open task → `{:create, ref, summary}`.
     * open task with a tracker ref whose issue is unassigned (or closed) →
       `{:close, task_id, reason}`.
+    * task closed locally whose linked tracker issue is still open (the
+      bd-2wilou drift case — a close that never propagated upstream) →
+      `{:drift, task_id, reason}`. This is report-only: `apply_plan/3` never
+      writes anything for a `:drift` action, since fixing it means re-closing
+      upstream (`task_sync_upstream_close`), not touching the local task.
 
   Returns `{:ok, plan}` or `{:error, reason}`. `plan` is an empty list when
   the workspace tracker doesn't support the claim operation.
@@ -285,14 +292,60 @@ defmodule Arbiter.Tasks.Claim do
           {:close, task.id, reason}
         end
 
-      {:ok, Enum.sort(creates ++ closes, &action_order/2)}
+      drifts = build_drift(adapter, workspace, type)
+
+      {:ok, Enum.sort(creates ++ closes ++ drifts, &action_order/2)}
+    end
+  end
+
+  # bd-2wilou: a task closed locally whose linked tracker issue is still open
+  # means a close never propagated upstream (or propagated and was later
+  # reopened by a human — either way it's drift worth surfacing). Scans every
+  # closed task with a `tracker_ref`, independent of current assignment,
+  # since the issue may no longer be assigned to the viewer by the time this
+  # runs.
+  defp build_drift(adapter, workspace, type) do
+    workspace
+    |> read_closed_tracker_tasks(type)
+    |> Enum.flat_map(fn task ->
+      case adapter.fetch(task.tracker_ref) do
+        {:ok, issue} ->
+          if adapter.issue_status(issue) == :closed do
+            []
+          else
+            [
+              {:drift, task.id,
+               "task closed locally but tracker issue #{task.tracker_ref} is still open"}
+            ]
+          end
+
+        {:error, _} ->
+          []
+      end
+    end)
+  end
+
+  defp read_closed_tracker_tasks(workspace, type) do
+    query =
+      Issue
+      |> Ash.Query.filter(
+        workspace_id == ^workspace.id and tracker_type == ^type and status == :closed and
+          not is_nil(tracker_ref)
+      )
+
+    case Ash.read(query) do
+      {:ok, list} -> list
+      _ -> []
     end
   end
 
   defp action_order({:create, a, _}, {:create, b, _}), do: a <= b
   defp action_order({:close, a, _}, {:close, b, _}), do: a <= b
-  defp action_order({:create, _, _}, {:close, _, _}), do: true
-  defp action_order({:close, _, _}, {:create, _, _}), do: false
+  defp action_order({:drift, a, _}, {:drift, b, _}), do: a <= b
+  defp action_order({:create, _, _}, _), do: true
+  defp action_order(_, {:create, _, _}), do: false
+  defp action_order({:close, _, _}, {:drift, _, _}), do: true
+  defp action_order({:drift, _, _}, {:close, _, _}), do: false
 
   defp read_open_tracker_tasks(workspace, type) do
     query =
@@ -321,9 +374,19 @@ defmodule Arbiter.Tasks.Claim do
   defp apply_action(_workspace, {:close, task_id, reason} = action) do
     with {:ok, task} <- Ash.get(Issue, task_id),
          {:ok, closed} <-
-           Ash.update(task, %{reason: reason}, action: :close) do
+           Ash.update(task, %{reason: reason, close_upstream: false}, action: :close) do
       {:closed, closed}
     else
+      {:error, reason} -> {:error, action, reason}
+    end
+  end
+
+  # Report-only: a `:drift` action never writes to the local task. Fixing
+  # drift means propagating the close upstream (`task_sync_upstream_close`),
+  # not mutating the task that's already correctly closed locally.
+  defp apply_action(_workspace, {:drift, task_id, _reason} = action) do
+    case Ash.get(Issue, task_id) do
+      {:ok, task} -> {:drifted, task}
       {:error, reason} -> {:error, action, reason}
     end
   end

@@ -924,8 +924,10 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Reconcile the workspace's tasks against its external tracker (`arb sync`): task assigned issues " <>
-          "with no task, close tasks whose issue is gone. `dry: true` returns the plan without acting. " <>
-          "No-ops cleanly when the tracker does not support reconciliation.",
+          "with no task, close tasks whose issue is gone, and report `drift` for tasks closed locally " <>
+          "whose tracker issue is still open (a close that never propagated upstream — drift entries " <>
+          "are report-only and never mutate the local task). `dry: true` returns the plan without " <>
+          "acting. No-ops cleanly when the tracker does not support reconciliation.",
       input_schema: %{
         "type" => "object",
         "properties" => %{

@@ -1584,9 +1584,12 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Reconcile the workspace's tasks against its external tracker (`arb sync`): open
   assigned issues with no task get a linked task; open tasks whose issue is
-  unassigned/closed get closed. Coordinator only. With `dry: true` the plan is
-  returned without acting. No-ops cleanly when the tracker does not support
-  reconciliation. Backs onto `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2`.
+  unassigned/closed get closed; closed tasks whose tracker issue is still open
+  are reported as `drift` (bd-2wilou — a close that never propagated
+  upstream). Drift entries are report-only and never mutate the local task.
+  Coordinator only. With `dry: true` the plan is returned without acting.
+  No-ops cleanly when the tracker does not support reconciliation. Backs onto
+  `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2`.
   """
   @spec tracker_sync(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
   def tracker_sync(%Scope{} = scope, args) do
@@ -2973,11 +2976,17 @@ defmodule Arbiter.MCP.Tools do
   defp serialize_claim_action({:close, task_id, reason}),
     do: %{action: "close", task_id: task_id, reason: reason}
 
+  defp serialize_claim_action({:drift, task_id, reason}),
+    do: %{action: "drift", task_id: task_id, reason: reason}
+
   defp serialize_claim_result({:created, task}),
     do: %{outcome: "created", task: serialize_task_summary(task)}
 
   defp serialize_claim_result({:closed, task}),
     do: %{outcome: "closed", task: serialize_task_summary(task)}
+
+  defp serialize_claim_result({:drifted, task}),
+    do: %{outcome: "drifted", task: serialize_task_summary(task)}
 
   defp serialize_claim_result({:error, action, reason}),
     do: %{outcome: "error", action: serialize_claim_action(action), reason: inspect(reason)}

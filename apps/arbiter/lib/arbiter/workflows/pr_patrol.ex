@@ -277,7 +277,11 @@ defmodule Arbiter.Workflows.PRPatrol do
 
     if count == 1, do: escalate_dispatch_failure(task, state, reason)
 
-    Ash.update(task, %{reason: "PRPatrol dispatch failed: #{inspect(reason)}"}, action: :close)
+    Ash.update(
+      task,
+      %{reason: "PRPatrol dispatch failed: #{inspect(reason)}", close_upstream: false},
+      action: :close
+    )
 
     retry_at = DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
 

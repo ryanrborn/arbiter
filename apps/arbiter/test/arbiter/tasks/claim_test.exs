@@ -600,6 +600,77 @@ defmodule Arbiter.Tasks.ClaimTest do
     test "empty plan when tracker doesn't support claim", %{none_ws: ws} do
       assert {:ok, []} = Claim.plan(ws)
     end
+
+    test "reports drift for a task closed locally whose tracker issue is still open (bd-2wilou)",
+         %{github_ws: ws} do
+      {:ok, drifted_task} =
+        Ash.create(Issue, %{
+          title: "Closed locally, issue still open",
+          tracker_type: :github,
+          tracker_ref: "45",
+          workspace_id: ws.id
+        })
+
+      {:ok, drifted_task} = Ash.update(drifted_task, %{close_upstream: false}, action: :close)
+
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/45"} ->
+            Req.Test.json(
+              conn,
+              issue_payload(%{"number" => 45, "title" => "Issue 45", "state" => "open"})
+            )
+        end
+      end)
+
+      assert {:ok, plan} = Claim.plan(ws)
+      assert [{:drift, task_id, reason}] = plan
+      assert task_id == drifted_task.id
+      assert reason =~ "still open"
+
+      assert {:ok, [{:drifted, reported_task}]} = Claim.apply_plan(ws, plan)
+      assert reported_task.id == drifted_task.id
+
+      {:ok, reloaded} = Ash.get(Issue, drifted_task.id)
+      assert reloaded.status == :closed
+    end
+
+    test "no drift reported when the closed task's tracker issue is also closed",
+         %{github_ws: ws} do
+      {:ok, closed_task} =
+        Ash.create(Issue, %{
+          title: "Closed locally and upstream",
+          tracker_type: :github,
+          tracker_ref: "46",
+          workspace_id: ws.id
+        })
+
+      {:ok, _closed_task} = Ash.update(closed_task, %{close_upstream: false}, action: :close)
+
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [])
+
+          {"GET", "/repos/ryanrborn/arbiter/issues/46"} ->
+            Req.Test.json(
+              conn,
+              issue_payload(%{"number" => 46, "title" => "Issue 46", "state" => "closed"})
+            )
+        end
+      end)
+
+      assert {:ok, []} = Claim.plan(ws)
+    end
   end
 
   describe "plan/1 and apply_plan/2 — Jira" do
