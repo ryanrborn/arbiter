@@ -793,10 +793,16 @@ defmodule Arbiter.Reviews.ExternalReview do
   # :completed_unposted with the retained findings/verdict/proposed_comments —
   # recoverable via `greenlight/1`. Any other failure (e.g. `:read_diff`, where
   # nothing was computed yet) remains a plain :failed with nothing to keep.
+  # (bd-7rspia): persist failure_stage and failure_reason for diagnosis.
   defp complete_failed_review(record, reason) do
+    failure_details = failure_details(reason)
+
     case post_failed_salvage(reason) do
-      nil -> complete_review_record(record, :failed, %{})
-      salvage -> complete_review_record(record, :completed_unposted, salvage_result(salvage))
+      nil ->
+        complete_review_record(record, :failed, failure_details)
+
+      salvage ->
+        complete_review_record(record, :completed_unposted, Map.merge(salvage_result(salvage), failure_details))
     end
   end
 
@@ -804,6 +810,49 @@ defmodule Arbiter.Reviews.ExternalReview do
     do: salvage
 
   defp post_failed_salvage(_reason), do: nil
+
+  # Extract failure_stage and failure_reason from the error for diagnosis (bd-7rspia).
+  defp failure_details(reason) do
+    stage = extract_failure_stage(reason)
+    reason_text = normalize_failure_reason(reason)
+    %{failure_stage: stage, failure_reason: reason_text}
+  end
+
+  # Determine which stage the review failed at based on error type.
+  defp extract_failure_stage({:file_findings, _}), do: "file_findings"
+  defp extract_failure_stage({:read_diff, _}), do: "read_diff"
+  defp extract_failure_stage({:agent, _}), do: "agent"
+  defp extract_failure_stage({:tracker_context, _}), do: "tracker_context"
+  defp extract_failure_stage({step, _reason}) when is_atom(step), do: to_string(step)
+  defp extract_failure_stage(_), do: "unknown"
+
+  # Normalize error reason into a concise diagnostic string.
+  defp normalize_failure_reason({:file_findings, {:post_failed, adapter_error, _salvage}}) do
+    format_error(adapter_error)
+  end
+
+  defp normalize_failure_reason({_stage, reason}) do
+    format_error(reason)
+  end
+
+  defp normalize_failure_reason(reason) do
+    format_error(reason)
+  end
+
+  # Format error object into a diagnostic string.
+  defp format_error(nil), do: "unknown error"
+
+  defp format_error(reason) when is_binary(reason), do: reason
+
+  defp format_error(%{__struct__: _mod, kind: kind, status: status, message: msg})
+       when is_atom(kind) and is_integer(status) and is_binary(msg) do
+    "#{kind} #{status}: #{msg}"
+  end
+
+  defp format_error(%{__struct__: _mod, message: msg}) when is_binary(msg), do: msg
+  defp format_error(%{kind: kind, status: status, message: msg}), do: "#{kind} #{status}: #{msg}"
+  defp format_error(%{message: msg}) when is_binary(msg), do: msg
+  defp format_error(reason), do: inspect(reason, limit: 500)
 
   defp salvage_result(%{findings: findings} = salvage) do
     %{

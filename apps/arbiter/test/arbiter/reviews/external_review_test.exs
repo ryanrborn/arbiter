@@ -1793,6 +1793,141 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end)
   end
 
+  describe "failure tracking — bd-7rspia" do
+    test "stores failure_stage and failure_reason when a record is created with failure info" do
+      ws = github_ws("er-fail-stage-reason")
+
+      {:ok, record} =
+        Ash.create(Record, %{
+          pr_ref: "test/repo#1",
+          pr: "1",
+          workspace_id: ws.id,
+          strategy: "github",
+          status: :failed,
+          failure_stage: "read_diff",
+          failure_reason: "forbidden: insufficient permissions",
+          started_at: DateTime.utc_now()
+        })
+
+      assert record.status == :failed
+      assert record.failure_stage == "read_diff"
+      assert record.failure_reason == "forbidden: insufficient permissions"
+    end
+
+    test "stores failure_stage and failure_reason for file_findings failures" do
+      ws = github_ws("er-fail-file-findings")
+
+      {:ok, record} =
+        Ash.create(Record, %{
+          pr_ref: "test/repo#2",
+          pr: "2",
+          workspace_id: ws.id,
+          strategy: "github",
+          status: :completed_unposted,
+          failure_stage: "file_findings",
+          failure_reason: "forbidden 403: rate limited",
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert record.status == :completed_unposted
+      assert record.failure_stage == "file_findings"
+      assert record.failure_reason == "forbidden 403: rate limited"
+    end
+
+    test "allows nil failure fields when review succeeds" do
+      ws = github_ws("er-success-no-failure")
+
+      {:ok, record} =
+        Ash.create(Record, %{
+          pr_ref: "test/repo#3",
+          pr: "3",
+          workspace_id: ws.id,
+          strategy: "github",
+          status: :completed,
+          verdict: :approve,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert record.status == :completed
+      assert is_nil(record.failure_stage)
+      assert is_nil(record.failure_reason)
+    end
+  end
+
+  describe "MCP serialization — failure fields" do
+    test "external_review_list includes failure_stage and failure_reason in serialized records" do
+      ws = github_ws("er-mcp-failure-fields")
+
+      {:ok, _record} =
+        Ash.create(Record, %{
+          pr_ref: "test/repo#4",
+          pr: "4",
+          workspace_id: ws.id,
+          strategy: "github",
+          status: :failed,
+          failure_stage: "read_diff",
+          failure_reason: "connection timeout",
+          started_at: DateTime.utc_now()
+        })
+
+      records = Arbiter.Reviews.Record |> Ash.read!()
+      serialized = Enum.map(records, &serialize_external_review/1)
+
+      assert Enum.any?(serialized, fn s ->
+               s.failure_stage == "read_diff" && s.failure_reason == "connection timeout"
+             end)
+    end
+  end
+
+  describe "REST API — failure fields" do
+    test "external_reviews endpoint includes failure_stage and failure_reason in response" do
+      ws = github_ws("er-api-failure-fields")
+
+      {:ok, _record} =
+        Ash.create(Record, %{
+          pr_ref: "test/repo#5",
+          pr: "5",
+          workspace_id: ws.id,
+          strategy: "github",
+          status: :failed,
+          failure_stage: "agent",
+          failure_reason: "rate_limit 429: too many requests",
+          started_at: DateTime.utc_now()
+        })
+
+      records = Record |> Ash.read!()
+      rendered = Enum.map(records, &render_external_review/1)
+
+      assert Enum.any?(rendered, fn r ->
+               r.failure_stage == "agent" && r.failure_reason == "rate_limit 429: too many requests"
+             end)
+    end
+  end
+
+  defp serialize_external_review(%Record{} = r) do
+    %{
+      id: r.id,
+      pr_ref: r.pr_ref,
+      status: r.status,
+      failure_stage: r.failure_stage,
+      failure_reason: r.failure_reason,
+      started_at: r.started_at
+    }
+  end
+
+  defp render_external_review(%Record{} = r) do
+    %{
+      id: r.id,
+      pr_ref: r.pr_ref,
+      status: r.status,
+      failure_stage: r.failure_stage,
+      failure_reason: r.failure_reason,
+      started_at: r.started_at
+    }
+  end
+
   defp json(conn, body) do
     conn
     |> Plug.Conn.put_resp_header("content-type", "application/json")
