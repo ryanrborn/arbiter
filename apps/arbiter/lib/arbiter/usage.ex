@@ -170,14 +170,9 @@ defmodule Arbiter.Usage do
     end)
   end
 
-  # Drop the "#review" suffix used by ReviewGate reviewers so a review event is
-  # still attributable to the author task for epic lookup.
-  defp base_task_id(<<id::binary>>) do
-    case String.split(id, "#", parts: 2) do
-      [base | _] -> base
-      _ -> id
-    end
-  end
+  # Drop any ReviewGate synthetic-id suffix (`#review`, `#r2`, ...) so a
+  # review event is still attributable to the author task for epic lookup.
+  defdelegate base_task_id(task_id), to: Arbiter.Worker.ReviewGate
 
   # Map each event's task to the parent task(s) it hangs under via `:parent_of`
   # edges (the task is the `to_issue`; its parents are the `from_issue`s).
