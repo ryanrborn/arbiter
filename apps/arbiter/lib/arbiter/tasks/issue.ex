@@ -191,7 +191,17 @@ defmodule Arbiter.Tasks.Issue do
     update :close do
       require_atomic? false
       argument :reason, :string
-      argument :close_upstream, :boolean, default: false
+
+      # bd-2wilou: defaults to true. A task with a `tracker_ref` used to leave
+      # its upstream issue open unless the caller remembered to pass
+      # `close_upstream: true` — a board sweep found five issues stranded this
+      # way across three separate dates. `SyncTracker` already no-ops when
+      # there's no tracker/`tracker_ref`, so flipping the default is a pure win
+      # for every ordinary close path; a caller that must NOT propagate (e.g.
+      # `MergedPRFinalizer`'s legacy follow-up close, where `tracker_ref` is
+      # actually a merged PR number) now has to opt out explicitly with
+      # `close_upstream: false`.
+      argument :close_upstream, :boolean, default: true
 
       change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :close}
       change set_attribute(:status, :closed)
@@ -203,10 +213,10 @@ defmodule Arbiter.Tasks.Issue do
       change {Arbiter.Tasks.Issue.Changes.StopWorker, []}
       change {Arbiter.Tasks.Issue.Changes.CleanupWorktree, []}
 
-      # Propagate the close to the linked external tracker only when
-      # close_upstream: true is explicitly passed. Default is to leave the
-      # upstream issue open (e.g. task abandoned, ceded, or pruned).
-      # Best-effort: a sync failure never fails the local close.
+      # Propagate the close to the linked external tracker by default (see the
+      # `close_upstream` argument above). Pass `close_upstream: false` to leave
+      # the upstream issue open. Best-effort: a sync failure never fails the
+      # local close.
       change {Arbiter.Tasks.Issue.Changes.SyncTracker, []}
 
       # After closing, roll the closure up to any auto-close parent of this task

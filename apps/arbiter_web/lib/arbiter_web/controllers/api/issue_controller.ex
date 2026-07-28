@@ -177,7 +177,11 @@ defmodule ArbiterWeb.Api.IssueController do
 
   def close(conn, %{"id" => id} = params) do
     reason = params["reason"]
-    close_upstream = params["close_upstream"] in [true, "true", "1"]
+
+    # bd-2wilou: propagate the close upstream by default (matches the `:close`
+    # action's own default). Only an explicit `close_upstream: false/"false"/"0"`
+    # suppresses it.
+    close_upstream = params["close_upstream"] not in [false, "false", "0"]
 
     args =
       %{}

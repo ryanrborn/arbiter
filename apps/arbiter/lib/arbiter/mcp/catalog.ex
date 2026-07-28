@@ -350,8 +350,9 @@ defmodule Arbiter.MCP.Catalog do
       name: "task_close",
       tiers: @coordinator,
       description:
-        "Close a task in the workspace. Optional `reason`; `close_upstream: true` also closes the " <>
-          "linked external tracker issue.",
+        "Close a task in the workspace. Optional `reason`. Also closes the linked external " <>
+          "tracker issue by default when the task has a `tracker_ref`; pass " <>
+          "`close_upstream: false` to leave it open.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
@@ -359,7 +360,8 @@ defmodule Arbiter.MCP.Catalog do
           "reason" => %{"type" => "string"},
           "close_upstream" => %{
             "type" => "boolean",
-            "description" => "Also close the linked tracker issue (default false)."
+            "description" =>
+              "Also close the linked tracker issue (default true; pass false to opt out)."
           }
         },
         "required" => ["id"],
@@ -922,8 +924,10 @@ defmodule Arbiter.MCP.Catalog do
       tiers: @coordinator,
       description:
         "Reconcile the workspace's tasks against its external tracker (`arb sync`): task assigned issues " <>
-          "with no task, close tasks whose issue is gone. `dry: true` returns the plan without acting. " <>
-          "No-ops cleanly when the tracker does not support reconciliation.",
+          "with no task, close tasks whose issue is gone, and report `drift` for tasks closed locally " <>
+          "whose tracker issue is still open (a close that never propagated upstream — drift entries " <>
+          "are report-only and never mutate the local task). `dry: true` returns the plan without " <>
+          "acting. No-ops cleanly when the tracker does not support reconciliation.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
