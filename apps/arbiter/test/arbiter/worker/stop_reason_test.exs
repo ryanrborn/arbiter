@@ -206,6 +206,39 @@ defmodule Arbiter.Worker.StopReasonTest do
     end
   end
 
+  describe "classify/2 — context autocompact thrash (bd-8cn795)" do
+    test "the exact autocompact-thrash message classifies as :context_thrash" do
+      lines = [
+        "reading apps/arbiter/lib/arbiter/workflows/review_patrol.ex",
+        "Autocompact is thrashing: the context refilled to the limit within 3 " <>
+          "turns of the previous compact, 3 times in a row"
+      ]
+
+      reason = StopReason.classify(1, lines)
+
+      assert reason.category == :context_thrash
+      assert reason.summary =~ "context"
+      assert reason.remediation =~ "1M"
+      assert StopReason.label(reason) =~ "context"
+    end
+
+    test "matches case-insensitively and regardless of exact exit code" do
+      assert StopReason.classify(1, ["autocompact is thrashing"]).category == :context_thrash
+      assert StopReason.classify(0, ["AUTOCOMPACT IS THRASHING"]).category == :context_thrash
+    end
+
+    test "context-thrash wins over the generic crashed/exited-without-done fallback" do
+      refute StopReason.classify(1, ["autocompact is thrashing"]).category == :crashed
+
+      refute StopReason.classify(0, ["autocompact is thrashing"]).category ==
+               :exited_without_done
+    end
+
+    test "an unrelated non-zero exit with no thrash signature is still :crashed" do
+      refute StopReason.classify(1, ["some other failure"]).category == :context_thrash
+    end
+  end
+
   describe "label/1 and to_map/1" do
     test "label is a compact one-liner with the exit code" do
       assert StopReason.classify(1, ["401"]) |> StopReason.label() ==
