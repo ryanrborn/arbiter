@@ -172,25 +172,53 @@ defmodule Arbiter.Mergers do
   Any other error (an unrelated 422, a network failure, …) returns
   immediately on the first attempt — this only retries the specific
   "already exists" case.
+
+  bd-28l6im: the original budget (3 attempts, flat 200ms) still let three
+  finalize runs strand in one afternoon (bd-8cn795, bd-7opdaf, bd-2wilou) —
+  the GitHub-listing miss window this retries around can outlast ~400ms. The
+  cost of retrying longer (a few extra seconds, only on a confirmed
+  already-open error) is negligible next to the cost of a false failure
+  (stranding approved, mergeable work for a human to merge by hand), so the
+  default budget backs off exponentially up to ~8.5s total instead of bailing
+  after under half a second.
   """
+  @default_open_retry_attempts 6
+  @default_open_retry_base_delay_ms 300
+  @default_open_retry_max_delay_ms 4_000
+
   @spec open_with_retry(adapter, String.t(), String.t(), String.t() | nil, map(), keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def open_with_retry(adapter, branch, title, description, opts, retry_opts \\ [])
       when is_atom(adapter) and is_binary(branch) and is_map(opts) do
-    attempts = Keyword.get(retry_opts, :attempts, 3)
-    delay_ms = Keyword.get(retry_opts, :delay_ms, 200)
-    do_open_with_retry(adapter, branch, title, description, opts, attempts, delay_ms)
+    attempts = Keyword.get(retry_opts, :attempts, @default_open_retry_attempts)
+    base_delay_ms = Keyword.get(retry_opts, :delay_ms, @default_open_retry_base_delay_ms)
+    max_delay_ms = Keyword.get(retry_opts, :max_delay_ms, @default_open_retry_max_delay_ms)
+
+    do_open_with_retry(adapter, branch, title, description, opts, attempts, 0, %{
+      base_delay_ms: base_delay_ms,
+      max_delay_ms: max_delay_ms
+    })
   end
 
-  defp do_open_with_retry(adapter, branch, title, description, opts, attempts, delay_ms) do
+  defp do_open_with_retry(adapter, branch, title, description, opts, attempts, attempt, backoff) do
     case adapter.open(branch, title, description, opts) do
       {:ok, mr_ref} = ok when is_binary(mr_ref) ->
         ok
 
       {:error, reason} = err ->
         if attempts > 1 and already_open_error?(reason) do
-          Process.sleep(delay_ms)
-          do_open_with_retry(adapter, branch, title, description, opts, attempts - 1, delay_ms)
+          Process.sleep(backoff_delay_ms(attempt, backoff))
+
+          do_open_with_retry(
+            adapter,
+            branch,
+            title,
+            description,
+            opts,
+            attempts - 1,
+            attempt + 1,
+            backoff
+          )
         else
           err
         end
@@ -198,6 +226,12 @@ defmodule Arbiter.Mergers do
       other ->
         other
     end
+  end
+
+  # Exponential backoff (base * 2^attempt), capped at max_delay_ms so a large
+  # attempt budget doesn't degenerate into an unbounded wait on later tries.
+  defp backoff_delay_ms(attempt, %{base_delay_ms: base, max_delay_ms: max}) do
+    min(base * Integer.pow(2, attempt), max)
   end
 
   @doc """
