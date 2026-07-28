@@ -2066,6 +2066,63 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert ack.status == "dispatched"
     end
 
+    test "force: true with an explicit automation: \"off\" argument dispatches instead of raising" do
+      ws = github_ws("er-off-explicit-force")
+
+      assert {:ok, ack} =
+               ExternalReview.dispatch(
+                 pr: "octo/widget#1",
+                 automation: "off",
+                 force: true,
+                 workspace: ws.name
+               )
+
+      assert ack.status == "dispatched"
+    end
+
+    test "an auto_authors exception is honored on the pr: path under a default: off policy" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "ra-off-auto-authors-ws",
+          prefix: uniq_prefix(),
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"credentials_ref" => "env:#{@env_var}"}
+            },
+            "review_automation" => %{"default" => "off", "auto_authors" => ["trusted_dev"]}
+          }
+        })
+
+      Req.Test.stub(Arbiter.Mergers.Github.HTTP, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/repos/leo-technologies-llc/quiet_repo/pulls/1"} ->
+            json(conn, %{
+              "number" => 1,
+              "user" => %{"login" => "trusted_dev"},
+              "head" => %{"sha" => "abc"},
+              "base" => %{"ref" => "main"}
+            })
+
+          {"GET", "/repos/leo-technologies-llc/quiet_repo/pulls/1/reviews"} ->
+            json(conn, [])
+
+          _ ->
+            Plug.Conn.resp(conn, 404, "")
+        end
+      end)
+
+      # Without the author resolved, this would refuse via `:default` even
+      # though `auto_authors` should make it `:auto` for this PR's author.
+      assert {:ok, ack} =
+               ExternalReview.dispatch(
+                 pr: "leo-technologies-llc/quiet_repo#1",
+                 workspace: ws.name
+               )
+
+      assert ack.status == "dispatched"
+    end
+
     test "describe_error names the repo and the config key responsible" do
       msg =
         ExternalReview.describe_error({:automation_off, "voice_biometrics", :repo_override})

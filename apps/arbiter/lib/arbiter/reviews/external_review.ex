@@ -570,9 +570,24 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp guard_automation_off(prepared, opts) do
     config = workspace_config(prepared.workspace)
     rig_name = Map.get(prepared, :rig_name)
+    explicit = Map.get(opts, :automation)
+
+    # bd-7opdaf: the PR author isn't known yet on the `pr:` path (it's only
+    # fetched later, in `run_workflow`/engagement creation). An explicit
+    # `automation:` arg or a matching `repo_overrides[rig_name]` both resolve
+    # without the author, so only pay for the extra adapter round-trip when
+    # resolution would actually fall through to `auto_authors`/`default` —
+    # otherwise a `default: "off"` policy would silently ignore `auto_authors`
+    # exceptions (they'd always resolve against a `nil` author).
+    pr_author =
+      if is_nil(ReviewAutomation.normalize(explicit)) &&
+           is_nil(ReviewAutomation.repo_override_mode(config, rig_name)) do
+        {_head_sha, author} = fetch_pr_baseline(Map.get(prepared, :adapter), prepared.mr_ref)
+        author
+      end
 
     {mode, source} =
-      ReviewAutomation.resolve_with_source(config, nil, rig_name, Map.get(opts, :automation))
+      ReviewAutomation.resolve_with_source(config, pr_author, rig_name, explicit)
 
     Logger.info(
       "ExternalReview: resolved review_automation=#{mode} (source: #{source}) for " <>
@@ -714,7 +729,7 @@ defmodule Arbiter.Reviews.ExternalReview do
           :report_only ->
             true
 
-          mode when mode in [:auto, :flag] ->
+          mode when mode in [:auto, :flag, :off] ->
             false
 
           nil ->
