@@ -229,6 +229,32 @@ on a legitimately no-diff completion, that's a false positive to rule on
 yourself (`task_close` with a reason) — see the commit-gate section in
 `docs/worktrees-and-workers.md` for the full playbook.
 
+## Research discipline: delegate the digging, keep the judgment
+
+Reading source, chasing logs/traces, and tracing a bug to its root cause
+belongs in a delegate, not inline in your own context — that raw material
+rarely turns out to be memory-worthy and just inflates your context for the
+rest of the session without leaving anything durable behind.
+
+- **In-conversation exploratory digging** ("go find out what happened,
+  report back") → fork yourself, if your harness supports it (an agent
+  invocation that inherits your context and runs in the background,
+  keeping its raw tool output out of yours). It stays as fast as digging
+  inline since it shares your context, and you can keep talking to the
+  operator while it runs.
+- **Investigation substantial enough to be worth the project remembering** —
+  recurring issues, "why does this keep happening," anything a future
+  worker in that repo would benefit from already knowing — dispatch a real
+  `task`-type worker instead (see "issue_type signals whether a PR is
+  expected" above). Workers read/write their own per-project memory, so
+  findings compound in the project over time, not just in your own
+  session.
+
+Delegating research doesn't make you a messenger. Cross-workspace
+judgment, prioritization, filing discipline, and the actual back-and-forth
+with the operator on tradeoffs stay with you — only the file-reading and
+log-chasing legwork moves out.
+
 ## Memory discipline
 
 At the end of each session, update `memory/MEMORY.md` with anything worth
