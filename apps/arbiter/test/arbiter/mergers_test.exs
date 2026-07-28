@@ -190,4 +190,75 @@ defmodule Arbiter.MergersTest do
       assert Mergers.prepare_with_repo(ws, "tonic_device") == :ok
     end
   end
+
+  # bd-28l6im: three finalize-422 false-failures (bd-8cn795, bd-7opdaf,
+  # bd-2wilou) landed in one afternoon despite bd-636thc's retry — the
+  # transient GitHub-listing miss window this retries around can outlast the
+  # original 3-attempt/200ms budget. These prove the widened budget actually
+  # waits long enough for a slow-to-clear miss, while still failing fast (no
+  # retry at all) on an unrelated error.
+  describe "open_with_retry/6" do
+    defmodule StubAdapter do
+      @moduledoc false
+      def responses(responses), do: Process.put(__MODULE__, responses)
+
+      def open(_branch, _title, _description, _opts) do
+        [head | rest] = Process.get(__MODULE__)
+        Process.put(__MODULE__, rest)
+        head
+      end
+    end
+
+    @already_exists_error %{
+      status: 422,
+      raw: %{
+        "errors" => [%{"code" => "custom", "message" => "A pull request already exists for o:b."}]
+      }
+    }
+
+    @fast_retry_opts [delay_ms: 1, max_delay_ms: 2]
+
+    test "retries an already-exists error past the old 3-attempt budget" do
+      StubAdapter.responses([
+        {:error, @already_exists_error},
+        {:error, @already_exists_error},
+        {:error, @already_exists_error},
+        {:error, @already_exists_error},
+        {:ok, "#700"}
+      ])
+
+      assert Mergers.open_with_retry(StubAdapter, "b", "t", "d", %{}, @fast_retry_opts) ==
+               {:ok, "#700"}
+    end
+
+    test "does not retry an unrelated error" do
+      StubAdapter.responses([
+        {:error, %{status: 422, raw: %{"message" => "Validation Failed"}}},
+        {:ok, "#701"}
+      ])
+
+      assert Mergers.open_with_retry(StubAdapter, "b", "t", "d", %{}, @fast_retry_opts) ==
+               {:error, %{status: 422, raw: %{"message" => "Validation Failed"}}}
+    end
+
+    test "gives up and returns the error once the retry budget is exhausted" do
+      StubAdapter.responses(List.duplicate({:error, @already_exists_error}, 20))
+
+      assert {:error, @already_exists_error} =
+               Mergers.open_with_retry(StubAdapter, "b", "t", "d", %{}, @fast_retry_opts)
+    end
+
+    test "defaults to a 6-attempt exponential backoff budget" do
+      StubAdapter.responses(List.duplicate({:error, @already_exists_error}, 20))
+
+      {micros, {:error, @already_exists_error}} =
+        :timer.tc(fn -> Mergers.open_with_retry(StubAdapter, "b", "t", "d", %{}, delay_ms: 1) end)
+
+      # 5 sleeps (attempts 6 -> 1), each min(1 * 2^n, 4_000) — dominated by the
+      # default max_delay_ms cap once attempt >= 12, so with delay_ms: 1 this
+      # is ~ (1+2+4+8+16)ms: fast, but proves 5 retries actually happened
+      # rather than bailing after the old budget's 2.
+      assert micros >= 30 * 1000
+    end
+  end
 end

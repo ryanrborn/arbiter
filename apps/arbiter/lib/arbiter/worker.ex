@@ -3164,7 +3164,7 @@ defmodule Arbiter.Worker do
       from_ref: task_id,
       workspace_id: ws_id,
       directive_ref: task_id,
-      subject: "Merge failed: #{task_id} could not be opened/merged",
+      subject: merge_failure_subject(task_id, reason),
       body: merge_failure_body(state, branch, reason)
     })
 
@@ -3177,16 +3177,42 @@ defmodule Arbiter.Worker do
 
   defp escalate_merge_failure(_state, _branch, _reason), do: :ok
 
+  # bd-28l6im: an "already exists" 422 that survives the full open_with_retry
+  # budget unresolved is not an ordinary merge failure — GitHub's own error
+  # confirms a PR is sitting there for this branch, arbiter just couldn't
+  # resolve its number. Distinguish it in both subject and body so the
+  # operator doesn't read this as "the work is broken" and go looking at the
+  # diff — the branch's PR is very likely open and mergeable already.
+  defp merge_failure_subject(task_id, reason) do
+    if Arbiter.Mergers.already_open_error?(reason) do
+      "PR already exists: #{task_id} — could not auto-resolve its number"
+    else
+      "Merge failed: #{task_id} could not be opened/merged"
+    end
+  end
+
   defp merge_failure_body(%State{mr_ref: mr_ref}, branch, reason) do
     ref_line = if is_binary(mr_ref) and mr_ref != "", do: "PR/MR ref: #{mr_ref}\n", else: ""
 
-    """
-    Merge of branch #{branch} failed and was NOT completed. The task is parked \
-    failed (not closed) — any PR/MR already opened for this branch may be \
-    approved and mergeable but stranded, and needs manual attention.
-    #{ref_line}
-    Error: #{inspect(reason)}
-    """
+    if Arbiter.Mergers.already_open_error?(reason) do
+      """
+      The forge reports a pull request already exists for branch #{branch}, \
+      but arbiter could not resolve its number after retrying — this is \
+      NOT necessarily a work failure. The branch's PR is very likely open \
+      and mergeable already; find it on the forge and merge it by hand, \
+      then close this task.
+      #{ref_line}
+      Forge error: #{inspect(reason)}
+      """
+    else
+      """
+      Merge of branch #{branch} failed and was NOT completed. The task is parked \
+      failed (not closed) — any PR/MR already opened for this branch may be \
+      approved and mergeable but stranded, and needs manual attention.
+      #{ref_line}
+      Error: #{inspect(reason)}
+      """
+    end
   end
 
   defp log_merge_conflict_warning(task_id, reason) do
@@ -3647,7 +3673,10 @@ defmodule Arbiter.Worker do
         # bd-13thk9: push the worktree branch to origin BEFORE asking a hosted
         # forge (GitHub/GitLab) to open a PR. GitHub returns 422 "field head
         # invalid" when the PR head ref does not exist remotely. A push failure
-        # is surfaced loudly rather than proceeding to a doomed PR-open.
+        # is surfaced loudly rather than proceeding to a doomed PR-open. Always
+        # push even when we already know the PR ref below — a revise-and-
+        # discuss round may have added commits since the pre-review open that
+        # the PR (and its CI) needs to see.
         case push_for_hosted_pr(state, workspace, opts) do
           {:error, push_reason} ->
             Logger.warning(
@@ -3658,75 +3687,118 @@ defmodule Arbiter.Worker do
             {:error, {:push_failed, push_reason}, state}
 
           :ok ->
-            case safe_open(adapter, branch, title, description, open_opts) do
+            case known_pr_ref_for_branch(state, branch) do
               {:ok, mr_ref} ->
-                merger_url = safe_link_for(adapter, mr_ref)
+                finalize_opened_mr(state, adapter, workspace, opts, mr_ref)
 
-                # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
-                # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
-                # later receives the {:worker_done, task_id} broadcast. Without
-                # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
-                # through to open_mr_for/3, fails opening a second PR on the
-                # already-merged branch, and the task is never auto-closed.
-                record_pr_ref_on_task(state, mr_ref)
-                record_mr_ref_on_run(state, mr_ref, merger_url)
-                sync_tracker_pr_opened(state, mr_ref, merger_url)
+              :none ->
+                retry_opts = open_retry_opts(state)
 
-                new_state = %State{
-                  state
-                  | status: :awaiting_review,
-                    mr_ref: mr_ref,
-                    merger_url: merger_url,
-                    merger_adapter: adapter,
-                    step_started_at: DateTime.utc_now(),
-                    meta:
-                      state.meta
-                      |> Map.put(:mr_ref, mr_ref)
-                      |> Map.put(:merger_url, merger_url)
-                }
+                case safe_open(adapter, branch, title, description, open_opts, retry_opts) do
+                  {:ok, mr_ref} ->
+                    finalize_opened_mr(state, adapter, workspace, opts, mr_ref)
 
-                # Guard: MR already exists on the forge. Watchdog startup failure must
-                # NOT prevent the worker from parking at :awaiting_review — the MR
-                # is real and must not be discarded. If the Watchdog can't start for
-                # any reason, escalate to the Admiral so the MR is not silently
-                # orphaned while the worker parks indefinitely.
-                watchdog_ok? =
-                  try do
-                    start_watchdog(new_state, workspace, opts) == :ok
-                  rescue
-                    e ->
-                      Logger.warning(
-                        "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
-                      )
+                  {:error, reason} ->
+                    Logger.warning(
+                      "Worker.open_mr: adapter open failed for task=#{state.task_id}: #{inspect(reason)}"
+                    )
 
-                      false
-                  catch
-                    :exit, reason ->
-                      Logger.warning(
-                        "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
-                      )
-
-                      false
-                  end
-
-                unless watchdog_ok? do
-                  escalate_watchdog_failure(new_state)
+                    {:error, reason, state}
                 end
-
-                {:ok, mr_ref, new_state}
-
-              {:error, reason} ->
-                Logger.warning(
-                  "Worker.open_mr: adapter open failed for task=#{state.task_id}: #{inspect(reason)}"
-                )
-
-                {:error, reason, state}
             end
         end
 
       {:error, reason} ->
         {:error, reason, state}
     end
+  end
+
+  # bd-28l6im: when `enter_review_gate` already opened a real PR for this exact
+  # branch before the reviewer ran (bd-129xh4, `maybe_open_pr_for_review`),
+  # APPROVE's `do_open_mr` must adopt that ref directly instead of racing a
+  # second `adapter.open/4` call against it. That second call is exactly what
+  # produced three finalize-422 false-failures in one afternoon (bd-8cn795,
+  # bd-7opdaf, bd-2wilou): GitHub's PR-listing endpoint can transiently miss a
+  # PR it just accepted, and `Mergers.open_with_retry/5` (bd-636thc) only
+  # retries the whole `open/4` call — that retry budget is not always enough
+  # to outlast the miss window. Skipping the second call removes the race
+  # entirely rather than out-waiting it.
+  #
+  # Returns `{:ok, mr_ref}` only when the branch matches the one the pre-review
+  # open recorded — a mismatched branch (should not happen in practice, but
+  # would mean adopting the wrong PR) falls through to a fresh `open/4` call.
+  defp known_pr_ref_for_branch(%State{meta: meta}, branch) when is_binary(branch) do
+    meta = meta || %{}
+
+    with ^branch <- Map.get(meta, :review_gate_branch),
+         pr_ref when is_binary(pr_ref) and pr_ref != "" <- Map.get(meta, :review_pr_ref) do
+      {:ok, pr_ref}
+    else
+      _ -> :none
+    end
+  end
+
+  defp known_pr_ref_for_branch(_state, _branch), do: :none
+
+  # Shared success continuation for `do_open_mr`: record the ref, sync the
+  # tracker, park at :awaiting_review, and start the Watchdog. Used whether
+  # `mr_ref` came from a fresh `adapter.open/4` call or was adopted directly
+  # via `known_pr_ref_for_branch/2`.
+  defp finalize_opened_mr(%State{} = state, adapter, workspace, opts, mr_ref) do
+    merger_url = safe_link_for(adapter, mr_ref)
+
+    # bd-7b46wd: persist the PR/MR ref onto the task so the workspace
+    # MergeQueue ADOPTS this PR (instead of opening a duplicate) when it
+    # later receives the {:worker_done, task_id} broadcast. Without
+    # this the MergeQueue's existing_mr_ref/1 is always nil, it falls
+    # through to open_mr_for/3, fails opening a second PR on the
+    # already-merged branch, and the task is never auto-closed.
+    record_pr_ref_on_task(state, mr_ref)
+    record_mr_ref_on_run(state, mr_ref, merger_url)
+    sync_tracker_pr_opened(state, mr_ref, merger_url)
+
+    new_state = %State{
+      state
+      | status: :awaiting_review,
+        mr_ref: mr_ref,
+        merger_url: merger_url,
+        merger_adapter: adapter,
+        step_started_at: DateTime.utc_now(),
+        meta:
+          state.meta
+          |> Map.put(:mr_ref, mr_ref)
+          |> Map.put(:merger_url, merger_url)
+    }
+
+    # Guard: MR already exists on the forge. Watchdog startup failure must
+    # NOT prevent the worker from parking at :awaiting_review — the MR
+    # is real and must not be discarded. If the Watchdog can't start for
+    # any reason, escalate to the Admiral so the MR is not silently
+    # orphaned while the worker parks indefinitely.
+    watchdog_ok? =
+      try do
+        start_watchdog(new_state, workspace, opts) == :ok
+      rescue
+        e ->
+          Logger.warning(
+            "Worker.open_mr: Watchdog startup raised for task=#{state.task_id}: #{Exception.message(e)}"
+          )
+
+          false
+      catch
+        :exit, reason ->
+          Logger.warning(
+            "Worker.open_mr: Watchdog startup exit for task=#{state.task_id}: #{inspect(reason)}"
+          )
+
+          false
+      end
+
+    unless watchdog_ok? do
+      escalate_watchdog_failure(new_state)
+    end
+
+    {:ok, mr_ref, new_state}
   end
 
   # bd-129xh4: open the PR for `branch` BEFORE the reviewer runs, WITHOUT
@@ -3860,7 +3932,7 @@ defmodule Arbiter.Worker do
         :none
 
       :ok ->
-        case safe_open(adapter, branch, title, description, open_opts) do
+        case safe_open(adapter, branch, title, description, open_opts, open_retry_opts(state)) do
           {:ok, mr_ref} ->
             merger_url = safe_link_for(adapter, mr_ref)
             record_pr_ref_on_task(state, mr_ref)
@@ -3920,13 +3992,24 @@ defmodule Arbiter.Worker do
   defp maybe_default(map, _key, nil), do: map
   defp maybe_default(map, key, value), do: Map.put_new(map, key, value)
 
+  # An explicit meta `:open_retry_opts` (tests only — keeps the "already
+  # exists" retry-exhaustion path fast to exercise instead of waiting out the
+  # real multi-second production backoff) overrides `Mergers.open_with_retry/6`'s
+  # defaults; production callers leave this unset.
+  defp open_retry_opts(%State{meta: meta}) do
+    case meta && Map.get(meta, :open_retry_opts) do
+      opts when is_list(opts) -> opts
+      _ -> []
+    end
+  end
+
   # bd-636thc: routes through Mergers.open_with_retry/6 rather than calling
   # adapter.open/4 directly, so a transient "already exists" 422 (the
   # adapter's own single-shot adoption lookup missing a PR that genuinely
   # exists — e.g. right after this same run's own pre-review PR-open,
   # bd-129xh4) gets one more chance to adopt instead of failing the run.
-  defp safe_open(adapter, branch, title, description, open_opts) do
-    Arbiter.Mergers.open_with_retry(adapter, branch, title, description, open_opts)
+  defp safe_open(adapter, branch, title, description, open_opts, retry_opts) do
+    Arbiter.Mergers.open_with_retry(adapter, branch, title, description, open_opts, retry_opts)
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   catch
