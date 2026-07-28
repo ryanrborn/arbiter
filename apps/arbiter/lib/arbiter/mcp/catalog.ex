@@ -39,8 +39,9 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_stop` | coordinator | `Arbiter.Worker.stop/2` |
   | `worker_list` | coordinator | `Arbiter.Worker.list_children/0` |
   | `worker_show` | coordinator | `Arbiter.Worker.whereis/1` + `Worker.state/1`, falls back to `Arbiter.Workers.Run` |
-  | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first |
-  | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for the task's most recent run |
+  | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first (accepts synthetic ids) |
+  | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for one run (by `run_id` or the task's most recent) |
+  | `run_log_list` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: … or …#…)`, task + synthetic children |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
@@ -738,13 +739,17 @@ defmodule Arbiter.MCP.Catalog do
           "<task-id>`). Each entry is a run summary (no output lines — use `worker_log` for " <>
           "the transcript): id, task_id, task_title, repo, workspace_id, worker_type, status, " <>
           "model, started_at, completed_at, exit_code, failure_reason. Optional `limit` " <>
-          "(default 20, max 200).",
+          "(default 20, max 200). `task_id` may be a ReviewGate synthetic id " <>
+          "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`) — those aren't `issues` " <>
+          "rows, but the run lookup still resolves (authorization checks the base task).",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "Task whose run history to list (required)."
+            "description" =>
+              "Task whose run history to list (required). Accepts a plain task id or a " <>
+                "ReviewGate synthetic id such as `<base>#review`."
           },
           "limit" => %{
             "type" => "integer",
@@ -760,23 +765,63 @@ defmodule Arbiter.MCP.Catalog do
       name: "worker_log",
       tiers: @coordinator,
       description:
-        "Full, uncapped durable transcript of a task's most recent run (`arb worker log " <>
-          "<task-id>`) — the audit source of record, retaining every line however long the " <>
-          "run. `exists` distinguishes \"no file yet / never captured\" (false, empty `lines`) " <>
-          "from \"captured but empty\" (true, empty `lines`). Not-found only when no run has " <>
-          "ever been recorded for the task.",
+        "Full, uncapped durable transcript of one run — the audit source of record, " <>
+          "retaining every line however long the run. Pass `run_id` to read that exact run " <>
+          "(independent of which run is latest — the only way to reach a superseded/failed " <>
+          "attempt), or `task_id` (no `run_id`) for the task's most recent run (`arb worker " <>
+          "log <task-id>`, unchanged behaviour). `task_id` may be a ReviewGate synthetic id " <>
+          "(`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`). `exists` distinguishes " <>
+          "\"no file yet / never captured\" (false, empty `lines`) from \"captured but empty\" " <>
+          "(true, empty `lines`). Not-found when no matching run exists.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
           "task_id" => %{
             "type" => "string",
-            "description" => "Task whose latest run's transcript to read (required)."
+            "description" =>
+              "Task whose latest run's transcript to read. Accepts a plain task id or a " <>
+                "ReviewGate synthetic id such as `<base>#review`. Ignored when `run_id` is given."
+          },
+          "run_id" => %{
+            "type" => "string",
+            "description" =>
+              "Exact run id whose transcript to read, independent of which run is latest " <>
+                "for its task. Takes precedence over `task_id`."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.worker_log/2
+    },
+    %{
+      name: "run_log_list",
+      tiers: @coordinator,
+      description:
+        "Enumerate every run recorded for a task AND its ReviewGate synthetic children " <>
+          "(`<task_id>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, `#t<N>`), newest first — the " <>
+          "whole retrievable transcript corpus for a task in one call. Unlike `worker_runs` " <>
+          "(exact `task_id` match only), this also matches anything prefixed `<task_id>#`, " <>
+          "surfacing the reviewer/re-prompt corpus alongside the author's own runs. Each " <>
+          "entry: run_id, task_id, worker_type, status, model, started_at, " <>
+          "transcript_exists, line_count. Optional `limit` (default 200, max 1000).",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" =>
+              "Base task whose full run corpus (including synthetic children) to list " <>
+                "(required). Pass the plain task id even to reach synthetic runs."
+          },
+          "limit" => %{
+            "type" => "integer",
+            "description" => "Max runs to return (default 200, max 1000)."
           }
         },
         "required" => ["task_id"],
         "additionalProperties" => false
       },
-      handler: &Tools.worker_log/2
+      handler: &Tools.run_log_list/2
     },
     %{
       name: "external_review_list",
@@ -824,6 +869,30 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.external_review_show/2
+    },
+    %{
+      name: "review_gate_rounds_list",
+      tiers: @coordinator,
+      description:
+        "List internal ReviewGate round outcomes for a task (bd-aqyjuc): one row per reviewer " <>
+          "or implementer pass, oldest-first. Each row carries the round number, role " <>
+          "(review/impl), verdict (approve/request_changes, nil for impl), findings text, " <>
+          "finding count, the model that ran the pass, its cost, and whether it converged — " <>
+          "so a round-1 rejection followed by a round-2 approval is visible as two distinct " <>
+          "rows instead of collapsing into the task's terminal outcome. Backfill is out of " <>
+          "scope; rows only exist for ReviewGate runs from 2026-07-28 onward.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" => "Task whose ReviewGate rounds to list (required)."
+          }
+        },
+        "required" => ["task_id"],
+        "additionalProperties" => false
+      },
+      handler: &Tools.review_gate_rounds_list/2
     },
     %{
       name: "review_greenlight",

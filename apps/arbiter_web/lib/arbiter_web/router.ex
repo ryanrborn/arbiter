@@ -113,6 +113,9 @@ defmodule ArbiterWeb.Router do
     # External review audit records (bd-31fh9e)
     get("/external_reviews", ExternalReviewController, :index)
 
+    # Internal ReviewGate structured round outcomes (bd-aqyjuc)
+    get("/review_gate_rounds", ReviewGateRoundController, :index)
+
     # Anthropic quota snapshot (captured by the local proxy)
     get("/quota", QuotaController, :show)
 
@@ -125,6 +128,7 @@ defmodule ArbiterWeb.Router do
     get("/workers", WorkerController, :index)
     get("/workers/:task_id", WorkerController, :show)
     get("/workers/:task_id/log", WorkerController, :log)
+    get("/workers/:task_id/run_log_list", WorkerController, :run_log_list)
     post("/workers/:task_id/stop", WorkerController, :stop)
 
     # Graph queue operations (C5 of #482)

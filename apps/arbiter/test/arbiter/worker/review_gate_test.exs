@@ -1424,6 +1424,29 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       assert Enum.any?(flags, &(&1.from_ref == task.id and &1.to_ref == review_id)),
              "expected an implementer→reviewer response message"
+
+      # bd-aqyjuc: the round-1 rejection and the round-2 approval are each
+      # persisted as their own structured row — the round-1 rejection is no
+      # longer invisible once the run completes.
+      require Ash.Query
+
+      rounds =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id)
+        |> Ash.Query.sort(round: :asc, inserted_at: :asc)
+        |> Ash.read!()
+
+      review_rounds = Enum.filter(rounds, &(&1.role == :review))
+      assert [round1, round2] = review_rounds
+      assert round1.round == 1
+      assert round1.verdict == :request_changes
+      assert round1.converged == false
+      assert round2.round == 2
+      assert round2.verdict == :approve
+      assert round2.converged == true
+
+      impl_rounds = Enum.filter(rounds, &(&1.role == :impl))
+      assert [%{round: 1, verdict: nil}] = impl_rounds
     end
 
     # bd-78vg4v: a large implementer transcript is CAPPED (head+tail) when

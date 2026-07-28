@@ -58,6 +58,7 @@ config :arbiter,
     Arbiter.Quota,
     Arbiter.Workflows,
     Arbiter.Reviews,
+    Arbiter.ReviewGate,
     Arbiter.Settings,
     Arbiter.Skills
   ]
