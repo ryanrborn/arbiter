@@ -48,7 +48,7 @@ defmodule Arbiter.Tasks.Workspace do
     otp_app: :arbiter,
     domain: Arbiter.Tasks,
     data_layer: AshSqlite.DataLayer,
-    extensions: [AshCloak]
+    extensions: [AshCloak, AshPaperTrail.Resource]
 
   @valid_tracker_types ~w(none jira shortcut linear github gitlab)
   @valid_merger_strategies ~w(direct gitlab github)
@@ -73,12 +73,33 @@ defmodule Arbiter.Tasks.Workspace do
     attributes([:secrets, :worker_env])
   end
 
+  # Version every write (bd-9j6is7). `config` carries `standing_orders`,
+  # routing, and skill-selection layers as free-text JSON — versioning it gives
+  # those unversioned knobs a history + rollback + attribution. The two
+  # ash_cloak-encrypted blobs are ignored: their diffs are opaque ciphertext
+  # and must never enter an unencrypted audit trail. `actor` is snapshotted
+  # onto each version for attribution (see `Arbiter.PaperTrail`).
+  paper_trail do
+    change_tracking_mode(:changes_only)
+    store_action_name?(true)
+    # NOT store_action_inputs?: the create/update `secrets` and `worker_env`
+    # arguments carry plaintext tokens, and paper_trail persists action inputs
+    # verbatim — capturing them would write secrets into an unencrypted audit
+    # trail. The `config` diff + snapshot already record the versionable state.
+    store_action_inputs?(false)
+    attributes_as_attributes([:actor, :config])
+    ignore_attributes([:created_at, :updated_at, :encrypted_secrets, :encrypted_worker_env])
+    # Workspaces can be destroyed; no FK from version rows to the source so a
+    # delete isn't blocked by history (matches Skill).
+    reference_source?(false)
+  end
+
   actions do
     defaults [:read, :destroy]
 
     create :create do
       primary? true
-      accept [:name, :description, :prefix, :config]
+      accept [:name, :description, :prefix, :config, :actor]
 
       argument :secrets, :map do
         allow_nil? true
@@ -115,7 +136,7 @@ defmodule Arbiter.Tasks.Workspace do
 
     update :update do
       primary? true
-      accept [:name, :description, :prefix, :config]
+      accept [:name, :description, :prefix, :config, :actor]
       require_atomic? false
 
       argument :secrets, :map do
@@ -153,7 +174,7 @@ defmodule Arbiter.Tasks.Workspace do
       """
 
       require_atomic? false
-      accept []
+      accept [:actor]
 
       argument :patch, :map do
         allow_nil? true
@@ -248,6 +269,16 @@ defmodule Arbiter.Tasks.Workspace do
       default %{}
 
       description "Names + secret flags for the workspace's worker env vars (no values)."
+    end
+
+    # `last_edited_by` marker: the actor of the most recent write, snapshotted
+    # onto each paper-trail version for attribution. Derived by the MCP layer
+    # from the caller's scope, never from untrusted tool arguments.
+    attribute :actor, :string do
+      public? true
+      allow_nil? true
+
+      description "Stable label of the actor who last wrote this workspace (e.g. \"coordinator\", \"cli\")."
     end
 
     create_timestamp :created_at

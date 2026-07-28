@@ -11,9 +11,12 @@ defmodule ArbiterWeb.Api.SkillController do
     * `PATCH  /api/skills/:id` — :update (also `PUT`)
     * `DELETE /api/skills/:id` — :delete
 
-  Skills are NOT workspace-scoped — one definition is shared across the whole
-  arbiter system. `create`/`update` responses include a non-fatal `warning`
-  when the name collides with a bundled skill (spike bd-5tc1s0 finding #3).
+  A skill is global by default; pass `workspace_id` on create to scope it to a
+  workspace (where it shadows a same-named global). `GET /api/skills` accepts an
+  optional `workspace_id` query param to list a workspace's effective set.
+  Writes are attributed to the `"cli"` actor in the paper-trail history.
+  `create`/`update` responses include a non-fatal `warning` when the name
+  collides with a bundled skill (spike bd-5tc1s0 finding #3).
   """
 
   use ArbiterWeb, :controller
@@ -22,8 +25,17 @@ defmodule ArbiterWeb.Api.SkillController do
 
   action_fallback ArbiterWeb.Api.FallbackController
 
-  def index(conn, _params) do
-    render(conn, :index, skills: Skills.list_skills())
+  # Attribution label for writes originating at the `arb` CLI / REST surface.
+  @actor "cli"
+
+  def index(conn, params) do
+    skills =
+      case Map.get(params, "workspace_id") do
+        nil -> Skills.list_skills()
+        ws_id -> Skills.list_skills(workspace_id: ws_id)
+      end
+
+    render(conn, :index, skills: skills)
   end
 
   def show(conn, %{"id" => id}) do
@@ -33,9 +45,10 @@ defmodule ArbiterWeb.Api.SkillController do
   end
 
   def create(conn, params) do
-    attrs = Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only"])
+    attrs =
+      Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only", "workspace_id"])
 
-    with {:ok, skill} <- Skills.create_skill(attrs) do
+    with {:ok, skill} <- Skills.create_skill(attrs, actor: @actor) do
       conn
       |> put_status(:created)
       |> render(:show, skill: skill, warning: Skills.bundled_collision(skill.name))
@@ -46,7 +59,7 @@ defmodule ArbiterWeb.Api.SkillController do
     attrs = Map.take(params, ["name", "body", "metadata", "activation_mode", "code_only"])
 
     with {:ok, skill} <- Skills.get_skill(id),
-         {:ok, updated} <- Skills.update_skill(skill, attrs) do
+         {:ok, updated} <- Skills.update_skill(skill, attrs, actor: @actor) do
       render(conn, :show, skill: updated, warning: Skills.bundled_collision(updated.name))
     end
   end

@@ -33,6 +33,9 @@ defmodule Arbiter.Skills do
 
   resources do
     resource Skill
+    # AshPaperTrail version rows for Skill (bd-9j6is7); queryable via
+    # Arbiter.Skills.Skill.Version.
+    resource Skill.Version
   end
 
   # The built-in skills every `claude --print` worker sees regardless of what
@@ -85,25 +88,59 @@ defmodule Arbiter.Skills do
   # ---- CRUD ---------------------------------------------------------------
 
   @doc """
-  Create a skill. `attrs` accepts `:name` / `"name"`, `:body` / `"body"`, and
-  optional `:metadata` / `"metadata"`. Returns `{:ok, %Skill{}}` or
-  `{:error, term}` (validation, or a unique-name collision).
+  Create a skill. `attrs` accepts `:name` / `"name"`, `:body` / `"body"`,
+  optional `:metadata` / `"metadata"`, and optional `:workspace_id` /
+  `"workspace_id"` (`nil` → a global skill; a workspace id → a workspace-scoped
+  skill that shadows a same-named global there — see `resolve_skill/2`).
+
+  `opts[:actor]` is normalised via `Arbiter.PaperTrail.actor_label/1` and
+  recorded on the resulting paper-trail version so the write is attributable.
+
+  Returns `{:ok, %Skill{}}` or `{:error, term}` (validation, or a unique-name
+  collision within the scope).
   """
-  @spec create_skill(map()) :: {:ok, Skill.t()} | {:error, term()}
-  def create_skill(attrs) when is_map(attrs), do: Ash.create(Skill, attrs)
+  @spec create_skill(map(), keyword()) :: {:ok, Skill.t()} | {:error, term()}
+  def create_skill(attrs, opts \\ []) when is_map(attrs) do
+    Ash.create(Skill, put_actor(attrs, opts), actor: actor(opts))
+  end
 
   @doc """
   Update a skill (by id, name, or a loaded struct) with `attrs`
-  (`:name` / `:body` / `:metadata`, any subset). Returns `{:ok, %Skill{}}` or
-  `{:error, term}`.
-  """
-  @spec update_skill(Skill.t() | String.t(), map()) :: {:ok, Skill.t()} | {:error, term()}
-  def update_skill(%Skill{} = skill, attrs) when is_map(attrs), do: Ash.update(skill, attrs)
+  (`:name` / `:body` / `:metadata`, any subset). A skill's `workspace_id`
+  (scope) is fixed at creation and cannot be changed here.
 
-  def update_skill(id_or_name, attrs) when is_binary(id_or_name) and is_map(attrs) do
+  `opts[:actor]` is recorded on the resulting version (see `create_skill/2`).
+  Returns `{:ok, %Skill{}}` or `{:error, term}`.
+  """
+  @spec update_skill(Skill.t() | String.t(), map(), keyword()) ::
+          {:ok, Skill.t()} | {:error, term()}
+  def update_skill(skill_or_ref, attrs, opts \\ [])
+
+  def update_skill(%Skill{} = skill, attrs, opts) when is_map(attrs) do
+    Ash.update(skill, put_actor(attrs, opts), actor: actor(opts))
+  end
+
+  def update_skill(id_or_name, attrs, opts) when is_binary(id_or_name) and is_map(attrs) do
     with {:ok, skill} <- get_skill(id_or_name) do
-      update_skill(skill, attrs)
+      update_skill(skill, attrs, opts)
     end
+  end
+
+  # Thread the caller-supplied actor into the changeset both as the Ash
+  # `actor:` option (for anything that reads it) and as the `actor` attribute
+  # that paper_trail snapshots onto the version. Never sourced from tool args.
+  defp actor(opts), do: Keyword.get(opts, :actor)
+
+  defp put_actor(attrs, opts) do
+    case Arbiter.PaperTrail.actor_label(actor(opts)) do
+      nil -> attrs
+      label -> Map.put(attrs, actor_key(attrs), label)
+    end
+  end
+
+  # Match the key style already in `attrs` so we don't mix atom/string keys.
+  defp actor_key(attrs) do
+    if Enum.any?(Map.keys(attrs), &is_binary/1), do: "actor", else: :actor
   end
 
   @doc "Delete a skill (by id, name, or a loaded struct)."
@@ -116,16 +153,46 @@ defmodule Arbiter.Skills do
     end
   end
 
-  @doc "List all skills, ordered by name."
-  @spec list_skills() :: [Skill.t()]
-  def list_skills do
+  @doc """
+  List skills, ordered by name.
+
+  Opts:
+
+    * `:workspace_id` — when given, return the **effective** set for that
+      workspace: every global skill plus that workspace's scoped skills, with a
+      scoped skill shadowing a same-named global (the scoped row wins). Passing
+      `nil` returns only global skills. Omitting the option returns *every* row
+      (all scopes), which is what the dashboard / `arb skill list` show.
+  """
+  @spec list_skills(keyword()) :: [Skill.t()]
+  def list_skills(opts \\ []) do
+    if Keyword.has_key?(opts, :workspace_id) do
+      list_effective_skills(Keyword.get(opts, :workspace_id))
+    else
+      Skill
+      |> Ash.Query.sort(name: :asc)
+      |> Ash.read!()
+    end
+  end
+
+  # The effective, shadowed set for a workspace: globals overlaid by that
+  # workspace's scoped skills (scoped wins on a name collision).
+  defp list_effective_skills(workspace_id) do
     Skill
+    |> Ash.Query.filter(is_nil(workspace_id) or workspace_id == ^workspace_id)
     |> Ash.Query.sort(name: :asc)
     |> Ash.read!()
+    |> Enum.group_by(& &1.name)
+    |> Enum.map(fn {_name, rows} ->
+      Enum.find(rows, hd(rows), &(&1.workspace_id == workspace_id))
+    end)
+    |> Enum.sort_by(& &1.name)
   end
 
   @doc """
-  Fetch one skill by UUID id or by `name`. Returns `{:ok, %Skill{}}` or
+  Fetch one skill by UUID id or by global `name`. A bare name resolves the
+  **global** skill (`workspace_id` nil); use `resolve_skill/2` for
+  workspace-aware, shadowing lookup. Returns `{:ok, %Skill{}}` or
   `{:error, :not_found}`.
   """
   @spec get_skill(String.t()) :: {:ok, Skill.t()} | {:error, :not_found}
@@ -140,13 +207,113 @@ defmodule Arbiter.Skills do
     end
   end
 
-  @doc "Fetch one skill by its unique `name`."
+  @doc "Fetch the **global** skill (workspace_id nil) with this `name`."
   @spec get_skill_by_name(String.t()) :: {:ok, Skill.t()} | {:error, :not_found}
-  def get_skill_by_name(name) when is_binary(name) do
-    case Ash.get(Skill, %{name: name}) do
+  def get_skill_by_name(name) when is_binary(name), do: fetch_scoped(name, nil)
+
+  @doc """
+  Resolve `name` for `workspace_id`, honouring shadowing precedence:
+
+      workspace-scoped `name` in that workspace  →  global `name`  →  not found
+
+  `workspace_id` `nil` resolves the global directly. This is the resolver the
+  dispatch-time skill selection (`Arbiter.Skills.Selection`) uses so a
+  workspace-scoped body shadows the global for that workspace only.
+  """
+  @spec resolve_skill(String.t(), String.t() | nil) ::
+          {:ok, Skill.t()} | {:error, :not_found}
+  def resolve_skill(name, nil) when is_binary(name), do: fetch_scoped(name, nil)
+
+  def resolve_skill(name, workspace_id) when is_binary(name) and is_binary(workspace_id) do
+    case fetch_scoped(name, workspace_id) do
       {:ok, skill} -> {:ok, skill}
+      {:error, :not_found} -> fetch_scoped(name, nil)
+    end
+  end
+
+  # Exact-scope fetch: the one row matching (name, workspace_id) or not_found.
+  # `nil` must match via `is_nil` — Ash `field == nil` does not compile to a
+  # SQL `IS NULL`, so a `nil`-workspace (global) lookup needs the split clause.
+  defp fetch_scoped(name, nil) do
+    Skill
+    |> Ash.Query.filter(name == ^name and is_nil(workspace_id))
+    |> read_one_skill()
+  end
+
+  defp fetch_scoped(name, workspace_id) do
+    Skill
+    |> Ash.Query.filter(name == ^name and workspace_id == ^workspace_id)
+    |> read_one_skill()
+  end
+
+  defp read_one_skill(query) do
+    case Ash.read_one(query) do
+      {:ok, %Skill{} = skill} -> {:ok, skill}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  # ---- Version history / rollback (bd-9j6is7) -----------------------------
+
+  @doc """
+  All paper-trail versions for a skill, newest first. Each version carries the
+  `body` (and other snapshotted attributes), `actor`, `version_action_type`,
+  and `version_action_name`, so a prior body can be inspected before
+  `restore_skill_version/3`.
+  """
+  @spec skill_versions(Skill.t() | String.t()) :: [Skill.Version.t()]
+  def skill_versions(%Skill{id: id}), do: versions_for(id)
+
+  def skill_versions(id_or_name) when is_binary(id_or_name) do
+    case get_skill(id_or_name) do
+      {:ok, skill} -> versions_for(skill.id)
+      {:error, _} -> []
+    end
+  end
+
+  defp versions_for(skill_id) do
+    Skill.Version
+    |> Ash.Query.filter(version_source_id == ^skill_id)
+    |> Ash.Query.sort(version_inserted_at: :desc)
+    |> Ash.read!()
+  end
+
+  @doc """
+  Restore a skill's `body` (and `metadata`) to a prior version. `version_id` is
+  the id of a `Skill.Version` row (from `skill_versions/1`). The restore is
+  itself an ordinary update, so it produces a new version — history is
+  append-only, never rewritten. `opts[:actor]` attributes the restore.
+
+  Returns `{:ok, %Skill{}}`, `{:error, :not_found}` if the skill or version is
+  unknown, or `{:error, :version_mismatch}` if the version belongs to a
+  different skill.
+  """
+  @spec restore_skill_version(Skill.t() | String.t(), String.t(), keyword()) ::
+          {:ok, Skill.t()} | {:error, term()}
+  def restore_skill_version(skill_or_ref, version_id, opts \\ [])
+
+  def restore_skill_version(%Skill{} = skill, version_id, opts) when is_binary(version_id) do
+    with {:ok, version} <- fetch_version(version_id),
+         :ok <- ensure_version_of(version, skill) do
+      update_skill(skill, %{body: version.body, metadata: version.metadata || %{}}, opts)
+    end
+  end
+
+  def restore_skill_version(id_or_name, version_id, opts) when is_binary(id_or_name) do
+    with {:ok, skill} <- get_skill(id_or_name) do
+      restore_skill_version(skill, version_id, opts)
+    end
+  end
+
+  defp fetch_version(version_id) do
+    case Ash.get(Skill.Version, version_id) do
+      {:ok, version} -> {:ok, version}
       {:error, _} -> {:error, :not_found}
     end
+  end
+
+  defp ensure_version_of(version, %Skill{id: id}) do
+    if version.version_source_id == id, do: :ok, else: {:error, :version_mismatch}
   end
 
   # A v4/v7 UUID (as emitted by uuid_v7_primary_key) — distinguishes an id
