@@ -974,6 +974,40 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert rec.greenlight_status == :pending
       assert [%{"file" => "x.ex", "line" => 1}] = rec.proposed_comments
       assert String.contains?(rec.findings_summary || "", "x.ex")
+      # bd-7rspia: even a :completed_unposted (partial) failure is diagnosable
+      # from the record alone — no ssh/journalctl needed.
+      assert rec.failure_stage == "file_findings"
+      assert is_binary(rec.failure_reason)
+      assert String.contains?(rec.failure_reason, "rate limit")
+    end
+
+    # bd-7rspia ac#4: accrued usage from :run_checks must survive the
+    # :file_findings salvage path so cost reporting doesn't understate spend.
+    test "retains accrued model/cost/token usage on the salvaged :completed_unposted record" do
+      ws = github_ws("er-postfail-4")
+      stub_forge_forbidden_on_comment_post("sha-postfail-4")
+
+      usage_runner = fn _diff, _state ->
+        {:ok, [%{severity: :error, file: "x.ex", line: 1, message: "boom"}],
+         %{model: "claude-opus-4-8", cost_usd: 1.2345, tokens_in: 4000, tokens_out: 300}}
+      end
+
+      assert {:error, _reason} =
+               ExternalReview.review(
+                 pr: "octo/widget#42",
+                 workspace: ws.name,
+                 follow_up: false,
+                 check_runner: usage_runner
+               )
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert rec.status == :completed_unposted
+      assert rec.model == "claude-opus-4-8"
+      assert rec.cost_usd == 1.2345
+      assert rec.tokens_in == 4000
+      assert rec.tokens_out == 300
+      assert rec.failure_stage == "file_findings"
     end
 
     # Contrast with the cheap failure mode: a `read_diff` failure has no
@@ -997,6 +1031,11 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert is_nil(rec.finding_count)
       assert is_nil(rec.greenlight_status)
       assert rec.proposed_comments == []
+      # bd-7rspia: read_diff vs file_findings failures must be distinguishable
+      # from the record alone, with no ssh/journalctl step.
+      assert rec.failure_stage == "read_diff"
+      assert is_binary(rec.failure_reason)
+      assert String.contains?(rec.failure_reason, "boom")
     end
 
     test "the salvaged record is re-postable via greenlight/1 once the forge recovers" do
@@ -1788,7 +1827,10 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
         true ->
           conn
           |> Plug.Conn.put_resp_header("content-type", "application/json")
-          |> Plug.Conn.resp(404, Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"}))
+          |> Plug.Conn.resp(
+            404,
+            Jason.encode!(%{"message" => "unhandled #{conn.method} #{path}"})
+          )
       end
     end)
   end
@@ -1856,11 +1898,14 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
     end
   end
 
-  describe "MCP serialization — failure fields" do
-    test "external_review_list includes failure_stage and failure_reason in serialized records" do
+  # bd-7rspia: exercise the real MCP serializer (`Arbiter.MCP.Tools`), not a
+  # test-local copy — the REST equivalent lives in
+  # ArbiterWeb.Api.ExternalReviewControllerTest, alongside the real controller.
+  describe "MCP serialization — failure fields (bd-7rspia)" do
+    test "external_review_list and external_review_show include failure_stage and failure_reason" do
       ws = github_ws("er-mcp-failure-fields")
 
-      {:ok, _record} =
+      {:ok, record} =
         Ash.create(Record, %{
           pr_ref: "test/repo#4",
           pr: "4",
@@ -1872,60 +1917,20 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
           started_at: DateTime.utc_now()
         })
 
-      records = Arbiter.Reviews.Record |> Ash.read!()
-      serialized = Enum.map(records, &serialize_external_review/1)
+      scope = %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: ws.id, can_dispatch: true}
 
-      assert Enum.any?(serialized, fn s ->
-               s.failure_stage == "read_diff" && s.failure_reason == "connection timeout"
-             end)
+      assert {:ok, %{external_reviews: [listed]}} =
+               Arbiter.MCP.Tools.external_review_list(scope, %{})
+
+      assert listed.failure_stage == "read_diff"
+      assert listed.failure_reason == "connection timeout"
+
+      assert {:ok, shown} =
+               Arbiter.MCP.Tools.external_review_show(scope, %{"record_id" => record.id})
+
+      assert shown.failure_stage == "read_diff"
+      assert shown.failure_reason == "connection timeout"
     end
-  end
-
-  describe "REST API — failure fields" do
-    test "external_reviews endpoint includes failure_stage and failure_reason in response" do
-      ws = github_ws("er-api-failure-fields")
-
-      {:ok, _record} =
-        Ash.create(Record, %{
-          pr_ref: "test/repo#5",
-          pr: "5",
-          workspace_id: ws.id,
-          strategy: "github",
-          status: :failed,
-          failure_stage: "agent",
-          failure_reason: "rate_limit 429: too many requests",
-          started_at: DateTime.utc_now()
-        })
-
-      records = Record |> Ash.read!()
-      rendered = Enum.map(records, &render_external_review/1)
-
-      assert Enum.any?(rendered, fn r ->
-               r.failure_stage == "agent" && r.failure_reason == "rate_limit 429: too many requests"
-             end)
-    end
-  end
-
-  defp serialize_external_review(%Record{} = r) do
-    %{
-      id: r.id,
-      pr_ref: r.pr_ref,
-      status: r.status,
-      failure_stage: r.failure_stage,
-      failure_reason: r.failure_reason,
-      started_at: r.started_at
-    }
-  end
-
-  defp render_external_review(%Record{} = r) do
-    %{
-      id: r.id,
-      pr_ref: r.pr_ref,
-      status: r.status,
-      failure_stage: r.failure_stage,
-      failure_reason: r.failure_reason,
-      started_at: r.started_at
-    }
   end
 
   defp json(conn, body) do

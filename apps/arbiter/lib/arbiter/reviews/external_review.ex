@@ -269,7 +269,15 @@ defmodule Arbiter.Reviews.ExternalReview do
 
     post_verdict? = Map.get(opts, :post_verdict, posted != [])
 
-    case maybe_submit_verdict(adapter, mr_ref, record, posted, skipped, post_verdict?, adapter_opts) do
+    case maybe_submit_verdict(
+           adapter,
+           mr_ref,
+           record,
+           posted,
+           skipped,
+           post_verdict?,
+           adapter_opts
+         ) do
       {:ok, verdict_posted} ->
         mark_greenlit(record, posted)
 
@@ -392,7 +400,15 @@ defmodule Arbiter.Reviews.ExternalReview do
   defp maybe_submit_verdict(_adapter, _mr_ref, _record, _posted, _skipped, false, _opts),
     do: {:ok, false}
 
-  defp maybe_submit_verdict(adapter, mr_ref, %Record{} = record, posted, skipped, true, adapter_opts) do
+  defp maybe_submit_verdict(
+         adapter,
+         mr_ref,
+         %Record{} = record,
+         posted,
+         skipped,
+         true,
+         adapter_opts
+       ) do
     verdict = record.verdict || :approve
 
     body =
@@ -802,7 +818,11 @@ defmodule Arbiter.Reviews.ExternalReview do
         complete_review_record(record, :failed, failure_details)
 
       salvage ->
-        complete_review_record(record, :completed_unposted, Map.merge(salvage_result(salvage), failure_details))
+        complete_review_record(
+          record,
+          :completed_unposted,
+          Map.merge(salvage_result(salvage), failure_details)
+        )
     end
   end
 
@@ -1340,6 +1360,8 @@ defmodule Arbiter.Reviews.ExternalReview do
       # greenlight, same as a fresh :report_only review — awaits
       # `greenlight/1` to post the retained findings once the forge recovers.
       |> maybe_put(:greenlight_status, if(status == :completed_unposted, do: :pending, else: nil))
+      |> maybe_put(:failure_stage, Map.get(result, :failure_stage))
+      |> maybe_put(:failure_reason, Map.get(result, :failure_reason))
 
     case Ash.update(record, attrs, action: :complete) do
       {:ok, updated} ->
