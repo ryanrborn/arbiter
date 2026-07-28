@@ -24,13 +24,16 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
   end
 
   describe "GET /api/external_reviews" do
-    test "returns valid JSON with control characters in findings_summary properly escaped", %{conn: conn} do
+    test "returns valid JSON with control characters in findings_summary properly escaped", %{
+      conn: conn
+    } do
       # Create a record with a multi-line findings_summary (containing literal newlines)
       # that will be embedded in JSON
       _rec =
         insert_record!(%{
           finding_count: 2,
-          findings_summary: "[info] file.ex:10 — first finding\n[error] file.ex:20 — second finding"
+          findings_summary:
+            "[info] file.ex:10 — first finding\n[error] file.ex:20 — second finding"
         })
 
       conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
@@ -55,11 +58,14 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
       assert record["findings_summary"] =~ "second finding"
     end
 
-    test "multiple finding lines with embedded newlines round-trip through JSON encoding", %{conn: conn} do
+    test "multiple finding lines with embedded newlines round-trip through JSON encoding", %{
+      conn: conn
+    } do
       _rec =
         insert_record!(%{
           finding_count: 3,
-          findings_summary: "[info] path/to/file.ex:42 — issue one\n[warning] another/file.py:99 — issue two\n[error] third/file.rs:7 — issue three"
+          findings_summary:
+            "[info] path/to/file.ex:42 — issue one\n[warning] another/file.py:99 — issue two\n[error] third/file.rs:7 — issue three"
         })
 
       conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
@@ -140,8 +146,44 @@ defmodule ArbiterWeb.Api.ExternalReviewControllerTest do
 
       assert Map.has_key?(mcp_result, :external_reviews),
              "MCP should return :external_reviews key, got: #{inspect(Map.keys(mcp_result))}"
+
       assert is_list(mcp_result.external_reviews), "MCP external_reviews should be a list"
       assert length(mcp_result.external_reviews) == 1
+    end
+
+    test "REST and MCP both surface failure_stage and failure_reason (bd-7rspia)", %{conn: conn} do
+      _rec =
+        insert_record!(%{
+          status: :failed,
+          completed_at: nil,
+          failure_stage: "read_diff",
+          failure_reason: "forbidden 403: rate limited"
+        })
+
+      conn = get(conn, ~p"/api/external_reviews", %{workspace_id: @ws})
+      {:ok, rest_parsed} = Jason.decode(conn.resp_body)
+      [rest_record] = rest_parsed["data"]
+      assert rest_record["failure_stage"] == "read_diff"
+      assert rest_record["failure_reason"] == "forbidden 403: rate limited"
+
+      {:ok, mcp_result} =
+        Arbiter.MCP.Tools.external_review_list(
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: @ws, can_dispatch: true},
+          %{}
+        )
+
+      [mcp_record] = mcp_result.external_reviews
+      assert mcp_record.failure_stage == "read_diff"
+      assert mcp_record.failure_reason == "forbidden 403: rate limited"
+
+      {:ok, show_result} =
+        Arbiter.MCP.Tools.external_review_show(
+          %Arbiter.MCP.Scope{tier: :coordinator, workspace_id: @ws, can_dispatch: true},
+          %{"record_id" => mcp_record.id}
+        )
+
+      assert show_result.failure_stage == "read_diff"
+      assert show_result.failure_reason == "forbidden 403: rate limited"
     end
   end
 end
