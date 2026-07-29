@@ -565,7 +565,7 @@ defmodule Arbiter.Worker do
       task_id: state.task_id,
       task_title: lookup_task_title(state.task_id),
       repo: state.repo,
-      workspace_id: state.workspace_id,
+      workspace_id: effective_workspace_id(state),
       worker_type: worker_type_from_meta(state.meta),
       status: :running,
       started_at: state.started_at,
@@ -744,13 +744,46 @@ defmodule Arbiter.Worker do
 
   # ---- Usage ledger (Arbiter.Usage.Event) -------------------------------
 
+  # bd-93ru7w: reviewer/implementer workers get `workspace_id: nil` on their
+  # own State deliberately (see `spawn_acolyte/4`) so their completion stays
+  # silent — no Admiral notification, no MergeQueue pickup for the synthetic
+  # id. But that same nil was leaking into the *ledger* (Usage.Event and
+  # Workers.Run rows), which made `Arbiter.Usage.summarize/1` invisible to
+  # ~20% of spend — precisely the review/rework spend this ledger exists to
+  # surface. Resolve the real workspace from the authoring task for those two
+  # write paths only; the worker's own `state.workspace_id` (read by
+  # `broadcast_done/1`, `broadcast_worker_failed/1`, and the merge-queue gate)
+  # is untouched.
+  defp effective_workspace_id(%State{workspace_id: ws}) when is_binary(ws), do: ws
+
+  defp effective_workspace_id(%State{workspace_id: nil, task_id: task_id} = state) do
+    base_id = Arbiter.Worker.ReviewGate.base_task_id(task_id)
+
+    if base_id != task_id do
+      case Ash.get(Arbiter.Tasks.Issue, base_id) do
+        {:ok, %{workspace_id: ws}} -> ws
+        _ -> nil
+      end
+    else
+      nil
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.effective_workspace_id/1 swallowed for task=#{state.task_id}: #{Exception.message(e)}"
+      )
+
+      nil
+  end
+
   # Best-effort: persist a row in the structured usage ledger when a Claude
   # session exits. The session carries everything we need (model, tokens,
   # cost, duration) in its `:usage` map; we shovel it into `Arbiter.Usage.Event`
   # alongside the worker's identifying fields. A reviewer worker (spawned by
-  # the ReviewGate, meta.role == :reviewer) writes a `:review` step row;
-  # everything else writes `:work`. Missing fields are fine — we record what
-  # we have rather than dropping the row.
+  # the ReviewGate, meta.role == :reviewer) writes a `:review` step row, an
+  # implementer (meta.role == :implementer) a `:impl` row; everything else
+  # writes `:work`. Missing fields are fine — we record what we have rather
+  # than dropping the row.
   defp record_usage_event(%State{} = state, %{} = session, exit_status) do
     usage =
       session
@@ -762,6 +795,7 @@ defmodule Arbiter.Worker do
     step =
       cond do
         role == :reviewer -> :review
+        role == :implementer -> :impl
         true -> :work
       end
 
@@ -786,7 +820,7 @@ defmodule Arbiter.Worker do
 
     attrs = %{
       task_id: state.task_id,
-      workspace_id: state.workspace_id,
+      workspace_id: effective_workspace_id(state),
       repo: state.repo,
       step: step,
       model: model,

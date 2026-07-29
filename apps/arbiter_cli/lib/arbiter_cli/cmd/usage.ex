@@ -15,7 +15,7 @@ defmodule ArbiterCli.Cmd.Usage do
                 [--workspace <id>]
                 [--limit N]
                 [--json]
-      arb usage events [--task <task-id>] [--workspace <id>] [--step work|review]
+      arb usage events [--task <task-id>] [--workspace <id>] [--step work|review|impl]
                        [--since ...] [--limit N] [--json]
 
   `--by campaign` is still accepted as a deprecated alias for `--by epic`.

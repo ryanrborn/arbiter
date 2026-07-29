@@ -708,6 +708,241 @@ defmodule Arbiter.UsageTest do
       assert_in_delta ev.cost_usd, 0.15, 0.001
     end
 
+    test "review_gate reviewer session stamps the author task's workspace_id onto the ledger row and run, while the worker's own workspace_id stays nil" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "usage-attrib-#{System.unique_integer([:positive])}",
+          prefix: "ua#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, author} = Ash.create(Issue, %{title: "author task", workspace_id: ws.id})
+
+      reviewer_id = "#{author.id}#review"
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: reviewer_id,
+          repo: "arbiter",
+          workspace_id: nil,
+          meta: %{role: :reviewer, reviews: author.id}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      # The nil workspace_id on the worker's own state is exactly what suppresses
+      # Admiral notifications and merge-queue pickup for this synthetic id — that
+      # must be unaffected by fixing the ledger.
+      assert Worker.state(pid).workspace_id == nil
+
+      cwd = tmp_dir!("usage-attrib-review")
+
+      events = [
+        %{
+          "type" => "system",
+          "subtype" => "init",
+          "model" => "claude-sonnet-4-6",
+          "session_id" => "sess-attrib"
+        },
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "duration_ms" => 1000,
+          "total_cost_usd" => 0.25,
+          "usage" => %{"input_tokens" => 300, "output_tokens" => 80},
+          "result" => "VERDICT: APPROVE"
+        }
+      ]
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(task_id == ^reviewer_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      assert ev.step == :review
+      assert ev.workspace_id == ws.id
+
+      run =
+        wait_until(fn ->
+          case Arbiter.Workers.Run
+               |> Ash.Query.filter(task_id == ^reviewer_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      assert run.workspace_id == ws.id
+    end
+
+    test "review_gate implementer session writes an :impl row stamped with the author task's workspace_id" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "usage-impl-#{System.unique_integer([:positive])}",
+          prefix: "ui#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, author} = Ash.create(Issue, %{title: "author task for impl", workspace_id: ws.id})
+
+      implementer_id = "#{author.id}#review#impl1"
+
+      {:ok, pid} =
+        Worker.start(
+          task_id: implementer_id,
+          repo: "arbiter",
+          workspace_id: nil,
+          meta: %{role: :implementer, revises: author.id}
+        )
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+      cwd = tmp_dir!("usage-impl")
+
+      events = [
+        %{
+          "type" => "system",
+          "subtype" => "init",
+          "model" => "claude-sonnet-4-6",
+          "session_id" => "sess-impl"
+        },
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "duration_ms" => 1000,
+          "total_cost_usd" => 0.4,
+          "usage" => %{"input_tokens" => 300, "output_tokens" => 80},
+          "result" => "arb done"
+        }
+      ]
+
+      {:ok, _port} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: pid,
+          worktree_path: cwd,
+          command: stream_json_command(cwd, events)
+        )
+
+      ev =
+        wait_until(fn ->
+          case Event
+               |> Ash.Query.filter(task_id == ^implementer_id)
+               |> Ash.read!() do
+            [row] -> row
+            _ -> nil
+          end
+        end)
+
+      assert ev.step == :impl
+      assert ev.workspace_id == ws.id
+    end
+
+    test "usage_summarize totals match the raw ledger sum once work + review + impl all land" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "usage-e2e-#{System.unique_integer([:positive])}",
+          prefix: "e2#{System.unique_integer([:positive])}"
+        })
+
+      {:ok, author} = Ash.create(Issue, %{title: "e2e author task", workspace_id: ws.id})
+
+      result_event = fn cost ->
+        %{
+          "type" => "result",
+          "subtype" => "success",
+          "is_error" => false,
+          "duration_ms" => 1000,
+          "total_cost_usd" => cost,
+          "usage" => %{"input_tokens" => 100, "output_tokens" => 50},
+          "result" => "arb done"
+        }
+      end
+
+      # :work — normal dispatch, real workspace_id from the start.
+      {:ok, work_pid} = Worker.start(task_id: author.id, repo: "arbiter", workspace_id: ws.id)
+      on_exit(fn -> if Process.alive?(work_pid), do: GenServer.stop(work_pid, :normal) end)
+
+      {:ok, _} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: work_pid,
+          worktree_path: tmp_dir!("usage-e2e-work"),
+          command: stream_json_command(tmp_dir!("usage-e2e-work-cwd"), [result_event.(1.00)])
+        )
+
+      # :review and :impl — ReviewGate-spawned, workspace_id: nil on the worker.
+      reviewer_id = "#{author.id}#review"
+
+      {:ok, review_pid} =
+        Worker.start(
+          task_id: reviewer_id,
+          repo: "arbiter",
+          workspace_id: nil,
+          meta: %{role: :reviewer, reviews: author.id}
+        )
+
+      on_exit(fn -> if Process.alive?(review_pid), do: GenServer.stop(review_pid, :normal) end)
+
+      {:ok, _} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: review_pid,
+          worktree_path: tmp_dir!("usage-e2e-review"),
+          command: stream_json_command(tmp_dir!("usage-e2e-review-cwd"), [result_event.(0.50)])
+        )
+
+      implementer_id = "#{reviewer_id}#impl1"
+
+      {:ok, impl_pid} =
+        Worker.start(
+          task_id: implementer_id,
+          repo: "arbiter",
+          workspace_id: nil,
+          meta: %{role: :implementer, revises: author.id}
+        )
+
+      on_exit(fn -> if Process.alive?(impl_pid), do: GenServer.stop(impl_pid, :normal) end)
+
+      {:ok, _} =
+        Arbiter.Worker.ClaudeSession.start(
+          owner: impl_pid,
+          worktree_path: tmp_dir!("usage-e2e-impl"),
+          command: stream_json_command(tmp_dir!("usage-e2e-impl-cwd"), [result_event.(0.25)])
+        )
+
+      # Wait for all three rows to land.
+      rows =
+        wait_until(fn ->
+          case Event |> Ash.Query.filter(workspace_id == ^ws.id) |> Ash.read!() do
+            rows when length(rows) == 3 -> rows
+            _ -> nil
+          end
+        end)
+
+      raw_sum = Enum.reduce(rows, 0.0, &(&1.cost_usd + &2))
+      assert_in_delta raw_sum, 1.75, 0.001
+
+      {:ok, step_rollups} = Usage.summarize(by: :step, workspace_id: ws.id)
+      by_step = Map.new(step_rollups, &{&1.group, &1})
+
+      assert Map.has_key?(by_step, "work")
+      assert Map.has_key?(by_step, "review")
+      assert Map.has_key?(by_step, "impl")
+
+      summarized_total = Enum.reduce(step_rollups, 0.0, &(&1.total_cost_usd + &2))
+      assert_in_delta summarized_total, raw_sum, 0.001
+    end
+
     test "gemini/agy session writes provider=gemini even without stream-json events" do
       task_id = "bd-gemini-#{System.unique_integer([:positive])}"
 

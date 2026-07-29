@@ -2,11 +2,15 @@ defmodule Arbiter.Usage do
   @moduledoc """
   Ash domain + aggregation API for the structured token/cost usage ledger.
 
-  Every Claude session — work worker or ReviewGate reviewer — emits a final
-  `result` event carrying tokens (input / output / cache), `total_cost_usd`,
-  `duration_ms`, and model. The worker captures that and inserts an
-  `Arbiter.Usage.Event` row keyed by task + step (`:work | :review`) +
-  optional `workspace_id` and `worker_run_id` for joinability.
+  Every Claude session — work worker, ReviewGate reviewer, or ReviewGate
+  implementer — emits a final `result` event carrying tokens (input / output /
+  cache), `total_cost_usd`, `duration_ms`, and model. The worker captures that
+  and inserts an `Arbiter.Usage.Event` row keyed by task + step
+  (`:work | :review | :impl`) + `workspace_id` (always the authoring task's
+  workspace — see `Arbiter.Worker.effective_workspace_id/1` — even for
+  reviewer/implementer rows, whose worker carries `workspace_id: nil` for
+  unrelated notification-suppression reasons) and `worker_run_id` for
+  joinability.
 
   Multiple rows per task are deliberate: a re-slung task writes a second
   `:work` row, a ReviewGate review adds a `:review` row, etc. Rework is then
