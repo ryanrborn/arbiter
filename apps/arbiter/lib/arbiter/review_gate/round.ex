@@ -43,8 +43,18 @@ defmodule Arbiter.ReviewGate.Round do
                           shape). Nil when not captured (e.g. a stub fixture in
                           tests, which never emits a `result` event).
     * `cost_usd`        — USD cost of this pass. Nil when not captured.
-    * `converged`       — true only for a `:review` row whose verdict is
-                          `:approve`; false otherwise (including all `:impl` rows).
+    * `criteria_total`  — number of acceptance criteria the reviewer addressed
+                          in its per-criterion CRITERIA breakdown (bd-4yhv4x).
+                          Nil when the pass carried no breakdown (an `:impl` row,
+                          or a `:review` row on a task with no stated criteria).
+    * `criteria_unmet`  — how many of those the breakdown marked `[NOT MET]`.
+                          Nil alongside a nil `criteria_total`; makes "APPROVE
+                          with N criteria unmet" queryable without re-reading
+                          the reviewer transcript.
+    * `converged`       — true for a `:review` row whose verdict is `:approve`
+                          AND whose CRITERIA breakdown left no criterion unmet;
+                          false otherwise (including all `:impl` rows, and an
+                          APPROVE that admits an unmet criterion).
 
   ## Metric start date
 
@@ -92,6 +102,8 @@ defmodule Arbiter.ReviewGate.Round do
         :finding_count,
         :reviewer_model,
         :cost_usd,
+        :criteria_total,
+        :criteria_unmet,
         :converged
       ]
     end
@@ -152,11 +164,23 @@ defmodule Arbiter.ReviewGate.Round do
       description "USD cost of this pass. Nil when not captured."
     end
 
+    attribute :criteria_total, :integer do
+      public? true
+      constraints min: 0
+      description "Acceptance criteria addressed in the reviewer's CRITERIA breakdown. Nil when no breakdown."
+    end
+
+    attribute :criteria_unmet, :integer do
+      public? true
+      constraints min: 0
+      description "How many addressed criteria the breakdown marked [NOT MET]. Nil when no breakdown."
+    end
+
     attribute :converged, :boolean do
       allow_nil? false
       public? true
       default false
-      description "True only for a :review row with verdict :approve."
+      description "True for a :review APPROVE with no criterion left unmet."
     end
 
     create_timestamp :inserted_at
