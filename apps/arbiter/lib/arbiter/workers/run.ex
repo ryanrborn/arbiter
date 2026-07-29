@@ -20,6 +20,15 @@ defmodule Arbiter.Workers.Run do
   `Arbiter.Worker.OutputLog` (path `<output_log_root>/<id>.log`) and is the
   audit source of record. Retrieve it with `arb worker log <task-id>` or
   `GET /api/workers/:task_id/log`.
+
+  ## Provenance (bd-dzz6ly)
+
+  `resolved_skills`, `standing_orders_digest`, `routing_policy`, `model_tier`,
+  `thinking`, and `difficulty_at_dispatch` record *what governed* the run, not
+  just what happened — so "which runs had skill X active, grouped by outcome"
+  is answerable without reading a transcript. Provenance recording started
+  2026-07-29; runs before that date have these fields `nil` (backfill is out
+  of scope — nil means "predates provenance," not "nothing applied").
   """
 
   use Ash.Resource,
@@ -75,7 +84,13 @@ defmodule Arbiter.Workers.Run do
         :mr_ref,
         :merger_url,
         :session_id,
-        :config_dir
+        :config_dir,
+        :difficulty_at_dispatch,
+        :resolved_skills,
+        :standing_orders_digest,
+        :routing_policy,
+        :model_tier,
+        :thinking
       ]
     end
 
@@ -94,7 +109,12 @@ defmodule Arbiter.Workers.Run do
         :mr_ref,
         :merger_url,
         :session_id,
-        :config_dir
+        :config_dir,
+        :resolved_skills,
+        :standing_orders_digest,
+        :routing_policy,
+        :model_tier,
+        :thinking
       ]
     end
   end
@@ -225,6 +245,71 @@ defmodule Arbiter.Workers.Run do
 
       description "Effective CLAUDE_CONFIG_DIR the worker spawned under (workers use an " <>
                     "isolated dir, not ~/.claude). Roots the on-disk session JSONL lookup."
+    end
+
+    # ---- Run provenance (bd-dzz6ly) ---------------------------------------
+    #
+    # What GOVERNED this run, not just what happened. Populated best-effort,
+    # in two waves: `difficulty_at_dispatch` is known before the worker even
+    # starts (stamped into `record_run_started/1`'s create attrs from meta);
+    # the rest are resolved later in the dispatch/spawn path (routing choice,
+    # materialized skills, workspace config) and backfilled via the same
+    # `:report` -> DB-patch path `:model` already uses. Nil on any run that
+    # predates this column (added 2026-07-29) — backfill is explicitly out of
+    # scope; a nil provenance field simply means "before we started recording
+    # it," not "nothing applied."
+    attribute :resolved_skills, {:array, :map} do
+      public? true
+      default []
+
+      description "Effective post-layering skill set (workspace -> repo -> task) active " <>
+                    "for this run: [{\"name\", \"activation_mode\", \"skill_version\"}, ...]. " <>
+                    "\"skill_version\" is the skill's updated_at at dispatch time, so a later " <>
+                    "edit to the skill body doesn't retroactively relabel this run's provenance."
+    end
+
+    attribute :standing_orders_digest, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "SHA-256 hex digest of the workspace's effective standing_orders text at " <>
+                    "dispatch time. Nil when the workspace has no standing_orders configured."
+    end
+
+    attribute :routing_policy, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "Which routing policy decided the model/tier for this run " <>
+                    "(\"static\" / \"by_priority\" / \"by_difficulty\" / \"by_budget\" / " <>
+                    "\"round_robin\" / \"review_agent\" — the last for a ReviewGate reviewer, " <>
+                    "which is configured directly rather than routed)."
+    end
+
+    attribute :model_tier, :string do
+      public? true
+      constraints max_length: 32, trim?: true
+
+      description "Resolved abstract tier (\"economy\" / \"standard\" / \"premium\"), not just " <>
+                    "the concrete model string already captured in :model."
+    end
+
+    attribute :thinking, :string do
+      public? true
+      constraints max_length: 32, trim?: true
+
+      description "Resolved abstract reasoning effort (\"none\" / \"low\" / \"medium\" / \"high\")."
+    end
+
+    attribute :difficulty_at_dispatch, :integer do
+      public? true
+      constraints min: 0, max: 4
+
+      description "The task's Issue.difficulty AT THE TIME this run was dispatched. A task's " <>
+                    "difficulty can be edited later (bd-7rspia was corrected D1 -> D2 after the " <>
+                    "fact) — reading the current issues.difficulty would silently attribute a " <>
+                    "run to the corrected estimate rather than the one it actually ran under, " <>
+                    "which would make difficulty-calibration analysis dishonest."
     end
 
     create_timestamp :inserted_at

@@ -1416,7 +1416,13 @@ defmodule Arbiter.MCP.Tools do
       started_at: iso(run.started_at),
       completed_at: iso(run.completed_at),
       exit_code: run.exit_code,
-      failure_reason: run.failure_reason
+      failure_reason: run.failure_reason,
+      resolved_skills: run.resolved_skills || [],
+      standing_orders_digest: run.standing_orders_digest,
+      routing_policy: run.routing_policy,
+      model_tier: run.model_tier,
+      thinking: run.thinking,
+      difficulty_at_dispatch: run.difficulty_at_dispatch
     }
   end
 

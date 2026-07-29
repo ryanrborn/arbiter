@@ -573,7 +573,13 @@ defmodule Arbiter.Worker do
       # bd-auma3z: when this worker was resumed (re-attached to a preserved
       # worktree), link the new run to the prior one so the stopped→resumed
       # lineage is traceable and metrics don't read it as two unrelated runs.
-      resumed_from_run_id: resumed_from_run_id(state.meta)
+      resumed_from_run_id: resumed_from_run_id(state.meta),
+      # bd-dzz6ly: the task's difficulty AT DISPATCH TIME, stamped into meta by
+      # the dispatcher before the worker starts (unlike the other provenance
+      # fields below, which are resolved after spawn and backfilled). Captured
+      # here — not read from `issues.difficulty` later — so a subsequent
+      # difficulty edit never retroactively relabels this run's provenance.
+      difficulty_at_dispatch: difficulty_at_dispatch(state.meta)
     }
 
     case Ash.create(Arbiter.Workers.Run, attrs) do
@@ -594,6 +600,11 @@ defmodule Arbiter.Worker do
     do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")
 
   defp resumed_from_run_id(_), do: nil
+
+  defp difficulty_at_dispatch(meta) when is_map(meta),
+    do: Map.get(meta, :difficulty_at_dispatch) || Map.get(meta, "difficulty_at_dispatch")
+
+  defp difficulty_at_dispatch(_), do: nil
 
   # Classify the worker that owns this run from its meta, mirroring the role
   # tags the ReviewGate and Dispatch stamp:
@@ -1019,6 +1030,14 @@ defmodule Arbiter.Worker do
       backfill_run_model(state.run_id, value, state.task_id)
     end
 
+    # bd-dzz6ly: routing/skills/standing_orders are resolved after this
+    # worker's Run row already exists (dispatch/spawn happens post-init), so
+    # they arrive as a single reported map and get patched onto the row the
+    # same way :model's late arrival does above.
+    if key == :run_provenance and not is_nil(state.run_id) and is_map(value) do
+      backfill_run_fields(state.run_id, value, state.task_id)
+    end
+
     {:reply, :ok, state}
   end
 
@@ -1101,7 +1120,7 @@ defmodule Arbiter.Worker do
       # a Gemini/Codex run has no Claude session file to reconcile against.
       if config_dir && new_state.run_id &&
            Map.get(session_config, :provider) in [nil, "claude"] do
-        stamp_run_session_coords(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
+        backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
       end
 
       {:reply, {:ok, port}, new_state}
@@ -1391,7 +1410,7 @@ defmodule Arbiter.Worker do
         end
 
         if not had_session_id? and not is_nil(session_id) and not is_nil(new_state.run_id) do
-          stamp_run_session_coords(new_state.run_id, %{session_id: session_id}, new_state.task_id)
+          backfill_run_fields(new_state.run_id, %{session_id: session_id}, new_state.task_id)
         end
 
         # Race-condition patch: if the worker already terminated (fail_now/complete_now
@@ -1421,18 +1440,20 @@ defmodule Arbiter.Worker do
     e -> log_run_warning("backfill_model", task_id, e)
   end
 
-  # bd-au3xrq: best-effort stamp of the on-disk session-JSONL coordinates
-  # (`session_id` / `config_dir`) onto the run row. Same swallow-and-log
-  # discipline as backfill_run_model — a DB hiccup must never crash the worker.
-  defp stamp_run_session_coords(run_id, fields, task_id) when is_map(fields) do
+  # Generic best-effort field patch onto the run row: originally the on-disk
+  # session-JSONL coordinates (`session_id` / `config_dir`, bd-au3xrq), now
+  # also used for the bd-dzz6ly provenance fields reported post-spawn. Same
+  # swallow-and-log discipline as backfill_run_model — a DB hiccup must never
+  # crash the worker.
+  defp backfill_run_fields(run_id, fields, task_id) when is_map(fields) do
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, fields, action: :update) do
       :ok
     else
-      {:error, reason} -> log_run_warning("stamp_session_coords", task_id, reason)
+      {:error, reason} -> log_run_warning("backfill_fields", task_id, reason)
     end
   rescue
-    e -> log_run_warning("stamp_session_coords", task_id, e)
+    e -> log_run_warning("backfill_fields", task_id, e)
   end
 
   # The effective CLAUDE_CONFIG_DIR a spawn ran under: the value injected into
