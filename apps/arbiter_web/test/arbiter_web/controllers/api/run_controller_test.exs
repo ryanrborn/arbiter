@@ -106,6 +106,37 @@ defmodule ArbiterWeb.Api.RunControllerTest do
       # Summary carries the worker_type + model surfaced in the history list.
       assert List.last(data)["model"] == "claude-opus-4-8"
     end
+
+    # bd-dzz6ly: worker_runs must expose what governed the run, not just what
+    # happened, over REST too — mirrors the MCP tool's surface.
+    test "lists provenance fields (resolved_skills/routing_policy/model_tier/thinking/standing_orders_digest/difficulty_at_dispatch)",
+         %{conn: conn} do
+      _ =
+        insert_run!(%{
+          task_id: "bd-prov",
+          resolved_skills: [
+            %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+          ],
+          standing_orders_digest: String.duplicate("b", 64),
+          routing_policy: "by_priority",
+          model_tier: "standard",
+          thinking: "medium",
+          difficulty_at_dispatch: 2
+        })
+
+      conn = get(conn, ~p"/api/workers/history", %{task_id: "bd-prov"})
+      [entry] = json_response(conn, 200)["data"]
+
+      assert entry["resolved_skills"] == [
+               %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+             ]
+
+      assert entry["standing_orders_digest"] == String.duplicate("b", 64)
+      assert entry["routing_policy"] == "by_priority"
+      assert entry["model_tier"] == "standard"
+      assert entry["thinking"] == "medium"
+      assert entry["difficulty_at_dispatch"] == 2
+    end
   end
 
   describe "GET /api/workers/history/:id" do

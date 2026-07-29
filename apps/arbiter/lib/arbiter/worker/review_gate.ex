@@ -156,6 +156,7 @@ defmodule Arbiter.Worker.ReviewGate do
   alias Arbiter.Worker.ClaudeSession
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewVerification
+  alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
   alias Arbiter.Workers.Run
 
@@ -1615,8 +1616,31 @@ defmodule Arbiter.Worker.ReviewGate do
     end
   end
 
-  defp acolyte_meta(state, :reviewer), do: %{role: :reviewer, reviews: state.task_id}
-  defp acolyte_meta(state, :implementer), do: %{role: :implementer, revises: state.task_id}
+  defp acolyte_meta(state, :reviewer) do
+    %{
+      role: :reviewer,
+      reviews: state.task_id,
+      difficulty_at_dispatch: difficulty_for(state.task_id)
+    }
+  end
+
+  defp acolyte_meta(state, :implementer) do
+    %{
+      role: :implementer,
+      revises: state.task_id,
+      difficulty_at_dispatch: difficulty_for(state.task_id)
+    }
+  end
+
+  # bd-dzz6ly: `state.task_id` is the BASE task id (not a synthetic ReviewGate
+  # id), so this reads the same `Issue.difficulty` the original dispatch saw —
+  # best-effort, nil on any lookup failure rather than blocking the spawn.
+  defp difficulty_for(task_id) do
+    case load_issue(task_id) do
+      %Issue{difficulty: difficulty} -> difficulty
+      _ -> nil
+    end
+  end
 
   defp step_for(:reviewer), do: :reviewing
   defp step_for(:implementer), do: :revising
@@ -1667,6 +1691,19 @@ defmodule Arbiter.Worker.ReviewGate do
           agent_opts_for_role(ws, role_atom, state.task_id) ++
             [security: SecurityPolicy.resolve(ws, %{}, state.repo)]
 
+        # bd-dzz6ly: same provenance backfill the main dispatch path reports
+        # (Arbiter.Worker.Dispatch.build_agent_session_opts/4), so a reviewer
+        # or revise-round implementer run answers "what governed it" too.
+        # No `resolved_skills` here — these acolyte roles don't carry a
+        # materialized skill set today, unlike the main worker.
+        Worker.report(pid, :run_provenance, %{
+          resolved_skills: [],
+          standing_orders_digest: RunProvenance.standing_orders_digest(ws),
+          routing_policy: routing_policy_for_role(role_atom, ws),
+          model_tier: Keyword.get(agent_opts, :model_tier),
+          thinking: Keyword.get(agent_opts, :thinking)
+        })
+
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
@@ -1682,6 +1719,15 @@ defmodule Arbiter.Worker.ReviewGate do
     do: {Agents.reviewer_for_workspace(ws), :review_agent}
 
   defp adapter_for(%Workspace{} = ws, :implementer), do: {Agents.for_workspace(ws), :agent}
+
+  # bd-dzz6ly: the reviewer slot is configured directly (`review_agent.config`)
+  # and never goes through `Arbiter.Agents.Routing` — record that plainly
+  # rather than claiming a routing policy that didn't actually decide
+  # anything. The implementer slot DOES route through `Routing.choose`
+  # (`agent_opts_for_role/3` below), so its provenance reflects the
+  # workspace's configured policy.
+  defp routing_policy_for_role(:review_agent, _ws), do: "review_agent"
+  defp routing_policy_for_role(:agent, ws), do: RunProvenance.routing_policy_string(ws)
 
   # The reviewer slot has its own config under `review_agent.config.*`
   # (falls back to the worker `agent` block so a workspace that names only
