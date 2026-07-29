@@ -879,6 +879,212 @@ defmodule Arbiter.Worker.ReviewGateTest do
     end
   end
 
+  # ---- reviewer tier routed by task difficulty (bd-3xultf) -----------------
+  #
+  # The reviewer's tier defaults to the task's own tier bumped one step
+  # (capped at premium) rather than a workspace-wide pin, so a D0/D1 task
+  # doesn't draw an Opus reviewer. Resolution uses `difficulty_at_dispatch`
+  # (the author run's own immutable provenance) — not a live re-read of
+  # `Issue.difficulty` — so a later difficulty edit can't retroactively change
+  # which tier a past round ran under.
+  describe "reviewer tier routed by task difficulty (bd-3xultf)" do
+    setup %{tmp: tmp} do
+      argv_file = Path.join(tmp, "reviewer-tier-argv.txt")
+      stub_dir = Path.join(tmp, "stub-bin-tier")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      %{argv_file: argv_file}
+    end
+
+    defp spawn_reviewer_for_tier_test(ws, task, repo) do
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 3_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+      pid
+    end
+
+    defp tier_ws(config_overrides \\ %{}) do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "tier-ws-#{System.unique_integer([:positive])}",
+          prefix: "ti",
+          config:
+            Map.merge(
+              %{
+                "review" => %{"required" => true, "rounds" => 1},
+                "agent" => %{"type" => "claude", "config" => %{}},
+                "review_agent" => %{"type" => "claude"}
+              },
+              config_overrides
+            )
+        })
+
+      ws
+    end
+
+    test "D1 task (economy author) gets a standard reviewer, one tier up",
+         %{repo: repo, argv_file: argv_file} do
+      ws = tier_ws()
+      task = new_task(ws, %{difficulty: 1})
+      spawn_reviewer_for_tier_test(ws, task, repo)
+
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "sonnet" in args
+    end
+
+    test "D3 task (premium author) keeps a premium reviewer, capped",
+         %{repo: repo, argv_file: argv_file} do
+      ws = tier_ws()
+      task = new_task(ws, %{difficulty: 3})
+      spawn_reviewer_for_tier_test(ws, task, repo)
+
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "opus" in args
+    end
+
+    test "review_agent.config.tier_offset: 0 restores a fixed (same-tier) reviewer",
+         %{repo: repo, argv_file: argv_file} do
+      ws = tier_ws(%{"review_agent" => %{"type" => "claude", "config" => %{"tier_offset" => 0}}})
+      task = new_task(ws, %{difficulty: 1})
+      spawn_reviewer_for_tier_test(ws, task, repo)
+
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "haiku" in args
+    end
+
+    test "an explicit review_agent.config.model_tier still overrides difficulty routing",
+         %{repo: repo, argv_file: argv_file} do
+      ws =
+        tier_ws(%{
+          "review_agent" => %{"type" => "claude", "config" => %{"model_tier" => "economy"}}
+        })
+
+      # D3 would otherwise route to premium — the explicit override wins.
+      task = new_task(ws, %{difficulty: 3})
+      spawn_reviewer_for_tier_test(ws, task, repo)
+
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      assert "haiku" in args
+    end
+
+    test "reviewer tier is resolved from difficulty_at_dispatch, not a later difficulty edit",
+         %{repo: repo, argv_file: argv_file} do
+      ws = tier_ws()
+      # Task is dispatched at D1 (economy author → standard reviewer)...
+      task = new_task(ws, %{difficulty: 1})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 3_000,
+        difficulty_at_dispatch: 1
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+
+      # ...but the difficulty is corrected to D3 (premium author) before the
+      # ReviewGate ever spawns the reviewer.
+      {:ok, _task} = Ash.update(task, %{difficulty: 3})
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+      args = File.read!(argv_file) |> String.split("\n", trim: true)
+      assert "--model" in args
+      # Still sonnet (D1 → economy → standard) — NOT opus, which is what a
+      # live re-read of the corrected D3 would have produced.
+      assert "sonnet" in args
+      refute "opus" in args
+    end
+
+    test "the resolved reviewer tier is persisted onto the round's Round row",
+         %{repo: repo} do
+      ws = tier_ws()
+      task = new_task(ws, %{difficulty: 1})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        review_command: [@reviewer, "APPROVE"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+
+      require Ash.Query
+
+      [round] =
+        Arbiter.ReviewGate.Round
+        |> Ash.Query.filter(task_id == ^task.id and role == :review)
+        |> Ash.read!()
+
+      assert round.reviewer_tier == "standard"
+    end
+  end
+
   # ---- verdict re-prompt (bd-8v8ays) ---------------------------------------
 
   describe "verdict re-prompt" do

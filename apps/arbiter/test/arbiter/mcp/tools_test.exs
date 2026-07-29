@@ -2696,6 +2696,7 @@ defmodule Arbiter.MCP.ToolsTest do
           findings: "VERDICT: REQUEST_CHANGES\n1. fix the thing",
           finding_count: 1,
           reviewer_model: "claude-sonnet-5",
+          reviewer_tier: "standard",
           cost_usd: 0.12,
           converged: false
         })
@@ -2720,6 +2721,9 @@ defmodule Arbiter.MCP.ToolsTest do
       assert round1.round == 1
       assert round1.verdict == :request_changes
       assert round1.converged == false
+      # bd-3xultf: the resolved reviewer tier is exposed alongside
+      # reviewer_model so analysis can control for the judge.
+      assert round1.reviewer_tier == "standard"
       assert round2.round == 2
       assert round2.verdict == :approve
       assert round2.converged == true

@@ -262,6 +262,37 @@ defmodule Arbiter.Agents.RoutingTest do
       assert ByDifficulty.effective_difficulty(-1) == 0
       assert ByDifficulty.effective_difficulty(99) == 4
     end
+
+    # bd-3xultf: the reviewer tier is derived from the author's nominal tier
+    # (this table), then bumped one step by ReviewGate — kept independent of
+    # any workspace `routing.rules` override, which only affects the author.
+    test "tier_for_difficulty/1 returns the default-mapping tier for each difficulty" do
+      assert ByDifficulty.tier_for_difficulty(0) == "economy"
+      assert ByDifficulty.tier_for_difficulty(1) == "economy"
+      assert ByDifficulty.tier_for_difficulty(2) == "standard"
+      assert ByDifficulty.tier_for_difficulty(3) == "premium"
+      assert ByDifficulty.tier_for_difficulty(4) == "premium"
+      assert ByDifficulty.tier_for_difficulty(nil) == "standard"
+    end
+
+    test "bump_tier/2 bumps one step, offset 1" do
+      assert ByDifficulty.bump_tier("economy", 1) == "standard"
+      assert ByDifficulty.bump_tier("standard", 1) == "premium"
+    end
+
+    test "bump_tier/2 caps at premium rather than overflowing" do
+      assert ByDifficulty.bump_tier("premium", 1) == "premium"
+      assert ByDifficulty.bump_tier("economy", 5) == "premium"
+    end
+
+    test "bump_tier/2 offset 0 is a no-op (the fixed-reviewer rollback knob)" do
+      assert ByDifficulty.bump_tier("economy", 0) == "economy"
+      assert ByDifficulty.bump_tier("premium", 0) == "premium"
+    end
+
+    test "bump_tier/2 passes an unrecognized tier through unchanged" do
+      assert ByDifficulty.bump_tier("weird", 1) == "weird"
+    end
   end
 
   describe "ByBudget policy (with :by_priority base, default)" do

@@ -95,4 +95,29 @@ defmodule Arbiter.Worker.OutputLogTest do
     assert List.first(lines) == "line 1"
     assert List.last(lines) == "line 5000"
   end
+
+  describe "tail_lines/2 — bounded terminal-signal read for loop analysis" do
+    test "returns only the last n lines of a long transcript", %{run_id: run_id} do
+      {:ok, handle} = OutputLog.open(run_id)
+      Enum.each(1..5_000, fn i -> OutputLog.append(handle, "line #{i}") end)
+      OutputLog.close(handle)
+
+      assert {:ok, tail} = OutputLog.tail_lines(run_id, 40)
+      assert length(tail) == 40
+      assert List.first(tail) == "line 4961"
+      assert List.last(tail) == "line 5000"
+    end
+
+    test "a transcript shorter than n returns all its lines", %{run_id: run_id} do
+      {:ok, handle} = OutputLog.open(run_id)
+      OutputLog.append(handle, "only line")
+      OutputLog.close(handle)
+
+      assert {:ok, ["only line"]} = OutputLog.tail_lines(run_id, 40)
+    end
+
+    test "a missing transcript is {:error, :enoent}, not a crash", %{run_id: run_id} do
+      assert {:error, :enoent} = OutputLog.tail_lines(run_id, 40)
+    end
+  end
 end

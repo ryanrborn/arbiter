@@ -276,6 +276,22 @@ Look for:
 
 Catch failures early — don't wait for them to be reported upstream.
 
+## 17. Loop analysis (weekly)
+
+Periodically review how the loop itself is performing:
+
+    arb loop analyze --since 7d          # or: mix arbiter.loop.analyze --since 7d
+
+This is the **manual, read-only** Stage 1 loop-analysis pass. It segments
+failures operational-vs-agent-quality by allowlist (so our own deploy restarts
+don't dominate), corroborates each `failure_reason` against the transcript
+(the label lies — context-exhaustion hides behind "rate-limited"/"crashed"
+labels), and emits a report with a suggested destination per finding (skill /
+repo `CLAUDE.md` / per-task override). It **writes nothing** but the report and
+one cost-ledger row — you read it and decide. Evidence bar for any fleet-wide
+change: ≥ 3 incidents across ≥ 2 tasks; a single incident is a per-task
+override. Full guide: `docs/loop-review.md`.
+
 ---
 
 _Generic — not operator-personal. Edit freely as you learn._
