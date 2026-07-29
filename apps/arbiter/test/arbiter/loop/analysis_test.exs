@@ -197,6 +197,49 @@ defmodule Arbiter.Loop.AnalysisTest do
     end
   end
 
+  describe "reviewer-finding incidents are counted per-task, not per-run" do
+    test "two failed agent-quality runs of one task contribute one incident" do
+      # Corpus keys the same task-level `findings` list to every run of a task
+      # (review rounds are recorded under the base task id, not a run id). Two
+      # failed agent-quality runs of the same task must count as ONE incident of
+      # a given reviewer-finding category — not two — else the evidence line and
+      # the categories table are inflated.
+      finding = ["Tests are green but the new code path is never executed at runtime — inert."]
+
+      rows = [
+        row(%{
+          run_id: "attempt-1",
+          task_id: "bd-dup",
+          status: :failed,
+          failure_reason: ":review_gate_rejected",
+          rejected?: true,
+          converged?: false,
+          max_round: 2,
+          findings: finding,
+          terminal_lines: ["VERDICT: request_changes"]
+        }),
+        row(%{
+          run_id: "attempt-2",
+          task_id: "bd-dup",
+          status: :failed,
+          failure_reason: ":review_gate_rejected",
+          rejected?: true,
+          converged?: false,
+          max_round: 2,
+          findings: finding,
+          terminal_lines: ["VERDICT: request_changes"]
+        })
+      ]
+
+      report = Analysis.build_report(rows, label: "test")
+
+      cat = Enum.find(report.finding_categories, &(&1.category =~ "inert at runtime"))
+      assert cat
+      assert cat.incidents == 1
+      assert cat.tasks == ["bd-dup"]
+    end
+  end
+
   # ---- the evidence bar --------------------------------------------------
 
   describe "evidence bar: >=3 incidents across >=2 tasks earns a fleet-wide suggestion" do

@@ -115,7 +115,20 @@ defmodule Arbiter.Loop.Analysis do
   defp class_rank(_), do: 4
 
   defp misclassification(classified) do
-    corroborated = Enum.filter(classified, & &1.classification.corroborated)
+    # Only an *operational* label can be "hiding" an agent-quality failure
+    # behind ops noise (the c88c77b0 case: labelled rate-limited, actually
+    # context exhaustion). Agent-quality-labelled runs also carry transcripts,
+    # so including them in the denominator would dilute the true
+    # operational-mislabel rate — on the real corpus `:review_gate_rejected`
+    # failures dominate and would understate the signal by a large factor.
+    # Restrict the denominator to operational labels; the numerator is the
+    # subset of those that the transcript flipped to agent-quality.
+    corroborated =
+      Enum.filter(
+        classified,
+        &(&1.classification.corroborated and &1.classification.label_class == :operational)
+      )
+
     reclassified = Enum.filter(corroborated, & &1.classification.reclassified)
 
     n_corr = length(corroborated)
@@ -148,6 +161,16 @@ defmodule Arbiter.Loop.Analysis do
   ]
 
   defp finding_categories(agent_quality_rows) do
+    # Reviewer findings are task-level: `Corpus` keys the same `findings` list
+    # to every run of a task (review rounds are recorded under the base task
+    # id, not a run id). Counting per-row would therefore count each finding
+    # once per failed agent-quality *run* of the task — inflating `incidents`
+    # for any task with more than one such run. Dedupe to one entry per
+    # `(category, task)` so a task's finding is counted once per task.
+    #
+    # Context-exhaustion (`from_context` below) is deliberately NOT deduped:
+    # it is a per-run death detected from that run's own transcript, so two
+    # context deaths in one task are two genuine incidents.
     from_findings =
       agent_quality_rows
       |> Enum.flat_map(fn row ->
@@ -157,6 +180,7 @@ defmodule Arbiter.Loop.Analysis do
         |> Enum.uniq()
         |> Enum.map(fn {cat, example} -> {cat, row, example} end)
       end)
+      |> Enum.uniq_by(fn {cat, row, _ex} -> {cat, row.task_id} end)
 
     from_context =
       agent_quality_rows
