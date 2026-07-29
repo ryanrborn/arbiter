@@ -223,7 +223,7 @@ defmodule ArbiterWeb.UsageLive do
                   <div
                     :if={quota.utilization_5h}
                     class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
-                    style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
+                    style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at, quota.overage_status)};"}
                   />
                   <.quota_marker
                     :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
@@ -257,7 +257,7 @@ defmodule ArbiterWeb.UsageLive do
                   <div
                     :if={quota.utilization_7d}
                     class="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
-                    style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
+                    style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at, quota.overage_status)};"}
                   />
                   <.quota_marker
                     :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
