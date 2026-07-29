@@ -85,6 +85,41 @@ defmodule Arbiter.ReviewGate.RoundTest do
     assert r2.converged == true
   end
 
+  test "records per-criterion counts so 'APPROVE with N criteria unmet' is queryable (bd-4yhv4x)" do
+    round =
+      create!(%{
+        verdict: :approve,
+        findings: "VERDICT: APPROVE\nCRITERIA:\n- [MET] one\n- [NOT MET] two",
+        criteria_total: 2,
+        criteria_unmet: 1,
+        converged: false
+      })
+
+    assert round.criteria_total == 2
+    assert round.criteria_unmet == 1
+
+    # The whole point of recording structurally: this is a query, not a
+    # transcript re-read.
+    unmet_approvals =
+      Round
+      |> Ash.Query.filter(verdict == :approve and criteria_unmet > 0)
+      |> Ash.read!()
+
+    assert Enum.any?(unmet_approvals, &(&1.id == round.id))
+  end
+
+  test "criteria counts are nil for a review round with no breakdown" do
+    round =
+      create!(%{
+        verdict: :approve,
+        findings: "VERDICT: APPROVE\nlooks good",
+        converged: true
+      })
+
+    assert round.criteria_total == nil
+    assert round.criteria_unmet == nil
+  end
+
   test "rejects an invalid role" do
     assert {:error, _} =
              Ash.create(Round, %{task_id: "bd-bad-role", round: 1, role: :bogus})
