@@ -1813,9 +1813,11 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Reconcile the workspace's tasks against its external tracker (`arb sync`): open
   assigned issues with no task get a linked task; open tasks whose issue is
-  unassigned/closed get closed; closed tasks whose tracker issue is still open
-  are reported as `drift` (bd-2wilou — a close that never propagated
-  upstream). Drift entries are report-only and never mutate the local task.
+  closed upstream or reassigned away get closed (an issue that is merely
+  unassigned is left alone — bd-83ojwi); closed non-`task` tasks whose tracker
+  issue is still open are reported as `drift` (bd-2wilou — a close that never
+  propagated upstream). Drift entries are report-only and never mutate the
+  local task.
   Coordinator only. With `dry: true` the plan is returned without acting.
   No-ops cleanly when the tracker does not support reconciliation. Backs onto
   `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2`.
