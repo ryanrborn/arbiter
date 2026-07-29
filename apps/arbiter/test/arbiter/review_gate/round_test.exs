@@ -22,6 +22,7 @@ defmodule Arbiter.ReviewGate.RoundTest do
         findings: "VERDICT: APPROVE\nlooks good",
         finding_count: 0,
         reviewer_model: "claude-sonnet-5",
+        reviewer_tier: "standard",
         cost_usd: 0.42,
         converged: true
       })
@@ -30,8 +31,17 @@ defmodule Arbiter.ReviewGate.RoundTest do
     assert round.verdict == :approve
     assert round.converged == true
     assert round.reviewer_model == "claude-sonnet-5"
+    assert round.reviewer_tier == "standard"
     assert round.cost_usd == 0.42
     assert %DateTime{} = round.inserted_at
+  end
+
+  # bd-3xultf: the resolved tier is recorded alongside `reviewer_model` so
+  # convergence analysis can segment by (and control for) the judge's tier —
+  # a moving reviewer would otherwise read as a quality change.
+  test "reviewer_tier is nil when not captured (an :impl row, or an unrouted reviewer)" do
+    round = create!(%{role: :impl, converged: false})
+    assert round.reviewer_tier == nil
   end
 
   test "persists an implementer round with no verdict" do
