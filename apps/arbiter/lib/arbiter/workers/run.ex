@@ -114,7 +114,11 @@ defmodule Arbiter.Workers.Run do
         :standing_orders_digest,
         :routing_policy,
         :model_tier,
-        :thinking
+        :thinking,
+        :prompt_sha256,
+        :result_subtype,
+        :result_is_error,
+        :result_message
       ]
     end
   end
@@ -310,6 +314,49 @@ defmodule Arbiter.Workers.Run do
                     "fact) — reading the current issues.difficulty would silently attribute a " <>
                     "run to the corrected estimate rather than the one it actually ran under, " <>
                     "which would make difficulty-calibration analysis dishonest."
+    end
+
+    # ---- Prompt + result persistence (bd-9rdwe4) --------------------------
+    #
+    # What the agent was TOLD and how it actually ended, not just the
+    # subprocess exit code. `prompt_sha256` anchors the redacted composed
+    # prompt persisted alongside the transcript
+    # (`Arbiter.Worker.PromptLog.path_for/1`); the `result_*` trio is the
+    # structured terminal record pulled off the stream-json `result` event
+    # (`Arbiter.Worker.ClaudeSession.absorb_usage/2`), so "what verdict did
+    # runs under skill X reach" is answerable without an LLM re-reading a
+    # transcript. Nil for a non-Claude / crashed / workflow-mode run — see
+    # this migration's moduledoc for the graceful-degradation cases.
+    attribute :prompt_sha256, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "SHA-256 hex of the redacted composed prompt persisted to " <>
+                    "<output_log_root>/<run_id>.prompt, so identical prompts are cheaply " <>
+                    "comparable without fetching the file."
+    end
+
+    attribute :result_subtype, :string do
+      public? true
+      constraints max_length: 64, trim?: true
+
+      description "The terminal stream-json `result` event's `subtype` (e.g. \"success\", " <>
+                    "\"error_max_turns\", \"error_during_execution\") — the CLI's own " <>
+                    "outcome/verdict, distinct from the subprocess exit_code."
+    end
+
+    attribute :result_is_error, :boolean do
+      public? true
+      description "The terminal event's `is_error` flag."
+    end
+
+    attribute :result_message, :string do
+      public? true
+      constraints max_length: 20_000
+
+      description "The terminal event's final assistant-facing text, redacted the same as " <>
+                    "transcript lines. Truncated at 20,000 chars to keep the row bounded — " <>
+                    "the full, untruncated transcript remains the audit source of record."
     end
 
     create_timestamp :inserted_at

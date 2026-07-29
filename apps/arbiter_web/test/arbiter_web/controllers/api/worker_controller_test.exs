@@ -4,6 +4,7 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PromptLog
   alias Arbiter.Workers.Run
 
   setup %{conn: conn} do
@@ -486,6 +487,116 @@ defmodule ArbiterWeb.Api.WorkerControllerTest do
 
       assert data["task_id"] == review_id
       assert data["lines"] == ["reviewer verdict"]
+    end
+  end
+
+  describe "GET /api/workers/:task_id/prompt (bd-9rdwe4)" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "pol-prompt-ctrl-#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:arbiter, :output_log_root)
+      Application.put_env(:arbiter, :output_log_root, root)
+
+      on_exit(fn ->
+        File.rm_rf(root)
+
+        if prev,
+          do: Application.put_env(:arbiter, :output_log_root, prev),
+          else: Application.delete_env(:arbiter, :output_log_root)
+      end)
+
+      :ok
+    end
+
+    test "returns the persisted prompt and its sha256 for the most recent run",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-prompt-#{System.unique_integer([:positive])}"
+      prompt_text = "you are a worker\n\ndo the thing"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      {:ok, run} =
+        Ash.update(run, %{prompt_sha256: PromptLog.sha256(prompt_text)}, action: :update)
+
+      :ok = PromptLog.write(run.id, prompt_text)
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/prompt")
+      data = json_response(conn, 200)["data"]
+
+      assert data["task_id"] == task_id
+      assert data["run_id"] == run.id
+      assert data["path"] == PromptLog.path_for(run.id)
+      assert data["exists"] == true
+      assert data["prompt"] == prompt_text
+      assert data["prompt_sha256"] == PromptLog.sha256(prompt_text)
+    end
+
+    test "exists=false with nil prompt when the run has no prompt on disk",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-noprompt-#{System.unique_integer([:positive])}"
+
+      {:ok, run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :running,
+          started_at: DateTime.utc_now()
+        })
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/prompt")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == run.id
+      assert data["exists"] == false
+      assert data["prompt"] == nil
+    end
+
+    test "returns 404 when no run was ever recorded for the task", %{conn: conn} do
+      conn = get(conn, ~p"/api/workers/bd-never-#{System.unique_integer([:positive])}/prompt")
+      assert json_response(conn, 404)
+    end
+
+    test "?run_id= reads a specific run's prompt, independent of which run is latest",
+         %{conn: conn, ws: ws} do
+      task_id = "bd-multirunprompt-#{System.unique_integer([:positive])}"
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, failed_run} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, _latest} =
+        Ash.create(Run, %{
+          task_id: task_id,
+          repo: "arbiter",
+          workspace_id: ws.id,
+          status: :completed,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      :ok = PromptLog.write(failed_run.id, "the failed attempt's prompt")
+
+      conn = get(conn, ~p"/api/workers/#{task_id}/prompt?run_id=#{failed_run.id}")
+      data = json_response(conn, 200)["data"]
+
+      assert data["run_id"] == failed_run.id
+      assert data["prompt"] == "the failed attempt's prompt"
     end
   end
 

@@ -1311,6 +1311,61 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
     end
   end
 
+  describe "structured terminal result capture (bd-9rdwe4)" do
+    defp new_session(opts \\ []) do
+      ClaudeSession.build_session_config("bd-9rdwe4", "worker:bd-9rdwe4", opts)
+      |> Map.merge(%{line_buf: "", output_lines: [], exit_status: nil, exited_at: nil})
+    end
+
+    test "the terminal result event's subtype/is_error/text land on usage_summary" do
+      session = new_session()
+
+      event = %{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => "all done, tests green"
+      }
+
+      session = ClaudeSession.handle_data(session, Jason.encode!(event), true)
+      usage = ClaudeSession.usage_summary(session)
+
+      assert usage[:result_subtype] == "success"
+      assert usage[:result_is_error] == false
+      assert usage[:result_message] == "all done, tests green"
+    end
+
+    test "the final message is redacted through the same choke-point as transcript lines" do
+      session = new_session(redact_values: ["tok_supersecret"])
+
+      event = %{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => "used token tok_supersecret to finish"
+      }
+
+      session = ClaudeSession.handle_data(session, Jason.encode!(event), true)
+      usage = ClaudeSession.usage_summary(session)
+
+      assert usage[:result_message] == "used token [REDACTED] to finish"
+      refute usage[:result_message] =~ "tok_supersecret"
+    end
+
+    test "a missing result text degrades to nil rather than raising" do
+      session = new_session()
+
+      event = %{"type" => "result", "subtype" => "error_max_turns", "is_error" => true}
+
+      session = ClaudeSession.handle_data(session, Jason.encode!(event), true)
+      usage = ClaudeSession.usage_summary(session)
+
+      assert usage[:result_subtype] == "error_max_turns"
+      assert usage[:result_is_error] == true
+      assert usage[:result_message] == nil
+    end
+  end
+
   describe "activity_for_event/1" do
     test "system/init reports starting; result reports wrapping up" do
       assert ClaudeSession.activity_for_event(%{"type" => "system", "subtype" => "init"}) ==
