@@ -124,5 +124,58 @@ defmodule Arbiter.Tasks.Issue.Changes.TeardownTest do
       assert File.dir?(wt_path)
       assert File.exists?(Path.join(wt_path, "scratch.txt"))
     end
+
+    # bd-9r1tta: a `task`-type audit runs in a *detached* checkout at its own
+    # leaf. Close must reclaim that leaf too, or the split leaks one worktree per
+    # audited bead.
+    test "removes the detached inspect worktree too", %{ws: ws, repo: repo} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "audit wt", issue_type: :task, workspace_id: ws.id})
+
+      branch = BranchNamer.derive(task)
+      {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
+      assert inspect_path == Worktree.inspect_path(branch)
+
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      refute File.dir?(inspect_path)
+    end
+
+    # ... even when the agent left scratch files in it. Unlike a branch worktree,
+    # a detached checkout has no branch and holds no deliverable, so there is
+    # nothing to preserve.
+    test "removes a dirty inspect worktree rather than leaking it", %{ws: ws, repo: repo} do
+      {:ok, task} =
+        Ash.create(Issue, %{title: "dirty audit wt", issue_type: :task, workspace_id: ws.id})
+
+      branch = BranchNamer.derive(task)
+      {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
+      File.write!(Path.join(inspect_path, "scratch.txt"), "audit scratch\n")
+
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      assert {:ok, closed} = Ash.update(task, %{}, action: :close)
+      assert closed.status == :closed
+
+      refute File.dir?(inspect_path)
+    end
+
+    # The branch worktree's dirty-preserve rule is unaffected by the inspect
+    # leaf's force-removal: both leaves are handled independently.
+    test "preserves a dirty branch worktree while still reclaiming the inspect one",
+         %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "both wts", workspace_id: ws.id})
+
+      branch = BranchNamer.derive(task)
+      {:ok, wt_path} = Worktree.create(repo, branch, "main")
+      File.write!(Path.join(wt_path, "scratch.txt"), "wip\n")
+      {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
+
+      {:ok, _} = Ash.update(task, %{status: :in_progress})
+      assert {:ok, _closed} = Ash.update(task, %{}, action: :close)
+
+      assert File.exists?(Path.join(wt_path, "scratch.txt"))
+      refute File.dir?(inspect_path)
+    end
   end
 end

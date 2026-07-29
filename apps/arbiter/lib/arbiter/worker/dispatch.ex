@@ -388,12 +388,30 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # Resolve the preserved worktree path for the task's per-task branch and require
-  # it to exist on disk. A missing worktree means there's nothing to resume.
+  # it to exist on disk AND be on a branch. A missing worktree — or a detached one
+  # — means there's nothing to resume.
+  #
+  # The detached check matters because `ResumeContext.build/3` renders whatever it
+  # finds there as "the commits the prior worker made … DO NOT start over"
+  # (bd-9r1tta). A detached checkout holds no prior work at all: its `<base>..HEAD`
+  # diff is the *upstream* commits it was cut from (the local `<base>` ref being
+  # the parent repo's, possibly stale, one), which the briefing would then present
+  # to a fresh agent as its predecessor's output. Refuse the resume instead,
+  # exactly as `arb resume` did before a task-type dispatch had any checkout.
+  #
+  # Only detached is rejected, not "any branch other than the derived one": a
+  # worktree on some other branch still has commits that plausibly *are* the prior
+  # worker's, and refusing there would throw away a resumable run.
   defp resume_worktree(%Issue{} = task, repo) do
     case resolve_repo_path(task, repo) do
       repo_path when is_binary(repo_path) ->
         path = Worktree.worktree_path(BranchNamer.derive(task))
-        if File.dir?(path), do: {:ok, path}, else: {:error, :no_outpost}
+
+        cond do
+          not File.dir?(path) -> {:error, :no_outpost}
+          Worktree.detached?(path) == {:ok, true} -> {:error, :no_outpost}
+          true -> {:ok, path}
+        end
 
       _ ->
         {:error, :repo_unknown}
@@ -859,19 +877,55 @@ defmodule Arbiter.Worker.Dispatch do
                 {:ok, path}
 
               {:error, {:git_failed, msg}} when is_binary(msg) ->
-                if String.contains?(msg, "already exists") do
-                  case Worktree.attach(repo_path, branch) do
-                    {:ok, path} -> {:ok, path}
-                    {:error, reason} -> {:error, {:worktree_failed, reason}}
-                  end
-                else
-                  {:error, {:worktree_failed, {:git_failed, msg}}}
+                cond do
+                  String.contains?(msg, "already exists") ->
+                    case Worktree.attach(repo_path, branch) do
+                      {:ok, path} -> {:ok, path}
+                      {:error, reason} -> {:error, {:worktree_failed, reason}}
+                    end
+
+                  String.contains?(msg, "different branch") ->
+                    recover_from_detached_worktree(repo_path, branch, target_branch, msg)
+
+                  true ->
+                    {:error, {:worktree_failed, {:git_failed, msg}}}
                 end
 
               {:error, reason} ->
                 {:error, {:worktree_failed, reason}}
             end
         end
+    end
+  end
+
+  # A branch dispatch found a *detached* worktree sitting at the branch leaf.
+  # Since bd-9r1tta an inspect checkout uses its own leaf, so this only happens
+  # for a bead whose inspect tree predates that split — but the failure it caused
+  # was permanent (`create/3` refuses, the `already exists` → `attach/2` recovery
+  # doesn't match "different branch", and nothing else reclaims the directory), so
+  # recover instead of stranding the dispatch. Safe by inspection: a detached tree
+  # has no branch and therefore no commits only reachable from it.
+  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg) do
+    require Logger
+
+    path = Worktree.worktree_path(branch)
+
+    case Worktree.detached?(path) do
+      {:ok, true} ->
+        Logger.info(
+          "Dispatch: reclaiming detached inspect worktree at #{path} so branch " <>
+            "#{branch} can be provisioned there"
+        )
+
+        _ = Worktree.cleanup(path)
+
+        case Worktree.create(repo_path, branch, target_branch) do
+          {:ok, path} -> {:ok, path}
+          {:error, reason} -> {:error, {:worktree_failed, reason}}
+        end
+
+      _ ->
+        {:error, {:worktree_failed, {:git_failed, msg}}}
     end
   end
 
@@ -1214,17 +1268,15 @@ defmodule Arbiter.Worker.Dispatch do
         {:ok, nil}
 
       true ->
-        # Review dispatches skip worktree provisioning but still need a real
-        # cwd for the Claude port. Fall back to the repo's local checkout so
-        # the reviewer has `git`/`gh`/etc. in scope; an unmapped repo with no
-        # worktree is still rejected — there's nowhere to `cd` to.
-        cwd = worktree_path || review_cwd(task, opts)
+        # Dispatches that provision no branch worktree (task-type audits,
+        # reviews) still need a real cwd for the agent port. `resolve_agent_cwd/3`
+        # owns that fallback — and, since bd-9r1tta, owns making sure it isn't a
+        # stale one.
+        case resolve_agent_cwd(task, worktree_path, opts) do
+          {:error, reason} ->
+            {:error, reason}
 
-        case cwd do
-          nil ->
-            {:error, :missing_worktree}
-
-          path when is_binary(path) ->
+          {:ok, path} when is_binary(path) ->
             # Inject the per-spawn MCP config (.mcp.json) into the *isolated*
             # worktree so the agent can read its task / mailbox and write
             # completion notes as typed tool calls. Best-effort: never blocks
@@ -1232,11 +1284,16 @@ defmodule Arbiter.Worker.Dispatch do
             #
             # Pass `worktree_path`, NOT `path` (bd-dlv3no): a review dispatch has
             # no worktree, so `path` falls back to the repo's shared checkout
-            # (`review_cwd/2`). Writing the token-bearing `.mcp.json` there leaks
-            # it into the canonical checkout the live server + operator share —
-            # the exact "worker leaks into the main worktree" class this fixes.
-            # With a nil worktree the helper is a no-op, so reviews never touch
-            # the repo's working tree.
+            # (`resolve_agent_cwd/3`). Writing the token-bearing `.mcp.json`
+            # there leaks it into the canonical checkout the live server +
+            # operator share — the exact "worker leaks into the main worktree"
+            # class this fixes. With a nil worktree the helper is a no-op, so
+            # reviews never touch the repo's working tree.
+            #
+            # bd-9r1tta note: a task-type dispatch's `path` is now an *isolated*
+            # detached worktree, so injecting there would be safe. Left keyed to
+            # `worktree_path` deliberately — enabling MCP tools for audit
+            # dispatches is a behavior change beyond that fix's scope.
             _ = maybe_write_mcp_config(task, worktree_path, opts)
 
             # Resolve the layered effective skill set and materialize ONLY it
@@ -1264,19 +1321,100 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # Resolve a sensible cwd for sessions that skip worktree provisioning:
+  # Resolve the agent's cwd.
+  #
+  # A provisioned worktree is already cut from `origin/<target>` by
+  # `Worktree.create/3`, so it is current by construction — use it as-is.
+  #
+  # Without one there are two cases, and before bd-9r1tta both got the repo's
+  # *shared* local checkout verbatim:
+  #
+  #   - task-type issues — ops/research/audit work whose deliverable is notes
   #   - review dispatches (`review: true`) — read-only code review, no branch
-  #   - task-type issues — deliverable is notes, not a PR; safe on main checkout
+  #
+  # On a developer host that shared checkout is a human contributor's working
+  # directory. Nothing kept it current: the `tonic` checkout that produced this
+  # bug was 72 commits and a full month behind `origin/main`, its HEAD predating
+  # the very merge the audit was asked about. The audit read that tree, found no
+  # encryption, and reported "PHI is stored in plaintext" as a release-gating
+  # critical finding with file:line citations. Every word of it was true about a
+  # month-old tree and false about the repo.
+  #
+  # So: a task-type dispatch now gets its own detached checkout at
+  # `origin/<target>` (`Worktree.create_detached/3`), and a review dispatch — which
+  # genuinely wants the shared checkout, since it diffs local branches — at least
+  # gets its remote-tracking refs refreshed first. Neither path writes to the
+  # contributor's HEAD, index, or working tree.
+  #
   # Regular feature/bug/chore dispatches without a worktree still surface
   # `:missing_worktree` rather than silently running from the main checkout.
-  defp review_cwd(%Issue{issue_type: :task} = task, opts) do
-    resolve_repo_path(task, Keyword.get(opts, :repo))
+  @spec resolve_agent_cwd(Issue.t(), String.t() | nil, keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  defp resolve_agent_cwd(_task, worktree_path, _opts) when is_binary(worktree_path),
+    do: {:ok, worktree_path}
+
+  defp resolve_agent_cwd(%Issue{issue_type: :task} = task, _nil_worktree, opts) do
+    case resolve_repo_path(task, Keyword.get(opts, :repo)) do
+      nil ->
+        {:error, :missing_worktree}
+
+      repo_path when is_binary(repo_path) ->
+        provision_inspect_worktree(task, repo_path, opts)
+    end
   end
 
-  defp review_cwd(%Issue{} = task, opts) do
-    case Keyword.get(opts, :review, false) do
-      true -> resolve_repo_path(task, Keyword.get(opts, :repo))
-      _ -> nil
+  defp resolve_agent_cwd(%Issue{} = task, _nil_worktree, opts) do
+    with true <- Keyword.get(opts, :review, false),
+         repo_path when is_binary(repo_path) <-
+           resolve_repo_path(task, Keyword.get(opts, :repo)) do
+      # Best-effort: a review that can't reach `origin` is still a useful review
+      # of the local branches, and refreshing remote-tracking refs is the only
+      # thing that could have failed — nothing was mutated.
+      _ = Worktree.fetch_origin(repo_path, resolve_target_branch(task, opts))
+      {:ok, repo_path}
+    else
+      _ -> {:error, :missing_worktree}
+    end
+  end
+
+  # An isolated, detached checkout at the tip of `origin/<target>`, at the task's
+  # *inspect* leaf (`Worktree.inspect_name/1` — the branch name plus a suffix, so
+  # it can never collide with a branch worktree for the same bead).
+  # `Issue.Changes.CleanupWorktree` reclaims that leaf on close exactly as it does
+  # a code worktree.
+  #
+  # A repo with no `origin` cannot be stale — there is no upstream to be behind —
+  # so that one case falls back to the local checkout instead of failing a
+  # dispatch that works fine today. Every other failure (fetch failed, the target
+  # branch is gone upstream, `git worktree add` failed) is surfaced: handing the
+  # agent the shared checkout after a failed refresh is precisely the
+  # silently-wrong-answer path this fix closes.
+  defp provision_inspect_worktree(%Issue{} = task, repo_path, opts) do
+    require Logger
+
+    name = Worktree.inspect_name(BranchNamer.derive(task))
+    base_branch = resolve_target_branch(task, opts)
+
+    case Worktree.create_detached(repo_path, name, base_branch) do
+      {:ok, path} ->
+        {:ok, path}
+
+      {:error, {:missing_origin_remote, _msg}} ->
+        Logger.info(
+          "Dispatch: #{repo_path} has no origin remote; task #{task.id} runs from the local " <>
+            "checkout (nothing upstream to be stale against)"
+        )
+
+        {:ok, repo_path}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Dispatch: could not provision an up-to-date checkout for task #{task.id} from " <>
+            "#{repo_path} (#{inspect(reason)}); refusing to run the agent against a possibly " <>
+            "stale local tree"
+        )
+
+        {:error, {:inspect_worktree_failed, reason}}
     end
   end
 

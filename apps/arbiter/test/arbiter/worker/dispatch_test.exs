@@ -4,7 +4,7 @@ defmodule Arbiter.Worker.DispatchTest do
   alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Usage.Event
   alias Arbiter.Worker
-  alias Arbiter.Worker.{Dispatch, Worktree}
+  alias Arbiter.Worker.{BranchNamer, Dispatch, Worktree}
   alias Arbiter.Workers.Run
   require Ash.Query
 
@@ -453,6 +453,33 @@ defmodule Arbiter.Worker.DispatchTest do
       repo
     end
 
+    # Push a commit to `repo`'s bare origin from a throwaway clone, so `repo`'s
+    # own local refs stay stale — the "human checkout hasn't pulled in a month"
+    # shape bd-9r1tta is about.
+    defp advance_origin!(tmp, repo, file, content) do
+      remote = rev_parse_remote!(repo)
+      clone = Path.join(tmp, "advance-#{System.unique_integer([:positive])}")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, file), content)
+      {_, 0} = System.cmd("git", ["-C", clone, "add", file])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance origin"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+      :ok
+    end
+
+    defp rev_parse_remote!(repo) do
+      {out, 0} = System.cmd("git", ["-C", repo, "remote", "get-url", "origin"])
+      String.trim(out)
+    end
+
+    defp rev_parse!(path, ref) do
+      {out, 0} = System.cmd("git", ["-C", path, "rev-parse", ref])
+      String.trim(out)
+    end
+
     test "defaults to start_claude: false → claude_port is nil", %{ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "no claude", workspace_id: ws.id})
 
@@ -632,16 +659,81 @@ defmodule Arbiter.Worker.DispatchTest do
       refute File.exists?(Path.join(repo, ".mcp.json"))
     end
 
-    # bd-9fjy6j: a task-type issue has no worktree (deliverable is notes, not a
-    # branch), but Claude still needs a cwd. It falls back to the repo's main
-    # checkout — same as a review dispatch — and no worktree is provisioned.
-    test "task-type dispatch with start_claude runs from the main checkout without a worktree",
+    # bd-9r1tta: a review genuinely wants the shared checkout as its cwd — it
+    # diffs local branches, which only exist there. But it must not inherit a
+    # month-stale idea of what `origin/<target>` points at: a reviewer comparing
+    # a PR against a stale base reports conflicts and "missing" upstream work
+    # that aren't real. So the dispatch refreshes the remote-tracking ref first
+    # — refs only, never the contributor's HEAD/index/working tree.
+    test "review dispatch refreshes origin refs in the shared checkout without disturbing it",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "revstale")
+
+      # The human's checkout: parked on a side branch with uncommitted work.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "human-wip"])
+      File.write!(Path.join(repo, "dirty.md"), "uncommitted\n")
+      head_before = rev_parse!(repo, "HEAD")
+      origin_ref_before = rev_parse!(repo, "refs/remotes/origin/main")
+
+      # Upstream moves behind the local checkout's back.
+      advance_origin!(tmp, repo, "UPSTREAM.md", "merged upstream\n")
+
+      Application.put_env(:arbiter, :repo_paths, %{"rv/stale" => repo})
+      on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "review stale base", workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "rv/stale",
+          review: true,
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sleep", "1"]
+        )
+
+      assert result.worktree_path == nil
+      assert is_port(result.claude_port)
+
+      # The remote-tracking ref now points at current upstream ...
+      assert rev_parse!(repo, "refs/remotes/origin/main") != origin_ref_before
+
+      # ... while nothing the contributor cares about moved: same branch, same
+      # HEAD, uncommitted file intact, and the fetched commit is NOT checked out.
+      assert {:ok, "human-wip"} = Worktree.current_branch(repo)
+      assert rev_parse!(repo, "HEAD") == head_before
+      assert File.read!(Path.join(repo, "dirty.md")) == "uncommitted\n"
+      refute File.exists?(Path.join(repo, "UPSTREAM.md"))
+    end
+
+    # bd-9fjy6j / bd-9r1tta: a task-type issue has no *branch* worktree (the
+    # deliverable is notes, not a PR), but Claude still needs a cwd. It used to
+    # get the repo's shared main checkout — a human contributor's working
+    # directory, on whatever HEAD they left it. bd-9r1tta: it now gets an
+    # isolated detached checkout cut from `origin/<target>`, so an audit reads
+    # current upstream instead of a month-stale local tree.
+    test "task-type dispatch with start_claude runs from a detached checkout at origin, not the stale local one",
          %{ws: ws, tmp: tmp} do
       repo = seed_repo!(tmp, "taskrepo")
+      advance_origin!(tmp, repo, "ENCRYPTION.md", "PHI encryption merged upstream\n")
 
+      # The local checkout has not fetched — exactly the tonic scenario.
+      refute File.exists?(Path.join(repo, "ENCRYPTION.md"))
+      local_head_before = rev_parse!(repo, "HEAD")
+
+      # bd-dlv3no's concern, now inherited by task-type dispatches: with
+      # injection on, the token-bearing `.mcp.json` must land in the isolated
+      # worktree, never in the shared checkout.
+      enable_mcp_injection!()
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "taskrepo-wt"))
       Application.put_env(:arbiter, :repo_paths, %{"task/repo" => repo})
 
-      on_exit(fn -> Application.delete_env(:arbiter, :repo_paths) end)
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
 
       {:ok, task} =
         Ash.create(Issue, %{title: "audit: parity check", issue_type: :task, workspace_id: ws.id})
@@ -652,13 +744,169 @@ defmodule Arbiter.Worker.DispatchTest do
           start_driver: false,
           start_claude: true,
           preflight: false,
-          claude_command: ["sleep", "2"]
+          claude_command: ["sh", "-c", "pwd -P > agent-cwd.txt"]
         )
 
-      # No worktree provisioned — task deliverable is notes, not a branch.
+      # Still no *branch* worktree in meta — nothing to merge, nothing to PR.
       assert result.worktree_path == nil
-      # Claude still launched — cwd resolved to main checkout.
       assert is_port(result.claude_port)
+
+      # Its own leaf — never the branch leaf, so a later branch dispatch of the
+      # same bead can't collide with it (round-1 review finding).
+      inspect_path = Worktree.inspect_path(BranchNamer.derive(task))
+      refute inspect_path == Worktree.worktree_path(BranchNamer.derive(task))
+
+      # The agent's cwd IS that isolated checkout — observed from the child.
+      cwd_file = Path.join(inspect_path, "agent-cwd.txt")
+      wait_until(fn -> File.exists?(cwd_file) end)
+      assert File.read!(cwd_file) |> String.trim() == Path.expand(inspect_path)
+
+      # ... and it reflects current upstream, not the stale local checkout.
+      assert File.exists?(Path.join(inspect_path, "ENCRYPTION.md"))
+
+      # The human's checkout is untouched: same HEAD, and the agent wrote
+      # nothing into it.
+      assert rev_parse!(repo, "HEAD") == local_head_before
+      refute File.exists?(Path.join(repo, "agent-cwd.txt"))
+
+      # bd-dlv3no's guarantee still holds: the token-bearing config never lands
+      # in the shared checkout. (It isn't written to the inspect worktree
+      # either — injection is still keyed to a *branch* worktree. Now that this
+      # cwd is isolated, injecting here would be safe; that's a follow-up, not
+      # this fix.)
+      refute File.exists?(Path.join(repo, ".mcp.json"))
+    end
+
+    # bd-9r1tta: a repo with no `origin` has nothing to be stale against, so a
+    # task-type dispatch must still work there — falling back to the local
+    # checkout rather than erroring.
+    test "task-type dispatch falls back to the local checkout when the repo has no origin",
+         %{ws: ws, tmp: tmp} do
+      repo = Path.join(tmp, "no-origin-repo")
+      File.mkdir_p!(repo)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", repo, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(repo, "README.md"), "x\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "i"])
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "no-origin-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"local/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "audit: local only", issue_type: :task, workspace_id: ws.id})
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "local/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false,
+          claude_command: ["sh", "-c", "pwd -P > agent-cwd.txt"]
+        )
+
+      assert is_port(result.claude_port)
+
+      cwd_file = Path.join(repo, "agent-cwd.txt")
+      wait_until(fn -> File.exists?(cwd_file) end)
+      assert File.read!(cwd_file) |> String.trim() == Path.expand(repo)
+    end
+
+    # bd-9r1tta: when the repo HAS an origin but provisioning the isolated
+    # checkout fails, the dispatch must surface the failure rather than quietly
+    # handing the agent the stale shared checkout — the silent-wrong-answer
+    # failure mode this fix exists to close.
+    test "task-type dispatch errors rather than falling back when the target branch is missing upstream",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "badbase")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "badbase-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"bad/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} =
+        Ash.create(Issue, %{title: "audit: bad base", issue_type: :task, workspace_id: ws.id})
+
+      assert {:error, {:inspect_worktree_failed, _}} =
+               Dispatch.dispatch(task.id,
+                 repo: "bad/repo",
+                 base_branch: "no-such-upstream-branch",
+                 start_driver: false,
+                 start_claude: true,
+                 preflight: false,
+                 claude_command: ["sleep", "1"]
+               )
+    end
+
+    # Round-1 review finding: the inspect checkout used to share the branch leaf,
+    # so a branch dispatch of a bead that had already been audited hit
+    # `create/3`'s "worktree exists … on a different branch" — which the
+    # `already exists` → `attach/2` recovery does not match — and failed
+    # permanently until someone deleted the directory by hand. Inspect trees now
+    # use their own leaf, and a detached tree found at the branch leaf (left by a
+    # pre-fix dispatch) is reclaimed rather than fatal.
+    test "a branch dispatch reclaims a detached worktree left at the branch leaf",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "collide")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "collide-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"col/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "was an audit first", workspace_id: ws.id})
+      branch = BranchNamer.derive(task)
+
+      # The pre-fix state: a detached checkout squatting on the branch leaf.
+      {:ok, squatter} = Worktree.create_detached(repo, branch, "main")
+      assert squatter == Worktree.worktree_path(branch)
+      assert {:ok, "HEAD"} = Worktree.current_branch(squatter)
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "col/repo", start_driver: false)
+
+      assert result.worktree_path == squatter
+      assert {:ok, ^branch} = Worktree.current_branch(squatter)
+    end
+
+    # Counterpart: the two leaves coexist, so an audit's checkout and the same
+    # bead's branch worktree never contend for one directory.
+    test "an inspect checkout and a branch worktree for the same bead coexist",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "coexist")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "coexist-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"cx/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "audited then built", workspace_id: ws.id})
+      branch = BranchNamer.derive(task)
+
+      {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "cx/repo", start_driver: false)
+
+      assert result.worktree_path == Worktree.worktree_path(branch)
+      refute result.worktree_path == inspect_path
+      assert {:ok, ^branch} = Worktree.current_branch(result.worktree_path)
+      assert {:ok, "HEAD"} = Worktree.current_branch(inspect_path)
     end
 
     # bd-ci2jl2: a PRPatrol follow-up used to be undispatchable. It carried
@@ -1513,7 +1761,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.dir?(result.worktree_path)
 
       # Branch matches BranchNamer's derivation.
-      branch = Arbiter.Worker.BranchNamer.derive(task)
+      branch = BranchNamer.derive(task)
       assert {:ok, ^branch} = Arbiter.Worker.Worktree.current_branch(result.worktree_path)
     end
 
@@ -1642,7 +1890,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # First dispatch — provisions the worktree, creating the branch locally.
       {:ok, first} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
       assert is_binary(first.worktree_path)
-      branch = Arbiter.Worker.BranchNamer.derive(task)
+      branch = BranchNamer.derive(task)
 
       # Simulate Driver cleanup: remove the worktree directory but leave the
       # branch (Worktree.cleanup removes the worktree, not the branch).
@@ -2203,6 +2451,26 @@ defmodule Arbiter.Worker.DispatchTest do
       # Tear the worktree down — nothing left to resume.
       Arbiter.Worker.Worktree.cleanup(first.worktree_path)
       refute File.dir?(first.worktree_path)
+
+      assert {:error, :no_outpost} = Dispatch.resume(task.id, start_driver: false)
+    end
+
+    # Round-1 review finding: a detached inspect checkout is not preserved work.
+    # If resume accepted it, `ResumeContext.build/3` would run `git log
+    # <base>..HEAD` in a tree whose HEAD is `origin/<base>` while the local
+    # `<base>` ref is the parent repo's stale one — listing UPSTREAM commits under
+    # "the commits the prior worker made … DO NOT start over".
+    test "refuses to resume from a detached checkout at the branch leaf", %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "detached resume", workspace_id: ws.id})
+      first = stop_worker_with_outpost(task.id)
+
+      # Replace the branch worktree with a detached one at the same leaf — the
+      # shape a pre-fix task-type dispatch left behind.
+      path = first.worktree_path
+      Worktree.cleanup(path)
+      branch = BranchNamer.derive(task)
+      {:ok, ^path} = Worktree.create_detached(repo, branch, "main")
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
 
       assert {:error, :no_outpost} = Dispatch.resume(task.id, start_driver: false)
     end
