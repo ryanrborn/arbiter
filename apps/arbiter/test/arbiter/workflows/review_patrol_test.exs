@@ -294,6 +294,29 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
     end
   end
 
+  describe "tick/1 — idle backoff (bd-4brb2j)" do
+    test "idle_ticks grows with no open engagements and resets once one appears", %{ws: ws} do
+      # A stub must exist (even a no-op one) before start_patrol/1 calls
+      # Req.Test.allow/3 — the allowance is keyed off an existing stub owner.
+      stub(fn conn -> conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{}) end)
+      {_pid, name} = start_patrol(ws)
+
+      :ok = ReviewPatrol.tick(name)
+      assert ReviewPatrol.state(name).idle_ticks == 1
+
+      :ok = ReviewPatrol.tick(name)
+      :ok = ReviewPatrol.tick(name)
+      assert ReviewPatrol.state(name).idle_ticks == 3
+
+      eng = engagement(ws, 200)
+      pr_stub(200, %{"number" => 200, "merged" => true, "html_url" => "x"})
+
+      :ok = ReviewPatrol.tick(name)
+      assert ReviewPatrol.state(name).idle_ticks == 0
+      assert reload(eng).status == :closed
+    end
+  end
+
   describe "tick/1 — new-commit re-review (bd-f3fg22)" do
     # A prior finding we'd have posted on the first review, stored on the
     # engagement so the relevance gate + de-dupe have something to compare against.

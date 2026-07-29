@@ -180,6 +180,141 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
       assert :skip = start(ws)
       assert keys_for_workspace(ws.id) == []
     end
+
+    # bd-4brb2j: a repo whose review_automation resolves to :off has no
+    # reviewer we would ever dispatch — no engagement on it can ever do
+    # anything but sit there, so the patrol process itself should never start.
+    test "skips a single-repo workspace whose review_automation default is :off" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-off-#{System.unique_integer([:positive])}",
+          prefix: "ro#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{"default" => "off"}
+          }
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    # Same, but the :off comes from a repo_overrides entry keyed by the bare
+    # repo name (merge.config.repo IS the rig name for a single-repo workspace)
+    # rather than the workspace-wide default.
+    test "skips a single-repo workspace whose repo_overrides entry is :off" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offover-#{System.unique_integer([:positive])}",
+          prefix: "rv#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"widget" => "off"}
+            }
+          }
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    # A repo_overrides entry takes precedence over the workspace-wide default
+    # even when the override is a non-off mode and the default is :off — the
+    # operator explicitly opted this repo in, and default-off must not veto it.
+    test "starts a patrol when the default is :off but the repo_overrides entry is :auto" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offdefault-override-#{System.unique_integer([:positive])}",
+          prefix: "rd#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{
+              "default" => "off",
+              "repo_overrides" => %{"widget" => "auto"}
+            }
+          }
+        })
+
+      assert {:ok, pid} = start(ws)
+      assert Process.alive?(pid)
+    end
+
+    # A running patrol for a repo that gets flipped to :off must be stopped on
+    # the next start_patrol/2 call (mirrors the stale-registration reconciler),
+    # not left running until the next full app restart.
+    test "stops an already-running patrol once its repo is flipped to :off" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offlive-#{System.unique_integer([:positive])}",
+          prefix: "rl#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert {:ok, pid} = start(ws)
+      assert Process.alive?(pid)
+
+      {:ok, flipped} =
+        Ash.update(ws, %{patch: %{"review_automation" => %{"default" => "off"}}},
+          action: :patch_config
+        )
+
+      assert :skip = start(flipped)
+      refute Process.alive?(pid)
+
+      # DynamicSupervisor.terminate_child/2 waits for the child process itself
+      # to exit before returning, but Registry's own removal of the :via entry
+      # runs via a separate monitor reacting to that exit — under heavy
+      # concurrent test load it can lag the terminate_child call by a beat, so
+      # poll briefly rather than asserting immediately.
+      assert Enum.any?(1..20, fn _ ->
+               keys_for_workspace(ws.id) == [] or (Process.sleep(10) && false)
+             end),
+             "expected patrol #{ws.id} to be unregistered, got #{inspect(keys_for_workspace(ws.id))}"
+    end
+
+    # Only the OFF-configured repo is skipped in a multi-repo workspace — the
+    # others still get their patrol.
+    test "in a multi-repo workspace, only the :off repo is skipped" do
+      alpha = git_repo_with_origin("git@github.com:octo/alpha.git")
+      beta = git_repo_with_origin("git@github.com:octo/beta.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offmulti-#{System.unique_integer([:positive])}",
+          prefix: "rm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "octo"}},
+            "repo_paths" => %{"alpha" => alpha, "beta" => beta},
+            "review_automation" => %{
+              "default" => "auto",
+              "repo_overrides" => %{"alpha" => "off"}
+            }
+          }
+        })
+
+      # start_patrol/2 returns the first per-repo result (alpha's, which is
+      # :skip since it sorts before beta) — beta still gets its own patrol.
+      start(ws)
+
+      keys = keys_for_workspace(ws.id)
+      assert keys == ["#{ws.id}:octo/beta"]
+    end
   end
 
   describe "whereis_all/1" do

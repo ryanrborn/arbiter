@@ -85,22 +85,20 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     name = String.to_atom("PRPatrol_#{System.unique_integer([:positive])}")
 
     pid =
-      start_supervised!(
-        {PRPatrol,
-         Keyword.merge(
-           [
-             repo: "owner/repo",
-             workspace_id: ws.id,
-             interval_ms: 60_000,
-             name: name,
-             # Stand-in for a running `claude --print` session — stays alive
-             # long enough to prove Dispatch.dispatch/2 was actually invoked
-             # (a live worker + worktree), without shelling out to `claude`.
-             dispatch_opts: [claude_command: ["sleep", "2"]]
-           ],
-           opts
-         )}
-      )
+      start_supervised!({PRPatrol,
+       Keyword.merge(
+         [
+           repo: "owner/repo",
+           workspace_id: ws.id,
+           interval_ms: 60_000,
+           name: name,
+           # Stand-in for a running `claude --print` session — stays alive
+           # long enough to prove Dispatch.dispatch/2 was actually invoked
+           # (a live worker + worktree), without shelling out to `claude`.
+           dispatch_opts: [claude_command: ["sleep", "2"]]
+         ],
+         opts
+       )})
 
     # Let the GenServer process see this test process's Req.Test stub.
     Req.Test.allow(@stub_name, self(), pid)
@@ -349,6 +347,53 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)
       :ok = PRPatrol.tick(name)
+
+      assert length(tasks_for_repo()) == 1
+    end
+
+    # Regression for bd-4brb2j: once a PR already has an open follow-up,
+    # `deduped?/2` (a local DB check) must run BEFORE the three GitHub signal
+    # calls (`changes_requested?`, `open_review_thread_count`,
+    # `required_check_failure_names`) — not after. The prior ordering paid the
+    # full three-call signal check for every open PR on every tick forever,
+    # even once nothing new could come of it; that steady per-tick cost was
+    # the "inter-sweep trickle" identified in the incident report. This test
+    # counts hits on the `/reviews` endpoint (one of the three signal calls)
+    # and asserts it is NOT called again once the PR is deduped.
+    test "dedup short-circuits BEFORE the GitHub signal calls on a later tick", %{ws: ws} do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 46, "title" => "counted", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/46/reviews" ->
+            Agent.update(counter, &(&1 + 1))
+
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/46/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+      assert Agent.get(counter, & &1) == 1
+
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+
+      assert Agent.get(counter, & &1) == 1,
+             "expected the /reviews signal call to fire only on the first (non-deduped) tick"
 
       assert length(tasks_for_repo()) == 1
     end
@@ -669,6 +714,28 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       assert PRPatrol.state(name).ticks >= 2,
              "expected at least 2 auto-ticks; got #{PRPatrol.state(name).ticks}"
     end
+
+    # bd-4brb2j: a patrol that keeps finding nothing actionable must stretch
+    # its own cadence out instead of holding the fixed interval forever.
+    test "idle_ticks grows on consecutive empty ticks and resets once a PR dispatches",
+         %{ws: ws} do
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      {_pid, name} = start_patrol(ws)
+
+      :ok = PRPatrol.tick(name)
+      assert PRPatrol.state(name).idle_ticks == 1
+
+      :ok = PRPatrol.tick(name)
+      :ok = PRPatrol.tick(name)
+      assert PRPatrol.state(name).idle_ticks == 3
+
+      pulls_stub(82, "anyone")
+      :ok = PRPatrol.tick(name)
+      assert PRPatrol.state(name).idle_ticks == 0
+    end
   end
 
   describe "tick/1 — multi-repo workspace (no repo in config)" do
@@ -725,7 +792,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       explicit_repo_path = seed_repo!(tmp, "explicit-repo")
 
       repo_paths = Application.get_env(:arbiter, :repo_paths, %{})
-      Application.put_env(:arbiter, :repo_paths, Map.put(repo_paths, "owner/explicit-repo", explicit_repo_path))
+
+      Application.put_env(
+        :arbiter,
+        :repo_paths,
+        Map.put(repo_paths, "owner/explicit-repo", explicit_repo_path)
+      )
 
       pid =
         start_supervised!(

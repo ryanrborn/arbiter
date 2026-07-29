@@ -70,7 +70,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Workflows.{CIFailureFollowUp, ReviewThreadFollowUp}
+  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolPacing, ReviewThreadFollowUp}
   require Ash.Query
   require Logger
 
@@ -79,6 +79,11 @@ defmodule Arbiter.Workflows.PRPatrol do
   # Cap the exponential dispatch-failure backoff so a permanently-broken repo
   # eventually retries about once an hour instead of never (bd-49ajyt).
   @max_backoff_ms 60 * 60_000
+
+  # Ceiling for the idle-tick backoff (bd-4brb2j): a repo with no actionable
+  # PR for several consecutive ticks stretches its cadence out to at most this,
+  # instead of holding a fixed ~1/min poll forever regardless of activity.
+  @idle_backoff_ceiling_ms 15 * 60_000
 
   defstruct [
     :repo,
@@ -89,6 +94,10 @@ defmodule Arbiter.Workflows.PRPatrol do
     ticks: 0,
     last_dispatched: %{},
     last_tick_at: nil,
+    # Consecutive ticks in a row that found zero actionable PRs — drives the
+    # idle backoff in `schedule_next/1` (bd-4brb2j). Reset to 0 the moment a
+    # tick dispatches (or would have dispatched, see `maybe_dispatch/3`).
+    idle_ticks: 0,
     # PR number => %{count: n, retry_at: DateTime} — tracks consecutive
     # follow-up dispatch failures per PR so a persistent failure escalates
     # ONCE and then exponential-backs-off, instead of re-filing + re-escalating
@@ -154,7 +163,8 @@ defmodule Arbiter.Workflows.PRPatrol do
          interval_ms: state.interval_ms,
          ticks: state.ticks,
          last_dispatched: state.last_dispatched,
-         last_tick_at: state.last_tick_at
+         last_tick_at: state.last_tick_at,
+         idle_ticks: state.idle_ticks
        }, state}
 
   @impl true
@@ -176,26 +186,42 @@ defmodule Arbiter.Workflows.PRPatrol do
 
     # Thread state through each PR so per-PR dispatch-failure backoff records
     # (bd-49ajyt) accumulate across the tick and survive into the next one.
-    dispatched_state =
+    # Also thread a `dispatched?` flag so the idle-backoff streak (bd-4brb2j)
+    # only resets when a PR was genuinely actionable this tick.
+    {dispatched_state, mr_count, dispatched_count} =
       with %Workspace{} <- workspace,
            adapter when not is_nil(adapter) <- resolve_adapter(workspace),
            true <- function_exported?(adapter, :list_open, 0),
            :ok <- Mergers.prepare_with_repo(workspace, state.repo),
            {:ok, mrs} <- adapter.list_open() do
-        Enum.reduce(mrs, %{state | workspace: workspace}, fn mr, acc ->
-          maybe_dispatch(mr, acc, adapter)
-        end)
+        {new_state, dispatched_count} =
+          Enum.reduce(mrs, {%{state | workspace: workspace}, 0}, fn mr, {acc, n} ->
+            case maybe_dispatch(mr, acc, adapter) do
+              {new_acc, true} -> {new_acc, n + 1}
+              {new_acc, false} -> {new_acc, n}
+            end
+          end)
+
+        {new_state, length(mrs), dispatched_count}
       else
         # On any failure (missing workspace, unsupported adapter, API error),
         # still bump the tick counter so callers can detect the patrol is alive.
-        _ -> %{state | workspace: workspace}
+        _ -> {%{state | workspace: workspace}, 0, 0}
       end
+
+    idle_ticks = if dispatched_count > 0, do: 0, else: dispatched_state.idle_ticks + 1
+
+    Logger.debug(
+      "PRPatrol[#{state.repo}]: tick open_prs=#{mr_count} dispatched=#{dispatched_count} " <>
+        "idle_ticks=#{idle_ticks}"
+    )
 
     %{
       dispatched_state
       | ticks: dispatched_state.ticks + 1,
         last_tick_at: DateTime.utc_now(),
-        workspace: workspace
+        workspace: workspace,
+        idle_ticks: idle_ticks
     }
   end
 
@@ -217,18 +243,28 @@ defmodule Arbiter.Workflows.PRPatrol do
     ArgumentError -> nil
   end
 
-  # Returns the (possibly updated) patrol state. `backing_off?/2` short-circuits
-  # before any forge calls so a PR whose dispatch keeps failing is parked for
-  # the backoff window instead of re-filed every tick (bd-49ajyt).
+  # Returns `{state, dispatched?}`. `backing_off?/2`, `author_allowed?/2`, and
+  # `deduped?/2` are all local/DB-only checks — cheap and free of GitHub calls —
+  # and are now checked BEFORE `actionable_reason/2`, which is the expensive
+  # step: it costs up to three GitHub API calls per PR (changes_requested?,
+  # open_review_thread_count, required_check_failure_names). Previously
+  # `deduped?/2` ran LAST, so once a follow-up was already filed for a PR, every
+  # subsequent tick still paid the full three-call signal check before
+  # discovering there was nothing to do — for every open PR in the repo, every
+  # ~60s, forever. That steady per-tick cost (independent of the once-per-minute
+  # `list_open` sweep) is the "inter-sweep trickle" identified in bd-4brb2j's
+  # incident report. Moving the free checks first means a PR that already has an
+  # open follow-up (the common steady-state case) short-circuits before any
+  # GitHub call is made.
   defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
     with false <- backing_off?(pr_number, state),
          true <- author_allowed?(mr, state.workspace),
-         {reason, extra_protocol} when is_binary(reason) <- actionable_reason(adapter, mr_ref),
-         false <- deduped?(pr_number, state.workspace_id) do
+         false <- deduped?(pr_number, state.workspace_id),
+         {reason, extra_protocol} when is_binary(reason) <- actionable_reason(adapter, mr_ref) do
       task = create_follow_up(mr, state, reason, extra_protocol)
-      dispatch_follow_up(task, pr_number, state)
+      {dispatch_follow_up(task, pr_number, state), true}
     else
-      _ -> state
+      _ -> {state, false}
     end
   end
 
@@ -271,7 +307,8 @@ defmodule Arbiter.Workflows.PRPatrol do
 
     Logger.warning(
       "PRPatrol: dispatch failed for follow-up #{task.id} (PR #{task.source_pr}): " <>
-        inspect(reason) <> " — closing" <>
+        inspect(reason) <>
+        " — closing" <>
         if(count == 1, do: " and escalating", else: " (backing off, already escalated)")
     )
 
@@ -283,7 +320,8 @@ defmodule Arbiter.Workflows.PRPatrol do
       action: :close
     )
 
-    retry_at = DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
+    retry_at =
+      DateTime.add(DateTime.utc_now(), backoff_ms(count, state.interval_ms), :millisecond)
 
     %{
       state
@@ -312,7 +350,9 @@ defmodule Arbiter.Workflows.PRPatrol do
   # Exponential backoff: interval, 2×interval, 4×interval, … capped at
   # @max_backoff_ms. `count` is the consecutive-failure count (>= 1).
   defp backoff_ms(count, interval_ms) do
-    base = if is_integer(interval_ms) and interval_ms > 0, do: interval_ms, else: @default_interval_ms
+    base =
+      if is_integer(interval_ms) and interval_ms > 0, do: interval_ms, else: @default_interval_ms
+
     min(base * Integer.pow(2, count - 1), @max_backoff_ms)
   end
 
@@ -510,9 +550,20 @@ defmodule Arbiter.Workflows.PRPatrol do
     task
   end
 
+  # Delay until the next tick: the idle-backed-off interval (bd-4brb2j — grows
+  # with consecutive idle ticks, capped at @idle_backoff_ceiling_ms), then
+  # jittered +/- 15% so N patrols started within milliseconds of each other at
+  # boot (18 patrols in ~22ms was the incident's synchronous restart burst)
+  # drift apart instead of ticking in lockstep forever.
   defp schedule_next(state) do
     if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
-    ref = Process.send_after(self(), :tick, state.interval_ms)
+
+    delay =
+      state.idle_ticks
+      |> PatrolPacing.idle_backoff_ms(state.interval_ms, @idle_backoff_ceiling_ms)
+      |> PatrolPacing.jitter()
+
+    ref = Process.send_after(self(), :tick, delay)
     %{state | timer_ref: ref}
   end
 end

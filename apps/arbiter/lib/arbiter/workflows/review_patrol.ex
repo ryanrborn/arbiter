@@ -186,7 +186,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
-  alias Arbiter.Workflows.{CodeReview, ReviewReply}
+  alias Arbiter.Workflows.{CodeReview, PatrolPacing, ReviewReply}
   alias Arbiter.{Mergers, Tasks.Workspace}
   require Ash.Query
   require Logger
@@ -221,6 +221,14 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   @rate_limit_base_backoff_ms 60_000
   @rate_limit_max_backoff_ms 30 * 60_000
 
+  # Ceiling for the idle-tick backoff (bd-4brb2j): a repo with no open
+  # engagements (or one where a tick produced no outcomes) for several
+  # consecutive ticks stretches its cadence out to at most this, instead of
+  # holding a fixed ~1/min poll forever. Distinct from the rate-limit circuit
+  # breaker above, which backs off for a different reason (GitHub is actively
+  # throttling us) and independently.
+  @idle_backoff_ceiling_ms 15 * 60_000
+
   defstruct [
     :repo,
     :workspace_id,
@@ -228,6 +236,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     :interval_ms,
     :timer_ref,
     ticks: 0,
+    # Consecutive ticks in a row that produced zero outcomes (no engagements
+    # open, or none needed action) — drives the idle backoff in
+    # `schedule_next/1` (bd-4brb2j). Reset to 0 the moment a tick does
+    # anything. Left untouched while the rate-limit circuit is open (a
+    # separate, already-backed-off state).
+    idle_ticks: 0,
     last_terminated: [],
     last_rereviewed: [],
     last_reported: [],
@@ -301,7 +315,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
          last_escalated: state.last_escalated,
          last_declined: state.last_declined,
          last_tick_at: state.last_tick_at,
-         rate_limit_paused_until: state.rate_limit.paused_until
+         rate_limit_paused_until: state.rate_limit.paused_until,
+         idle_ticks: state.idle_ticks
        }, state}
 
   @impl true
@@ -357,6 +372,12 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           _ -> {[], state.rate_limit}
         end
 
+      idle_ticks = if outcomes == [], do: state.idle_ticks + 1, else: 0
+
+      Logger.debug(
+        "ReviewPatrol[#{state.repo}]: tick outcomes=#{length(outcomes)} idle_ticks=#{idle_ticks}"
+      )
+
       %{
         state
         | ticks: state.ticks + 1,
@@ -369,7 +390,8 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           last_escalated: for({:escalated, id} <- outcomes, do: id),
           last_declined: for({:declined, id} <- outcomes, do: id),
           workspace: workspace,
-          rate_limit: rate_limit
+          rate_limit: rate_limit,
+          idle_ticks: idle_ticks
       }
     end
   end
@@ -1536,16 +1558,20 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   defp restriction_rank(:flag), do: 2
   defp restriction_rank(:off), do: 3
 
-  # Reverse `state.repo` (the "owner/repo" string this patrol was started with,
-  # from `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare rig/repo-config
+  @doc false
+  # Reverse `repo` (the "owner/repo" string a patrol is started with, from
+  # `ReviewPatrolSupervisor.patrol_repos/1`) back to the bare rig/repo-config
   # name that `review_automation.repo_overrides` is keyed by (bd-3cpcw2) — the
   # same identifier `worker_review`'s `args["repo"]` uses at dispatch time
-  # (`Arbiter.Mcp.Tools.guard_review_automation/3`).
+  # (`Arbiter.Mcp.Tools.guard_review_automation/3`). Public (not just used by
+  # this module's own ticks) so `ReviewPatrolSupervisor` can resolve the same
+  # rig name to gate patrol startup on a repo's `:off`-mode override
+  # (bd-4brb2j) without duplicating the rig_paths-remote-resolution logic.
   #
   # Single-repo workspaces: `merge.config.repo` IS that bare name directly.
   # Multi-repo workspaces: find the `repo_paths`/`rig_paths` entry whose git
   # remote resolves to this "owner/repo" and use its key.
-  defp rig_name_for_repo(%Workspace{config: config}, repo) when is_binary(repo) and repo != "" do
+  def rig_name_for_repo(%Workspace{config: config}, repo) when is_binary(repo) and repo != "" do
     config = config || %{}
 
     case get_in(config, ["merge", "config", "repo"]) do
@@ -1554,7 +1580,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     end
   end
 
-  defp rig_name_for_repo(_workspace, _repo), do: nil
+  def rig_name_for_repo(_workspace, _repo), do: nil
 
   defp rig_name_from_rig_paths(config, repo) do
     rig_map = Map.get(config, "repo_paths") || Map.get(config, "rig_paths") || %{}
@@ -1691,9 +1717,21 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     :exit, _ -> :error
   end
 
+  # Delay until the next tick: the idle-backed-off interval (bd-4brb2j — grows
+  # with consecutive outcome-free ticks, capped at @idle_backoff_ceiling_ms),
+  # then jittered +/- 15% so patrols started within milliseconds of each other
+  # at boot drift apart instead of ticking in lockstep forever. Independent of
+  # the rate-limit circuit breaker's own pause window (bd-1m8k7d), which
+  # already suppresses forge calls while open regardless of this schedule.
   defp schedule_next(state) do
     if state.timer_ref, do: Process.cancel_timer(state.timer_ref)
-    ref = Process.send_after(self(), :tick, state.interval_ms)
+
+    delay =
+      state.idle_ticks
+      |> PatrolPacing.idle_backoff_ms(state.interval_ms, @idle_backoff_ceiling_ms)
+      |> PatrolPacing.jitter()
+
+    ref = Process.send_after(self(), :tick, delay)
     %{state | timer_ref: ref}
   end
 end
