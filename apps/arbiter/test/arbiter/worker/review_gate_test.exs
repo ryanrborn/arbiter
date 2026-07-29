@@ -794,6 +794,88 @@ defmodule Arbiter.Worker.ReviewGateTest do
       assert "--model" in args
       assert "haiku" in args
     end
+
+    # bd-dzz6ly: the reviewer is configured directly (review_agent.config), not
+    # routed by Arbiter.Agents.Routing — provenance must say so plainly
+    # ("review_agent") rather than claiming a routing policy that never ran.
+    test "reviewer spawn records provenance (model_tier/thinking/routing_policy/standing_orders_digest) onto its own Run row",
+         %{repo: repo, tmp: tmp} do
+      argv_file = Path.join(tmp, "reviewer-prov-argv.txt")
+      stub_dir = Path.join(tmp, "stub-bin-prov")
+      File.mkdir_p!(stub_dir)
+      stub = Path.join(stub_dir, "claude")
+
+      File.write!(stub, """
+      #!/bin/sh
+      for a in "$@"; do echo "$a" >> #{argv_file}; done
+      exit 0
+      """)
+
+      File.chmod!(stub, 0o755)
+      old_path = System.get_env("PATH") || ""
+      System.put_env("PATH", "#{stub_dir}:#{old_path}")
+      on_exit(fn -> System.put_env("PATH", old_path) end)
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "trib-prov-ws-#{System.unique_integer([:positive])}",
+          prefix: "tp",
+          config: %{
+            "review" => %{"required" => true, "rounds" => 1},
+            "agent" => %{"type" => "claude", "config" => %{"model" => "sonnet"}},
+            "review_agent" => %{
+              "type" => "claude",
+              "config" => %{"model" => "haiku", "model_tier" => "economy", "thinking" => "low"}
+            },
+            "standing_orders" => ["always run tests"]
+          }
+        })
+
+      task = new_task(ws)
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        review_verdict_retries: 0,
+        review_timeout_ms: 3_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> File.exists?(argv_file) end, 6_000)
+
+      require Ash.Query
+      review_id = ReviewGate.reviewer_task_id(task.id)
+
+      find_run = fn ->
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(task_id == ^review_id)
+        |> Ash.read!()
+        |> List.first()
+      end
+
+      :ok = wait_until(fn -> not is_nil(find_run.()) end)
+      run = find_run.()
+
+      assert run.model_tier == "economy"
+      assert run.thinking == "low"
+      assert run.routing_policy == "review_agent"
+      assert is_binary(run.standing_orders_digest)
+      assert String.length(run.standing_orders_digest) == 64
+      assert run.resolved_skills == []
+    end
   end
 
   # ---- verdict re-prompt (bd-8v8ays) ---------------------------------------

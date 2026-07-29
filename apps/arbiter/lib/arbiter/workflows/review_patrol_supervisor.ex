@@ -20,6 +20,7 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
   alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
+  alias Arbiter.Worker.ReviewAutomation
   alias Arbiter.Workflows.ReviewPatrol
 
   @registry Arbiter.Workflows.ReviewPatrolRegistry
@@ -75,23 +76,74 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
             registry_key =
               if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
 
-            child_opts =
-              opts
-              |> Keyword.put(:repo, repo)
-              |> Keyword.put(:workspace_id, workspace.id)
-              |> Keyword.put_new(:interval_ms, patrol_interval_ms())
-              |> Keyword.put(:name, via(registry_key))
+            if off_mode?(workspace, repo) do
+              stop_if_running(registry_key)
 
-            result = DynamicSupervisor.start_child(__MODULE__, {ReviewPatrol, child_opts})
+              Logger.info(
+                "ReviewPatrolSupervisor: skip patrol #{repo} workspace #{workspace.id} " <>
+                  "(#{workspace.name}) — review_automation resolves to :off for this repo"
+              )
 
-            Logger.info(
-              "ReviewPatrolSupervisor: patrol #{repo} workspace #{workspace.id} (#{workspace.name}): #{inspect(result)}"
-            )
+              :skip
+            else
+              child_opts =
+                opts
+                |> Keyword.put(:repo, repo)
+                |> Keyword.put(:workspace_id, workspace.id)
+                |> Keyword.put_new(:interval_ms, patrol_interval_ms())
+                |> Keyword.put(:name, via(registry_key))
 
-            result
+              result = DynamicSupervisor.start_child(__MODULE__, {ReviewPatrol, child_opts})
+
+              Logger.info(
+                "ReviewPatrolSupervisor: patrol #{repo} workspace #{workspace.id} (#{workspace.name}): #{inspect(result)}"
+              )
+
+              result
+            end
           end)
 
         List.first(results, :skip)
+    end
+  end
+
+  # A repo whose LIVE `review_automation.repo_overrides[rig_name]` (or,
+  # absent an override, `review_automation.default`) resolves to `:off` has no
+  # reviewer we'd ever dispatch against it — ReviewPatrol's own tick logic
+  # already downgrades an in-flight engagement to no-dispatch behavior in this
+  # case (see `ReviewPatrol.automation_mode/3`), but the PATROL PROCESS ITSELF
+  # still started and ticked GitHub every interval regardless (bd-4brb2j: this
+  # was true of both `voice_biometrics` at `:flag` and `atlas` at
+  # `:report_only` in the incident — closing that gap for the strictly-worse
+  # `:off` case here is the highest-value, lowest-risk slice of that finding).
+  # Checked at author-independent granularity (`repo_override_mode/2`, no PR
+  # author needed), same as ReviewPatrol's own live re-check.
+  defp off_mode?(%Workspace{} = workspace, repo) do
+    rig_name = ReviewPatrol.rig_name_for_repo(workspace, repo)
+
+    case ReviewAutomation.repo_override_mode(workspace.config, rig_name) do
+      :off -> true
+      nil -> default_off?(workspace.config)
+      _ -> false
+    end
+  end
+
+  defp default_off?(%{"review_automation" => %{"default" => default}}),
+    do: ReviewAutomation.normalize(default) == :off
+
+  defp default_off?(_config), do: false
+
+  defp stop_if_running(registry_key) do
+    case Registry.lookup(@registry, registry_key) do
+      [{pid, _}] ->
+        Logger.info(
+          "ReviewPatrolSupervisor: stopping patrol #{registry_key} — review_automation flipped to :off"
+        )
+
+        DynamicSupervisor.terminate_child(__MODULE__, pid)
+
+      _ ->
+        :ok
     end
   end
 

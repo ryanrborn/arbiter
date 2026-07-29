@@ -1745,6 +1745,45 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{runs: []}} = Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
     end
 
+    # bd-dzz6ly: "which runs had skill X active, grouped by outcome" must be
+    # answerable straight off this MCP surface, without reading a transcript.
+    test "surfaces run provenance (resolved_skills/routing_policy/model_tier/thinking/standing_orders_digest/difficulty_at_dispatch)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "provenance target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          resolved_skills: [
+            %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+          ],
+          standing_orders_digest: String.duplicate("a", 64),
+          routing_policy: "by_difficulty",
+          model_tier: "premium",
+          thinking: "high",
+          difficulty_at_dispatch: 3
+        })
+
+      assert {:ok, %{runs: [entry]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert entry.id == run.id
+
+      assert entry.resolved_skills == [
+               %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+             ]
+
+      assert entry.standing_orders_digest == String.duplicate("a", 64)
+      assert entry.routing_policy == "by_difficulty"
+      assert entry.model_tier == "premium"
+      assert entry.thinking == "high"
+      assert entry.difficulty_at_dispatch == 3
+    end
+
     test "honors a bounded limit", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "many runs", workspace_id: ctx.ws.id})
 
@@ -2034,6 +2073,65 @@ defmodule Arbiter.MCP.ToolsTest do
 
       assert {:error, {:not_found, _}} =
                Tools.run_log_list(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+  end
+
+  describe "transcript_capture_stats/2 (bd-9wotbo)" do
+    test "reports capture rate over Claude-driven runs only, excluding workflow-only runs", ctx do
+      base = ~U[2026-07-01 00:00:00Z]
+
+      {:ok, captured} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-captured",
+          started_at: base
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(captured.id)
+      Arbiter.Worker.OutputLog.append(handle, "line")
+      Arbiter.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Arbiter.Worker.OutputLog.path_for(captured.id)) end)
+
+      {:ok, missing} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-missing",
+          started_at: DateTime.add(base, 60, :second)
+        })
+
+      {:ok, _workflow_only} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.add(base, 120, :second)
+        })
+
+      {:ok, _pre_corpus} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-pre-corpus",
+          started_at: ~U[2026-06-10 00:00:00Z]
+        })
+
+      assert {:ok, stats} = Tools.transcript_capture_stats(ctx.coordinator, %{})
+
+      assert stats.corpus_start_date == "2026-06-20"
+      assert stats.claude_sessions == 2
+      assert stats.transcript_missing == 1
+      assert stats.workflow_only_runs == 1
+      assert stats.capture_rate_pct == 50.0
+      assert is_binary(missing.id)
     end
   end
 

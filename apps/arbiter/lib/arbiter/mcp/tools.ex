@@ -1416,7 +1416,13 @@ defmodule Arbiter.MCP.Tools do
       started_at: iso(run.started_at),
       completed_at: iso(run.completed_at),
       exit_code: run.exit_code,
-      failure_reason: run.failure_reason
+      failure_reason: run.failure_reason,
+      resolved_skills: run.resolved_skills || [],
+      standing_orders_digest: run.standing_orders_digest,
+      routing_policy: run.routing_policy,
+      model_tier: run.model_tier,
+      thinking: run.thinking,
+      difficulty_at_dispatch: run.difficulty_at_dispatch
     }
   end
 
@@ -1470,6 +1476,74 @@ defmodule Arbiter.MCP.Tools do
 
   defp line_count_of({:ok, lines}), do: length(lines)
   defp line_count_of({:error, _}), do: 0
+
+  # ---- transcript_capture_stats -------------------------------------------
+
+  # 2026-06-19 rename (commit 8181cfc) moved the durable-transcript root from
+  # the retired `arbiter-polecat-logs` to `arbiter-worker-logs`; `path_for/1`
+  # only ever looks in the current root. That's an accepted loss (bd-9wotbo,
+  # operator decision 2026-07-28) — no migration, no legacy-root fallback — so
+  # every run before this date is definitionally unreachable and must be
+  # excluded from the denominator rather than counted as a capture failure.
+  @corpus_start_date ~U[2026-06-20 00:00:00Z]
+
+  @doc """
+  Transcript-capture health for a workspace (bd-9wotbo, gap G4): what fraction
+  of Claude-driven runs actually produced a durable transcript, scoped to
+  `started_at >= #{@corpus_start_date}` (the `arbiter-worker-logs` corpus
+  start date — see the module note on `@corpus_start_date` and
+  `Arbiter.Worker.OutputLog`'s moduledoc for the accepted pre-rename loss).
+
+  A workflow-mode (bookkeeping-only) run never opens a Claude session — see
+  `Arbiter.Worker.Driver`'s "workflow mode" — so it carries no `session_id`
+  and, by design, no transcript. Counting those as capture failures would
+  make the rate look broken when nothing is wrong, so they're reported
+  separately as `workflow_only_runs` and excluded from `claude_sessions` /
+  `capture_rate_pct`. `capture_rate_pct` is `nil` when there are no
+  Claude-driven runs in the window (avoids a divide-by-zero misread as 0%).
+
+  Coordinator only. Optional `workspace` (resolved the same way as
+  `worker_list` / `task_ready`).
+  """
+  @spec transcript_capture_stats(Scope.t(), map()) ::
+          {:ok, map()} | {:error, {atom(), String.t()}}
+  def transcript_capture_stats(%Scope{} = scope, args) do
+    require Ash.Query
+
+    with {:ok, ws_id} <- resolve_workspace_id(scope, args) do
+      runs =
+        Arbiter.Workers.Run
+        |> Ash.Query.filter(workspace_id == ^ws_id and started_at >= ^@corpus_start_date)
+        |> Ash.read!()
+
+      {claude_sessions, workflow_only} =
+        Enum.split_with(runs, &(&1.session_id not in [nil, ""]))
+
+      missing =
+        Enum.count(claude_sessions, fn run ->
+          not File.regular?(Arbiter.Worker.OutputLog.path_for(run.id))
+        end)
+
+      {:ok,
+       %{
+         corpus_start_date: Date.to_iso8601(DateTime.to_date(@corpus_start_date)),
+         total_runs: length(runs),
+         claude_sessions: length(claude_sessions),
+         transcript_missing: missing,
+         workflow_only_runs: length(workflow_only),
+         capture_rate_pct: capture_rate_pct(claude_sessions, missing)
+       }}
+    end
+  rescue
+    e -> {:error, {:internal, "transcript_capture_stats failed: #{Exception.message(e)}"}}
+  end
+
+  defp capture_rate_pct([], _missing), do: nil
+
+  defp capture_rate_pct(claude_sessions, missing) do
+    total = length(claude_sessions)
+    Float.round((total - missing) / total * 100, 1)
+  end
 
   # ---- external_review_list -----------------------------------------------
 
@@ -1813,9 +1887,14 @@ defmodule Arbiter.MCP.Tools do
   @doc """
   Reconcile the workspace's tasks against its external tracker (`arb sync`): open
   assigned issues with no task get a linked task; open tasks whose issue is
-  unassigned/closed get closed; closed tasks whose tracker issue is still open
-  are reported as `drift` (bd-2wilou — a close that never propagated
-  upstream). Drift entries are report-only and never mutate the local task.
+  closed upstream or reassigned away get closed (an issue that is merely
+  unassigned is left alone — bd-83ojwi); closed tasks whose close was meant to
+  propagate upstream — a recorded close intent (bd-bsco7f), or for rows closed
+  before that was recorded a non-blank `pr_ref` (bd-83ojwi) — but whose tracker
+  issue is still open are reported as `drift` (bd-2wilou — a close that never
+  propagated upstream). `task`-type and `review_only` tasks are exempt: they
+  are expected to close with their ticket still open.
+  Drift entries are report-only and never mutate the local task.
   Coordinator only. With `dry: true` the plan is returned without acting.
   No-ops cleanly when the tracker does not support reconciliation. Backs onto
   `Arbiter.Tasks.Claim.plan/1` + `apply_plan/2`.

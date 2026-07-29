@@ -573,7 +573,13 @@ defmodule Arbiter.Worker do
       # bd-auma3z: when this worker was resumed (re-attached to a preserved
       # worktree), link the new run to the prior one so the stopped→resumed
       # lineage is traceable and metrics don't read it as two unrelated runs.
-      resumed_from_run_id: resumed_from_run_id(state.meta)
+      resumed_from_run_id: resumed_from_run_id(state.meta),
+      # bd-dzz6ly: the task's difficulty AT DISPATCH TIME, stamped into meta by
+      # the dispatcher before the worker starts (unlike the other provenance
+      # fields below, which are resolved after spawn and backfilled). Captured
+      # here — not read from `issues.difficulty` later — so a subsequent
+      # difficulty edit never retroactively relabels this run's provenance.
+      difficulty_at_dispatch: difficulty_at_dispatch(state.meta)
     }
 
     case Ash.create(Arbiter.Workers.Run, attrs) do
@@ -594,6 +600,11 @@ defmodule Arbiter.Worker do
     do: Map.get(meta, :resumed_from_run_id) || Map.get(meta, "resumed_from_run_id")
 
   defp resumed_from_run_id(_), do: nil
+
+  defp difficulty_at_dispatch(meta) when is_map(meta),
+    do: Map.get(meta, :difficulty_at_dispatch) || Map.get(meta, "difficulty_at_dispatch")
+
+  defp difficulty_at_dispatch(_), do: nil
 
   # Classify the worker that owns this run from its meta, mirroring the role
   # tags the ReviewGate and Dispatch stamp:
@@ -659,8 +670,11 @@ defmodule Arbiter.Worker do
   # Open the durable, uncapped per-run transcript for this session. Keyed on
   # run_id: a worker whose Run row never persisted (run_id nil) gets no
   # durable log, since there's no row to anchor audit retrieval to. A disk
-  # error logs a warning and degrades to nil — the live capped path (PubSub +
-  # bounded output_lines) is unaffected either way. See Arbiter.Worker.OutputLog.
+  # error degrades to nil — the live capped path (PubSub + bounded
+  # output_lines) is unaffected either way — but bd-9wotbo found that a
+  # `Logger.warning` alone is effectively silent: a corpus with an unnoticed
+  # capture hole can't be trusted for measurement, so a real open failure
+  # also raises a coordinator escalation. See Arbiter.Worker.OutputLog.
   defp open_output_log(%State{run_id: nil}), do: nil
 
   defp open_output_log(%State{run_id: run_id} = state) do
@@ -670,8 +684,43 @@ defmodule Arbiter.Worker do
 
       {:error, reason} ->
         log_run_warning("output_log_open", state.task_id, reason)
+        escalate_output_log_failure(state, reason)
         nil
     end
+  end
+
+  # bd-9wotbo: a transcript-capture failure must be loud, not a warning nobody
+  # reads. Raises a coordinator escalation naming the run so it shows up in
+  # `arb inbox` alongside the other things that need a human's attention.
+  # Public (and `@doc false`, mirroring `resume_decision/6`) purely so this is
+  # unit-testable without spawning a real Claude session port.
+  @doc false
+  def escalate_output_log_failure(%State{} = state, reason) do
+    %State{task_id: task_id, workspace_id: workspace_id, run_id: run_id} = state
+
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+      from_ref: "system",
+      workspace_id: workspace_id,
+      directive_ref: task_id,
+      subject: "#{task_id} — transcript capture failed for run #{run_id}",
+      body:
+        "Arbiter.Worker.OutputLog.open/1 failed for run #{run_id} (#{inspect(reason)}). " <>
+          "This run's durable transcript will be missing from the audit corpus; the " <>
+          "capped in-memory tail (worker_runs.output_lines) is unaffected. " <>
+          "Action: check disk space / permissions on the output_log_root."
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.escalate_output_log_failure/2 swallowed for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
   end
 
   defp stringify_failure(nil), do: nil
@@ -1019,6 +1068,14 @@ defmodule Arbiter.Worker do
       backfill_run_model(state.run_id, value, state.task_id)
     end
 
+    # bd-dzz6ly: routing/skills/standing_orders are resolved after this
+    # worker's Run row already exists (dispatch/spawn happens post-init), so
+    # they arrive as a single reported map and get patched onto the row the
+    # same way :model's late arrival does above.
+    if key == :run_provenance and not is_nil(state.run_id) and is_map(value) do
+      backfill_run_fields(state.run_id, value, state.task_id)
+    end
+
     {:reply, :ok, state}
   end
 
@@ -1101,7 +1158,7 @@ defmodule Arbiter.Worker do
       # a Gemini/Codex run has no Claude session file to reconcile against.
       if config_dir && new_state.run_id &&
            Map.get(session_config, :provider) in [nil, "claude"] do
-        stamp_run_session_coords(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
+        backfill_run_fields(new_state.run_id, %{config_dir: config_dir}, new_state.task_id)
       end
 
       {:reply, {:ok, port}, new_state}
@@ -1391,7 +1448,7 @@ defmodule Arbiter.Worker do
         end
 
         if not had_session_id? and not is_nil(session_id) and not is_nil(new_state.run_id) do
-          stamp_run_session_coords(new_state.run_id, %{session_id: session_id}, new_state.task_id)
+          backfill_run_fields(new_state.run_id, %{session_id: session_id}, new_state.task_id)
         end
 
         # Race-condition patch: if the worker already terminated (fail_now/complete_now
@@ -1421,18 +1478,20 @@ defmodule Arbiter.Worker do
     e -> log_run_warning("backfill_model", task_id, e)
   end
 
-  # bd-au3xrq: best-effort stamp of the on-disk session-JSONL coordinates
-  # (`session_id` / `config_dir`) onto the run row. Same swallow-and-log
-  # discipline as backfill_run_model — a DB hiccup must never crash the worker.
-  defp stamp_run_session_coords(run_id, fields, task_id) when is_map(fields) do
+  # Generic best-effort field patch onto the run row: originally the on-disk
+  # session-JSONL coordinates (`session_id` / `config_dir`, bd-au3xrq), now
+  # also used for the bd-dzz6ly provenance fields reported post-spawn. Same
+  # swallow-and-log discipline as backfill_run_model — a DB hiccup must never
+  # crash the worker.
+  defp backfill_run_fields(run_id, fields, task_id) when is_map(fields) do
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, fields, action: :update) do
       :ok
     else
-      {:error, reason} -> log_run_warning("stamp_session_coords", task_id, reason)
+      {:error, reason} -> log_run_warning("backfill_fields", task_id, reason)
     end
   rescue
-    e -> log_run_warning("stamp_session_coords", task_id, e)
+    e -> log_run_warning("backfill_fields", task_id, e)
   end
 
   # The effective CLAUDE_CONFIG_DIR a spawn ran under: the value injected into

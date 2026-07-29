@@ -193,6 +193,35 @@ defmodule Arbiter.Tasks.IssueTest do
       assert {:error, %Ash.Error.Invalid{} = err} = Ash.update(closed, %{}, action: :close)
       assert err |> Exception.message() |> String.contains?("already closed")
     end
+
+    # bd-bsco7f: `close_upstream` is an argument, so it vanishes with the
+    # action. Tasks.Claim's drift check needs to know afterwards whether this
+    # close was meant to close the ticket — record it.
+    test "records that the close was expected to propagate upstream", %{issue: issue} do
+      assert {:ok, closed} = Ash.update(issue, %{}, action: :close)
+      assert closed.close_upstream_expected == true
+    end
+
+    test "records an explicit opt-out of propagating upstream", %{issue: issue} do
+      assert {:ok, closed} = Ash.update(issue, %{close_upstream: false}, action: :close)
+      assert closed.close_upstream_expected == false
+    end
+
+    test "a review-only close records no upstream intent, whatever the caller passed",
+         %{ws: ws} do
+      # SyncTracker refuses to transition a tracker issue a review-only task
+      # merely borrowed (bd-6xaaam), so recording `true` here would claim an
+      # upstream close that provably never happened.
+      {:ok, borrowed} =
+        Ash.create(Issue, %{
+          title: "someone else's ticket",
+          workspace_id: ws.id,
+          review_only: true
+        })
+
+      assert {:ok, closed} = Ash.update(borrowed, %{close_upstream: true}, action: :close)
+      assert closed.close_upstream_expected == false
+    end
   end
 
   describe ":reopen action" do
@@ -233,6 +262,15 @@ defmodule Arbiter.Tasks.IssueTest do
       assert reopened.status == :open
       assert reopened.pr_ref == nil
       assert reopened.source_pr == nil
+    end
+
+    test "clears the recorded close intent — it describes a close that no longer stands
+          (bd-bsco7f)",
+         %{closed: closed} do
+      assert closed.close_upstream_expected == true
+
+      assert {:ok, reopened} = Ash.update(closed, %{}, action: :reopen)
+      assert reopened.close_upstream_expected == nil
     end
 
     test "cannot update fields on a closed issue via :update (status guard)", %{closed: closed} do

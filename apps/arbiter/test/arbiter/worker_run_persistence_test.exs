@@ -159,6 +159,74 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     assert run.model == "claude-haiku-4-5"
   end
 
+  test "difficulty_at_dispatch is captured from meta at Run creation (bd-dzz6ly)" do
+    task_id = "bd-rundiff-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(
+        task_id: task_id,
+        repo: "arbiter",
+        workspace_id: "ws-runs",
+        meta: %{difficulty_at_dispatch: 1}
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    [run] = runs_for(task_id)
+    assert run.difficulty_at_dispatch == 1
+  end
+
+  test "difficulty_at_dispatch is nil when the dispatch carried no difficulty" do
+    task_id = "bd-rundiffnil-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} = Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    [run] = runs_for(task_id)
+    assert run.difficulty_at_dispatch == nil
+  end
+
+  test "reporting :run_provenance backfills resolved_skills/routing/tier/thinking/orders digest onto the Run row (bd-dzz6ly)" do
+    task_id = "bd-runprov-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    provenance = %{
+      resolved_skills: [
+        %{
+          "name" => "tdd",
+          "activation_mode" => "always_on",
+          "skill_version" => "2026-01-01T00:00:00Z"
+        }
+      ],
+      standing_orders_digest: String.duplicate("a", 64),
+      routing_policy: "by_difficulty",
+      model_tier: "premium",
+      thinking: "high"
+    }
+
+    :ok = Worker.report(pid, :run_provenance, provenance)
+
+    [run] = runs_for(task_id)
+
+    assert run.resolved_skills == [
+             %{
+               "name" => "tdd",
+               "activation_mode" => "always_on",
+               "skill_version" => "2026-01-01T00:00:00Z"
+             }
+           ]
+
+    assert run.standing_orders_digest == String.duplicate("a", 64)
+    assert run.routing_policy == "by_difficulty"
+    assert run.model_tier == "premium"
+    assert run.thinking == "high"
+  end
+
   test "completing a worker stamps the Run row :completed with output_lines" do
     task_id = "bd-runcomp-#{System.unique_integer([:positive])}"
 
