@@ -611,10 +611,11 @@ defmodule Arbiter.Tasks.ClaimTest do
           workspace_id: ws.id
         })
 
-      # bd-83ojwi: drift now requires a close that actually landed a diff.
-      {:ok, drifted_task} = Ash.update(drifted_task, %{pr_ref: "845"})
-      {:ok, drifted_task} = Ash.update(drifted_task, %{close_upstream: false}, action: :close)
-
+      # bd-bsco7f restores this to its original **no-`pr_ref`** shape. bd-83ojwi
+      # had to bolt a `pr_ref` on to keep it green; that edit was the blind spot
+      # made concrete. The close below asks to propagate (`close_upstream: true`)
+      # and the stubbed tracker never actually closes — a failed propagation, no
+      # PR anywhere in sight. That is the bd-2wilou case verbatim.
       stub_gh(fn conn ->
         case {conn.method, conn.request_path} do
           {"GET", "/user"} ->
@@ -623,13 +624,17 @@ defmodule Arbiter.Tasks.ClaimTest do
           {"GET", "/repos/ryanrborn/arbiter/issues"} ->
             Req.Test.json(conn, [])
 
-          {"GET", "/repos/ryanrborn/arbiter/issues/45"} ->
+          {method, "/repos/ryanrborn/arbiter/issues/45"} when method in ["GET", "PATCH"] ->
+            # The PATCH is accepted but never takes: the issue stays open.
             Req.Test.json(
               conn,
               issue_payload(%{"number" => 45, "title" => "Issue 45", "state" => "open"})
             )
         end
       end)
+
+      {:ok, drifted_task} = Ash.update(drifted_task, %{close_upstream: true}, action: :close)
+      refute drifted_task.pr_ref
 
       assert {:ok, plan} = Claim.plan(ws)
       assert [{:drift, task_id, reason}] = plan
@@ -867,6 +872,102 @@ defmodule Arbiter.Tasks.ClaimTest do
       end)
 
       assert {:ok, []} = Claim.plan(ws)
+    end
+  end
+
+  describe "plan/1 — drift gates on the recorded close intent (bd-bsco7f)" do
+    # One stub for the whole close→plan round trip: the close-time PATCH is
+    # accepted but never takes (the issue is still "open" on every read), which
+    # is the failed upstream propagation this drift check exists to catch.
+    defp stub_forever_open_issues do
+      stub_gh(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/user"} ->
+            Req.Test.json(conn, %{"login" => @viewer})
+
+          {"GET", "/repos/ryanrborn/arbiter/issues"} ->
+            Req.Test.json(conn, [])
+
+          {_method, "/repos/ryanrborn/arbiter/issues/" <> n} ->
+            Req.Test.json(
+              conn,
+              issue_payload(%{"number" => String.to_integer(n), "state" => "open"})
+            )
+        end
+      end)
+    end
+
+    defp closed_upstream_task(ws, ref, attrs) do
+      ws
+      |> open_task(ref, attrs)
+      |> Ash.update!(%{close_upstream: true}, action: :close)
+    end
+
+    # Simulate a row closed before `close_upstream_expected` existed: the column
+    # is NULL, so the gate has nothing but the legacy `pr_ref` proxy to go on.
+    defp forget_close_intent(task) do
+      Arbiter.Repo.query!("UPDATE issues SET close_upstream_expected = NULL WHERE id = $1", [
+        task.id
+      ])
+
+      task
+    end
+
+    test "a closed `bug` with NO pr_ref whose close was meant to propagate IS drift",
+         %{github_ws: ws} do
+      stub_forever_open_issues()
+      bug = closed_upstream_task(ws, "70", %{issue_type: :bug})
+      chore = closed_upstream_task(ws, "71", %{issue_type: :chore})
+
+      refute bug.pr_ref
+      refute chore.pr_ref
+
+      assert {:ok, plan} = Claim.plan(ws)
+      drifted = for {:drift, id, _reason} <- plan, do: id
+      assert Enum.sort(drifted) == Enum.sort([bug.id, chore.id])
+    end
+
+    test "a close that explicitly opted out of propagating is NOT drift", %{github_ws: ws} do
+      stub_forever_open_issues()
+      _investigation = closed_task(ws, "72", %{issue_type: :bug})
+
+      assert {:ok, []} = Claim.plan(ws)
+    end
+
+    test "a `task`-type close stays exempt even when it was meant to propagate",
+         %{github_ws: ws} do
+      stub_forever_open_issues()
+      _research = closed_upstream_task(ws, "73", %{issue_type: :task})
+
+      assert {:ok, []} = Claim.plan(ws)
+    end
+
+    test "a review-only close is NOT drift — it never owned the ticket", %{github_ws: ws} do
+      stub_forever_open_issues()
+      _borrowed = closed_upstream_task(ws, "74", %{issue_type: :bug, review_only: true})
+
+      assert {:ok, []} = Claim.plan(ws)
+    end
+
+    test "a legacy close with no recorded intent falls back to the pr_ref proxy",
+         %{github_ws: ws} do
+      stub_forever_open_issues()
+
+      landed =
+        ws
+        |> open_task("75", %{issue_type: :bug})
+        |> Ash.update!(%{pr_ref: "975"})
+        |> Ash.update!(%{close_upstream: true}, action: :close)
+        |> forget_close_intent()
+
+      _findings_only =
+        ws
+        |> closed_upstream_task("76", %{issue_type: :bug})
+        |> forget_close_intent()
+
+      assert {:ok, plan} = Claim.plan(ws)
+      assert [{:drift, task_id, _reason}] = plan
+      assert task_id == landed.id
     end
   end
 

@@ -97,8 +97,12 @@ defmodule Arbiter.Tasks.Claim do
       `{:drift, task_id, reason}`. This is report-only: `apply_plan/3` never
       writes anything for a `:drift` action, since fixing it means re-closing
       upstream (`task_sync_upstream_close`), not touching the local task.
-      `:task`-type tasks are exempt (bd-83ojwi): research/investigation work
-      is *expected* to close locally with its ticket still open upstream.
+      Only closes that were *meant* to propagate are eligible: a close carries
+      a recorded `close_upstream_expected` (bd-bsco7f), and for rows predating
+      that, `pr_ref`'s presence stands in (bd-83ojwi). `:task`-type and
+      `review_only` tasks are exempt outright — research/investigation work and
+      borrowed tickets are *expected* to close locally with the ticket still
+      open upstream.
 
   Returns `{:ok, plan}` or `{:error, reason}`. `plan` is an empty list when
   the workspace tracker doesn't support the claim operation.
@@ -334,14 +338,14 @@ defmodule Arbiter.Tasks.Claim do
   # since the issue may no longer be assigned to the viewer by the time this
   # runs.
   #
-  # bd-83ojwi: but only for closes that actually *landed* something — see
-  # `landed_close?/1`. A close implies "the ticket is done" only when it
-  # shipped a diff; a findings-only close never made that claim, so its ticket
-  # staying open is the expected outcome, not drift.
+  # bd-83ojwi/bd-bsco7f: but only for closes that were meant to take the ticket
+  # with them — see `close_meant_to_propagate?/1`. A findings-only close never
+  # made that claim, so its ticket staying open is the expected outcome, not
+  # drift.
   defp build_drift(adapter, workspace, type) do
     workspace
     |> read_closed_tracker_tasks(type)
-    |> Enum.filter(&landed_close?/1)
+    |> Enum.filter(&close_meant_to_propagate?/1)
     |> Enum.flat_map(fn task ->
       case adapter.fetch(task.tracker_ref) do
         {:ok, issue} ->
@@ -360,29 +364,48 @@ defmodule Arbiter.Tasks.Claim do
     end)
   end
 
-  # bd-83ojwi: did this local close actually land work upstream-worthy enough
-  # that the tracker ticket should have closed with it? Two shapes of close
-  # land nothing, and for both the ticket legitimately stays open:
+  # bd-83ojwi: was this local close supposed to leave the tracker ticket
+  # closed? When it wasn't, the ticket staying open is the intended outcome and
+  # reporting it invites a "reconciliation" that closes a live ticket and
+  # destroys the handoff notes it carries.
+  #
+  # Two shapes are exempt outright:
   #
   #   * `:task`-type — the opt-in non-reviewable research/investigation type
   #     (see `Issue.issue_type`). Its deliverable is a findings summary in
   #     `notes`: no diff, no PR. Closing one records that the *investigation*
   #     finished, not that the underlying work is done.
-  #   * any type closed with no `pr_ref` — the merger sets `pr_ref` when it
-  #     opens a PR, so its absence means the bead closed without shipping a
-  #     diff. Observed live on `vstim` as `bug` beads closed as investigations
-  #     (vs-9y1ipo/sc-619, vs-bdix5z/sc-485): the ticket body carries the
-  #     handoff notes and the bug is still unfixed. `issue_type` alone does
-  #     not catch these — the declared type is the *filing* intent, `pr_ref`
-  #     is what actually happened.
+  #   * `review_only` — a borrowed ticket this task never owned. SyncTracker
+  #     refuses to transition it (bd-6xaaam), so it is open by construction.
   #
-  # Reporting either as drift invites a "reconciliation" that closes a live
-  # ticket and destroys the handoff notes. What remains — a non-`:task` bead
-  # that shipped a PR yet whose ticket is still open — is exactly the
-  # bd-2wilou case: a close that never propagated upstream.
-  defp landed_close?(%Issue{issue_type: :task}), do: false
-  defp landed_close?(%Issue{pr_ref: pr_ref}) when is_binary(pr_ref), do: String.trim(pr_ref) != ""
-  defp landed_close?(_task), do: false
+  # Past that, bd-83ojwi asked whether the close shipped a diff, using `pr_ref`
+  # as the stand-in. bd-bsco7f keeps that limb and adds the signal it was
+  # standing in for. `close_upstream_expected` (recorded at close time by
+  # `Issue.Changes.RecordCloseIntent`) says outright whether the close was meant
+  # to propagate, which catches the case `pr_ref` cannot see: a `bug` fixed by
+  # hand or as a drive-by, closed with `close_upstream: true`, whose upstream
+  # close then failed. No PR was ever opened, so bd-83ojwi's gate read it as a
+  # findings-only close and said nothing — the bd-2wilou class arriving by the
+  # manual path.
+  #
+  # Both limbs are needed, and neither subsumes the other:
+  #
+  #   * intent alone would drop the Jira merge path, which closes with
+  #     `close_upstream: false` on purpose (the `:merged` lifecycle already
+  #     moved the ticket to Code Complete — see `MergeQueue.close_task_and_finalize`)
+  #     yet very much expects the ticket not to be left open.
+  #   * `pr_ref` alone is bd-83ojwi's blind spot, and it is the only signal
+  #     available for rows closed before the intent was recorded (`nil`), where
+  #     it stays the fallback. That is what keeps the live findings-only closes
+  #     vs-9y1ipo/sc-619 and vs-bdix5z/sc-485 unflagged.
+  defp close_meant_to_propagate?(%Issue{issue_type: :task}), do: false
+  defp close_meant_to_propagate?(%Issue{review_only: true}), do: false
+  defp close_meant_to_propagate?(%Issue{close_upstream_expected: true}), do: true
+
+  defp close_meant_to_propagate?(%Issue{pr_ref: pr_ref}) when is_binary(pr_ref),
+    do: String.trim(pr_ref) != ""
+
+  defp close_meant_to_propagate?(_task), do: false
 
   defp read_closed_tracker_tasks(workspace, type) do
     query =
