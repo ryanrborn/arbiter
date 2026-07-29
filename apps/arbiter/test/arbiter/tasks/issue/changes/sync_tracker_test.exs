@@ -734,6 +734,30 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
 
       refute_receive {:github, :patch, _, _}
     end
+
+    test "a forced :sync_upstream_close on a review-only task pushes nothing and records no intent" do
+      forwarding_stub()
+      ws = github_workspace()
+
+      {:ok, issue} =
+        Ash.create(Issue, %{
+          title: "review-only task",
+          tracker_type: :github,
+          tracker_ref: @ref,
+          workspace_id: ws.id
+        })
+
+      {:ok, issue} = Ash.update(issue, %{review_only: true})
+      {:ok, closed} = Ash.update(issue, %{close_upstream: true}, action: :close)
+
+      assert {:ok, synced} = Ash.update(closed, %{}, action: :sync_upstream_close)
+
+      # maybe_force_sync/1 skips review-only outright, so nothing goes upstream —
+      # recording `true` here would be a record of a close that never happened
+      # and would manufacture drift on a ticket this task never owned (bd-bsco7f).
+      refute_receive {:github, :patch, _, _}
+      assert synced.close_upstream_expected == false
+    end
   end
 
   describe "auto-close rollup propagates close_upstream (bd-dqjd2f)" do
@@ -791,6 +815,12 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       assert {:ok, synced} = Ash.update(closed, %{}, action: :sync_upstream_close)
       assert synced.status == :closed
       assert synced.closed_at == closed_at
+
+      # bd-bsco7f: the local close said "leave the ticket open"; this action
+      # says otherwise. Recording it makes the repaired task drift-visible if
+      # the ticket is *still* open next sweep.
+      assert closed.close_upstream_expected == false
+      assert synced.close_upstream_expected == true
 
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :get, ^expected_path}
