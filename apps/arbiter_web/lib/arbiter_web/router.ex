@@ -131,6 +131,7 @@ defmodule ArbiterWeb.Router do
     get("/workers", WorkerController, :index)
     get("/workers/:task_id", WorkerController, :show)
     get("/workers/:task_id/log", WorkerController, :log)
+    get("/workers/:task_id/prompt", WorkerController, :prompt)
     get("/workers/:task_id/run_log_list", WorkerController, :run_log_list)
     post("/workers/:task_id/stop", WorkerController, :stop)
 

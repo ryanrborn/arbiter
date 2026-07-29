@@ -1095,7 +1095,11 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       mr_ref: engagement.source_pr,
       workspace: workspace,
       adapter_opts: opts,
-      check_runner: dedupe_runner(prior_keys)
+      check_runner: dedupe_runner(prior_keys),
+      # bd-9rdwe4 (#1017 gap G5): a re-review never spawns through
+      # `Arbiter.Worker` — this is its only prompt-persistence choke-point,
+      # keyed on the engagement (an `Issue` row, not a Reviews.Record).
+      review_record_id: engagement.id
     }
 
     case Arbiter.Workflow.run(CodeReview, state) do
@@ -1138,7 +1142,9 @@ defmodule Arbiter.Workflows.ReviewPatrol do
       workspace: workspace,
       adapter_opts: opts,
       report_only: true,
-      check_runner: dedupe_runner(prior_keys)
+      check_runner: dedupe_runner(prior_keys),
+      # bd-9rdwe4 (#1017 gap G5): see the mirroring comment in run_rereview/5.
+      review_record_id: engagement.id
     }
 
     case Arbiter.Workflow.run(CodeReview, state) do

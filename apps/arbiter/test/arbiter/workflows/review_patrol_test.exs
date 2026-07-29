@@ -479,6 +479,12 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       assert reloaded.last_reviewed_sha == "newsha"
       assert length(reloaded.posted_findings) == 2
       assert ReviewPatrol.state(name).last_rereviewed == [eng.id]
+
+      # bd-9rdwe4 (#1017 gap G5): a re-review never spawns through
+      # Arbiter.Worker, so CodeReview.Checks persists the composed prompt
+      # itself, keyed by the engagement id.
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(eng.id)
+      assert prompt =~ "BEGIN DIFF"
     end
 
     test "a push touching only unrelated files does NOT trigger a re-review", %{ws: ws} do

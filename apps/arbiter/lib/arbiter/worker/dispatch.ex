@@ -1388,7 +1388,10 @@ defmodule Arbiter.Worker.Dispatch do
             # run correctly even when the CLI stream carries no model/provider
             # (bd-guegdl).
             session_meta = [provider: provider, model: session_model]
-            {:ok, base ++ [command: argv, env: env] ++ session_meta}
+            # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+            # resolution (that's `command:`'s job) — it's carried purely so
+            # `Arbiter.Worker` can persist what this worker was actually told.
+            {:ok, base ++ [command: argv, prompt: prompt, env: env] ++ session_meta}
 
           {:error, reason} ->
             {:error, reason}

@@ -183,7 +183,7 @@ defmodule Arbiter.Reviews.ExternalReview do
       opts = put_report_only(opts, prepared)
       record = create_review_record(prepared, opts)
 
-      case run_workflow(prepared, opts) do
+      case run_workflow(prepared, opts, record) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
           resolve_pr_state_on_complete(record, prepared.workspace)
@@ -601,7 +601,7 @@ defmodule Arbiter.Reviews.ExternalReview do
     end
   end
 
-  defp run_workflow(prepared, opts) do
+  defp run_workflow(prepared, opts, record) do
     %{adapter: adapter, mr_ref: mr_ref, workspace: workspace, repo_path: repo_path} = prepared
     report_only = Map.get(opts, :report_only, false)
     ws_config = workspace_config(workspace)
@@ -634,7 +634,12 @@ defmodule Arbiter.Reviews.ExternalReview do
         # runs against it, subsuming the old base-tree limitation.
         scope: ReviewScope.resolve(ws_config, Map.get(opts, :scope), []),
         repo_path: checkout_path || repo_path,
-        sensitive_globs: sensitive_globs(ws_config)
+        sensitive_globs: sensitive_globs(ws_config),
+        # bd-9rdwe4 (#1017 gap G5): lets CodeReview.Checks persist the
+        # composed prompt (redacted) against this review's own audit record —
+        # this workflow never spawns through `Arbiter.Worker`, so it has no
+        # other prompt-persistence choke-point.
+        review_record_id: record && record.id
       }
       |> maybe_put(:review_cwd, checkout_path)
       # bd-5yp6yn: when a checkout was provisioned, route :read_diff through
@@ -871,7 +876,7 @@ defmodule Arbiter.Reviews.ExternalReview do
 
   defp start_async(prepared, opts, record) do
     Task.Supervisor.start_child(@task_supervisor, fn ->
-      case run_workflow(prepared, opts) do
+      case run_workflow(prepared, opts, record) do
         {:ok, result} ->
           complete_review_record(record, :completed, result)
           resolve_pr_state_on_complete(record, prepared.workspace)

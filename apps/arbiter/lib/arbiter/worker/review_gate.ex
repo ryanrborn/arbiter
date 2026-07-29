@@ -1923,7 +1923,11 @@ defmodule Arbiter.Worker.ReviewGate do
         case adapter.default_argv(prompt, agent_opts) do
           {:ok, argv} ->
             env = safe_spawn_env(adapter, agent_opts)
-            {:ok, base ++ [command: argv, env: env, provider: adapter.provider()]}
+
+            # bd-9rdwe4: `prompt:` alongside `command:` plays no role in argv
+            # resolution — it's carried purely so `Arbiter.Worker` can persist
+            # what this reviewer/implementer was actually told.
+            {:ok, base ++ [command: argv, prompt: prompt, env: env, provider: adapter.provider()]}
 
           {:error, reason} ->
             {:error, reason}

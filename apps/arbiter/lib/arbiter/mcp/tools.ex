@@ -1426,6 +1426,59 @@ defmodule Arbiter.MCP.Tools do
     }
   end
 
+  # ---- worker_prompt ----------------------------------------------------
+
+  @doc """
+  The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5),
+  redacted through the same choke-point as transcript lines. Sibling of
+  `worker_log/2` — same `run_id`/`task_id` selection rule, same
+  synthetic-id-aware task resolution.
+
+  `exists` distinguishes "no prompt was ever persisted for this run" (false,
+  `prompt` nil) from a captured one — including a run whose prompt redacted
+  down to something shorter than what was typed, which is still "exists".
+  """
+  @spec worker_prompt(Scope.t(), map()) :: {:ok, map()} | {:error, {atom(), String.t()}}
+  def worker_prompt(%Scope{} = scope, args) do
+    case fetch_string(args, "run_id") do
+      nil -> worker_prompt_by_task(scope, args)
+      run_id -> worker_prompt_by_run_id(scope, args, run_id)
+    end
+  end
+
+  defp worker_prompt_by_task(scope, args) do
+    with {:ok, task_id} <- resolve_task_id(scope, args, "task_id"),
+         {:ok, _task} <- fetch_task(scope, args, ReviewGate.base_task_id(task_id)) do
+      case latest_run(task_id) do
+        %Arbiter.Workers.Run{} = run -> {:ok, serialize_worker_prompt(run)}
+        nil -> {:error, {:not_found, "no worker run found for task #{task_id}"}}
+      end
+    end
+  end
+
+  defp worker_prompt_by_run_id(scope, args, run_id) do
+    with {:ok, run} <- fetch_run(scope, args, run_id) do
+      {:ok, serialize_worker_prompt(run)}
+    end
+  end
+
+  defp serialize_worker_prompt(%Arbiter.Workers.Run{} = run) do
+    {exists, prompt} =
+      case Arbiter.Worker.PromptLog.read(run.id) do
+        {:ok, content} -> {true, content}
+        {:error, _} -> {false, nil}
+      end
+
+    %{
+      task_id: run.task_id,
+      run_id: run.id,
+      path: Arbiter.Worker.PromptLog.path_for(run.id),
+      exists: exists,
+      prompt: prompt,
+      prompt_sha256: run.prompt_sha256
+    }
+  end
+
   # ---- run_log_list -----------------------------------------------------
 
   @doc """
