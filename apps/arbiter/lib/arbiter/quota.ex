@@ -627,6 +627,24 @@ defmodule Arbiter.Quota do
     end
   end
 
+  @doc """
+  The `on_exhaustion` mode (`:throttle` / `:continue`) for the installation
+  default workspace (bd-l4epbc) — used by the quota-bar UI to word the
+  pace-warning label ("stalls in Nm" vs "starts billing overage in Nm")
+  without threading the workspace record through every LiveView. Falls back
+  to `Workspace.quota_on_exhaustion(nil)` (global default) when the default
+  workspace can't be resolved.
+  """
+  @spec default_workspace_on_exhaustion() :: :throttle | :continue
+  def default_workspace_on_exhaustion do
+    with {:ok, ws_id} <- default_workspace_id(),
+         {:ok, workspace} <- Ash.get(Workspace, ws_id) do
+      Workspace.quota_on_exhaustion(workspace)
+    else
+      _ -> Workspace.quota_on_exhaustion(nil)
+    end
+  end
+
   # ---- internals ---------------------------------------------------------
 
   defp resolve_workspace_id(ws_id) when is_binary(ws_id) and ws_id != "", do: {:ok, ws_id}

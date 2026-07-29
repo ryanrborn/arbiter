@@ -94,6 +94,26 @@ config :arbiter, :quota,
   throttle_threshold: 0.85,
   overage_alert_usd: 50.0
 
+# Quota-bar color thresholds (bd-l4epbc). The topbar/usage-page bars color on
+# projected *deficit minutes* — how long the window would run dry before
+# reset at the current burn rate — not on absolute utilization (a raw
+# used/elapsed ratio is alarming early in the window and meaningless late in
+# it). See `ArbiterWeb.QuotaHelpers`.
+#
+#   * deficit_red_minutes / deficit_amber_minutes: the two color boundaries.
+#   * sampling_floor_elapsed_minutes / sampling_floor_used: below these, a
+#     single burst implies a nonsense burn rate, so the bar renders neutral
+#     grey ("sampling") instead of guessing.
+#   * wall_guard_used: utilization at/above which the bar is never better
+#     than amber, regardless of pace — being on-pace and being out of quota
+#     are independent facts.
+config :arbiter_web, :quota_bar_colors,
+  deficit_red_minutes: 60,
+  deficit_amber_minutes: 20,
+  sampling_floor_elapsed_minutes: 15,
+  sampling_floor_used: 0.05,
+  wall_guard_used: 0.95
+
 # Direct Gemini CLI + Antigravity quota tracking (bd-57ukgb). Unlike the
 # Anthropic snapshot (passively captured by the proxy), these fetch live from
 # Google's Cloud Code Assist API when `GET /api/quota` / `arb quota` / the MCP
