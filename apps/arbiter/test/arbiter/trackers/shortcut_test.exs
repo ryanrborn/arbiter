@@ -910,6 +910,22 @@ defmodule Arbiter.Trackers.ShortcutTest do
 
       assert {:ok, []} = Shortcut.list_open([])
     end
+
+    test "search payload excludes done stories via workflow_state_types, not a disallowed 'completed' key" do
+      stub(fn conn ->
+        assert {conn.method, conn.request_path} == {"POST", "/api/v3/stories/search"}
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        refute Map.has_key?(decoded, "completed")
+        assert decoded["workflow_state_types"] == ["backlog", "unstarted", "started"]
+        assert decoded["archived"] == false
+
+        Req.Test.json(conn, [])
+      end)
+
+      assert {:ok, []} = Shortcut.list_open(assignee: "explicit-member-id")
+    end
   end
 
   # ---- extract_priority/1 ----------------------------------------------------

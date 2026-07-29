@@ -442,7 +442,7 @@ defmodule Arbiter.Trackers.Shortcut do
   defp fetch_stories_by_owner(cfg, member_id) do
     payload = %{
       "owner_ids" => [member_id],
-      "completed" => false,
+      "workflow_state_types" => ["backlog", "unstarted", "started"],
       "archived" => false
     }
 
