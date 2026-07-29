@@ -13,14 +13,16 @@ defmodule Arbiter.Tasks.Issue.Changes.RecordCloseIntent do
   This change writes the answer down, in the same shape
   `Arbiter.Tasks.Issue.Changes.SyncTracker` uses to decide whether to push:
 
-    * `:close` — records `close_upstream and not review_only`. The `review_only`
-      term is not incidental: SyncTracker refuses to transition a tracker issue
-      a review-only task merely borrowed (bd-6xaaam), so recording a bare `true`
-      there would claim an upstream close that provably never happened and
-      manufacture drift on someone else's ticket.
-    * `:sync_upstream_close` (`forced: true`) — records `true` outright. That
-      action's whole purpose is pushing a close upstream for a task already
-      closed locally, so there is no intent to infer.
+    * `review_only` — records `false` whichever action asked, and it is checked
+      first. SyncTracker refuses to transition a tracker issue a review-only
+      task merely borrowed (bd-6xaaam) — both on `:close` (`maybe_sync/4`) and
+      on the forced `:sync_upstream_close` (`maybe_force_sync/1`) — so recording
+      `true` for one would claim an upstream close that provably never happened
+      and manufacture drift on someone else's ticket.
+    * `:sync_upstream_close` (`forced: true`) — records `true`. That action's
+      whole purpose is pushing a close upstream for a task already closed
+      locally, so there is no intent to infer.
+    * `:close` — records the `close_upstream` argument.
 
   Nothing writes `false`-by-omission: a `nil` column means the close predates
   this record, and the drift check falls back to the `pr_ref` proxy for it.
@@ -30,15 +32,18 @@ defmodule Arbiter.Tasks.Issue.Changes.RecordCloseIntent do
 
   @impl true
   def change(changeset, opts, _context) do
-    if Keyword.get(opts, :forced, false) do
-      Ash.Changeset.change_attribute(changeset, :close_upstream_expected, true)
-    else
-      Ash.Changeset.change_attribute(
-        changeset,
-        :close_upstream_expected,
-        Ash.Changeset.get_argument(changeset, :close_upstream) == true and
-          changeset.data.review_only != true
-      )
+    Ash.Changeset.change_attribute(
+      changeset,
+      :close_upstream_expected,
+      expected?(changeset, opts)
+    )
+  end
+
+  defp expected?(changeset, opts) do
+    cond do
+      changeset.data.review_only == true -> false
+      Keyword.get(opts, :forced, false) -> true
+      true -> Ash.Changeset.get_argument(changeset, :close_upstream) == true
     end
   end
 end

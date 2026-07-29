@@ -259,7 +259,9 @@ defmodule Arbiter.Tasks.Issue do
       # bd-bsco7f: this action exists *only* to propagate a close upstream, so
       # the intent is unambiguous — record it. A legacy close that predates
       # `close_upstream_expected` becomes drift-visible once someone repairs it
-      # this way and the ticket is still open afterwards.
+      # this way and the ticket is still open afterwards. (A review-only task
+      # still records `false` — SyncTracker below skips it, so nothing is
+      # pushed and nothing should be claimed.)
       change {Arbiter.Tasks.Issue.Changes.RecordCloseIntent, forced: true}
 
       change {Arbiter.Tasks.Issue.Changes.SyncTracker, force: true}
@@ -536,10 +538,11 @@ defmodule Arbiter.Tasks.Issue do
       identical to a findings-only investigation that should leave its ticket
       open. This attribute records the answer at close time instead.
 
-      Written by `:close` (the effective intent — `close_upstream` AND not
-      `review_only`, since SyncTracker skips review-only tasks entirely) and by
+      Written by `:close` (from the `close_upstream` argument) and by
       `:sync_upstream_close` (which exists solely to push a close upstream, so
-      the intent is unambiguously true). Cleared by `:reopen`.
+      the intent is unambiguously true). Either way a `review_only` task records
+      `false`: SyncTracker skips review-only tasks on both paths, so no upstream
+      close ever happens for one. Cleared by `:reopen`.
 
       `nil` means "closed before this was recorded" — for those rows the drift
       check still falls back to the `pr_ref` proxy. Not `public?`: it is a
