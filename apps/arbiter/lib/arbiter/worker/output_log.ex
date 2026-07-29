@@ -36,7 +36,32 @@ defmodule Arbiter.Worker.OutputLog do
   `open/1` is best-effort from the caller's view — a caller that can't afford
   to crash on a disk error should match `{:error, _}` and carry on with `nil`.
   The file IO device is linked to the opening process (the worker), so an
-  unclean worker death still flushes and closes the fd.
+  unclean worker death still flushes and closes the fd. `Arbiter.Worker`
+  additionally raises a coordinator escalation on a real open failure
+  (bd-9wotbo) — a capture failure must be loud, not a warning nobody reads.
+
+  ## Corpus start date: 2026-06-20 (accepted loss of the pre-rename root)
+
+  Before the 2026-06-19 rename (commit `8181cfc`), `output_log_root` pointed
+  at `~/dev/arbiter-polecat-logs` instead of the current
+  `~/dev/arbiter-worker-logs`. `path_for/1` only ever looks in the *current*
+  root, so the 198 files under the old root (2026-06-02 → 06-19, ~13 MB) are
+  unreachable from here.
+
+  **Operator decision (2026-07-28, bd-9wotbo): this is an accepted loss.**
+  No migration, no legacy-root fallback — `arbiter-polecat-logs` is not
+  referenced by any code path and may be deleted. Anything that reports on
+  the transcript corpus (capture-rate stats, audits) must scope its window to
+  `started_at >= 2026-06-20` so a run from before the rename doesn't silently
+  read as a capture failure. See `Arbiter.MCP.Tools.transcript_capture_stats/2`
+  for the corpus-start-date-aware capture-rate report.
+
+  A run with no durable transcript is not automatically a bug even within the
+  post-rename corpus: a workflow-mode (bookkeeping-only) worker — see
+  `Arbiter.Worker.Driver`'s "workflow mode" — never opens a Claude session at
+  all, so it has no `run_id`-keyed session to capture. Only a run that *did*
+  spawn a Claude session (non-nil `session_id` on its `Run` row) and still
+  has no transcript represents a genuine capture failure.
   """
 
   @typedoc "An open durable-log handle. Opaque; pass to `append/2` and `close/1`."
