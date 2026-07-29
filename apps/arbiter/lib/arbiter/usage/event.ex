@@ -19,8 +19,18 @@ defmodule Arbiter.Usage.Event do
               `#review` suffix used by `Arbiter.Worker.ReviewGate` so the row
               is still attributable to the task being reviewed (drop the
               suffix at read time).
+  `:impl` — a ReviewGate-spawned implementer session revising the diff in
+            response to review findings. `task_id` carries an `#impl<N>`
+            suffix (chained onto the reviewer suffix), stripped the same way.
   `:other` — escape hatch for future non-Claude agents that don't fit the
-              author/reviewer split.
+              author/reviewer/implementer split.
+
+  Every step's `workspace_id` is the *authoring task's* workspace, resolved
+  from `Arbiter.Worker.ReviewGate.base_task_id/1` when the worker's own
+  `workspace_id` is nil (deliberately the case for reviewer/implementer
+  workers, to suppress notifications and merge-queue pickup for the synthetic
+  id). The ledger row still needs the real workspace so
+  `Arbiter.Usage.summarize/1` doesn't silently drop review/impl spend.
 
   ## Graceful degradation
 
@@ -34,7 +44,7 @@ defmodule Arbiter.Usage.Event do
     domain: Arbiter.Usage,
     data_layer: AshSqlite.DataLayer
 
-  @steps ~w(work review other)a
+  @steps ~w(work review impl other)a
 
   sqlite do
     table "usage_events"
