@@ -226,6 +226,30 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
       assert keys_for_workspace(ws.id) == []
     end
 
+    # A repo_overrides entry takes precedence over the workspace-wide default
+    # even when the override is a non-off mode and the default is :off — the
+    # operator explicitly opted this repo in, and default-off must not veto it.
+    test "starts a patrol when the default is :off but the repo_overrides entry is :auto" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-offdefault-override-#{System.unique_integer([:positive])}",
+          prefix: "rd#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            },
+            "review_automation" => %{
+              "default" => "off",
+              "repo_overrides" => %{"widget" => "auto"}
+            }
+          }
+        })
+
+      assert {:ok, pid} = start(ws)
+      assert Process.alive?(pid)
+    end
+
     # A running patrol for a repo that gets flipped to :off must be stopped on
     # the next start_patrol/2 call (mirrors the stale-registration reconciler),
     # not left running until the next full app restart.

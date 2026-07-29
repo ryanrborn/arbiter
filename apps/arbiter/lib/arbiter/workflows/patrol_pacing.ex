@@ -38,10 +38,15 @@ defmodule Arbiter.Workflows.PatrolPacing do
   `base_ms` falls back to 60_000 when not a positive integer, so a
   misconfigured/zero interval can't collapse this into a zero-delay loop.
   """
+  # Above this, `base * 2^exponent` already exceeds any realistic ceiling_ms,
+  # so clamping the exponent here avoids recomputing an ever-larger bignum on
+  # every schedule for a patrol that's been idle for weeks/months.
+  @max_exponent 32
+
   @spec idle_backoff_ms(non_neg_integer(), integer(), pos_integer()) :: pos_integer()
   def idle_backoff_ms(idle_streak, base_ms, ceiling_ms)
       when is_integer(idle_streak) and idle_streak >= 0 do
     base = if is_integer(base_ms) and base_ms > 0, do: base_ms, else: 60_000
-    min(base * Integer.pow(2, idle_streak), ceiling_ms)
+    min(base * Integer.pow(2, min(idle_streak, @max_exponent)), ceiling_ms)
   end
 end

@@ -123,7 +123,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisor do
 
     case ReviewAutomation.repo_override_mode(workspace.config, rig_name) do
       :off -> true
-      _ -> default_off?(workspace.config)
+      nil -> default_off?(workspace.config)
+      _ -> false
     end
   end
 
