@@ -746,8 +746,21 @@ defmodule Arbiter.Worker.ReviewGate do
         end
 
       {:approve, findings} = verdict ->
-        record_round(state, :review, :approve, findings, converged: true)
-        {:done, finish(state, verdict)}
+        # bd-4yhv4x: an APPROVE that judges code quality but whose own CRITERIA
+        # breakdown admits a stated acceptance criterion is `[NOT MET]` must NOT
+        # clean-merge — the same fail-closed treatment `partial_verification?`
+        # gets. Only gate when the task actually HAS acceptance criteria (Option
+        # B): a task with no stated criteria has nothing to break down, so its
+        # APPROVE finalizes exactly as before.
+        if has_acceptance_criteria?(state) and ReviewVerification.unmet_criteria?(findings) do
+          handle_unmet_criteria(state, findings)
+        else
+          record_round(state, :review, :approve, findings,
+            converged: not ReviewVerification.unmet_criteria?(findings)
+          )
+
+          {:done, finish(state, verdict)}
+        end
 
       {:request_changes, findings} ->
         # A REQUEST_CHANGES verdict that names no concrete findings is useless: the
@@ -798,9 +811,14 @@ defmodule Arbiter.Worker.ReviewGate do
         # Strip synthesized session-stats footers appended by the harness
         # (e.g. "⚙ claude session success · 183.5s · $1.1489") — both the
         # Claude and Gemini agent variants use the ⚙ glyph as a prefix.
+        # Also strip CRITERIA breakdown lines (`- [MET]` / `- [NOT MET]` /
+        # `- [N/A]`): they are verdict payload, not enumerated findings, and
+        # would otherwise let a bare APPROVE+breakdown read as "findings present"
+        # (bd-4yhv4x).
         String.trim(line) == "" or
           Regex.match?(~r/\barb done\b/, line) or
-          Regex.match?(~r/^\s*⚙/, line)
+          Regex.match?(~r/^\s*⚙/, line) or
+          ReviewVerification.criteria_line?(line)
       end)
       |> Enum.join("\n")
       |> String.trim()
@@ -826,11 +844,23 @@ defmodule Arbiter.Worker.ReviewGate do
     |> String.trim()
   end
 
-  # A REQUEST_CHANGES verdict with the round budget exhausted: record the final
-  # findings into the thread, then escalate to Darth Gnosis with the FULL
-  # transcript + unresolved findings + current diff.
-  defp handle_reject(%{round: round, max_rounds: max} = state, findings) when round >= max do
+  # A REQUEST_CHANGES verdict: record the honest `:request_changes` round, then
+  # route on the remaining round budget (escalate if exhausted, else revise).
+  defp handle_reject(state, findings) do
     record_round(state, :review, :request_changes, findings, converged: false)
+    route_after_reject(state, findings)
+  end
+
+  # The post-reject routing, shared by a plain REQUEST_CHANGES and the
+  # unmet-criteria reject (bd-4yhv4x). With the round budget exhausted, record
+  # the final findings into the thread and escalate to Darth Gnosis with the
+  # FULL transcript + unresolved findings + current diff; otherwise post the
+  # findings to the implementer and spawn a fresh implementer mind to address
+  # them on the same branch. The caller owns the `record_round` write so each
+  # entry point can log its own honest verdict — a `:request_changes` reject vs.
+  # an `:approve` that admits an unmet criterion.
+  defp route_after_reject(%{round: round, max_rounds: max} = state, findings)
+       when round >= max do
     state = record_thread(state, :reviewer, round_subject(state, "REQUEST_CHANGES"), findings)
 
     Logger.info(
@@ -840,10 +870,7 @@ defmodule Arbiter.Worker.ReviewGate do
     {:done, finish(state, {:request_changes, escalation_payload(state)})}
   end
 
-  # Rounds remain: post the findings to the implementer and spawn a fresh
-  # implementer mind to address them on the same branch.
-  defp handle_reject(state, findings) do
-    record_round(state, :review, :request_changes, findings, converged: false)
+  defp route_after_reject(state, findings) do
     enter_revise(state, findings)
   end
 
@@ -1178,6 +1205,101 @@ defmodule Arbiter.Worker.ReviewGate do
     ReviewVerification.prepend_banner(findings)
   end
 
+  # ---- unmet-criteria guard (bd-4yhv4x) ------------------------------------
+
+  # Whether the task under review actually carries stated acceptance criteria.
+  # `state` does not cache the task's acceptance text, so load it on demand.
+  # Option B: the unmet-criteria guard only fires for a task that HAS criteria —
+  # a task with none has nothing to break down, and its APPROVE finalizes
+  # unchanged. `load_task/1` never returns a nil acceptance (it falls back to
+  # "(none)"), so a plain string compare is enough.
+  defp has_acceptance_criteria?(state) do
+    acceptance_present?(load_task(state.task_id).acceptance)
+  end
+
+  # Shared predicate: does this acceptance text state real criteria? `load_task/1`
+  # falls back to "(none)" rather than nil, so treat that (and the empty string)
+  # as "no criteria". Reused by `review_prompt/1` to decide whether to emit the
+  # CRITERIA breakdown instruction, so the prompt and the guard agree on what
+  # counts as having criteria.
+  defp acceptance_present?(acceptance) do
+    is_binary(acceptance) and String.trim(acceptance) not in ["", "(none)"]
+  end
+
+  # An APPROVE whose own CRITERIA breakdown marks a stated acceptance criterion
+  # `[NOT MET]`: the reviewer judged code quality but the work does not satisfy
+  # the task as stated (bd-4yhv4x). Mirror the partial-verification guard — give
+  # it one more chance (shared verdict-retry budget) to re-review each criterion
+  # against the current diff with a fresh mind. If the budget is exhausted (or
+  # the retry can't be spawned), do NOT accept the approval at face value:
+  # record the honest outcome and route it down the reject path with a loud
+  # banner, so the thread, revise prompt, and any escalation all carry the
+  # unmet-criteria reason and count.
+  defp handle_unmet_criteria(%{retries_left: budget} = state, findings) when budget > 0 do
+    stop_acolyte(state)
+
+    review_id_for_reprompt =
+      if state.round > 1 do
+        reviewer_round_id(state.review_id, state.round)
+      else
+        state.review_id
+      end
+
+    retry_id = reprompt_task_id(review_id_for_reprompt, state.attempt)
+
+    case launch_acolyte(
+           %{state | retries_left: budget - 1},
+           retry_id,
+           :reviewer,
+           verdict_reprompt_prompt(state, :unmet_criteria),
+           state.command
+         ) do
+      {:ok, state} ->
+        Logger.info(
+          "ReviewGate: reviewer for task=#{state.task_id} approved with unmet acceptance " <>
+            "criteria; re-prompting for a per-criterion re-review (attempt #{state.attempt})"
+        )
+
+        {:reprompt, state}
+
+      {:error, spawn_error} ->
+        Logger.warning(
+          "ReviewGate: unmet-criteria re-prompt failed to spawn for task=#{state.task_id}: " <>
+            "#{inspect(spawn_error)}; rejecting the approval, clearly marked"
+        )
+
+        reject_unmet_criteria(state, findings)
+    end
+  end
+
+  defp handle_unmet_criteria(state, findings) do
+    Logger.warning(
+      "ReviewGate: reviewer for task=#{state.task_id} approved with unmet acceptance criteria " <>
+        "and the re-prompt budget is exhausted; rejecting the approval, clearly marked"
+    )
+
+    reject_unmet_criteria(state, findings)
+  end
+
+  # Terminal handling for an APPROVE that admits unmet criteria: record the
+  # HONEST round — verdict `:approve`, `converged: false` — so "APPROVE with N
+  # criteria unmet" is literally queryable in `review_gate_rounds` (bd-4yhv4x
+  # AC7), then route the banner-prefixed findings down the shared reject path
+  # (escalate if the round budget is spent, else back to the implementer). Not
+  # `handle_reject/2`, which would mislabel the round as `:request_changes`.
+  defp reject_unmet_criteria(state, findings) do
+    record_round(state, :review, :approve, findings, converged: false)
+    route_after_reject(state, unmet_criteria_banner(findings))
+  end
+
+  # Prepend the unmet-criteria warning banner (with the [NOT MET] count) right
+  # after the `VERDICT:` line. Only reached once `unmet_criteria?/1` is true, so
+  # the breakdown is present and `criteria_counts/1` returns integer counts.
+  defp unmet_criteria_banner(findings) when is_binary(findings) do
+    {total, unmet} = ReviewVerification.criteria_counts(findings)
+    ReviewVerification.prepend_criteria_banner(findings, unmet, total)
+  end
+
   # ---- reporting ----------------------------------------------------------
 
   # Report the given verdict to the author exactly once and mark reported.
@@ -1230,6 +1352,13 @@ defmodule Arbiter.Worker.ReviewGate do
     converged = Keyword.fetch!(opts, :converged)
     {run_id, reviewer_model, cost_usd} = pass_usage(state.current_id)
 
+    # Record the reviewer's per-criterion CRITERIA breakdown structurally
+    # (bd-4yhv4x): {total, unmet} for a :review row that carried a breakdown,
+    # {nil, nil} otherwise. :impl rows never carry a breakdown. Makes "APPROVE
+    # with N criteria unmet" queryable without re-reading the transcript.
+    {criteria_total, criteria_unmet} =
+      if role == :review, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
+
     attrs = %{
       task_id: state.task_id,
       run_id: run_id,
@@ -1240,6 +1369,8 @@ defmodule Arbiter.Worker.ReviewGate do
       finding_count: if(role == :review, do: count_findings(findings), else: nil),
       reviewer_model: reviewer_model,
       cost_usd: cost_usd,
+      criteria_total: criteria_total,
+      criteria_unmet: criteria_unmet,
       converged: converged
     }
 
@@ -1331,6 +1462,10 @@ defmodule Arbiter.Worker.ReviewGate do
     items =
       findings
       |> String.split("\n")
+      # A CRITERIA breakdown line (`- [NOT MET] …`) is a list item to
+      # `@finding_item`, but it is verdict payload, not an enumerated finding —
+      # exclude it so the count reflects real findings only (bd-4yhv4x).
+      |> Enum.reject(&ReviewVerification.criteria_line?/1)
       |> Enum.count(&Regex.match?(@finding_item, &1))
 
     cond do
@@ -1932,7 +2067,7 @@ defmodule Arbiter.Worker.ReviewGate do
         VERDICT: APPROVE
         VERDICT: REQUEST_CHANGES
 
-    If you REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of
+    #{criteria_prompt_block(task)}If you REQUEST_CHANGES you MUST follow the verdict with an ENUMERATED list of
     concrete findings — each with a severity, a `file:line` location, and a
     suggested fix. A REQUEST_CHANGES verdict that names no findings is invalid and
     will be rejected: the implementer would have nothing to act on. Output only
@@ -1946,6 +2081,20 @@ defmodule Arbiter.Worker.ReviewGate do
     """
   end
 
+  # Emit the per-criterion CRITERIA breakdown instruction only when the task has
+  # stated acceptance criteria (Option B, bd-4yhv4x): tasks with no criteria (the
+  # bulk of existing work) keep the leaner prompt and merge unchanged, while a
+  # task that DOES state criteria forces the reviewer to address each one as
+  # verdict payload — which is what the unmet-criteria guard reads back. The
+  # trailing newline keeps the surrounding prompt spacing intact when empty.
+  defp criteria_prompt_block(task) do
+    if acceptance_present?(task.acceptance) do
+      ReviewVerification.criteria_block() <> "\n"
+    else
+      ""
+    end
+  end
+
   @doc """
   Build the verdict re-prompt used when a prior pass produced a malformed result:
   a missing sentinel (`:no_verdict`) or a REQUEST_CHANGES with no findings
@@ -1954,8 +2103,41 @@ defmodule Arbiter.Worker.ReviewGate do
   re-supplies the full review context, prefixed with an instruction naming exactly
   what went wrong so it isn't repeated. Public for inspection in tests.
   """
-  @spec verdict_reprompt_prompt(map(), :no_verdict | :empty_findings | :unverified) :: String.t()
+  @spec verdict_reprompt_prompt(
+          map(),
+          :no_verdict | :empty_findings | :unverified | :unmet_criteria
+        ) :: String.t()
   def verdict_reprompt_prompt(state, reason \\ :no_verdict)
+
+  def verdict_reprompt_prompt(state, :unmet_criteria) do
+    """
+    A prior review pass of this diff returned `VERDICT: APPROVE`, but its own
+    CRITERIA breakdown marked one or more stated acceptance criteria `[NOT MET]`.
+    An APPROVE that admits an unmet criterion is a contradiction — "the code
+    looks fine" is not "the task is done". This is exactly the failure this gate
+    exists to catch: shipping work that does not satisfy the task as stated.
+
+    Re-review the CURRENT diff against the acceptance criteria from scratch and
+    this time:
+
+      * Address EACH acceptance criterion on its own `CRITERIA:` line, using
+        exactly one of `[MET]`, `[NOT MET]`, `[N/A]` — this is the verdict
+        payload, not a formality.
+      * "Met" means the criterion is actually SATISFIED by the diff you can see
+        RIGHT NOW, traced to the real behaviour that delivers it — NOT that a
+        test is green (a test can assert against a test-local helper or stub, or
+        exercise an inert feature) and NOT that the code merely looks clean. If
+        the implementer declared a limitation, deferral, or "out of scope" that
+        touches a criterion, that criterion is `[NOT MET]`.
+      * Only finish with `VERDICT: APPROVE` if EVERY criterion is `[MET]` or
+        `[N/A]`. If any criterion is genuinely `[NOT MET]`, finish with
+        `VERDICT: REQUEST_CHANGES` followed by an ENUMERATED list of concrete
+        findings — each with a severity, a `file:line` location, and a suggested
+        fix — so the implementer can close the gap. An APPROVE whose breakdown
+        still contains a `[NOT MET]` line will not be accepted.
+
+    """ <> review_prompt(state)
+  end
 
   def verdict_reprompt_prompt(state, :unverified) do
     """
