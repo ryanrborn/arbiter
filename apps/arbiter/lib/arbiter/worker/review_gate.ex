@@ -147,6 +147,7 @@ defmodule Arbiter.Worker.ReviewGate do
 
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
+  alias Arbiter.Agents.Routing.ByDifficulty
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.ReviewGate.Round
   alias Arbiter.Tasks.Issue
@@ -196,6 +197,13 @@ defmodule Arbiter.Worker.ReviewGate do
   # Difficulty → default round cap. D0/D1 are straightforward; D3/D4 are
   # architecturally significant and may need more back-and-forth to converge.
   @rounds_by_difficulty %{0 => 2, 1 => 2, 2 => 3, 3 => 4, 4 => 4}
+
+  # bd-3xultf: how many tiers above the task's own tier the reviewer is
+  # routed by default (capped at "premium" by `ByDifficulty.bump_tier/2`).
+  # Overridable per-workspace via `review_agent.config.tier_offset`; 0
+  # restores a fixed (same-tier) reviewer — the rollback knob if a moving
+  # judge invalidates the before/after convergence comparison (#1011).
+  @default_reviewer_tier_offset 1
 
   # Defensive cap on the escalation diff so a huge branch can't bloat the
   # Admiral's mailbox row beyond reason.
@@ -1441,6 +1449,12 @@ defmodule Arbiter.Worker.ReviewGate do
     {criteria_total, criteria_unmet} =
       if role == :review, do: ReviewVerification.criteria_counts(findings), else: {nil, nil}
 
+    # bd-3xultf: the resolved tier that governed this pass — recorded only
+    # for :review rows, alongside `reviewer_model`, so analysis can control
+    # for the judge instead of a routed-by-difficulty reviewer reading as a
+    # quality change.
+    reviewer_tier = if role == :review, do: reviewer_tier_for(state), else: nil
+
     attrs = %{
       task_id: state.task_id,
       run_id: run_id,
@@ -1450,6 +1464,7 @@ defmodule Arbiter.Worker.ReviewGate do
       findings: findings,
       finding_count: if(role == :review, do: count_findings(findings), else: nil),
       reviewer_model: reviewer_model,
+      reviewer_tier: reviewer_tier,
       cost_usd: cost_usd,
       criteria_total: criteria_total,
       criteria_unmet: criteria_unmet,
@@ -1474,6 +1489,18 @@ defmodule Arbiter.Worker.ReviewGate do
       )
 
       :error
+  end
+
+  # Recompute the same tier `reviewer_model_tier/2` resolved for this pass's
+  # spawn — deterministic given workspace config + `difficulty_at_dispatch`,
+  # so re-deriving it here (rather than threading it through `state`) can't
+  # drift from what actually spawned. Best-effort: nil on a missing/unloadable
+  # workspace (e.g. a workspace-less ad-hoc ReviewGate run).
+  defp reviewer_tier_for(state) do
+    case load_workspace(state.workspace_id) do
+      %Workspace{config: config} -> reviewer_model_tier(config, state.task_id)
+      _ -> nil
+    end
   end
 
   # Best-effort lookup of the run id / model / cost for the pass that just
@@ -1836,7 +1863,7 @@ defmodule Arbiter.Worker.ReviewGate do
     %{
       role: :reviewer,
       reviews: state.task_id,
-      difficulty_at_dispatch: difficulty_for(state.task_id)
+      difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id)
     }
   end
 
@@ -1844,13 +1871,36 @@ defmodule Arbiter.Worker.ReviewGate do
     %{
       role: :implementer,
       revises: state.task_id,
-      difficulty_at_dispatch: difficulty_for(state.task_id)
+      difficulty_at_dispatch: difficulty_at_dispatch_for(state.task_id)
     }
   end
 
-  # bd-dzz6ly: `state.task_id` is the BASE task id (not a synthetic ReviewGate
-  # id), so this reads the same `Issue.difficulty` the original dispatch saw —
-  # best-effort, nil on any lookup failure rather than blocking the spawn.
+  # bd-3xultf: `state.task_id` is the BASE task id (not a synthetic ReviewGate
+  # id) — read the *author's own run* `difficulty_at_dispatch` (stamped once,
+  # immutably, when that run was dispatched — see
+  # `Arbiter.Worker.Dispatch.build_worker_meta/3`), not a live re-read of
+  # `Issue.difficulty`. A difficulty edited after dispatch (bd-7rspia) must
+  # not retroactively relabel which tier a past reviewer/implementer pass ran
+  # under. Falls back to the task's current difficulty when no author Run row
+  # exists (e.g. an ad-hoc ReviewGate started without going through Dispatch)
+  # — best-effort, nil on any lookup failure rather than blocking the spawn.
+  defp difficulty_at_dispatch_for(task_id) do
+    require Ash.Query
+
+    Run
+    |> Ash.Query.filter(task_id == ^task_id)
+    |> Ash.Query.sort(started_at: :desc)
+    |> Ash.Query.limit(1)
+    |> Ash.read!()
+    |> List.first()
+    |> case do
+      %Run{difficulty_at_dispatch: d} when is_integer(d) -> d
+      _ -> difficulty_for(task_id)
+    end
+  rescue
+    _ -> difficulty_for(task_id)
+  end
+
   defp difficulty_for(task_id) do
     case load_issue(task_id) do
       %Issue{difficulty: difficulty} -> difficulty
@@ -1951,18 +2001,18 @@ defmodule Arbiter.Worker.ReviewGate do
 
   # The reviewer slot has its own config under `review_agent.config.*`
   # (falls back to the worker `agent` block so a workspace that names only
-  # `agent` still spawns a reviewer). The model/tier/thinking knobs are
-  # read directly from the configured block — the reviewer doesn't route
-  # by difficulty (the task's difficulty drives the *worker*; the reviewer
-  # has its own fixed config).
-  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, _task_id) do
+  # `agent` still spawns a reviewer). `model`/`thinking` are read directly
+  # from the configured block; `model_tier` defaults to the task's own tier
+  # bumped one step (bd-3xultf, `reviewer_model_tier/2`) unless the block
+  # pins one explicitly.
+  defp agent_opts_for_role(%Workspace{config: config}, :review_agent, task_id) do
     block =
       get_in(config || %{}, ["review_agent", "config"]) ||
         get_in(config || %{}, ["agent", "config"]) || %{}
 
     [
       model: Map.get(block, "model"),
-      model_tier: Map.get(block, "model_tier"),
+      model_tier: reviewer_model_tier(config, task_id),
       thinking: Map.get(block, "thinking"),
       config: block
     ]
@@ -1994,6 +2044,39 @@ defmodule Arbiter.Worker.ReviewGate do
           thinking: Map.get(config, "thinking"),
           config: config
         ]
+    end
+  end
+
+  # bd-3xultf: resolve the reviewer's `model_tier`. An explicit
+  # `review_agent.config.model_tier` (or `agent.config.model_tier` fallback)
+  # always wins — a workspace that wants a hard-pinned reviewer keeps that
+  # today. Otherwise the reviewer is routed one tier above the task's own
+  # nominal tier (`ByDifficulty.tier_for_difficulty/1`), bumped by
+  # `review_agent.config.tier_offset` (default 1, capped at "premium" by
+  # `bump_tier/2`), so it's never weaker than the author. `tier_offset: 0`
+  # restores a fixed (same-tier) reviewer — the rollback knob for #1011's
+  # measurement-validity concern.
+  defp reviewer_model_tier(config, task_id) do
+    block =
+      get_in(config || %{}, ["review_agent", "config"]) ||
+        get_in(config || %{}, ["agent", "config"]) || %{}
+
+    case Map.get(block, "model_tier") do
+      tier when is_binary(tier) and tier != "" ->
+        tier
+
+      _ ->
+        task_id
+        |> difficulty_at_dispatch_for()
+        |> ByDifficulty.tier_for_difficulty()
+        |> ByDifficulty.bump_tier(reviewer_tier_offset(block))
+    end
+  end
+
+  defp reviewer_tier_offset(block) do
+    case Map.get(block, "tier_offset") do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> @default_reviewer_tier_offset
     end
   end
 
