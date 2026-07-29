@@ -136,6 +136,26 @@ defmodule Arbiter.QuotaTest do
     end
   end
 
+  describe "default_workspace_on_exhaustion/0 (bd-l4epbc)" do
+    test "delegates to Workspace.quota_on_exhaustion/1 for whichever workspace default_workspace_id/0 resolves" do
+      # `Workspace.quota_on_exhaustion/1`'s own precedence rules (per-workspace
+      # override > global default > hardcoded :throttle) are covered in
+      # `Arbiter.Quota.Gate.GateTest`; this only proves the wiring — that this
+      # reads the SAME workspace `default_workspace_id/0` resolves, not a
+      # hardcoded/mismatched one.
+      case Quota.default_workspace_id() do
+        {:ok, ws_id} ->
+          workspace = Ash.get!(Workspace, ws_id)
+
+          assert Quota.default_workspace_on_exhaustion() ==
+                   Workspace.quota_on_exhaustion(workspace)
+
+        {:error, _} ->
+          assert Quota.default_workspace_on_exhaustion() == Workspace.quota_on_exhaustion(nil)
+      end
+    end
+  end
+
   describe "list_serialized/1" do
     test "serializes every tracked provider, each carrying its provider tag" do
       ws = workspace!()
