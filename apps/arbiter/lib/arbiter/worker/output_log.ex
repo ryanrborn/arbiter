@@ -130,4 +130,24 @@ defmodule Arbiter.Worker.OutputLog do
   end
 
   def read_lines(_), do: {:error, :invalid_run_id}
+
+  @doc """
+  Read only the last `n` lines of a run's transcript — the *terminal signal*.
+
+  The loop-analysis pass (`Arbiter.Loop`) corroborates each failed run's
+  `failure_reason` against the tail of its transcript. It needs the closing
+  lines (autocompact-thrash message, `claude session error`, final `arb done`),
+  never the whole log, so this returns a bounded slice regardless of how long
+  the run was. Returns `{:ok, lines}` (oldest-first within the slice), or
+  `{:error, reason}` when the file is absent (`:enoent`) or unreadable.
+  """
+  @spec tail_lines(String.t(), pos_integer()) :: {:ok, [String.t()]} | {:error, term()}
+  def tail_lines(run_id, n) when is_binary(run_id) and run_id != "" and is_integer(n) and n > 0 do
+    case read_lines(run_id) do
+      {:ok, lines} -> {:ok, Enum.take(lines, -n)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def tail_lines(_, _), do: {:error, :invalid_run_id}
 end

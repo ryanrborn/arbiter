@@ -1,0 +1,317 @@
+defmodule Arbiter.Loop.Report do
+  @moduledoc """
+  The data contract + markdown renderer for the Stage 1 loop-analysis pass
+  (bd-dyfaq3, epic #1011).
+
+  `Arbiter.Loop.Analysis` computes every number and packs it into a `%Report{}`;
+  `to_markdown/1` is a pure formatter with no database or I/O, so the exact
+  markdown the operator reads is testable in isolation. Keeping the struct
+  separate from the analysis means the discipline the report must enforce lives
+  in one inspectable shape:
+
+    * `segmentation` — operational vs agent-quality counts, with `run_ids` so
+      every claim is cited. Operational is shown but flagged excluded from
+      prompt-shaping.
+    * `misclassification` — the rate at which `failure_reason` disagreed with
+      the transcript, a **first-class corpus-integrity finding**, with the
+      corrected run_ids (the c88c77b0 lesson).
+    * `cells` / `difficulty_misestimates` — comparisons segmented by
+      `(difficulty, repo)`, never across cells.
+    * `suggestions` — each names a target metric, a baseline, a destination
+      (skill / repo `CLAUDE.md` / per-task override) and its evidence tier, so
+      a single incident visibly **declines** a fleet-wide change.
+    * `notes` — the small-sample caveats, rendered verbatim.
+  """
+
+  @enforce_keys [:window, :totals]
+  defstruct window: %{},
+            totals: %{},
+            segmentation: [],
+            misclassification: %{corroborated: 0, reclassified: 0, rate: 0.0, citations: []},
+            finding_categories: [],
+            difficulty_misestimates: [],
+            cells: [],
+            suggestions: [],
+            notes: []
+
+  @type t :: %__MODULE__{}
+
+  @doc "Render the report as markdown. Pure — no DB, no I/O."
+  @spec to_markdown(t()) :: String.t()
+  def to_markdown(%__MODULE__{} = r) do
+    [
+      header(r),
+      corpus(r),
+      segmentation(r),
+      misclassification(r),
+      finding_categories(r),
+      cells(r),
+      difficulty_misestimates(r),
+      suggestions(r),
+      notes(r)
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  # ---------------------------------------------------------------------------
+
+  defp header(%{window: w}) do
+    label = Map.get(w, :label, "window")
+    span = window_span(w)
+
+    """
+    # Loop-analysis report — #{label}
+    #{span}
+    This pass is **read-only**: it writes nothing but this report and a single
+    `usage_events` cost row (zero writes to skills, config, or issues). The
+    operator reads it and decides where each lesson lands.
+    """
+  end
+
+  defp window_span(%{since: since, until: until}) when not is_nil(since) do
+    "**Window:** #{iso(since)} → #{iso(until)}\n"
+  end
+
+  defp window_span(_), do: ""
+
+  defp corpus(%{totals: t}) do
+    """
+    ## Corpus
+
+    | metric | count |
+    |---|---|
+    | dispatches | #{g(t, :dispatches)} |
+    | runs | #{g(t, :runs)} |
+    | main runs | #{g(t, :main_runs)} |
+    | completed | #{g(t, :completed)} |
+    | failed | #{g(t, :failed)} |
+    | distinct tasks | #{g(t, :tasks)} |
+    """
+  end
+
+  defp segmentation(%{segmentation: seg}) do
+    grouped = Enum.group_by(seg, & &1.class)
+
+    op =
+      class_block(
+        "Operational (routed to ops — excluded from prompt-shaping analysis)",
+        grouped[:operational]
+      )
+
+    aq = class_block("Agent-quality (eligible for prompt/skill changes)", grouped[:agent_quality])
+
+    others =
+      grouped
+      |> Map.drop([:operational, :agent_quality])
+      |> Enum.map(fn {class, rows} -> class_block("#{class}", rows) end)
+      |> Enum.join("\n")
+
+    """
+    ## Failure segmentation (allowlist, not heuristic)
+
+    Split by allowlist. Operational reasons route to ops and are **excluded**
+    from prompt-shaping — a naive pass would burn its whole budget on our own
+    deploy restarts. Only agent-quality failures can be moved by a prompt or
+    skill change.
+
+    #{op}
+    #{aq}
+    #{others}
+    """
+  end
+
+  defp class_block(_title, nil), do: ""
+  defp class_block(_title, []), do: ""
+
+  defp class_block(title, rows) do
+    body =
+      rows
+      |> Enum.map(fn row ->
+        cites = row |> Map.get(:run_ids, []) |> Enum.take(5) |> Enum.join(", ")
+        "| `#{row.subcategory}` | #{row.count} | #{cites} |"
+      end)
+      |> Enum.join("\n")
+
+    """
+    ### #{title}
+
+    | subcategory | runs | example run_ids |
+    |---|---|---|
+    #{body}
+    """
+  end
+
+  defp misclassification(%{misclassification: m}) do
+    cites =
+      (Map.get(m, :citations) || [])
+      |> Enum.map(fn c ->
+        "- `#{c.run_id}` — labelled #{inspect(c.failure_reason)}, corrected to `#{c.corrected}`"
+      end)
+      |> Enum.join("\n")
+
+    """
+    ## Corpus integrity: misclassification rate (`failure_reason` vs transcript)
+
+    `failure_reason` is a hint, not ground truth. Of **#{g(m, :corroborated)}**
+    operational-labelled runs corroborated against their transcript,
+    **#{g(m, :reclassified)}** disagreed — a misclassification rate of
+    **#{pct(Map.get(m, :rate, 0.0))}**. This is a **first-class corpus-integrity
+    finding**: a label that hides agent-quality failures behind ops noise is
+    worth more than any prompt tweak. Surfaced with citations, not silently
+    corrected.
+
+    #{cites}
+    """
+  end
+
+  defp finding_categories(%{finding_categories: []}), do: ""
+
+  defp finding_categories(%{finding_categories: cats}) do
+    body =
+      cats
+      |> Enum.map(fn c ->
+        tasks = c |> Map.get(:tasks, []) |> Enum.join(", ")
+        cites = c |> Map.get(:run_ids, []) |> Enum.join(", ")
+        "| #{c.category} | #{c.incidents} | #{tasks} | #{cites} | #{Map.get(c, :example, "")} |"
+      end)
+      |> Enum.join("\n")
+
+    """
+    ## Reviewer-finding categories (agent-quality only)
+
+    | category | incidents | tasks | run_ids | example |
+    |---|---|---|---|---|
+    #{body}
+    """
+  end
+
+  defp cells(%{cells: []}), do: ""
+
+  defp cells(%{cells: cells}) do
+    body =
+      cells
+      |> Enum.map(fn c ->
+        "| #{dlabel(c.difficulty)} | #{c.repo} | #{g(c, :tasks)} | #{pct(Map.get(c, :rework_rate, 0.0))} | $#{money(Map.get(c, :mean_cost_usd))} |"
+      end)
+      |> Enum.join("\n")
+
+    """
+    ## Cost & rework by (difficulty, repo) cell
+
+    Compare **within** a cell; metrics move with difficulty mix and repo, so
+    cross-cell comparison reads drift as improvement.
+
+    | difficulty | repo | tasks | rework rate | mean cost |
+    |---|---|---|---|---|
+    #{body}
+    """
+  end
+
+  defp difficulty_misestimates(%{difficulty_misestimates: []}), do: ""
+
+  defp difficulty_misestimates(%{difficulty_misestimates: mis}) do
+    body =
+      mis
+      |> Enum.map(fn m ->
+        {d, repo} = Map.get(m, :cell, {Map.get(m, :dispatched_difficulty), "?"})
+        rec = Map.get(m, :recommendation, %{})
+
+        """
+        ### #{m.task_id} — cell (#{d}, #{repo})
+
+        - **Dispatched difficulty:** D#{Map.get(m, :dispatched_difficulty)}
+        - **Rounds:** #{Map.get(m, :rounds)}
+        - **Cost:** $#{money(Map.get(m, :cost_usd))}
+        - **Note:** #{Map.get(m, :note, "")}
+        - **Recommendation:** #{destination(Map.get(rec, :destination))} — #{Map.get(rec, :action, "")}
+        - **Target metric:** #{Map.get(rec, :target_metric)} (baseline: #{Map.get(rec, :baseline)})
+        """
+      end)
+      |> Enum.join("\n")
+
+    """
+    ## Difficulty misestimates (segmented by (difficulty, repo) cell)
+
+    #{body}
+    """
+  end
+
+  defp suggestions(%{suggestions: []}), do: ""
+
+  defp suggestions(%{suggestions: suggestions}) do
+    body =
+      suggestions
+      |> Enum.map(fn s ->
+        ev = Map.get(s, :evidence, %{})
+        incidents = Map.get(ev, :incidents, 0)
+        tasks = Map.get(ev, :tasks, 0)
+
+        """
+        ### #{s.title}
+
+        - **Target metric:** #{Map.get(s, :target_metric)}
+        - **Baseline:** #{Map.get(s, :baseline)}
+        - **Destination:** #{destination(Map.get(s, :destination))}
+        - **Evidence:** #{incidents} incidents across #{tasks} tasks
+        - **Verdict:** #{verdict(Map.get(s, :verdict))} — #{Map.get(s, :rationale, "")}
+        """
+      end)
+      |> Enum.join("\n")
+
+    """
+    ## Suggestions
+
+    Every suggestion names the metric it should move, that metric's current
+    baseline, and a destination — a **skill** (general working practice), the
+    repo's **`CLAUDE.md`** (repo-specific convention), or a **per-task override**
+    (single incident, blast-radius-1). A finding below the ≥3-incident / ≥2-task
+    bar visibly declines a fleet-wide change.
+
+    #{body}
+    """
+  end
+
+  defp notes(%{notes: []}), do: ""
+
+  defp notes(%{notes: notes}) do
+    body = notes |> Enum.map(&"- #{&1}") |> Enum.join("\n")
+
+    """
+    ## Caveats
+
+    #{body}
+    """
+  end
+
+  # --- formatting ------------------------------------------------------------
+
+  defp destination(:skill), do: "skill"
+  defp destination(:claude_md), do: "repo `CLAUDE.md`"
+  defp destination(:per_task), do: "per-task override"
+  defp destination(:per_task_override), do: "per-task override"
+  defp destination(nil), do: "unspecified"
+  defp destination(other), do: to_string(other)
+
+  defp verdict(:fleet_wide), do: "fleet-wide"
+  defp verdict(:per_task), do: "per-task override"
+  defp verdict(:per_task_override), do: "per-task override"
+  defp verdict(nil), do: "—"
+  defp verdict(other), do: to_string(other)
+
+  defp g(map, key), do: Map.get(map, key, 0)
+
+  defp dlabel(nil), do: "D? (unset)"
+  defp dlabel(d), do: "D#{d}"
+
+  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp iso(other), do: to_string(other)
+
+  defp pct(rate) when is_number(rate), do: "#{Float.round(rate * 100, 1)}%"
+  defp pct(_), do: "n/a"
+
+  defp money(nil), do: "0.00"
+  defp money(n) when is_integer(n), do: :erlang.float_to_binary(n / 1, decimals: 2)
+  defp money(n) when is_float(n), do: :erlang.float_to_binary(n, decimals: 2)
+  defp money(n), do: to_string(n)
+end
