@@ -88,13 +88,17 @@ defmodule Arbiter.Tasks.Claim do
   Build a reconcile plan for the workspace. Three kinds of action:
 
     * issue assigned to viewer + open + no open task → `{:create, ref, summary}`.
-    * open task with a tracker ref whose issue is unassigned (or closed) →
-      `{:close, task_id, reason}`.
+    * open task whose tracker issue is closed upstream, or is now assigned to
+      somebody other than the viewer → `{:close, task_id, reason}`. An issue
+      that is merely *unassigned*, or that can't be fetched, yields no action
+      (bd-83ojwi): unassigned is a resting state, not abandonment.
     * task closed locally whose linked tracker issue is still open (the
       bd-2wilou drift case — a close that never propagated upstream) →
       `{:drift, task_id, reason}`. This is report-only: `apply_plan/3` never
       writes anything for a `:drift` action, since fixing it means re-closing
       upstream (`task_sync_upstream_close`), not touching the local task.
+      `:task`-type tasks are exempt (bd-83ojwi): research/investigation work
+      is *expected* to close locally with its ticket still open upstream.
 
   Returns `{:ok, plan}` or `{:error, reason}`. `plan` is an empty list when
   the workspace tracker doesn't support the claim operation.
@@ -270,31 +274,56 @@ defmodule Arbiter.Tasks.Claim do
         end
 
       closes =
-        for {ref, task} <- task_by_ref, not Map.has_key?(assigned_by_ref, ref) do
-          reason =
-            case adapter.fetch(ref) do
-              {:ok, issue} ->
-                cond do
-                  adapter.issue_status(issue) == :closed ->
-                    "tracker issue #{ref} closed"
-
-                  adapter.assignees(issue) == [] ->
-                    "tracker issue #{ref} unassigned"
-
-                  true ->
-                    "tracker issue #{ref} reassigned to #{Enum.join(adapter.assignees(issue), ", ")}"
-                end
-
-              {:error, _} ->
-                "tracker issue #{ref} no longer assigned"
-            end
-
-          {:close, task.id, reason}
-        end
+        task_by_ref
+        |> Enum.reject(fn {ref, _task} -> Map.has_key?(assigned_by_ref, ref) end)
+        |> Enum.flat_map(fn {ref, task} ->
+          case close_reason(adapter, ref, current_user_id) do
+            nil -> []
+            reason -> [{:close, task.id, reason}]
+          end
+        end)
 
       drifts = build_drift(adapter, workspace, type)
 
       {:ok, Enum.sort(creates ++ closes ++ drifts, &action_order/2)}
+    end
+  end
+
+  # bd-83ojwi: absence from `list_open(assignee: viewer)` is NOT on its own a
+  # signal to close. That call only returns issues assigned to the viewer, so
+  # an open-but-*unassigned* issue is absent from it too — and on these boards
+  # unassigned is the normal resting state for backlog work, not abandonment
+  # (a parked `decision` waiting to be promoted looks identical to a dropped
+  # one). Only two upstream facts justify closing a local task:
+  #
+  #   * the issue is actually closed upstream, or
+  #   * it is genuinely assigned to somebody other than the viewer.
+  #
+  # Everything else — unassigned, or a `fetch` we could not complete — returns
+  # `nil` and produces no action at all, so neither a quiet board nor a
+  # transient API failure can bulk-close live work. Under-closing is visible
+  # and cheap to correct by hand; over-closing silently destroys open work.
+  defp close_reason(adapter, ref, current_user_id) do
+    case adapter.fetch(ref) do
+      {:ok, issue} ->
+        # Compare against the viewer explicitly: an issue still assigned to us
+        # that merely failed to show up in `list_open` (paging, index lag) is
+        # not a reassignment.
+        others = adapter.assignees(issue) -- [current_user_id]
+
+        cond do
+          adapter.issue_status(issue) == :closed ->
+            "tracker issue #{ref} closed"
+
+          others != [] ->
+            "tracker issue #{ref} reassigned to #{Enum.join(others, ", ")}"
+
+          true ->
+            nil
+        end
+
+      {:error, _} ->
+        nil
     end
   end
 
@@ -304,9 +333,15 @@ defmodule Arbiter.Tasks.Claim do
   # closed task with a `tracker_ref`, independent of current assignment,
   # since the issue may no longer be assigned to the viewer by the time this
   # runs.
+  #
+  # bd-83ojwi: but only for closes that actually *landed* something — see
+  # `landed_close?/1`. A close implies "the ticket is done" only when it
+  # shipped a diff; a findings-only close never made that claim, so its ticket
+  # staying open is the expected outcome, not drift.
   defp build_drift(adapter, workspace, type) do
     workspace
     |> read_closed_tracker_tasks(type)
+    |> Enum.filter(&landed_close?/1)
     |> Enum.flat_map(fn task ->
       case adapter.fetch(task.tracker_ref) do
         {:ok, issue} ->
@@ -324,6 +359,30 @@ defmodule Arbiter.Tasks.Claim do
       end
     end)
   end
+
+  # bd-83ojwi: did this local close actually land work upstream-worthy enough
+  # that the tracker ticket should have closed with it? Two shapes of close
+  # land nothing, and for both the ticket legitimately stays open:
+  #
+  #   * `:task`-type — the opt-in non-reviewable research/investigation type
+  #     (see `Issue.issue_type`). Its deliverable is a findings summary in
+  #     `notes`: no diff, no PR. Closing one records that the *investigation*
+  #     finished, not that the underlying work is done.
+  #   * any type closed with no `pr_ref` — the merger sets `pr_ref` when it
+  #     opens a PR, so its absence means the bead closed without shipping a
+  #     diff. Observed live on `vstim` as `bug` beads closed as investigations
+  #     (vs-9y1ipo/sc-619, vs-bdix5z/sc-485): the ticket body carries the
+  #     handoff notes and the bug is still unfixed. `issue_type` alone does
+  #     not catch these — the declared type is the *filing* intent, `pr_ref`
+  #     is what actually happened.
+  #
+  # Reporting either as drift invites a "reconciliation" that closes a live
+  # ticket and destroys the handoff notes. What remains — a non-`:task` bead
+  # that shipped a PR yet whose ticket is still open — is exactly the
+  # bd-2wilou case: a close that never propagated upstream.
+  defp landed_close?(%Issue{issue_type: :task}), do: false
+  defp landed_close?(%Issue{pr_ref: pr_ref}) when is_binary(pr_ref), do: String.trim(pr_ref) != ""
+  defp landed_close?(_task), do: false
 
   defp read_closed_tracker_tasks(workspace, type) do
     query =
