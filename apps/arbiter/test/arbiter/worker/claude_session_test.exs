@@ -1364,6 +1364,24 @@ defmodule Arbiter.Worker.ClaudeSessionTest do
       assert usage[:result_is_error] == true
       assert usage[:result_message] == nil
     end
+
+    test "an over-length final message is truncated to the column's max_length" do
+      session = new_session()
+      long_result = String.duplicate("a", 25_000)
+
+      event = %{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => long_result
+      }
+
+      session = ClaudeSession.handle_data(session, Jason.encode!(event), true)
+      usage = ClaudeSession.usage_summary(session)
+
+      assert String.length(usage[:result_message]) == 20_000
+      assert usage[:result_message] == String.duplicate("a", 20_000)
+    end
   end
 
   describe "activity_for_event/1" do

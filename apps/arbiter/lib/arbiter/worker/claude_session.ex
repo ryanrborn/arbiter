@@ -627,9 +627,21 @@ defmodule Arbiter.Worker.ClaudeSession do
   end
 
   # Same choke-point as `redact_line/2`, for a value that may be absent (the
-  # terminal `result` event's text is nil on some error subtypes).
+  # terminal `result` event's text is nil on some error subtypes). Truncated
+  # to the `result_message` column's `max_length: 20_000` constraint (see
+  # `Arbiter.Workers.Run`) — that Ash constraint rejects rather than
+  # truncates an over-length string, which silently dropped the ENTIRE
+  # terminal write (status, completed_at, exit_code, every `result_*` field)
+  # for any run whose final assistant message ran long.
+  @result_message_max_length 20_000
+
   defp redact_optional(_session, nil), do: nil
-  defp redact_optional(session, text) when is_binary(text), do: redact_line(session, text)
+
+  defp redact_optional(session, text) when is_binary(text) do
+    session
+    |> redact_line(text)
+    |> String.slice(0, @result_message_max_length)
+  end
 
   # Append the line to the durable, uncapped per-run transcript when the
   # session carries an :output_log handle. Best-effort and never blocks the
