@@ -27,7 +27,8 @@ defmodule Arbiter.MCP.CatalogTest do
                                 quota_get task_create worker_list task_list usage_summarize notify_list
                                 tracker_claim tracker_sync worker_review graph_create workspace_config_get
                                 workspace_config_overview workspace_config_set workspace_config_unset
-                                external_review_list skill_create skill_update skill_list skill_get)
+                                external_review_list skill_create skill_update skill_list skill_get
+                                transcript_capture_stats)
 
   describe "visible/1" do
     test "the worker tier sees the both-tier tools but no coordinator-only tool" do

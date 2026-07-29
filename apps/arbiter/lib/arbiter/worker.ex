@@ -659,8 +659,11 @@ defmodule Arbiter.Worker do
   # Open the durable, uncapped per-run transcript for this session. Keyed on
   # run_id: a worker whose Run row never persisted (run_id nil) gets no
   # durable log, since there's no row to anchor audit retrieval to. A disk
-  # error logs a warning and degrades to nil — the live capped path (PubSub +
-  # bounded output_lines) is unaffected either way. See Arbiter.Worker.OutputLog.
+  # error degrades to nil — the live capped path (PubSub + bounded
+  # output_lines) is unaffected either way — but bd-9wotbo found that a
+  # `Logger.warning` alone is effectively silent: a corpus with an unnoticed
+  # capture hole can't be trusted for measurement, so a real open failure
+  # also raises a coordinator escalation. See Arbiter.Worker.OutputLog.
   defp open_output_log(%State{run_id: nil}), do: nil
 
   defp open_output_log(%State{run_id: run_id} = state) do
@@ -670,8 +673,43 @@ defmodule Arbiter.Worker do
 
       {:error, reason} ->
         log_run_warning("output_log_open", state.task_id, reason)
+        escalate_output_log_failure(state, reason)
         nil
     end
+  end
+
+  # bd-9wotbo: a transcript-capture failure must be loud, not a warning nobody
+  # reads. Raises a coordinator escalation naming the run so it shows up in
+  # `arb inbox` alongside the other things that need a human's attention.
+  # Public (and `@doc false`, mirroring `resume_decision/6`) purely so this is
+  # unit-testable without spawning a real Claude session port.
+  @doc false
+  def escalate_output_log_failure(%State{} = state, reason) do
+    %State{task_id: task_id, workspace_id: workspace_id, run_id: run_id} = state
+
+    Arbiter.Messages.Message.send_mail(%{
+      kind: :escalation,
+      to_ref: Arbiter.Messages.Message.coordinator_ref(),
+      from_ref: "system",
+      workspace_id: workspace_id,
+      directive_ref: task_id,
+      subject: "#{task_id} — transcript capture failed for run #{run_id}",
+      body:
+        "Arbiter.Worker.OutputLog.open/1 failed for run #{run_id} (#{inspect(reason)}). " <>
+          "This run's durable transcript will be missing from the audit corpus; the " <>
+          "capped in-memory tail (worker_runs.output_lines) is unaffected. " <>
+          "Action: check disk space / permissions on the output_log_root."
+    })
+
+    :ok
+  rescue
+    e ->
+      Logger.warning(
+        "Worker.escalate_output_log_failure/2 swallowed for task=#{state.task_id}: " <>
+          Exception.message(e)
+      )
+
+      :ok
   end
 
   defp stringify_failure(nil), do: nil
