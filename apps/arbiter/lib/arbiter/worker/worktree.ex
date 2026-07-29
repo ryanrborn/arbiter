@@ -108,6 +108,70 @@ defmodule Arbiter.Worker.Worktree do
     end
   end
 
+  @doc """
+  Create a **detached** worktree at `<worktree_root>/<sanitized_name>/`,
+  checked out at the upstream tip of `base_branch` (`origin/<base_branch>`)
+  with no branch of its own.
+
+  Counterpart to `create/3` for dispatches whose deliverable is not a branch —
+  `task`-type audits/spikes and reviews (bd-9r1tta). They previously ran
+  straight from the *shared* local checkout, which on a developer machine is a
+  human contributor's working directory: an arbitrary HEAD, arbitrarily many
+  commits behind `origin`. An audit reading that tree reports the state of the
+  world as of whenever the contributor last pulled, with full confidence and
+  file:line citations — the fabricated "PHI encryption was never merged"
+  finding this function exists to prevent.
+
+  Same fetch-first guarantee as `create/3`: `origin` must exist, the fetch must
+  succeed, and `origin/<base_branch>` must resolve, or the call errors rather
+  than silently falling back to stale local state.
+
+  Detached rather than branched on purpose: nothing here is meant to be
+  committed or pushed, so there is no branch to leave behind and no way for an
+  audit to accidentally commit onto one the merge path would pick up.
+
+  Reads the source repo, writes only `.git/worktrees/<leaf>` and the new
+  directory: the source checkout's HEAD, index, working tree, and unpushed
+  commits are never touched.
+
+  Idempotent on the same terms as `create/3`: an existing directory at the
+  target path is returned as-is (no fetch, no re-checkout) so re-provisioning
+  a live worktree can neither pay the fetch cost nor clobber work in it.
+  """
+  @spec create_detached(path(), String.t(), String.t()) ::
+          {:ok, path()} | {:error, error_reason()}
+  def create_detached(_repo_path, "", _base_branch), do: {:error, :invalid_branch_name}
+  def create_detached(_repo_path, nil, _base_branch), do: {:error, :invalid_branch_name}
+
+  def create_detached(repo_path, name, base_branch)
+      when is_binary(repo_path) and is_binary(name) and is_binary(base_branch) do
+    path = worktree_path(name)
+
+    result =
+      if File.dir?(path) do
+        {:ok, path}
+      else
+        File.mkdir_p!(Path.dirname(path))
+
+        with :ok <- ensure_origin_remote(repo_path),
+             :ok <- fetch_origin_branch(repo_path, base_branch),
+             :ok <- ensure_origin_ref(repo_path, base_branch),
+             {:ok, _stdout} <-
+               run_git(
+                 ["worktree", "add", "--detach", path, "origin/" <> base_branch],
+                 cd: repo_path
+               ) do
+          :ok = seed_compiled_deps(repo_path, path)
+          {:ok, path}
+        end
+      end
+
+    with {:ok, wt_path} <- result do
+      _ = ensure_arbiter_exclude(wt_path)
+      {:ok, wt_path}
+    end
+  end
+
   # bd-bhrji9: `.arbiter/INBOX` (Arbiter.Messages.WorktreeDelivery) is written
   # into the worktree out-of-band, whenever a coordinator/sibling message
   # arrives — independent of, and not gated by, MCP config injection
@@ -121,6 +185,29 @@ defmodule Arbiter.Worker.Worktree do
   @spec ensure_arbiter_exclude(path()) :: :ok
   defp ensure_arbiter_exclude(path),
     do: Arbiter.MCP.AgentConfig.add_to_git_exclude(path, [".arbiter/"])
+
+  @doc """
+  Refresh `repo_path`'s remote-tracking ref for `base_branch` from `origin`.
+
+  Refs only: this updates `refs/remotes/origin/<base_branch>` and touches
+  nothing else — not HEAD, not the index, not the working tree, not any local
+  branch. Safe to call on a checkout a human is actively working in.
+
+  For callers that must keep using a shared checkout as their cwd (local code
+  review, which diffs against local branches) but still need `origin/<base>` to
+  mean *current* upstream rather than whenever the contributor last pulled
+  (bd-9r1tta).
+
+  Returns `:ok` or `{:error, reason}`; callers generally treat it as
+  best-effort.
+  """
+  @spec fetch_origin(path(), String.t()) :: :ok | {:error, error_reason()}
+  def fetch_origin(repo_path, base_branch)
+      when is_binary(repo_path) and is_binary(base_branch) do
+    with :ok <- ensure_origin_remote(repo_path) do
+      fetch_origin_branch(repo_path, base_branch)
+    end
+  end
 
   defp ensure_origin_remote(repo_path) do
     case run_git(["remote", "get-url", "origin"], cd: repo_path) do

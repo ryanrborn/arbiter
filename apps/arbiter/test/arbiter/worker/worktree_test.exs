@@ -167,6 +167,179 @@ defmodule Arbiter.Worker.WorktreeTest do
     end
   end
 
+  # bd-9r1tta: dispatches that produce no branch (task-type audits, reviews)
+  # used to run straight from the shared local checkout — whatever HEAD a human
+  # contributor happened to leave it on, however many commits behind origin.
+  # `create_detached/3` gives them the same fetch-first guarantee `create/3`
+  # gives code dispatches, without minting a branch they'd never push.
+  describe "create_detached/3" do
+    test "checks out origin/<base> detached, at the predicted path", %{repo: repo, root: root} do
+      assert {:ok, path} = Worktree.create_detached(repo, "feature/bd-detach", "main")
+      assert path == Path.join(root, "feature-bd-detach")
+      assert File.dir?(path)
+
+      # Detached: no branch, and HEAD is exactly origin/main's tip.
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
+      assert head_sha(path) == rev_parse(repo, "refs/remotes/origin/main")
+    end
+
+    test "fetches origin first, so a month-stale local checkout still gets current upstream",
+         %{repo: repo, remote: remote, tmp: tmp} do
+      # Advance origin/main behind the local checkout's back — the tonic
+      # scenario: the local clone is a human's working dir, 72 commits behind.
+      clone = Path.join(tmp, "detach-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, "ENCRYPTION.md"), "shipped upstream\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "ENCRYPTION.md"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "encrypt PHI at rest"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+
+      refute File.exists?(Path.join(repo, "ENCRYPTION.md"))
+
+      assert {:ok, path} = Worktree.create_detached(repo, "feature/bd-stale", "main")
+
+      # The auditing agent sees the merged work — not the stale local tree.
+      assert File.exists?(Path.join(path, "ENCRYPTION.md"))
+    end
+
+    test "never touches the source checkout's HEAD, branch, or working tree",
+         %{repo: repo, remote: remote, tmp: tmp} do
+      # The human's checkout: on a side branch, with unpushed commits AND
+      # uncommitted work. None of it may be disturbed.
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "human-wip"])
+      File.write!(Path.join(repo, "unpushed.md"), "local commit\n")
+      {_, 0} = System.cmd("git", ["-C", repo, "add", "unpushed.md"])
+      {_, 0} = System.cmd("git", ["-C", repo, "commit", "-q", "-m", "unpushed local work"])
+      File.write!(Path.join(repo, "dirty.md"), "uncommitted\n")
+
+      head_before = head_sha(repo)
+
+      clone = Path.join(tmp, "untouched-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, "REMOTE.md"), "upstream moved\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "REMOTE.md"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "upstream"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+
+      assert {:ok, path} = Worktree.create_detached(repo, "feature/bd-untouched", "main")
+
+      # Source checkout: same branch, same HEAD, dirty file intact, unpushed
+      # commit intact.
+      assert {:ok, "human-wip"} = Worktree.current_branch(repo)
+      assert head_sha(repo) == head_before
+      assert File.read!(Path.join(repo, "dirty.md")) == "uncommitted\n"
+      assert File.exists?(Path.join(repo, "unpushed.md"))
+
+      # ... while the detached checkout is at current upstream.
+      assert File.exists?(Path.join(path, "REMOTE.md"))
+      refute File.exists?(Path.join(path, "unpushed.md"))
+    end
+
+    test "is idempotent: a second call returns the existing path", %{repo: repo} do
+      assert {:ok, path1} = Worktree.create_detached(repo, "feature/bd-idem", "main")
+      assert {:ok, ^path1} = Worktree.create_detached(repo, "feature/bd-idem", "main")
+      assert File.dir?(path1)
+    end
+
+    test "errors when the repo has no origin remote", %{tmp: tmp} do
+      local = Path.join(tmp, "no-origin")
+      File.mkdir_p!(local)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local])
+      {_, 0} = System.cmd("git", ["-C", local, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", local, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", local, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(local, "a.md"), "a\n")
+      {_, 0} = System.cmd("git", ["-C", local, "add", "a.md"])
+      {_, 0} = System.cmd("git", ["-C", local, "commit", "-q", "-m", "i"])
+
+      assert {:error, {:missing_origin_remote, msg}} =
+               Worktree.create_detached(local, "feature/bd-no-origin", "main")
+
+      assert msg =~ "origin"
+    end
+
+    test "errors when the base branch does not exist on origin", %{repo: repo} do
+      assert {:error, {:fetch_failed, _}} =
+               Worktree.create_detached(repo, "feature/bd-no-base", "nonexistent-base")
+    end
+
+    test "rejects an empty or nil name", %{repo: repo} do
+      assert {:error, :invalid_branch_name} = Worktree.create_detached(repo, "", "main")
+      assert {:error, :invalid_branch_name} = Worktree.create_detached(repo, nil, "main")
+    end
+  end
+
+  # bd-9r1tta: for callers that must keep a shared, human-used checkout as their
+  # cwd (local code review) but still need `origin/<base>` to mean *current*
+  # upstream rather than whenever the contributor last pulled.
+  describe "fetch_origin/2" do
+    test "advances the remote-tracking ref to current upstream", %{
+      repo: repo,
+      remote: remote,
+      tmp: tmp
+    } do
+      before = rev_parse(repo, "refs/remotes/origin/main")
+
+      clone = Path.join(tmp, "fetch-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, "NEW.md"), "upstream\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "NEW.md"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "upstream commit"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+
+      assert :ok = Worktree.fetch_origin(repo, "main")
+
+      assert rev_parse(repo, "refs/remotes/origin/main") == head_sha(clone)
+      refute rev_parse(repo, "refs/remotes/origin/main") == before
+    end
+
+    test "refs only — leaves HEAD, the local branch, and the working tree alone",
+         %{repo: repo, remote: remote, tmp: tmp} do
+      {_, 0} = System.cmd("git", ["-C", repo, "checkout", "-q", "-b", "human-wip"])
+      File.write!(Path.join(repo, "dirty.md"), "uncommitted\n")
+      head_before = head_sha(repo)
+
+      clone = Path.join(tmp, "refs-only-clone")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(clone, "REMOTE_ONLY.md"), "upstream\n")
+      {_, 0} = System.cmd("git", ["-C", clone, "add", "REMOTE_ONLY.md"])
+      {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "upstream"])
+      {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+
+      assert :ok = Worktree.fetch_origin(repo, "main")
+
+      assert {:ok, "human-wip"} = Worktree.current_branch(repo)
+      assert head_sha(repo) == head_before
+      assert File.read!(Path.join(repo, "dirty.md")) == "uncommitted\n"
+      # The fetched commit is in the object store but not in the working tree.
+      refute File.exists?(Path.join(repo, "REMOTE_ONLY.md"))
+    end
+
+    test "errors when the repo has no origin remote", %{tmp: tmp} do
+      local = Path.join(tmp, "fetch-no-origin")
+      File.mkdir_p!(local)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", local])
+
+      assert {:error, {:missing_origin_remote, _}} = Worktree.fetch_origin(local, "main")
+    end
+
+    test "errors when the branch does not exist upstream", %{repo: repo} do
+      assert {:error, {:fetch_failed, _}} = Worktree.fetch_origin(repo, "no-such-branch")
+    end
+  end
+
   describe "current_branch/1" do
     test "returns the branch the worktree was created on", %{repo: repo} do
       {:ok, path} = Worktree.create(repo, "feature/cb", "main")
@@ -551,6 +724,13 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert File.exists?(Path.join(dep_dst, "mix.exs"))
     end
   end
+
+  defp rev_parse(path, ref) do
+    {out, 0} = System.cmd("git", ["-C", path, "rev-parse", ref], stderr_to_stdout: true)
+    String.trim(out)
+  end
+
+  defp head_sha(path), do: rev_parse(path, "HEAD")
 
   # Commit `content` to `file` in `path` and return :ok.
   defp commit(path, file, content, msg) do
