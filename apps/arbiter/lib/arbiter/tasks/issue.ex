@@ -207,6 +207,12 @@ defmodule Arbiter.Tasks.Issue do
       change set_attribute(:status, :closed)
       change set_attribute(:closed_at, &DateTime.utc_now/0)
 
+      # bd-bsco7f: persist what this close meant upstream, so the drift check
+      # can read the intent instead of guessing it from `pr_ref`. Mirrors the
+      # gate SyncTracker actually applies below: a review-only task never
+      # touches the ticket it borrowed, whatever `close_upstream` says.
+      change {Arbiter.Tasks.Issue.Changes.RecordCloseIntent, []}
+
       # Best-effort teardown: stop the task's worker (if any) and remove
       # its worktree (if clean). Failures never fail the :close itself.
       # Runs for every :close path — CLI, Driver, MergeQueue.
@@ -249,6 +255,15 @@ defmodule Arbiter.Tasks.Issue do
       # rollup are all close-time side effects and deliberately do NOT run
       # here, since this isn't a status transition.
       change {Arbiter.Tasks.Issue.Changes.GuardStatus, action: :sync_upstream_close}
+
+      # bd-bsco7f: this action exists *only* to propagate a close upstream, so
+      # the intent is unambiguous — record it. A legacy close that predates
+      # `close_upstream_expected` becomes drift-visible once someone repairs it
+      # this way and the ticket is still open afterwards. (A review-only task
+      # still records `false` — SyncTracker below skips it, so nothing is
+      # pushed and nothing should be claimed.)
+      change {Arbiter.Tasks.Issue.Changes.RecordCloseIntent, forced: true}
+
       change {Arbiter.Tasks.Issue.Changes.SyncTracker, force: true}
     end
 
@@ -268,6 +283,10 @@ defmodule Arbiter.Tasks.Issue do
       # dispatch opens a new PR and the finalizer never targets the wrong bead.
       change set_attribute(:pr_ref, nil)
       change set_attribute(:source_pr, nil)
+
+      # bd-bsco7f: same reasoning for the recorded close intent — it describes a
+      # close that no longer stands. The next close records its own.
+      change set_attribute(:close_upstream_expected, nil)
 
       # Propagate the reopen to the linked external tracker (reopens the GitHub
       # issue, etc.). Best-effort: a sync failure never fails the local reopen.
@@ -502,6 +521,33 @@ defmodule Arbiter.Tasks.Issue do
 
     attribute :closed_at, :utc_datetime_usec do
       public? true
+    end
+
+    attribute :close_upstream_expected, :boolean do
+      allow_nil? true
+      public? false
+
+      description """
+      bd-bsco7f: what this task's close *meant* for the linked tracker issue.
+
+      `close_upstream` is an argument on `:close`, not an attribute — once the
+      action returns, nothing on the record says whether the close was supposed
+      to propagate upstream. That left `Tasks.Claim`'s drift check inferring
+      intent from `pr_ref`'s presence, which silently misses the manual-close
+      path: a `bug` fixed by hand (no PR) whose upstream close failed looked
+      identical to a findings-only investigation that should leave its ticket
+      open. This attribute records the answer at close time instead.
+
+      Written by `:close` (from the `close_upstream` argument) and by
+      `:sync_upstream_close` (which exists solely to push a close upstream, so
+      the intent is unambiguously true). Either way a `review_only` task records
+      `false`: SyncTracker skips review-only tasks on both paths, so no upstream
+      close ever happens for one. Cleared by `:reopen`.
+
+      `nil` means "closed before this was recorded" — for those rows the drift
+      check still falls back to the `pr_ref` proxy. Not `public?`: it is a
+      record of what an action did, never something a caller sets directly.
+      """
     end
 
     attribute :review_only, :boolean do
