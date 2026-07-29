@@ -42,6 +42,13 @@ defmodule Arbiter.ReviewGate.Round do
                           despite the field name — matches the ticket's requested
                           shape). Nil when not captured (e.g. a stub fixture in
                           tests, which never emits a `result` event).
+    * `reviewer_tier`   — the abstract `model_tier` (`"economy"` | `"standard"`
+                          | `"premium"`) resolved for a `:review` row (bd-3xultf:
+                          the reviewer's tier is the task's own tier bumped one
+                          step). Always nil for `:impl` rows. Recorded alongside
+                          `reviewer_model` so convergence analysis can segment by
+                          the judge's tier instead of a moving reviewer reading
+                          as a quality change.
     * `cost_usd`        — USD cost of this pass. Nil when not captured.
     * `criteria_total`  — number of acceptance criteria the reviewer addressed
                           in its per-criterion CRITERIA breakdown (bd-4yhv4x).
@@ -101,6 +108,7 @@ defmodule Arbiter.ReviewGate.Round do
         :findings,
         :finding_count,
         :reviewer_model,
+        :reviewer_tier,
         :cost_usd,
         :criteria_total,
         :criteria_unmet,
@@ -157,6 +165,12 @@ defmodule Arbiter.ReviewGate.Round do
       public? true
       constraints max_length: 255, trim?: true
       description "Model that ran this pass. Nil when not captured."
+    end
+
+    attribute :reviewer_tier, :string do
+      public? true
+      constraints max_length: 255, trim?: true
+      description "Resolved model_tier for a :review row. Nil for :impl rows."
     end
 
     attribute :cost_usd, :float do

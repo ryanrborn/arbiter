@@ -82,6 +82,10 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   # Unset difficulty is treated as D2 — the common-feature default.
   @default_difficulty 2
 
+  # Ladder used by `bump_tier/2` (bd-3xultf) — the ReviewGate reviewer's tier
+  # is the author's nominal tier moved up this many steps, capped at the end.
+  @tier_order ~w(economy standard premium)
+
   @impl true
   def choose(%Issue{} = task, workspace, _ledger_snapshot) do
     default = Routing.default_choice(workspace)
@@ -117,6 +121,34 @@ defmodule Arbiter.Agents.Routing.ByDifficulty do
   end
 
   def effective_difficulty(_), do: @default_difficulty
+
+  @doc """
+  The author's nominal `model_tier` for a difficulty, from `default_mapping/0`
+  (workspace `routing.rules` overrides are NOT consulted — this is the
+  author's *default* tier, used e.g. as the base the ReviewGate bumps one
+  step for the reviewer, per bd-3xultf).
+  """
+  @spec tier_for_difficulty(integer() | nil) :: String.t()
+  def tier_for_difficulty(difficulty) do
+    difficulty
+    |> effective_difficulty()
+    |> then(&Map.fetch!(@default_mapping, &1))
+    |> Map.fetch!("model_tier")
+  end
+
+  @doc """
+  Moves `tier` up `offset` steps on the economy → standard → premium ladder,
+  capping at premium rather than overflowing. `offset: 0` is a no-op — the
+  knob a workspace sets to restore a fixed (same-tier) reviewer (bd-3xultf).
+  A tier not on the ladder passes through unchanged.
+  """
+  @spec bump_tier(String.t(), non_neg_integer()) :: String.t()
+  def bump_tier(tier, offset) when is_binary(tier) and is_integer(offset) and offset >= 0 do
+    case Enum.find_index(@tier_order, &(&1 == tier)) do
+      nil -> tier
+      idx -> Enum.at(@tier_order, min(idx + offset, length(@tier_order) - 1))
+    end
+  end
 
   # The merged rule = default for that tier, overridden by any
   # workspace-config rule for the same tier. Default keys survive when
