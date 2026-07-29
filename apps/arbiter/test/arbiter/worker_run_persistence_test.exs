@@ -392,6 +392,50 @@ defmodule Arbiter.WorkerRunPersistenceTest do
     refute "line 100" in run.output_lines
   end
 
+  test "the terminal result event's structured outcome lands on the Run row (bd-9rdwe4)" do
+    task_id = "bd-runresult-#{System.unique_integer([:positive])}"
+
+    {:ok, pid} =
+      Worker.start(task_id: task_id, repo: "arbiter", workspace_id: "ws-runs")
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+
+    cwd = System.tmp_dir!()
+
+    result_event =
+      Jason.encode!(%{
+        "type" => "result",
+        "subtype" => "success",
+        "is_error" => false,
+        "result" => "all done, tests green"
+      })
+
+    events_path = Path.join(cwd, "result-events-#{System.unique_integer([:positive])}.jsonl")
+    File.write!(events_path, result_event <> "\n")
+
+    {:ok, _port} =
+      ClaudeSession.start(owner: pid, worktree_path: cwd, command: ["cat", events_path])
+
+    # The result event lands on session meta asynchronously (port data); wait
+    # for it before completing the worker, mirroring how a real driver would
+    # only close the run out after the terminal event actually arrived.
+    :ok =
+      wait_until(fn ->
+        case Worker.state(pid) do
+          %{meta: %{result_subtype: "success"}} -> true
+          _ -> false
+        end
+      end)
+
+    :ok = Worker.advance(pid, :implement)
+    :ok = Worker.complete(pid, :done)
+
+    [run] = runs_for(task_id)
+    assert run.result_subtype == "success"
+    assert run.result_is_error == false
+    assert run.result_message == "all done, tests green"
+  end
+
   defp wait_until(fun, timeout_ms \\ 500, step_ms \\ 20) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait(fun, deadline, step_ms)

@@ -1958,6 +1958,109 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "worker_prompt/2 (bd-9rdwe4)" do
+    test "reads the persisted prompt for the task's most recent run", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "prompt target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      :ok = Arbiter.Worker.PromptLog.write(run.id, "you are a worker\n\ndo the thing")
+      on_exit(fn -> File.rm(Arbiter.Worker.PromptLog.path_for(run.id)) end)
+
+      digest =
+        Ash.update!(
+          run,
+          %{prompt_sha256: Arbiter.Worker.PromptLog.sha256("you are a worker\n\ndo the thing")},
+          action: :update
+        ).prompt_sha256
+
+      assert {:ok, data} = Tools.worker_prompt(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.task_id == task.id
+      assert data.run_id == run.id
+      assert data.exists == true
+      assert data.prompt == "you are a worker\n\ndo the thing"
+      assert data.prompt_sha256 == digest
+    end
+
+    test "exists: false when the run row exists but no prompt was captured", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no prompt", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          completed_at: DateTime.utc_now()
+        })
+
+      assert {:ok, data} = Tools.worker_prompt(ctx.coordinator, %{"task_id" => task.id})
+
+      assert data.run_id == run.id
+      assert data.exists == false
+      assert data.prompt == nil
+    end
+
+    test "not-found when the task has no run at all", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "no run at all", workspace_id: ctx.ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_prompt(ctx.coordinator, %{"task_id" => task.id})
+    end
+
+    test "cannot read the prompt for a task in another workspace (not-found)", ctx do
+      {:ok, other_ws} = Ash.create(Workspace, %{name: "wp-other", prefix: "wpo"})
+      {:ok, foreign} = Ash.create(Issue, %{title: "foreign", workspace_id: other_ws.id})
+
+      assert {:error, {:not_found, _}} =
+               Tools.worker_prompt(ctx.coordinator, %{"task_id" => foreign.id})
+    end
+
+    test "run_id: reads a specific run's prompt, independent of which run is latest", ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "multi-run prompt", workspace_id: ctx.ws.id})
+      older = DateTime.add(DateTime.utc_now(), -60, :second)
+      newer = DateTime.utc_now()
+
+      {:ok, older_run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :failed,
+          started_at: older,
+          completed_at: older
+        })
+
+      {:ok, _latest} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: newer,
+          completed_at: newer
+        })
+
+      :ok = Arbiter.Worker.PromptLog.write(older_run.id, "the earlier attempt's prompt")
+      on_exit(fn -> File.rm(Arbiter.Worker.PromptLog.path_for(older_run.id)) end)
+
+      assert {:ok, data} = Tools.worker_prompt(ctx.coordinator, %{"run_id" => older_run.id})
+
+      assert data.run_id == older_run.id
+      assert data.prompt == "the earlier attempt's prompt"
+    end
+  end
+
   describe "worker_runs/2 with ReviewGate synthetic ids (bd-cuy75r)" do
     test "resolves auth against the base task while matching the synthetic id's own runs", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "reviewed task", workspace_id: ctx.ws.id})

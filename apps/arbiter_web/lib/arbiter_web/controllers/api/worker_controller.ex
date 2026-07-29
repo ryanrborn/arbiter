@@ -33,6 +33,9 @@ defmodule ArbiterWeb.Api.WorkerController do
       `task_id` may be a ReviewGate synthetic id (`<base>#review`, `#r<N>`,
       `#impl<N>`, `#v<N>`, `#t<N>`, percent-encoded in the path). Pass
       `?run_id=` to read that exact run instead of the task's latest.
+    * `GET  /api/workers/:task_id/prompt`  — :prompt (bd-9rdwe4). The composed
+      prompt the run's most recent (or `?run_id=`-selected) session was spawned
+      with, redacted the same way the transcript is. Sibling of `:log`.
     * `GET  /api/workers/:task_id/run_log_list` — :run_log_list. Every run
       for `task_id` plus its ReviewGate synthetic children, newest first,
       with `transcript_exists`/`line_count` (no full transcript — use
@@ -44,6 +47,7 @@ defmodule ArbiterWeb.Api.WorkerController do
   alias Arbiter.Reviews.ExternalReview
   alias Arbiter.Worker
   alias Arbiter.Worker.OutputLog
+  alias Arbiter.Worker.PromptLog
   alias Arbiter.Worker.Dispatch
   alias Arbiter.Workers.Run
   require Ash.Query
@@ -344,6 +348,45 @@ defmodule ArbiterWeb.Api.WorkerController do
       exists: exists,
       line_count: length(lines),
       lines: lines
+    }
+  end
+
+  # The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5),
+  # redacted through the same choke-point as transcript lines. Sibling of
+  # `:log` — identical `run_id`/`task_id` selection rule. `exists`
+  # distinguishes "no prompt was ever persisted for this run" (false, `prompt`
+  # nil) from a captured one. 404 when no matching run exists.
+  def prompt(conn, %{"task_id" => task_id, "run_id" => run_id})
+      when is_binary(task_id) and task_id != "" and is_binary(run_id) and run_id != "" do
+    case Ash.get(Run, run_id) do
+      {:ok, %Run{} = run} -> json(conn, %{data: render_prompt(run)})
+      _ -> {:error, :not_found}
+    end
+  end
+
+  def prompt(conn, %{"task_id" => task_id}) when is_binary(task_id) and task_id != "" do
+    case latest_run(task_id) do
+      %Run{} = run -> json(conn, %{data: render_prompt(run)})
+      nil -> {:error, :not_found}
+    end
+  end
+
+  def prompt(_conn, _params), do: {:error, {:invalid_request, "task_id is required", %{}}}
+
+  defp render_prompt(%Run{} = run) do
+    {exists, text} =
+      case PromptLog.read(run.id) do
+        {:ok, content} -> {true, content}
+        {:error, _} -> {false, nil}
+      end
+
+    %{
+      task_id: run.task_id,
+      run_id: run.id,
+      path: PromptLog.path_for(run.id),
+      exists: exists,
+      prompt: text,
+      prompt_sha256: run.prompt_sha256
     }
   end
 

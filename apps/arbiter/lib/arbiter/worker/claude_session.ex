@@ -140,6 +140,13 @@ defmodule Arbiter.Worker.ClaudeSession do
     * `:redact_values` — secret worker env values to scrub from output. Resolved
       from the task's workspace when omitted; pass the previous session's list
       on a respawn to skip the redundant DB read.
+    * `:composed_prompt` — the raw prompt text this spawn was built from
+      (bd-9rdwe4, #1017 gap G5), carried purely for durable persistence
+      (`Arbiter.Worker.PromptLog`) — it plays no role in argv construction.
+      A caller that already built its own argv (`command:` opts, e.g.
+      `Arbiter.Worker.Dispatch` / `Arbiter.Worker.ReviewGate`) should still
+      pass the prompt string it composed here so the worker can record what
+      the agent was actually told.
   """
   @spec build_session_config(String.t() | nil, String.t() | nil, keyword()) :: map()
   def build_session_config(task_id, topic \\ nil, opts \\ []) do
@@ -153,7 +160,8 @@ defmodule Arbiter.Worker.ClaudeSession do
       redact_values:
         Keyword.get_lazy(opts, :redact_values, fn ->
           Arbiter.Worker.WorkerEnv.secret_values(task_id)
-        end)
+        end),
+      composed_prompt: Keyword.get(opts, :composed_prompt)
     }
   end
 
@@ -204,7 +212,11 @@ defmodule Arbiter.Worker.ClaudeSession do
           # (Gemini). Claude omits this and learns the model from its `init`
           # event instead.
           model: Keyword.get(opts, :model),
-          redact_values: redact_values
+          redact_values: redact_values,
+          # bd-9rdwe4: `:prompt` still means "raw prompt text" even when
+          # `:command` (a caller-built argv) wins argv resolution below — it's
+          # carried through purely for the worker to persist.
+          composed_prompt: Keyword.get(opts, :prompt)
         )
 
       port_args = %{
@@ -506,6 +518,13 @@ defmodule Arbiter.Worker.ClaudeSession do
       duration_ms: number(event["duration_ms"]),
       result_subtype: event["subtype"],
       is_error: event["is_error"],
+      # bd-9rdwe4: the structured terminal record (#1017 gap G5) — the CLI's
+      # own outcome/verdict plus the final assistant-facing text, redacted
+      # through the SAME choke-point (`redact_line/2`) that already protects
+      # every transcript line, since this text is what lands on the
+      # `worker_runs` row rather than staying inside the uncapped transcript.
+      result_is_error: event["is_error"],
+      result_message: redact_optional(session, event["result"]),
       raw: event
     })
   end
@@ -605,6 +624,23 @@ defmodule Arbiter.Worker.ClaudeSession do
       [_ | _] = values -> Arbiter.Redaction.redact(line, values)
       _ -> line
     end
+  end
+
+  # Same choke-point as `redact_line/2`, for a value that may be absent (the
+  # terminal `result` event's text is nil on some error subtypes). Truncated
+  # to the `result_message` column's `max_length: 20_000` constraint (see
+  # `Arbiter.Workers.Run`) — that Ash constraint rejects rather than
+  # truncates an over-length string, which silently dropped the ENTIRE
+  # terminal write (status, completed_at, exit_code, every `result_*` field)
+  # for any run whose final assistant message ran long.
+  @result_message_max_length 20_000
+
+  defp redact_optional(_session, nil), do: nil
+
+  defp redact_optional(session, text) when is_binary(text) do
+    session
+    |> redact_line(text)
+    |> String.slice(0, @result_message_max_length)
   end
 
   # Append the line to the durable, uncapped per-run transcript when the
