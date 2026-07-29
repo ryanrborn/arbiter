@@ -829,6 +829,25 @@ defmodule Arbiter.Reviews.ExternalReviewTest do
       assert String.contains?(rec.findings_summary || "", "x.ex")
     end
 
+    test "review/1 persists the composed prompt against the review record (bd-9rdwe4)" do
+      ws = github_ws("er-rec-prompt")
+      stub_full_review(head_sha: "sha-recprompt", author: "dev", max_comment_id: 1)
+
+      Application.put_env(:arbiter, :code_review_invoker, fn _prompt, _state ->
+        {:ok, ~s({"findings": []})}
+      end)
+
+      on_exit(fn -> Application.delete_env(:arbiter, :code_review_invoker) end)
+
+      assert {:ok, _result} =
+               ExternalReview.review(pr: "octo/widget#42", workspace: ws.name, follow_up: false)
+
+      [rec] = records_for(ws.id, "octo/widget#42")
+
+      assert {:ok, prompt} = Arbiter.Worker.PromptLog.read(rec.id)
+      assert prompt =~ "BEGIN DIFF"
+    end
+
     test "review/1 with no findings persists a :completed :approve record" do
       ws = github_ws("er-rec-2")
       stub_full_review(head_sha: "sha-rec2", author: "dev", max_comment_id: 1)

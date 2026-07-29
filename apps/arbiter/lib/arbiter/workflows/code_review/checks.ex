@@ -88,9 +88,42 @@ defmodule Arbiter.Workflows.CodeReview.Checks do
   # ---- internals --------------------------------------------------------
 
   defp invoke_reviewer(prompt, state) do
+    persist_review_prompt(prompt, state)
     invoker = Application.get_env(:arbiter, :code_review_invoker) || (&default_invoke/2)
     invoker.(prompt, state)
   end
+
+  # bd-9rdwe4 (#1017 gap G5): this is the shared invoker for BOTH
+  # `Arbiter.Reviews.ExternalReview` and `Arbiter.Workflows.ReviewPatrol`'s
+  # re-review — neither spawns through `Arbiter.Worker`/`ClaudeSession`, so
+  # neither gets prompt persistence for free from that choke-point. Callers
+  # that want their prompt recorded set `state[:review_record_id]` (an
+  # `Arbiter.Reviews.Record` id for an external review, an engagement
+  # `Issue` id for a ReviewPatrol re-review) — anything without one (the
+  # legacy diff-only `CodeReview` workflow, most existing tests) is
+  # unaffected. Redacted with the SAME `Arbiter.Redaction.redact/2` used by
+  # the worker transcript/prompt choke-point, using the workspace's
+  # secret-flagged worker env values when a workspace is in state.
+  defp persist_review_prompt(prompt, state) do
+    case Map.get(state, :review_record_id) do
+      id when is_binary(id) and id != "" ->
+        redacted = Arbiter.Redaction.redact(prompt, review_redact_values(state))
+        Arbiter.Worker.PromptLog.write(id, redacted)
+
+      _ ->
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning("CodeReview.Checks: persist_review_prompt/2 failed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp review_redact_values(%{workspace: %Arbiter.Tasks.Workspace{} = ws}) do
+    Arbiter.Tasks.Workspace.worker_env_secret_values(ws)
+  end
+
+  defp review_redact_values(_state), do: []
 
   # Default invoker shells out to `claude --print --output-format stream-json
   # --verbose` with the prompt delivered via stdin. Using stream-json lets us

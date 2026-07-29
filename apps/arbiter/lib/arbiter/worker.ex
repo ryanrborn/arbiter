@@ -649,6 +649,16 @@ defmodule Arbiter.Worker do
     # Only include model in the update if it's non-nil (to preserve NULL if not set)
     attrs = if model, do: Map.put(attrs, :model, model), else: attrs
 
+    # bd-9rdwe4: the structured terminal record (#1017 gap G5) — nil on a run
+    # whose session never reached a terminal `result` event (crashed,
+    # non-Claude provider, workflow-mode worker), same graceful degradation
+    # as every other best-effort field here.
+    attrs =
+      attrs
+      |> maybe_put(:result_subtype, Map.get(meta, :result_subtype))
+      |> maybe_put(:result_is_error, Map.get(meta, :result_is_error))
+      |> maybe_put(:result_message, Map.get(meta, :result_message))
+
     with {:ok, run} <- Ash.get(Arbiter.Workers.Run, run_id),
          {:ok, _updated} <- Ash.update(run, attrs, action: :update) do
       :ok
@@ -1135,6 +1145,15 @@ defmodule Arbiter.Worker do
       provider = Map.get(session_config, :provider)
       adapter = agent_adapter_for_provider(provider)
 
+      # bd-9rdwe4 (#1017 gap G5): persist the composed prompt BEFORE any
+      # tmpfile is reclaimed below — nothing recorded what an agent was told,
+      # and the oversized-prompt tmpfile is unlinked as soon as this worker no
+      # longer needs it. We already hold the raw prompt string in
+      # `session_config` (threaded in by `ClaudeSession.start/1` /
+      # `ClaudeSession.build_session_config/3`), so persistence never depends
+      # on reading it back off a temp file that might already be gone.
+      persist_composed_prompt(state, session_config)
+
       if spawn_args != pristine_args do
         case get_prompt_tmpfile(adapter, pristine_args.argv) do
           path when is_binary(path) -> File.rm(path)
@@ -1464,6 +1483,12 @@ defmodule Arbiter.Worker do
 
         had_session_id? = not is_nil(Map.get(meta, :session_id))
 
+        # bd-9rdwe4: mirror the structured terminal result (#1017 gap G5) the
+        # same way model/session_id are already surfaced, so
+        # `record_run_finished/1` can stamp it onto the Run row without
+        # reaching into the session map directly.
+        usage = Map.get(session, :usage) || %{}
+
         meta =
           meta
           |> Map.put(:output_lines, Enum.reverse(session.output_lines))
@@ -1474,6 +1499,9 @@ defmodule Arbiter.Worker do
           |> maybe_put(:model, model)
           |> maybe_put(:provider, Map.get(session, :provider))
           |> maybe_put(:session_id, session_id)
+          |> maybe_put(:result_subtype, Map.get(usage, :result_subtype))
+          |> maybe_put(:result_is_error, Map.get(usage, :result_is_error))
+          |> maybe_put(:result_message, Map.get(usage, :result_message))
 
         new_state = %State{state | meta: meta}
 
@@ -1527,6 +1555,58 @@ defmodule Arbiter.Worker do
   rescue
     e -> log_run_warning("backfill_fields", task_id, e)
   end
+
+  # bd-9rdwe4 (#1017 gap G5): persist the composed prompt this spawn carries,
+  # redacted through the SAME `Arbiter.Redaction.redact/2` choke-point that
+  # already protects transcripts (`Arbiter.Worker.ClaudeSession`'s
+  # `redact_line/2`), so a prompt persisted here is never a new leak surface.
+  # No-op when the spawn carried no prompt (a `:command` fixture that also
+  # skipped `:prompt` — tests) or `run_id` is nil (the Run row create failed;
+  # matches `open_output_log/1`'s same "no row to anchor to" rule).
+  defp persist_composed_prompt(%State{run_id: nil}, _session_config), do: :ok
+
+  defp persist_composed_prompt(%State{run_id: run_id, task_id: task_id}, session_config) do
+    case Map.get(session_config, :composed_prompt) do
+      prompt when is_binary(prompt) and prompt != "" ->
+        redacted = Arbiter.Redaction.redact(prompt, Map.get(session_config, :redact_values) || [])
+
+        case Arbiter.Worker.PromptLog.write(run_id, redacted) do
+          :ok ->
+            backfill_run_fields(
+              run_id,
+              %{prompt_sha256: Arbiter.Worker.PromptLog.sha256(redacted)},
+              task_id
+            )
+
+          {:error, reason} ->
+            log_run_warning("persist_prompt", task_id, reason)
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    e -> log_run_warning("persist_prompt", task_id, e)
+  end
+
+  # bd-9rdwe4: append a follow-up prompt (gate nudge, resume continue prompt)
+  # to the run's already-persisted prompt file, redacted the same way. No-op
+  # without a run_id — matches persist_composed_prompt/2's rule.
+  defp append_prompt(%State{run_id: nil}, _prompt, _session_config), do: :ok
+
+  defp append_prompt(%State{run_id: run_id, task_id: task_id}, prompt, session_config)
+       when is_binary(prompt) and prompt != "" do
+    redacted = Arbiter.Redaction.redact(prompt, Map.get(session_config, :redact_values) || [])
+
+    case Arbiter.Worker.PromptLog.append(run_id, redacted) do
+      :ok -> :ok
+      {:error, reason} -> log_run_warning("append_prompt", task_id, reason)
+    end
+  rescue
+    e -> log_run_warning("append_prompt", task_id, e)
+  end
+
+  defp append_prompt(_state, _prompt, _session_config), do: :ok
 
   # The effective CLAUDE_CONFIG_DIR a spawn ran under: the value injected into
   # this spawn's env (workers isolate into `~/.cache/arbiter/acolyte-claude`),
@@ -2369,6 +2449,12 @@ defmodule Arbiter.Worker do
 
       session_config = session_config_for(state, provider, model)
 
+      # bd-9rdwe4: a gate nudge is still telling the agent something new —
+      # append it (redacted) to the same run's prompt file rather than
+      # letting it vanish once the original prompt was already persisted at
+      # session-open.
+      append_prompt(state, nudge, session_config)
+
       now = DateTime.utc_now()
 
       adapter = agent_adapter_for_provider(provider)
@@ -2717,10 +2803,14 @@ defmodule Arbiter.Worker do
       )
 
       now = DateTime.utc_now()
+      resume_session_config = session_config_for(state, provider, model)
+
+      # bd-9rdwe4: the resume's short "keep going" continue prompt is a real
+      # follow-up instruction — append it (redacted) to the run's prompt file.
+      append_prompt(state, prompt, resume_session_config)
 
       session =
-        state
-        |> session_config_for(provider, model)
+        resume_session_config
         |> Map.put(:port, port)
         # inject_resume_argv/3 always leaves the prompt inline (the continue
         # prompt is short), so this is always nil — see the parity note in

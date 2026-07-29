@@ -41,6 +41,7 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_show` | coordinator | `Arbiter.Worker.whereis/1` + `Worker.state/1`, falls back to `Arbiter.Workers.Run` |
   | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first (accepts synthetic ids) |
   | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for one run (by `run_id` or the task's most recent) |
+  | `worker_prompt` | coordinator | `Arbiter.Worker.PromptLog.read/1` for one run (by `run_id` or the task's most recent) |
   | `run_log_list` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: … or …#…)`, task + synthetic children |
   | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, capture rate over Claude-driven runs |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
@@ -793,6 +794,39 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.worker_log/2
+    },
+    %{
+      name: "worker_prompt",
+      tiers: @coordinator,
+      description:
+        "The composed prompt one run was spawned with (bd-9rdwe4, #1017 gap G5), redacted " <>
+          "through the same choke-point as transcript lines — the sibling of `worker_log` for " <>
+          "\"what was this agent told\" instead of \"what did it say\". Pass `run_id` to read " <>
+          "that exact run, or `task_id` (no `run_id`) for the task's most recent run. `task_id` " <>
+          "may be a ReviewGate synthetic id (`<base>#review`, `#r<N>`, `#impl<N>`, `#v<N>`, " <>
+          "`#t<N>`). `exists` distinguishes \"no prompt ever persisted\" (false, `prompt` nil) " <>
+          "from a captured (possibly empty-after-redaction) one. `prompt_sha256` mirrors the " <>
+          "Run row's column so identical prompts are comparable without re-fetching the text. " <>
+          "Not-found when no matching run exists.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "task_id" => %{
+            "type" => "string",
+            "description" =>
+              "Task whose latest run's prompt to read. Accepts a plain task id or a " <>
+                "ReviewGate synthetic id such as `<base>#review`. Ignored when `run_id` is given."
+          },
+          "run_id" => %{
+            "type" => "string",
+            "description" =>
+              "Exact run id whose prompt to read, independent of which run is latest for its " <>
+                "task. Takes precedence over `task_id`."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.worker_prompt/2
     },
     %{
       name: "run_log_list",
