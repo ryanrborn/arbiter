@@ -1202,6 +1202,83 @@ defmodule Arbiter.Worker.DispatchTest do
       assert "haiku" in args
     end
 
+    # bd-dzz6ly: worker_runs records what happened but not what governed it.
+    # This proves the effective post-layering skill set, the routing policy
+    # that decided the tier, the resolved tier/thinking, the standing_orders
+    # digest, and the task's difficulty AT DISPATCH TIME all land on the Run
+    # row — so "which runs had skill X active, grouped by outcome" is
+    # answerable without reading a transcript.
+    test "dispatch records provenance (resolved_skills, routing_policy, model_tier, thinking, standing_orders_digest, difficulty_at_dispatch) onto the Run row",
+         %{ws: ws, tmp: tmp} do
+      argv_file = Path.join(tmp, "argv.txt")
+      :ok = stub_claude_on_path(tmp, argv_file)
+
+      repo = seed_repo!(tmp, "prov-repo")
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "provwt"))
+      Application.put_env(:arbiter, :repo_paths, %{"prov/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, _skill} =
+        Arbiter.Skills.create_skill(%{
+          name: "prov-canary",
+          body: "# Canary",
+          activation_mode: :always_on
+        })
+
+      {:ok, ws} =
+        Ash.update(ws, %{
+          config: %{
+            "agent" => %{"type" => "claude"},
+            "routing" => %{"policy" => "by_difficulty"},
+            "skills" => %{"workspace" => ["prov-canary"]},
+            "standing_orders" => ["always run tests"]
+          }
+        })
+
+      # D3 → premium / high per ByDifficulty's default mapping.
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "provenance work",
+          workspace_id: ws.id,
+          issue_type: :feature,
+          difficulty: 3
+        })
+
+      {:ok, result} =
+        Dispatch.dispatch(task.id,
+          repo: "prov/repo",
+          start_driver: false,
+          start_claude: true,
+          preflight: false
+        )
+
+      _ = wait_for_argv!(argv_file)
+
+      run = latest_run(task.id)
+      assert run.difficulty_at_dispatch == 3
+      assert run.routing_policy == "by_difficulty"
+      assert run.model_tier == "premium"
+      assert run.thinking == "high"
+      assert is_binary(run.standing_orders_digest)
+      assert String.length(run.standing_orders_digest) == 64
+
+      assert [%{"name" => "prov-canary", "activation_mode" => "always_on"} = entry] =
+               run.resolved_skills
+
+      assert is_binary(entry["skill_version"])
+
+      # Editing the task's difficulty AFTER dispatch must not retroactively
+      # change what this run recorded — it ran under D3, not whatever the
+      # task is corrected to later (bd-7rspia was D1 → D2).
+      {:ok, _updated_task} = Ash.update(result.task, %{difficulty: 1})
+      run_after_edit = latest_run(task.id)
+      assert run_after_edit.difficulty_at_dispatch == 3
+    end
+
     test "redispatch after a :context_thrash failure auto-escalates to the 1M model (bd-8cn795)",
          %{ws: ws, tmp: tmp} do
       argv_file = Path.join(tmp, "argv.txt")

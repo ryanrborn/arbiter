@@ -1745,6 +1745,45 @@ defmodule Arbiter.MCP.ToolsTest do
       assert {:ok, %{runs: []}} = Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
     end
 
+    # bd-dzz6ly: "which runs had skill X active, grouped by outcome" must be
+    # answerable straight off this MCP surface, without reading a transcript.
+    test "surfaces run provenance (resolved_skills/routing_policy/model_tier/thinking/standing_orders_digest/difficulty_at_dispatch)",
+         ctx do
+      {:ok, task} = Ash.create(Issue, %{title: "provenance target", workspace_id: ctx.ws.id})
+
+      {:ok, run} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.utc_now(),
+          resolved_skills: [
+            %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+          ],
+          standing_orders_digest: String.duplicate("a", 64),
+          routing_policy: "by_difficulty",
+          model_tier: "premium",
+          thinking: "high",
+          difficulty_at_dispatch: 3
+        })
+
+      assert {:ok, %{runs: [entry]}} =
+               Tools.worker_runs(ctx.coordinator, %{"task_id" => task.id})
+
+      assert entry.id == run.id
+
+      assert entry.resolved_skills == [
+               %{"name" => "tdd", "activation_mode" => "always_on", "skill_version" => "v1"}
+             ]
+
+      assert entry.standing_orders_digest == String.duplicate("a", 64)
+      assert entry.routing_policy == "by_difficulty"
+      assert entry.model_tier == "premium"
+      assert entry.thinking == "high"
+      assert entry.difficulty_at_dispatch == 3
+    end
+
     test "honors a bounded limit", ctx do
       {:ok, task} = Ash.create(Issue, %{title: "many runs", workspace_id: ctx.ws.id})
 

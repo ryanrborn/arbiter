@@ -27,7 +27,13 @@ defmodule ArbiterWeb.Api.RunJSON do
       started_at: iso(r.started_at),
       completed_at: iso(r.completed_at),
       exit_code: r.exit_code,
-      failure_reason: r.failure_reason
+      failure_reason: r.failure_reason,
+      resolved_skills: r.resolved_skills || [],
+      standing_orders_digest: r.standing_orders_digest,
+      routing_policy: r.routing_policy,
+      model_tier: r.model_tier,
+      thinking: r.thinking,
+      difficulty_at_dispatch: r.difficulty_at_dispatch
     }
   end
 
