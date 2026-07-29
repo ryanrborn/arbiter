@@ -1020,11 +1020,13 @@ defmodule Arbiter.MCP.Catalog do
       description:
         "Reconcile the workspace's tasks against its external tracker (`arb sync`): open assigned " <>
           "issues with no task get a linked task; open tasks whose issue is closed upstream or " <>
-          "reassigned away get closed (unassigned issues are left alone); closed tasks that shipped a " <>
-          "PR (non-`task` type with a `pr_ref`) whose tracker issue is still open are reported as `drift` " <>
+          "reassigned away get closed (unassigned issues are left alone); closed tasks whose close was " <>
+          "meant to propagate upstream — a recorded close intent, or for rows closed before that was " <>
+          "recorded a non-blank `pr_ref` — but whose tracker issue is still open are reported as `drift` " <>
           "(a close that never propagated upstream — drift entries are report-only and never mutate the " <>
-          "local task). `dry: true` returns the plan without acting. No-ops cleanly when the tracker does " <>
-          "not support reconciliation.",
+          "local task). `task`-type and `review_only` tasks are exempt: they are expected to close with " <>
+          "their ticket still open. `dry: true` returns the plan without acting. No-ops cleanly when the " <>
+          "tracker does not support reconciliation.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
