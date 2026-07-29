@@ -247,6 +247,84 @@ defmodule Arbiter.Worker.WorktreeTest do
       assert File.dir?(path1)
     end
 
+    # Round-1 review finding: returning an existing directory as-is re-opened the
+    # staleness hole on any re-dispatch. The leaf is keyed to the bead and the
+    # worktree outlives its run (`CleanupWorktree` removes it only on close, and
+    # skips a dirty one), so a re-dispatched audit read the FIRST dispatch's
+    # snapshot of upstream — the same silently-wrong answer, shorter fuse.
+    test "re-points an existing detached worktree at current upstream instead of reusing the old snapshot",
+         %{repo: repo, remote: remote, tmp: tmp} do
+      assert {:ok, path} = Worktree.create_detached(repo, "feature/bd-restale", "main")
+      first_head = head_sha(path)
+      refute File.exists?(Path.join(path, "LATER.md"))
+
+      # Upstream moves after the first dispatch (and the local checkout, as
+      # always, has not pulled).
+      advance_origin!(tmp, remote, "LATER.md", "merged after the first audit\n")
+
+      assert {:ok, ^path} = Worktree.create_detached(repo, "feature/bd-restale", "main")
+
+      assert File.exists?(Path.join(path, "LATER.md"))
+      assert head_sha(path) == rev_parse(repo, "refs/remotes/origin/main")
+      refute head_sha(path) == first_head
+      # Still detached — re-pointing must not mint a branch.
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
+    end
+
+    test "re-points even when a prior agent left the tree dirty", %{
+      repo: repo,
+      remote: remote,
+      tmp: tmp
+    } do
+      assert {:ok, path} = Worktree.create_detached(repo, "feature/bd-dirty", "main")
+      File.write!(Path.join(path, "README.md"), "an agent scribbled here\n")
+      File.write!(Path.join(path, "scratch.txt"), "notes\n")
+
+      advance_origin!(tmp, remote, "AFTER_DIRTY.md", "upstream moved\n")
+
+      assert {:ok, ^path} = Worktree.create_detached(repo, "feature/bd-dirty", "main")
+
+      assert File.exists?(Path.join(path, "AFTER_DIRTY.md"))
+      assert File.read!(Path.join(path, "README.md")) == "hello\n"
+    end
+
+    test "refuses to re-point a worktree that is on a branch", %{repo: repo} do
+      # A branch worktree at the same leaf may hold unpushed commits — never
+      # clobber it, even though nothing in an inspect tree is precious.
+      assert {:ok, path} = Worktree.create(repo, "feature/bd-branchy", "main")
+
+      assert {:error, {:git_failed, msg}} =
+               Worktree.create_detached(repo, "feature/bd-branchy", "main")
+
+      assert msg =~ "not a detached inspect checkout"
+      assert {:ok, "feature/bd-branchy"} = Worktree.current_branch(path)
+    end
+
+    test "reclaims a leftover directory that is not a git worktree", %{repo: repo} do
+      path = Worktree.worktree_path("feature/bd-leftover")
+      File.mkdir_p!(path)
+      File.write!(Path.join(path, "junk.txt"), "not a worktree\n")
+
+      assert {:ok, ^path} = Worktree.create_detached(repo, "feature/bd-leftover", "main")
+
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
+      assert File.exists?(Path.join(path, "README.md"))
+      refute File.exists?(Path.join(path, "junk.txt"))
+    end
+
+    test "recovers when the leaf is still registered but its directory was deleted",
+         %{repo: repo} do
+      assert {:ok, path} = Worktree.create_detached(repo, "feature/bd-pruned", "main")
+
+      # Delete the directory behind git's back: the registration in
+      # `.git/worktrees` survives and makes a plain `worktree add` fail forever.
+      File.rm_rf!(path)
+      assert {:error, _} = Worktree.current_branch(path)
+
+      assert {:ok, ^path} = Worktree.create_detached(repo, "feature/bd-pruned", "main")
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
+    end
+
     test "errors when the repo has no origin remote", %{tmp: tmp} do
       local = Path.join(tmp, "no-origin")
       File.mkdir_p!(local)
@@ -272,6 +350,50 @@ defmodule Arbiter.Worker.WorktreeTest do
     test "rejects an empty or nil name", %{repo: repo} do
       assert {:error, :invalid_branch_name} = Worktree.create_detached(repo, "", "main")
       assert {:error, :invalid_branch_name} = Worktree.create_detached(repo, nil, "main")
+    end
+  end
+
+  # Round-1 review finding: sharing one leaf between an inspect checkout and a
+  # branch worktree made a later branch dispatch of the same bead hard-fail
+  # ("worktree exists … on a different branch", which the `already exists` →
+  # `attach/2` recovery does not match). Separate leaves make that impossible.
+  describe "inspect_name/1 and inspect_path/1" do
+    test "the inspect leaf is distinct from the branch leaf" do
+      assert Worktree.inspect_name("feature/bd-x") == "feature/bd-x-inspect"
+
+      assert Worktree.inspect_path("feature/bd-x") ==
+               Worktree.worktree_path("feature/bd-x-inspect")
+
+      refute Worktree.inspect_path("feature/bd-x") == Worktree.worktree_path("feature/bd-x")
+    end
+
+    test "an inspect checkout and a branch worktree for the same name coexist", %{repo: repo} do
+      name = "feature/bd-both"
+
+      assert {:ok, inspect_path} =
+               Worktree.create_detached(repo, Worktree.inspect_name(name), "main")
+
+      assert {:ok, branch_path} = Worktree.create(repo, name, "main")
+
+      refute inspect_path == branch_path
+      assert {:ok, "HEAD"} = Worktree.current_branch(inspect_path)
+      assert {:ok, ^name} = Worktree.current_branch(branch_path)
+    end
+  end
+
+  describe "detached?/1" do
+    test "true for a detached checkout, false for a branch worktree", %{repo: repo} do
+      {:ok, detached} = Worktree.create_detached(repo, "feature/bd-det-probe", "main")
+      {:ok, branched} = Worktree.create(repo, "feature/bd-branch-probe", "main")
+
+      assert {:ok, true} = Worktree.detached?(detached)
+      assert {:ok, false} = Worktree.detached?(branched)
+    end
+
+    test "errors for a path that is not a git worktree", %{tmp: tmp} do
+      plain = Path.join(tmp, "not-a-worktree")
+      File.mkdir_p!(plain)
+      assert {:error, _} = Worktree.detached?(plain)
     end
   end
 
@@ -731,6 +853,22 @@ defmodule Arbiter.Worker.WorktreeTest do
   end
 
   defp head_sha(path), do: rev_parse(path, "HEAD")
+
+  # Push a commit to the bare `remote` from a throwaway clone, so the source
+  # checkout's own refs stay behind — the "human hasn't pulled in a month" shape
+  # bd-9r1tta is about.
+  defp advance_origin!(tmp, remote, file, content) do
+    clone = Path.join(tmp, "advance-#{:erlang.unique_integer([:positive])}")
+    {_, 0} = System.cmd("git", ["clone", "-q", remote, clone])
+    {_, 0} = System.cmd("git", ["-C", clone, "config", "user.email", "t@e.com"])
+    {_, 0} = System.cmd("git", ["-C", clone, "config", "user.name", "T"])
+    {_, 0} = System.cmd("git", ["-C", clone, "config", "commit.gpgsign", "false"])
+    File.write!(Path.join(clone, file), content)
+    {_, 0} = System.cmd("git", ["-C", clone, "add", file])
+    {_, 0} = System.cmd("git", ["-C", clone, "commit", "-q", "-m", "advance origin"])
+    {_, 0} = System.cmd("git", ["-C", clone, "push", "-q", "origin", "main"])
+    :ok
+  end
 
   # Commit `content` to `file` in `path` and return :ok.
   defp commit(path, file, content, msg) do

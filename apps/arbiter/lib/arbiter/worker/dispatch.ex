@@ -388,12 +388,30 @@ defmodule Arbiter.Worker.Dispatch do
   end
 
   # Resolve the preserved worktree path for the task's per-task branch and require
-  # it to exist on disk. A missing worktree means there's nothing to resume.
+  # it to exist on disk AND be on a branch. A missing worktree — or a detached one
+  # — means there's nothing to resume.
+  #
+  # The detached check matters because `ResumeContext.build/3` renders whatever it
+  # finds there as "the commits the prior worker made … DO NOT start over"
+  # (bd-9r1tta). A detached checkout holds no prior work at all: its `<base>..HEAD`
+  # diff is the *upstream* commits it was cut from (the local `<base>` ref being
+  # the parent repo's, possibly stale, one), which the briefing would then present
+  # to a fresh agent as its predecessor's output. Refuse the resume instead,
+  # exactly as `arb resume` did before a task-type dispatch had any checkout.
+  #
+  # Only detached is rejected, not "any branch other than the derived one": a
+  # worktree on some other branch still has commits that plausibly *are* the prior
+  # worker's, and refusing there would throw away a resumable run.
   defp resume_worktree(%Issue{} = task, repo) do
     case resolve_repo_path(task, repo) do
       repo_path when is_binary(repo_path) ->
         path = Worktree.worktree_path(BranchNamer.derive(task))
-        if File.dir?(path), do: {:ok, path}, else: {:error, :no_outpost}
+
+        cond do
+          not File.dir?(path) -> {:error, :no_outpost}
+          Worktree.detached?(path) == {:ok, true} -> {:error, :no_outpost}
+          true -> {:ok, path}
+        end
 
       _ ->
         {:error, :repo_unknown}
@@ -859,19 +877,55 @@ defmodule Arbiter.Worker.Dispatch do
                 {:ok, path}
 
               {:error, {:git_failed, msg}} when is_binary(msg) ->
-                if String.contains?(msg, "already exists") do
-                  case Worktree.attach(repo_path, branch) do
-                    {:ok, path} -> {:ok, path}
-                    {:error, reason} -> {:error, {:worktree_failed, reason}}
-                  end
-                else
-                  {:error, {:worktree_failed, {:git_failed, msg}}}
+                cond do
+                  String.contains?(msg, "already exists") ->
+                    case Worktree.attach(repo_path, branch) do
+                      {:ok, path} -> {:ok, path}
+                      {:error, reason} -> {:error, {:worktree_failed, reason}}
+                    end
+
+                  String.contains?(msg, "different branch") ->
+                    recover_from_detached_worktree(repo_path, branch, target_branch, msg)
+
+                  true ->
+                    {:error, {:worktree_failed, {:git_failed, msg}}}
                 end
 
               {:error, reason} ->
                 {:error, {:worktree_failed, reason}}
             end
         end
+    end
+  end
+
+  # A branch dispatch found a *detached* worktree sitting at the branch leaf.
+  # Since bd-9r1tta an inspect checkout uses its own leaf, so this only happens
+  # for a bead whose inspect tree predates that split — but the failure it caused
+  # was permanent (`create/3` refuses, the `already exists` → `attach/2` recovery
+  # doesn't match "different branch", and nothing else reclaims the directory), so
+  # recover instead of stranding the dispatch. Safe by inspection: a detached tree
+  # has no branch and therefore no commits only reachable from it.
+  defp recover_from_detached_worktree(repo_path, branch, target_branch, msg) do
+    require Logger
+
+    path = Worktree.worktree_path(branch)
+
+    case Worktree.detached?(path) do
+      {:ok, true} ->
+        Logger.info(
+          "Dispatch: reclaiming detached inspect worktree at #{path} so branch " <>
+            "#{branch} can be provisioned there"
+        )
+
+        _ = Worktree.cleanup(path)
+
+        case Worktree.create(repo_path, branch, target_branch) do
+          {:ok, path} -> {:ok, path}
+          {:error, reason} -> {:error, {:worktree_failed, reason}}
+        end
+
+      _ ->
+        {:error, {:worktree_failed, {:git_failed, msg}}}
     end
   end
 
@@ -1323,9 +1377,11 @@ defmodule Arbiter.Worker.Dispatch do
     end
   end
 
-  # An isolated, detached checkout at the tip of `origin/<target>`, keyed to the
-  # task's branch name so `Issue.Changes.CleanupWorktree` reclaims it on close
-  # exactly as it does a code worktree.
+  # An isolated, detached checkout at the tip of `origin/<target>`, at the task's
+  # *inspect* leaf (`Worktree.inspect_name/1` — the branch name plus a suffix, so
+  # it can never collide with a branch worktree for the same bead).
+  # `Issue.Changes.CleanupWorktree` reclaims that leaf on close exactly as it does
+  # a code worktree.
   #
   # A repo with no `origin` cannot be stale — there is no upstream to be behind —
   # so that one case falls back to the local checkout instead of failing a
@@ -1336,7 +1392,7 @@ defmodule Arbiter.Worker.Dispatch do
   defp provision_inspect_worktree(%Issue{} = task, repo_path, opts) do
     require Logger
 
-    name = BranchNamer.derive(task)
+    name = Worktree.inspect_name(BranchNamer.derive(task))
     base_branch = resolve_target_branch(task, opts)
 
     case Worktree.create_detached(repo_path, name, base_branch) do

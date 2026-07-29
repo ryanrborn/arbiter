@@ -751,7 +751,10 @@ defmodule Arbiter.Worker.DispatchTest do
       assert result.worktree_path == nil
       assert is_port(result.claude_port)
 
-      inspect_path = Worktree.worktree_path(BranchNamer.derive(task))
+      # Its own leaf — never the branch leaf, so a later branch dispatch of the
+      # same bead can't collide with it (round-1 review finding).
+      inspect_path = Worktree.inspect_path(BranchNamer.derive(task))
+      refute inspect_path == Worktree.worktree_path(BranchNamer.derive(task))
 
       # The agent's cwd IS that isolated checkout — observed from the child.
       cwd_file = Path.join(inspect_path, "agent-cwd.txt")
@@ -844,6 +847,66 @@ defmodule Arbiter.Worker.DispatchTest do
                  preflight: false,
                  claude_command: ["sleep", "1"]
                )
+    end
+
+    # Round-1 review finding: the inspect checkout used to share the branch leaf,
+    # so a branch dispatch of a bead that had already been audited hit
+    # `create/3`'s "worktree exists … on a different branch" — which the
+    # `already exists` → `attach/2` recovery does not match — and failed
+    # permanently until someone deleted the directory by hand. Inspect trees now
+    # use their own leaf, and a detached tree found at the branch leaf (left by a
+    # pre-fix dispatch) is reclaimed rather than fatal.
+    test "a branch dispatch reclaims a detached worktree left at the branch leaf",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "collide")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "collide-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"col/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "was an audit first", workspace_id: ws.id})
+      branch = BranchNamer.derive(task)
+
+      # The pre-fix state: a detached checkout squatting on the branch leaf.
+      {:ok, squatter} = Worktree.create_detached(repo, branch, "main")
+      assert squatter == Worktree.worktree_path(branch)
+      assert {:ok, "HEAD"} = Worktree.current_branch(squatter)
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "col/repo", start_driver: false)
+
+      assert result.worktree_path == squatter
+      assert {:ok, ^branch} = Worktree.current_branch(squatter)
+    end
+
+    # Counterpart: the two leaves coexist, so an audit's checkout and the same
+    # bead's branch worktree never contend for one directory.
+    test "an inspect checkout and a branch worktree for the same bead coexist",
+         %{ws: ws, tmp: tmp} do
+      repo = seed_repo!(tmp, "coexist")
+
+      Application.put_env(:arbiter, :worktree_root, Path.join(tmp, "coexist-wt"))
+      Application.put_env(:arbiter, :repo_paths, %{"cx/repo" => repo})
+
+      on_exit(fn ->
+        Application.delete_env(:arbiter, :worktree_root)
+        Application.delete_env(:arbiter, :repo_paths)
+      end)
+
+      {:ok, task} = Ash.create(Issue, %{title: "audited then built", workspace_id: ws.id})
+      branch = BranchNamer.derive(task)
+
+      {:ok, inspect_path} = Worktree.create_detached(repo, Worktree.inspect_name(branch), "main")
+
+      {:ok, result} = Dispatch.dispatch(task.id, repo: "cx/repo", start_driver: false)
+
+      assert result.worktree_path == Worktree.worktree_path(branch)
+      refute result.worktree_path == inspect_path
+      assert {:ok, ^branch} = Worktree.current_branch(result.worktree_path)
+      assert {:ok, "HEAD"} = Worktree.current_branch(inspect_path)
     end
 
     # bd-ci2jl2: a PRPatrol follow-up used to be undispatchable. It carried
@@ -1698,7 +1761,7 @@ defmodule Arbiter.Worker.DispatchTest do
       assert File.dir?(result.worktree_path)
 
       # Branch matches BranchNamer's derivation.
-      branch = Arbiter.Worker.BranchNamer.derive(task)
+      branch = BranchNamer.derive(task)
       assert {:ok, ^branch} = Arbiter.Worker.Worktree.current_branch(result.worktree_path)
     end
 
@@ -1827,7 +1890,7 @@ defmodule Arbiter.Worker.DispatchTest do
       # First dispatch — provisions the worktree, creating the branch locally.
       {:ok, first} = Dispatch.dispatch(task.id, repo: "st/repo", start_driver: false)
       assert is_binary(first.worktree_path)
-      branch = Arbiter.Worker.BranchNamer.derive(task)
+      branch = BranchNamer.derive(task)
 
       # Simulate Driver cleanup: remove the worktree directory but leave the
       # branch (Worktree.cleanup removes the worktree, not the branch).
@@ -2388,6 +2451,26 @@ defmodule Arbiter.Worker.DispatchTest do
       # Tear the worktree down — nothing left to resume.
       Arbiter.Worker.Worktree.cleanup(first.worktree_path)
       refute File.dir?(first.worktree_path)
+
+      assert {:error, :no_outpost} = Dispatch.resume(task.id, start_driver: false)
+    end
+
+    # Round-1 review finding: a detached inspect checkout is not preserved work.
+    # If resume accepted it, `ResumeContext.build/3` would run `git log
+    # <base>..HEAD` in a tree whose HEAD is `origin/<base>` while the local
+    # `<base>` ref is the parent repo's stale one — listing UPSTREAM commits under
+    # "the commits the prior worker made … DO NOT start over".
+    test "refuses to resume from a detached checkout at the branch leaf", %{ws: ws, repo: repo} do
+      {:ok, task} = Ash.create(Issue, %{title: "detached resume", workspace_id: ws.id})
+      first = stop_worker_with_outpost(task.id)
+
+      # Replace the branch worktree with a detached one at the same leaf — the
+      # shape a pre-fix task-type dispatch left behind.
+      path = first.worktree_path
+      Worktree.cleanup(path)
+      branch = BranchNamer.derive(task)
+      {:ok, ^path} = Worktree.create_detached(repo, branch, "main")
+      assert {:ok, "HEAD"} = Worktree.current_branch(path)
 
       assert {:error, :no_outpost} = Dispatch.resume(task.id, start_driver: false)
     end

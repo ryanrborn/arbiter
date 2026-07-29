@@ -134,9 +134,19 @@ defmodule Arbiter.Worker.Worktree do
   directory: the source checkout's HEAD, index, working tree, and unpushed
   commits are never touched.
 
-  Idempotent on the same terms as `create/3`: an existing directory at the
-  target path is returned as-is (no fetch, no re-checkout) so re-provisioning
-  a live worktree can neither pay the fetch cost nor clobber work in it.
+  Idempotent, but NOT a no-op on re-provision: a directory already at the target
+  path is **re-pointed** at the freshly-fetched `origin/<base_branch>` rather
+  than reused as-is. Reusing it would re-open exactly the hole this function
+  closes — the leaf is keyed to the bead, and a worktree outlives its run
+  (`CleanupWorktree` removes it only on close, and skips a dirty one), so a
+  re-dispatched audit would otherwise read the *first* dispatch's snapshot of
+  upstream, however old it has since become. Nothing in a detached inspect
+  checkout is meant to be preserved, so re-pointing clobbers nothing.
+
+  Refuses (rather than re-pointing) if the existing directory is on a *branch* —
+  that is someone else's worktree and may hold unpushed commits. A directory
+  that is not a live worktree at all (metadata pruned, interrupted `worktree
+  add`, plain leftover dir) is reclaimed and provisioned fresh.
   """
   @spec create_detached(path(), String.t(), String.t()) ::
           {:ok, path()} | {:error, error_reason()}
@@ -149,26 +159,130 @@ defmodule Arbiter.Worker.Worktree do
 
     result =
       if File.dir?(path) do
-        {:ok, path}
+        refresh_or_recreate_detached(repo_path, path, base_branch)
       else
-        File.mkdir_p!(Path.dirname(path))
-
-        with :ok <- ensure_origin_remote(repo_path),
-             :ok <- fetch_origin_branch(repo_path, base_branch),
-             :ok <- ensure_origin_ref(repo_path, base_branch),
-             {:ok, _stdout} <-
-               run_git(
-                 ["worktree", "add", "--detach", path, "origin/" <> base_branch],
-                 cd: repo_path
-               ) do
-          :ok = seed_compiled_deps(repo_path, path)
-          {:ok, path}
-        end
+        add_detached(repo_path, path, base_branch)
       end
 
     with {:ok, wt_path} <- result do
       _ = ensure_arbiter_exclude(wt_path)
       {:ok, wt_path}
+    end
+  end
+
+  @inspect_suffix "-inspect"
+
+  @doc """
+  The worktree name a *detached inspect* checkout for `base_name` uses.
+
+  Deliberately distinct from the branch leaf `create/3` would use for the same
+  bead (`<base_name>` vs `<base_name>#{@inspect_suffix}`). One bead can need
+  both — an audit that is later re-filed as code work, or the
+  `provision_worktree: true` escape hatch on a `task`-type bead — and sharing a
+  leaf makes the two collide: `create/3` finds a detached HEAD there, reports
+  "worktree exists … on a different branch", and the dispatch hard-fails until
+  someone removes the directory by hand. Separate leaves also mean a path's
+  *name* tells you whether it may hold work: a branch worktree can, an inspect
+  checkout never does.
+
+  `Issue.Changes.CleanupWorktree` reclaims both leaves on close, so the split
+  does not leak worktrees.
+  """
+  @spec inspect_name(String.t()) :: String.t()
+  def inspect_name(base_name) when is_binary(base_name), do: base_name <> @inspect_suffix
+
+  @doc """
+  The directory a detached inspect checkout for `base_name` lives at —
+  `worktree_path(inspect_name(base_name))`.
+  """
+  @spec inspect_path(String.t()) :: path()
+  def inspect_path(base_name) when is_binary(base_name),
+    do: base_name |> inspect_name() |> worktree_path()
+
+  @doc """
+  Return `{:ok, true}` if the worktree at `path` has a detached HEAD (no branch),
+  `{:ok, false}` if it is on a branch, `{:error, reason}` if `path` is not a
+  readable git worktree.
+
+  Lets callers distinguish a detached *inspect* checkout — which holds nothing
+  worth preserving and is safe to re-point or throw away — from a branch
+  worktree, which may hold unpushed commits (bd-9r1tta).
+  """
+  @spec detached?(path()) :: {:ok, boolean()} | {:error, error_reason()}
+  def detached?(path) when is_binary(path) do
+    with {:ok, branch} <- current_branch(path) do
+      {:ok, branch == "HEAD"}
+    end
+  end
+
+  # An existing directory at the inspect leaf: re-point it at current upstream if
+  # it is the detached checkout we left there, reclaim-and-recreate if it is not a
+  # live worktree at all, refuse if it is on a branch (not ours to clobber).
+  defp refresh_or_recreate_detached(repo_path, path, base_branch) do
+    case current_branch(path) do
+      {:ok, "HEAD"} ->
+        repoint_detached(repo_path, path, base_branch)
+
+      {:ok, branch} ->
+        {:error,
+         {:git_failed,
+          "worktree exists at #{path} on branch #{branch}, not a detached inspect " <>
+            "checkout; refusing to re-point it (it may hold unpushed commits)"}}
+
+      {:error, _} ->
+        # The directory is not a live git worktree — git's metadata was pruned,
+        # a `worktree add` was interrupted, or something left a plain directory
+        # behind. Reclaim it (`cleanup/1` also drops any stale registration) and
+        # provision fresh, rather than failing this bead's dispatch forever.
+        _ = cleanup(path)
+        add_detached(repo_path, path, base_branch)
+    end
+  end
+
+  # `--force`: the tree is ours and disposable, so a scratch file a prior agent
+  # left modified must not block the re-point. Same fetch-first guarantee as the
+  # fresh path — the checkout target is the ref the fetch just advanced.
+  defp repoint_detached(repo_path, path, base_branch) do
+    with :ok <- ensure_origin_remote(repo_path),
+         :ok <- fetch_origin_branch(repo_path, base_branch),
+         :ok <- ensure_origin_ref(repo_path, base_branch),
+         {:ok, _stdout} <-
+           run_git(["checkout", "--detach", "--force", "origin/" <> base_branch], cd: path) do
+      :ok = seed_compiled_deps(repo_path, path)
+      {:ok, path}
+    end
+  end
+
+  defp add_detached(repo_path, path, base_branch) do
+    File.mkdir_p!(Path.dirname(path))
+
+    with :ok <- ensure_origin_remote(repo_path),
+         :ok <- fetch_origin_branch(repo_path, base_branch),
+         :ok <- ensure_origin_ref(repo_path, base_branch),
+         {:ok, _stdout} <- add_detached_git(repo_path, path, base_branch) do
+      :ok = seed_compiled_deps(repo_path, path)
+      {:ok, path}
+    end
+  end
+
+  # A leaf still registered in `.git/worktrees` whose directory is gone makes
+  # `worktree add` fail permanently ("is a missing but already registered
+  # worktree"), which would strand every future dispatch of that bead. Prune the
+  # stale registration once and retry.
+  defp add_detached_git(repo_path, path, base_branch) do
+    args = ["worktree", "add", "--detach", path, "origin/" <> base_branch]
+
+    case run_git(args, cd: repo_path) do
+      {:error, {:git_failed, msg}} = err ->
+        if String.contains?(msg, "already registered") do
+          _ = run_git(["worktree", "prune"], cd: repo_path)
+          run_git(args, cd: repo_path)
+        else
+          err
+        end
+
+      other ->
+        other
     end
   end
 
