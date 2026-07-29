@@ -4,8 +4,9 @@ defmodule ArbiterCli.Cmd.Sync do
   workspace user against tasks linked by `tracker_ref`. Two directions:
 
     * issue assigned + open + no task → create a linked task (as `claim`).
-    * open task with a github ref whose issue is unassigned/closed → close
-      the task.
+    * open task whose issue is closed upstream, or is now assigned to someone
+      else → close the task. An issue that is merely *unassigned* is left
+      alone (bd-83ojwi) — unassigned is a resting state, not abandonment.
 
   Flags:
     --dry    Print the plan without applying it.
