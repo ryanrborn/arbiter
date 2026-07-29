@@ -66,6 +66,7 @@ defmodule Arbiter.Worker.Dispatch do
   alias Arbiter.Worker.Driver
   alias Arbiter.Worker.ResumeContext
   alias Arbiter.Worker.ReviewVerification
+  alias Arbiter.Worker.RunProvenance
   alias Arbiter.Worker.StopReason
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
@@ -739,6 +740,12 @@ defmodule Arbiter.Worker.Dispatch do
     # PR) instead of the commit/review/merge path.
     base = Map.put(base, :issue_type, task.issue_type)
 
+    # bd-dzz6ly: capture difficulty HERE, before the worker ever starts — not
+    # read later off `issues.difficulty`, which can be edited after dispatch
+    # (bd-7rspia was corrected D1 -> D2) and would then silently relabel this
+    # run's provenance to the corrected estimate instead of the one it ran under.
+    base = Map.put(base, :difficulty_at_dispatch, task.difficulty)
+
     base = maybe_put_resume_meta(base, opts)
 
     case worktree_path && resolve_repo_path(task, Keyword.get(opts, :repo)) do
@@ -1345,6 +1352,19 @@ defmodule Arbiter.Worker.Dispatch do
         }
 
         Worker.report(worker_pid, :routing_config, routing_config)
+
+        # bd-dzz6ly: everything that GOVERNED this run — the effective
+        # post-layering skill set (already threaded onto opts by
+        # maybe_start_claude), the routing policy that produced `choice`, and
+        # the workspace's standing_orders digest — backfilled onto the Run
+        # row the same way :model's late arrival already is above.
+        Worker.report(worker_pid, :run_provenance, %{
+          resolved_skills: RunProvenance.skills(Keyword.get(opts, :resolved_skills, [])),
+          standing_orders_digest: RunProvenance.standing_orders_digest(workspace),
+          routing_policy: RunProvenance.routing_policy_string(workspace),
+          model_tier: Keyword.get(agent_opts, :model_tier),
+          thinking: Keyword.get(agent_opts, :thinking)
+        })
 
         # Stamp the resolved model onto the worker's meta at dispatch time so
         # worker_list can show the model before any session output lands.
