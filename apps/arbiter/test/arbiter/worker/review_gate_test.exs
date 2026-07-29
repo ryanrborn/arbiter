@@ -34,6 +34,7 @@ defmodule Arbiter.Worker.ReviewGateTest do
   @reprompt Path.expand("../../fixtures/review_reprompt.sh", __DIR__)
   @partial_verification Path.expand("../../fixtures/review_partial_verification.sh", __DIR__)
   @unmet_criteria Path.expand("../../fixtures/review_unmet_criteria.sh", __DIR__)
+  @missing_criteria Path.expand("../../fixtures/review_missing_criteria.sh", __DIR__)
   @empty_findings Path.expand("../../fixtures/review_empty_findings.sh", __DIR__)
   @rounds Path.expand("../../fixtures/review_rounds.sh", __DIR__)
   @rounds_empty_mid Path.expand("../../fixtures/review_rounds_empty_mid.sh", __DIR__)
@@ -1562,6 +1563,87 @@ defmodule Arbiter.Worker.ReviewGateTest do
 
       refute Enum.any?(runs, &(&1.task_id == reprompt_id)),
              "a task with no acceptance criteria must not trigger a criteria re-prompt"
+    end
+
+    test "a bare APPROVE with NO CRITERIA breakdown on a criteria-bearing task does not clean-merge; it routes to reject",
+         %{repo: repo, ws: ws} do
+      # The gap the prompt-only enforcement left open: a reviewer that ignores
+      # the CRITERIA instruction and emits a holistic `VERDICT: APPROVE` with no
+      # per-criterion accounting at all. `unmet_criteria?/1` is false (no
+      # breakdown), so before the gate itself checked for a *missing* breakdown
+      # this merged as converged — the original bug (occurrences #1/#2).
+      task = new_task(ws, %{acceptance: @acceptance})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        review_rounds: 1,
+        worktree_path: repo,
+        # Both passes keep emitting a bare APPROVE with no breakdown, so the retry
+        # budget (1) is exhausted after the re-prompt and the gate must reject.
+        review_command: [@missing_criteria, "MISSING"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :failed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 0
+      assert Worker.state(pid).meta.failure_reason == :review_gate_rejected
+
+      # The gate re-prompted (spending its round) before rejecting, proving the
+      # first breakdown-less APPROVE was NOT accepted at face value.
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "expected a distinct re-prompt reviewer run row"
+    end
+
+    test "a bare APPROVE with no breakdown that supplies an all-MET breakdown on re-prompt merges",
+         %{repo: repo, ws: ws} do
+      task = new_task(ws, %{acceptance: @acceptance})
+      branch = "feature/rev"
+      :ok = seed_feature_branch(repo, branch)
+
+      meta = %{
+        branch: branch,
+        repo_path: repo,
+        target_branch: "main",
+        merge_title: "Merge #{task.id}",
+        review_required: true,
+        worktree_path: repo,
+        # First pass omits the breakdown; the re-prompt supplies an all-MET one,
+        # so the gate converges to a genuine, fully-accounted APPROVE and merges.
+        review_command: [@missing_criteria, "MET"],
+        review_timeout_ms: 5_000
+      }
+
+      {:ok, pid} =
+        Worker.start(task_id: task.id, repo: "trib/repo", workspace_id: ws.id, meta: meta)
+
+      on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal) end)
+      :ok = Worker.advance(pid, :claude)
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(pid)) end, 6_000)
+      assert merge_commit_count(repo) == 1
+
+      reprompt_id = ReviewGate.reviewer_task_id(task.id) <> "#v2"
+      runs = Ash.read!(Arbiter.Workers.Run)
+
+      assert Enum.any?(runs, &(&1.task_id == reprompt_id)),
+             "expected a distinct re-prompt reviewer run row"
     end
   end
 

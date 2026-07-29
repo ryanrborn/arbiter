@@ -204,4 +204,31 @@ defmodule Arbiter.Worker.ReviewVerification do
       "and must NOT be treated as a clean, mergeable APPROVE. Address the unmet criteria " <>
       "below before this can merge."
   end
+
+  @doc """
+  Prepend the "no CRITERIA breakdown" banner to a verdict's findings text, right
+  after the `VERDICT:` line (bd-4yhv4x). Used when a criteria-bearing task is
+  APPROVEd with no per-criterion breakdown at all — a holistic judgement that
+  never accounted for the acceptance criteria, the original bug's exact shape.
+  """
+  @spec prepend_missing_criteria_banner(String.t()) :: String.t()
+  def prepend_missing_criteria_banner(findings) when is_binary(findings) do
+    banner = missing_criteria_banner_text()
+
+    case String.split(findings, "\n", parts: 2) do
+      [verdict_line, rest] -> verdict_line <> "\n\n" <> banner <> "\n\n" <> rest
+      [verdict_line] -> verdict_line <> "\n\n" <> banner
+    end
+  end
+
+  @doc "The missing-CRITERIA-breakdown banner text. Public for inspection in tests."
+  @spec missing_criteria_banner_text() :: String.t()
+  def missing_criteria_banner_text do
+    "⚠️ ACCEPTANCE CRITERIA NOT ADDRESSED — this task has stated acceptance criteria, but the " <>
+      "reviewer approved WITHOUT a per-criterion CRITERIA breakdown: it judged the code " <>
+      "holistically and never accounted for whether the work delivers what was asked. This is " <>
+      "the exact failure the gate exists to catch. The approval is NOT accepted as a clean, " <>
+      "mergeable verdict — each acceptance criterion must be addressed individually (met / not " <>
+      "met / N/A with evidence) before this can merge."
+  end
 end
