@@ -2076,6 +2076,65 @@ defmodule Arbiter.MCP.ToolsTest do
     end
   end
 
+  describe "transcript_capture_stats/2 (bd-9wotbo)" do
+    test "reports capture rate over Claude-driven runs only, excluding workflow-only runs", ctx do
+      base = ~U[2026-07-01 00:00:00Z]
+
+      {:ok, captured} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-captured",
+          started_at: base
+        })
+
+      {:ok, handle} = Arbiter.Worker.OutputLog.open(captured.id)
+      Arbiter.Worker.OutputLog.append(handle, "line")
+      Arbiter.Worker.OutputLog.close(handle)
+      on_exit(fn -> File.rm(Arbiter.Worker.OutputLog.path_for(captured.id)) end)
+
+      {:ok, missing} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-missing",
+          started_at: DateTime.add(base, 60, :second)
+        })
+
+      {:ok, _workflow_only} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          started_at: DateTime.add(base, 120, :second)
+        })
+
+      {:ok, _pre_corpus} =
+        Ash.create(Arbiter.Workers.Run, %{
+          task_id: ctx.task.id,
+          repo: "arbiter",
+          workspace_id: ctx.ws.id,
+          status: :completed,
+          session_id: "sess-pre-corpus",
+          started_at: ~U[2026-06-10 00:00:00Z]
+        })
+
+      assert {:ok, stats} = Tools.transcript_capture_stats(ctx.coordinator, %{})
+
+      assert stats.corpus_start_date == "2026-06-20"
+      assert stats.claude_sessions == 2
+      assert stats.transcript_missing == 1
+      assert stats.workflow_only_runs == 1
+      assert stats.capture_rate_pct == 50.0
+      assert is_binary(missing.id)
+    end
+  end
+
   describe "usage_summarize/2" do
     test "requires a valid `by` grouping", ctx do
       assert {:error, {:invalid, _}} = Tools.usage_summarize(ctx.coordinator, %{})

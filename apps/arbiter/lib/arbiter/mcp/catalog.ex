@@ -42,6 +42,7 @@ defmodule Arbiter.MCP.Catalog do
   | `worker_runs` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: …)`, newest first (accepts synthetic ids) |
   | `worker_log` | coordinator | `Arbiter.Worker.OutputLog.read_lines/1` for one run (by `run_id` or the task's most recent) |
   | `run_log_list` | coordinator | `Ash.read(Arbiter.Workers.Run, task_id: … or …#…)`, task + synthetic children |
+  | `transcript_capture_stats` | coordinator | `Ash.read(Arbiter.Workers.Run, workspace_id: …)` since the corpus start date, capture rate over Claude-driven runs |
   | `message_send` | worker, coordinator | `Messages.send_mail/1` (flag / direction) |
   | `notify_list` | worker, coordinator | `Messages.recent_notifications/2` |
   | `task_list` | coordinator | `Ash.read(Issue, …)` with filters |
@@ -822,6 +823,31 @@ defmodule Arbiter.MCP.Catalog do
         "additionalProperties" => false
       },
       handler: &Tools.run_log_list/2
+    },
+    %{
+      name: "transcript_capture_stats",
+      tiers: @coordinator,
+      description:
+        "Transcript-capture health for a workspace (bd-9wotbo, gap G4): what fraction of " <>
+          "Claude-driven runs actually produced a durable transcript. Scoped to " <>
+          "`started_at >= 2026-06-20` (the arbiter-worker-logs corpus start date — earlier runs " <>
+          "lived under the retired arbiter-polecat-logs root, an accepted, unreachable loss). " <>
+          "Workflow-mode (bookkeeping-only) runs never open a Claude session, so they're reported " <>
+          "separately as workflow_only_runs and excluded from claude_sessions / capture_rate_pct " <>
+          "rather than counted as capture failures. Returns corpus_start_date, total_runs, " <>
+          "claude_sessions, transcript_missing, workflow_only_runs, capture_rate_pct (nil when " <>
+          "claude_sessions is 0). Optional `workspace` to target a workspace other than the default.",
+      input_schema: %{
+        "type" => "object",
+        "properties" => %{
+          "workspace" => %{
+            "type" => "string",
+            "description" => "Workspace name/id to report on. Omit for the default workspace."
+          }
+        },
+        "additionalProperties" => false
+      },
+      handler: &Tools.transcript_capture_stats/2
     },
     %{
       name: "external_review_list",
