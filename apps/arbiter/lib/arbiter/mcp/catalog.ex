@@ -1018,11 +1018,13 @@ defmodule Arbiter.MCP.Catalog do
       name: "tracker_sync",
       tiers: @coordinator,
       description:
-        "Reconcile the workspace's tasks against its external tracker (`arb sync`): task assigned issues " <>
-          "with no task, close tasks whose issue is gone, and report `drift` for tasks closed locally " <>
-          "whose tracker issue is still open (a close that never propagated upstream — drift entries " <>
-          "are report-only and never mutate the local task). `dry: true` returns the plan without " <>
-          "acting. No-ops cleanly when the tracker does not support reconciliation.",
+        "Reconcile the workspace's tasks against its external tracker (`arb sync`): open assigned " <>
+          "issues with no task get a linked task; open tasks whose issue is closed upstream or " <>
+          "reassigned away get closed (unassigned issues are left alone); closed non-`task` tasks " <>
+          "whose tracker issue is still open are reported as `drift` (a close that never propagated " <>
+          "upstream — drift entries are report-only and never mutate the local task). `dry: true` " <>
+          "returns the plan without acting. No-ops cleanly when the tracker does not support " <>
+          "reconciliation.",
       input_schema: %{
         "type" => "object",
         "properties" => %{
