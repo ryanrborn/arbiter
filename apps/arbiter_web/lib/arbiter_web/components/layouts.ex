@@ -38,6 +38,15 @@ defmodule ArbiterWeb.Layouts do
   slot(:inner_block, required: true)
 
   def app(assigns) do
+    # Fetched once per render rather than threaded through every LiveView's
+    # `<Layouts.app quotas={@quotas} ...>` call site (bd-l4epbc) — the quota
+    # bars only ever show the installation default workspace regardless of
+    # which page is open, same as `@quotas` itself (`ArbiterWeb.LiveHooks`).
+    assigns =
+      assign_new(assigns, :quota_on_exhaustion, fn ->
+        Arbiter.Quota.default_workspace_on_exhaustion()
+      end)
+
     ~H"""
     <header class="navbar bg-base-200 border-b border-base-300 px-4 sm:px-6 lg:px-8 min-h-12 py-1">
       <div class="flex-1">
@@ -105,16 +114,24 @@ defmodule ArbiterWeb.Layouts do
         <span class="text-[9px] text-base-content/35 uppercase tracking-wide leading-none">
           {quota_provider_label(quota.provider)}
         </span>
-        <div class="flex items-center gap-1.5">
+        <div class={[
+          "flex items-center gap-1.5",
+          quota_binding_class(quota.representative_claim, "five_hour")
+        ]}>
           <span class="text-base-content/40 w-4 shrink-0">5h</span>
           <div
             class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
-            title={quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)}
+            title={
+              quota_bar_title([
+                quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at),
+                quota_pace_ratio_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)
+              ])
+            }
           >
             <div
               :if={quota.utilization_5h}
               class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
+              style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at, quota.overage_status)};"}
             />
             <.quota_marker
               :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
@@ -124,19 +141,33 @@ defmodule ArbiterWeb.Layouts do
             />
           </div>
           <span class="text-base-content/60 tabular-nums w-12">
-            {quota_reset_label(quota.reset_5h_at)}
+            {quota_pace_label_5h(
+              quota.provider,
+              quota.utilization_5h,
+              quota.reset_5h_at,
+              quota.overage_status,
+              @quota_on_exhaustion
+            ) || quota_reset_label(quota.reset_5h_at)}
           </span>
         </div>
-        <div class="flex items-center gap-1.5">
+        <div class={[
+          "flex items-center gap-1.5",
+          quota_binding_class(quota.representative_claim, "seven_day")
+        ]}>
           <span class="text-base-content/40 w-4 shrink-0">7d</span>
           <div
             class="relative w-24 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
-            title={quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)}
+            title={
+              quota_bar_title([
+                quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at),
+                quota_pace_ratio_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)
+              ])
+            }
           >
             <div
               :if={quota.utilization_7d}
               class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-              style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
+              style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at, quota.overage_status)};"}
             />
             <.quota_marker
               :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
@@ -146,7 +177,13 @@ defmodule ArbiterWeb.Layouts do
             />
           </div>
           <span class="text-base-content/60 tabular-nums w-12">
-            {quota_reset_label(quota.reset_7d_at)}
+            {quota_pace_label_7d(
+              quota.provider,
+              quota.utilization_7d,
+              quota.reset_7d_at,
+              quota.overage_status,
+              @quota_on_exhaustion
+            ) || quota_reset_label(quota.reset_7d_at)}
           </span>
         </div>
       </div>
@@ -250,18 +287,24 @@ defmodule ArbiterWeb.Layouts do
                   <span class="text-[9px] text-base-content/35 uppercase tracking-wide leading-none">
                     {quota_provider_label(quota.provider)}
                   </span>
-                  <div class="flex items-center gap-1.5">
+                  <div class={[
+                    "flex items-center gap-1.5",
+                    quota_binding_class(quota.representative_claim, "five_hour")
+                  ]}>
                     <span class="text-base-content/40 w-4 shrink-0">5h</span>
                     <div
                       class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
                       title={
-                        quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)
+                        quota_bar_title([
+                          quota_tooltip_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at),
+                          quota_pace_ratio_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at)
+                        ])
                       }
                     >
                       <div
                         :if={quota.utilization_5h}
                         class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                        style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color(quota.utilization_5h, quota.overage_status)};"}
+                        style={"width: #{quota_pct(quota.utilization_5h)}%; background-color: #{quota_color_5h(quota.provider, quota.utilization_5h, quota.reset_5h_at, quota.overage_status)};"}
                       />
                       <.quota_marker
                         :if={quota_elapsed_pct_5h(quota.provider, quota.reset_5h_at)}
@@ -273,21 +316,33 @@ defmodule ArbiterWeb.Layouts do
                       />
                     </div>
                     <span class="text-base-content/60 tabular-nums w-12 text-right">
-                      {quota_reset_label(quota.reset_5h_at)}
+                      {quota_pace_label_5h(
+                        quota.provider,
+                        quota.utilization_5h,
+                        quota.reset_5h_at,
+                        quota.overage_status,
+                        @quota_on_exhaustion
+                      ) || quota_reset_label(quota.reset_5h_at)}
                     </span>
                   </div>
-                  <div class="flex items-center gap-1.5">
+                  <div class={[
+                    "flex items-center gap-1.5",
+                    quota_binding_class(quota.representative_claim, "seven_day")
+                  ]}>
                     <span class="text-base-content/40 w-4 shrink-0">7d</span>
                     <div
                       class="relative flex-1 h-1.5 rounded-full bg-base-content/10 overflow-hidden"
                       title={
-                        quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)
+                        quota_bar_title([
+                          quota_tooltip_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at),
+                          quota_pace_ratio_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at)
+                        ])
                       }
                     >
                       <div
                         :if={quota.utilization_7d}
                         class="absolute inset-y-0 left-0 rounded-full transition-all duration-500"
-                        style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color(quota.utilization_7d, quota.overage_status)};"}
+                        style={"width: #{quota_pct(quota.utilization_7d)}%; background-color: #{quota_color_7d(quota.provider, quota.utilization_7d, quota.reset_7d_at, quota.overage_status)};"}
                       />
                       <.quota_marker
                         :if={quota_elapsed_pct_7d(quota.provider, quota.reset_7d_at)}
@@ -299,7 +354,13 @@ defmodule ArbiterWeb.Layouts do
                       />
                     </div>
                     <span class="text-base-content/60 tabular-nums w-12 text-right">
-                      {quota_reset_label(quota.reset_7d_at)}
+                      {quota_pace_label_7d(
+                        quota.provider,
+                        quota.utilization_7d,
+                        quota.reset_7d_at,
+                        quota.overage_status,
+                        @quota_on_exhaustion
+                      ) || quota_reset_label(quota.reset_7d_at)}
                     </span>
                   </div>
                 </div>
