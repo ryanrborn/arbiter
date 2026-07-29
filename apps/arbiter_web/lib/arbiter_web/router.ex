@@ -67,6 +67,9 @@ defmodule ArbiterWeb.Router do
     post("/dependencies", DependencyController, :create)
     delete("/dependencies/:from/:to", DependencyController, :delete)
 
+    # Loop-analysis pass (Stage 1, bd-dyfaq3) — operator-invoked, report-only
+    get("/loop/analyze", LoopController, :analyze)
+
     # Repos (repo/project checkouts workers operate on)
     get("/repos", RepoController, :index)
 
