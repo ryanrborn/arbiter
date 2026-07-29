@@ -792,6 +792,12 @@ defmodule Arbiter.Tasks.Issue.Changes.SyncTrackerTest do
       assert synced.status == :closed
       assert synced.closed_at == closed_at
 
+      # bd-bsco7f: the local close said "leave the ticket open"; this action
+      # says otherwise. Recording it makes the repaired task drift-visible if
+      # the ticket is *still* open next sweep.
+      assert closed.close_upstream_expected == false
+      assert synced.close_upstream_expected == true
+
       expected_path = "/repos/#{@owner}/#{@repo}/issues/#{@ref}"
       assert_receive {:github, :get, ^expected_path}
       assert_receive {:github, :patch, ^expected_path, %{"state" => "closed"}}
