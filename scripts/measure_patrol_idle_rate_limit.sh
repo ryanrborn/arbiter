@@ -56,13 +56,15 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # One sample of the used counters. Echoes: "<epoch> <core_used> <search_used>".
+# Returns non-zero on any failure. NOTE: this MUST signal failure via the return
+# code, never `exit` — it is invoked in a command substitution ($(sample)), whose
+# subshell would swallow an `exit` and let the caller march on with empty values,
+# turning a broken measurement into a false PASS. The caller checks the return
+# code explicitly and aborts.
 sample() {
   local json
-  if ! json="$(gh api rate_limit 2>/dev/null)"; then
-    echo "error: 'gh api rate_limit' failed — is gh authenticated?" >&2
-    exit 2
-  fi
   # `/rate_limit` is exempt, so this call itself does not move the counters.
+  json="$(gh api rate_limit 2>/dev/null)" || return 1
   printf '%s %s %s\n' \
     "$(date -u +%s)" \
     "$(jq -r '.resources.core.used' <<<"$json")" \
@@ -85,7 +87,21 @@ search_consumed=0
 
 deadline=$(( $(date -u +%s) + DURATION ))
 while :; do
-  read -r ts core search <<<"$(sample)"
+  # Capture at top level so a gh/jq failure aborts the whole gate rather than
+  # being swallowed by the command-substitution subshell. A failed measurement
+  # must never be reported as a PASS.
+  if ! out="$(sample)"; then
+    echo "error: 'gh api rate_limit' failed — is gh authenticated?" >&2
+    exit 2
+  fi
+  read -r ts core search <<<"$out"
+  # A sample must be three integers. `jq` emits "null" (not a number) if the
+  # rate_limit payload is malformed; treat that as a hard failure too, never a
+  # zero-consumption PASS.
+  if ! [[ "$ts" =~ ^[0-9]+$ && "$core" =~ ^[0-9]+$ && "$search" =~ ^[0-9]+$ ]]; then
+    echo "error: malformed rate_limit sample: '$out'" >&2
+    exit 2
+  fi
 
   if [[ -z "$start_epoch" ]]; then
     start_epoch="$ts"; start_core="$core"; start_search="$search"
@@ -110,6 +126,14 @@ while :; do
   remaining=$(( deadline - now ))
   (( remaining < INTERVAL )) && sleep "$remaining" || sleep "$INTERVAL"
 done
+
+# Defensive: the loop cannot fall through here without a valid first sample (the
+# per-sample guard aborts otherwise), but never compute a window from an empty
+# operand — that would make `elapsed` a garbage epoch and mask a broken run.
+if ! [[ "$start_epoch" =~ ^[0-9]+$ ]]; then
+  echo "error: no valid sample was taken — measurement did not run." >&2
+  exit 2
+fi
 
 elapsed=$(( $(date -u +%s) - start_epoch ))
 total_consumed=$(( core_consumed + search_consumed ))
