@@ -2198,6 +2198,50 @@ defmodule Arbiter.Worker.DispatchTest do
     end
   end
 
+  describe "PRPatrol follow-up prompt (bd-6v2my2)" do
+    test "a task-type follow-up with source_pr is told it has no branch/PR of its own and may push to the original PR",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "PR #3679: needs follow-up",
+          workspace_id: ws.id,
+          issue_type: :task,
+          source_pr: "3679"
+        })
+
+      prompt = Dispatch.prompt_for_task(task, worktree_path: "/tmp/wt-follow-up")
+
+      assert prompt =~ "NO branch or pull request of its"
+      assert prompt =~ "PRPatrol follow-up against EXISTING pull request #3679"
+      assert prompt =~ "code change at all is SUCCESS"
+      assert prompt =~ "gh pr checkout 3679"
+      assert prompt =~ "git push -u origin <new-branch>"
+      assert prompt =~ "arb create <title> --parent #{task.id} --type feature"
+
+      # Still gets the notes gate (it's a `:task`) and its own worktree's
+      # isolation warning (provisioned so it has a checkout to `gh`/`git` from).
+      assert prompt =~ "notes gate"
+      assert prompt =~ "FILESYSTEM ISOLATION"
+      assert prompt =~ "/tmp/wt-follow-up"
+    end
+
+    test "a plain task-type directive (no source_pr) keeps the original 'do not edit a repo' framing",
+         %{ws: ws} do
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: "investigate the flaky deploy",
+          workspace_id: ws.id,
+          issue_type: :task
+        })
+
+      prompt = Dispatch.prompt_for_task(task, [])
+
+      assert prompt =~ "you are not expected to edit a repo"
+      refute prompt =~ "PRPatrol follow-up"
+      refute prompt =~ "gh pr checkout"
+    end
+  end
+
   describe "conflict_resolve_briefing/3 (#354, Phase 2b)" do
     test "embeds the task intent and the rebase/resolve/test/push steps", %{ws: ws} do
       {:ok, task} =

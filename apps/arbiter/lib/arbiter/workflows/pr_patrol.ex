@@ -341,6 +341,14 @@ defmodule Arbiter.Workflows.PRPatrol do
   # automatic re-drain, and closing the task here would make that later
   # re-dispatch fail at ensure_not_closed.
   defp dispatch_follow_up(task, pr_number, state) do
+    # bd-6v2my2: no `provision_worktree: true` override — `:task`'s default
+    # (skip branch provisioning) is exactly right here. The worker still gets
+    # a real repo checkout to run `gh`/`git` from: `Dispatch.resolve_agent_cwd/3`
+    # falls back to a DETACHED inspect checkout (no branch at all) for any
+    # `:task` whose worktree was skipped, which is what makes `gh pr checkout
+    # <source_pr>` (onto the ORIGINAL PR's branch — see the branch-policy note
+    # this description carries) safe to run there: nothing Arbiter provisioned
+    # is a branch of its own to begin with.
     opts = Keyword.merge([repo: state.repo, start_claude: true], state.dispatch_opts)
 
     case Dispatch.dispatch(task.id, opts) do
@@ -544,15 +552,16 @@ defmodule Arbiter.Workflows.PRPatrol do
   end
 
   # A non-closed follow-up normally blocks dedup — but a follow-up whose
-  # worker registered `:idle` and never provisioned a worktree is a zombie
-  # (bd-bi5pn0 — the pre-Dispatch.dispatch/2 bare Worker.start bug, or any
-  # future dispatch crash between registration and worktree provisioning).
-  # Dispatch.dispatch/2 always provisions the worktree before starting the
-  # worker for a reviewable follow-up, so a live worker with no
-  # `meta.worktree_path` can only mean a zombie registration, never a normal
-  # in-progress run. Left unfiltered, that zombie would permanently blackhole
-  # every future PRPatrol trigger on the PR (lt-c9td4r) since it never
-  # transitions to :closed on its own.
+  # worker registered `:idle` and never advanced is a zombie (bd-bi5pn0 — the
+  # pre-Dispatch.dispatch/2 bare Worker.start bug, or any future dispatch
+  # crash between registration and `maybe_start_claude/4` advancing it off
+  # `:idle`). A healthy dispatch always makes that advance synchronously,
+  # within the SAME `Dispatch.dispatch/2` call that registered the worker —
+  # so a worker still `:idle` when a LATER PRPatrol tick observes it can only
+  # be one that crashed before advancing, never a normal in-progress run. Left
+  # unfiltered, that zombie would permanently blackhole every future PRPatrol
+  # trigger on the PR (lt-c9td4r) since it never transitions to :closed on its
+  # own.
   defp still_blocking?(%Issue{} = issue) do
     case Worker.whereis(issue.id) do
       nil -> true
@@ -560,6 +569,14 @@ defmodule Arbiter.Workflows.PRPatrol do
     end
   end
 
+  # bd-6v2my2: every follow-up is now `:task` (not :feature/reviewable), so
+  # `meta.worktree_path` is nil for every HEALTHY run too, not just a zombie
+  # — Dispatch skips branch-worktree provisioning for `:task` by design (its
+  # cwd, when it has one, is a detached inspect checkout, never tracked in
+  # meta). `:idle` alone is therefore the load-bearing zombie signal here (see
+  # `still_blocking?/1`'s reasoning above) — this was already true for plain
+  # research/ops `:task` directives before this fix, so no behavior changes,
+  # just the discriminator that now matters for every follow-up too.
   defp zombie_idle?(pid) do
     case Worker.state(pid) do
       %{status: :idle, meta: meta} -> is_nil(meta) or is_nil(Map.get(meta, :worktree_path))
@@ -590,14 +607,21 @@ defmodule Arbiter.Workflows.PRPatrol do
       Ash.create(Issue, %{
         title: issue_title,
         description: description,
-        # A reviewable type (NOT :task): a follow-up addresses PR review
-        # feedback with a real code change, so it must take the normal
-        # worktree → commit → review → PR path. `:task` would skip worktree
-        # provisioning (dispatch.ex) and dispatch would 500 with
-        # :missing_worktree (bd-ci2jl2). The fresh worktree is cut from the
-        # repo's default branch, which is correct for a follow-up to a PR
-        # whose own branch was cleaned up on merge.
-        issue_type: :feature,
+        # bd-6v2my2: :task, NOT a reviewable type. A follow-up's deliverable is
+        # replies + resolves against the ORIGINAL PR's review threads — it has
+        # no code deliverable of its own. A reviewable type would provision a
+        # fresh worktree/branch that `dispatch_follow_up/3`'s
+        # `Dispatch.dispatch/2` call turns into a brand-new PR on completion
+        # (via the MergeQueue), and its commit gate would fail a run that
+        # posts replies/resolves but pushes no commit — exactly the
+        # lt-divfvo -> verus_server#3682 duplicate-PR incident. `:task`
+        # completes via the notes gate instead: no commit gate, no PR, no
+        # merge, and no branch worktree at all — the worker still gets a real
+        # (detached, branch-free) repo checkout to run `gh`/`git` from via
+        # `Dispatch.resolve_agent_cwd/3`'s existing `:task` fallback. See the
+        # branch-policy note this description carries, folded in by
+        # `Arbiter.Worker.Dispatch.task_prompt/2` via `source_pr`.
+        issue_type: :task,
         priority: 2,
         # No tracker lifecycle write-back: a PR number is not a workable
         # tracker issue (transitioning a merged PR on dispatch fails with
