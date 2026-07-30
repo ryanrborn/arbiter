@@ -109,6 +109,25 @@ Before restarting:
 2. If any are running, wait for them to finish — or explicitly stop them first.
 3. Never restart mid-flight as a shortcut.
 
+### Post-deploy: confirm patrols are lazy (bd-7tr11p acceptance gate)
+
+Patrols exist only while a repo has watched work (an open review engagement or a
+fleet-authored open PR). A restart with no open work must produce **no** patrol
+sweep at all. Verify this after any deploy that touches patrol lifecycle, with
+the fleet idle (0 workers, no open engagements, no fleet-authored open PRs):
+
+    scripts/measure_patrol_idle_rate_limit.sh        # samples >=5 min, asserts near-zero
+
+`gh api rate_limit` is exempt, so the sampler doesn't perturb what it measures —
+any rise in `.resources.core.used` over the window is background traffic. **Pass**
+= near zero. **Fail** = something is still polling; grep the journal for the
+per-repo patrol **start**/**stop** lines to see which repo and why. Compare a
+fail against the pre-#1036 signature: a ~30-call burst ~1/min (~2,200/hr idle).
+
+This is the live measurement `bd-4brb2j` asked for and could not satisfy; it can
+only run against a real deployment, not from a worker worktree. Record the
+samples on the PR / task.
+
 ## 9. Trust State, But Verify
 
 - A worker can show "running" while its subprocess is dead — check the port or

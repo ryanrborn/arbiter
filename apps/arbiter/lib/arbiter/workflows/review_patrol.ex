@@ -180,13 +180,17 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   per-PR.
   """
 
-  use GenServer
+  # `:transient` (not the default `:permanent`) so a patrol that self-terminates
+  # because its repo has no open engagement left (bd-7tr11p) stays down — a
+  # `:permanent` child would be restarted immediately by the DynamicSupervisor,
+  # defeating the lazy-stop. A genuine crash still exits abnormally and restarts.
+  use GenServer, restart: :transient
 
   alias Arbiter.Agents
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
-  alias Arbiter.Workflows.{CodeReview, PatrolPacing, ReviewReply}
+  alias Arbiter.Workflows.{CodeReview, PatrolPacing, PatrolRepoScope, ReviewReply}
   alias Arbiter.{Mergers, Tasks.Workspace}
   require Ash.Query
   require Logger
@@ -321,8 +325,40 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   @impl true
   def handle_info(:tick, state) do
-    new_state = do_tick(state) |> schedule_next()
-    {:noreply, new_state}
+    # Lazy-stop gate (bd-7tr11p): re-check — with a cheap DB read, NOT a forge
+    # call — whether this repo still has an open engagement to watch. When it
+    # doesn't, terminate before touching GitHub, so an idle repo's patrol makes
+    # zero background requests on the tick that reaps it. `:transient` restart
+    # keeps it down; a crash still restarts (abnormal exit).
+    if has_open_engagement?(state.workspace_id, state.repo) do
+      new_state = do_tick(state) |> schedule_next()
+      {:noreply, new_state}
+    else
+      Logger.info(
+        "ReviewPatrol[#{state.repo}]: stopping — no open engagement left to watch " <>
+          "(workspace #{state.workspace_id})"
+      )
+
+      {:stop, :normal, state}
+    end
+  end
+
+  # Prompt lazy-stop nudge (bd-7tr11p): the PatrolLifecycle subscriber sends
+  # this when a watched item in this workspace closes, so the patrol re-checks
+  # and terminates immediately rather than waiting for its next (idle-backed-off)
+  # scheduled tick. No forge call — pure DB re-check. When an engagement remains,
+  # it's a no-op and the existing schedule is left untouched.
+  def handle_info(:recheck, state) do
+    if has_open_engagement?(state.workspace_id, state.repo) do
+      {:noreply, state}
+    else
+      Logger.info(
+        "ReviewPatrol[#{state.repo}]: stopping — last watched engagement closed " <>
+          "(workspace #{state.workspace_id})"
+      )
+
+      {:stop, :normal, state}
+    end
   end
 
   # ---- tick logic ----
@@ -364,7 +400,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
           rig_name = rig_name_for_repo(workspace, state.repo)
 
           state.workspace_id
-          |> open_engagements()
+          |> open_engagements(state.repo)
           |> process_engagements_paced(adapter, workspace, rig_name, state.rate_limit)
         else
           # On any failure (missing workspace, unsupported adapter), no-op the
@@ -410,17 +446,45 @@ defmodule Arbiter.Workflows.ReviewPatrol do
     ArgumentError -> nil
   end
 
-  # OPEN review engagements for this workspace: review_only tasks with a linked
-  # source PR that are not yet closed. The `review_only == true` filter is what
-  # keeps this disjoint from PRPatrol's author-side follow-ups (review_only ==
-  # false), so the two patrols never act on each other's tasks.
-  defp open_engagements(workspace_id) do
+  @doc """
+  Whether `repo` (an `"owner/repo"` slug) has an open review engagement worth
+  watching (bd-7tr11p). Pure DB read, no forge call: an engagement's repo is
+  recoverable from its `source_pr` (embedded `owner/repo#N` for multi-repo, bare
+  `#N` in a single-repo workspace where the sole repo is unambiguous — see
+  `PatrolRepoScope`).
+
+  The lazy-start gate: the supervisor starts a patrol only for repos where this
+  is true, and a running patrol self-terminates once it flips false, so an idle
+  repo costs zero background polling.
+  """
+  @spec has_open_engagement?(String.t(), String.t()) :: boolean()
+  def has_open_engagement?(workspace_id, repo)
+      when is_binary(workspace_id) and is_binary(repo) do
+    workspace_id |> open_engagements(repo) |> Kernel.!=([])
+  end
+
+  # OPEN review engagements for a specific repo in this workspace: review_only
+  # tasks with a linked source PR that are not yet closed. The `review_only ==
+  # true` filter is what keeps this disjoint from PRPatrol's author-side
+  # follow-ups (review_only == false), so the two patrols never act on each
+  # other's tasks.
+  #
+  # The engagement set is scoped to `repo` (bd-7tr11p): the workspace-level query
+  # is filtered down to engagements whose `source_pr` belongs to `repo`. This is
+  # what makes per-repo lazy start/stop correct in a multi-repo workspace — a
+  # patrol's watched set is exactly its own repo's engagements, so it can tell
+  # when ITS last engagement closes. It also removes the prior redundancy where
+  # every repo's patrol polled (and acted on) every other repo's engagements,
+  # since a qualified `source_pr` self-routes at the adapter regardless of the
+  # per-patrol repo override.
+  defp open_engagements(workspace_id, repo) do
     Issue
     |> Ash.Query.filter(
       review_only == true and not is_nil(source_pr) and status != :closed and
         workspace_id == ^workspace_id
     )
     |> Ash.read!()
+    |> Enum.filter(fn %Issue{source_pr: ref} -> PatrolRepoScope.ref_matches_repo?(ref, repo) end)
   rescue
     _ -> []
   end

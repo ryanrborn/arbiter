@@ -63,14 +63,18 @@ defmodule Arbiter.Workflows.PRPatrol do
   waiting for the next interval.
   """
 
-  use GenServer
+  # `:transient` (not the default `:permanent`) so a patrol that self-terminates
+  # because its repo has no watched work (bd-7tr11p) stays down — a `:permanent`
+  # child would be restarted immediately by the DynamicSupervisor, defeating the
+  # whole lazy-stop. A genuine crash still exits abnormally and is restarted.
+  use GenServer, restart: :transient
 
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
   alias Arbiter.Worker
   alias Arbiter.Worker.Dispatch
-  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolPacing, ReviewThreadFollowUp}
+  alias Arbiter.Workflows.{CIFailureFollowUp, PatrolPacing, PatrolRepoScope, ReviewThreadFollowUp}
   require Ash.Query
   require Logger
 
@@ -122,6 +126,31 @@ defmodule Arbiter.Workflows.PRPatrol do
   @doc "Snapshot of internal state."
   def state(server \\ __MODULE__), do: GenServer.call(server, :state)
 
+  @doc """
+  Whether `repo` (an `"owner/repo"` slug) has an open fleet-authored PR worth
+  watching (bd-7tr11p) — an open `Issue` in the workspace whose `pr_ref` the
+  MergeQueue stamped when it opened the PR. Pure DB read, no forge call: the
+  repo a task's PR belongs to is recoverable from the `pr_ref` shape (embedded
+  `owner/repo#N` for multi-repo, bare `#N` in a single-repo workspace where the
+  sole repo is unambiguous — see `PatrolRepoScope`).
+
+  This is the lazy-start gate: the supervisor starts a patrol only for repos
+  where this is true, and a running patrol self-terminates once it flips false,
+  so an idle repo costs zero background polling.
+  """
+  @spec has_open_authored_pr?(String.t(), String.t()) :: boolean()
+  def has_open_authored_pr?(workspace_id, repo)
+      when is_binary(workspace_id) and is_binary(repo) do
+    Issue
+    |> Ash.Query.filter(
+      status != :closed and not is_nil(pr_ref) and workspace_id == ^workspace_id
+    )
+    |> Ash.read!()
+    |> Enum.any?(fn %Issue{pr_ref: ref} -> PatrolRepoScope.ref_matches_repo?(ref, repo) end)
+  rescue
+    _ -> false
+  end
+
   # ---- GenServer callbacks ----
 
   @impl true
@@ -169,8 +198,40 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   @impl true
   def handle_info(:tick, state) do
-    new_state = do_tick(state) |> schedule_next()
-    {:noreply, new_state}
+    # Lazy-stop gate (bd-7tr11p): re-check — with a cheap DB read, NOT a forge
+    # call — whether this repo still has a fleet-authored PR to watch. When it
+    # doesn't, terminate before touching GitHub, so an idle repo's patrol makes
+    # zero background requests on the tick that reaps it. `:transient` restart
+    # keeps it down. A crash still restarts (abnormal exit).
+    if has_open_authored_pr?(state.workspace_id, state.repo) do
+      new_state = do_tick(state) |> schedule_next()
+      {:noreply, new_state}
+    else
+      Logger.info(
+        "PRPatrol[#{state.repo}]: stopping — no open fleet-authored PR left to watch " <>
+          "(workspace #{state.workspace_id})"
+      )
+
+      {:stop, :normal, state}
+    end
+  end
+
+  # Prompt lazy-stop nudge (bd-7tr11p): the PatrolLifecycle subscriber sends
+  # this when a watched item in this workspace closes, so the patrol re-checks
+  # and terminates immediately rather than waiting for its next (idle-backed-off)
+  # scheduled tick. No forge call — pure DB re-check. When work remains, it's a
+  # no-op and the existing schedule is left untouched.
+  def handle_info(:recheck, state) do
+    if has_open_authored_pr?(state.workspace_id, state.repo) do
+      {:noreply, state}
+    else
+      Logger.info(
+        "PRPatrol[#{state.repo}]: stopping — last watched item closed " <>
+          "(workspace #{state.workspace_id})"
+      )
+
+      {:stop, :normal, state}
+    end
   end
 
   # ---- tick logic ----

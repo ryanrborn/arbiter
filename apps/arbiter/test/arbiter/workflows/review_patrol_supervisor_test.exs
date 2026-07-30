@@ -2,10 +2,26 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
   # async: false — the ReviewPatrolSupervisor and its Registry are singletons.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflows.{ReviewPatrol, ReviewPatrolSupervisor}
 
   @registry Arbiter.Workflows.ReviewPatrolRegistry
+
+  # Seed an open review engagement (the lazy-start watched item, bd-7tr11p) for a
+  # repo: a review_only task with a source_pr. `source_pr` encodes the repo —
+  # qualified "owner/repo#N" for multi-repo, bare "#N" in a single-repo workspace.
+  defp open_engagement!(ws, source_pr) do
+    {:ok, task} =
+      Ash.create(Issue, %{
+        title: "eng-#{System.unique_integer([:positive])}",
+        tracker_type: :none,
+        source_pr: to_string(source_pr),
+        review_only: true,
+        workspace_id: ws.id
+      })
+
+    task
+  end
 
   # A long interval means the GenServer never touches the DB/forge during the
   # test; we only assert on registration/derivation — the behaviour this module
@@ -68,6 +84,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      open_engagement!(ws, "#1")
+
       assert {:ok, pid} = start(ws)
       assert is_pid(pid) and Process.alive?(pid)
 
@@ -89,6 +107,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      open_engagement!(ws, "#1")
+
       assert {:ok, pid} = start(ws)
 
       assert {:error, {:already_started, ^pid}} =
@@ -109,6 +129,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
             }
           }
         })
+
+      open_engagement!(ws, "#1")
 
       assert {:ok, pid} = start(ws)
 
@@ -139,6 +161,9 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
             "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
           }
         })
+
+      open_engagement!(ws, "leo-technologies-llc/verus_server#1")
+      open_engagement!(ws, "leo-technologies-llc/verus_web#1")
 
       assert {:ok, _pid} = start(ws)
 
@@ -198,6 +223,10 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      # Seed an engagement so the ONLY reason to skip is the :off mode, not the
+      # lazy-start gate (bd-7tr11p).
+      open_engagement!(ws, "#1")
+
       assert :skip = start(ws)
       assert keys_for_workspace(ws.id) == []
     end
@@ -221,6 +250,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
             }
           }
         })
+
+      open_engagement!(ws, "#1")
 
       assert :skip = start(ws)
       assert keys_for_workspace(ws.id) == []
@@ -246,6 +277,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      open_engagement!(ws, "#1")
+
       assert {:ok, pid} = start(ws)
       assert Process.alive?(pid)
     end
@@ -265,6 +298,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
             }
           }
         })
+
+      open_engagement!(ws, "#1")
 
       assert {:ok, pid} = start(ws)
       assert Process.alive?(pid)
@@ -308,6 +343,10 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      # Both repos have an engagement; alpha is skipped only because it is :off.
+      open_engagement!(ws, "octo/alpha#1")
+      open_engagement!(ws, "octo/beta#1")
+
       # start_patrol/2 returns the first per-repo result (alpha's, which is
       # :skip since it sorts before beta) — beta still gets its own patrol.
       start(ws)
@@ -336,6 +375,8 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      open_engagement!(ws, "#1")
+
       assert {:ok, pid} = start(ws)
       assert ReviewPatrolSupervisor.whereis_all(ws.id) == [{ws.id, pid}]
     end
@@ -355,6 +396,9 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
             "repo_paths" => %{"alpha" => rig_a, "beta" => rig_b}
           }
         })
+
+      open_engagement!(ws, "acme/alpha#1")
+      open_engagement!(ws, "acme/beta#1")
 
       assert {:ok, _} = start(ws)
       assert length(keys_for_workspace(ws.id)) == 2
@@ -379,6 +423,9 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
           }
         })
 
+      open_engagement!(ws, "acme/alpha#1")
+      open_engagement!(ws, "acme/beta#1")
+
       assert {:ok, _} = start(ws)
       assert keys_for_workspace(ws.id) == [ws.id]
 
@@ -391,6 +438,142 @@ defmodule Arbiter.Workflows.ReviewPatrolSupervisorTest do
 
       assert keys_for_workspace(ws.id) ==
                Enum.sort(["#{ws.id}:acme/alpha", "#{ws.id}:acme/beta"])
+    end
+  end
+
+  describe "start_patrol/2 — lazy-start gate (bd-7tr11p)" do
+    test "skips a single-repo workspace with no open engagement" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-lazy-none-#{System.unique_integer([:positive])}",
+          prefix: "ln#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "starts a single-repo workspace once an engagement is open" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-lazy-one-#{System.unique_integer([:positive])}",
+          prefix: "lo#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert ReviewPatrolSupervisor.whereis(ws.id) == pid
+    end
+
+    test "in a multi-repo workspace starts only the repo(s) with an open engagement" do
+      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-lazy-multi-#{System.unique_integer([:positive])}",
+          prefix: "lm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
+            "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
+          }
+        })
+
+      # Only verus_server has an engagement (qualified source_pr names its repo).
+      open_engagement!(ws, "leo-technologies-llc/verus_server#1")
+
+      assert {:ok, _} = start(ws)
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:leo-technologies-llc/verus_server"]
+    end
+  end
+
+  describe "start_for_existing_workspaces/0 — boot path (bd-7tr11p)" do
+    test "a work-free workspace produces no patrol sweep at boot" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-boot-none-#{System.unique_integer([:positive])}",
+          prefix: "bn#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert :ok = ReviewPatrolSupervisor.start_for_existing_workspaces()
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "a workspace with an open engagement starts its patrol at boot" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-boot-work-#{System.unique_integer([:positive])}",
+          prefix: "bw#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_engagement!(ws, "#1")
+
+      assert :ok = ReviewPatrolSupervisor.start_for_existing_workspaces()
+
+      on_exit(fn ->
+        for {_k, pid} <- ReviewPatrolSupervisor.whereis_all(ws.id),
+            is_pid(pid),
+            Process.alive?(pid),
+            do: DynamicSupervisor.terminate_child(ReviewPatrolSupervisor, pid)
+      end)
+
+      assert [ws.id] == keys_for_workspace(ws.id)
+    end
+  end
+
+  describe "recheck_all/1 (bd-7tr11p)" do
+    test "reaps a patrol whose last engagement has closed" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "rp-recheck-#{System.unique_integer([:positive])}",
+          prefix: "rc#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      eng = open_engagement!(ws, "#1")
+      assert {:ok, pid} = start(ws)
+      mref = Process.monitor(pid)
+
+      {:ok, _} = Ash.update(eng, %{}, action: :close)
+      ReviewPatrolSupervisor.recheck_all(ws.id)
+
+      assert_receive {:DOWN, ^mref, :process, ^pid, :normal}, 2_000
+
+      # Registry removes the :via entry via a monitor reacting to the exit, which
+      # can lag the DOWN by a beat — poll briefly (mirrors the :off-flip test).
+      assert Enum.any?(1..20, fn _ ->
+               keys_for_workspace(ws.id) == [] or (Process.sleep(10) && false)
+             end)
     end
   end
 end

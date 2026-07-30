@@ -2,10 +2,27 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
   # async: false — the PRPatrolSupervisor and its Registry are singletons.
   use Arbiter.DataCase, async: false
 
-  alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.{Issue, Workspace}
   alias Arbiter.Workflows.{PRPatrol, PRPatrolSupervisor}
 
   @registry Arbiter.Workflows.PRPatrolRegistry
+
+  # Seed an open fleet-authored PR task (the lazy-start watched item, bd-7tr11p)
+  # for a repo. `pr_ref` is not create-accepted, so set it via :update — exactly
+  # as the MergeQueue does when it opens the PR.
+  defp open_pr_task!(ws, pr_ref) do
+    {:ok, task} =
+      Ash.create(Issue, %{
+        title: "authored-#{System.unique_integer([:positive])}",
+        description: "d",
+        issue_type: :feature,
+        tracker_type: :none,
+        workspace_id: ws.id
+      })
+
+    {:ok, task} = Ash.update(task, %{pr_ref: pr_ref}, action: :update)
+    task
+  end
 
   # PRPatrol's first tick is scheduled interval_ms out; with a long interval the
   # GenServer never touches GitHub or the DB during the test, so we only assert
@@ -70,6 +87,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           }
         })
 
+      open_pr_task!(ws, "#1")
+
       assert {:ok, pid} = start(ws)
       assert is_pid(pid) and Process.alive?(pid)
 
@@ -93,6 +112,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
             }
           }
         })
+
+      open_pr_task!(ws, "#1")
 
       assert {:ok, pid} = start(ws)
 
@@ -124,6 +145,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           }
         })
 
+      open_pr_task!(ws, "leo-technologies-llc/verus_server#1")
+      open_pr_task!(ws, "leo-technologies-llc/verus_web#1")
+
       assert {:ok, _pid} = start(ws)
 
       assert keys_for_workspace(ws.id) ==
@@ -152,6 +176,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
             "repo_paths" => %{"a" => rig_a, "b" => rig_b}
           }
         })
+
+      open_pr_task!(ws, "#1")
 
       assert {:ok, pid} = start(ws)
 
@@ -214,6 +240,8 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           }
         })
 
+      open_pr_task!(ws, "#1")
+
       assert {:ok, pid} = start(ws)
       assert PRPatrolSupervisor.whereis_all(ws.id) == [{ws.id, pid}]
     end
@@ -235,6 +263,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
           }
         })
 
+      open_pr_task!(ws, "leo-technologies-llc/verus_server#1")
+      open_pr_task!(ws, "leo-technologies-llc/verus_web#1")
+
       assert {:ok, _} = start(ws)
       pairs = PRPatrolSupervisor.whereis_all(ws.id)
       assert length(pairs) == 2
@@ -245,6 +276,143 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
                  "#{ws.id}:leo-technologies-llc/verus_server",
                  "#{ws.id}:leo-technologies-llc/verus_web"
                ])
+    end
+  end
+
+  describe "start_patrol/2 — lazy-start gate (bd-7tr11p)" do
+    test "skips a single-repo workspace with no open fleet-authored PR" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "lazy-none-#{System.unique_integer([:positive])}",
+          prefix: "ln#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert :skip = start(ws)
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "starts a single-repo workspace once a fleet-authored PR is open" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "lazy-one-#{System.unique_integer([:positive])}",
+          prefix: "lo#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_pr_task!(ws, "#1")
+
+      assert {:ok, pid} = start(ws)
+      assert PRPatrolSupervisor.whereis(ws.id) == pid
+    end
+
+    test "in a multi-repo workspace starts only the repo(s) with an open fleet PR" do
+      rig_a = git_repo_with_origin("git@github.com:leo-technologies-llc/verus_server.git")
+      rig_b = git_repo_with_origin("https://github.com/leo-technologies-llc/verus_web.git")
+
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "lazy-multi-#{System.unique_integer([:positive])}",
+          prefix: "lm#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{"strategy" => "github", "config" => %{"owner" => "leo-technologies-llc"}},
+            "repo_paths" => %{"verus_server" => rig_a, "verus_web" => rig_b}
+          }
+        })
+
+      # Only verus_server has an open fleet PR (qualified ref names its repo).
+      open_pr_task!(ws, "leo-technologies-llc/verus_server#1")
+
+      assert {:ok, _} = start(ws)
+
+      assert keys_for_workspace(ws.id) == ["#{ws.id}:leo-technologies-llc/verus_server"]
+    end
+  end
+
+  describe "start_for_existing_workspaces/0 — boot path (bd-7tr11p)" do
+    test "a work-free workspace produces no patrol sweep at boot" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "boot-none-#{System.unique_integer([:positive])}",
+          prefix: "bn#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      assert :ok = PRPatrolSupervisor.start_for_existing_workspaces()
+      assert keys_for_workspace(ws.id) == []
+    end
+
+    test "a workspace with an open fleet PR starts its patrol at boot" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "boot-work-#{System.unique_integer([:positive])}",
+          prefix: "bw#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      open_pr_task!(ws, "#1")
+
+      assert :ok = PRPatrolSupervisor.start_for_existing_workspaces()
+
+      on_exit(fn ->
+        for {_k, pid} <- PRPatrolSupervisor.whereis_all(ws.id),
+            is_pid(pid),
+            Process.alive?(pid),
+            do: DynamicSupervisor.terminate_child(PRPatrolSupervisor, pid)
+      end)
+
+      assert [ws.id] == keys_for_workspace(ws.id)
+    end
+  end
+
+  describe "recheck_all/1 (bd-7tr11p)" do
+    test "reaps a patrol whose last watched item has closed" do
+      {:ok, ws} =
+        Ash.create(Workspace, %{
+          name: "recheck-#{System.unique_integer([:positive])}",
+          prefix: "rc#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{"owner" => "octo", "repo" => "widget"}
+            }
+          }
+        })
+
+      task = open_pr_task!(ws, "#1")
+      assert {:ok, pid} = start(ws)
+      mref = Process.monitor(pid)
+
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+      PRPatrolSupervisor.recheck_all(ws.id)
+
+      assert_receive {:DOWN, ^mref, :process, ^pid, :normal}, 2_000
+
+      # Registry removes the :via entry via a monitor reacting to the exit, which
+      # can lag the DOWN by a beat — poll briefly.
+      assert Enum.any?(1..20, fn _ ->
+               keys_for_workspace(ws.id) == [] or (Process.sleep(10) && false)
+             end)
     end
   end
 
@@ -262,6 +430,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
             "repo_paths" => %{"alpha" => rig_a, "beta" => rig_b}
           }
         })
+
+      open_pr_task!(ws, "acme/alpha#1")
+      open_pr_task!(ws, "acme/beta#1")
 
       # Start with two repos — registered under composite keys
       assert {:ok, _} = start(ws)
@@ -289,6 +460,9 @@ defmodule Arbiter.Workflows.PRPatrolSupervisorTest do
             "repo_paths" => %{"alpha" => rig_a}
           }
         })
+
+      open_pr_task!(ws, "acme/alpha#1")
+      open_pr_task!(ws, "acme/beta#1")
 
       # Start with one repo — registered under bare key
       assert {:ok, _} = start(ws)

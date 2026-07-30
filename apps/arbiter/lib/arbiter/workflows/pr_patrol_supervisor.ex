@@ -60,7 +60,7 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
 
   alias Arbiter.{Mergers, Tasks.RepoConfig, Tasks.Workspace}
   alias Arbiter.Mergers.Github.RepoResolver
-  alias Arbiter.Workflows.PRPatrol
+  alias Arbiter.Workflows.{PatrolRepoScope, PRPatrol}
 
   @registry Arbiter.Workflows.PRPatrolRegistry
 
@@ -122,24 +122,80 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
             registry_key =
               if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
 
-            child_opts =
-              opts
-              |> Keyword.put(:repo, repo)
-              |> Keyword.put(:workspace_id, workspace.id)
-              |> Keyword.put_new(:interval_ms, patrol_interval_ms())
-              |> Keyword.put(:name, via(registry_key))
+            # Lazy-start gate (bd-7tr11p): only patrol a repo that actually has a
+            # fleet-authored PR to watch. A repo with none costs nothing — no
+            # process, no polling — until one is opened (the PatrolLifecycle
+            # subscriber re-invokes this on the lifecycle event, and a running
+            # patrol self-terminates once its last PR closes). Cheap DB read,
+            # never a forge call, so an idle-fleet boot starts zero patrols.
+            if PRPatrol.has_open_authored_pr?(workspace.id, repo) do
+              start_repo(workspace, repo, registry_key, opts)
+            else
+              Logger.info(
+                "PRPatrolSupervisor: skip patrol #{repo} workspace #{workspace.id} " <>
+                  "(#{workspace.name}) — no open fleet-authored PR to watch"
+              )
 
-            result = DynamicSupervisor.start_child(__MODULE__, {PRPatrol, child_opts})
-
-            Logger.info(
-              "PRPatrolSupervisor: patrol #{repo} workspace #{workspace.id} (#{workspace.name}): #{inspect(result)}"
-            )
-
-            result
+              :skip
+            end
           end)
 
         List.first(results, :skip)
     end
+  end
+
+  @doc """
+  Ensure a patrol is running for the repo a just-opened fleet PR belongs to,
+  WITHOUT re-reading the database (bd-7tr11p). Called by the `PatrolLifecycle`
+  subscriber on the lifecycle event: the event itself is proof that watched work
+  exists, so this starts the repo's patrol optimistically rather than gating on
+  a DB read that could race the not-yet-committed create/update. `ref` is the
+  issue's `pr_ref`; the repo is resolved from it against the workspace config.
+  Idempotent (a running patrol collapses to `{:error, {:already_started, pid}}`);
+  returns `:skip` when the ref names no repo this workspace patrols.
+  """
+  @spec ensure_started(Workspace.t(), String.t()) ::
+          DynamicSupervisor.on_start_child() | :skip
+  def ensure_started(%Workspace{} = workspace, ref) when is_binary(ref) do
+    adapter = resolve_adapter(workspace)
+    repos = patrol_repos(workspace)
+
+    with false <- is_nil(adapter) or not function_exported?(adapter, :list_open, 0),
+         repo when is_binary(repo) <- resolve_demand_repo(ref, repos) do
+      registry_key = if length(repos) == 1, do: workspace.id, else: "#{workspace.id}:#{repo}"
+      start_repo(workspace, repo, registry_key, [])
+    else
+      _ -> :skip
+    end
+  end
+
+  # Resolve the repo a demand-start ref belongs to, against the workspace's
+  # patrolled repos. A qualified ref must name one of them; a bare ref can only
+  # come from a single-repo workspace, so it maps to the sole repo.
+  defp resolve_demand_repo(ref, repos) do
+    case PatrolRepoScope.repo_of_ref(ref) do
+      {:ok, slug} -> if slug in repos, do: slug, else: nil
+      :bare -> if match?([_], repos), do: hd(repos), else: nil
+    end
+  end
+
+  # Start one repo's patrol under its registry key. Shared by the gated boot
+  # loop and the demand-start path. Idempotent via the DynamicSupervisor.
+  defp start_repo(workspace, repo, registry_key, opts) do
+    child_opts =
+      opts
+      |> Keyword.put(:repo, repo)
+      |> Keyword.put(:workspace_id, workspace.id)
+      |> Keyword.put_new(:interval_ms, patrol_interval_ms())
+      |> Keyword.put(:name, via(registry_key))
+
+    result = DynamicSupervisor.start_child(__MODULE__, {PRPatrol, child_opts})
+
+    Logger.info(
+      "PRPatrolSupervisor: patrol #{repo} workspace #{workspace.id} (#{workspace.name}): #{inspect(result)}"
+    )
+
+    result
   end
 
   @doc """
@@ -171,6 +227,22 @@ defmodule Arbiter.Workflows.PRPatrolSupervisor do
     |> Enum.filter(fn {key, _pid} ->
       key == workspace_id or String.starts_with?(key, workspace_id <> ":")
     end)
+  end
+
+  @doc """
+  Nudge every running patrol for a workspace to re-check whether its repo still
+  has watched work (bd-7tr11p). Sends each an async `:recheck`; a patrol whose
+  last fleet PR has closed terminates itself (`:transient`, so it stays down).
+  Called by the `PatrolLifecycle` subscriber when a watched item closes, so an
+  idle repo's patrol is reaped promptly rather than on its next scheduled tick.
+  """
+  @spec recheck_all(String.t()) :: :ok
+  def recheck_all(workspace_id) when is_binary(workspace_id) do
+    for {_key, pid} <- whereis_all(workspace_id), is_pid(pid) do
+      send(pid, :recheck)
+    end
+
+    :ok
   end
 
   @doc false
