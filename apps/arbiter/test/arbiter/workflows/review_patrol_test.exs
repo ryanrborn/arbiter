@@ -285,7 +285,18 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
 
   describe "periodic ticking" do
     test "the :tick message reschedules itself", %{ws: ws} do
-      # No engagements → every tick no-ops, but the counter still advances.
+      # An open engagement keeps the lazy-stop guard (bd-7tr11p) satisfied so
+      # the scheduled ticks proceed instead of self-terminating. The PR stays
+      # open across ticks, so nothing terminates the engagement either.
+      engagement(ws, 250)
+
+      pr_stub(250, %{
+        "number" => 250,
+        "state" => "open",
+        "head" => %{"sha" => "abc"},
+        "html_url" => "x"
+      })
+
       {_pid, name} = start_patrol(ws, interval_ms: 50)
       Process.sleep(250)
 
@@ -1734,6 +1745,134 @@ defmodule Arbiter.Workflows.ReviewPatrolTest do
       # circuit breaker never engages.
       assert :counters.get(counter, 1) == 10
       assert ReviewPatrol.state(name).rate_limit_paused_until == nil
+    end
+  end
+
+  # ---- lazy-start lifecycle (bd-7tr11p) ----
+
+  # Start a ReviewPatrol directly (not under start_supervised), so a
+  # self-initiated :normal stop is observable via a monitor without the ExUnit
+  # supervisor's restart interfering.
+  defp start_unsupervised(ws, repo) do
+    name = String.to_atom("ReviewPatrol_lazy_#{System.unique_integer([:positive])}")
+
+    {:ok, pid} =
+      ReviewPatrol.start_link(
+        repo: repo,
+        workspace_id: ws.id,
+        interval_ms: 60_000,
+        name: name
+      )
+
+    Req.Test.allow(@stub_name, self(), pid)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 5_000) end)
+    {pid, name}
+  end
+
+  describe "has_open_engagement?/2 — lazy-start DB gate (bd-7tr11p)" do
+    test "true for a repo with an open engagement (bare source_pr)", %{ws: ws} do
+      engagement(ws, 300)
+      assert ReviewPatrol.has_open_engagement?(ws.id, "owner/repo")
+    end
+
+    test "false with no engagement", %{ws: ws} do
+      refute ReviewPatrol.has_open_engagement?(ws.id, "owner/repo")
+    end
+
+    test "false once the only engagement is closed", %{ws: ws} do
+      eng = engagement(ws, 300)
+      {:ok, _} = Ash.update(eng, %{}, action: :close)
+      refute ReviewPatrol.has_open_engagement?(ws.id, "owner/repo")
+    end
+
+    test "a qualified source_pr scopes the engagement to its own repo", %{ws: ws} do
+      engagement(ws, "octo/alpha#1")
+      assert ReviewPatrol.has_open_engagement?(ws.id, "octo/alpha")
+      refute ReviewPatrol.has_open_engagement?(ws.id, "octo/beta")
+    end
+  end
+
+  describe "scheduled tick self-termination (bd-7tr11p)" do
+    test "a scheduled tick makes zero forge calls and stops with no engagement watched",
+         %{ws: ws} do
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:github_called, conn.request_path})
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(%{})
+      end)
+
+      {pid, _name} = start_unsupervised(ws, "owner/repo")
+      ref = Process.monitor(pid)
+
+      send(pid, :tick)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_receive {:github_called, _}, 100
+    end
+
+    test "a scheduled tick proceeds (and the patrol survives) with an open engagement",
+         %{ws: ws} do
+      engagement(ws, 300)
+
+      pr_stub(300, %{
+        "number" => 300,
+        "state" => "open",
+        "head" => %{"sha" => "abc"},
+        "html_url" => "x"
+      })
+
+      {pid, name} = start_unsupervised(ws, "owner/repo")
+
+      send(pid, :tick)
+      _ = ReviewPatrol.state(name)
+
+      assert Process.alive?(pid)
+      assert ReviewPatrol.state(name).ticks >= 1
+    end
+  end
+
+  describe ":recheck (prompt stop on last-item close, bd-7tr11p)" do
+    test ":recheck stops the patrol when its last engagement has closed", %{ws: ws} do
+      eng = engagement(ws, 300)
+      {pid, _name} = start_unsupervised(ws, "owner/repo")
+      ref = Process.monitor(pid)
+
+      {:ok, _} = Ash.update(eng, %{}, action: :close)
+      send(pid, :recheck)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test ":recheck keeps the patrol alive while an engagement remains", %{ws: ws} do
+      engagement(ws, 300)
+      {pid, name} = start_unsupervised(ws, "owner/repo")
+
+      send(pid, :recheck)
+      _ = ReviewPatrol.state(name)
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "repo-scoped engagement set (bd-7tr11p)" do
+    test "an engagement whose PR is in a different repo does not keep this patrol alive",
+         %{ws: ws} do
+      # This patrol watches owner/other; the only engagement's PR is in octo/alpha
+      # (qualified source_pr). It must not count as watched work for owner/other.
+      engagement(ws, "octo/alpha#1")
+
+      {pid, _name} = start_unsupervised(ws, "owner/other")
+      ref = Process.monitor(pid)
+
+      send(pid, :tick)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+  end
+
+  describe "child_spec restart policy (bd-7tr11p)" do
+    test "is :transient so a :normal self-stop is not restarted" do
+      assert ReviewPatrol.child_spec([]).restart == :transient
     end
   end
 end
