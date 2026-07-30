@@ -75,6 +75,13 @@ defmodule Arbiter.Application do
       PRPatrolSupervisor,
       {Registry, keys: :unique, name: Arbiter.Workflows.ReviewPatrolRegistry},
       ReviewPatrolSupervisor,
+      # Event-driven half of lazy patrolling (bd-7tr11p): subscribes to task
+      # lifecycle and starts a patrol when a repo gains its first fleet PR /
+      # engagement, and reaps one when its last watched item closes — so a
+      # newly-opened engagement resurrects a patrol with no server restart.
+      # Inert in test (auto_start? false → does not subscribe). Placed after both
+      # patrol supervisors + registries so they exist when it reacts.
+      Arbiter.Workflows.PatrolLifecycle,
       {Registry, keys: :unique, name: Arbiter.Workflows.MergedPRFinalizerRegistry},
       MergedPRFinalizerSupervisor,
       # Per-workspace quota-aware dispatch queues (bd-7cd38f). Holds dispatches

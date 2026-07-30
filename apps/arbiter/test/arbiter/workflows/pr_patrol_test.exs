@@ -702,6 +702,10 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   describe "periodic ticking" do
     test "the :tick message reschedules itself", %{ws: ws} do
+      # An open fleet-authored PR task keeps the lazy-stop guard (bd-7tr11p)
+      # satisfied so the scheduled ticks proceed instead of self-terminating.
+      create_pr_task!(ws, "#7")
+
       stub(fn conn ->
         conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
       end)
@@ -1210,5 +1214,137 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     Issue
     |> Ash.Query.filter(not is_nil(source_pr))
     |> Ash.read!()
+  end
+
+  # ---- lazy-start lifecycle (bd-7tr11p) ----
+
+  # Create an open fleet-authored PR task: a task whose `pr_ref` was stamped by
+  # the MergeQueue when it opened the PR. `pr_ref` is not create-accepted, so
+  # set it via :update exactly as the MergeQueue does.
+  defp create_pr_task!(ws, pr_ref) do
+    {:ok, task} =
+      Ash.create(Issue, %{
+        title: "authored-#{System.unique_integer([:positive])}",
+        description: "d",
+        issue_type: :feature,
+        tracker_type: :none,
+        workspace_id: ws.id
+      })
+
+    {:ok, task} = Ash.update(task, %{pr_ref: pr_ref}, action: :update)
+    task
+  end
+
+  # Start a PRPatrol directly (not under start_supervised), so a self-initiated
+  # :normal stop is observable via a monitor without the ExUnit supervisor's
+  # restart getting in the way.
+  defp start_unsupervised(ws, repo) do
+    name = String.to_atom("PRPatrol_lazy_#{System.unique_integer([:positive])}")
+
+    {:ok, pid} =
+      PRPatrol.start_link(
+        repo: repo,
+        workspace_id: ws.id,
+        interval_ms: 60_000,
+        name: name
+      )
+
+    Req.Test.allow(@stub_name, self(), pid)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid, :normal, 5_000) end)
+    {pid, name}
+  end
+
+  describe "has_open_authored_pr?/2 — lazy-start DB gate (bd-7tr11p)" do
+    test "true for a repo with an open fleet-authored PR task (bare ref)", %{ws: ws} do
+      create_pr_task!(ws, "#7")
+      assert PRPatrol.has_open_authored_pr?(ws.id, "owner/repo")
+    end
+
+    test "false with no pr_ref task at all", %{ws: ws} do
+      refute PRPatrol.has_open_authored_pr?(ws.id, "owner/repo")
+    end
+
+    test "false once the only pr_ref task is closed", %{ws: ws} do
+      task = create_pr_task!(ws, "#7")
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+      refute PRPatrol.has_open_authored_pr?(ws.id, "owner/repo")
+    end
+
+    test "a qualified pr_ref scopes to its own repo (multi-repo shape)", %{ws: ws} do
+      create_pr_task!(ws, "octo/alpha#1")
+      assert PRPatrol.has_open_authored_pr?(ws.id, "octo/alpha")
+      refute PRPatrol.has_open_authored_pr?(ws.id, "octo/beta")
+    end
+  end
+
+  describe "scheduled tick self-termination (bd-7tr11p)" do
+    test "a scheduled tick makes zero forge calls and stops when nothing is watched",
+         %{ws: ws} do
+      test_pid = self()
+
+      # If the patrol touches GitHub, this stub reports it — proving the guard
+      # fired BEFORE any forge call (near-zero background consumption).
+      stub(fn conn ->
+        send(test_pid, {:github_called, conn.request_path})
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      {pid, _name} = start_unsupervised(ws, "owner/repo")
+      ref = Process.monitor(pid)
+
+      send(pid, :tick)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+      refute_receive {:github_called, _}, 100
+    end
+
+    test "a scheduled tick proceeds (and the patrol survives) when a fleet PR is open",
+         %{ws: ws} do
+      create_pr_task!(ws, "#7")
+      test_pid = self()
+
+      stub(fn conn ->
+        send(test_pid, {:github_called, conn.request_path})
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+      end)
+
+      {pid, name} = start_unsupervised(ws, "owner/repo")
+
+      send(pid, :tick)
+
+      # It hit list_open (watched work present) and is still alive afterward.
+      assert_receive {:github_called, "/repos/owner/repo/pulls"}, 2_000
+      assert Process.alive?(pid)
+      assert PRPatrol.state(name).ticks >= 1
+    end
+  end
+
+  describe ":recheck (prompt stop on last-item close, bd-7tr11p)" do
+    test ":recheck stops the patrol when its last watched item has closed", %{ws: ws} do
+      task = create_pr_task!(ws, "#7")
+      {pid, _name} = start_unsupervised(ws, "owner/repo")
+      ref = Process.monitor(pid)
+
+      {:ok, _} = Ash.update(task, %{}, action: :close)
+      send(pid, :recheck)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test ":recheck keeps the patrol alive while a watched item remains", %{ws: ws} do
+      create_pr_task!(ws, "#7")
+      {pid, _name} = start_unsupervised(ws, "owner/repo")
+
+      send(pid, :recheck)
+      # Give the message time to be processed, then confirm still alive.
+      _ = PRPatrol.state(pid)
+      assert Process.alive?(pid)
+    end
+  end
+
+  describe "child_spec restart policy (bd-7tr11p)" do
+    test "is :transient so a :normal self-stop is not restarted" do
+      assert PRPatrol.child_spec([]).restart == :transient
+    end
   end
 end
