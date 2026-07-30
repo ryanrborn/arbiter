@@ -86,19 +86,25 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
   defp stub_release(tag, tarball, sha_text, opts \\ []) do
     workspaces = Keyword.get(opts, :workspaces, @green)
     latest? = Keyword.get(opts, :latest, true)
+    version_resp = Keyword.get(opts, :version_resp)
 
     api_path =
       if latest?,
         do: "/repos/#{@repo}/releases/latest",
         else: "/repos/#{@repo}/releases/tags/#{tag}"
 
-    stub_routes([
-      {{"get", api_path}, {release_json(tag), 200}},
-      {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
-      {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha_text) end},
-      {{"get", "/api/workspaces"}, {workspaces, 200}},
-      {{"get", "/api/workers"}, {@no_workers, 200}}
-    ])
+    version_route =
+      if version_resp, do: [{{"get", "/api/version"}, {version_resp, 200}}], else: []
+
+    stub_routes(
+      [
+        {{"get", api_path}, {release_json(tag), 200}},
+        {{"get", tarball_path(tag)}, fn conn -> raw_response(conn, 200, tarball) end},
+        {{"get", sha_path(tag)}, fn conn -> raw_response(conn, 200, sha_text) end},
+        {{"get", "/api/workspaces"}, {workspaces, 200}},
+        {{"get", "/api/workers"}, {@no_workers, 200}}
+      ] ++ version_route
+    )
   end
 
   # Cmd runner covering the migrate eval + the reused restart lifecycle.
@@ -274,6 +280,40 @@ defmodule ArbiterCli.Cmd.ReleaseDeployTest do
       # The (failed) new release is still what current points at.
       assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
       assert Path.basename(link_target) == @vsn
+    end
+
+    test "restart reports success but /api/version still shows the prior release (failed swap): rolls back, exits 1",
+         %{home: home} do
+      prior_tag = "v0.0.2"
+      prior = seed_release(home, prior_tag)
+      point_current(home, prior)
+
+      tarball = release_tarball(@vsn)
+      sha = "#{sha256_hex(tarball)}  arbiter-#{@vsn}-linux.tar.gz\n"
+
+      # Doctor goes green (Phoenix reachable, workspaces exist) — Restart.perform
+      # reports {:ok, ...} — but /api/version never moved off the prior release,
+      # i.e. the symlink swap/restart silently didn't take.
+      stale_version_resp = %{
+        "version" => "0.0.2",
+        "sha" => "unknown",
+        "built_at" => "2023-01-01T00:00:00Z",
+        "booted_at" => "2023-01-01T00:01:00Z"
+      }
+
+      stub_release(@vsn, tarball, sha, version_resp: stale_version_resp)
+      stub_cmds()
+
+      {out, _err, code} = capture(fn -> ReleaseDeploy.run([]) end)
+
+      assert code == 1
+      assert out =~ "still reports 0.0.2"
+      assert out =~ "Rolled back to #{prior_tag}"
+
+      # current symlink restored to the prior release — the deploy must not be
+      # reported as successful when the server never actually moved.
+      assert {:ok, link_target} = File.read_link(Path.join(home, "current"))
+      assert Path.basename(link_target) == prior_tag
     end
   end
 

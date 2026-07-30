@@ -148,13 +148,50 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
 
       case Restart.perform(restart_root(current_link), timeout_ms) do
         {:ok, actions, was_running} ->
-          pruned = prune_old_releases(releases_dir, target_dir, prior_target)
-          emit_deployed(mode, tag, prior_basename(prior_target), actions, was_running, pruned)
+          case verify_deployed_version(tag) do
+            :ok ->
+              pruned = prune_old_releases(releases_dir, target_dir, prior_target)
+              emit_deployed(mode, tag, prior_basename(prior_target), actions, was_running, pruned)
+
+            {:mismatch, server_vsn} ->
+              rolled_back = auto_rollback(current_link, prior_target, timeout_ms)
+              emit_swap_failed(mode, tag, server_vsn, rolled_back)
+
+            :inconclusive ->
+              # Doctor already confirmed Phoenix is reachable (a fatal check),
+              # so a failure here is a transient /api/version hiccup, not
+              # evidence the swap failed — don't roll back a healthy deploy on
+              # a flaky read of a non-fatal endpoint.
+              pruned = prune_old_releases(releases_dir, target_dir, prior_target)
+              emit_deployed(mode, tag, prior_basename(prior_target), actions, was_running, pruned)
+          end
 
         {:timeout, _actions, _was_running} ->
           rolled_back = auto_rollback(current_link, prior_target, timeout_ms)
           emit_rollback(mode, tag, rolled_back, timeout_ms)
       end
+    end
+  end
+
+  # ---- post-swap version verification --------------------------------------
+
+  # Distinguishes the two mismatch cases from bd-a3t4ao: a stale local CLI is
+  # normal and must never gate rollback (that's `Doctor`'s non-fatal `version`
+  # check); but here, right after a swap we just performed ourselves, we know
+  # exactly which version *should* be running — so a server that reports
+  # anything else is a failed swap, and that must roll back.
+  defp verify_deployed_version(tag) do
+    expected_vsn = String.trim_leading(tag, "v")
+
+    case Client.get("/api/version") do
+      {:ok, %{"version" => server_vsn}} when server_vsn == expected_vsn ->
+        :ok
+
+      {:ok, %{"version" => server_vsn}} ->
+        {:mismatch, server_vsn}
+
+      {:error, _} ->
+        :inconclusive
     end
   end
 
@@ -664,6 +701,44 @@ defmodule ArbiterCli.Cmd.ReleaseDeploy do
       IO.puts("Rolled back to #{rolled_back} and restarted.")
     else
       IO.puts("No prior release to roll back to — the stack is down.")
+    end
+
+    IO.puts("")
+    Doctor.report()
+    IO.puts("")
+    IO.puts("hint: tail #{Start.phoenix_log_path()} for startup output.")
+    Output.halt(1)
+  end
+
+  defp emit_swap_failed(:json, tag, server_vsn, rolled_back) do
+    IO.puts(
+      Jason.encode!(%{
+        version: tag,
+        deployed: false,
+        rolled_back: rolled_back != nil,
+        rolled_back_to: rolled_back,
+        server_version_after_restart: server_vsn,
+        base_url: Client.base_url(),
+        checks: Enum.map(Doctor.checks(), &Map.from_struct/1),
+        ok: false
+      })
+    )
+
+    Output.halt(1)
+  end
+
+  defp emit_swap_failed(:text, tag, server_vsn, rolled_back) do
+    IO.puts("")
+
+    IO.puts(
+      "Deploy of #{tag} restarted the service, but /api/version still reports " <>
+        "#{server_vsn} — the swap did not take."
+    )
+
+    if rolled_back do
+      IO.puts("Rolled back to #{rolled_back} and restarted.")
+    else
+      IO.puts("No prior release to roll back to — the stack is on an unexpected version.")
     end
 
     IO.puts("")
