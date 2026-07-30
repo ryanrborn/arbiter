@@ -198,6 +198,29 @@ defmodule Arbiter.WorkerTest do
       assert Worker.state(pid).status == :completed
     end
 
+    # bd-6v2my2: a `:task`-type directive (PRPatrol's reply/resolve follow-ups
+    # among them) has no branch/PR of its own, even when a worktree WAS
+    # provisioned for it (e.g. PRPatrol's `provision_worktree: true` override
+    # so the worker has a real checkout to run `gh`/`git` from). Broadcasting
+    # `{:worker_done}` here would hand it to the workspace MergeQueue, whose
+    # `do_enqueue/2` has no issue_type awareness at all — it unconditionally
+    # pushes the per-task branch and opens a PR for it. Without this guard, a
+    # follow-up that replies/resolves and pushes zero commits would still get
+    # a spurious/empty PR opened for it the instant `arb done` fires.
+    test "a `:task`-type worker's arb-done does NOT broadcast worker_done" do
+      ws_id = "ws-task-type-#{System.unique_integer([:positive])}"
+      :ok = Phoenix.PubSub.subscribe(Arbiter.PubSub, "worker:done:" <> ws_id)
+
+      {pid, task_id} = start_worker(workspace_id: ws_id, meta: %{issue_type: :task})
+
+      :ok = Worker.advance(pid, :run_claude)
+
+      send(pid, {:__claude_session_done__, "arb done"})
+
+      refute_receive {:worker_done, ^task_id}, 500
+      assert Worker.state(pid).status == :completed
+    end
+
     test "advance/2 after complete/2 is rejected" do
       {pid, _} = start_worker()
       :ok = Worker.advance(pid, :submit)

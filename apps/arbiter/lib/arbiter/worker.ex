@@ -504,10 +504,21 @@ defmodule Arbiter.Worker do
   # to do, and the task they're reviewing may not even belong to the fleet.
   # The Admiral notification still fires so the dashboard / inbox feed picks
   # up the completion.
+  #
+  # bd-6v2my2: a `:task` directive (`task_type?/1`) skips it for the same
+  # reason. `MergeQueue.do_enqueue/2` has no issue_type awareness at all — it
+  # unconditionally computes the per-task branch, pushes it, and opens a PR for
+  # it. That's harmless for the common no-worktree `:task` (the push fails,
+  # since there's no worktree to push), but a `:task` dispatched with
+  # `provision_worktree: true` (e.g. a PRPatrol follow-up, which needs a real
+  # checkout to `gh`/`git` from without being a code deliverable of its own)
+  # DOES have a real branch to push — left unguarded, the MergeQueue would
+  # push it and open a spurious/empty PR the instant `arb done` fires, even
+  # with zero commits and even though the worker was told not to touch it.
   defp broadcast_done(%State{workspace_id: nil}), do: :ok
 
   defp broadcast_done(%State{workspace_id: ws_id, task_id: task_id, meta: meta} = state) do
-    unless review_only?(meta) do
+    unless review_only?(meta) or task_type?(meta) do
       Phoenix.PubSub.broadcast(
         Arbiter.PubSub,
         "worker:done:" <> ws_id,
