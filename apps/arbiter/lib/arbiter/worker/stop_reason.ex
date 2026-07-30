@@ -139,13 +139,22 @@ defmodule Arbiter.Worker.StopReason do
     | upgrade[^\n]{0,20}plan
   /ix
 
+  # bd-6nr53z: tightened to require a *positive* signal — a status code, an
+  # explicit provider error token, or "overloaded"/"rate limit" in close
+  # proximity to "api" — rather than the bare words "rate-limit"/"overloaded"
+  # anywhere in the tail. The bare-word form false-matched a worker's own
+  # tool output (e.g. grepping source that mentions "rate-limit" identifiers
+  # in comments/code, as in run c88c77b0) with no genuine API error at all.
   @rate_limit_signature ~r/
       \b429\b
-    | rate[ _-]?limit
+    | \b529\b
+    | overloaded_error
+    | rate_limit_error
     | too[ _]many[ _]requests
-    | overloaded
-    | resource[ _]exhausted
-    | retry[^\n]{0,20}after
+    | resource_exhausted
+    | api[^\n]{0,20}overload
+    | overload[^\n]{0,20}api
+    | http[ _]?5(0|2|3)\d\b[^\n]{0,30}(overload|rate[ _-]?limit)
   /ix
 
   # Matches the local Anthropic proxy's 502/503 error body and common upstream
@@ -195,6 +204,30 @@ defmodule Arbiter.Worker.StopReason do
     signal = signal_for(exit_status)
 
     cond do
+      # bd-6nr53z: checked FIRST, ahead of every provider-error signature. The
+      # autocompact-thrash message is the CLI's own deterministic loop
+      # detector and the run's genuine terminal signal — it must win even
+      # when the same tail window also contains incidental "rate-limit" /
+      # "overloaded" -shaped words from a tool result the worker merely read
+      # (source comments, grep output, the task's own prose). Those weaker
+      # signatures are matched by substring anywhere in the haystack with no
+      # positional awareness, so ordering is the only thing that lets the
+      # true signal outrank them (see run c88c77b0-2927-41ec-b582-6210538a43b3).
+      Regex.match?(@context_thrash_signature, haystack) ->
+        %__MODULE__{
+          category: :context_thrash,
+          summary:
+            "agent's context window thrashed (autocompact refilled immediately, several " <>
+              "cycles in a row) before completing any work — the task's working set is too " <>
+              "large for this model's context window",
+          remediation:
+            "Deterministic for this task's file set — retrying identically will fail the " <>
+              "same way. Re-dispatch on a 1M-context model (e.g. claude-sonnet-5[1m]), or " <>
+              "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
+          exit_status: exit_status,
+          signal: signal
+        }
+
       Regex.match?(@auth_signature, haystack) ->
         %__MODULE__{
           category: :auth_expired,
@@ -233,21 +266,6 @@ defmodule Arbiter.Worker.StopReason do
           remediation:
             "Transient network blip between the harness proxy and Anthropic. " <>
               "Auto-resuming the session — if retries are exhausted, check proxy logs.",
-          exit_status: exit_status,
-          signal: signal
-        }
-
-      Regex.match?(@context_thrash_signature, haystack) ->
-        %__MODULE__{
-          category: :context_thrash,
-          summary:
-            "agent's context window thrashed (autocompact refilled immediately, several " <>
-              "cycles in a row) before completing any work — the task's working set is too " <>
-              "large for this model's context window",
-          remediation:
-            "Deterministic for this task's file set — retrying identically will fail the " <>
-              "same way. Re-dispatch on a 1M-context model (e.g. claude-sonnet-5[1m]), or " <>
-              "narrow reads with grep + bounded offset/limit ranges instead of whole-file reads.",
           exit_status: exit_status,
           signal: signal
         }
