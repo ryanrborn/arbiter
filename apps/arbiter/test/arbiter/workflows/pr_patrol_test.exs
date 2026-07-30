@@ -81,6 +81,25 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   defp stub(fun), do: Req.Test.stub(@stub_name, fun)
 
+  defp wait_until(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_wait_until(fun, deadline)
+  end
+
+  defp do_wait_until(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition not met within timeout")
+
+      true ->
+        Process.sleep(15)
+        do_wait_until(fun, deadline)
+    end
+  end
+
   defp start_patrol(ws, opts \\ []) do
     name = String.to_atom("PRPatrol_#{System.unique_integer([:positive])}")
 
@@ -207,15 +226,19 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       [task] = tasks_for_repo()
       # tracker_type is :none so dispatch never tries to transition the merged
       # PR; the source PR is linked via source_pr instead (bd-ci2jl2). The
-      # follow-up is a reviewable type so dispatch provisions a fresh worktree.
+      # follow-up is `:task` (bd-6v2my2, NOT :feature/reviewable): it has no
+      # branch/PR of its own — `:task`'s default (skip branch-worktree
+      # provisioning) is exactly right, so `meta.worktree_path` stays nil.
       assert task.tracker_type == :none
       assert task.source_pr == "42"
-      assert task.issue_type == :feature
+      assert task.issue_type == :task
       assert task.title =~ "PR #42"
       assert task.workspace_id == ws.id
 
-      # Worker is registered for this task
-      assert is_pid(Worker.whereis(task.id))
+      # Worker is registered for this task.
+      pid = Worker.whereis(task.id)
+      assert is_pid(pid)
+      assert %{issue_type: :task, worktree_path: nil} = Worker.state(pid).meta
     end
 
     test "COMMENTED review with an unresolved review thread → 1 task created, worker spawned",
@@ -276,10 +299,100 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       [task] = tasks_for_repo()
       assert task.source_pr == "50"
       assert task.title =~ "PR #50"
+      # bd-6v2my2: NOT a reviewable type — no branch/PR of its own.
+      assert task.issue_type == :task
       assert task.description =~ "unresolved review thread"
       assert task.description =~ "Review thread follow-up protocol"
       assert task.description =~ "Addressed in <sha>"
       assert is_pid(Worker.whereis(task.id))
+    end
+
+    # Regression for bd-6v2my2 / lt-divfvo -> verus_server#3682: a thread-reply
+    # follow-up that replies + resolves and pushes zero commits must complete
+    # as a SUCCESS with zero new PRs opened on the forge — not the prior
+    # behaviour, where the follow-up's own worktree/branch got pushed and
+    # turned into a byte-identical duplicate PR the instant it completed.
+    test "thread-reply follow-up completing with zero commits opens zero new PRs (bd-6v2my2)",
+         %{ws: ws} do
+      pulls_posted = :counters.new(1, [])
+
+      stub(fn conn ->
+        cond do
+          conn.method == "POST" and conn.request_path == "/repos/owner/repo/pulls" ->
+            :counters.add(pulls_posted, 1, 1)
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 999})
+
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{
+                "number" => 3679,
+                "title" => "openspec change",
+                "html_url" => "https://gh/pr/3679"
+              }
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/3679/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "COMMENTED", "user" => %{"login" => "copilot"}}])
+
+          conn.request_path == "/repos/owner/repo/pulls/3679/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and conn.request_path == "/graphql" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(%{
+              "data" => %{
+                "repository" => %{
+                  "pullRequest" => %{
+                    "reviewThreads" => %{
+                      "nodes" => [
+                        %{
+                          "id" => "RT_1",
+                          "isResolved" => false,
+                          "path" => "openspec/changes/x.md",
+                          "comments" => %{
+                            "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            })
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      [task] = tasks_for_repo()
+      assert task.issue_type == :task
+
+      worker_pid = Worker.whereis(task.id)
+      assert is_pid(worker_pid)
+
+      # The worker addressed everything via replies/resolves against the
+      # ORIGINAL PR and pushed no commits of its own — write a notes summary
+      # (as the notes gate requires for a `:task` completion) and signal done.
+      {:ok, _} =
+        Ash.update(task, %{notes: "Replied to RT_1 and resolved it. No code fix was needed."},
+          action: :update
+        )
+
+      send(worker_pid, {:__claude_session_done__, "arb done"})
+
+      wait_until(fn -> match?(%{status: :completed}, Worker.state(worker_pid)) end)
+
+      assert :counters.get(pulls_posted, 1) == 0,
+             "thread-reply follow-up must never open a new PR on the forge"
     end
 
     test "COMMENTED review with all threads resolved → no task", %{ws: ws} do
@@ -634,6 +747,11 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       [task] = tasks_for_repo()
       assert task.source_pr == "70"
+      # bd-6v2my2 audit: the CI-failure trigger gets the same `:task` fix as
+      # the review-thread trigger — a fix pushed here must land on the
+      # ORIGINAL PR's branch to turn its required check green; a fix on a
+      # fresh branch/PR can never do that.
+      assert task.issue_type == :task
       assert task.description =~ "required check(s) failing: ui-integration-tests"
       assert task.description =~ "Required-check failure triage protocol"
       assert task.description =~ "FLAKE"
@@ -1167,6 +1285,63 @@ defmodule Arbiter.Workflows.PRPatrolTest do
       tasks =
         Issue
         |> Ash.Query.filter(source_pr == "91")
+        |> Ash.read!()
+
+      assert length(tasks) == 2
+    end
+
+    # bd-6v2my2: every follow-up is now `:task` (not :feature/reviewable), so
+    # `meta.worktree_path` is nil for every HEALTHY run too, not just a
+    # zombie — the worktree_path check alone can no longer tell them apart.
+    # Pin the same zombie-doesn't-block-dedup guarantee for a follow-up
+    # registered with `issue_type: :task` in its meta, stuck `:idle`.
+    test "a zombie idle `:task`-type follow-up does not block re-dispatch on the same PR",
+         %{ws: ws} do
+      {:ok, zombie} =
+        Ash.create(Issue, %{
+          title: "zombie task-type follow-up",
+          tracker_type: :none,
+          issue_type: :task,
+          source_pr: "92",
+          workspace_id: ws.id
+        })
+
+      {:ok, _pid} =
+        Worker.start(
+          task_id: zombie.id,
+          repo: "owner/repo",
+          workspace_id: ws.id,
+          meta: %{issue_type: :task}
+        )
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"number" => 92, "title" => "zombie task-type retry", "html_url" => "x"}
+            ])
+
+          conn.request_path == "/repos/owner/repo/pulls/92/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/repo/pulls/92/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      tasks =
+        Issue
+        |> Ash.Query.filter(source_pr == "92")
         |> Ash.read!()
 
       assert length(tasks) == 2

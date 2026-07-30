@@ -1864,7 +1864,7 @@ defmodule Arbiter.Worker.Dispatch do
   def prompt_for_task(%Issue{} = task, opts) do
     cond do
       Keyword.get(opts, :review, false) == true -> review_prompt(task, opts)
-      task.issue_type == :task -> task_prompt(task)
+      task.issue_type == :task -> task_prompt(task, opts)
       true -> work_prompt(task, opts)
     end
   end
@@ -1962,6 +1962,27 @@ defmodule Arbiter.Worker.Dispatch do
   # to be read discipline, not a retry. Shared between the work and review
   # prompts since both failure instances (bd-3cpcw2, lt-5jhqs8) were reads,
   # not writes.
+  # Shared between `base_work_prompt/2` and `task_prompt/2` (bd-6v2my2): any
+  # dispatch that provisions a worktree needs the same "don't write outside it"
+  # warning, regardless of whether the directive is reviewable code or a
+  # `:task`-type follow-up that also happens to get a checkout.
+  defp isolation_section(worktree_path) when is_binary(worktree_path) do
+    """
+
+    FILESYSTEM ISOLATION — Your worktree is at:
+
+        #{worktree_path}
+
+    You MUST only write files inside this directory. Do NOT use absolute
+    paths that point outside it — especially not to the main repo checkout
+    (e.g. /home/ryan/dev/arbiter/...). Writing to the main repo corrupts
+    Phoenix hot-reload and cascades to kill every other running worker.
+    Always use relative paths or paths rooted at #{worktree_path}.
+    """
+  end
+
+  defp isolation_section(_), do: ""
+
   defp read_discipline_section do
     """
     READ DISCIPLINE — avoid whole-file reads of large modules: they refill
@@ -1976,24 +1997,7 @@ defmodule Arbiter.Worker.Dispatch do
 
   defp base_work_prompt(%Issue{} = task, opts) do
     worktree_path = Keyword.get(opts, :worktree_path)
-
-    isolation_section =
-      if worktree_path do
-        """
-
-        FILESYSTEM ISOLATION — Your worktree is at:
-
-            #{worktree_path}
-
-        You MUST only write files inside this directory. Do NOT use absolute
-        paths that point outside it — especially not to the main repo checkout
-        (e.g. /home/ryan/dev/arbiter/...). Writing to the main repo corrupts
-        Phoenix hot-reload and cascades to kill every other running worker.
-        Always use relative paths or paths rooted at #{worktree_path}.
-        """
-      else
-        ""
-      end
+    isolation_section = isolation_section(worktree_path)
 
     """
     You are a worker working autonomously on task #{task.id}.
@@ -2064,7 +2068,15 @@ defmodule Arbiter.Worker.Dispatch do
   # until `notes` is non-blank, so this prompt frames the whole job around
   # producing those findings and deliberately omits the commit/push/PR-body
   # steps the standard work prompt carries.
-  defp task_prompt(%Issue{} = task) do
+  #
+  # bd-6v2my2: a PRPatrol follow-up (`source_pr` set) is also dispatched as a
+  # `:task` — it has no branch/PR of its own either — but unlike a pure
+  # research/ops task it MAY legitimately need to push a code fix. That fix
+  # belongs on the ORIGINAL PR's branch, never a fresh one, so `pr_follow_up_note/1`
+  # swaps in that guidance (and the worktree it runs from, when one was
+  # provisioned) in place of the generic "you are not expected to edit a repo"
+  # line.
+  defp task_prompt(%Issue{} = task, opts) do
     """
     You are a worker working autonomously on task #{task.id}.
 
@@ -2076,14 +2088,9 @@ defmodule Arbiter.Worker.Dispatch do
     Acceptance:
     #{task.acceptance || "(none)"}
 
-    This is a `task`-type directive: non-reviewable ops / research / spike work.
-    It produces NO code change, NO commit, and NO pull request. Your deliverable
-    is a findings / results summary written to the directive's `notes` field.
-
-    No worktree is provisioned by default — you are not expected to edit a repo.
-    If the work genuinely requires inspecting code you may read files, but do not
-    author a branch or open a PR.
-
+    This is a `task`-type directive: it has NO branch or pull request of its
+    own, and none will be opened for it.
+    #{pr_follow_up_note(task)}#{isolation_section(Keyword.get(opts, :worktree_path))}
     #{read_discipline_section()}
     Your job:
       1. Do the investigation / ops work the directive describes.
@@ -2120,6 +2127,52 @@ defmodule Arbiter.Worker.Dispatch do
 
     on a line by itself, exactly. The worker watches your stdout and will mark
     the task complete when it sees that marker.
+    """
+  end
+
+  # bd-6v2my2: a PRPatrol follow-up carries `source_pr` — the PR it was auto-filed
+  # against (unresolved review threads / CHANGES_REQUESTED / a failing required
+  # check, see `Arbiter.Workflows.PRPatrol`). Unlike plain research/ops `:task`
+  # work, it may need to push a real fix, but that fix must land on the
+  # ORIGINAL PR's branch: pushing a new branch from this directive's own
+  # (unintegrated) worktree previously became a byte-identical duplicate PR
+  # against the original's entire diff (lt-divfvo -> verus_server#3682). Like
+  # any `:task`, this directive gets no branch worktree — its current
+  # directory (when one is provisioned) is a disposable, detached checkout
+  # with no branch of its own, so `gh pr checkout` there is always safe: there
+  # is nothing Arbiter-owned to collide with or lose.
+  defp pr_follow_up_note(%Issue{id: id, source_pr: source_pr})
+       when is_binary(source_pr) and source_pr != "" do
+    """
+
+    This directive is a PRPatrol follow-up against EXISTING pull request ##{source_pr}.
+    If the reviewer's findings were already addressed — or your job here is only
+    to reply / resolve / escalate on the review threads — completing with no
+    code change at all is SUCCESS. Do not force a commit just to have one.
+
+    Your current directory is already a checkout of the repository (read-only
+    by convention, not a branch of its own) — good enough to inspect the code
+    and run `gh`/`git`. If a fix genuinely is needed: check out the ORIGINAL
+    PR's branch directly — `gh pr checkout #{source_pr}` — right there, and
+    commit + push (`git push`), which updates PR ##{source_pr} in place. Do
+    NOT `git push -u origin <new-branch>` or `gh pr create` — that opens a
+    duplicate PR against the original's entire diff.
+
+    If the fix is too large or risky to fold in now, do not silently open a new
+    PR either — that must never be a side effect of this dispatch. Push back on
+    the thread explaining why (see the protocol above), or, only when a
+    genuinely separate deliverable is warranted, file it as an explicit,
+    recorded decision: `arb create <title> --parent #{id} --type feature` —
+    a distinct task that gets its own branch/PR by design.
+    """
+  end
+
+  defp pr_follow_up_note(_task) do
+    """
+
+    No worktree is provisioned by default — you are not expected to edit a repo.
+    If the work genuinely requires inspecting code you may read files, but do
+    not author a branch or open a PR.
     """
   end
 
