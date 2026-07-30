@@ -81,6 +81,20 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   defp stub(fun), do: Req.Test.stub(@stub_name, fun)
 
+  # Rewinds the recorded `retry_at` for `pr_number` into the past so the next
+  # explicit `tick/1` re-attempts dispatch immediately, without waiting out a
+  # real exponential-backoff window (`interval_ms` is kept realistic, e.g.
+  # 60_000, so the GenServer's own scheduled tick doesn't race the test and
+  # self-terminate via the bd-7tr11p lazy-stop gate — see bd-dtpjlf).
+  defp force_retry_now(pid, pr_number) do
+    :sys.replace_state(pid, fn state ->
+      update_in(state.dispatch_failures[pr_number], fn
+        nil -> nil
+        entry -> %{entry | retry_at: DateTime.add(DateTime.utc_now(), -1, :second)}
+      end)
+    end)
+  end
+
   defp wait_until(fun, timeout \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout
     do_wait_until(fun, deadline)
@@ -1239,6 +1253,195 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
       assert length(escalations) == 1,
              "expected exactly one escalation, got #{length(escalations)}"
+    end
+  end
+
+  describe "tick/1 — escalation persistence (bd-dtpjlf)" do
+    # bd-dtpjlf: verus-ai-tools#13 failed to dispatch a follow-up 5 times in a
+    # row; the first failure logged "...closing and escalating", every
+    # subsequent one logged "(backing off, already escalated)" — but
+    # `coordinator_inbox_peek` showed zero messages. The suppression was keyed
+    # on having ATTEMPTED an escalation, not on one having persisted, so a
+    # write that silently failed (or was swallowed by the old rescue/catch)
+    # permanently blinded the coordinator to a repo that fails every follow-up
+    # forever. Simulate that exact write failure via `escalate_send_fun` and
+    # assert the next dispatch failure retries the escalation instead of
+    # being suppressed.
+    test "a failed escalation write is retried on the next dispatch failure, not suppressed",
+         %{ws: _ws} do
+      {:ok, unconfigured_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-escalate-fail-#{System.unique_integer([:positive])}",
+          prefix: "ppe#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "escalate-fail-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/escalate-fail-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"number" => 13, "title" => "verus-ai-tools#13", "html_url" => "x"}
+            ])
+
+          conn.request_path == "/repos/owner/escalate-fail-repo/pulls/13/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/escalate-fail-repo/pulls/13/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      escalate_send_fun = fn attrs ->
+        n = Agent.get_and_update(counter, fn n -> {n, n + 1} end)
+
+        if n == 0 do
+          {:error, :simulated_write_failure}
+        else
+          Arbiter.Messages.Message.send_mail(attrs)
+        end
+      end
+
+      name = String.to_atom("PRPatrol_escalate_fail_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/escalate-fail-repo",
+           workspace_id: unconfigured_ws.id,
+           interval_ms: 60_000,
+           name: name,
+           escalate_send_fun: escalate_send_fun}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      inbox = fn ->
+        Arbiter.Messages.Message.inbox("coordinator", workspace_id: unconfigured_ws.id)
+      end
+
+      # Tick 1: dispatch fails, escalation write fails too (simulated) — the
+      # bug's exact symptom is that nothing reaches the coordinator here.
+      :ok = PRPatrol.tick(name)
+      assert inbox.() == [], "escalation write failed — no message should have persisted"
+
+      force_retry_now(pid, 13)
+
+      # Tick 2: the backoff window has been rewound, so the follow-up dispatch
+      # is retried and fails again. Because the FIRST escalation never
+      # persisted, this must NOT be suppressed as "already escalated" — it
+      # must retry.
+      :ok = PRPatrol.tick(name)
+      messages = inbox.()
+
+      assert [message] = messages,
+             "expected the retried escalation to persist exactly one message, got: #{inspect(messages)}"
+
+      assert message.kind == :escalation
+      assert message.subject =~ "PR #13"
+      assert message.body =~ "escalate-fail-repo"
+      assert message.body =~ "repo_not_found"
+
+      force_retry_now(pid, 13)
+
+      # Tick 3: dispatch fails again, but this time the PRIOR escalation DID
+      # persist and the default re-escalate window (1 hour) hasn't elapsed —
+      # so suppression should hold and no second message should appear.
+      :ok = PRPatrol.tick(name)
+      assert length(inbox.()) == 1, "a persisted escalation should suppress the next attempt"
+    end
+
+    # Acceptance: repeated consecutive failures must not stay silent forever —
+    # they re-escalate on a bounded schedule. `re_escalate_after_ms` is the
+    # test-only override of that schedule (production defaults to 1 hour).
+    test "repeated consecutive failures re-escalate after the re-escalation window elapses",
+         %{ws: _ws} do
+      {:ok, unconfigured_ws} =
+        Ash.create(Workspace, %{
+          name: "pp-reescalate-#{System.unique_integer([:positive])}",
+          prefix: "ppr#{System.unique_integer([:positive])}",
+          config: %{
+            "merge" => %{
+              "strategy" => "github",
+              "config" => %{
+                "owner" => "owner",
+                "repo" => "reescalate-repo",
+                "credentials_ref" => "env:GITHUB_TOKEN"
+              }
+            }
+          }
+        })
+
+      stub(fn conn ->
+        cond do
+          conn.request_path == "/repos/owner/reescalate-repo/pulls" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"number" => 14, "title" => "repeat failure", "html_url" => "x"}])
+
+          conn.request_path == "/repos/owner/reescalate-repo/pulls/14/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
+
+          conn.request_path == "/repos/owner/reescalate-repo/pulls/14/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      name = String.to_atom("PRPatrol_reescalate_#{System.unique_integer([:positive])}")
+
+      pid =
+        start_supervised!(
+          {PRPatrol,
+           repo: "owner/reescalate-repo",
+           workspace_id: unconfigured_ws.id,
+           interval_ms: 60_000,
+           re_escalate_after_ms: 1,
+           name: name}
+        )
+
+      Req.Test.allow(@stub_name, self(), pid)
+
+      inbox = fn ->
+        Arbiter.Messages.Message
+        |> Ash.Query.filter(
+          to_ref == "coordinator" and workspace_id == ^unconfigured_ws.id and kind == :escalation
+        )
+        |> Ash.read!()
+      end
+
+      :ok = PRPatrol.tick(name)
+      assert length(inbox.()) == 1, "first failure should escalate"
+
+      force_retry_now(pid, 14)
+      # `re_escalate_after_ms: 1` (1ms) has already elapsed by the time this
+      # second tick runs.
+      :ok = PRPatrol.tick(name)
+
+      assert length(inbox.()) == 2,
+             "a still-failing PR must re-escalate once the re-escalation window elapses, " <>
+               "instead of staying silent forever"
     end
   end
 

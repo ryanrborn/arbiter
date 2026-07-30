@@ -89,6 +89,11 @@ defmodule Arbiter.Workflows.PRPatrol do
   # instead of holding a fixed ~1/min poll forever regardless of activity.
   @idle_backoff_ceiling_ms 15 * 60_000
 
+  # A PR stuck in a persistent dispatch-failure streak re-escalates at most
+  # this often, so a condition that outlives the original escalation (missed
+  # notification, new failure mode) doesn't stay silent forever (bd-dtpjlf).
+  @re_escalate_after_ms 60 * 60_000
+
   defstruct [
     :repo,
     :workspace_id,
@@ -102,15 +107,29 @@ defmodule Arbiter.Workflows.PRPatrol do
     # idle backoff in `schedule_next/1` (bd-4brb2j). Reset to 0 the moment a
     # tick dispatches (or would have dispatched, see `maybe_dispatch/3`).
     idle_ticks: 0,
-    # PR number => %{count: n, retry_at: DateTime} — tracks consecutive
-    # follow-up dispatch failures per PR so a persistent failure escalates
-    # ONCE and then exponential-backs-off, instead of re-filing + re-escalating
-    # every tick (bd-49ajyt). Cleared as soon as a dispatch succeeds.
+    # PR number => %{count: n, retry_at: DateTime, escalated_at: DateTime | nil}
+    # — tracks consecutive follow-up dispatch failures per PR so a persistent
+    # failure escalates and then exponential-backs-off, instead of re-filing +
+    # re-escalating every tick (bd-49ajyt). `escalated_at` is set ONLY when the
+    # coordinator message actually persisted (bd-dtpjlf) — a failed escalation
+    # write leaves it as it was, so the very next failure retries the
+    # escalation instead of being silently suppressed as "already escalated".
+    # Cleared as soon as a dispatch succeeds.
     dispatch_failures: %{},
+    # How often (ms) a still-failing PR may re-escalate even after a prior
+    # escalation persisted (bd-dtpjlf) — test-only override; production
+    # defaults to @re_escalate_after_ms.
+    re_escalate_after_ms: @re_escalate_after_ms,
     # Test-only escape hatch merged into the Dispatch.dispatch/2 opts (e.g.
     # `claude_command:` to avoid spawning a real `claude` subprocess).
     # Production never sets this — it always defaults to [].
-    dispatch_opts: []
+    dispatch_opts: [],
+    # Test-only escape hatch replacing the coordinator-escalation write
+    # (defaults to `Message.send_mail/1`). Lets tests simulate the write
+    # failing — e.g. a transient DB/PubSub error — so the "only suppress on a
+    # persisted escalation" logic (bd-dtpjlf) can be exercised without
+    # corrupting a real Ash changeset. Production never sets this.
+    escalate_send_fun: nil
   ]
 
   # ---- public API ----
@@ -159,6 +178,8 @@ defmodule Arbiter.Workflows.PRPatrol do
     workspace_id = Keyword.fetch!(opts, :workspace_id)
     interval_ms = Keyword.get(opts, :interval_ms, @default_interval_ms)
     dispatch_opts = Keyword.get(opts, :dispatch_opts, [])
+    re_escalate_after_ms = Keyword.get(opts, :re_escalate_after_ms, @re_escalate_after_ms)
+    escalate_send_fun = Keyword.get(opts, :escalate_send_fun, &Message.send_mail/1)
 
     workspace =
       case Ash.get(Workspace, workspace_id) do
@@ -171,7 +192,9 @@ defmodule Arbiter.Workflows.PRPatrol do
       workspace_id: workspace_id,
       workspace: workspace,
       interval_ms: interval_ms,
-      dispatch_opts: dispatch_opts
+      dispatch_opts: dispatch_opts,
+      re_escalate_after_ms: re_escalate_after_ms,
+      escalate_send_fun: escalate_send_fun
     }
 
     {:ok, schedule_next(state)}
@@ -367,21 +390,46 @@ defmodule Arbiter.Workflows.PRPatrol do
   # a zombie `:idle` registration). Previously that also freed `deduped?/2` for
   # an immediate refile on the very next tick — a persistent failure therefore
   # re-filed + re-escalated once a minute forever (bd-49ajyt spammed ~25
-  # escalations on verus-client#3282). Now the failure is recorded per PR: we
-  # escalate only on the FIRST failure of a streak, and `backing_off?/2` parks
-  # the PR for an exponentially-growing window before the next retry.
+  # escalations on verus-client#3282). Now the failure is recorded per PR:
+  # `backing_off?/2` parks the PR for an exponentially-growing window before
+  # the next retry, and escalation is gated on whether the coordinator message
+  # actually PERSISTED (bd-dtpjlf) — not merely on whether this is the first
+  # failure of a streak. A failed escalation write leaves `escalated_at`
+  # untouched, so the very next dispatch failure retries it instead of being
+  # silently swallowed forever behind "already escalated". Once an escalation
+  # does persist, a still-failing PR re-escalates at most every
+  # `re_escalate_after_ms`, so a condition that outlives the original message
+  # (missed notification, new failure mode) doesn't stay silent indefinitely.
   defp record_dispatch_failure(task, pr_number, state, reason) do
     prior = Map.get(state.dispatch_failures, pr_number)
     count = if prior, do: prior.count + 1, else: 1
+    prior_escalated_at = prior && Map.get(prior, :escalated_at)
+
+    due_for_escalation? =
+      is_nil(prior_escalated_at) or
+        DateTime.diff(DateTime.utc_now(), prior_escalated_at, :millisecond) >=
+          state.re_escalate_after_ms
+
+    {escalated_at, escalated_this_time?} =
+      if due_for_escalation? do
+        case escalate_dispatch_failure(task, state, reason) do
+          :ok -> {DateTime.utc_now(), true}
+          :error -> {prior_escalated_at, false}
+        end
+      else
+        {prior_escalated_at, false}
+      end
 
     Logger.warning(
       "PRPatrol: dispatch failed for follow-up #{task.id} (PR #{task.source_pr}): " <>
         inspect(reason) <>
         " — closing" <>
-        if(count == 1, do: " and escalating", else: " (backing off, already escalated)")
+        cond do
+          escalated_this_time? -> " and escalating"
+          due_for_escalation? -> " (escalation failed to persist — will retry next failure)"
+          true -> " (backing off, already escalated)"
+        end
     )
-
-    if count == 1, do: escalate_dispatch_failure(task, state, reason)
 
     Ash.update(
       task,
@@ -395,7 +443,11 @@ defmodule Arbiter.Workflows.PRPatrol do
     %{
       state
       | dispatch_failures:
-          Map.put(state.dispatch_failures, pr_number, %{count: count, retry_at: retry_at})
+          Map.put(state.dispatch_failures, pr_number, %{
+            count: count,
+            retry_at: retry_at,
+            escalated_at: escalated_at
+          })
     }
   end
 
@@ -425,8 +477,14 @@ defmodule Arbiter.Workflows.PRPatrol do
     min(base * Integer.pow(2, count - 1), @max_backoff_ms)
   end
 
+  # Returns `:ok` only when the coordinator message actually persisted, `:error`
+  # otherwise (bd-dtpjlf) — the caller (`record_dispatch_failure/4`) uses this
+  # to decide whether the "already escalated" suppression may kick in. Both a
+  # `{:error, _}` return from the write AND a raised exception/exit are loud
+  # (`Logger.error`, not `Logger.debug`) — the whole prior incident was this
+  # failure mode being invisible.
   defp escalate_dispatch_failure(task, state, reason) do
-    Message.send_mail(%{
+    attrs = %{
       kind: :escalation,
       to_ref: Message.coordinator_ref(),
       from_ref: task.id,
@@ -437,11 +495,37 @@ defmodule Arbiter.Workflows.PRPatrol do
         "PRPatrol auto-filed a follow-up for #{state.repo} PR ##{task.source_pr}, but " <>
           "Dispatch.dispatch/2 failed: #{inspect(reason)}. The follow-up task has been " <>
           "closed so the next patrol tick can retry filing it."
-    })
+    }
+
+    send_fun = state.escalate_send_fun || (&Message.send_mail/1)
+
+    case send_fun.(attrs) do
+      {:ok, _message} ->
+        :ok
+
+      {:error, error} ->
+        Logger.error(
+          "PRPatrol.escalate_dispatch_failure/3: coordinator escalation for PR " <>
+            "##{task.source_pr} failed to persist: #{inspect(error)}"
+        )
+
+        :error
+    end
   rescue
-    e -> Logger.debug("PRPatrol.escalate_dispatch_failure/3 swallowed: #{Exception.message(e)}")
+    e ->
+      Logger.error(
+        "PRPatrol.escalate_dispatch_failure/3 raised for PR ##{task.source_pr}: " <>
+          Exception.message(e)
+      )
+
+      :error
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.error(
+        "PRPatrol.escalate_dispatch_failure/3 exited for PR ##{task.source_pr}: #{inspect(reason)}"
+      )
+
+      :error
   end
 
   # When the workspace sets `config["pr_patrol"]["author_logins"]`, only patrol
