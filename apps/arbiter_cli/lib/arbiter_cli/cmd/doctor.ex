@@ -170,52 +170,9 @@ defmodule ArbiterCli.Cmd.Doctor do
     cli_vsn = ArbiterCli.Version.app_version()
 
     case Client.get("/api/version") do
-      {:ok, %{"sha" => server_sha, "version" => server_vsn}} ->
-        cond do
-          major_version(cli_vsn) != major_version(server_vsn) ->
-            %Result{
-              name: "version",
-              status: :fail,
-              detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
-              hint: "Major version mismatch — upgrade both CLI and server to the same major.",
-              fatal: false
-            }
-
-          cli_sha == server_sha ->
-            %Result{
-              name: "version",
-              status: :ok,
-              detail: "#{cli_vsn} @ #{cli_sha} (CLI and server match)",
-              fatal: false
-            }
-
-          server_sha == "unknown" and cli_vsn == server_vsn ->
-            %Result{
-              name: "version",
-              status: :ok,
-              detail: "#{cli_vsn} @ #{cli_sha} (release build — versions match)",
-              fatal: false
-            }
-
-          server_sha == "unknown" ->
-            %Result{
-              name: "version",
-              status: :fail,
-              detail: "CLI #{cli_vsn} / server release #{server_vsn}",
-              hint:
-                "Redeploy the server to #{cli_vsn} or reinstall the CLI to match the deployed release.",
-              fatal: false
-            }
-
-          true ->
-            %Result{
-              name: "version",
-              status: :fail,
-              detail: "CLI #{cli_vsn} @ #{cli_sha} / server #{server_vsn} @ #{server_sha}",
-              hint: "Rebuild the escript and/or redeploy the server.",
-              fatal: false
-            }
-        end
+      {:ok, %{"version" => server_vsn} = body} ->
+        server_sha = Map.get(body, "sha", "unknown")
+        version_result(cli_vsn, cli_sha, server_vsn, server_sha)
 
       {:error, %Client.Error{kind: :connection_refused}} ->
         %Result{
@@ -231,6 +188,47 @@ defmodule ArbiterCli.Cmd.Doctor do
           status: :ok,
           detail: "CLI #{cli_vsn} @ #{cli_sha} (server error: #{err.message})",
           fatal: true
+        }
+    end
+  end
+
+  # Always report both versions explicitly, and only claim a match when the
+  # version numbers themselves are equal. SHAs are informational only — in
+  # particular, both CLI and server routinely report sha "unknown" (no git at
+  # runtime in a release build), so `cli_sha == server_sha` is NOT evidence of
+  # a real match and must never be used as one.
+  #
+  # `arb server deploy` doesn't refresh the local CLI binary, so a CLI that's
+  # a release behind the server is the normal post-deploy state — reported as
+  # a warning (`fatal: false`), never as a reason to auto-roll-back a deploy.
+  defp version_result(cli_vsn, cli_sha, server_vsn, server_sha) do
+    cond do
+      cli_vsn == server_vsn ->
+        %Result{
+          name: "version",
+          status: :ok,
+          detail: "server #{server_vsn}, CLI #{cli_vsn} (CLI and server match)",
+          fatal: false
+        }
+
+      major_version(cli_vsn) != major_version(server_vsn) ->
+        %Result{
+          name: "version",
+          status: :fail,
+          detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
+          hint: "Major version mismatch — upgrade both CLI and server to the same major.",
+          fatal: false
+        }
+
+      true ->
+        %Result{
+          name: "version",
+          status: :fail,
+          detail: "server #{server_vsn} @ #{server_sha}, CLI #{cli_vsn} @ #{cli_sha}",
+          hint:
+            "`arb server deploy` does not refresh the local CLI — reinstall the CLI from " <>
+              "the #{server_vsn} release asset to match the server.",
+          fatal: false
         }
     end
   end

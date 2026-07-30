@@ -237,6 +237,54 @@ defmodule Arbiter.Worker.StopReasonTest do
     test "an unrelated non-zero exit with no thrash signature is still :crashed" do
       refute StopReason.classify(1, ["some other failure"]).category == :context_thrash
     end
+
+    # bd-6nr53z / run c88c77b0-2927-41ec-b582-6210538a43b3: the worker's own
+    # earlier tool output (grepping arbiter/github.ex, which is riddled with
+    # "rate-limit" identifiers/comments) sat in the same tail window as the
+    # terminal autocompact-thrash message. classify/2 stamped `:rate_limited`
+    # instead of `:context_thrash` because the rate-limit signature was
+    # checked (and won) before the thrash signature ever got a look. The true
+    # terminal signal — the CLI's own loop detector — must win regardless of
+    # incidental "rate-limit"-shaped prose earlier in the captured output.
+    test "context-thrash outranks incidental rate-limit-shaped text earlier in the tail (c88c77b0 regression)" do
+      lines = [
+        "apps/arbiter/lib/arbiter/github.ex:20:      rate-limit cache in `:persistent_term` keyed by",
+        "apps/arbiter/lib/arbiter/github.ex:44:  @rate_limit_key :arbiter_github_rate_limit",
+        "apps/arbiter/lib/arbiter/github.ex:241:  Return the most recent rate-limit state observed from any GitHub response,",
+        "apps/arbiter/lib/arbiter/github.ex:445:  defp update_rate_limit(headers) do",
+        "apps/arbiter/lib/arbiter/agents/claude.ex:27:      `ANTHROPIC_API_KEY` for the spawn — addresses rate-limit relief",
+        "Autocompact is thrashing: the context refilled to the limit within 3 turns of the " <>
+          "previous compact, 3 times in a row. A file being read or a tool output is likely " <>
+          "too large for the context window. Try reading in smaller chunks, or use /clear to start fresh.",
+        "⚙ claude session error · 523.8s · $4.6105"
+      ]
+
+      reason = StopReason.classify(1, lines)
+
+      assert reason.category == :context_thrash
+      refute reason.category == :rate_limited
+    end
+  end
+
+  describe "classify/2 — rate-limit signature requires a positive signal (bd-6nr53z)" do
+    test "bare mentions of 'rate-limit' in source-code prose do NOT classify as rate_limited" do
+      lines = [
+        "apps/arbiter/lib/arbiter/github.ex:20:      rate-limit cache in `:persistent_term` keyed by",
+        "apps/arbiter/lib/arbiter/github.ex:44:  @rate_limit_key :arbiter_github_rate_limit",
+        "apps/arbiter/lib/arbiter/github/error.ex:8:    * :forbidden — 403, token lacks scope or rate-limit hit",
+        "error: unknown option '--reasoning-effort'"
+      ]
+
+      reason = StopReason.classify(1, lines)
+
+      refute reason.category == :rate_limited
+      assert reason.category == :crashed
+    end
+
+    test "a genuine 429 payload still classifies as rate_limited" do
+      assert StopReason.classify(1, ["API Error: 429 {\"type\":\"rate_limit_error\"}"]).category ==
+               :rate_limited
+    end
   end
 
   describe "label/1 and to_map/1" do
