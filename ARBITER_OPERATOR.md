@@ -87,6 +87,29 @@ Workers branch from the repo's base branch. A stale repo means stale, possibly
 regressed state for every new worker. Keep repos current; let provisioning
 fetch from origin.
 
+That auto-fetch (`Worktree.fetch_origin/2`) only refreshes the
+`origin/<base>` *ref* inside a repo's primary checkout (the shared directory
+in `repo_paths`/`rig_paths` — not a worker's isolated worktree). It never
+touches that checkout's own local branch, HEAD, index, or working tree — so
+`git log`/`git status` run directly in the primary checkout (by you, or by a
+`task`-type worker reading it for context) can still show a branch that's
+weeks behind `origin/main`, even though every dispatch has kept the ref
+fresh. This bit a real audit: a worker read a checkout ~1 month stale and
+confidently reported already-shipped work as unmerged (bd-bqqnin).
+
+Opt a repo in to closing that gap with `config["merge"]["auto_sync_primary"]
+= true` (`arb config set merge.auto_sync_primary true`, default `false`).
+When set, every merge to that repo's default branch fast-forwards the
+primary checkout's local branch to the new `origin/<base>` — but *only* as a
+zero-risk fast-forward: the checkout must already be on the default branch,
+clean (no uncommitted changes), and a strict ancestor of the new tip. Any
+other state (dirty tree, checked out elsewhere, diverged history — i.e. a
+human mid-work in that checkout) is skipped silently (logged, not errored);
+it never resets, stashes, or switches branches out from under someone. Still
+worth an explicit `git pull` if you're about to trust a primary checkout for
+something high-stakes and aren't certain `auto_sync_primary` is on for that
+repo.
+
 ## 7. Config Safety
 
 Workspace config is a single JSON map stored in the database.

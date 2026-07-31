@@ -215,7 +215,9 @@ defmodule Arbiter.Workflows.MergeQueue do
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Mergers
+  alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Worker.PRTemplate
+  alias Arbiter.Worker.PrimarySync
   alias Arbiter.Worker.TargetBranch
   alias Arbiter.Worker.Worktree
   alias Arbiter.Workers.Run
@@ -1118,8 +1120,69 @@ defmodule Arbiter.Workflows.MergeQueue do
         )
     end
 
+    safe_sync_primary_checkout(state, item)
+
     state
   end
+
+  # bd-bqqnin: `close_task_and_finalize/2` is the single funnel every merge-
+  # success path routes through (a fresh adapter.merge/1, a poll that finds
+  # the MR already merged externally, and the direct/no-PR strategy alike),
+  # so it's the right place to also fast-forward the repo's *primary* local
+  # checkout — the shared directory a human/coordinator may `cd` into,
+  # distinct from a worker's isolated worktree. `Worktree.fetch_origin/2`
+  # already keeps `origin/<base>` fresh in that checkout before dispatch,
+  # but never touches the checkout's own local branch/HEAD/working tree
+  # (see its docstring), so without this the primary checkout drifts
+  # further behind with every merge. Opt-in (`Workspace.auto_sync_primary?/1`,
+  # default false) and always best-effort: never raises into the merge
+  # queue, never blocks task close on it.
+  defp safe_sync_primary_checkout(state, item) do
+    if Workspace.auto_sync_primary?(state.workspace) do
+      base = item.base || state.base
+
+      case resolve_primary_repo_path(state.workspace, item.repo) do
+        nil ->
+          :ok
+
+        repo_path when is_binary(base) ->
+          case PrimarySync.fast_forward(repo_path, base) do
+            :ok ->
+              :ok
+
+            {:skipped, reason} ->
+              Logger.info(
+                "MergeQueue: skipped primary-checkout sync for #{repo_path} (#{reason})"
+              )
+
+            {:error, reason} ->
+              Logger.warning(
+                "MergeQueue: primary-checkout sync failed for #{repo_path}: #{inspect(reason)}"
+              )
+          end
+
+        _repo_path ->
+          :ok
+      end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "MergeQueue.safe_sync_primary_checkout: swallowed exception for task=#{item.task_id}: " <>
+          Exception.message(e)
+      )
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp resolve_primary_repo_path(%Workspace{config: %{} = config}, repo)
+       when is_binary(repo) and repo != "" do
+    RepoConfig.find_path(get_in(config, ["repo_paths"]), repo) ||
+      RepoConfig.find_path(get_in(config, ["rig_paths"]), repo) ||
+      RepoConfig.find_path(Application.get_env(:arbiter, :repo_paths, %{}), repo)
+  end
+
+  defp resolve_primary_repo_path(_workspace, _repo), do: nil
 
   # ---- helpers ------------------------------------------------------------
 

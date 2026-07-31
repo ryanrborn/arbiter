@@ -31,4 +31,27 @@ defmodule Arbiter.Tasks.RepoConfig do
   """
   def normalize_slug(s) when is_binary(s), do: s |> String.downcase() |> String.replace("_", "-")
   def normalize_slug(_), do: nil
+
+  @doc """
+  Looks up `repo`'s filesystem path in a `repo_paths`/`rig_paths`-shaped
+  map. Exact key match first; falls back to a normalized match (see
+  `normalize_slug/1`) so a differently-separated key (`verus_server` vs
+  `verus-server`) still resolves. Returns `nil` if `map` isn't a map, or the
+  repo isn't registered.
+  """
+  def find_path(map, repo) when is_map(map) and is_binary(repo) do
+    case Map.get(map, repo) do
+      nil ->
+        target = normalize_slug(repo)
+
+        Enum.find_value(map, fn {k, v} ->
+          if normalize_slug(k) == target, do: repo_path_from_config(v)
+        end)
+
+      raw ->
+        repo_path_from_config(raw)
+    end
+  end
+
+  def find_path(_map, _repo), do: nil
 end
