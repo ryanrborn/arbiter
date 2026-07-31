@@ -47,6 +47,13 @@ defmodule Arbiter.Application do
       Arbiter.Vault,
       {DNSCluster, query: Application.get_env(:arbiter, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Arbiter.PubSub},
+      # Shared, priority-aware GitHub request budget (bd-3p5vqc). Keyed on pool
+      # identity (the account owning a credential), it reserves headroom so
+      # background patrol traffic can never starve foreground work — a deploy,
+      # dispatch, PR open/merge/finalize, or tracker transition. Started early
+      # (no deps) so every GitHub-calling path can gate through it. See
+      # Arbiter.GitHub.Limiter.
+      Arbiter.GitHub.Limiter,
       Arbiter.Agents.ProviderPool,
       Arbiter.Agents.CredentialWatchdog,
       {Registry, keys: :unique, name: Arbiter.Worker.Registry},
