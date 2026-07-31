@@ -49,3 +49,7 @@ MORNING-BRIEF.md
 # Never commit to version control.
 .arbiter.env
 .arbiter.env.backup
+
+# SQLite and database artifacts (legacy local development artifacts from pre-Postgres era).
+*.sqlite3
+*.db
