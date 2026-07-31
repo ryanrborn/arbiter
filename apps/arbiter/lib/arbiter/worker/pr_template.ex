@@ -113,6 +113,37 @@ defmodule Arbiter.Worker.PRTemplate do
     end
   end
 
+  @doc """
+  Ensures a custom PR body includes a Closes keyword for GitHub-tracked tasks.
+
+  If `body` is provided for a task with `tracker_type: :github` and a bare
+  numeric `tracker_ref`, this function appends "Closes #N" if it's not already
+  present. For all other tracker types or non-numeric refs, returns the body
+  unchanged.
+
+  This acts as a backstop for custom PR bodies authored by workers — even if
+  they forget to include the closing keyword, it will be added when the PR
+  is opened, ensuring GitHub's native auto-close mechanism fires on merge.
+  """
+  @spec ensure_closes_keyword(String.t(), Issue.t()) :: String.t()
+  def ensure_closes_keyword(body, %Issue{} = task) when is_binary(body) do
+    keyword = closing_keyword(task)
+
+    cond do
+      keyword == "" ->
+        # No closing keyword needed (non-github tracker or non-numeric ref)
+        body
+
+      body =~ ~r/Closes\s+#\d+/ ->
+        # Already has a Closes keyword, don't duplicate
+        body
+
+      true ->
+        # Add the closing keyword
+        body <> "\n\n" <> keyword
+    end
+  end
+
   # ---- internals ----
 
   defp render_line(line, placeholders) do
