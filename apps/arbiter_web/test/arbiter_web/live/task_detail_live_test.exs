@@ -96,6 +96,26 @@ defmodule ArbiterWeb.TaskDetailLiveTest do
       assert html =~ "not found"
     end
 
+    test "long task title is truncated and doesn't cause page overflow", %{conn: conn, ws: ws} do
+      long_title =
+        "This is a very long task title that is definitely longer than one hundred characters and should be truncated with an ellipsis to prevent it from overflowing the page"
+
+      {:ok, task} =
+        Ash.create(Issue, %{
+          title: long_title,
+          description: "do the thing",
+          workspace_id: ws.id
+        })
+
+      {:ok, _view, html} = live(conn, ~p"/tasks/#{task.id}")
+
+      assert html =~ long_title
+      # Verify the h1 has the truncate class
+      assert html =~ ~r/<h1[^>]*class="[^"]*truncate[^"]*"[^>]*>/
+      # Verify the title attribute is set for tooltip
+      assert html =~ ~r/title="#{Regex.escape(long_title)}"/
+    end
+
     test "re-renders when a relevant task_lifecycle fires", %{conn: conn, ws: ws} do
       {:ok, task} = Ash.create(Issue, %{title: "transitioning", workspace_id: ws.id})
 
