@@ -278,9 +278,26 @@ defmodule Arbiter.Workflows.PRPatrol do
            true <- function_exported?(adapter, :list_open, 0),
            :ok <- Mergers.prepare_with_repo(workspace, state.repo),
            {:ok, mrs} <- adapter.list_open() do
+        base_state = %{state | workspace: workspace}
+
+        # Cheap, DB-only / in-memory gate FIRST (bd-4brb2j): a PR that's backing
+        # off, filtered out by the author allowlist, or already has an open
+        # follow-up (the steady-state case) needs no forge signal check at all.
+        # Only the survivors enter the batched request below — so a steady-state
+        # tick where every open PR already has a follow-up filed issues ZERO
+        # GraphQL requests, preserving the inter-sweep-trickle→0 win.
+        candidates = Enum.filter(mrs, &dispatch_candidate?(&1, base_state))
+
+        # bd-3byp1n: fetch every candidate's three trigger signals in ONE batched
+        # forge request, replacing the ~3 calls per PR. Any candidate the batch
+        # couldn't resolve (a partial GraphQL failure) or that a non-batch adapter
+        # can't cover is simply absent from the map, and actionable_reason/3 falls
+        # back to the per-PR path for it.
+        signals_by_ref = batch_signals(adapter, candidates)
+
         {new_state, dispatched_count} =
-          Enum.reduce(mrs, {%{state | workspace: workspace}, 0}, fn mr, {acc, n} ->
-            case maybe_dispatch(mr, acc, adapter) do
+          Enum.reduce(candidates, {base_state, 0}, fn mr, {acc, n} ->
+            case maybe_dispatch(mr, acc, adapter, Map.get(signals_by_ref, mr.ref)) do
               {new_acc, true} -> {new_acc, n + 1}
               {new_acc, false} -> {new_acc, n}
             end
@@ -327,28 +344,56 @@ defmodule Arbiter.Workflows.PRPatrol do
     ArgumentError -> nil
   end
 
-  # Returns `{state, dispatched?}`. `backing_off?/2`, `author_allowed?/2`, and
-  # `deduped?/2` are all local/DB-only checks — cheap and free of GitHub calls —
-  # and are now checked BEFORE `actionable_reason/2`, which is the expensive
-  # step: it costs up to three GitHub API calls per PR (changes_requested?,
-  # open_review_thread_count, required_check_failure_names). Previously
+  # The cheap, DB-only / in-memory gate deciding whether a PR is even worth a
+  # forge signal check this tick. `backing_off?/2`, `author_allowed?/2`, and
+  # `deduped?/2` cost no GitHub call, and are run BEFORE the batched signal
+  # request (bd-4brb2j): a PR that's backing off, filtered out by the author
+  # allowlist, or already has an open follow-up needs no signal check. Previously
   # `deduped?/2` ran LAST, so once a follow-up was already filed for a PR, every
-  # subsequent tick still paid the full three-call signal check before
-  # discovering there was nothing to do — for every open PR in the repo, every
-  # ~60s, forever. That steady per-tick cost (independent of the once-per-minute
-  # `list_open` sweep) is the "inter-sweep trickle" identified in bd-4brb2j's
-  # incident report. Moving the free checks first means a PR that already has an
-  # open follow-up (the common steady-state case) short-circuits before any
-  # GitHub call is made.
-  defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter) do
-    with false <- backing_off?(pr_number, state),
-         true <- author_allowed?(mr, state.workspace),
-         false <- deduped?(pr_number, state.workspace_id),
-         {reason, extra_protocol} when is_binary(reason) <- actionable_reason(adapter, mr_ref) do
-      task = create_follow_up(mr, state, reason, extra_protocol)
-      {dispatch_follow_up(task, pr_number, state), true}
+  # subsequent tick still paid the full signal check before discovering there was
+  # nothing to do — for every open PR in the repo, every ~60s, forever. That
+  # steady per-tick cost is the "inter-sweep trickle" from bd-4brb2j's incident
+  # report. Gating here means a PR that already has an open follow-up (the common
+  # steady-state case) never enters the batched request at all — so a fully
+  # deduped sweep makes zero signal requests.
+  defp dispatch_candidate?(%{number: pr_number} = mr, state) do
+    not backing_off?(pr_number, state) and
+      author_allowed?(mr, state.workspace) and
+      not deduped?(pr_number, state.workspace_id)
+  end
+
+  # One batched forge request for every candidate's trigger signals (bd-3byp1n),
+  # via the adapter's optional `batch_pr_signals/1`. Returns a `%{ref =>
+  # pr_signals}` map; a ref absent from it — no batch surface (e.g. `Direct`),
+  # empty candidate list (no request made), a total failure, or a per-PR partial
+  # failure — falls back to the per-PR path in `actionable_reason/3`. Never
+  # raises: a batch error degrades to per-PR, it does not crash the tick.
+  defp batch_signals(_adapter, []), do: %{}
+
+  defp batch_signals(adapter, candidates) do
+    if function_exported?(adapter, :batch_pr_signals, 1) do
+      refs = Enum.map(candidates, & &1.ref)
+
+      case adapter.batch_pr_signals(refs) do
+        {:ok, map} when is_map(map) -> map
+        _ -> %{}
+      end
     else
-      _ -> {state, false}
+      %{}
+    end
+  end
+
+  # A candidate that passed `dispatch_candidate?/2`: decide if it's actionable —
+  # from the pre-fetched batched `signals` when present, else the per-PR fallback
+  # path — and dispatch a follow-up if so. Returns `{state, dispatched?}`.
+  defp maybe_dispatch(%{ref: mr_ref, number: pr_number} = mr, state, adapter, signals) do
+    case actionable_reason(adapter, mr_ref, signals) do
+      {reason, extra_protocol} when is_binary(reason) ->
+        task = create_follow_up(mr, state, reason, extra_protocol)
+        {dispatch_follow_up(task, pr_number, state), true}
+
+      _ ->
+        {state, false}
     end
   end
 
@@ -563,15 +608,21 @@ defmodule Arbiter.Workflows.PRPatrol do
   # CHANGES_REQUESTED takes priority; then any unresolved review thread /
   # inline comment; then a settled required-check failure (bd-ayetel) — CI
   # failing silently on an otherwise-clean, approved PR.
-  defp actionable_reason(adapter, mr_ref) do
+  #
+  # `signals` is the pre-fetched batched `t:Merger.pr_signals/0` for this PR
+  # (bd-3byp1n) when the sweep's one batched request covered it, or `nil` to fall
+  # back to the per-PR adapter calls. Either source resolves to bit-for-bit the
+  # same trigger decision — the batched decomposition reuses the adapter's own
+  # per-PR extractors — so the priority order and semantics are unchanged.
+  defp actionable_reason(adapter, mr_ref, signals) do
     cond do
-      changes_requested?(adapter, mr_ref) ->
+      changes_requested_signal?(adapter, mr_ref, signals) ->
         {"at least one review with state=CHANGES_REQUESTED", ""}
 
-      (n = open_review_thread_count(adapter, mr_ref)) > 0 ->
+      (n = open_review_thread_count(adapter, mr_ref, signals)) > 0 ->
         {"#{n} unresolved review thread(s) / inline review comment(s)", ""}
 
-      (names = required_check_failure_names(adapter, mr_ref)) != [] ->
+      (names = required_check_failure_names(adapter, mr_ref, signals)) != [] ->
         {"#{length(names)} required check(s) failing: #{Enum.join(names, ", ")}",
          CIFailureFollowUp.instructions(names)}
 
@@ -580,12 +631,30 @@ defmodule Arbiter.Workflows.PRPatrol do
     end
   end
 
+  # CHANGES_REQUESTED: from the batched signals when present, else the per-PR
+  # `list_review_feedback/1` fallback.
+  defp changes_requested_signal?(_adapter, _mr_ref, %{changes_requested: cr})
+       when is_boolean(cr),
+       do: cr
+
+  defp changes_requested_signal?(adapter, mr_ref, _no_batch),
+    do: changes_requested?(adapter, mr_ref)
+
   defp changes_requested?(adapter, mr_ref) do
     case adapter.list_review_feedback(mr_ref) do
       {:ok, %{changes_requested: true}} -> true
       _ -> false
     end
   end
+
+  # Count of unresolved review threads: from the batched signals when present,
+  # else the per-PR `list_open_review_threads/1` fallback.
+  defp open_review_thread_count(_adapter, _mr_ref, %{review_threads: threads})
+       when is_list(threads),
+       do: length(threads)
+
+  defp open_review_thread_count(adapter, mr_ref, _no_batch),
+    do: open_review_thread_count(adapter, mr_ref)
 
   # The count of unresolved review threads, via the adapter's optional
   # `list_open_review_threads/1` primitive. Adapters without a thread surface
@@ -600,6 +669,15 @@ defmodule Arbiter.Workflows.PRPatrol do
       0
     end
   end
+
+  # Names of settled, REQUIRED failing checks: from the batched signals when
+  # present, else the per-PR `list_required_check_failures/1` fallback.
+  defp required_check_failure_names(_adapter, _mr_ref, %{required_check_failures: checks})
+       when is_list(checks),
+       do: Enum.map(checks, & &1.name)
+
+  defp required_check_failure_names(adapter, mr_ref, _no_batch),
+    do: required_check_failure_names(adapter, mr_ref)
 
   # The names of settled, REQUIRED failing checks on this PR, via the
   # adapter's optional `list_required_check_failures/1` primitive (bd-ayetel).
