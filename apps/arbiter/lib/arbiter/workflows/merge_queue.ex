@@ -701,12 +701,38 @@ defmodule Arbiter.Workflows.MergeQueue do
     # project the item's task actually merges into.
     Mergers.prepare_with_repo(state.workspace, item.repo)
 
+    # bd-6w7j8h: log on an item's very first poll, unconditionally — the total
+    # absence of log lines is what let a stranded item hide for 20 hours. An
+    # item adopted via adopt_existing_mr/4 is planted in the tightest possible
+    # race window right after an external merge, exactly when the forge API is
+    # most likely to still be transiently inconsistent for that ref — so this
+    # first-poll marker exists regardless of whether the call below succeeds.
+    if is_nil(item.last_polled_at) do
+      Logger.info(
+        "MergeQueue: first poll for task=#{item.task_id} mr_ref=#{item.mr_ref} " <>
+          "status=#{item.status}"
+      )
+    end
+
     case state.adapter.get(item.mr_ref) do
       {:ok, mr_state} ->
         advance_status(state, item, mr_state)
 
       {:error, reason} ->
-        {%{item | status: :failed, last_error: reason, last_polled_at: DateTime.utc_now()}, state}
+        # bd-6w7j8h: a poll error used to mark the item :failed permanently and
+        # silently — poll_item/2's :failed clause never re-polls a failed item,
+        # so a single transient forge hiccup (most likely to hit exactly here,
+        # in the adopt path's race window against an external merge) stranded
+        # the task forever with zero log trace. Log it, and leave the item's
+        # status alone so the next tick gets a real chance to retry — a
+        # genuinely permanent error just keeps logging every tick instead of
+        # vanishing.
+        Logger.warning(
+          "MergeQueue: poll failed for task=#{item.task_id} mr_ref=#{item.mr_ref}: " <>
+            "#{inspect(reason)} — will retry next tick"
+        )
+
+        {%{item | last_error: reason, last_polled_at: DateTime.utc_now()}, state}
     end
   end
 

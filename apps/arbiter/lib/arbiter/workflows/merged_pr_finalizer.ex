@@ -292,12 +292,39 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
     end
   end
 
+  # Worker statuses that mean the worker is still actively doing something —
+  # the complement, :completed / :failed, means its own job is done and it's
+  # just sitting there waiting to be reaped (see actively_working?/1).
+  @active_worker_statuses [
+    :idle,
+    :resuming,
+    :running,
+    :awaiting,
+    :awaiting_review_gate,
+    :awaiting_review
+  ]
+
   # bd-38l3px: does the task have a live worker registered right now? The sweep
   # is a fallback for orphaned tasks (worker/Watchdog gone) — a task with a live
   # worker is left to that worker to finalize, so a stale `pr_ref`/`source_pr`
   # from a prior run can never make this sweep close an in-flight bead.
+  #
+  # bd-6w7j8h: registration alone isn't enough. `Worker.complete_now/2` never
+  # stops the Worker GenServer — it lingers at `status: :completed`, still
+  # registered, until the task's `:close` action's after-action reaps it
+  # (Worker.stop, mirrors `Arbiter.Workers.Reconciler`'s moduledoc on this same
+  # reap-on-close design). If the task never gets closed — e.g. the MergeQueue
+  # lost the item that would have closed it — a merely-registered-but-done
+  # worker used to make this sweep defer to it forever: the fallback safety net
+  # explicitly built to route around a stuck task instead got deadlocked
+  # against it. Checking the worker's actual status (not just its
+  # registration) breaks that deadlock: only a worker still doing something
+  # protects the task from finalization.
   defp live_worker?(%Issue{id: id}) when is_binary(id) do
-    is_pid(Worker.whereis(id))
+    case Worker.whereis(id) do
+      nil -> false
+      pid -> actively_working?(pid)
+    end
   rescue
     _ -> false
   catch
@@ -305,6 +332,17 @@ defmodule Arbiter.Workflows.MergedPRFinalizer do
   end
 
   defp live_worker?(_), do: false
+
+  defp actively_working?(pid) do
+    case Worker.state(pid) do
+      %{status: status} -> status in @active_worker_statuses
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
 
   defp skip_live_worker(%Issue{} = task) do
     Logger.debug(
