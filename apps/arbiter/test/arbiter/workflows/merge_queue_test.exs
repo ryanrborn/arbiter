@@ -1303,6 +1303,156 @@ defmodule Arbiter.Workflows.MergeQueueTest do
     end
   end
 
+  describe "primary checkout sync on merge (bd-bqqnin)" do
+    setup do
+      tmp =
+        Path.join(System.tmp_dir!(), "mqps-#{System.unique_integer([:positive])}")
+
+      File.rm_rf!(tmp)
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf(tmp) end)
+
+      remote = Path.join(tmp, "remote.git")
+      {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
+
+      seed = Path.join(tmp, "seed")
+      File.mkdir_p!(seed)
+      {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", seed])
+      {_, 0} = System.cmd("git", ["-C", seed, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", seed, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", seed, "config", "commit.gpgsign", "false"])
+      File.write!(Path.join(seed, "README.md"), "hi\n")
+      {_, 0} = System.cmd("git", ["-C", seed, "add", "README.md"])
+      {_, 0} = System.cmd("git", ["-C", seed, "commit", "-q", "-m", "initial"])
+      {_, 0} = System.cmd("git", ["-C", seed, "remote", "add", "origin", remote])
+      {_, 0} = System.cmd("git", ["-C", seed, "push", "-q", "origin", "main"])
+
+      primary = Path.join(tmp, "primary")
+      {_, 0} = System.cmd("git", ["clone", "-q", remote, primary])
+      {_, 0} = System.cmd("git", ["-C", primary, "config", "user.email", "t@e.com"])
+      {_, 0} = System.cmd("git", ["-C", primary, "config", "user.name", "T"])
+      {_, 0} = System.cmd("git", ["-C", primary, "config", "commit.gpgsign", "false"])
+
+      # Advance the shared remote past what `primary` has checked out —
+      # mirrors upstream moving because of the merge this test triggers.
+      File.write!(Path.join(seed, "MERGED.md"), "merged\n")
+      {_, 0} = System.cmd("git", ["-C", seed, "add", "MERGED.md"])
+      {_, 0} = System.cmd("git", ["-C", seed, "commit", "-q", "-m", "merged change"])
+      {_, 0} = System.cmd("git", ["-C", seed, "push", "-q", "origin", "main"])
+
+      %{primary: primary}
+    end
+
+    defp head(path) do
+      {out, 0} = System.cmd("git", ["-C", path, "rev-parse", "HEAD"])
+      String.trim(out)
+    end
+
+    @tag workspace_config: %{
+           "merge" => %{
+             "strategy" => "github",
+             "config" => %{
+               "owner" => "octo",
+               "repo" => "widget",
+               "credentials_ref" => "test-token-abc123"
+             },
+             "auto_sync_primary" => true
+           },
+           "repo_paths" => %{"widget" => "__PRIMARY__"}
+         }
+    test "fast-forwards the primary checkout when auto_sync_primary is on", %{
+      workspace: ws,
+      task: task,
+      primary: primary
+    } do
+      ws = update_repo_paths(ws, primary)
+      :ok = record_run(task, "widget")
+      full_cycle_stub(201)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      :ok = MergeQueue.tick(name)
+
+      task_id = task.id
+      wait_until_closed(task_id)
+
+      {out, 0} = System.cmd("git", ["-C", primary, "rev-parse", "origin/main"])
+      assert head(primary) == String.trim(out)
+      assert File.exists?(Path.join(primary, "MERGED.md"))
+    end
+
+    @tag workspace_config: %{
+           "merge" => %{
+             "strategy" => "github",
+             "config" => %{
+               "owner" => "octo",
+               "repo" => "widget",
+               "credentials_ref" => "test-token-abc123"
+             }
+           },
+           "repo_paths" => %{"widget" => "__PRIMARY__"}
+         }
+    test "leaves the primary checkout untouched when auto_sync_primary is off (default)", %{
+      workspace: ws,
+      task: task,
+      primary: primary
+    } do
+      ws = update_repo_paths(ws, primary)
+      :ok = record_run(task, "widget")
+      before = head(primary)
+      full_cycle_stub(202)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+      :ok = MergeQueue.tick(name)
+
+      task_id = task.id
+      wait_until_closed(task_id)
+
+      assert head(primary) == before
+    end
+
+    @tag workspace_config: %{
+           "merge" => %{"strategy" => "direct", "auto_sync_primary" => true},
+           "repo_paths" => %{"widget" => "__PRIMARY__"}
+         }
+    test "fast-forwards the primary checkout for the direct (no-PR) strategy too", %{
+      workspace: ws,
+      task: task,
+      primary: primary
+    } do
+      ws = update_repo_paths(ws, primary)
+      :ok = record_run(task, "widget")
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      task_id = task.id
+      wait_until_closed(task_id)
+
+      {out, 0} = System.cmd("git", ["-C", primary, "rev-parse", "origin/main"])
+      assert head(primary) == String.trim(out)
+      assert File.exists?(Path.join(primary, "MERGED.md"))
+    end
+
+    defp update_repo_paths(ws, primary) do
+      config = put_in(ws.config, ["repo_paths", "widget"], primary)
+      {:ok, ws} = Ash.update(ws, %{config: config}, action: :update)
+      ws
+    end
+
+    defp wait_until_closed(task_id) do
+      Enum.reduce_while(1..50, nil, fn _, _ ->
+        if Ash.get!(Issue, task_id).status == :closed do
+          {:halt, :ok}
+        else
+          Process.sleep(10)
+          {:cont, nil}
+        end
+      end)
+    end
+  end
+
   describe "enqueue/2 per-repo GitLab project resolution (bd-c9vb0r)" do
     @tag workspace_config: @ws_gitlab_repos
     test "a task worked in the overridden repo opens its MR against the overridden project",
