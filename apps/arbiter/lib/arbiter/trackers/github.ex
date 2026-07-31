@@ -60,6 +60,7 @@ defmodule Arbiter.Trackers.GitHub do
 
   @behaviour Arbiter.Trackers.Tracker
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Trackers.GitHub.{Config, Error}
 
   @stub_name Arbiter.Trackers.GitHub.HTTP
@@ -835,7 +836,11 @@ defmodule Arbiter.Trackers.GitHub do
       |> Keyword.merge(req_opts)
       |> Keyword.merge(stub_opts())
 
-    Req.request(full_opts)
+    # Gate through the shared priority-aware GitHub budget (bd-3p5vqc). Tracker
+    # transitions/updates are foreground (a task is actively waiting) and so are
+    # never withheld; the gate still feeds observed rate-limit headers back to
+    # the limiter to keep its numbers current.
+    Limiter.gate(cfg.token, fn -> Req.request(full_opts) end)
   end
 
   defp handle_json({:ok, %Req.Response{status: status, body: body}}) when status in 200..299,

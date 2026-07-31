@@ -70,6 +70,7 @@ defmodule Arbiter.Mergers.Github do
 
   require Logger
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers.{Merger, Github.Config, Github.Error, Github.RepoResolver}
 
   @stub_name Arbiter.Mergers.Github.HTTP
@@ -1747,7 +1748,7 @@ defmodule Arbiter.Mergers.Github do
       ]
       |> Keyword.merge(stub_opts())
 
-    case perform_request(full_opts, 0) do
+    case Limiter.gate(cfg.token, fn -> perform_request(full_opts, 0) end) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, to_string(body)}
 
@@ -1785,7 +1786,12 @@ defmodule Arbiter.Mergers.Github do
       |> Keyword.merge(req_opts)
       |> Keyword.merge(stub_opts())
 
-    perform_request(full_opts, 0)
+    # Gate through the shared priority-aware GitHub budget (bd-3p5vqc). Background
+    # patrol traffic may be withheld here so it can never starve foreground work
+    # (PR open/merge/finalize, deploys). The local secondary-retry loop in
+    # perform_request/2 runs *inside* the gate; the limiter observes the final
+    # result to drive its headroom + secondary-limit accounting.
+    Limiter.gate(cfg.token, fn -> perform_request(full_opts, 0) end)
   end
 
   defp perform_request(full_opts, attempt) do

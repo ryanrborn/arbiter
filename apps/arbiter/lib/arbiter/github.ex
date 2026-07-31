@@ -33,6 +33,7 @@ defmodule Arbiter.GitHub do
   """
 
   alias Arbiter.GitHub.Error
+  alias Arbiter.GitHub.Limiter
 
   @type repo :: String.t()
   @type pr_number :: pos_integer()
@@ -318,7 +319,10 @@ defmodule Arbiter.GitHub do
       |> Keyword.merge(req_opts)
       |> Keyword.merge(stub_opts(opts))
 
-    Req.request(full_opts)
+    # Gate through the shared priority-aware budget (bd-3p5vqc): a background
+    # call may be withheld here (returning a %Limiter.Paused{} error) so it can
+    # never starve foreground work; the ambient priority is process-scoped.
+    Limiter.gate(token, fn -> Req.request(full_opts) end)
   end
 
   defp graphql_request(payload, opts) do
@@ -337,7 +341,7 @@ defmodule Arbiter.GitHub do
       ]
       |> Keyword.merge(stub_opts(opts))
 
-    case Req.request(full_opts) do
+    case Limiter.gate(token, fn -> Req.request(full_opts) end) do
       {:ok, %Req.Response{status: status, body: body, headers: headers}}
       when status in 200..299 ->
         update_rate_limit(headers)

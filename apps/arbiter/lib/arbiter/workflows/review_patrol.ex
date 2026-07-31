@@ -187,6 +187,7 @@ defmodule Arbiter.Workflows.ReviewPatrol do
   use GenServer, restart: :transient
 
   alias Arbiter.Agents
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Mergers.Github.RepoResolver
   alias Arbiter.Tasks.{Issue, RepoConfig}
   alias Arbiter.Worker.ReviewAutomation
@@ -363,7 +364,15 @@ defmodule Arbiter.Workflows.ReviewPatrol do
 
   # ---- tick logic ----
 
+  # Every forge call this tick makes is background (bd-3p5vqc): review polling
+  # must yield to foreground work and never starve it. `with_priority/2` tags
+  # the patrol process for the tick; the GitHub clients honour that class at
+  # their request seam (this runs synchronously in the patrol process).
   defp do_tick(state) do
+    Limiter.with_priority(:background, fn -> do_tick_body(state) end)
+  end
+
+  defp do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes take effect
     # immediately without a GenServer restart (mirrors PRPatrol).
     workspace =
