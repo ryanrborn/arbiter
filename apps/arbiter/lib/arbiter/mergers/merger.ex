@@ -393,6 +393,57 @@ defmodule Arbiter.Mergers.Merger do
   """
   @callback list_required_check_failures(mr_ref) :: {:ok, [failing_check()]} | {:error, term()}
 
+  @typedoc """
+  The three PRPatrol trigger signals for a single PR, decoded in one shot by
+  `batch_pr_signals/1` (bd-3byp1n) — the batched-in-one-request equivalent of
+  separately calling `list_review_feedback/1`, `list_open_review_threads/1`,
+  and `list_required_check_failures/1` for that PR.
+
+    * `:changes_requested` — the same boolean `list_review_feedback/1` returns:
+      the latest verdict (per reviewer) settles on CHANGES_REQUESTED.
+    * `:review_threads` — the **unresolved** review threads, exactly as
+      `list_open_review_threads/1` would return them (already normalized to
+      `t:review_thread/0`).
+    * `:required_check_failures` — the settled, REQUIRED failing checks, exactly
+      as `list_required_check_failures/1` would return them.
+
+  The decomposition is bit-for-bit identical to the per-PR callbacks; only the
+  transport differs (one aliased request instead of ~3 per PR).
+  """
+  @type pr_signals :: %{
+          required(:changes_requested) => boolean(),
+          required(:review_threads) => [review_thread()],
+          required(:required_check_failures) => [failing_check()]
+        }
+
+  @doc """
+  Fetch the PRPatrol trigger signals for **many** PRs — across many repos — in a
+  single forge request (bd-3byp1n), instead of the ~3 per-PR calls PRPatrol
+  otherwise makes (`list_review_feedback/1`, `list_open_review_threads/1`,
+  `list_required_check_failures/1`). For GitHub this is one GraphQL query that
+  aliases each PR's `pullRequest` selection (`p0:`, `p1:`, …) under its repo
+  (`r0:`, `r1:`, …), so `3 × PRs × repos` collapses to 1 request per sweep.
+
+  `refs` is a list of `t:mr_ref/0`. Returns `{:ok, map}` where `map` is keyed by
+  the input ref and each value is a `t:pr_signals/0`. The map may **omit** a ref
+  the batch could not resolve (a partial GraphQL failure — some aliased nodes
+  came back `null` alongside a top-level error): the caller treats a missing ref
+  as "batch didn't cover it" and falls back to the per-PR callbacks for it,
+  rather than dropping the PR. A total failure (transport error, or an
+  errors-only response with no usable `data`) returns `{:error, term()}` and the
+  caller falls back for every ref. An empty `refs` returns `{:ok, %{}}` and makes
+  no request.
+
+  `isRequired(pullRequestNumber:)` is resolved per PR (each against that PR's own
+  branch protection) — it is never hoisted across PRs.
+
+  Optional — adapters without a batch surface (e.g. `Direct`) simply don't
+  implement it; callers guard with `function_exported?/3` and fall back to the
+  per-PR path for every ref.
+  """
+  @callback batch_pr_signals(refs :: [mr_ref()]) ::
+              {:ok, %{optional(mr_ref()) => pr_signals()}} | {:error, term()}
+
   @optional_callbacks update_branch: 1,
                       failing_check_logs: 1,
                       ref_for_pr: 2,
@@ -400,5 +451,6 @@ defmodule Arbiter.Mergers.Merger do
                       list_open_review_threads: 1,
                       reply_to_review_comment: 4,
                       resolve_review_thread: 3,
-                      list_required_check_failures: 1
+                      list_required_check_failures: 1,
+                      batch_pr_signals: 1
 end

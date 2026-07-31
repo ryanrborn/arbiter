@@ -413,6 +413,41 @@ defmodule Arbiter.Mergers.Github do
     end
   end
 
+  # Batch all three PRPatrol trigger signals for many PRs (across many repos)
+  # into ONE aliased GraphQL request (bd-3byp1n), replacing the ~3 per-PR calls
+  # (`list_review_feedback/1` + `list_open_review_threads/1` +
+  # `list_required_check_failures/1`). The per-PR decomposition reuses the exact
+  # same extractors as those callbacks — `changes_requested?/1`,
+  # `normalize_review_thread/1`, `required_settled_failure?/1`,
+  # `summarize_required_check/1` — so trigger semantics are bit-for-bit
+  # identical; only the transport changes.
+  #
+  # One credential per batch: `Config.resolve/0` yields a single token for the
+  # calling process (workspace-scoped, NOT per-repo), so every repo aliased into
+  # one query is read with that one token and bills one GraphQL points pool.
+  # There is no per-repo credential to diverge, so nothing to split — a PRPatrol
+  # tick, which is per-repo anyway, always batches one repo under one token.
+  @impl true
+  def batch_pr_signals(refs) when is_list(refs) do
+    with {:ok, cfg} <- Config.resolve() do
+      case batch_entries(cfg, refs) do
+        [] ->
+          # Nothing resolvable (empty input, or every ref unparseable) — no
+          # request, empty map. The caller falls back per-PR for any ref it
+          # passed that isn't in the result.
+          {:ok, %{}}
+
+        entries ->
+          {query, variables} = build_batch_query(entries)
+
+          case graphql_batch(cfg, query, variables) do
+            {:ok, data} -> {:ok, extract_batch(entries, data)}
+            {:error, _} = err -> err
+          end
+      end
+    end
+  end
+
   @impl true
   def close(mr_ref) when is_binary(mr_ref) do
     with {:ok, cfg} <- Config.resolve(),
@@ -1248,6 +1283,265 @@ defmodule Arbiter.Mergers.Github do
       {:error, exception} ->
         {:error, transport_error(exception)}
     end
+  end
+
+  # ---- Internals: batched PR signals (GraphQL, bd-3byp1n) ------------------
+
+  # Parse each ref to {owner, repo, number} and assign aliases: a repo alias
+  # (`r0`, `r1`, …) per distinct {owner, repo} in first-seen order, and a
+  # globally-unique PR alias (`p0`, `p1`, …) per entry. Unparseable refs are
+  # dropped (the caller falls back per-PR for any ref missing from the result).
+  defp batch_entries(cfg, refs) do
+    {entries, _repo_aliases, _k} =
+      refs
+      |> Enum.reduce({[], %{}, 0}, fn ref, {acc, repo_aliases, k} ->
+        case resolve_ref(cfg, ref) do
+          {:ok, {owner, repo, number}} ->
+            key = {owner, repo}
+
+            {ralias, repo_aliases} =
+              case Map.get(repo_aliases, key) do
+                nil ->
+                  ra = "r#{map_size(repo_aliases)}"
+                  {ra, Map.put(repo_aliases, key, ra)}
+
+                ra ->
+                  {ra, repo_aliases}
+              end
+
+            entry = %{
+              ref: ref,
+              owner: owner,
+              repo: repo,
+              number: number,
+              ralias: ralias,
+              palias: "p#{k}"
+            }
+
+            {[entry | acc], repo_aliases, k + 1}
+
+          _ ->
+            {acc, repo_aliases, k + 1}
+        end
+      end)
+
+    Enum.reverse(entries)
+  end
+
+  # Build one aliased query for all entries. owner/name go through GraphQL
+  # variables (`$o<j>`/`$n<j>`) so repo identifiers can't inject query text; the
+  # PR number is interpolated as a literal integer — safe (an int) and needed in
+  # two spots, `pullRequest(number:)` and `isRequired(pullRequestNumber:)`, the
+  # latter resolved per PR against that PR's own branch protection (never
+  # hoisted). Returns `{query, variables_map}`.
+  defp build_batch_query(entries) do
+    repo_aliases = entries |> Enum.map(& &1.ralias) |> Enum.uniq()
+
+    {var_decls, variables} =
+      Enum.reduce(repo_aliases, {[], %{}}, fn "r" <> j = ra, {decls, vars} ->
+        %{owner: owner, repo: repo} = Enum.find(entries, &(&1.ralias == ra))
+
+        {decls ++ ["$o#{j}: String!", "$n#{j}: String!"],
+         vars |> Map.put("o#{j}", owner) |> Map.put("n#{j}", repo)}
+      end)
+
+    repo_blocks =
+      repo_aliases
+      |> Enum.map(fn "r" <> j = ra ->
+        pr_blocks =
+          entries
+          |> Enum.filter(&(&1.ralias == ra))
+          |> Enum.map_join("\n", &batch_pr_block/1)
+
+        "    #{ra}: repository(owner: $o#{j}, name: $n#{j}) {\n#{pr_blocks}\n    }"
+      end)
+      |> Enum.join("\n")
+
+    # `rateLimit { cost }` is itself free of points and makes GitHub return the
+    # exact points this query billed, so a sweep's cost is observable in the logs
+    # (bd-3byp1n's "measure the points cost") rather than merely estimated.
+    query = "query(#{Enum.join(var_decls, ", ")}) {\n#{repo_blocks}\n    rateLimit { cost nodeCount }\n}\n"
+
+    {query, variables}
+  end
+
+  # The per-PR selection set — the "...PRBits" fragment inlined per alias (a
+  # shared fragment can't carry the per-PR `isRequired(pullRequestNumber:)`
+  # argument). Fetches exactly what the three trigger decisions need — and no
+  # more, to keep the GraphQL points cost low (bd-3byp1n: "the points budget
+  # must not become the new ceiling"):
+  #
+  #   * `reviews` states → changes_requested (same as `list_review_feedback/1`).
+  #   * `reviewThreads { isResolved }` → the unresolved-thread COUNT PRPatrol
+  #     triggers on. Comments are fetched `first: 1` (the opening comment, for
+  #     thread author/body context) — NOT `first: 100` like the single-PR
+  #     `@review_threads_query`. PRPatrol only needs the count; the full comment
+  #     tree is re-read per-PR by the follow-up worker via
+  #     `list_open_review_threads/1`. Dropping the 100×100 comment fan-out is
+  #     what keeps this query's node cost ~one rollup page per PR instead of
+  #     ~10k nodes/PR.
+  #   * `statusCheckRollup` contexts with per-PR `isRequired` → required-check
+  #     failures (same as `@required_checks_query`).
+  defp batch_pr_block(%{palias: palias, number: number}) do
+    """
+        #{palias}: pullRequest(number: #{number}) {
+          reviews(last: 100) { nodes { state author { login } } }
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              path
+              line
+              comments(first: 1) { nodes { databaseId body author { login } } }
+            }
+          }
+          commits(last: 1) {
+            nodes {
+              commit {
+                statusCheckRollup {
+                  contexts(first: 100) {
+                    nodes {
+                      __typename
+                      ... on CheckRun {
+                        name
+                        status
+                        conclusion
+                        detailsUrl
+                        isRequired(pullRequestNumber: #{number})
+                      }
+                      ... on StatusContext {
+                        context
+                        state
+                        targetUrl
+                        description
+                        isRequired(pullRequestNumber: #{number})
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }\
+    """
+  end
+
+  # POST the batched query. Partial failure is tolerated: a body carrying a
+  # `data` map is returned as `{:ok, data}` EVEN IF a top-level `errors` list is
+  # also present (some aliased nodes came back null) — per-PR extraction then
+  # skips the null nodes and the caller falls back for those refs. Only an
+  # errors-only response (no usable `data`), an unexpected shape, a non-2xx, or a
+  # transport error is a total `{:error, ...}`.
+  defp graphql_batch(cfg, query, variables) do
+    payload = %{"query" => query, "variables" => variables}
+
+    case request(cfg, :post, "/graphql", json: payload) do
+      {:ok, %Req.Response{status: status, body: %{"data" => data}}}
+      when status in 200..299 and is_map(data) ->
+        log_batch_points(data)
+        {:ok, data}
+
+      {:ok, %Req.Response{status: status, body: %{"errors" => [_ | _] = errors}}} ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: graphql_error_message(errors),
+           raw: errors
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:error,
+         %Error{
+           kind: :validation_failed,
+           status: status,
+           message: "unexpected GraphQL response shape",
+           raw: body
+         }}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, http_error(status, body)}
+
+      {:error, exception} ->
+        {:error, transport_error(exception)}
+    end
+  end
+
+  # Log the GraphQL points this batched sweep actually billed (bd-3byp1n), so the
+  # secondary-vs-primary budget can be watched in production. `cost` is the exact
+  # points the query consumed against the token's 5,000 points/hr pool;
+  # `nodeCount` is how many nodes it touched. Debug-level: one line per sweep.
+  defp log_batch_points(%{"rateLimit" => %{"cost" => cost, "nodeCount" => nodes}})
+       when is_integer(cost) do
+    Logger.debug("GitHub batch_pr_signals: GraphQL points cost=#{cost} nodeCount=#{nodes}")
+  end
+
+  defp log_batch_points(_), do: :ok
+
+  # Destructure the aliased response back to `%{ref => pr_signals}`. A ref whose
+  # aliased node is null/missing (partial failure) is simply omitted so the
+  # caller re-fetches it per-PR — never dropped silently.
+  defp extract_batch(entries, data) do
+    Enum.reduce(entries, %{}, fn e, acc ->
+      case get_in(data, [e.ralias, e.palias]) do
+        node when is_map(node) -> Map.put(acc, e.ref, extract_pr_signals(node))
+        _ -> acc
+      end
+    end)
+  end
+
+  # Decompose one aliased PullRequest node into the three trigger signals,
+  # reusing the SAME extractors the per-PR callbacks use so decisions are
+  # identical.
+  defp extract_pr_signals(node) do
+    %{
+      changes_requested: batch_changes_requested?(node),
+      review_threads: batch_review_threads(node),
+      required_check_failures: batch_required_check_failures(node)
+    }
+  end
+
+  # Normalize the GraphQL reviews (`author { login }`) to the REST shape
+  # `changes_requested?/1` expects (`user.login`), then reuse it verbatim — same
+  # latest-verdict-per-reviewer semantics as `list_review_feedback/1`.
+  defp batch_changes_requested?(node) do
+    node
+    |> get_in(["reviews", "nodes"])
+    |> List.wrap()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(fn r ->
+      %{"state" => Map.get(r, "state"), "user" => %{"login" => get_in(r, ["author", "login"])}}
+    end)
+    |> changes_requested?()
+  end
+
+  # Same unresolved-thread filter + normalization as `list_open_review_threads/1`.
+  defp batch_review_threads(node) do
+    node
+    |> get_in(["reviewThreads", "nodes"])
+    |> List.wrap()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reject(fn n -> Map.get(n, "isResolved") == true end)
+    |> Enum.map(&normalize_review_thread/1)
+  end
+
+  # Same required+settled filter + summary as `list_required_check_failures/1`.
+  defp batch_required_check_failures(node) do
+    node
+    |> get_in(["commits", "nodes"])
+    |> List.wrap()
+    |> List.first()
+    |> case do
+      %{"commit" => %{"statusCheckRollup" => %{"contexts" => %{"nodes" => nodes}}}}
+      when is_list(nodes) ->
+        nodes
+
+      _ ->
+        []
+    end
+    |> Enum.reject(&is_nil/1)
+    |> Enum.filter(&required_settled_failure?/1)
+    |> Enum.map(&summarize_required_check/1)
   end
 
   # A required rollup context (CheckRun or legacy StatusContext) that has

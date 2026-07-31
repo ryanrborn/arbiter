@@ -184,25 +184,12 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
 
     test "PR with all-APPROVED reviews → no task", %{ws: ws} do
-      stub(fn conn ->
-        cond do
-          conn.request_path == "/repos/owner/repo/pulls" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"number" => 41, "title" => "ok", "html_url" => "x"}])
-
-          conn.request_path == "/repos/owner/repo/pulls/41/reviews" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"state" => "APPROVED"}])
-
-          conn.request_path == "/repos/owner/repo/pulls/41/comments" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      stub(
+        signals_stub(
+          pulls: [pull(41, title: "ok")],
+          nodes: %{41 => pr_node(reviews: [%{"state" => "APPROVED", "author" => %{"login" => "a"}}])}
+        )
+      )
 
       {_pid, name} = start_patrol(ws)
       assert :ok = PRPatrol.tick(name)
@@ -210,29 +197,161 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
   end
 
-  describe "tick/1 — actionable PRs" do
-    test "CHANGES_REQUESTED → 1 task created, worker spawned", %{ws: ws} do
+  describe "tick/1 — batched signal request (bd-3byp1n)" do
+    test "a multi-PR sweep issues ONE GraphQL request and preserves each trigger class",
+         %{ws: ws} do
+      graphql = :counters.new(1, [])
+
+      nodes = %{
+        # CHANGES_REQUESTED — highest-priority signal
+        101 => pr_node(cr: true),
+        # COMMENTED only, but one unresolved inline thread (bd-823q7e)
+        102 =>
+          pr_node(
+            reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+            threads: [
+              %{
+                "id" => "RT_102",
+                "isResolved" => false,
+                "path" => "lib/x.ex",
+                "line" => 3,
+                "comments" => %{"nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]}
+              }
+            ]
+          ),
+        # APPROVED, one settled+required failing check (bd-ayetel)
+        103 =>
+          pr_node(
+            reviews: [%{"state" => "APPROVED", "author" => %{"login" => "alice"}}],
+            contexts: [
+              %{
+                "__typename" => "CheckRun",
+                "name" => "ci-required",
+                "status" => "COMPLETED",
+                "conclusion" => "FAILURE",
+                "isRequired" => true
+              }
+            ]
+          ),
+        # Clean: approved, no threads, no failing checks → no task
+        104 => pr_node(reviews: [%{"state" => "APPROVED", "author" => %{"login" => "alice"}}])
+      }
+
+      stub(
+        signals_stub(
+          graphql_counter: graphql,
+          pulls: [pull(101), pull(102), pull(103), pull(104)],
+          nodes: nodes
+        )
+      )
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      assert :counters.get(graphql, 1) == 1,
+             "a 4-PR sweep must issue exactly ONE GraphQL request, not ~3 per PR"
+
+      by_pr = Map.new(tasks_for_repo(), &{&1.source_pr, &1})
+      assert Map.keys(by_pr) |> Enum.sort() == ["101", "102", "103"]
+
+      assert by_pr["101"].description =~ "CHANGES_REQUESTED"
+      assert by_pr["102"].description =~ "unresolved review thread"
+      assert by_pr["103"].description =~ "required check(s) failing: ci-required"
+    end
+
+    test "a fully-deduped sweep issues ZERO GraphQL requests (steady-state)", %{ws: ws} do
+      graphql = :counters.new(1, [])
+
+      stub(
+        signals_stub(
+          graphql_counter: graphql,
+          pulls: [pull(110)],
+          nodes: %{110 => pr_node(cr: true)}
+        )
+      )
+
+      {_pid, name} = start_patrol(ws)
+
+      # First tick files the follow-up (one batched request).
+      :ok = PRPatrol.tick(name)
+      assert :counters.get(graphql, 1) == 1
+      assert length(tasks_for_repo()) == 1
+
+      # Second tick: the PR is already deduped, so it never enters the batch —
+      # the cheap DB gate short-circuits it and NO GraphQL request is issued.
+      :ok = PRPatrol.tick(name)
+      assert :counters.get(graphql, 1) == 1, "a deduped PR must not enter the batched request"
+      assert length(tasks_for_repo()) == 1
+    end
+
+    test "partial batch failure falls back to the per-PR path for the affected PR", %{ws: ws} do
+      # PR 120 resolves in the batch; PR 121 comes back null with a top-level
+      # error. 121 must still be actioned — via the per-PR fallback callbacks —
+      # not silently dropped.
+      batch_node = %{120 => pr_node(cr: true)}
+
       stub(fn conn ->
         cond do
           conn.request_path == "/repos/owner/repo/pulls" ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json([
-              %{"number" => 42, "title" => "needs work", "html_url" => "https://gh/pr/42"}
-            ])
+            |> Req.Test.json([pull(120), pull(121)])
 
-          conn.request_path == "/repos/owner/repo/pulls/42/reviews" ->
+          # Per-PR fallback for 121: REST review feedback (CHANGES_REQUESTED).
+          conn.request_path == "/repos/owner/repo/pulls/121/reviews" ->
             conn
             |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}])
+            |> Req.Test.json([%{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "a"}}])
 
-          conn.request_path == "/repos/owner/repo/pulls/42/comments" ->
+          conn.request_path == "/repos/owner/repo/pulls/121/comments" ->
             conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "POST" and conn.request_path == "/graphql" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            query = Jason.decode!(body)["query"]
+
+            if query =~ ~r/\w+:\s*repository\(/ do
+              # Batched query: 120 present, 121 null, plus a top-level error.
+              base = batch_data_from_query(query, batch_node)
+
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(
+                Map.put(base, "errors", [%{"message" => "Could not resolve to PR 121"}])
+              )
+            else
+              # Single-PR fallback GraphQL for 121 (threads / required checks):
+              # empty — 121 already triggers on CHANGES_REQUESTED via REST above.
+              conn
+              |> Plug.Conn.put_status(200)
+              |> Req.Test.json(%{
+                "data" => %{
+                  "repository" => %{"pullRequest" => %{"reviewThreads" => %{"nodes" => []}}}
+                }
+              })
+            end
 
           true ->
             conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
         end
       end)
+
+      {_pid, name} = start_patrol(ws)
+      :ok = PRPatrol.tick(name)
+
+      prs = tasks_for_repo() |> Enum.map(& &1.source_pr) |> Enum.sort()
+      assert prs == ["120", "121"], "the partial-failure PR must fall back to the per-PR path"
+    end
+  end
+
+  describe "tick/1 — actionable PRs" do
+    test "CHANGES_REQUESTED → 1 task created, worker spawned", %{ws: ws} do
+      stub(
+        signals_stub(
+          pulls: [pull(42, title: "needs work", html_url: "https://gh/pr/42")],
+          nodes: %{42 => pr_node(reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}])}
+        )
+      )
 
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)
@@ -259,53 +378,29 @@ defmodule Arbiter.Workflows.PRPatrolTest do
          %{ws: ws} do
       # The Copilot-on-#3609 case: the review is COMMENTED (not CHANGES_REQUESTED),
       # so changes_requested? is false — but it left an inline comment that lives
-      # in an unresolved review thread, which the GraphQL primitive surfaces.
-      stub(fn conn ->
-        cond do
-          conn.request_path == "/repos/owner/repo/pulls" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([
-              %{"number" => 50, "title" => "commented only", "html_url" => "https://gh/pr/50"}
-            ])
-
-          conn.request_path == "/repos/owner/repo/pulls/50/reviews" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"state" => "COMMENTED", "user" => %{"login" => "copilot"}}])
-
-          conn.request_path == "/repos/owner/repo/pulls/50/comments" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
-
-          conn.method == "POST" and conn.request_path == "/graphql" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{
-              "data" => %{
-                "repository" => %{
-                  "pullRequest" => %{
-                    "reviewThreads" => %{
-                      "nodes" => [
-                        %{
-                          "id" => "RT_1",
-                          "isResolved" => false,
-                          "path" => "lib/x.ex",
-                          "line" => 5,
-                          "comments" => %{
-                            "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
-                          }
-                        }
-                      ]
+      # in an unresolved review thread, which the batched signals surface.
+      stub(
+        signals_stub(
+          pulls: [pull(50, title: "commented only", html_url: "https://gh/pr/50")],
+          nodes: %{
+            50 =>
+              pr_node(
+                reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+                threads: [
+                  %{
+                    "id" => "RT_1",
+                    "isResolved" => false,
+                    "path" => "lib/x.ex",
+                    "line" => 5,
+                    "comments" => %{
+                      "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
                     }
                   }
-                }
-              }
-            })
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+                ]
+              )
+          }
+        )
+      )
 
       {_pid, name} = start_patrol(ws)
       :ok = PRPatrol.tick(name)
@@ -330,57 +425,28 @@ defmodule Arbiter.Workflows.PRPatrolTest do
          %{ws: ws} do
       pulls_posted = :counters.new(1, [])
 
+      node =
+        pr_node(
+          reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+          threads: [
+            %{
+              "id" => "RT_1",
+              "isResolved" => false,
+              "path" => "openspec/changes/x.md",
+              "comments" => %{"nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]}
+            }
+          ]
+        )
+
+      base = signals_stub(pulls: [pull(3679, title: "openspec change", html_url: "https://gh/pr/3679")], nodes: %{3679 => node})
+
       stub(fn conn ->
-        cond do
-          conn.method == "POST" and conn.request_path == "/repos/owner/repo/pulls" ->
-            :counters.add(pulls_posted, 1, 1)
-            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 999})
-
-          conn.request_path == "/repos/owner/repo/pulls" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([
-              %{
-                "number" => 3679,
-                "title" => "openspec change",
-                "html_url" => "https://gh/pr/3679"
-              }
-            ])
-
-          conn.request_path == "/repos/owner/repo/pulls/3679/reviews" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"state" => "COMMENTED", "user" => %{"login" => "copilot"}}])
-
-          conn.request_path == "/repos/owner/repo/pulls/3679/comments" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
-
-          conn.method == "POST" and conn.request_path == "/graphql" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{
-              "data" => %{
-                "repository" => %{
-                  "pullRequest" => %{
-                    "reviewThreads" => %{
-                      "nodes" => [
-                        %{
-                          "id" => "RT_1",
-                          "isResolved" => false,
-                          "path" => "openspec/changes/x.md",
-                          "comments" => %{
-                            "nodes" => [%{"body" => "nit", "author" => %{"login" => "copilot"}}]
-                          }
-                        }
-                      ]
-                    }
-                  }
-                }
-              }
-            })
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        # A POST to /pulls is a NEW PR being opened — count it (must stay 0).
+        if conn.method == "POST" and conn.request_path == "/repos/owner/repo/pulls" do
+          :counters.add(pulls_posted, 1, 1)
+          conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 999})
+        else
+          base.(conn)
         end
       end)
 
@@ -410,40 +476,18 @@ defmodule Arbiter.Workflows.PRPatrolTest do
     end
 
     test "COMMENTED review with all threads resolved → no task", %{ws: ws} do
-      stub(fn conn ->
-        cond do
-          conn.request_path == "/repos/owner/repo/pulls" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"number" => 51, "title" => "resolved", "html_url" => "x"}])
-
-          conn.request_path == "/repos/owner/repo/pulls/51/reviews" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"state" => "COMMENTED"}])
-
-          conn.request_path == "/repos/owner/repo/pulls/51/comments" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
-
-          conn.method == "POST" and conn.request_path == "/graphql" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json(%{
-              "data" => %{
-                "repository" => %{
-                  "pullRequest" => %{
-                    "reviewThreads" => %{
-                      "nodes" => [%{"id" => "RT_1", "isResolved" => true}]
-                    }
-                  }
-                }
-              }
-            })
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      stub(
+        signals_stub(
+          pulls: [pull(51, title: "resolved", html_url: "x")],
+          nodes: %{
+            51 =>
+              pr_node(
+                reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "c"}}],
+                threads: [%{"id" => "RT_1", "isResolved" => true, "comments" => %{"nodes" => []}}]
+              )
+          }
+        )
+      )
 
       {_pid, name} = start_patrol(ws)
       assert :ok = PRPatrol.tick(name)
@@ -684,62 +728,22 @@ defmodule Arbiter.Workflows.PRPatrolTest do
   end
 
   describe "tick/1 — required check failure trigger (bd-ayetel)" do
-    # Both `list_open_review_threads/1` and `list_required_check_failures/1`
-    # POST to the same "/graphql" path with different queries — dispatch on
-    # the request body to answer each one correctly.
+    # The PR is APPROVED (no CHANGES_REQUESTED) with no unresolved threads, so
+    # the ONLY signal that can fire is a settled+required check failure carried
+    # in `contexts`. Fetched through the single batched request (bd-3byp1n).
     defp required_check_stub(number, contexts, opts \\ []) do
       title = Keyword.get(opts, :title, "approved but CI-blocked")
 
-      fn conn ->
-        cond do
-          conn.request_path == "/repos/owner/repo/pulls" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([%{"number" => number, "title" => title, "html_url" => "x"}])
-
-          conn.request_path == "/repos/owner/repo/pulls/#{number}/reviews" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([%{"state" => "APPROVED"}])
-
-          conn.request_path == "/repos/owner/repo/pulls/#{number}/comments" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
-
-          conn.method == "POST" and conn.request_path == "/graphql" ->
-            {:ok, body, conn} = Plug.Conn.read_body(conn)
-
-            if String.contains?(body, "reviewThreads") do
-              conn
-              |> Plug.Conn.put_status(200)
-              |> Req.Test.json(%{
-                "data" => %{
-                  "repository" => %{"pullRequest" => %{"reviewThreads" => %{"nodes" => []}}}
-                }
-              })
-            else
-              conn
-              |> Plug.Conn.put_status(200)
-              |> Req.Test.json(%{
-                "data" => %{
-                  "repository" => %{
-                    "pullRequest" => %{
-                      "commits" => %{
-                        "nodes" => [
-                          %{
-                            "commit" => %{
-                              "statusCheckRollup" => %{"contexts" => %{"nodes" => contexts}}
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }
-              })
-            end
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end
+      signals_stub(
+        pulls: [pull(number, title: title, html_url: "x")],
+        nodes: %{
+          number =>
+            pr_node(
+              reviews: [%{"state" => "APPROVED", "author" => %{"login" => "a"}}],
+              contexts: contexts
+            )
+        }
+      )
     end
 
     test "settled required check FAILURE on an approved PR → 1 task, CI triage protocol included",
@@ -895,33 +899,15 @@ defmodule Arbiter.Workflows.PRPatrolTest do
           }
         })
 
-      stub(fn conn ->
-        cond do
-          conn.request_path == "/repos/owner/explicit-repo/pulls" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([
-              %{
-                "number" => 60,
-                "title" => "multi-repo PR",
-                "html_url" => "https://gh/pr/60"
-              }
-            ])
-
-          conn.request_path == "/repos/owner/explicit-repo/pulls/60/reviews" ->
-            conn
-            |> Plug.Conn.put_status(200)
-            |> Req.Test.json([
-              %{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}
-            ])
-
-          conn.request_path == "/repos/owner/explicit-repo/pulls/60/comments" ->
-            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
-
-          true ->
-            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
-        end
-      end)
+      stub(
+        signals_stub(
+          repo: "owner/explicit-repo",
+          pulls: [pull(60, title: "multi-repo PR", html_url: "https://gh/pr/60")],
+          nodes: %{
+            60 => pr_node(reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}])
+          }
+        )
+      )
 
       name = String.to_atom("PRPatrol_multirepo_#{System.unique_integer([:positive])}")
 
@@ -1553,36 +1539,121 @@ defmodule Arbiter.Workflows.PRPatrolTest do
 
   # ---- helpers ----
 
-  # Stub the `/pulls` list (carrying `user.login` so PRPatrol can resolve the
-  # MR author) plus a CHANGES_REQUESTED review for `number`, so the only
-  # variable under test is the author gate.
-  defp pulls_stub(number, author_login) do
-    stub(fn conn ->
+  # A single GraphQL PullRequest node in the shape the batched query (bd-3byp1n)
+  # fetches: reviews (→ changes_requested), reviewThreads (isResolved), and the
+  # head commit's statusCheckRollup contexts (isRequired). All lists default
+  # empty. `:cr` is a shorthand for one CHANGES_REQUESTED review.
+  defp pr_node(opts) do
+    reviews =
       cond do
-        conn.request_path == "/repos/owner/repo/pulls" ->
-          conn
-          |> Plug.Conn.put_status(200)
-          |> Req.Test.json([
-            %{
-              "number" => number,
-              "title" => "t#{number}",
-              "html_url" => "https://gh/pr/#{number}",
-              "user" => %{"login" => author_login}
+        opts[:reviews] -> opts[:reviews]
+        opts[:cr] -> [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
+        true -> []
+      end
+
+    %{
+      "reviews" => %{"nodes" => reviews},
+      "reviewThreads" => %{"nodes" => Keyword.get(opts, :threads, [])},
+      "commits" => %{
+        "nodes" => [
+          %{
+            "commit" => %{
+              "statusCheckRollup" => %{
+                "contexts" => %{"nodes" => Keyword.get(opts, :contexts, [])}
+              }
             }
-          ])
+          }
+        ]
+      }
+    }
+  end
 
-        conn.request_path == "/repos/owner/repo/pulls/#{number}/reviews" ->
+  # Build the `%{"data" => ...}` batched-signals response by MIRRORING the
+  # aliased GraphQL query the adapter POSTed: walk its lines, map each `r<j>:
+  # repository(` block and the `p<k>: pullRequest(number: N)` aliases inside it,
+  # and nest the per-number node from `by_number` under `data[ralias][palias]`.
+  # A number absent from `by_number` yields a `null` node (partial-failure path).
+  # Decoupled from the adapter's exact alias scheme.
+  defp batch_data_from_query(query, by_number) do
+    {data, _cur} =
+      query
+      |> String.split("\n")
+      |> Enum.reduce({%{}, nil}, fn line, {data, cur} ->
+        cond do
+          m = Regex.run(~r/(\w+):\s*repository\(/, line) ->
+            [_, ralias] = m
+            {Map.put(data, ralias, %{}), ralias}
+
+          m = Regex.run(~r/(\w+):\s*pullRequest\(number:\s*(\d+)\)/, line) ->
+            [_, palias, num] = m
+            node = Map.get(by_number, String.to_integer(num))
+            {put_in(data, [cur, palias], node), cur}
+
+          true ->
+            {data, cur}
+        end
+      end)
+
+    %{"data" => data}
+  end
+
+  # A full stub for a PRPatrol sweep that batches its signals (bd-3byp1n):
+  #   * GET  /repos/<repo>/pulls   → the open-PR list from `pulls`
+  #   * POST /graphql              → the batched signals response, mirrored from
+  #                                  the aliased query and `nodes` (number → node)
+  # `opts`: repo (default "owner/repo"), pulls (list payload), nodes (map),
+  # graphql_counter (optional :counters ref bumped once per /graphql POST).
+  defp signals_stub(opts) do
+    repo = Keyword.get(opts, :repo, "owner/repo")
+    pulls = Keyword.get(opts, :pulls, [])
+    nodes = Keyword.get(opts, :nodes, %{})
+    counter = Keyword.get(opts, :graphql_counter)
+
+    fn conn ->
+      cond do
+        conn.request_path == "/repos/#{repo}/pulls" and conn.method == "GET" ->
+          conn |> Plug.Conn.put_status(200) |> Req.Test.json(pulls)
+
+        conn.method == "POST" and conn.request_path == "/graphql" ->
+          if counter, do: :counters.add(counter, 1, 1)
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          query = Jason.decode!(body)["query"]
+
           conn
           |> Plug.Conn.put_status(200)
-          |> Req.Test.json([%{"state" => "CHANGES_REQUESTED"}])
-
-        conn.request_path == "/repos/owner/repo/pulls/#{number}/comments" ->
-          conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+          |> Req.Test.json(batch_data_from_query(query, nodes))
 
         true ->
           conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
       end
+    end
+  end
+
+  # A `/pulls` payload entry.
+  defp pull(number, opts \\ []) do
+    %{
+      "number" => number,
+      "title" => Keyword.get(opts, :title, "t#{number}"),
+      "html_url" => Keyword.get(opts, :html_url, "https://gh/pr/#{number}")
+    }
+    |> then(fn m ->
+      case Keyword.get(opts, :author) do
+        nil -> m
+        login -> Map.put(m, "user", %{"login" => login})
+      end
     end)
+  end
+
+  # Stub the `/pulls` list (carrying `user.login` so PRPatrol can resolve the MR
+  # author) plus a batched CHANGES_REQUESTED signal for `number`, so the only
+  # variable under test is the author gate.
+  defp pulls_stub(number, author_login) do
+    stub(
+      signals_stub(
+        pulls: [pull(number, author: author_login)],
+        nodes: %{number => pr_node(cr: true)}
+      )
+    )
   end
 
   # PRPatrol follow-ups link their source PR via `source_pr` (and carry

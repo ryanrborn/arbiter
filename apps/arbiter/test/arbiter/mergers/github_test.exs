@@ -2080,6 +2080,280 @@ defmodule Arbiter.Mergers.GithubTest do
     end
   end
 
+  describe "batch_pr_signals/1 (bd-3byp1n)" do
+    # A single GraphQL PullRequest node in the shape the batched query fetches:
+    # reviews (for changes_requested), reviewThreads (isResolved), and the head
+    # commit's statusCheckRollup contexts (isRequired). Any list defaults empty.
+    defp pr_node(opts) do
+      %{
+        "reviews" => %{"nodes" => Keyword.get(opts, :reviews, [])},
+        "reviewThreads" => %{"nodes" => Keyword.get(opts, :threads, [])},
+        "commits" => %{
+          "nodes" => [
+            %{
+              "commit" => %{
+                "statusCheckRollup" => %{
+                  "contexts" => %{"nodes" => Keyword.get(opts, :contexts, [])}
+                }
+              }
+            }
+          ]
+        }
+      }
+    end
+
+    # Build the `%{"data" => ...}` response by MIRRORING the aliased query the
+    # adapter POSTed — walk its lines, map each `r<j>: repository(` block and the
+    # `p<k>: pullRequest(number: N)` aliases inside it, and nest the per-number
+    # node from `by_number` under `data[ralias][palias]`. Decoupled from the
+    # adapter's exact alias scheme: whatever aliases it emits, the response
+    # echoes them. A number absent from `by_number` yields a `null` node (used
+    # to exercise the partial-failure path).
+    defp batch_data_from_query(query, by_number) do
+      {data, _cur} =
+        query
+        |> String.split("\n")
+        |> Enum.reduce({%{}, nil}, fn line, {data, cur} ->
+          cond do
+            m = Regex.run(~r/(\w+):\s*repository\(/, line) ->
+              [_, ralias] = m
+              {Map.put(data, ralias, %{}), ralias}
+
+            m = Regex.run(~r/(\w+):\s*pullRequest\(number:\s*(\d+)\)/, line) ->
+              [_, palias, num] = m
+              node = Map.get(by_number, String.to_integer(num))
+              {put_in(data, [cur, palias], node), cur}
+
+            true ->
+              {data, cur}
+          end
+        end)
+
+      %{"data" => data}
+    end
+
+    test "issues ONE GraphQL request aliasing every PR across every repo" do
+      counter = :counters.new(1, [])
+
+      by_number = %{
+        # CHANGES_REQUESTED verdict → changes_requested: true
+        42 =>
+          pr_node(
+            reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}]
+          ),
+        # COMMENTED only, but one unresolved inline thread → review_threads: [_]
+        43 =>
+          pr_node(
+            reviews: [%{"state" => "COMMENTED", "author" => %{"login" => "copilot"}}],
+            threads: [
+              %{
+                "id" => "RT_43",
+                "isResolved" => false,
+                "path" => "lib/x.ex",
+                "line" => 9,
+                "comments" => %{
+                  "nodes" => [%{"databaseId" => 1, "body" => "nit", "author" => %{"login" => "copilot"}}]
+                }
+              }
+            ]
+          ),
+        # settled, required, failing CheckRun → required_check_failures: [_]
+        7 =>
+          pr_node(
+            contexts: [
+              %{
+                "__typename" => "CheckRun",
+                "name" => "ci-required",
+                "status" => "COMPLETED",
+                "conclusion" => "FAILURE",
+                "detailsUrl" => "https://gh/runs/7",
+                "isRequired" => true
+              }
+            ]
+          )
+      }
+
+      stub(fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/graphql"
+        :counters.add(counter, 1, 1)
+
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        query = decoded["query"]
+
+        # One repository() alias per distinct repo, one pullRequest() per PR.
+        assert length(Regex.scan(~r/\w+:\s*repository\(/, query)) == 2
+        assert length(Regex.scan(~r/\w+:\s*pullRequest\(number:/, query)) == 3
+        # isRequired must be resolved per PR (task requirement 3): it cannot be
+        # hoisted to a shared value because it resolves against each PR's branch
+        # protection. The literal number appears in each context's isRequired.
+        assert query =~ "isRequired(pullRequestNumber: 42)"
+        assert query =~ "isRequired(pullRequestNumber: 43)"
+        assert query =~ "isRequired(pullRequestNumber: 7)"
+
+        # Points-budget guard (bd-3byp1n): the batch fetches only the opening
+        # comment per thread (`first: 1`), NOT the full 100×100 comment tree the
+        # single-PR query pulls — PRPatrol needs only the unresolved-thread count.
+        # And it probes `rateLimit { cost }` so the sweep's points are observable.
+        assert query =~ "comments(first: 1)"
+        refute query =~ "comments(first: 100)"
+        assert query =~ "rateLimit { cost"
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(batch_data_from_query(query, by_number))
+      end)
+
+      refs = ["octo/widget#42", "octo/widget#43", "octo/other#7"]
+
+      assert {:ok, signals} = Github.batch_pr_signals(refs)
+      assert :counters.get(counter, 1) == 1, "a batched sweep must issue exactly one GraphQL request"
+
+      assert %{changes_requested: true, review_threads: [], required_check_failures: []} =
+               signals["octo/widget#42"]
+
+      assert %{changes_requested: false, review_threads: [thread], required_check_failures: []} =
+               signals["octo/widget#43"]
+
+      assert thread.id == "RT_43"
+      assert thread.author == "copilot"
+
+      assert %{changes_requested: false, review_threads: [], required_check_failures: [check]} =
+               signals["octo/other#7"]
+
+      assert check.name == "ci-required"
+      assert check.url == "https://gh/runs/7"
+    end
+
+    test "per-PR signals are identical to the unbatched per-PR callbacks" do
+      # Same PR fetched two ways: batched vs. the three legacy per-PR callbacks.
+      # The batched decomposition must agree with each unbatched path exactly.
+      node =
+        pr_node(
+          reviews: [
+            %{"state" => "COMMENTED", "author" => %{"login" => "bob"}},
+            %{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "alice"}}
+          ],
+          threads: [
+            %{
+              "id" => "RT_1",
+              "isResolved" => false,
+              "path" => "lib/a.ex",
+              "line" => 2,
+              "comments" => %{
+                "nodes" => [%{"databaseId" => 10, "body" => "hmm", "author" => %{"login" => "alice"}}]
+              }
+            },
+            %{"id" => "RT_2", "isResolved" => true, "comments" => %{"nodes" => []}}
+          ],
+          contexts: [
+            %{
+              "__typename" => "StatusContext",
+              "context" => "legacy/ci",
+              "state" => "FAILURE",
+              "description" => "boom",
+              "targetUrl" => "https://ci/1",
+              "isRequired" => true
+            }
+          ]
+        )
+
+      stub(fn conn ->
+        cond do
+          # Legacy list_review_feedback/1 — REST reviews (verdict states) +
+          # comments. Mirror the same reviews the node carries.
+          conn.request_path == "/repos/octo/widget/pulls/99/reviews" ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json([
+              %{"state" => "COMMENTED", "user" => %{"login" => "bob"}},
+              %{"state" => "CHANGES_REQUESTED", "user" => %{"login" => "alice"}}
+            ])
+
+          conn.request_path == "/repos/octo/widget/pulls/99/comments" ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          # Every GraphQL POST: the batched query is aliased (`r0:`/`p0:`); the
+          # two single-PR queries are not. Answer whichever shape was asked for
+          # from the SAME source node, so batched vs. per-PR read identical data.
+          conn.request_path == "/graphql" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            query = Jason.decode!(body)["query"]
+
+            resp =
+              cond do
+                query =~ ~r/\w+:\s*repository\(/ -> batch_data_from_query(query, %{99 => node})
+                true -> %{"data" => %{"repository" => %{"pullRequest" => node}}}
+              end
+
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json(resp)
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{})
+        end
+      end)
+
+      ref = "octo/widget#99"
+
+      assert {:ok, %{^ref => batched}} = Github.batch_pr_signals([ref])
+
+      {:ok, %{changes_requested: legacy_cr}} = Github.list_review_feedback(ref)
+      {:ok, legacy_threads} = Github.list_open_review_threads(ref)
+      {:ok, legacy_checks} = Github.list_required_check_failures(ref)
+
+      assert batched.changes_requested == legacy_cr
+      assert length(batched.review_threads) == length(legacy_threads)
+      assert Enum.map(batched.review_threads, & &1.id) == Enum.map(legacy_threads, & &1.id)
+      assert Enum.map(batched.required_check_failures, & &1.name) ==
+               Enum.map(legacy_checks, & &1.name)
+    end
+
+    test "partial failure: a null node is omitted so the caller can fall back per-PR" do
+      # Node for 42 present; 44 comes back null with a top-level error naming its
+      # path. The batch returns 42's signals and simply omits 44 — the caller
+      # then re-fetches 44 through the per-PR path.
+      by_number = %{
+        42 => pr_node(reviews: [%{"state" => "CHANGES_REQUESTED", "author" => %{"login" => "a"}}])
+      }
+
+      stub(fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        query = Jason.decode!(body)["query"]
+        base = batch_data_from_query(query, by_number)
+
+        payload =
+          Map.put(base, "errors", [
+            %{"message" => "Could not resolve to a PullRequest with the number of 44."}
+          ])
+
+        conn |> Plug.Conn.put_status(200) |> Req.Test.json(payload)
+      end)
+
+      assert {:ok, signals} = Github.batch_pr_signals(["octo/widget#42", "octo/widget#44"])
+      assert Map.has_key?(signals, "octo/widget#42")
+      refute Map.has_key?(signals, "octo/widget#44")
+      assert signals["octo/widget#42"].changes_requested == true
+    end
+
+    test "total failure (errors and no data) surfaces {:error, %Error{}}" do
+      stub(fn conn ->
+        conn
+        |> Plug.Conn.put_status(200)
+        |> Req.Test.json(%{"errors" => [%{"message" => "Bad credentials"}]})
+      end)
+
+      assert {:error, %Error{message: "Bad credentials"}} =
+               Github.batch_pr_signals(["octo/widget#42"])
+    end
+
+    test "empty ref list makes no request and returns {:ok, %{}}" do
+      counter = :counters.new(1, [])
+      stub(fn conn -> :counters.add(counter, 1, 1); Req.Test.json(conn, %{}) end)
+
+      assert {:ok, %{}} = Github.batch_pr_signals([])
+      assert :counters.get(counter, 1) == 0
+    end
+  end
+
   # Minimal git repo whose `origin` remote is set to the given URL, so
   # RepoResolver.from_remote/1 can derive {owner, repo}.
   defp tmp_git_repo(origin_url) do
