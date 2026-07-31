@@ -3,6 +3,8 @@ defmodule Arbiter.Workflows.MergeQueueTest do
   # in async mode.
   use Arbiter.DataCase, async: false
 
+  import ExUnit.CaptureLog
+
   alias Arbiter.Tasks.Issue
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Worker.TargetBranch
@@ -884,6 +886,121 @@ defmodule Arbiter.Workflows.MergeQueueTest do
 
       reloaded = Ash.get!(Issue, task.id)
       assert reloaded.status == :closed
+    end
+  end
+
+  # bd-6w7j8h: an adopted item whose first `adapter.get` hits a transient error
+  # (e.g. the forge briefly 500s/404s in the split-second right after an
+  # external Watchdog auto-merge, exactly the window `adopt_existing_mr/4`
+  # plants into) used to be marked `:failed` permanently and silently — no log
+  # line, and `poll_item/2` short-circuits `:failed` items forever afterward.
+  # A one-off hiccup then stranded the task's PR-already-merged item forever,
+  # even though the very next tick would have seen `status: :merged` and
+  # closed it via the healthy bd-d1jp4r clause. The fix: log the error, and
+  # don't let a single poll error be terminal — keep the item's status so the
+  # next tick retries.
+  describe "poll error must not permanently strand an item (bd-6w7j8h)" do
+    @tag workspace_config: @ws_github
+    test "a transient adapter.get error on one tick does not block a later merged-close", %{
+      workspace: ws,
+      task: task
+    } do
+      pr_number = 301
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      # First tick: the forge errors transiently (e.g. a brief 500 in the
+      # eventual-consistency window right after an external merge).
+      stub(fn conn ->
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "server error"})
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      log =
+        capture_log(fn ->
+          :ok = MergeQueue.tick(name)
+        end)
+
+      assert log =~ task.id
+      assert log =~ "##{pr_number}"
+
+      # The item must still be present and still pollable — NOT permanently
+      # `:failed` — so the next tick gets a real chance to observe `:merged`.
+      %{items: [item]} = MergeQueue.state(name)
+      refute item.status == :failed
+
+      # Second tick: the forge has recovered and reports the PR merged.
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(
+              pr_payload(%{
+                "number" => pr_number,
+                "state" => "closed",
+                "merged" => true,
+                "merged_at" => "2026-07-30T20:44:36Z",
+                "mergeStateStatus" => "UNKNOWN"
+              })
+            )
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      :ok = MergeQueue.tick(name)
+
+      %{items: items} = MergeQueue.state(name)
+      assert items == []
+
+      reloaded = Ash.get!(Issue, task.id)
+      assert reloaded.status == :closed
+    end
+
+    @tag workspace_config: @ws_github
+    test "every item logs at least once on its first poll", %{workspace: ws, task: task} do
+      pr_number = 302
+      {:ok, task} = Ash.update(task, %{pr_ref: "##{pr_number}"}, action: :update)
+
+      stub(fn conn ->
+        cond do
+          conn.method == "GET" and String.ends_with?(conn.request_path, "/reviews") ->
+            conn |> Plug.Conn.put_status(200) |> Req.Test.json([])
+
+          conn.method == "GET" and String.contains?(conn.request_path, "/pulls/#{pr_number}") ->
+            conn
+            |> Plug.Conn.put_status(200)
+            |> Req.Test.json(pr_payload(%{"number" => pr_number}))
+
+          true ->
+            conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "unexpected"})
+        end
+      end)
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      # The first-poll marker logs at :info (visible under prod's configured
+      # level); test config runs at :warning, so raise it for this capture —
+      # capture_log's own :level option only filters what it captures, it
+      # can't override the process-wide Logger.level/0 floor.
+      prior_level = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: prior_level) end)
+
+      log =
+        capture_log(fn ->
+          :ok = MergeQueue.tick(name)
+        end)
+
+      assert log =~ task.id
+      assert log =~ "##{pr_number}"
     end
   end
 

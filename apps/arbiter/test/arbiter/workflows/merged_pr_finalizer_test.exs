@@ -5,6 +5,29 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   alias Arbiter.Workflows.MergedPRFinalizer
   require Ash.Query
 
+  # A minimal real GenServer double for `Arbiter.Worker` — just enough to
+  # answer the `:snapshot` call `Worker.state/1` makes (bd-6w7j8h) and to
+  # behave like any ordinary GenServer under `GenServer.stop/1` (the `:close`
+  # action's `StopWorker` after-action calls this once the task closes). A
+  # bare `spawn`ed process handling only the raw `$gen_call` protocol doesn't
+  # understand `GenServer.stop`'s system-message handshake and hangs forever
+  # under it — a real (if trivial) GenServer avoids that entirely.
+  defmodule FakeWorker do
+    use GenServer
+
+    def start_link(task_id, status) do
+      GenServer.start_link(__MODULE__, status, name: Arbiter.Worker.Registry.via_tuple(task_id))
+    end
+
+    @impl true
+    def init(status), do: {:ok, status}
+
+    @impl true
+    def handle_call(:snapshot, _from, status) do
+      {:reply, %{status: status}, status}
+    end
+  end
+
   @stub_name Arbiter.Mergers.Github.HTTP
 
   setup do
@@ -103,28 +126,13 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
   end
 
   # Register a dummy process as the live worker for `task_id`. The finalizer's
-  # live_worker?/1 uses Arbiter.Worker.whereis/1 (a lookup in Arbiter.Worker.Registry),
-  # so any pid registered under that Registry for the id makes the task "live".
-  defp register_live_worker(task_id) do
-    parent = self()
-
-    pid =
-      spawn(fn ->
-        {:ok, _} = Registry.register(Arbiter.Worker.Registry, task_id, nil)
-        send(parent, :registered)
-
-        receive do
-          :stop -> :ok
-        end
-      end)
-
-    receive do
-      :registered -> :ok
-    after
-      1_000 -> flunk("dummy worker did not register")
-    end
-
-    on_exit(fn -> send(pid, :stop) end)
+  # live_worker?/1 uses Arbiter.Worker.whereis/1 (a lookup in Arbiter.Worker.Registry)
+  # plus a Arbiter.Worker.state/1 snapshot (bd-6w7j8h), so this double answers
+  # the `:snapshot` GenServer.call the same way a real Worker would, reporting
+  # `status`. Defaults to `:running` — a genuinely active worker.
+  defp register_live_worker(task_id, status \\ :running) do
+    {:ok, pid} = FakeWorker.start_link(task_id, status)
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
     pid
   end
 
@@ -293,6 +301,29 @@ defmodule Arbiter.Workflows.MergedPRFinalizerTest do
       :ok = MergedPRFinalizer.tick(name)
 
       assert Ash.get!(Issue, task.id).status == :in_progress
+    end
+
+    # bd-6w7j8h: complete_now/2 never stops the Worker GenServer — the process
+    # lingers, still registered, at status: :completed until the task's
+    # `:close` action's after-action reaps it (Worker.stop, see worker.ex
+    # terminate/2). If the task never gets closed (e.g. the MergeQueue lost
+    # the item), this "done but not yet reaped" worker is exactly what
+    # MergedPRFinalizer is supposed to route around. Treating ANY registered
+    # pid as "live" — without checking whether it's still actually working —
+    # deadlocks the two safety nets against each other: the finalizer defers
+    # to "the live worker" to close the task, but the worker is only ever
+    # stopped as a side effect of the task closing.
+    test "a completed-but-not-yet-reaped worker does not block finalization", %{ws: ws} do
+      task = create_task(ws, "703")
+      {:ok, _} = Ash.update(task, %{status: :in_progress}, action: :update)
+      register_live_worker(task.id, :completed)
+
+      stub(pr_get_stub(703, :merged))
+
+      {_pid, name} = start_finalizer(ws)
+      :ok = MergedPRFinalizer.tick(name)
+
+      assert Ash.get!(Issue, task.id).status == :closed
     end
   end
 
