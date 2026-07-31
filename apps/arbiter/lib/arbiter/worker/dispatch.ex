@@ -2172,7 +2172,18 @@ defmodule Arbiter.Worker.Dispatch do
   # (`pr_body` field), which the MergeQueue reads back as `pr_body`. We use the
   # MCP tool rather than the `arb` escript so completion never depends on
   # `~/.local/bin/arb` being present (it is transiently deleted by test runs).
-  defp pr_body_step(%Issue{id: id}) do
+  defp pr_body_step(%Issue{id: id, tracker_type: tracker_type, tracker_ref: tracker_ref}) do
+    closes_guidance =
+      case {tracker_type, is_binary(tracker_ref) && Regex.match?(~r/^\d+$/, tracker_ref)} do
+        {:github, true} ->
+          "\n\n    For GitHub-tracked tasks, include a closing keyword `Closes ##{tracker_ref}`" <>
+            " in the References section — GitHub will auto-close the issue on merge, " <>
+            "acting as a backstop independent of Arbiter's own close mechanism."
+
+        _ ->
+          ""
+      end
+
     """
 
     Author the PR description and persist it on the task — the MergeQueue opens
@@ -2182,7 +2193,7 @@ defmodule Arbiter.Worker.Dispatch do
 
       * **Summary** — what changed and why, in a few sentences.
       * **Test plan** — the checks you ran, with checked boxes for what passed.
-      * **References** — the task id (#{id}) and any linked ticket/PRs.
+      * **References** — the task id (#{id}) and any linked ticket/PRs.#{closes_guidance}
 
     If the repo has a PR template (`.github/pull_request_template.md`), FILL it
     rather than discard it. Persist the finished body verbatim by calling the
