@@ -69,6 +69,7 @@ defmodule Arbiter.Workflows.PRPatrol do
   # whole lazy-stop. A genuine crash still exits abnormally and is restarted.
   use GenServer, restart: :transient
 
+  alias Arbiter.GitHub.Limiter
   alias Arbiter.Tasks.Issue
   alias Arbiter.{Mergers, Tasks.Workspace}
   alias Arbiter.Messages.Message
@@ -259,7 +260,16 @@ defmodule Arbiter.Workflows.PRPatrol do
 
   # ---- tick logic ----
 
+  # All GitHub traffic this tick issues is background (bd-3p5vqc): the forge
+  # polling here must yield to — and never starve — foreground work like a
+  # deploy or a PR merge. `with_priority/2` tags the current process for the
+  # duration of the tick; the GitHub clients read that ambient class at their
+  # request seam. Runs synchronously in the patrol process, so the tag applies.
   defp do_tick(state) do
+    Limiter.with_priority(:background, fn -> do_tick_body(state) end)
+  end
+
+  defp do_tick_body(state) do
     # Re-fetch the workspace on every tick so config changes (author_logins,
     # merge settings, etc.) take effect immediately without a GenServer restart.
     workspace =

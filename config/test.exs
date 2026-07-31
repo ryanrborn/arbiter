@@ -24,6 +24,12 @@ config :arbiter_web, ArbiterWeb.Endpoint,
 config :arbiter, Arbiter.Vault, key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 config :arbiter, :github_http_stub, true
+# The GitHub limiter's owning-account resolution and periodic /rate_limit poll
+# both make real HTTP calls; disable that probing in the suite so the app-wide
+# singleton never reaches out. Its priority/headroom/secondary logic is still
+# fully exercised (LimiterTest starts isolated instances; the integration tests
+# drive it via Req.Test stubs).
+config :arbiter, :github_limiter_probe, false
 config :arbiter, :jira_http_stub, true
 config :arbiter, :shortcut_http_stub, true
 config :arbiter, :gitlab_http_stub, true
