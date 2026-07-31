@@ -6,7 +6,9 @@ defmodule Arbiter.Worker.PrimarySyncTest do
   setup do
     unique = "ps009-#{:erlang.unique_integer([:positive])}"
     tmp = Path.join(System.tmp_dir!(), unique)
+    File.rm_rf!(tmp)
     File.mkdir_p!(tmp)
+    on_exit(fn -> File.rm_rf(tmp) end)
 
     remote = Path.join(tmp, "remote.git")
     {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
@@ -108,7 +110,9 @@ defmodule Arbiter.Worker.PrimarySyncTest do
 
   test "returns an error for a path that is not a git repo" do
     tmp = Path.join(System.tmp_dir!(), "ps009-notrepo-#{:erlang.unique_integer([:positive])}")
+    File.rm_rf!(tmp)
     File.mkdir_p!(tmp)
+    on_exit(fn -> File.rm_rf(tmp) end)
 
     assert {:error, _reason} = PrimarySync.fast_forward(tmp, "main")
   end

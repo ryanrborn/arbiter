@@ -443,8 +443,16 @@ defmodule Arbiter.Workflows.MergeQueue do
           strategy == "direct" ->
             # direct: never call MR/PR APIs. The worker owned the push + merge;
             # we just transition the task. This is the explicit escape hatch
-            # for personal projects that don't use the PR/MR workflow.
-            item = new_item(task_id, strategy, status: :done)
+            # for personal projects that don't use the PR/MR workflow. Still
+            # carry repo/base through so `safe_sync_primary_checkout/2` can
+            # resolve the primary checkout the same as every other strategy
+            # (bd-bqqnin finding 2 — direct was silently dead here).
+            item =
+              new_item(task_id, strategy,
+                status: :done,
+                repo: repo,
+                base: resolve_base(state, task)
+              )
             state = %{state | items: [item | state.items]}
             state = close_task_and_finalize(state, item)
             {:ok, state}
@@ -1143,7 +1151,10 @@ defmodule Arbiter.Workflows.MergeQueue do
 
       case resolve_primary_repo_path(state.workspace, item.repo) do
         nil ->
-          :ok
+          Logger.info(
+            "MergeQueue: primary-checkout sync skipped for task=#{item.task_id} " <>
+              "(no repo_paths entry for #{inspect(item.repo)})"
+          )
 
         repo_path when is_binary(base) ->
           case PrimarySync.fast_forward(repo_path, base) do
@@ -1161,8 +1172,11 @@ defmodule Arbiter.Workflows.MergeQueue do
               )
           end
 
-        _repo_path ->
-          :ok
+        repo_path ->
+          Logger.info(
+            "MergeQueue: primary-checkout sync skipped for task=#{item.task_id} " <>
+              "path=#{repo_path} (no base branch resolved)"
+          )
       end
     end
   rescue
