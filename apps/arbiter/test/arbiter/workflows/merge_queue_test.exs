@@ -1308,7 +1308,9 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       tmp =
         Path.join(System.tmp_dir!(), "mqps-#{System.unique_integer([:positive])}")
 
+      File.rm_rf!(tmp)
       File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf(tmp) end)
 
       remote = Path.join(tmp, "remote.git")
       {_, 0} = System.cmd("git", ["init", "-q", "--bare", "-b", "main", remote])
@@ -1408,6 +1410,29 @@ defmodule Arbiter.Workflows.MergeQueueTest do
       wait_until_closed(task_id)
 
       assert head(primary) == before
+    end
+
+    @tag workspace_config: %{
+           "merge" => %{"strategy" => "direct", "auto_sync_primary" => true},
+           "repo_paths" => %{"widget" => "__PRIMARY__"}
+         }
+    test "fast-forwards the primary checkout for the direct (no-PR) strategy too", %{
+      workspace: ws,
+      task: task,
+      primary: primary
+    } do
+      ws = update_repo_paths(ws, primary)
+      :ok = record_run(task, "widget")
+
+      {_pid, name} = start_merge_queue(ws)
+      :ok = MergeQueue.enqueue(name, task.id)
+
+      task_id = task.id
+      wait_until_closed(task_id)
+
+      {out, 0} = System.cmd("git", ["-C", primary, "rev-parse", "origin/main"])
+      assert head(primary) == String.trim(out)
+      assert File.exists?(Path.join(primary, "MERGED.md"))
     end
 
     defp update_repo_paths(ws, primary) do

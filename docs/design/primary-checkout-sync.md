@@ -48,7 +48,7 @@ only ever does a zero-risk fast-forward — the equivalent of
 1. Fetch `origin/<base>` fresh (reuses `Worktree.fetch_origin/2`).
 2. If the checkout isn't currently *on* `base_branch` → `{:skipped, :not_on_default_branch}`.
 3. If the working tree has any uncommitted changes (staged, unstaged, or
-   untracked — reuses `Worktree.has_uncommitted?/2`) → `{:skipped, :uncommitted_changes}`.
+   untracked — reuses `Worktree.has_uncommitted?/1`) → `{:skipped, :uncommitted_changes}`.
 4. Otherwise attempt `git merge --ff-only origin/<base>`. If history has
    diverged (or local is already ahead) → `{:skipped, :not_fast_forwardable}`.
 5. Already at the tip → `:ok`, no-op.

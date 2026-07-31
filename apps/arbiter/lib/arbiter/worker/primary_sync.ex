@@ -69,14 +69,22 @@ defmodule Arbiter.Worker.PrimarySync do
   end
 
   defp merge_ff_only(repo_path, base_branch) do
-    case run_git(["merge", "--ff-only", "origin/" <> base_branch], cd: repo_path) do
+    # Gate on ancestry explicitly rather than inferring "not fast-forwardable"
+    # from any non-zero `merge --ff-only` exit: that command also fails on
+    # index.lock contention (Dispatch runs `git worktree add` against this
+    # same repo concurrently), a repo left mid-merge/mid-rebase by a human,
+    # or `origin/<base>` failing to resolve — none of which are benign skips
+    # (bd-bqqnin finding 4).
+    case run_git(["merge-base", "--is-ancestor", "HEAD", "origin/" <> base_branch],
+           cd: repo_path
+         ) do
       {:ok, _output} ->
-        :ok
+        case run_git(["merge", "--ff-only", "origin/" <> base_branch], cd: repo_path) do
+          {:ok, _output} -> :ok
+          {:error, _} = err -> err
+        end
 
       {:error, {:git_failed, _msg}} ->
-        # `--ff-only` refuses for any non-fast-forward reason (diverged
-        # history, or local ahead of origin) — the only cases left once
-        # we're already on a clean `base_branch` checkout.
         {:skipped, :not_fast_forwardable}
     end
   end
