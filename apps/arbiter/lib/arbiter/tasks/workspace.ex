@@ -420,6 +420,29 @@ defmodule Arbiter.Tasks.Workspace do
   end
 
   @doc """
+  Whether a successful merge to a repo's default branch should fast-forward
+  that repo's *primary* local checkout (the shared directory registered in
+  `repo_paths`/`rig_paths` — not a worker's isolated worktree) to the new
+  `origin/<default>`, from `config["merge"]["auto_sync_primary"]`.
+
+  Defaults to `false`: fast-forwarding a checkout a human may have open is
+  only ever attempted when explicitly opted into, and even then only as a
+  safe fast-forward (see `Arbiter.Worker.PrimarySync`) — never one that could
+  discard uncommitted work or switch branches out from under someone.
+
+  Accepts both a real boolean and the string `"true"`/`"false"` that round-trip
+  through JSON workspace config. Anything else is treated as `false`.
+  """
+  @spec auto_sync_primary?(t()) :: boolean()
+  def auto_sync_primary?(workspace) do
+    case get_in(workspace.config || %{}, ["merge", "auto_sync_primary"]) do
+      true -> true
+      "true" -> true
+      _ -> false
+    end
+  end
+
+  @doc """
   PR/MR title formatting convention for this workspace.
 
   Read from `config["merge"]["pr_title_format"]`:

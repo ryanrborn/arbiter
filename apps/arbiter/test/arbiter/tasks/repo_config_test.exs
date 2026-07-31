@@ -58,4 +58,29 @@ defmodule Arbiter.Tasks.RepoConfigTest do
       assert RepoConfig.repo_target_from_config(nil) == nil
     end
   end
+
+  describe "find_path/2" do
+    test "returns the path for an exact key match" do
+      map = %{"widget" => "/home/dev/widget"}
+      assert RepoConfig.find_path(map, "widget") == "/home/dev/widget"
+    end
+
+    test "resolves object-form entries too" do
+      map = %{"widget" => %{"path" => "/home/dev/widget", "target_branch" => "main"}}
+      assert RepoConfig.find_path(map, "widget") == "/home/dev/widget"
+    end
+
+    test "falls back to a normalized (underscore/hyphen-insensitive) match" do
+      map = %{"verus_server" => "/home/dev/verus_server"}
+      assert RepoConfig.find_path(map, "verus-server") == "/home/dev/verus_server"
+    end
+
+    test "returns nil when the repo isn't registered" do
+      assert RepoConfig.find_path(%{"widget" => "/home/dev/widget"}, "other") == nil
+    end
+
+    test "returns nil for a non-map" do
+      assert RepoConfig.find_path(nil, "widget") == nil
+    end
+  end
 end
