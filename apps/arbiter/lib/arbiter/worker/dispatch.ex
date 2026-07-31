@@ -1038,21 +1038,7 @@ defmodule Arbiter.Worker.Dispatch do
   # "owner/verus_server") must still resolve against a `repo_paths` entry
   # registered under a differently-separated key (e.g. "owner/verus-server").
   # See bd-6rioa4.
-  defp find_repo_path(map, repo) when is_map(map) and is_binary(repo) do
-    case Map.get(map, repo) do
-      nil ->
-        target = RepoConfig.normalize_slug(repo)
-
-        Enum.find_value(map, fn {k, v} ->
-          if RepoConfig.normalize_slug(k) == target, do: repo_path_from_config(v)
-        end)
-
-      raw ->
-        repo_path_from_config(raw)
-    end
-  end
-
-  defp find_repo_path(_map, _repo), do: nil
+  defp find_repo_path(map, repo), do: RepoConfig.find_path(map, repo)
 
   defp load_workspace_config(ws_id) do
     case Ash.get(Workspace, ws_id) do
