@@ -606,8 +606,12 @@ defmodule Arbiter.Workflows.MergeQueue do
   # The task is fetched fresh via `Ash.get/2` in `do_enqueue/2`, which selects
   # all attributes — so `pr_body` and `description` are loaded, never silently
   # nil from a partial select.
+  #
+  # Additionally, for tasks with github tracker_refs, ensures the PR body
+  # includes a Closes keyword for GitHub's native auto-close mechanism (bd-1070).
   defp pr_description_for(%Issue{} = task) do
-    present(task.pr_body) || present(task.description) || PRTemplate.default_body(task)
+    body = present(task.pr_body) || present(task.description) || PRTemplate.default_body(task)
+    PRTemplate.ensure_closes_keyword(body, task)
   end
 
   # A string is "present" when it's a non-blank binary; nil/""/whitespace-only

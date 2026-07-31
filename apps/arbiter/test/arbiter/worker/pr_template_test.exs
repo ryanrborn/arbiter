@@ -410,4 +410,140 @@ defmodule Arbiter.Worker.PRTemplateTest do
       assert out =~ "after"
     end
   end
+
+  describe "ensure_closes_keyword/2 — backstop for custom PR bodies" do
+    test "appends Closes #N to a custom pr_body for github-tracked tasks with numeric ref" do
+      task = %Issue{
+        id: "bd-6v2my2",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :github,
+        tracker_ref: "1059"
+      }
+
+      custom_body = "## Summary\n\nFixed the issue.\n\n## References\n\n- Task: bd-6v2my2"
+
+      out = PRTemplate.ensure_closes_keyword(custom_body, task)
+      assert out =~ "Closes #1059"
+      assert out =~ "Task: bd-6v2my2"
+      # Shouldn't duplicate the Closes keyword if already present
+      refute out =~ "Closes.*Closes"
+    end
+
+    test "regression fixture: bd-6v2my2 / tracker_ref 1059 gets Closes added" do
+      # This is the regression case from the task description:
+      # PR #1064 for bd-6v2my2 (tracker_ref: 1059) was missing Closes #1059
+      task = %Issue{
+        id: "bd-6v2my2",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :github,
+        tracker_ref: "1059"
+      }
+
+      # This is what a worker wrote manually (without Closes keyword)
+      custom_body = """
+      ## Summary
+
+      This is the fix for the issue.
+
+      ## References
+
+      - Task: bd-6v2my2
+      - Related protocol: bd-76ydsu (reply-then-resolve), bd-7ezcqb (no dangling deferral promises)
+      - Regression fixture: `lt-divfvo` → `leo-technologies-llc/verus_server#3682`
+      """
+
+      out = PRTemplate.ensure_closes_keyword(custom_body, task)
+      # Should now include the Closes keyword
+      assert out =~ "Closes #1059"
+      # Should preserve the original content
+      assert out =~ "Task: bd-6v2my2"
+      assert out =~ "Related protocol"
+      assert out =~ "Regression fixture"
+    end
+
+    test "doesn't add Closes if it's already in the custom pr_body" do
+      task = %Issue{
+        id: "bd-6v2my2",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :github,
+        tracker_ref: "1059"
+      }
+
+      custom_body = "## Summary\n\nFixed the issue.\n\nCloses #1059"
+
+      out = PRTemplate.ensure_closes_keyword(custom_body, task)
+      # Should contain exactly one Closes keyword
+      assert out =~ "Closes #1059"
+      assert out |> String.split("Closes") |> length() == 2
+    end
+
+    test "doesn't add Closes for non-github trackers" do
+      task = %Issue{
+        id: "bd-6v2my2",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :jira,
+        tracker_ref: "VR-1059"
+      }
+
+      custom_body = "## Summary\n\nFixed the issue.\n\n## References\n\n- Task: bd-6v2my2"
+
+      out = PRTemplate.ensure_closes_keyword(custom_body, task)
+      refute out =~ "Closes"
+      assert out == custom_body
+    end
+
+    test "doesn't add Closes for github tasks with non-numeric tracker_ref" do
+      task = %Issue{
+        id: "bd-6v2my2",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :github,
+        tracker_ref: "gh-1059"
+      }
+
+      custom_body = "## Summary\n\nFixed the issue.\n\n## References\n\n- Task: bd-6v2my2"
+
+      out = PRTemplate.ensure_closes_keyword(custom_body, task)
+      refute out =~ "Closes"
+      assert out == custom_body
+    end
+
+    test "Jira-tracked task with custom pr_body: no Closes keyword added" do
+      task = %Issue{
+        id: "bd-test",
+        title: "Fix thing",
+        priority: 2,
+        issue_type: :task,
+        tracker_type: :jira,
+        tracker_ref: "VR-1059"
+      }
+
+      custom_body = """
+      ## Summary
+
+      Fixed the issue.
+
+      ## References
+
+      - Task: bd-test
+      - Jira Issue: VR-1059
+      """
+
+      out = PRTemplate.ensure_closes_keyword(custom_body, task)
+      # Should not add Closes for Jira trackers
+      refute out =~ "Closes"
+      # Should preserve the original content
+      assert out =~ "Task: bd-test"
+      assert out =~ "VR-1059"
+    end
+  end
 end
