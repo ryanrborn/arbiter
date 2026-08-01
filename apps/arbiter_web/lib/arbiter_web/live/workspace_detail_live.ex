@@ -11,7 +11,24 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       strategy, routing policy, review required), patched atomically through
       the `:patch_config` action so siblings (e.g. `agent.config`,
       `agent.security`) are preserved. The resolved security posture is
-      surfaced read-only underneath; edit it with `arb config set`.
+      surfaced above the security editor below.
+    * **Agent model config** (`agent.config.*`) — `model`, the tier → model
+      map, per-thinking-level argv, per-provider tier overrides, and
+      `credentials_ref`. The credential field is a **select over the
+      workspace's existing secret names** (`secret:<key>`), never a free-text
+      field that could take a raw token: secret *values* are write-only and
+      live in their own encrypted attribute.
+    * **Advanced / security** (`agent.security.*`) — deliberately a separate,
+      collapsed section rather than one more toggle beside the routine
+      merge/review switches, because these fields decide what a dispatched
+      worker may do to this host. The *resolved* posture (what actually
+      applies after the base → install → workspace layering in
+      `Arbiter.Agents.SecurityPolicy`) is shown above the editor, and any
+      submit that would strip a guard — a `safe_defaults` category, the
+      sandbox, worktree filesystem scoping, an operator deny rule, or the
+      network cut-off — is refused on first submit and re-presented as an
+      explicit confirmation naming exactly what is being given up. Only the
+      confirm click writes. See `security_downgrades/2`.
     * **Standing orders** — add/remove individual orders without clobbering the
       list (`config.standing_orders`).
     * **Secrets** — the *names* of configured secrets only; set/rm via a modal.
@@ -33,7 +50,24 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspace.Changes.PatchConfig
   alias Arbiter.Tasks.Workspace.Changes.ValidateConfig
+
+  # The model tiers (`agent.config.tier_models`) and thinking levels
+  # (`agent.config.thinking_argv`) every adapter defines. They are only the
+  # *baseline* row set: operators routinely add keys of their own (real
+  # workspaces carry `tier_models.flagship` and `thinking_argv.xhigh`, neither
+  # of which appears anywhere in this codebase), so the rendered rows are the
+  # baseline unioned with whatever the workspace actually stores — see
+  # `model_tiers/1` / `thinking_levels/1`. Hiding an unknown key would leave
+  # config only `arb config set` can reach.
+  @base_model_tiers ~w[economy standard premium]
+  @base_thinking_levels ~w[low medium high]
+
+  # `thinking_argv["none"]` is inert: every adapter's `thinking_argv/1` returns
+  # `[]` for "none" before it ever consults the overrides. No row, and the key
+  # is left untouched rather than being unset by a blank field.
+  @inert_thinking_levels ~w[none]
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -51,11 +85,17 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:config_error, nil)
          |> assign(:order_error, nil)
          |> assign(:details_error, nil)
+         |> assign(:agent_config_error, nil)
+         |> assign(:security_error, nil)
+         |> assign(:security_confirm, nil)
          |> assign(:tracker_types, Workspace.valid_tracker_types())
          |> assign(:merger_strategies, Workspace.valid_merger_strategies())
          |> assign(:agent_types, Agents.valid_agent_types())
          |> assign(:routing_policies, Routing.valid_policies())
          |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
+         |> assign(:security_modes, SecurityPolicy.valid_modes())
+         |> assign(:security_filesystems, SecurityPolicy.valid_filesystems())
+         |> assign(:safe_default_categories, SecurityPolicy.safe_default_categories())
          |> load_derived()}
 
       _ ->
@@ -211,6 +251,140 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       {:error, msg} ->
         {:noreply, assign(socket, :config_error, msg)}
     end
+  end
+
+  # ---- agent.config.* (model / tier_models / thinking_argv / credentials) ----
+
+  def handle_event("save_agent_config", %{"agent_config" => params}, socket) do
+    {patch, unset} =
+      agent_config_patch(params, socket.assigns.model_tiers, socket.assigns.thinking_levels)
+
+    case patch_config(socket.assigns.workspace, patch, unset) do
+      {:ok, ws} ->
+        {:noreply,
+         socket
+         |> assign(:workspace, ws)
+         |> assign(:agent_config_error, nil)
+         |> load_derived()
+         |> put_flash(:info, "Agent config saved.")}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :agent_config_error, msg)}
+    end
+  end
+
+  def handle_event(
+        "add_provider_override",
+        %{"provider_override" => %{"provider" => provider, "tier" => tier, "model" => model}},
+        socket
+      ) do
+    model = blank_to_nil(model)
+
+    cond do
+      provider not in socket.assigns.agent_types ->
+        {:noreply, assign(socket, :agent_config_error, "Unknown provider #{inspect(provider)}.")}
+
+      tier not in socket.assigns.model_tiers ->
+        {:noreply, assign(socket, :agent_config_error, "Unknown model tier #{inspect(tier)}.")}
+
+      is_nil(model) ->
+        {:noreply, assign(socket, :agent_config_error, "Override model can't be empty.")}
+
+      true ->
+        patch = %{
+          "agent" => %{
+            "config" => %{provider => %{"tier_models" => %{tier => model}}}
+          }
+        }
+
+        case patch_config(socket.assigns.workspace, patch, []) do
+          {:ok, ws} ->
+            {:noreply,
+             socket
+             |> assign(:workspace, ws)
+             |> assign(:agent_config_error, nil)
+             |> load_derived()}
+
+          {:error, msg} ->
+            {:noreply, assign(socket, :agent_config_error, msg)}
+        end
+    end
+  end
+
+  def handle_event("rm_provider_override", %{"provider" => provider, "tier" => tier}, socket) do
+    ws = socket.assigns.workspace
+
+    remaining =
+      ws
+      |> cfg(["agent", "config", provider, "tier_models"], %{})
+      |> then(fn m -> if is_map(m), do: m, else: %{} end)
+      |> Map.delete(tier)
+
+    # Deep-merge can't delete a map key, so the whole sub-map is unset first
+    # and the survivors merged back. `provider` comes from the fixed
+    # `Agents.valid_agent_types/0` list, so the dotted path can't be widened
+    # by a name containing "." (cf. the review_automation.repo_overrides fix).
+    patch = %{"agent" => %{"config" => %{provider => %{"tier_models" => remaining}}}}
+
+    if provider in socket.assigns.agent_types do
+      case patch_config(ws, patch, ["agent.config.#{provider}.tier_models"]) do
+        {:ok, ws} ->
+          {:noreply,
+           socket |> assign(:workspace, ws) |> assign(:agent_config_error, nil) |> load_derived()}
+
+        {:error, msg} ->
+          {:noreply, assign(socket, :agent_config_error, msg)}
+      end
+    else
+      {:noreply, assign(socket, :agent_config_error, "Unknown provider #{inspect(provider)}.")}
+    end
+  end
+
+  # ---- agent.security.* (guard-gated) ----
+
+  def handle_event("save_security", %{"security" => params}, socket) do
+    ws = socket.assigns.workspace
+
+    case validate_security_params(params) do
+      {:error, msg} ->
+        {:noreply, socket |> assign(:security_error, msg) |> assign(:security_confirm, nil)}
+
+      :ok ->
+        block = security_block(params, socket.assigns.safe_default_categories)
+
+        current = SecurityPolicy.resolve(ws)
+        proposed = SecurityPolicy.resolve(%{config: security_preview_config(ws, block)})
+
+        case security_downgrades(current, proposed) do
+          [] ->
+            {:noreply, apply_security(socket, block)}
+
+          downgrades ->
+            # Refuse the plain save: the operator has to look at the list of
+            # guards they are giving up and click through, mirroring how
+            # destructive operations elsewhere are gated behind an explicit
+            # acknowledgement rather than a single submit.
+            {:noreply,
+             socket
+             |> assign(:security_error, nil)
+             |> assign(:security_confirm, %{
+               block: block,
+               downgrades: downgrades,
+               posture: SecurityPolicy.one_line(proposed)
+             })}
+        end
+    end
+  end
+
+  def handle_event("confirm_security", _params, socket) do
+    case socket.assigns.security_confirm do
+      %{block: block} -> {:noreply, apply_security(socket, block)}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_security", _params, socket) do
+    {:noreply, assign(socket, security_confirm: nil, security_error: nil)}
   end
 
   # ---- secrets ----
@@ -476,6 +650,190 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # Builds the `agent.config.*` patch/unset pair. Every field here is an
+  # *override* of an adapter default, so a blank field unsets rather than
+  # writing "" (which the adapters would happily use as a model name). Keys
+  # this form doesn't own — `vernacular`, `api_keys`, the routing rules — are
+  # siblings under `agent.config` and survive the deep merge untouched.
+  defp agent_config_patch(params, model_tiers, thinking_levels) do
+    {patch, unset} =
+      Enum.reduce([{"model", "model"}, {"credentials_ref", "credentials_ref"}], {%{}, []}, fn
+        {field, key}, {patch, unset} ->
+          case blank_to_nil(params[field]) do
+            nil -> {patch, unset ++ ["agent.config.#{key}"]}
+            v -> {Map.put(patch, key, v), unset}
+          end
+      end)
+
+    {tier_models, unset} =
+      Enum.reduce(model_tiers, {%{}, unset}, fn tier, {acc, unset} ->
+        case blank_to_nil(params["tier_#{tier}"]) do
+          nil -> {acc, unset ++ ["agent.config.tier_models.#{tier}"]}
+          v -> {Map.put(acc, tier, v), unset}
+        end
+      end)
+
+    {thinking_argv, unset} =
+      Enum.reduce(thinking_levels, {%{}, unset}, fn level, {acc, unset} ->
+        case blank_to_nil(params["thinking_#{level}"]) do
+          nil -> {acc, unset ++ ["agent.config.thinking_argv.#{level}"]}
+          v -> {Map.put(acc, level, String.split(v, ~r/\s+/, trim: true)), unset}
+        end
+      end)
+
+    agent_config =
+      patch
+      |> maybe_put_map("tier_models", tier_models)
+      |> maybe_put_map("thinking_argv", thinking_argv)
+
+    {%{"agent" => %{"config" => agent_config}}, unset}
+  end
+
+  # `mode` and `sandbox.filesystem` are the two enum fields the form writes
+  # verbatim into config, and `ValidateConfig` has no `agent.security` branch
+  # to catch a bad one. An unrecognized value is not inert: `SecurityPolicy`
+  # reads config leniently, so `parse_mode/2` would silently fall back to the
+  # *base* default (`:bypass`) — a workspace pinned at `:strict` would be
+  # quietly downgraded while `arb config get agent.security` still showed the
+  # junk string. Reject it instead, the way `add_provider_override` checks its
+  # provider/tier against fixed lists.
+  defp validate_security_params(params) do
+    mode = params["mode"]
+    filesystem = params["sandbox_filesystem"]
+    valid_modes = Enum.map(SecurityPolicy.valid_modes(), &Atom.to_string/1)
+    valid_filesystems = Enum.map(SecurityPolicy.valid_filesystems(), &Atom.to_string/1)
+
+    cond do
+      mode not in valid_modes ->
+        {:error,
+         "Unknown permission mode #{inspect(mode)} — expected one of #{Enum.join(valid_modes, ", ")}."}
+
+      filesystem not in valid_filesystems ->
+        {:error,
+         "Unknown filesystem scope #{inspect(filesystem)} — expected one of #{Enum.join(valid_filesystems, ", ")}."}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Normalizes the security form params into an `agent.security` config block.
+  # Written whole (rather than field-by-field) so the resolved posture the
+  # operator confirmed is exactly what lands. `mode` / `sandbox_filesystem`
+  # are pre-validated by `validate_security_params/1`.
+  defp security_block(params, categories) do
+    safe_defaults = params["safe_defaults"] || %{}
+
+    %{
+      "permissions" => %{
+        "mode" => params["mode"],
+        "allow" => rule_list(params["allow"]),
+        "deny" => rule_list(params["deny"]),
+        "safe_defaults" =>
+          categories
+          |> Enum.map(&Atom.to_string/1)
+          |> Enum.filter(&(Map.get(safe_defaults, &1) == "true"))
+      },
+      "sandbox" => %{
+        "enabled" => params["sandbox_enabled"] == "true",
+        "filesystem" => params["sandbox_filesystem"],
+        "network" => params["sandbox_network"] == "true"
+      }
+    }
+  end
+
+  # The config the workspace *would* have, used to resolve the proposed
+  # posture through the same layering as the live one — so the confirmation
+  # compares effective postures, not raw config fragments.
+  defp security_preview_config(ws, block) do
+    PatchConfig.deep_merge(ws.config || %{}, %{"agent" => %{"security" => block}})
+  end
+
+  # Every way the proposed posture gives up ground relative to the current
+  # one, as operator-readable strings. Tightenings (stricter mode, network
+  # cut, added deny rules) are deliberately absent — they need no gate.
+  #
+  # `mode` counts: the deny list is a hard block in every mode
+  # (`Claude.Security.settings_argv/1` is emitted even for `:bypass`), but
+  # that is not the whole guard. `:strict` maps to `--permission-mode default`
+  # / `"defaultMode" => "default"`, under which only allow-listed tools run;
+  # `:auto` keeps the interactive classifier; `:bypass`
+  # (`--dangerously-skip-permissions`) drops both, so anything not explicitly
+  # denied runs. Loosening the mode is therefore the widest-blast-radius
+  # control on this form and gets the same confirm step as the rest.
+  @mode_strictness %{strict: 2, auto: 1, bypass: 0}
+
+  defp security_downgrades(current, proposed) do
+    mode =
+      if mode_rank(proposed.permissions.mode) < mode_rank(current.permissions.mode) do
+        [
+          "Loosens the permission mode (#{current.permissions.mode} → #{proposed.permissions.mode}) — " <>
+            mode_loss(proposed.permissions.mode)
+        ]
+      else
+        []
+      end
+
+    removed_guards =
+      Enum.map(
+        current.permissions.safe_defaults -- proposed.permissions.safe_defaults,
+        &"Removes the #{&1} safe-default guard"
+      )
+
+    removed_denies =
+      Enum.map(
+        current.permissions.deny -- proposed.permissions.deny,
+        &"Removes the deny rule #{&1}"
+      )
+
+    sandbox =
+      [
+        {current.sandbox.enabled and not proposed.sandbox.enabled,
+         "Disables the sandbox entirely (sandbox.enabled true → false)"},
+        {current.sandbox.filesystem == :worktree and proposed.sandbox.filesystem != :worktree,
+         "Widens filesystem access beyond the worktree (sandbox.filesystem worktree → #{proposed.sandbox.filesystem})"},
+        {not current.sandbox.network and proposed.sandbox.network,
+         "Restores worker network egress (sandbox.network false → true)"}
+      ]
+      |> Enum.filter(&elem(&1, 0))
+      |> Enum.map(&elem(&1, 1))
+
+    mode ++ removed_guards ++ sandbox ++ removed_denies
+  end
+
+  defp mode_rank(mode), do: Map.get(@mode_strictness, mode, 0)
+
+  defp mode_loss(:bypass),
+    do: "tools are no longer restricted to the allow list and the classifier is skipped"
+
+  defp mode_loss(:auto), do: "tools are no longer restricted to the allow list"
+  defp mode_loss(mode), do: "the #{mode} mode is looser"
+
+  defp apply_security(socket, block) do
+    case patch_config(socket.assigns.workspace, %{"agent" => %{"security" => block}}, []) do
+      {:ok, ws} ->
+        socket
+        |> assign(:workspace, ws)
+        |> assign(:security_error, nil)
+        |> assign(:security_confirm, nil)
+        |> load_derived()
+        |> put_flash(:info, "Security posture saved.")
+
+      {:error, msg} ->
+        socket |> assign(:security_error, msg) |> assign(:security_confirm, nil)
+    end
+  end
+
+  # allow/deny rules are entered one per line; blanks are dropped so a
+  # trailing newline doesn't become an empty rule.
+  defp rule_list(nil), do: []
+
+  defp rule_list(text) when is_binary(text) do
+    text |> String.split("\n") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+  end
+
+  defp rule_list(_), do: []
+
   defp maybe_put_map(patch, _key, empty) when empty == %{}, do: patch
   defp maybe_put_map(patch, key, value), do: Map.put(patch, key, value)
 
@@ -524,6 +882,93 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     |> assign(:worker_env_values, Workspace.worker_env_map(ws))
     |> assign(:orders, standing_orders(ws))
     |> assign(:repo_overrides, repo_overrides(ws) |> Enum.sort())
+    |> assign(:provider_overrides, provider_overrides(ws))
+    |> assign(:model_tiers, model_tiers(ws))
+    |> assign(:thinking_levels, thinking_levels(ws))
+    |> assign(:security_policy, SecurityPolicy.resolve(ws))
+    |> assign(:security_repo_postures, security_repo_postures(ws))
+  end
+
+  # `agent.security.repos.<repo>` is a whole extra layer applied on top of the
+  # workspace-wide posture for dispatches against that repo, so the resolved
+  # workspace line alone can misrepresent what a worker actually gets (a repo
+  # can, say, turn the sandbox back off). Resolved through the same
+  # `SecurityPolicy.resolve/3` path and listed read-only under the posture
+  # panel; this form edits the workspace layer only, that one stays CLI-owned.
+  defp security_repo_postures(ws) do
+    case cfg(ws, ["agent", "security", "repos"]) do
+      %{} = repos ->
+        repos
+        |> Map.keys()
+        |> Enum.filter(&is_binary/1)
+        |> Enum.sort()
+        |> Enum.map(&{&1, SecurityPolicy.resolve(ws, %{}, &1)})
+
+      _ ->
+        []
+    end
+  end
+
+  # The baseline keys plus every key this workspace actually stores (including
+  # per-provider sub-maps, so a tier only Codex overrides still gets a row in
+  # the add-override picker). Baseline order first, extras alphabetical.
+  defp model_tiers(ws) do
+    stored =
+      [config_map(ws, ["agent", "config", "tier_models"])]
+      |> Enum.concat(Enum.map(Agents.valid_agent_types(), &provider_tier_models(ws, &1)))
+      |> Enum.flat_map(&Map.keys/1)
+
+    order_keys(@base_model_tiers, stored)
+  end
+
+  defp thinking_levels(ws) do
+    stored = ws |> config_map(["agent", "config", "thinking_argv"]) |> Map.keys()
+
+    @base_thinking_levels
+    |> order_keys(stored)
+    |> Enum.reject(&(&1 in @inert_thinking_levels))
+  end
+
+  defp order_keys(base, stored) do
+    extras = stored |> Enum.filter(&is_binary/1) |> Enum.reject(&(&1 in base)) |> Enum.uniq()
+    base ++ Enum.sort(extras)
+  end
+
+  # Per-provider tier overrides flattened for display:
+  # `agent.config.<provider>.tier_models.<tier>` → `{provider, tier, model}`,
+  # ordered by the provider precedence list then by tier.
+  defp provider_overrides(ws) do
+    tier_order = model_tiers(ws)
+
+    for provider <- Agents.valid_agent_types(),
+        {tier, model} <-
+          Enum.sort_by(provider_tier_models(ws, provider), &tier_rank(&1, tier_order)),
+        is_binary(model),
+        do: {provider, tier, model}
+  end
+
+  defp tier_rank({tier, _model}, tier_order) do
+    Enum.find_index(tier_order, &(&1 == tier)) || length(tier_order)
+  end
+
+  defp provider_tier_models(ws, provider) do
+    config_map(ws, ["agent", "config", provider, "tier_models"])
+  end
+
+  # A nested config map, or `%{}` for anything that isn't one — `agent.config`
+  # is free-form JSON, so a scalar at any level is possible and must not crash
+  # the page.
+  defp config_map(ws, path) do
+    Enum.reduce(path, ws.config || %{}, fn key, acc ->
+      case acc do
+        %{} = map -> Map.get(map, key, %{})
+        _ -> %{}
+      end
+    end)
+    |> case do
+      %{} = map -> map
+      _ -> %{}
+    end
   end
 
   defp standing_orders(ws) do
@@ -586,9 +1031,64 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
-  # Effective security posture for the worker agent (mode, sandbox, and
-  # safe-default deny count) — read-only, set via `arb config set agent.security.*`.
-  defp security_summary(ws), do: ws |> SecurityPolicy.resolve() |> SecurityPolicy.one_line()
+  # ---- agent.config.* form prefill ----
+
+  defp agent_cfg(ws, key) do
+    case cfg(ws, ["agent", "config", key]) do
+      v when is_binary(v) -> v
+      _ -> ""
+    end
+  end
+
+  defp tier_model_value(ws, tier) do
+    case cfg(ws, ["agent", "config", "tier_models"]) do
+      %{} = m ->
+        case Map.get(m, tier) do
+          model when is_binary(model) -> model
+          _ -> ""
+        end
+
+      _ ->
+        ""
+    end
+  end
+
+  defp thinking_argv_value(ws, level) do
+    case cfg(ws, ["agent", "config", "thinking_argv"]) do
+      %{} = m ->
+        case Map.get(m, level) do
+          argv when is_list(argv) -> argv |> Enum.filter(&is_binary/1) |> Enum.join(" ")
+          argv when is_binary(argv) -> argv
+          _ -> ""
+        end
+
+      _ ->
+        ""
+    end
+  end
+
+  # `credentials_ref` is picked from the workspace's own secret registry — the
+  # page never offers a box a raw token could be pasted into. A ref set
+  # outside the dashboard (typically `env:NAME`) is carried as an extra option
+  # so opening this form and saving can't silently drop it.
+  defp credentials_ref_options(secret_keys, current) do
+    options = [{"(unset)", ""} | Enum.map(secret_keys, &{"secret:#{&1}", "secret:#{&1}"})]
+
+    if current == "" or Enum.any?(options, fn {_label, value} -> value == current end) do
+      options
+    else
+      options ++ [{"#{current} (set outside the dashboard)", current}]
+    end
+  end
+
+  # ---- agent.security.* form prefill ----
+
+  # The form is seeded from the *resolved* posture, not the raw config block:
+  # what the operator sees is what a worker dispatched right now would get,
+  # and saving pins exactly that.
+  defp rules_text(rules), do: Enum.join(rules, "\n")
+
+  defp security_summary(policy), do: SecurityPolicy.one_line(policy)
 
   # ---- agent-type precedence list component ----
 
@@ -893,11 +1393,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
               </div>
             </.form>
             <p class="text-xs text-base-content/50">
-              Security posture (<code>agent.security.*</code>):
-              <span class="font-mono">{security_summary(@workspace)}</span>
-            </p>
-            <p class="text-xs text-base-content/50">
-              Adapter-specific details (hosts, owner/repo, <code>credentials_ref</code>) are set with <code>arb config set</code>. Reference a secret below via <code>secret:&lt;key&gt;</code>.
+              Adapter-specific tracker/merger details (hosts, owner/repo) are still set with <code>arb config set</code>. Worker security lives in its own section below.
             </p>
 
             <div class="border-t border-base-300 pt-3">
@@ -951,6 +1447,314 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 </.button>
               </.form>
             </div>
+          </div>
+        </section>
+
+        <%!-- Agent model config (agent.config.*) --%>
+        <section class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-3">
+            <h2 class="font-semibold flex items-center gap-2">
+              <.icon name="hero-cpu-chip" class="size-5 text-base-content/60" /> Agent model config
+            </h2>
+            <p class="text-xs text-base-content/50 -mt-1">
+              <code>agent.config.*</code>
+              — what model a dispatched worker runs and how it authenticates. Blank unsets the
+              override and lets the adapter default apply.
+            </p>
+
+            <.form
+              for={%{}}
+              as={:agent_config}
+              phx-submit="save_agent_config"
+              class="grid sm:grid-cols-2 gap-x-4"
+            >
+              <.input
+                type="text"
+                name="agent_config[model]"
+                label="Model (agent.config.model)"
+                placeholder="default: let the CLI pick"
+                value={agent_cfg(@workspace, "model")}
+              />
+              <.input
+                type="select"
+                name="agent_config[credentials_ref]"
+                label="Credentials (agent.config.credentials_ref)"
+                options={
+                  credentials_ref_options(@secret_keys, agent_cfg(@workspace, "credentials_ref"))
+                }
+                value={agent_cfg(@workspace, "credentials_ref")}
+              />
+              <.input
+                :for={tier <- @model_tiers}
+                type="text"
+                name={"agent_config[tier_#{tier}]"}
+                label={"Tier model — #{tier} (agent.config.tier_models.#{tier})"}
+                placeholder="adapter default"
+                value={tier_model_value(@workspace, tier)}
+              />
+              <.input
+                :for={level <- @thinking_levels}
+                type="text"
+                name={"agent_config[thinking_#{level}]"}
+                label={"Thinking argv — #{level} (agent.config.thinking_argv.#{level})"}
+                placeholder="adapter default, e.g. --effort medium"
+                value={thinking_argv_value(@workspace, level)}
+              />
+              <div class="sm:col-span-2 flex items-center gap-3 mt-2">
+                <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+                  Save agent config
+                </.button>
+                <p :if={@agent_config_error} class="text-sm text-error">{@agent_config_error}</p>
+              </div>
+            </.form>
+
+            <div class="border-t border-base-300 pt-3">
+              <h3 class="font-semibold text-sm flex items-center gap-2">
+                Per-provider model overrides
+                <span class="text-base-content/40 font-normal">({length(@provider_overrides)})</span>
+              </h3>
+              <p class="text-xs text-base-content/50 mt-1">
+                <code>agent.config.&lt;provider&gt;.tier_models.&lt;tier&gt;</code>
+                — scopes a tier to one provider in a multi-provider pool, where the flat
+                <code>tier_models</code>
+                above would otherwise apply to every adapter.
+              </p>
+
+              <ul
+                :if={@provider_overrides != []}
+                id="provider-overrides"
+                class="flex flex-col gap-1.5 mt-2"
+              >
+                <li
+                  :for={{provider, tier, model} <- @provider_overrides}
+                  class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+                >
+                  <code class="text-sm flex-1">{provider} · {tier}</code>
+                  <span class="badge badge-sm badge-ghost font-mono">{model}</span>
+                  <button
+                    type="button"
+                    phx-click="rm_provider_override"
+                    phx-value-provider={provider}
+                    phx-value-tier={tier}
+                    class="btn btn-ghost btn-xs text-error shrink-0"
+                    aria-label={"Remove #{provider} #{tier} model override"}
+                    data-confirm={"Remove the #{provider} #{tier} model override?"}
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
+                </li>
+              </ul>
+
+              <.form
+                for={%{}}
+                as={:provider_override}
+                phx-submit="add_provider_override"
+                class="flex gap-2 items-start mt-2"
+              >
+                <select name="provider_override[provider]" class="select select-sm">
+                  <option :for={provider <- @agent_types} value={provider}>{provider}</option>
+                </select>
+                <select name="provider_override[tier]" class="select select-sm">
+                  <option :for={tier <- @model_tiers} value={tier}>{tier}</option>
+                </select>
+                <input
+                  type="text"
+                  name="provider_override[model]"
+                  placeholder="model, e.g. gemini-3-pro"
+                  class="input input-sm flex-1"
+                  required
+                />
+                <.button type="submit" class="btn btn-sm">
+                  <.icon name="hero-plus" class="size-4" /> Add
+                </.button>
+              </.form>
+            </div>
+          </div>
+        </section>
+
+        <%!-- Advanced / security (agent.security.*) — deliberately separated
+             from the routine toggles above: these fields decide what a worker
+             may do to this host. --%>
+        <section
+          id="agent-security"
+          class="card bg-base-200 border-2 border-warning/40 shadow-sm"
+        >
+          <div class="card-body p-4 gap-3">
+            <h2 class="font-semibold flex items-center gap-2">
+              <.icon name="hero-shield-exclamation" class="size-5 text-warning" />
+              Advanced — worker security
+            </h2>
+            <p class="text-xs text-base-content/50 -mt-1">
+              <code>agent.security.*</code>
+              controls the filesystem, network and destructive-action guardrails applied to every
+              worker this workspace dispatches on this machine. Weakening a guard needs an explicit
+              confirmation.
+            </p>
+
+            <div class="rounded-box border border-base-300 bg-base-100 px-3 py-2">
+              <p class="text-xs uppercase tracking-wide text-base-content/50">
+                Effective workspace-wide posture right now
+              </p>
+              <p class="font-mono text-sm mt-0.5">{security_summary(@security_policy)}</p>
+              <div class="flex flex-wrap gap-1 mt-2">
+                <span class="badge badge-sm badge-outline font-mono">
+                  mode={@security_policy.permissions.mode}
+                </span>
+                <span class={[
+                  "badge badge-sm font-mono",
+                  if(@security_policy.sandbox.enabled, do: "badge-success", else: "badge-error")
+                ]}>
+                  sandbox={if @security_policy.sandbox.enabled, do: "on", else: "OFF"}
+                </span>
+                <span class={[
+                  "badge badge-sm font-mono",
+                  if(@security_policy.sandbox.filesystem == :worktree,
+                    do: "badge-success",
+                    else: "badge-error"
+                  )
+                ]}>
+                  fs={@security_policy.sandbox.filesystem}
+                </span>
+                <span class="badge badge-sm badge-outline font-mono">
+                  net={if @security_policy.sandbox.network, do: "on", else: "tools-off"}
+                </span>
+                <span class={[
+                  "badge badge-sm font-mono",
+                  if(
+                    length(@security_policy.permissions.safe_defaults) ==
+                      length(@safe_default_categories),
+                    do: "badge-success",
+                    else: "badge-warning"
+                  )
+                ]}>
+                  safe_defaults={length(@security_policy.permissions.safe_defaults)}/{length(
+                    @safe_default_categories
+                  )}
+                </span>
+              </div>
+
+              <%!-- agent.security.repos.<repo> layers on top of the line above
+                   for dispatches against that repo, so the workspace-wide
+                   posture is not the whole story. Read-only: the form below
+                   edits the workspace layer only. --%>
+              <div :if={@security_repo_postures != []} id="security-repo-postures" class="mt-3">
+                <p class="text-xs uppercase tracking-wide text-base-content/50">
+                  Per-repo overrides (<code>agent.security.repos.*</code>) — applied on top of the
+                  line above; edit via <code>arb config</code>
+                </p>
+                <ul class="mt-1 flex flex-col gap-0.5">
+                  <li
+                    :for={{repo, policy} <- @security_repo_postures}
+                    class="font-mono text-xs flex flex-wrap gap-x-2"
+                  >
+                    <span class="text-base-content/60">{repo}:</span>
+                    <span>{security_summary(policy)}</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <details class="collapse collapse-arrow border border-base-300 bg-base-100">
+              <summary class="collapse-title text-sm font-medium">
+                Edit security posture
+              </summary>
+              <div class="collapse-content">
+                <.form for={%{}} as={:security} phx-submit="save_security" class="space-y-3">
+                  <div class="grid sm:grid-cols-2 gap-x-4">
+                    <.input
+                      type="select"
+                      name="security[mode]"
+                      label="Permission mode (permissions.mode)"
+                      options={Enum.map(@security_modes, &{Atom.to_string(&1), Atom.to_string(&1)})}
+                      value={Atom.to_string(@security_policy.permissions.mode)}
+                    />
+                    <.input
+                      type="select"
+                      name="security[sandbox_filesystem]"
+                      label="Filesystem scope (sandbox.filesystem)"
+                      options={
+                        Enum.map(@security_filesystems, &{Atom.to_string(&1), Atom.to_string(&1)})
+                      }
+                      value={Atom.to_string(@security_policy.sandbox.filesystem)}
+                    />
+                    <label class="fieldset flex items-center gap-2 mt-2">
+                      <input type="hidden" name="security[sandbox_enabled]" value="false" />
+                      <input
+                        type="checkbox"
+                        name="security[sandbox_enabled]"
+                        value="true"
+                        checked={@security_policy.sandbox.enabled}
+                        class="toggle toggle-sm toggle-primary"
+                      />
+                      <span class="text-sm">Sandbox enabled (sandbox.enabled)</span>
+                    </label>
+                    <label class="fieldset flex items-center gap-2 mt-2">
+                      <input type="hidden" name="security[sandbox_network]" value="false" />
+                      <input
+                        type="checkbox"
+                        name="security[sandbox_network]"
+                        value="true"
+                        checked={@security_policy.sandbox.network}
+                        class="toggle toggle-sm toggle-primary"
+                      />
+                      <span class="text-sm">Network egress allowed (sandbox.network)</span>
+                    </label>
+                  </div>
+
+                  <fieldset class="fieldset">
+                    <legend class="label">Safe-default guards (permissions.safe_defaults)</legend>
+                    <p class="text-xs text-base-content/50">
+                      The baseline destructive-op categories every adapter denies. Unchecking one
+                      requires confirmation.
+                    </p>
+                    <div class="flex flex-wrap gap-x-4 gap-y-1 mt-1">
+                      <label
+                        :for={category <- @safe_default_categories}
+                        class="flex items-center gap-2 text-sm cursor-pointer"
+                      >
+                        <input
+                          type="hidden"
+                          name={"security[safe_defaults][#{category}]"}
+                          value="false"
+                        />
+                        <input
+                          type="checkbox"
+                          name={"security[safe_defaults][#{category}]"}
+                          value="true"
+                          checked={category in @security_policy.permissions.safe_defaults}
+                          class="checkbox checkbox-sm"
+                        />
+                        <code>{category}</code>
+                      </label>
+                    </div>
+                  </fieldset>
+
+                  <div class="grid sm:grid-cols-2 gap-x-4">
+                    <.input
+                      type="textarea"
+                      name="security[allow]"
+                      label="Allow rules (permissions.allow) — one per line"
+                      value={rules_text(@security_policy.permissions.allow)}
+                      rows="4"
+                    />
+                    <.input
+                      type="textarea"
+                      name="security[deny]"
+                      label="Deny rules (permissions.deny) — one per line"
+                      value={rules_text(@security_policy.permissions.deny)}
+                      rows="4"
+                    />
+                  </div>
+
+                  <div class="flex items-center gap-3">
+                    <.button type="submit" class="btn btn-sm btn-warning">
+                      Review security changes
+                    </.button>
+                    <p :if={@security_error} class="text-sm text-error">{@security_error}</p>
+                  </div>
+                </.form>
+              </div>
+            </details>
           </div>
         </section>
 
@@ -1134,6 +1938,43 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
             </p>
           </div>
         </section>
+      </div>
+
+      <%!-- Security-downgrade confirmation. The plain submit above never
+           writes when a guard is being removed; this is the only path that
+           applies such a change, and it names each guard explicitly. --%>
+      <div :if={@security_confirm} class="modal modal-open" id="security-confirm-modal">
+        <div class="modal-box border-2 border-error/50">
+          <h3 class="font-semibold text-lg mb-1 flex items-center gap-2">
+            <.icon name="hero-shield-exclamation" class="size-5 text-error" />
+            Weaken this workspace's security posture?
+          </h3>
+          <p class="text-sm text-base-content/70">
+            These changes remove guardrails from every worker this workspace dispatches on this
+            machine:
+          </p>
+          <ul class="list-disc list-inside text-sm text-error mt-2 space-y-1">
+            <li :for={downgrade <- @security_confirm.downgrades}>{downgrade}</li>
+          </ul>
+          <p class="text-xs text-base-content/50 mt-3">
+            Resulting workspace-wide posture:
+            <span class="font-mono">{@security_confirm.posture}</span>
+          </p>
+          <p :if={@security_repo_postures != []} class="text-xs text-warning mt-1">
+            {length(@security_repo_postures)} per-repo override(s) still layer on top of this — see
+            <code>agent.security.repos.*</code>
+            in the posture panel.
+          </p>
+          <div class="modal-action">
+            <.button type="button" phx-click="cancel_security" class="btn btn-sm btn-ghost">
+              Cancel
+            </.button>
+            <.button type="button" phx-click="confirm_security" class="btn btn-sm btn-error">
+              I understand — weaken the posture
+            </.button>
+          </div>
+        </div>
+        <div class="modal-backdrop" phx-click="cancel_security"></div>
       </div>
 
       <%!-- Set-secret modal --%>

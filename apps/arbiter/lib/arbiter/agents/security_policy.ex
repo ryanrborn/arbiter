@@ -69,8 +69,11 @@ defmodule Arbiter.Agents.SecurityPolicy do
       own PR produces a duplicate on the wrong base (bd-53xrmi).
 
   Replaceable as a whole (set `safe_defaults: []` to opt a domain out — not
-  recommended), but defaults non-empty. In `:bypass` mode they are
-  informational only (bypass enforces nothing).
+  recommended), but defaults non-empty. They are enforced in **every** mode
+  including `:bypass`: `Arbiter.Agents.Claude.Security` expands them into the
+  deny document, and `--settings` carries that document even when
+  `--dangerously-skip-permissions` is passed. What `:bypass` skips is the
+  interactive classifier, not the deny list.
 
   ### `sandbox`
 
