@@ -3,12 +3,43 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Workspace
 
   defp new_workspace(attrs \\ %{}) do
     base = %{name: "ws-#{System.unique_integer([:positive])}", prefix: "wx"}
     {:ok, ws} = Ash.create(Workspace, Map.merge(base, attrs))
     ws
+  end
+
+  # The security form posts every field on every submit (checkboxes carry a
+  # hidden "false" companion), so tests spell out the full baseline — the
+  # posture a fresh workspace already resolves to — and override only the
+  # field under test. Keeps "what changed" obvious at the call site.
+  @security_baseline %{
+    "mode" => "bypass",
+    "sandbox_enabled" => "true",
+    "sandbox_filesystem" => "worktree",
+    "sandbox_network" => "true",
+    "allow" => "",
+    "deny" => "",
+    "safe_defaults" => %{
+      "no_destructive_fs" => "true",
+      "no_force_push" => "true",
+      "no_secret_reads" => "true",
+      "no_outside_writes" => "true",
+      "no_pr_create" => "true"
+    }
+  }
+
+  defp security_params(overrides) do
+    merged =
+      Map.merge(@security_baseline, overrides, fn
+        "safe_defaults", base, override -> Map.merge(base, override)
+        _key, _base, override -> override
+      end)
+
+    %{"security" => merged}
   end
 
   describe "index" do
@@ -314,6 +345,363 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["review_automation"]["repo_overrides"] == %{}
     end
 
+    test "saves agent.config.* model/tier_models/thinking_argv through patch_config", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_agent_config]", %{
+        "agent_config" => %{
+          "model" => "opus",
+          "credentials_ref" => "",
+          "tier_economy" => "haiku",
+          "tier_standard" => "sonnet",
+          "tier_premium" => "opus",
+          "thinking_low" => "--effort low",
+          "thinking_medium" => "",
+          "thinking_high" => "--effort  high"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      agent_config = reloaded.config["agent"]["config"]
+
+      assert agent_config["model"] == "opus"
+
+      assert agent_config["tier_models"] == %{
+               "economy" => "haiku",
+               "standard" => "sonnet",
+               "premium" => "opus"
+             }
+
+      assert agent_config["thinking_argv"]["low"] == ["--effort", "low"]
+      assert agent_config["thinking_argv"]["high"] == ["--effort", "high"]
+      refute Map.has_key?(agent_config["thinking_argv"], "medium")
+    end
+
+    test "blank agent.config fields unset rather than writing empty values, preserving siblings",
+         %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{
+              "type" => "claude",
+              "config" => %{
+                "model" => "opus",
+                "credentials_ref" => "secret:anthropic",
+                "tier_models" => %{"standard" => "sonnet"},
+                "thinking_argv" => %{"high" => ["--effort", "high"]},
+                "vernacular" => "keep-me"
+              }
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_agent_config]", %{
+        "agent_config" => %{
+          "model" => "  ",
+          "credentials_ref" => "",
+          "tier_economy" => "",
+          "tier_standard" => "",
+          "tier_premium" => "",
+          "thinking_low" => "",
+          "thinking_medium" => "",
+          "thinking_high" => ""
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      agent_config = reloaded.config["agent"]["config"]
+
+      refute Map.has_key?(agent_config, "model")
+      refute Map.has_key?(agent_config, "credentials_ref")
+      refute Map.has_key?(agent_config["tier_models"] || %{}, "standard")
+      refute Map.has_key?(agent_config["thinking_argv"] || %{}, "high")
+      # Keys this form doesn't own (CLI-only) survive the patch.
+      assert agent_config["vernacular"] == "keep-me"
+      assert reloaded.config["agent"]["type"] == "claude"
+    end
+
+    # Real workspaces carry tier/thinking keys the adapters don't define
+    # ("flagship", "xhigh"). A fixed row list would hide them, leaving config
+    # only `arb config set` can reach — and an operator editing a neighbouring
+    # field would have no idea they were there.
+    test "surfaces tier_models/thinking_argv keys outside the built-in set", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{
+              "config" => %{
+                "tier_models" => %{"flagship" => "fable"},
+                "thinking_argv" => %{"xhigh" => ["--effort", "xhigh"], "none" => []}
+              }
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(view, "input[name='agent_config[tier_flagship]'][value=fable]")
+      assert has_element?(view, "input[name='agent_config[thinking_xhigh]']")
+      # "none" is hardcoded in every adapter as "pass no argv", so an override
+      # there is inert — no row, and the key is left alone.
+      refute has_element?(view, "input[name='agent_config[thinking_none]']")
+
+      view
+      |> form("form[phx-submit=save_agent_config]", %{
+        "agent_config" => %{"tier_flagship" => "opus", "thinking_xhigh" => ""}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      agent_config = reloaded.config["agent"]["config"]
+      assert agent_config["tier_models"]["flagship"] == "opus"
+      refute Map.has_key?(agent_config["thinking_argv"], "xhigh")
+      assert agent_config["thinking_argv"]["none"] == []
+    end
+
+    test "credentials_ref is a select over existing secret names, never a raw value field", %{
+      conn: conn
+    } do
+      {:ok, ws} =
+        Ash.update(new_workspace(), %{secrets: %{"anthropic_key" => "sk-live-not-echoed"}},
+          action: :update
+        )
+
+      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(view, "select[name='agent_config[credentials_ref]']")
+      refute has_element?(view, "input[name='agent_config[credentials_ref]']")
+      assert html =~ "secret:anthropic_key"
+      refute html =~ "sk-live-not-echoed"
+
+      view
+      |> form("form[phx-submit=save_agent_config]", %{
+        "agent_config" => %{"credentials_ref" => "secret:anthropic_key"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["agent"]["config"]["credentials_ref"] == "secret:anthropic_key"
+    end
+
+    test "adds and removes per-provider tier_models overrides", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_provider_override]", %{
+        "provider_override" => %{
+          "provider" => "gemini",
+          "tier" => "premium",
+          "model" => "gemini-3-pro"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["agent"]["config"]["gemini"]["tier_models"] == %{
+               "premium" => "gemini-3-pro"
+             }
+
+      view
+      |> element(
+        "button[phx-click=rm_provider_override][phx-value-provider=gemini][phx-value-tier=premium]"
+      )
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["agent"]["config"]["gemini"]["tier_models"] == %{}
+    end
+
+    test "lists a per-provider override on a tier outside the built-in set", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{
+              "config" => %{"codex" => %{"tier_models" => %{"flagship" => "gpt-5.5"}}}
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(
+               view,
+               "button[phx-click=rm_provider_override][phx-value-provider=codex][phx-value-tier=flagship]"
+             )
+    end
+
+    test "renders the effective security posture alongside the agent.security.* editor", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{
+              "security" => %{
+                "permissions" => %{"mode" => "strict", "deny" => ["Bash(curl:*)"]},
+                "sandbox" => %{"network" => false}
+              }
+            }
+          }
+        })
+
+      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      # Effective posture (resolved, not just raw config).
+      assert html =~ SecurityPolicy.one_line(SecurityPolicy.resolve(ws))
+      # Visually separated from the routine settings form.
+      assert has_element?(view, "#agent-security")
+      assert has_element?(view, "form[phx-submit=save_security]")
+      # Current raw values are pre-filled.
+      assert html =~ "Bash(curl:*)"
+    end
+
+    test "saves a non-weakening agent.security.* change without a confirmation step", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form(
+        "form[phx-submit=save_security]",
+        security_params(%{
+          "mode" => "strict",
+          "deny" => "Bash(curl:*)\nBash(rm:*)",
+          "sandbox_network" => "false"
+        })
+      )
+      |> render_submit()
+
+      refute has_element?(view, "#security-confirm-modal")
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      policy = SecurityPolicy.resolve(reloaded)
+      assert policy.permissions.mode == :strict
+      assert policy.permissions.deny == ["Bash(curl:*)", "Bash(rm:*)"]
+      assert policy.sandbox.network == false
+      assert policy.permissions.safe_defaults == SecurityPolicy.safe_default_categories()
+    end
+
+    test "removing a safe_defaults guard requires an explicit confirmation step", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      html =
+        view
+        |> form(
+          "form[phx-submit=save_security]",
+          security_params(%{"safe_defaults" => %{"no_force_push" => "false"}})
+        )
+        |> render_submit()
+
+      # First submit does NOT save — it opens an explicit confirmation.
+      assert html =~ "no_force_push"
+      assert has_element?(view, "#security-confirm-modal")
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert SecurityPolicy.resolve(reloaded).permissions.safe_defaults ==
+               SecurityPolicy.safe_default_categories()
+
+      # Explicit confirm applies it.
+      view |> element("button[phx-click=confirm_security]") |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute :no_force_push in SecurityPolicy.resolve(reloaded).permissions.safe_defaults
+      refute has_element?(view, "#security-confirm-modal")
+    end
+
+    test "disabling the sandbox requires an explicit confirmation step", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form(
+        "form[phx-submit=save_security]",
+        security_params(%{"sandbox_enabled" => "false", "sandbox_filesystem" => "none"})
+      )
+      |> render_submit()
+
+      assert has_element?(view, "#security-confirm-modal")
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert SecurityPolicy.resolve(reloaded).sandbox.enabled == true
+    end
+
+    test "cancelling the security confirmation leaves the posture untouched", %{conn: conn} do
+      ws = new_workspace()
+      before = SecurityPolicy.resolve(ws)
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form(
+        "form[phx-submit=save_security]",
+        security_params(%{"safe_defaults" => %{"no_secret_reads" => "false"}})
+      )
+      |> render_submit()
+
+      view |> element("button[phx-click=cancel_security]") |> render_click()
+
+      refute has_element?(view, "#security-confirm-modal")
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert SecurityPolicy.resolve(reloaded) == before
+      assert reloaded.config == ws.config
+    end
+
+    test "viewing the page and saving unrelated config never changes the security posture", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{
+              "security" => %{
+                "permissions" => %{"mode" => "strict", "safe_defaults" => ["no_force_push"]},
+                "sandbox" => %{"enabled" => false}
+              }
+            }
+          }
+        })
+
+      before_config = ws.config
+      before_policy = SecurityPolicy.resolve(ws)
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static"
+        }
+      })
+      |> render_submit()
+
+      view
+      |> form("form[phx-submit=save_agent_config]", %{"agent_config" => %{"model" => "opus"}})
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["agent"]["security"] == before_config["agent"]["security"]
+      assert SecurityPolicy.resolve(reloaded) == before_policy
+    end
+
     test "renders agent.type and review_agent.type as an ordered precedence list", %{conn: conn} do
       ws =
         new_workspace(%{
@@ -468,6 +856,135 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
 
       {:ok, reloaded} = Ash.get(Workspace, ws.id)
       assert Workspace.worker_env_map(reloaded) == %{}
+    end
+  end
+
+  # Acceptance criterion (d): landing this ticket must not move any existing
+  # workspace's security posture. These are verbatim `config` blobs lifted
+  # from the live dev database (a read-only `.backup` copy) — including the
+  # `flagship` tier and `xhigh`/`none` thinking levels that appear nowhere in
+  # the codebase, and vstim's four-of-five `safe_defaults` list. Anything the
+  # page does short of an explicit security submit has to leave
+  # `SecurityPolicy.resolve/1` byte-identical.
+  describe "real workspace configs — posture drift" do
+    @real_configs %{
+      "default" => %{
+        "agent" => %{
+          "config" => %{
+            "codex" => %{
+              "tier_models" => %{
+                "economy" => "gpt-5.4-mini",
+                "premium" => "gpt-5.5",
+                "standard" => "gpt-5.5"
+              }
+            },
+            "thinking_argv" => %{
+              "high" => ["--effort", "high"],
+              "low" => ["--effort", "low"],
+              "medium" => ["--effort", "medium"],
+              "none" => [],
+              "xhigh" => ["--effort", "xhigh"]
+            },
+            "tier_models" => %{"flagship" => "fable"}
+          },
+          "type" => ["claude"]
+        },
+        "review" => %{"required" => true},
+        "routing" => %{
+          "policy" => "by_difficulty",
+          "rules" => %{"D4" => %{"model_tier" => "flagship", "thinking" => "xhigh"}}
+        }
+      },
+      "emricare" => %{
+        "agent" => %{
+          "config" => %{
+            "thinking_argv" => %{"xhigh" => ["--effort", "xhigh"]},
+            "tier_models" => %{"flagship" => "fable"}
+          },
+          "type" => ["claude"]
+        },
+        "review" => %{"required" => true}
+      },
+      "vstim" => %{
+        "agent" => %{
+          "config" => %{
+            "thinking_argv" => %{"xhigh" => ["--effort", "xhigh"]},
+            "tier_models" => %{"flagship" => "fable"}
+          },
+          "security" => %{
+            "permissions" => %{
+              "safe_defaults" => [
+                "no_destructive_fs",
+                "no_force_push",
+                "no_secret_reads",
+                "no_outside_writes"
+              ]
+            }
+          },
+          "type" => ["claude"]
+        },
+        "review" => %{"required" => true}
+      }
+    }
+
+    test "viewing the page leaves every real workspace's config and posture untouched", %{
+      conn: conn
+    } do
+      for {name, config} <- @real_configs do
+        ws = new_workspace(%{config: config})
+        before = SecurityPolicy.resolve(ws)
+
+        {:ok, _view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+        {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+        assert reloaded.config == config, "#{name}: viewing the page rewrote config"
+        assert SecurityPolicy.resolve(reloaded) == before, "#{name}: posture drifted on view"
+
+        # And the page actually renders the stored keys rather than silently
+        # dropping the ones outside the built-in tier/level sets.
+        assert html =~ "flagship"
+      end
+    end
+
+    test "saving an unrelated section never moves the security posture", %{conn: conn} do
+      for {name, config} <- @real_configs do
+        ws = new_workspace(%{config: config})
+        before = SecurityPolicy.resolve(ws)
+
+        {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+        # Submit the agent-config form exactly as rendered — no edits.
+        view |> form("form[phx-submit=save_agent_config]") |> render_submit()
+
+        {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+        assert SecurityPolicy.resolve(reloaded) == before,
+               "#{name}: agent-config save changed the security posture"
+
+        assert get_in(reloaded.config, ["agent", "security"]) ==
+                 get_in(config, ["agent", "security"]),
+               "#{name}: agent-config save touched agent.security"
+      end
+    end
+
+    test "round-tripping the security form unchanged is not treated as a downgrade", %{conn: conn} do
+      for {name, config} <- @real_configs do
+        ws = new_workspace(%{config: config})
+        before = SecurityPolicy.resolve(ws)
+
+        {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+        html = view |> form("form[phx-submit=save_security]") |> render_submit()
+
+        refute html =~ "security-confirm-modal",
+               "#{name}: an unchanged security submit demanded confirmation"
+
+        {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+        assert SecurityPolicy.resolve(reloaded) == before,
+               "#{name}: unchanged security submit moved the posture"
+      end
     end
   end
 end
