@@ -197,13 +197,16 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   end
 
   def handle_event("rm_repo_override", %{"repo" => repo}, socket) do
+    overrides = socket.assigns.workspace |> repo_overrides() |> Map.delete(repo)
+
     case patch_config(
            socket.assigns.workspace,
-           %{},
-           ["review_automation.repo_overrides.#{repo}"]
+           %{"review_automation" => %{"repo_overrides" => overrides}},
+           ["review_automation.repo_overrides"]
          ) do
       {:ok, ws} ->
-        {:noreply, socket |> assign(:workspace, ws) |> load_derived()}
+        {:noreply,
+         socket |> assign(:workspace, ws) |> assign(:config_error, nil) |> load_derived()}
 
       {:error, msg} ->
         {:noreply, assign(socket, :config_error, msg)}
