@@ -295,43 +295,164 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
     end
   end
 
-  describe "unit_contents/2" do
+  describe "unit_contents/3 (release mode — root is not a source checkout)" do
     test "user units omit docker ordering (can't cross the manager boundary)" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       refute contents =~ "docker.service"
       assert contents =~ "WantedBy=default.target"
       assert contents =~ "EnvironmentFile=-/home/user/.arbiter/arbiter.env"
     end
 
     test "uses the release binary as ExecStart" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       assert contents =~ "ExecStart=/home/user/.arbiter/current/bin/arbiter start"
       assert contents =~ "Type=exec"
       refute contents =~ "RemainAfterExit"
     end
 
     test "does not bake MIX_HOME or PATH directly into the unit (PATH goes in EnvironmentFile instead)" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       refute contents =~ "MIX_HOME"
       refute contents =~ ~r/Environment=PATH=/
     end
 
     test "includes Restart=on-failure and RestartSec so systemd auto-retries" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       assert contents =~ "Restart=on-failure"
       assert contents =~ "RestartSec=10"
     end
 
     test "user unit routes output to a file so logs survive reboots without journald group" do
-      contents = InstallService.unit_contents(:user, "/home/user/.arbiter")
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"
       assert contents =~ "StandardError=append:/home/user/.arbiter/log/arbiter.log"
     end
 
     test "system unit omits file-based log directives (journald is fine with root)" do
-      contents = InstallService.unit_contents(:system, "/home/user/.arbiter")
+      contents =
+        InstallService.unit_contents(:system, "/home/user/.arbiter", "/home/user/.arbiter")
+
       refute contents =~ "StandardOutput="
       refute contents =~ "StandardError="
+    end
+
+    test "a root with no mix.exs/apps is release mode even if it happens to share a path prefix" do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
+      refute contents =~ ".run-server.sh"
+    end
+  end
+
+  describe "unit_contents/3 (dev mode — root is a source checkout)" do
+    setup do
+      root = Path.join(System.tmp_dir!(), "arb-devroot-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(root, "apps"))
+      File.write!(Path.join(root, "mix.exs"), "# fake umbrella mix.exs\n")
+      on_exit(fn -> File.rm_rf!(root) end)
+      {:ok, root: root}
+    end
+
+    test "points ExecStart at the dev-mode launcher instead of the release binary", %{root: root} do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      assert contents =~ "ExecStart=/bin/sh #{root}/.run-server.sh"
+      refute contents =~ "current/bin/arbiter start"
+      assert contents =~ "Type=exec"
+    end
+
+    test "keeps WorkingDirectory at the checkout root, not the arbiter data home", %{root: root} do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      assert contents =~ "WorkingDirectory=#{root}"
+    end
+
+    test "still uses the arbiter_home EnvironmentFile for captured secrets/PATH", %{root: root} do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      assert contents =~ "EnvironmentFile=-/home/user/.arbiter/arbiter.env"
+    end
+
+    test "forwards ARB_HOME=root so subprocesses resolve the same checkout", %{root: root} do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      assert contents =~ "Environment=ARB_HOME=#{root}"
+    end
+
+    test "raises TimeoutStartSec so a cold mix compile doesn't get killed as a startup failure",
+         %{
+           root: root
+         } do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      assert contents =~ "TimeoutStartSec=900"
+    end
+
+    test "keeps Restart=on-failure and file-based logging, same as release mode", %{root: root} do
+      contents = InstallService.unit_contents(:user, "/home/user/.arbiter", root)
+      assert contents =~ "Restart=on-failure"
+      assert contents =~ "RestartSec=10"
+      assert contents =~ "StandardOutput=append:/home/user/.arbiter/log/arbiter.log"
+    end
+
+    test "system scope keeps docker ordering and drops file-based logging, same as release mode",
+         %{
+           root: root
+         } do
+      contents = InstallService.unit_contents(:system, "/home/user/.arbiter", root)
+      assert contents =~ "After=network-online.target docker.service"
+      assert contents =~ "WantedBy=multi-user.target"
+      refute contents =~ "StandardOutput="
+    end
+  end
+
+  describe "install writes .run-server.sh for a dev-mode checkout" do
+    setup %{unit_dir: _dir} do
+      root = Path.join(System.tmp_dir!(), "arb-devroot-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(root, "apps"))
+      File.write!(Path.join(root, "mix.exs"), "# fake umbrella mix.exs\n")
+      System.put_env("ARB_HOME", root)
+      on_exit(fn -> File.rm_rf!(root) end)
+      {:ok, root: root}
+    end
+
+    test "generates .run-server.sh when absent and points the unit at it", %{
+      root: root,
+      unit_dir: dir
+    } do
+      record_cmds()
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+
+      script = Path.join(root, ".run-server.sh")
+      assert File.exists?(script)
+      assert File.read!(script) =~ "exec mix phx.server"
+
+      unit_contents = File.read!(Path.join(dir, "arbiter.service"))
+      assert unit_contents =~ "ExecStart=/bin/sh #{script}"
+    end
+
+    test "never overwrites an existing .run-server.sh", %{root: root} do
+      record_cmds()
+
+      script = Path.join(root, ".run-server.sh")
+      File.write!(script, "#!/bin/sh\necho custom launcher\n")
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+      assert File.read!(script) =~ "custom launcher"
+    end
+
+    test "re-running keeps generating a dev-mode unit (no flip-flop to release mode)", %{
+      unit_dir: dir
+    } do
+      record_cmds()
+
+      {_o1, _e1, c1} = capture(fn -> InstallService.run([]) end)
+      {_o2, _e2, c2} = capture(fn -> InstallService.run([]) end)
+
+      assert c1 == 0
+      assert c2 == 0
+
+      contents = File.read!(Path.join(dir, "arbiter.service"))
+      assert contents =~ ".run-server.sh"
+      refute contents =~ "current/bin/arbiter start"
     end
   end
 end
