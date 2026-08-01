@@ -113,5 +113,5 @@ defmodule Arbiter.Tasks.DoltImport.Mapper do
     id |> String.split("-", parts: 2) |> List.first() |> String.downcase()
   end
 
-  def derive_prefix(_), do: "bd"
+  def derive_prefix(_), do: "ar"
 end

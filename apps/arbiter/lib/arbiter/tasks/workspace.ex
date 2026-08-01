@@ -209,7 +209,7 @@ defmodule Arbiter.Tasks.Workspace do
     attribute :prefix, :string do
       allow_nil? false
       public? true
-      default "bd"
+      default "ar"
       constraints min_length: 1, max_length: 16, trim?: true, match: ~r/^[a-z][a-z0-9]*$/
 
       description """

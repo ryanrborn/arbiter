@@ -172,7 +172,7 @@ defmodule Arbiter.Tasks.DoltImport.MapperTest do
     end
 
     test "fallback for empty list" do
-      assert Mapper.derive_prefix([]) == "bd"
+      assert Mapper.derive_prefix([]) == "ar"
     end
   end
 end
