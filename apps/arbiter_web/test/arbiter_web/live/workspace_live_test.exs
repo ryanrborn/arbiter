@@ -634,6 +634,110 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["repo_paths"] == %{}
     end
 
+    test "adding a repo_path on a rig_paths workspace doesn't shadow existing rig_paths entries",
+         %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{"rig_paths" => %{"arbiter" => "/home/ryan/dev/arbiter"}}
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_repo_path]", %{
+        "repo_path" => %{"repo" => "other", "path" => "/home/ryan/dev/other"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["rig_paths"] == %{
+               "arbiter" => "/home/ryan/dev/arbiter",
+               "other" => "/home/ryan/dev/other"
+             }
+
+      refute Map.has_key?(reloaded.config, "repo_paths")
+    end
+
+    test "removing a repo_path on a rig_paths workspace doesn't leave it live in rig_paths",
+         %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "rig_paths" => %{
+              "arbiter" => "/home/ryan/dev/arbiter",
+              "other" => "/home/ryan/dev/other"
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> element("button[phx-click=rm_repo_path][phx-value-repo='other']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["rig_paths"] == %{"arbiter" => "/home/ryan/dev/arbiter"}
+      refute Map.has_key?(reloaded.config, "repo_paths")
+    end
+
+    test "re-adding a repo_path with the richer map shape preserves target_branch", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "repo_paths" => %{
+              "arbiter" => %{"path" => "/old/path", "target_branch" => "integration/dolphin"}
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_repo_path]", %{
+        "repo_path" => %{"repo" => "arbiter", "path" => "/home/ryan/dev/arbiter"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["repo_paths"] == %{
+               "arbiter" => %{
+                 "path" => "/home/ryan/dev/arbiter",
+                 "target_branch" => "integration/dolphin"
+               }
+             }
+    end
+
+    test "a malformed repo_paths entry (no path) still renders and can be removed", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "repo_paths" => %{
+              "arbiter" => "/home/ryan/dev/arbiter",
+              "broken" => %{"target_branch" => "main"}
+            }
+          }
+        })
+
+      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert html =~ "broken"
+      assert has_element?(view, "button[phx-click=rm_repo_path][phx-value-repo='broken']")
+
+      view
+      |> element("button[phx-click=rm_repo_path][phx-value-repo='broken']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["repo_paths"] == %{"arbiter" => "/home/ryan/dev/arbiter"}
+    end
+
     test "saves pr_patrol.* and review_patrol.our_login through patch_config", %{conn: conn} do
       ws = new_workspace()
 
@@ -658,6 +762,32 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["pr_patrol"]["resolve_bot_threads"] == true
       assert reloaded.config["pr_patrol"]["resolve_human_threads"] == true
       assert reloaded.config["review_patrol"]["our_login"] == "arbiter-bot"
+    end
+
+    test "pr_patrol resolve-thread checkboxes render checked for the string boolean form", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "pr_patrol" => %{
+              "resolve_bot_threads" => "false",
+              "resolve_human_threads" => "true"
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      refute has_element?(
+               view,
+               "input[name='config[pr_patrol_resolve_bot_threads]'][type=checkbox][checked]"
+             )
+
+      assert has_element?(
+               view,
+               "input[name='config[pr_patrol_resolve_human_threads]'][type=checkbox][checked]"
+             )
     end
 
     test "blank pr_patrol/review_patrol fields unset rather than writing empty values", %{
