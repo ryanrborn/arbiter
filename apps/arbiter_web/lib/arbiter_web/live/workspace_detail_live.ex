@@ -380,10 +380,22 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
         {:noreply, assign(socket, :config_error, "Repo path can't be empty.")}
 
       true ->
+        key = repo_paths_key(socket.assigns.workspace)
+        other_key = other_repo_paths_key(key)
+        existing = repo_paths_raw(socket.assigns.workspace)
+
+        entry =
+          case Map.get(existing, repo) do
+            %{} = m -> Map.put(m, "path", path)
+            _ -> path
+          end
+
+        new_paths = Map.put(existing, repo, entry)
+
         case patch_config(
                socket.assigns.workspace,
-               %{"repo_paths" => %{repo => path}},
-               []
+               %{key => new_paths},
+               [key, other_key]
              ) do
           {:ok, ws} ->
             {:noreply,
@@ -399,9 +411,11 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   end
 
   def handle_event("rm_repo_path", %{"repo" => repo}, socket) do
+    key = repo_paths_key(socket.assigns.workspace)
+    other_key = other_repo_paths_key(key)
     paths = socket.assigns.workspace |> repo_paths_raw() |> Map.delete(repo)
 
-    case patch_config(socket.assigns.workspace, %{"repo_paths" => paths}, ["repo_paths"]) do
+    case patch_config(socket.assigns.workspace, %{key => paths}, [key, other_key]) do
       {:ok, ws} ->
         {:noreply,
          socket |> assign(:workspace, ws) |> assign(:config_error, nil) |> load_derived()}
@@ -1354,13 +1368,32 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # Which config key this workspace's repo-path map actually lives under.
+  # `repo_paths` takes precedence when both are (improbably) present, matching
+  # `repo_paths_raw/1` / every runtime consumer's `||` precedence. Writers use
+  # this so edits land on the key the workspace already uses instead of
+  # shadowing it with a second, divergent map (see `add_repo_path` /
+  # `rm_repo_path`).
+  defp repo_paths_key(ws) do
+    cond do
+      is_map(cfg(ws, ["repo_paths"])) -> "repo_paths"
+      is_map(cfg(ws, ["rig_paths"])) -> "rig_paths"
+      true -> "repo_paths"
+    end
+  end
+
+  defp other_repo_paths_key("repo_paths"), do: "rig_paths"
+  defp other_repo_paths_key("rig_paths"), do: "repo_paths"
+
   # `repo_paths_raw/1` flattened to a simple repo -> path string map for
-  # display, same as `RepoConfig.find_path/2` elsewhere reads it.
+  # display, same as `RepoConfig.find_path/2` elsewhere reads it. Entries that
+  # don't resolve to a path string (malformed, e.g. `%{"target_branch" => .}`
+  # with no `"path"`) are kept with a `nil` path rather than dropped, so they
+  # still render (as "invalid") and can be removed from the dashboard.
   defp repo_paths(ws) do
     ws
     |> repo_paths_raw()
     |> Enum.map(fn {repo, entry} -> {repo, RepoConfig.repo_path_from_config(entry)} end)
-    |> Enum.filter(fn {_repo, path} -> is_binary(path) end)
     |> Map.new()
   end
 
@@ -1369,13 +1402,6 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       list when is_list(list) -> Enum.join(list, ", ")
       _ -> ""
     end
-  end
-
-  # `pr_patrol.resolve_bot_threads` defaults to `true` when unset (see
-  # ConfigSchema/pr-patrol.md), unlike `resolve_human_threads` which defaults
-  # false — so the checkbox must default checked, not just "truthy value".
-  defp pr_patrol_resolve_bot_threads?(ws) do
-    cfg(ws, ["pr_patrol", "resolve_bot_threads"], true) == true
   end
 
   defp auto_authors_text(ws) do
@@ -1865,7 +1891,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                   type="checkbox"
                   name="config[pr_patrol_resolve_bot_threads]"
                   value="true"
-                  checked={pr_patrol_resolve_bot_threads?(@workspace)}
+                  checked={Workspace.pr_patrol_resolve_bot_threads?(@workspace)}
                   class="toggle toggle-sm toggle-primary"
                 />
                 <span class="text-sm">
@@ -1878,7 +1904,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                   type="checkbox"
                   name="config[pr_patrol_resolve_human_threads]"
                   value="true"
-                  checked={cfg(@workspace, ["pr_patrol", "resolve_human_threads"], false) == true}
+                  checked={Workspace.pr_patrol_resolve_human_threads?(@workspace)}
                   class="toggle toggle-sm toggle-primary"
                 />
                 <span class="text-sm">
@@ -2011,7 +2037,9 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                   class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
                 >
                   <code class="text-sm font-semibold">{repo}</code>
-                  <span class="text-xs font-mono text-base-content/60 flex-1">{path}</span>
+                  <span class="text-xs font-mono text-base-content/60 flex-1">
+                    {path || "— (invalid entry)"}
+                  </span>
                   <button
                     type="button"
                     phx-click="rm_repo_path"
