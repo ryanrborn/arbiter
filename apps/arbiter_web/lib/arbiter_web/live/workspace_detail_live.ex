@@ -102,6 +102,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:agent_types, Agents.valid_agent_types())
          |> assign(:routing_policies, Routing.valid_policies())
          |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
+         |> assign(:quota_modes, ValidateConfig.valid_quota_modes())
          |> assign(:security_modes, SecurityPolicy.valid_modes())
          |> assign(:security_filesystems, SecurityPolicy.valid_filesystems())
          |> assign(:safe_default_categories, SecurityPolicy.safe_default_categories())
@@ -135,6 +136,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {merge_patch, merge_unset} = merge_settings_patch(params)
     {review_gate_patch, review_gate_unset} = review_gate_settings_patch(params)
     {review_automation_patch, review_automation_unset} = review_automation_settings_patch(params)
+    {quota_patch, quota_unset} = quota_settings_patch(params)
+    {conductor_patch, conductor_unset} = conductor_settings_patch(params)
 
     case routing_settings_patch(params) do
       {:ok, {routing_patch, routing_unset}} ->
@@ -147,8 +150,13 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
           }
           |> maybe_put_map("review_gate", review_gate_patch)
           |> maybe_put_map("review_automation", review_automation_patch)
+          |> maybe_put_map("quota", quota_patch)
+          |> maybe_put_map("conductor", conductor_patch)
 
-        unset = merge_unset ++ review_gate_unset ++ review_automation_unset ++ routing_unset
+        unset =
+          merge_unset ++
+            review_gate_unset ++
+            review_automation_unset ++ routing_unset ++ quota_unset ++ conductor_unset
 
         case patch_config(socket.assigns.workspace, patch, unset) do
           {:ok, ws} ->
@@ -780,6 +788,41 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       v ->
         authors = v |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
         {Map.put(patch, "auto_authors", authors), unset}
+    end
+  end
+
+  # Builds the `quota.*` patch/unset pair (quota-aware dispatch throttle):
+  # `on_exhaustion` is an enum with a `throttle` server default, while
+  # `overage_alert_usd`/`throttle_threshold` are optional numbers kept as
+  # their raw string form (the validator accepts either a number or its JSON
+  # string form, same as `merge.watchdog_max_polls`) — a blank field unsets
+  # rather than writing an empty string.
+  defp quota_settings_patch(params) do
+    {patch, unset} =
+      case blank_to_nil(params["quota_on_exhaustion"]) do
+        nil -> {%{}, ["quota.on_exhaustion"]}
+        v -> {%{"on_exhaustion" => v}, []}
+      end
+
+    {patch, unset} =
+      case blank_to_nil(params["quota_overage_alert_usd"]) do
+        nil -> {patch, unset ++ ["quota.overage_alert_usd"]}
+        v -> {Map.put(patch, "overage_alert_usd", v), unset}
+      end
+
+    case blank_to_nil(params["quota_throttle_threshold"]) do
+      nil -> {patch, unset ++ ["quota.throttle_threshold"]}
+      v -> {Map.put(patch, "throttle_threshold", v), unset}
+    end
+  end
+
+  # Builds the `conductor.max_concurrent` patch/unset pair — the per-workspace
+  # concurrency cap, uncapped by default, kept as its raw string form (same
+  # accepted-string-or-number pattern as `quota.*` above).
+  defp conductor_settings_patch(params) do
+    case blank_to_nil(params["conductor_max_concurrent"]) do
+      nil -> {%{}, ["conductor.max_concurrent"]}
+      v -> {%{"max_concurrent" => v}, []}
     end
   end
 
@@ -1567,6 +1610,34 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                   Fast-forward primary checkout after merge (merge.auto_sync_primary)
                 </span>
               </label>
+              <.input
+                type="select"
+                name="config[quota_on_exhaustion]"
+                label="On quota exhaustion (quota.on_exhaustion)"
+                options={[{"(unset — defaults to throttle)", ""} | Enum.map(@quota_modes, &{&1, &1})]}
+                value={cfg(@workspace, ["quota", "on_exhaustion"], "")}
+              />
+              <.input
+                type="text"
+                name="config[quota_overage_alert_usd]"
+                label="Overage alert threshold USD (quota.overage_alert_usd)"
+                placeholder="e.g. 50"
+                value={cfg(@workspace, ["quota", "overage_alert_usd"], "")}
+              />
+              <.input
+                type="text"
+                name="config[quota_throttle_threshold]"
+                label="Throttle threshold (quota.throttle_threshold, 0-1]"
+                placeholder="e.g. 0.8"
+                value={cfg(@workspace, ["quota", "throttle_threshold"], "")}
+              />
+              <.input
+                type="text"
+                name="config[conductor_max_concurrent]"
+                label="Max concurrent dispatches (conductor.max_concurrent)"
+                placeholder="default: uncapped"
+                value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
+              />
               <div class="sm:col-span-2 flex items-center gap-3 mt-2">
                 <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
                   Save configuration
