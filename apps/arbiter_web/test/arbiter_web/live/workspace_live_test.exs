@@ -642,6 +642,115 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert SecurityPolicy.resolve(reloaded).sandbox.enabled == true
     end
 
+    test "loosening the permission mode requires an explicit confirmation step", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}}
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      # Everything else identical to the current posture — only strict → bypass,
+      # which drops the allow-list restriction and the classifier.
+      html =
+        view
+        |> form("form[phx-submit=save_security]", security_params(%{"mode" => "bypass"}))
+        |> render_submit()
+
+      assert has_element?(view, "#security-confirm-modal")
+      assert html =~ "strict → bypass"
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert SecurityPolicy.resolve(reloaded).permissions.mode == :strict
+
+      view |> element("button[phx-click=confirm_security]") |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert SecurityPolicy.resolve(reloaded).permissions.mode == :bypass
+    end
+
+    test "tightening the permission mode saves without a confirmation step", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{"security" => %{"permissions" => %{"mode" => "bypass"}}}
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_security]", security_params(%{"mode" => "auto"}))
+      |> render_submit()
+
+      refute has_element?(view, "#security-confirm-modal")
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert SecurityPolicy.resolve(reloaded).permissions.mode == :auto
+    end
+
+    # A stale tab or a hand-crafted submit can carry a value the select never
+    # offered. `SecurityPolicy` parses config leniently, so persisting one would
+    # silently revert the workspace to the base `:bypass` default while
+    # `arb config get` showed the junk string.
+    test "rejects a security submit carrying an unknown mode or filesystem", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{"security" => %{"permissions" => %{"mode" => "strict"}}}
+          }
+        })
+
+      before_config = ws.config
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      html =
+        render_submit(view, "save_security", security_params(%{"mode" => "yolo"}))
+
+      assert html =~ "Unknown permission mode"
+      refute has_element?(view, "#security-confirm-modal")
+
+      html =
+        render_submit(view, "save_security", security_params(%{"sandbox_filesystem" => "/"}))
+
+      assert html =~ "Unknown filesystem scope"
+      refute has_element?(view, "#security-confirm-modal")
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config == before_config
+      assert SecurityPolicy.resolve(reloaded).permissions.mode == :strict
+    end
+
+    test "surfaces per-repo security overrides alongside the workspace-wide posture", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "agent" => %{
+              "security" => %{
+                "permissions" => %{"mode" => "strict"},
+                "repos" => %{
+                  "acme/widgets" => %{"sandbox" => %{"enabled" => false}}
+                }
+              }
+            }
+          }
+        })
+
+      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(view, "#security-repo-postures")
+      assert html =~ "acme/widgets"
+      # The repo layer is resolved, not just echoed: its sandbox is off even
+      # though the workspace-wide line says it is on.
+      assert html =~ SecurityPolicy.one_line(SecurityPolicy.resolve(ws, %{}, "acme/widgets"))
+      refute SecurityPolicy.resolve(ws, %{}, "acme/widgets").sandbox.enabled
+      assert SecurityPolicy.resolve(ws).sandbox.enabled
+    end
+
     test "cancelling the security confirmation leaves the posture untouched", %{conn: conn} do
       ws = new_workspace()
       before = SecurityPolicy.resolve(ws)

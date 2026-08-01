@@ -344,28 +344,35 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   def handle_event("save_security", %{"security" => params}, socket) do
     ws = socket.assigns.workspace
-    block = security_block(params, socket.assigns.safe_default_categories)
 
-    current = SecurityPolicy.resolve(ws)
-    proposed = SecurityPolicy.resolve(%{config: security_preview_config(ws, block)})
+    case validate_security_params(params) do
+      {:error, msg} ->
+        {:noreply, socket |> assign(:security_error, msg) |> assign(:security_confirm, nil)}
 
-    case security_downgrades(current, proposed) do
-      [] ->
-        {:noreply, apply_security(socket, block)}
+      :ok ->
+        block = security_block(params, socket.assigns.safe_default_categories)
 
-      downgrades ->
-        # Refuse the plain save: the operator has to look at the list of
-        # guards they are giving up and click through, mirroring how
-        # destructive operations elsewhere are gated behind an explicit
-        # acknowledgement rather than a single submit.
-        {:noreply,
-         socket
-         |> assign(:security_error, nil)
-         |> assign(:security_confirm, %{
-           block: block,
-           downgrades: downgrades,
-           posture: SecurityPolicy.one_line(proposed)
-         })}
+        current = SecurityPolicy.resolve(ws)
+        proposed = SecurityPolicy.resolve(%{config: security_preview_config(ws, block)})
+
+        case security_downgrades(current, proposed) do
+          [] ->
+            {:noreply, apply_security(socket, block)}
+
+          downgrades ->
+            # Refuse the plain save: the operator has to look at the list of
+            # guards they are giving up and click through, mirroring how
+            # destructive operations elsewhere are gated behind an explicit
+            # acknowledgement rather than a single submit.
+            {:noreply,
+             socket
+             |> assign(:security_error, nil)
+             |> assign(:security_confirm, %{
+               block: block,
+               downgrades: downgrades,
+               posture: SecurityPolicy.one_line(proposed)
+             })}
+        end
     end
   end
 
@@ -682,9 +689,38 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {%{"agent" => %{"config" => agent_config}}, unset}
   end
 
+  # `mode` and `sandbox.filesystem` are the two enum fields the form writes
+  # verbatim into config, and `ValidateConfig` has no `agent.security` branch
+  # to catch a bad one. An unrecognized value is not inert: `SecurityPolicy`
+  # reads config leniently, so `parse_mode/2` would silently fall back to the
+  # *base* default (`:bypass`) — a workspace pinned at `:strict` would be
+  # quietly downgraded while `arb config get agent.security` still showed the
+  # junk string. Reject it instead, the way `add_provider_override` checks its
+  # provider/tier against fixed lists.
+  defp validate_security_params(params) do
+    mode = params["mode"]
+    filesystem = params["sandbox_filesystem"]
+    valid_modes = Enum.map(SecurityPolicy.valid_modes(), &Atom.to_string/1)
+    valid_filesystems = Enum.map(SecurityPolicy.valid_filesystems(), &Atom.to_string/1)
+
+    cond do
+      mode not in valid_modes ->
+        {:error,
+         "Unknown permission mode #{inspect(mode)} — expected one of #{Enum.join(valid_modes, ", ")}."}
+
+      filesystem not in valid_filesystems ->
+        {:error,
+         "Unknown filesystem scope #{inspect(filesystem)} — expected one of #{Enum.join(valid_filesystems, ", ")}."}
+
+      true ->
+        :ok
+    end
+  end
+
   # Normalizes the security form params into an `agent.security` config block.
   # Written whole (rather than field-by-field) so the resolved posture the
-  # operator confirmed is exactly what lands.
+  # operator confirmed is exactly what lands. `mode` / `sandbox_filesystem`
+  # are pre-validated by `validate_security_params/1`.
   defp security_block(params, categories) do
     safe_defaults = params["safe_defaults"] || %{}
 
@@ -716,10 +752,28 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   # Every way the proposed posture gives up ground relative to the current
   # one, as operator-readable strings. Tightenings (stricter mode, network
   # cut, added deny rules) are deliberately absent — they need no gate.
-  # `mode` is not listed either: `:bypass` skips the interactive classifier
-  # but the deny list is still a hard block, so no mode transition removes a
-  # guard on its own (see `Arbiter.Agents.SecurityPolicy`).
+  #
+  # `mode` counts: the deny list is a hard block in every mode
+  # (`Claude.Security.settings_argv/1` is emitted even for `:bypass`), but
+  # that is not the whole guard. `:strict` maps to `--permission-mode default`
+  # / `"defaultMode" => "default"`, under which only allow-listed tools run;
+  # `:auto` keeps the interactive classifier; `:bypass`
+  # (`--dangerously-skip-permissions`) drops both, so anything not explicitly
+  # denied runs. Loosening the mode is therefore the widest-blast-radius
+  # control on this form and gets the same confirm step as the rest.
+  @mode_strictness %{strict: 2, auto: 1, bypass: 0}
+
   defp security_downgrades(current, proposed) do
+    mode =
+      if mode_rank(proposed.permissions.mode) < mode_rank(current.permissions.mode) do
+        [
+          "Loosens the permission mode (#{current.permissions.mode} → #{proposed.permissions.mode}) — " <>
+            mode_loss(proposed.permissions.mode)
+        ]
+      else
+        []
+      end
+
     removed_guards =
       Enum.map(
         current.permissions.safe_defaults -- proposed.permissions.safe_defaults,
@@ -744,8 +798,16 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       |> Enum.filter(&elem(&1, 0))
       |> Enum.map(&elem(&1, 1))
 
-    removed_guards ++ sandbox ++ removed_denies
+    mode ++ removed_guards ++ sandbox ++ removed_denies
   end
+
+  defp mode_rank(mode), do: Map.get(@mode_strictness, mode, 0)
+
+  defp mode_loss(:bypass),
+    do: "tools are no longer restricted to the allow list and the classifier is skipped"
+
+  defp mode_loss(:auto), do: "tools are no longer restricted to the allow list"
+  defp mode_loss(mode), do: "the #{mode} mode is looser"
 
   defp apply_security(socket, block) do
     case patch_config(socket.assigns.workspace, %{"agent" => %{"security" => block}}, []) do
@@ -824,6 +886,27 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     |> assign(:model_tiers, model_tiers(ws))
     |> assign(:thinking_levels, thinking_levels(ws))
     |> assign(:security_policy, SecurityPolicy.resolve(ws))
+    |> assign(:security_repo_postures, security_repo_postures(ws))
+  end
+
+  # `agent.security.repos.<repo>` is a whole extra layer applied on top of the
+  # workspace-wide posture for dispatches against that repo, so the resolved
+  # workspace line alone can misrepresent what a worker actually gets (a repo
+  # can, say, turn the sandbox back off). Resolved through the same
+  # `SecurityPolicy.resolve/3` path and listed read-only under the posture
+  # panel; this form edits the workspace layer only, that one stays CLI-owned.
+  defp security_repo_postures(ws) do
+    case cfg(ws, ["agent", "security", "repos"]) do
+      %{} = repos ->
+        repos
+        |> Map.keys()
+        |> Enum.filter(&is_binary/1)
+        |> Enum.sort()
+        |> Enum.map(&{&1, SecurityPolicy.resolve(ws, %{}, &1)})
+
+      _ ->
+        []
+    end
   end
 
   # The baseline keys plus every key this workspace actually stores (including
@@ -1510,7 +1593,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
             <div class="rounded-box border border-base-300 bg-base-100 px-3 py-2">
               <p class="text-xs uppercase tracking-wide text-base-content/50">
-                Effective posture right now
+                Effective workspace-wide posture right now
               </p>
               <p class="font-mono text-sm mt-0.5">{security_summary(@security_policy)}</p>
               <div class="flex flex-wrap gap-1 mt-2">
@@ -1548,6 +1631,26 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                     @safe_default_categories
                   )}
                 </span>
+              </div>
+
+              <%!-- agent.security.repos.<repo> layers on top of the line above
+                   for dispatches against that repo, so the workspace-wide
+                   posture is not the whole story. Read-only: the form below
+                   edits the workspace layer only. --%>
+              <div :if={@security_repo_postures != []} id="security-repo-postures" class="mt-3">
+                <p class="text-xs uppercase tracking-wide text-base-content/50">
+                  Per-repo overrides (<code>agent.security.repos.*</code>) — applied on top of the
+                  line above; edit via <code>arb config</code>
+                </p>
+                <ul class="mt-1 flex flex-col gap-0.5">
+                  <li
+                    :for={{repo, policy} <- @security_repo_postures}
+                    class="font-mono text-xs flex flex-wrap gap-x-2"
+                  >
+                    <span class="text-base-content/60">{repo}:</span>
+                    <span>{security_summary(policy)}</span>
+                  </li>
+                </ul>
               </div>
             </div>
 
@@ -1854,7 +1957,13 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
             <li :for={downgrade <- @security_confirm.downgrades}>{downgrade}</li>
           </ul>
           <p class="text-xs text-base-content/50 mt-3">
-            Resulting posture: <span class="font-mono">{@security_confirm.posture}</span>
+            Resulting workspace-wide posture:
+            <span class="font-mono">{@security_confirm.posture}</span>
+          </p>
+          <p :if={@security_repo_postures != []} class="text-xs text-warning mt-1">
+            {length(@security_repo_postures)} per-repo override(s) still layer on top of this — see
+            <code>agent.security.repos.*</code>
+            in the posture panel.
           </p>
           <div class="modal-action">
             <.button type="button" phx-click="cancel_security" class="btn btn-sm btn-ghost">
