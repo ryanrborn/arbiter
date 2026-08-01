@@ -340,6 +340,18 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
       contents = InstallService.unit_contents(:user, "/home/user/.arbiter", "/home/user/.arbiter")
       refute contents =~ ".run-server.sh"
     end
+
+    test "a root with only compose.yml (no mix.exs/apps) is release mode, not dev mode" do
+      root = Path.join(System.tmp_dir!(), "arb-composeonly-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      File.write!(Path.join(root, "compose.yml"), "# postgres only\n")
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      contents = InstallService.unit_contents(:user, root, root)
+
+      refute contents =~ ".run-server.sh"
+      assert contents =~ "ExecStart=#{root}/current/bin/arbiter start"
+    end
   end
 
   describe "unit_contents/3 (dev mode — root is a source checkout)" do
@@ -425,6 +437,24 @@ defmodule ArbiterCli.Cmd.InstallServiceTest do
 
       unit_contents = File.read!(Path.join(dir, "arbiter.service"))
       assert unit_contents =~ "ExecStart=/bin/sh #{script}"
+    end
+
+    test "generated .run-server.sh sources the checkout's .arbiter.env before exec", %{
+      root: root
+    } do
+      record_cmds()
+
+      {_out, _err, code} = capture(fn -> InstallService.run([]) end)
+
+      assert code == 0
+
+      script_body = File.read!(Path.join(root, ".run-server.sh"))
+      assert script_body =~ ~s(. ./.arbiter.env)
+
+      # Must source .arbiter.env *before* exec-ing mix, not after.
+      source_index = :binary.match(script_body, ".arbiter.env") |> elem(0)
+      exec_index = :binary.match(script_body, "exec mix phx.server") |> elem(0)
+      assert source_index < exec_index
     end
 
     test "never overwrites an existing .run-server.sh", %{root: root} do

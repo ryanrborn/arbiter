@@ -14,10 +14,15 @@ defmodule ArbiterCli.Cmd.InstallService do
       source checkout (`mix.exs` + `apps/`, the same heuristic
       `Cmd.Start.is_umbrella_root?/1` uses), `ExecStart` instead runs
       `<root>/.run-server.sh`, a small `exec`-chain launcher that `cd`s to
-      the checkout and `exec`s `mix phx.server` directly — so systemd tracks
-      the real BEAM process instead of a detached background job. The script
-      is generated at `<root>/.run-server.sh` if it doesn't already exist;
-      an existing script is never overwritten.
+      the checkout, sources the checkout's own `.arbiter.env` (for
+      `SECRET_KEY_BASE`, `DATABASE_PATH`, and similar dev-only settings that
+      `EnvironmentFile=` below doesn't carry), and `exec`s `mix phx.server`
+      directly — so systemd tracks the real BEAM process instead of a
+      detached background job. The script is generated at
+      `<root>/.run-server.sh` if it doesn't already exist; an existing
+      script is never overwritten. Note this script is also what
+      `Cmd.Start.start_phoenix/1` prefers for plain `arb start`/`arb restart`
+      when present, so it has to work standalone, not just under systemd.
 
   Either way the service runs as a long-lived foreground process
   (`Type=exec`), tracked by systemd for the full lifetime of the VM. Which
@@ -402,12 +407,15 @@ defmodule ArbiterCli.Cmd.InstallService do
     end
   end
 
-  # Same heuristic `Cmd.Start.is_umbrella_root?/1` uses to find the umbrella
-  # root: mix.exs + an apps/ dir. A release install's root (the release
-  # directory structure under arbiter_home) has neither, so this is a stable,
-  # non-incidental signal — it depends only on what's actually on disk at
-  # `root`, not on any other install state.
-  defp dev_checkout?(root), do: Start.is_umbrella_root?(root)
+  # Deliberately NOT `Start.is_umbrella_root?/1` — that helper also treats a
+  # bare `compose.yml` (no mix.exs/apps/) as a root, which is right for
+  # locating *some* Arbiter home but wrong here: a release-install box whose
+  # ARB_HOME points at a data dir holding only the Postgres compose.yml would
+  # get misclassified as dev mode and lose its release unit. This checks
+  # mix.exs + apps/ directly, so a compose-only root is release mode.
+  defp dev_checkout?(root) do
+    File.exists?(Path.join(root, "mix.exs")) and File.dir?(Path.join(root, "apps"))
+  end
 
   defp release_unit_contents(scope, arbiter_home) do
     release_bin = Path.join([arbiter_home, "current", "bin", "arbiter"])
@@ -439,8 +447,11 @@ defmodule ArbiterCli.Cmd.InstallService do
   # unchanged), but ExecStart runs the source checkout via `.run-server.sh`
   # instead of the release binary, WorkingDirectory is the checkout root (not
   # arbiter_home), and ARB_HOME is forwarded so any subprocess resolves the
-  # same checkout. TimeoutStartSec is raised because a cold `mix compile` can
-  # take minutes — the release binary needs no such allowance.
+  # same checkout. TimeoutStartSec is raised as a generous, mostly-harmless
+  # safety margin — under `Type=exec`, systemd marks the unit started as soon
+  # as `/bin/sh` execs, before `mix phx.server` even runs, so this directive
+  # does NOT actually span `mix`'s cold-compile time (unlike, say, `Type=notify`
+  # would need).
   defp dev_unit_contents(scope, arbiter_home, root) do
     run_server_sh = Path.join(root, @run_server_script_name)
     wanted_by = if scope == :system, do: "multi-user.target", else: "default.target"
@@ -488,18 +499,34 @@ defmodule ArbiterCli.Cmd.InstallService do
   # Generate `.run-server.sh` at the checkout root if it isn't already there.
   # Never overwrites an existing script — a hand-tuned launcher (or one this
   # command generated on a prior run) is left alone.
+  #
+  # This script is consumed by more than systemd: `Cmd.Start.start_phoenix/1`
+  # prefers `root/.run-server.sh` whenever it exists, falling back to an
+  # inline launcher otherwise. So it must stand on its own as a valid
+  # launcher for `arb start`/`arb restart` too, not just as an `ExecStart=`
+  # target — including sourcing `.arbiter.env` itself (see below).
   defp ensure_run_server_script(root) do
     path = Path.join(root, @run_server_script_name)
-
-    unless File.exists?(path) do
-      File.write!(path, run_server_script_contents())
-      File.chmod!(path, 0o755)
-    end
+    unless File.exists?(path), do: write_run_server_script(path, root)
   end
 
-  # `EnvironmentFile=` already injects the captured secrets/PATH before
-  # systemd execs this script, so — unlike a hand-rolled launcher — it doesn't
-  # need to source anything itself. Every hop uses `exec` (process-image
+  defp write_run_server_script(path, root) do
+    File.write!(path, run_server_script_contents())
+    File.chmod!(path, 0o755)
+  rescue
+    e in File.Error ->
+      Output.die(
+        "could not write #{path}: #{:file.format_error(e.reason)}",
+        "Check the checkout root is writable: #{root}"
+      )
+  end
+
+  # `EnvironmentFile=` covers the captured secrets/PATH (see @captured_secrets)
+  # when run under systemd, but not the checkout's own `.arbiter.env` (holds
+  # SECRET_KEY_BASE, DATABASE_PATH, ARBITER_CLOAK_KEY — see .gitignore) — and
+  # this script also runs standalone from `arb start` with no EnvironmentFile
+  # at all. So it sources `.arbiter.env` itself, same as the hand-written
+  # launcher it's modeled on. Every hop uses `exec` (process-image
   # replacement, not fork) so the PID systemd tracks becomes, via mix's own
   # launcher doing the same, the actual BEAM VM PID.
   defp run_server_script_contents do
@@ -507,6 +534,11 @@ defmodule ArbiterCli.Cmd.InstallService do
     #!/bin/sh
     set -e
     cd "$(dirname "$0")"
+    if [ -f .arbiter.env ]; then
+      set -a
+      . ./.arbiter.env
+      set +a
+    fi
     exec mix phx.server
     """
   end
