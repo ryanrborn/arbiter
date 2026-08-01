@@ -49,6 +49,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:revealed_worker_env, MapSet.new())
          |> assign(:config_error, nil)
          |> assign(:order_error, nil)
+         |> assign(:details_error, nil)
          |> assign(:tracker_types, Workspace.valid_tracker_types())
          |> assign(:merger_strategies, Workspace.valid_merger_strategies())
          |> assign(:agent_types, Agents.valid_agent_types())
@@ -60,30 +61,34 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # ---- workspace details (name/prefix) ----
+
+  def handle_event("save_details", %{"details" => %{"name" => name, "prefix" => prefix}}, socket) do
+    case Ash.update(socket.assigns.workspace, %{name: name, prefix: prefix}, action: :update) do
+      {:ok, ws} ->
+        {:noreply,
+         socket
+         |> assign(:workspace, ws)
+         |> assign(:details_error, nil)
+         |> put_flash(:info, "Workspace details saved.")}
+
+      {:error, err} ->
+        {:noreply, assign(socket, :details_error, error_message(err))}
+    end
+  end
+
   # ---- config form (enums) ----
 
   @impl true
   def handle_event("save_config", %{"config" => params}, socket) do
-    agent_types = List.wrap(params["agent_types"]) |> Enum.reject(&(&1 in [nil, ""]))
-
-    review_agent_types =
-      List.wrap(params["review_agent_types"]) |> Enum.reject(&(&1 in [nil, ""]))
-
     patch = %{
-      "agent" => %{"type" => type_value(agent_types, "claude")},
       "tracker" => %{"type" => params["tracker_type"]},
       "merge" => %{"strategy" => params["merger_strategy"]},
       "routing" => %{"policy" => params["routing_policy"]},
       "review" => %{"required" => params["review_required"] == "true"}
     }
 
-    {patch, unset_paths} =
-      case type_value(review_agent_types, nil) do
-        nil -> {patch, ["review_agent.type"]}
-        value -> {Map.put(patch, "review_agent", %{"type" => value}), []}
-      end
-
-    case patch_config(socket.assigns.workspace, patch, unset_paths) do
+    case patch_config(socket.assigns.workspace, patch, []) do
       {:ok, ws} ->
         {:noreply,
          socket
@@ -95,6 +100,22 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       {:error, msg} ->
         {:noreply, assign(socket, :config_error, msg)}
     end
+  end
+
+  # ---- agent-type precedence list (agent.type / review_agent.type) ----
+
+  def handle_event("add_agent_type", %{"role" => role, "type" => type}, socket) do
+    update_agent_types(socket, role, fn list ->
+      if type in list, do: list, else: list ++ [type]
+    end)
+  end
+
+  def handle_event("remove_agent_type", %{"role" => role, "type" => type}, socket) do
+    update_agent_types(socket, role, &List.delete(&1, type))
+  end
+
+  def handle_event("move_agent_type", %{"role" => role, "type" => type, "dir" => dir}, socket) do
+    update_agent_types(socket, role, &move_type(&1, type, dir))
   end
 
   # ---- standing orders ----
@@ -285,6 +306,55 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # Reorders/adds/removes a provider from the `agent.type` or
+  # `review_agent.type` precedence list and persists it via `:patch_config`.
+  # Same collapse rule as the old checkbox path (`type_value/2`): a single
+  # provider saves as a scalar, an empty worker-agent list falls back to
+  # "claude", an empty review-agent list unsets the key (falls back to the
+  # worker agent's type).
+  defp update_agent_types(socket, role, fun) do
+    ws = socket.assigns.workspace
+    new_list = ws |> agent_type_list(role) |> fun.() |> Enum.uniq()
+    default = if role == "agent", do: "claude", else: nil
+
+    {patch, unset_paths} =
+      case type_value(new_list, default) do
+        nil -> {%{}, ["#{role}.type"]}
+        value -> {%{role => %{"type" => value}}, []}
+      end
+
+    case patch_config(ws, patch, unset_paths) do
+      {:ok, updated} ->
+        {:noreply,
+         socket |> assign(:workspace, updated) |> assign(:config_error, nil) |> load_derived()}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :config_error, msg)}
+    end
+  end
+
+  defp move_type(list, type, "up") do
+    case Enum.find_index(list, &(&1 == type)) do
+      nil -> list
+      0 -> list
+      idx -> swap(list, idx, idx - 1)
+    end
+  end
+
+  defp move_type(list, type, "down") do
+    case Enum.find_index(list, &(&1 == type)) do
+      nil -> list
+      idx when idx == length(list) - 1 -> list
+      idx -> swap(list, idx, idx + 1)
+    end
+  end
+
+  defp swap(list, i, j) do
+    a = Enum.at(list, i)
+    b = Enum.at(list, j)
+    list |> List.replace_at(i, b) |> List.replace_at(j, a)
+  end
+
   defp patch_config(ws, patch, unset_paths) do
     case Ash.update(ws, %{patch: patch, unset_paths: unset_paths}, action: :patch_config) do
       {:ok, updated} -> {:ok, updated}
@@ -372,6 +442,85 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   # safe-default deny count) — read-only, set via `arb config set agent.security.*`.
   defp security_summary(ws), do: ws |> SecurityPolicy.resolve() |> SecurityPolicy.one_line()
 
+  # ---- agent-type precedence list component ----
+
+  # Renders `selected` as an ordered, reorderable list (order = precedence,
+  # first-listed wins per `Arbiter.Agents.ProviderPool`) plus buttons to add
+  # any remaining `available` provider. All actions patch-save immediately,
+  # mirroring the standing-orders add/remove pattern elsewhere on this page.
+  attr :role, :string, required: true
+  attr :label, :string, required: true
+  attr :selected, :list, required: true
+  attr :available, :list, required: true
+  attr :hint, :string, default: nil
+
+  defp agent_type_editor(assigns) do
+    ~H"""
+    <fieldset class="fieldset">
+      <legend class="fieldset-legend">{@label}</legend>
+      <ol class="space-y-1">
+        <li
+          :for={{type, idx} <- Enum.with_index(@selected)}
+          class="flex items-center gap-2 bg-base-100 rounded px-2 py-1 border border-base-300 text-sm"
+        >
+          <span class="text-xs text-base-content/40 font-mono w-4">{idx + 1}</span>
+          <span class="flex-1">{type}</span>
+          <button
+            type="button"
+            phx-click="move_agent_type"
+            phx-value-role={@role}
+            phx-value-type={type}
+            phx-value-dir="up"
+            disabled={idx == 0}
+            class="btn btn-xs btn-ghost btn-square"
+            aria-label={"Move #{type} up"}
+          >
+            <.icon name="hero-chevron-up" class="size-3" />
+          </button>
+          <button
+            type="button"
+            phx-click="move_agent_type"
+            phx-value-role={@role}
+            phx-value-type={type}
+            phx-value-dir="down"
+            disabled={idx == length(@selected) - 1}
+            class="btn btn-xs btn-ghost btn-square"
+            aria-label={"Move #{type} down"}
+          >
+            <.icon name="hero-chevron-down" class="size-3" />
+          </button>
+          <button
+            type="button"
+            phx-click="remove_agent_type"
+            phx-value-role={@role}
+            phx-value-type={type}
+            class="btn btn-xs btn-ghost btn-square text-error"
+            aria-label={"Remove #{type}"}
+          >
+            <.icon name="hero-x-mark" class="size-3" />
+          </button>
+        </li>
+        <li :if={@selected == []} class="text-xs text-base-content/40 italic">
+          None selected.
+        </li>
+      </ol>
+      <div :if={@available != []} class="flex flex-wrap gap-1 mt-1">
+        <button
+          :for={type <- @available}
+          type="button"
+          phx-click="add_agent_type"
+          phx-value-role={@role}
+          phx-value-type={type}
+          class="btn btn-xs btn-outline gap-1"
+        >
+          <.icon name="hero-plus" class="size-3" /> {type}
+        </button>
+      </div>
+      <p :if={@hint} class="text-xs text-base-content/50">{@hint}</p>
+    </fieldset>
+    """
+  end
+
   # ---- render ----
 
   @impl true
@@ -406,51 +555,77 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
           </p>
         </div>
 
+        <%!-- Workspace details (name/prefix) --%>
+        <section class="card bg-base-200 border border-base-300 shadow-sm">
+          <div class="card-body p-4 gap-3">
+            <h2 class="font-semibold flex items-center gap-2">
+              <.icon name="hero-identification" class="size-5 text-base-content/60" />
+              Workspace details
+            </h2>
+            <.form
+              for={%{}}
+              as={:details}
+              phx-submit="save_details"
+              class="grid sm:grid-cols-2 gap-x-4"
+            >
+              <.input
+                name="details[name]"
+                label="Name"
+                value={@workspace.name}
+                required
+              />
+              <div>
+                <.input
+                  name="details[prefix]"
+                  label="Prefix"
+                  value={@workspace.prefix}
+                  pattern="[a-z][a-z0-9]*"
+                  maxlength="16"
+                  required
+                />
+                <p class="text-xs text-base-content/50 mt-1">
+                  Changing the prefix does not rename existing issue IDs — the prefix is baked
+                  into each ID at creation time, so old and new issues will show different
+                  prefixes in this workspace. This is expected.
+                </p>
+              </div>
+              <div class="sm:col-span-2 flex items-center gap-3 mt-2">
+                <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
+                  Save details
+                </.button>
+                <p :if={@details_error} class="text-sm text-error">{@details_error}</p>
+              </div>
+            </.form>
+          </div>
+        </section>
+
         <%!-- Configuration --%>
         <section class="card bg-base-200 border border-base-300 shadow-sm">
           <div class="card-body p-4 gap-3">
             <h2 class="font-semibold flex items-center gap-2">
               <.icon name="hero-cog-6-tooth" class="size-5 text-base-content/60" /> Configuration
             </h2>
+            <div class="grid sm:grid-cols-2 gap-x-4 gap-y-3">
+              <.agent_type_editor
+                role="agent"
+                label="Worker agent (agent.type)"
+                selected={agent_type_list(@workspace, "agent")}
+                available={@agent_types -- agent_type_list(@workspace, "agent")}
+              />
+              <.agent_type_editor
+                role="review_agent"
+                label="Review agent (review_agent.type)"
+                selected={agent_type_list(@workspace, "review_agent")}
+                available={@agent_types -- agent_type_list(@workspace, "review_agent")}
+                hint="Leave empty to fall back to the worker agent's type."
+              />
+            </div>
             <.form
               for={%{}}
               as={:config}
               phx-submit="save_config"
               class="grid sm:grid-cols-2 gap-x-4"
             >
-              <fieldset class="fieldset">
-                <legend class="fieldset-legend">Worker agent (agent.type)</legend>
-                <div class="flex flex-wrap gap-3">
-                  <label :for={type <- @agent_types} class="label gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      name="config[agent_types][]"
-                      value={type}
-                      checked={type in agent_type_list(@workspace, "agent")}
-                      class="checkbox checkbox-sm"
-                    />
-                    {type}
-                  </label>
-                </div>
-              </fieldset>
-              <fieldset class="fieldset">
-                <legend class="fieldset-legend">Review agent (review_agent.type)</legend>
-                <div class="flex flex-wrap gap-3">
-                  <label :for={type <- @agent_types} class="label gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      name="config[review_agent_types][]"
-                      value={type}
-                      checked={type in agent_type_list(@workspace, "review_agent")}
-                      class="checkbox checkbox-sm"
-                    />
-                    {type}
-                  </label>
-                </div>
-                <p class="text-xs text-base-content/50">
-                  Leave unchecked to fall back to the worker agent's type.
-                </p>
-              </fieldset>
               <.input
                 type="select"
                 name="config[tracker_type]"
