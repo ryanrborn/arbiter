@@ -81,14 +81,16 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
   @impl true
   def handle_event("save_config", %{"config" => params}, socket) do
+    {merge_patch, merge_unset} = merge_settings_patch(params)
+
     patch = %{
       "tracker" => %{"type" => params["tracker_type"]},
-      "merge" => %{"strategy" => params["merger_strategy"]},
+      "merge" => Map.put(merge_patch, "strategy", params["merger_strategy"]),
       "routing" => %{"policy" => params["routing_policy"]},
       "review" => %{"required" => params["review_required"] == "true"}
     }
 
-    case patch_config(socket.assigns.workspace, patch, []) do
+    case patch_config(socket.assigns.workspace, patch, merge_unset) do
       {:ok, ws} ->
         {:noreply,
          socket
@@ -353,6 +355,39 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     a = Enum.at(list, i)
     b = Enum.at(list, j)
     list |> List.replace_at(i, b) |> List.replace_at(j, a)
+  end
+
+  # Builds the `merge.*` patch/unset pair for `save_config`: booleans always
+  # write an explicit true/false (matching `review_required`'s pattern, since
+  # false is itself the documented default), while the optional string
+  # fields (`pr_title_format`, `watchdog_max_polls`) unset rather than write
+  # a blank string when cleared, so the mode-specific server default applies.
+  defp merge_settings_patch(params) do
+    patch = %{
+      "auto_merge" => params["merge_auto_merge"] == "true",
+      "watch_pipeline" => params["merge_watch_pipeline"] == "true",
+      "auto_sync_primary" => params["merge_auto_sync_primary"] == "true"
+    }
+
+    {patch, unset} =
+      case blank_to_nil(params["merge_pr_title_format"]) do
+        nil -> {patch, ["merge.pr_title_format"]}
+        v -> {Map.put(patch, "pr_title_format", v), []}
+      end
+
+    case blank_to_nil(params["merge_watchdog_max_polls"]) do
+      nil -> {patch, unset ++ ["merge.watchdog_max_polls"]}
+      v -> {Map.put(patch, "watchdog_max_polls", v), unset}
+    end
+  end
+
+  defp blank_to_nil(nil), do: nil
+
+  defp blank_to_nil(s) when is_binary(s) do
+    case String.trim(s) do
+      "" -> nil
+      trimmed -> trimmed
+    end
   end
 
   defp patch_config(ws, patch, unset_paths) do
@@ -657,6 +692,57 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                   class="toggle toggle-sm toggle-primary"
                 />
                 <span class="text-sm">Code review required before merge</span>
+              </label>
+              <.input
+                type="select"
+                name="config[merge_pr_title_format]"
+                label="PR title format (merge.pr_title_format)"
+                options={[{"Raw (default)", ""}, {"Conventional Commit", "conventional_commit"}]}
+                value={cfg(@workspace, ["merge", "pr_title_format"], "")}
+              />
+              <.input
+                type="text"
+                name="config[merge_watchdog_max_polls]"
+                label="Watchdog max polls (merge.watchdog_max_polls)"
+                placeholder="default: varies by auto_merge mode"
+                value={cfg(@workspace, ["merge", "watchdog_max_polls"], "")}
+              />
+              <label class="fieldset flex items-center gap-2 mt-6">
+                <input type="hidden" name="config[merge_auto_merge]" value="false" />
+                <input
+                  type="checkbox"
+                  name="config[merge_auto_merge]"
+                  value="true"
+                  checked={Workspace.auto_merge?(@workspace)}
+                  class="toggle toggle-sm toggle-primary"
+                />
+                <span class="text-sm">Auto-merge on review approval (merge.auto_merge)</span>
+              </label>
+              <label class="fieldset flex items-center gap-2 mt-6">
+                <input type="hidden" name="config[merge_watch_pipeline]" value="false" />
+                <input
+                  type="checkbox"
+                  name="config[merge_watch_pipeline]"
+                  value="true"
+                  checked={Workspace.watch_pipeline?(@workspace)}
+                  class="toggle toggle-sm toggle-primary"
+                />
+                <span class="text-sm">
+                  Wait for CI pipeline before merging (merge.watch_pipeline)
+                </span>
+              </label>
+              <label class="fieldset flex items-center gap-2 mt-6">
+                <input type="hidden" name="config[merge_auto_sync_primary]" value="false" />
+                <input
+                  type="checkbox"
+                  name="config[merge_auto_sync_primary]"
+                  value="true"
+                  checked={Workspace.auto_sync_primary?(@workspace)}
+                  class="toggle toggle-sm toggle-primary"
+                />
+                <span class="text-sm">
+                  Fast-forward primary checkout after merge (merge.auto_sync_primary)
+                </span>
               </label>
               <div class="sm:col-span-2 flex items-center gap-3 mt-2">
                 <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
