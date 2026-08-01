@@ -456,6 +456,70 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       refute Map.has_key?(reloaded.config["review_automation"] || %{}, "auto_authors")
     end
 
+    test "saves quota.* settings and conductor.max_concurrent through patch_config", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "quota_on_exhaustion" => "continue",
+          "quota_overage_alert_usd" => "50",
+          "quota_throttle_threshold" => "0.8",
+          "conductor_max_concurrent" => "4"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["quota"]["on_exhaustion"] == "continue"
+      assert reloaded.config["quota"]["overage_alert_usd"] == "50"
+      assert reloaded.config["quota"]["throttle_threshold"] == "0.8"
+      assert reloaded.config["conductor"]["max_concurrent"] == "4"
+    end
+
+    test "blank quota/conductor fields unset rather than writing empty values", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "quota" => %{
+              "on_exhaustion" => "continue",
+              "overage_alert_usd" => "50",
+              "throttle_threshold" => "0.8"
+            },
+            "conductor" => %{"max_concurrent" => "4"}
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "quota_on_exhaustion" => "",
+          "quota_overage_alert_usd" => "  ",
+          "quota_throttle_threshold" => "",
+          "conductor_max_concurrent" => "  "
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["quota"] || %{}, "on_exhaustion")
+      refute Map.has_key?(reloaded.config["quota"] || %{}, "overage_alert_usd")
+      refute Map.has_key?(reloaded.config["quota"] || %{}, "throttle_threshold")
+      refute Map.has_key?(reloaded.config["conductor"] || %{}, "max_concurrent")
+    end
+
     test "adds and removes review_automation.repo_overrides entries", %{conn: conn} do
       ws = new_workspace()
 
