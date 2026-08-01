@@ -57,6 +57,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   alias Arbiter.Agents
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
+  alias Arbiter.Tasks.RepoConfig
   alias Arbiter.Tasks.Workspace
   alias Arbiter.Tasks.Workspace.Changes.PatchConfig
   alias Arbiter.Tasks.Workspace.Changes.ValidateConfig
@@ -140,6 +141,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {review_automation_patch, review_automation_unset} = review_automation_settings_patch(params)
     {quota_patch, quota_unset} = quota_settings_patch(params)
     {conductor_patch, conductor_unset} = conductor_settings_patch(params)
+    {pr_patrol_patch, pr_patrol_unset} = pr_patrol_settings_patch(params)
+    {review_patrol_patch, review_patrol_unset} = review_patrol_settings_patch(params)
 
     case routing_settings_patch(params) do
       {:ok, {routing_patch, routing_unset}} ->
@@ -154,11 +157,15 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
           |> maybe_put_map("review_automation", review_automation_patch)
           |> maybe_put_map("quota", quota_patch)
           |> maybe_put_map("conductor", conductor_patch)
+          |> maybe_put_map("pr_patrol", pr_patrol_patch)
+          |> maybe_put_map("review_patrol", review_patrol_patch)
 
         unset =
           merge_unset ++
             review_gate_unset ++
-            review_automation_unset ++ routing_unset ++ quota_unset ++ conductor_unset
+            review_automation_unset ++
+            routing_unset ++
+            quota_unset ++ conductor_unset ++ pr_patrol_unset ++ review_patrol_unset
 
         case patch_config(socket.assigns.workspace, patch, unset) do
           {:ok, ws} ->
@@ -350,6 +357,65 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
            %{"review_automation" => %{"repo_overrides" => overrides}},
            ["review_automation.repo_overrides"]
          ) do
+      {:ok, ws} ->
+        {:noreply,
+         socket |> assign(:workspace, ws) |> assign(:config_error, nil) |> load_derived()}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :config_error, msg)}
+    end
+  end
+
+  # ---- repo_paths (repo name -> local checkout path) ----
+
+  def handle_event("add_repo_path", %{"repo_path" => %{"repo" => repo, "path" => path}}, socket) do
+    repo = String.trim(repo || "")
+    path = String.trim(path || "")
+
+    cond do
+      repo == "" ->
+        {:noreply, assign(socket, :config_error, "Repo name can't be empty.")}
+
+      path == "" ->
+        {:noreply, assign(socket, :config_error, "Repo path can't be empty.")}
+
+      true ->
+        key = repo_paths_key(socket.assigns.workspace)
+        other_key = other_repo_paths_key(key)
+        existing = repo_paths_raw(socket.assigns.workspace)
+
+        entry =
+          case Map.get(existing, repo) do
+            %{} = m -> Map.put(m, "path", path)
+            _ -> path
+          end
+
+        new_paths = Map.put(existing, repo, entry)
+
+        case patch_config(
+               socket.assigns.workspace,
+               %{key => new_paths},
+               [key, other_key]
+             ) do
+          {:ok, ws} ->
+            {:noreply,
+             socket
+             |> assign(:workspace, ws)
+             |> assign(:config_error, nil)
+             |> load_derived()}
+
+          {:error, msg} ->
+            {:noreply, assign(socket, :config_error, msg)}
+        end
+    end
+  end
+
+  def handle_event("rm_repo_path", %{"repo" => repo}, socket) do
+    key = repo_paths_key(socket.assigns.workspace)
+    other_key = other_repo_paths_key(key)
+    paths = socket.assigns.workspace |> repo_paths_raw() |> Map.delete(repo)
+
+    case patch_config(socket.assigns.workspace, %{key => paths}, [key, other_key]) do
       {:ok, ws} ->
         {:noreply,
          socket |> assign(:workspace, ws) |> assign(:config_error, nil) |> load_derived()}
@@ -845,6 +911,34 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # Builds the `pr_patrol.*` patch/unset pair. `author_logins` is entered as a
+  # comma-separated string and split into a list (same convention as
+  # `review_automation.auto_authors`); the two `resolve_*_threads` booleans
+  # are always written (checkbox-with-hidden-fallback, same as merge.*).
+  defp pr_patrol_settings_patch(params) do
+    patch = %{
+      "resolve_bot_threads" => params["pr_patrol_resolve_bot_threads"] == "true",
+      "resolve_human_threads" => params["pr_patrol_resolve_human_threads"] == "true"
+    }
+
+    case blank_to_nil(params["pr_patrol_author_logins"]) do
+      nil ->
+        {patch, ["pr_patrol.author_logins"]}
+
+      v ->
+        logins = v |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+        {Map.put(patch, "author_logins", logins), []}
+    end
+  end
+
+  # Builds the `review_patrol.our_login` patch/unset pair.
+  defp review_patrol_settings_patch(params) do
+    case blank_to_nil(params["review_patrol_our_login"]) do
+      nil -> {%{}, ["review_patrol.our_login"]}
+      v -> {%{"our_login" => v}, []}
+    end
+  end
+
   # Builds the `conductor.max_concurrent` patch/unset pair — the per-workspace
   # concurrency cap, uncapped by default, kept as its raw string form (same
   # accepted-string-or-number pattern as `quota.*` above).
@@ -1090,6 +1184,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     |> assign(:routing_rules, routing_rules(ws))
     |> assign(:routing_adapters, routing_adapters(ws))
     |> assign(:repo_overrides, repo_overrides(ws) |> Enum.sort())
+    |> assign(:repo_paths, repo_paths(ws) |> Enum.sort())
     |> assign(:provider_overrides, provider_overrides(ws))
     |> assign(:model_tiers, model_tiers(ws))
     |> assign(:thinking_levels, thinking_levels(ws))
@@ -1258,6 +1353,54 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     case cfg(ws, ["review_automation", "repo_overrides"]) do
       m when is_map(m) -> m
       _ -> %{}
+    end
+  end
+
+  # The raw `repo_paths` map (falling back to the legacy `rig_paths` key) —
+  # entries may be a bare path string or the richer
+  # `%{"path" => ..., "target_branch" => ...}` shape set via the CLI. Used
+  # as-is for `rm_repo_path` so removing one entry can't flatten/clobber a
+  # sibling's `target_branch`.
+  defp repo_paths_raw(ws) do
+    case cfg(ws, ["repo_paths"]) || cfg(ws, ["rig_paths"]) do
+      m when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  # Which config key this workspace's repo-path map actually lives under.
+  # `repo_paths` takes precedence when both are (improbably) present, matching
+  # `repo_paths_raw/1` / every runtime consumer's `||` precedence. Writers use
+  # this so edits land on the key the workspace already uses instead of
+  # shadowing it with a second, divergent map (see `add_repo_path` /
+  # `rm_repo_path`).
+  defp repo_paths_key(ws) do
+    cond do
+      is_map(cfg(ws, ["repo_paths"])) -> "repo_paths"
+      is_map(cfg(ws, ["rig_paths"])) -> "rig_paths"
+      true -> "repo_paths"
+    end
+  end
+
+  defp other_repo_paths_key("repo_paths"), do: "rig_paths"
+  defp other_repo_paths_key("rig_paths"), do: "repo_paths"
+
+  # `repo_paths_raw/1` flattened to a simple repo -> path string map for
+  # display, same as `RepoConfig.find_path/2` elsewhere reads it. Entries that
+  # don't resolve to a path string (malformed, e.g. `%{"target_branch" => .}`
+  # with no `"path"`) are kept with a `nil` path rather than dropped, so they
+  # still render (as "invalid") and can be removed from the dashboard.
+  defp repo_paths(ws) do
+    ws
+    |> repo_paths_raw()
+    |> Enum.map(fn {repo, entry} -> {repo, RepoConfig.repo_path_from_config(entry)} end)
+    |> Map.new()
+  end
+
+  defp pr_patrol_author_logins_text(ws) do
+    case cfg(ws, ["pr_patrol", "author_logins"]) do
+      list when is_list(list) -> Enum.join(list, ", ")
+      _ -> ""
     end
   end
 
@@ -1728,6 +1871,46 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 placeholder="default: uncapped"
                 value={cfg(@workspace, ["conductor", "max_concurrent"], "")}
               />
+              <.input
+                type="text"
+                name="config[pr_patrol_author_logins]"
+                label="PR-patrol authors (pr_patrol.author_logins)"
+                placeholder="comma-separated forge logins; blank = patrol everyone"
+                value={pr_patrol_author_logins_text(@workspace)}
+              />
+              <.input
+                type="text"
+                name="config[review_patrol_our_login]"
+                label="Our forge login (review_patrol.our_login)"
+                placeholder="e.g. arbiter-bot"
+                value={cfg(@workspace, ["review_patrol", "our_login"], "")}
+              />
+              <label class="fieldset flex items-center gap-2 mt-6">
+                <input type="hidden" name="config[pr_patrol_resolve_bot_threads]" value="false" />
+                <input
+                  type="checkbox"
+                  name="config[pr_patrol_resolve_bot_threads]"
+                  value="true"
+                  checked={Workspace.pr_patrol_resolve_bot_threads?(@workspace)}
+                  class="toggle toggle-sm toggle-primary"
+                />
+                <span class="text-sm">
+                  Resolve addressed bot review threads (pr_patrol.resolve_bot_threads)
+                </span>
+              </label>
+              <label class="fieldset flex items-center gap-2 mt-6">
+                <input type="hidden" name="config[pr_patrol_resolve_human_threads]" value="false" />
+                <input
+                  type="checkbox"
+                  name="config[pr_patrol_resolve_human_threads]"
+                  value="true"
+                  checked={Workspace.pr_patrol_resolve_human_threads?(@workspace)}
+                  class="toggle toggle-sm toggle-primary"
+                />
+                <span class="text-sm">
+                  Resolve addressed human review threads (pr_patrol.resolve_human_threads)
+                </span>
+              </label>
               <div class="sm:col-span-2 flex items-center gap-3 mt-2">
                 <.button type="submit" variant="primary" class="btn btn-sm btn-primary">
                   Save configuration
@@ -1832,6 +2015,64 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 <select name="repo_override[mode]" class="select select-sm">
                   <option :for={mode <- @review_automation_modes} value={mode}>{mode}</option>
                 </select>
+                <.button type="submit" class="btn btn-sm">
+                  <.icon name="hero-plus" class="size-4" /> Add
+                </.button>
+              </.form>
+            </div>
+
+            <div class="border-t border-base-300 pt-3">
+              <h3 class="font-semibold text-sm flex items-center gap-2">
+                Repo paths
+                <span class="text-base-content/40 font-normal">({length(@repo_paths)})</span>
+              </h3>
+              <p class="text-xs text-base-content/50 mt-1">
+                <code>repo_paths</code> (alias: <code>rig_paths</code>) — repo name to local
+                filesystem checkout path, used to resolve a dispatch's working directory.
+              </p>
+
+              <ul :if={@repo_paths != []} id="repo-paths" class="flex flex-col gap-1.5 mt-2">
+                <li
+                  :for={{repo, path} <- @repo_paths}
+                  class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+                >
+                  <code class="text-sm font-semibold">{repo}</code>
+                  <span class="text-xs font-mono text-base-content/60 flex-1">
+                    {path || "— (invalid entry)"}
+                  </span>
+                  <button
+                    type="button"
+                    phx-click="rm_repo_path"
+                    phx-value-repo={repo}
+                    class="btn btn-ghost btn-xs text-error shrink-0"
+                    aria-label={"Remove repo path for #{repo}"}
+                    data-confirm={"Remove the repo_paths entry for #{repo}?"}
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
+                </li>
+              </ul>
+
+              <.form
+                for={%{}}
+                as={:repo_path}
+                phx-submit="add_repo_path"
+                class="flex gap-2 items-start mt-2"
+              >
+                <input
+                  type="text"
+                  name="repo_path[repo]"
+                  placeholder="repo name, e.g. arbiter"
+                  class="input input-sm flex-1"
+                  required
+                />
+                <input
+                  type="text"
+                  name="repo_path[path]"
+                  placeholder="/home/ryan/dev/arbiter"
+                  class="input input-sm flex-1"
+                  required
+                />
                 <.button type="submit" class="btn btn-sm">
                   <.icon name="hero-plus" class="size-4" /> Add
                 </.button>
