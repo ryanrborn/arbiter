@@ -29,6 +29,14 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       network cut-off — is refused on first submit and re-presented as an
       explicit confirmation naming exactly what is being given up. Only the
       confirm click writes. See `security_downgrades/2`.
+    * **Routing detail** (`routing.*`) — beyond the top-level `routing.policy`
+      enum: `routing.rules`, a nested map keyed by priority (`P0`..`P4`) or
+      difficulty (`D0`..`D4`) tier to a small partial agent-config object
+      (`model_tier`/`thinking`/`model`), edited as an add/edit/remove list
+      keyed by tier — see `save_routing_rule`/`rm_routing_rule`;
+      `routing.base_policy` and `routing.budget_usd_per_day` (`by_budget`
+      only); and `routing.adapters`, an ordered list of the same partial
+      agent-config shape cycled by `round_robin`.
     * **Standing orders** — add/remove individual orders without clobbering the
       list (`config.standing_orders`).
     * **Secrets** — the *names* of configured secrets only; set/rm via a modal.
@@ -79,6 +87,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:not_found, false)
          |> assign(:secret_modal, false)
          |> assign(:secret_error, nil)
+         |> assign(:routing_rule_error, nil)
          |> assign(:worker_env_modal, false)
          |> assign(:worker_env_error, nil)
          |> assign(:revealed_worker_env, MapSet.new())
@@ -127,26 +136,32 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     {review_gate_patch, review_gate_unset} = review_gate_settings_patch(params)
     {review_automation_patch, review_automation_unset} = review_automation_settings_patch(params)
 
-    patch =
-      %{
-        "tracker" => %{"type" => params["tracker_type"]},
-        "merge" => Map.put(merge_patch, "strategy", params["merger_strategy"]),
-        "routing" => %{"policy" => params["routing_policy"]},
-        "review" => %{"required" => params["review_required"] == "true"}
-      }
-      |> maybe_put_map("review_gate", review_gate_patch)
-      |> maybe_put_map("review_automation", review_automation_patch)
+    case routing_settings_patch(params) do
+      {:ok, {routing_patch, routing_unset}} ->
+        patch =
+          %{
+            "tracker" => %{"type" => params["tracker_type"]},
+            "merge" => Map.put(merge_patch, "strategy", params["merger_strategy"]),
+            "routing" => Map.put(routing_patch, "policy", params["routing_policy"]),
+            "review" => %{"required" => params["review_required"] == "true"}
+          }
+          |> maybe_put_map("review_gate", review_gate_patch)
+          |> maybe_put_map("review_automation", review_automation_patch)
 
-    unset = merge_unset ++ review_gate_unset ++ review_automation_unset
+        unset = merge_unset ++ review_gate_unset ++ review_automation_unset ++ routing_unset
 
-    case patch_config(socket.assigns.workspace, patch, unset) do
-      {:ok, ws} ->
-        {:noreply,
-         socket
-         |> assign(:workspace, ws)
-         |> assign(:config_error, nil)
-         |> load_derived()
-         |> put_flash(:info, "Configuration saved.")}
+        case patch_config(socket.assigns.workspace, patch, unset) do
+          {:ok, ws} ->
+            {:noreply,
+             socket
+             |> assign(:workspace, ws)
+             |> assign(:config_error, nil)
+             |> load_derived()
+             |> put_flash(:info, "Configuration saved.")}
+
+          {:error, msg} ->
+            {:noreply, assign(socket, :config_error, msg)}
+        end
 
       {:error, msg} ->
         {:noreply, assign(socket, :config_error, msg)}
@@ -203,6 +218,80 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
       {:error, msg} ->
         {:noreply, assign(socket, :order_error, msg)}
+    end
+  end
+
+  # ---- routing.rules (P0..P4 / D0..D4 -> partial agent-config map) ----
+
+  def handle_event("save_routing_rule", %{"rule" => params}, socket) do
+    key = params["key"] |> to_string() |> String.trim()
+
+    if key == "" do
+      {:noreply, assign(socket, :routing_rule_error, "Rule key can't be empty.")}
+    else
+      rule = routing_entry_fields(params)
+      patch = maybe_put_map(%{}, "routing", maybe_put_map(%{}, "rules", %{key => rule}))
+
+      case patch_config(socket.assigns.workspace, patch, ["routing.rules.#{key}"]) do
+        {:ok, ws} ->
+          {:noreply,
+           socket
+           |> assign(:workspace, ws)
+           |> assign(:routing_rule_error, nil)
+           |> load_derived()}
+
+        {:error, msg} ->
+          {:noreply, assign(socket, :routing_rule_error, msg)}
+      end
+    end
+  end
+
+  def handle_event("rm_routing_rule", %{"key" => key}, socket) do
+    case patch_config(socket.assigns.workspace, %{}, ["routing.rules.#{key}"]) do
+      {:ok, ws} ->
+        {:noreply, socket |> assign(:workspace, ws) |> load_derived()}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :routing_rule_error, msg)}
+    end
+  end
+
+  # ---- routing.adapters (ordered list of partial agent-config maps) ----
+
+  def handle_event("add_routing_adapter", %{"adapter" => params}, socket) do
+    entry = routing_entry_fields(params)
+
+    if entry == %{} do
+      {:noreply, assign(socket, :routing_rule_error, "Adapter entry can't be empty.")}
+    else
+      adapters = routing_adapters_raw(socket.assigns.workspace) ++ [entry]
+
+      case patch_config(socket.assigns.workspace, %{"routing" => %{"adapters" => adapters}}, []) do
+        {:ok, ws} ->
+          {:noreply,
+           socket
+           |> assign(:workspace, ws)
+           |> assign(:routing_rule_error, nil)
+           |> load_derived()}
+
+        {:error, msg} ->
+          {:noreply, assign(socket, :routing_rule_error, msg)}
+      end
+    end
+  end
+
+  def handle_event("rm_routing_adapter", %{"index" => index}, socket) do
+    adapters =
+      socket.assigns.workspace
+      |> routing_adapters_raw()
+      |> List.delete_at(String.to_integer(index))
+
+    case patch_config(socket.assigns.workspace, %{"routing" => %{"adapters" => adapters}}, []) do
+      {:ok, ws} ->
+        {:noreply, socket |> assign(:workspace, ws) |> load_derived()}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :routing_rule_error, msg)}
     end
   end
 
@@ -611,6 +700,50 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # Builds the `routing.base_policy`/`budget_usd_per_day` patch/unset pair
+  # (siblings `policy`/`rules`/`adapters` are managed separately so they
+  # survive this form's submit untouched). `budget_usd_per_day` is parsed to
+  # a number here — `ByBudget.over_budget?/2` compares it against the
+  # ledger's `cost_usd_today` with `is_number/1` and silently no-ops
+  # otherwise, so a stored string would make the budget gate inert.
+  defp routing_settings_patch(params) do
+    {patch, unset} =
+      case blank_to_nil(params["routing_base_policy"]) do
+        nil -> {%{}, ["routing.base_policy"]}
+        v -> {%{"base_policy" => v}, []}
+      end
+
+    case blank_to_nil(params["routing_budget_usd_per_day"]) do
+      nil ->
+        {:ok, {patch, unset ++ ["routing.budget_usd_per_day"]}}
+
+      v ->
+        case Float.parse(v) do
+          {num, ""} -> {:ok, {Map.put(patch, "budget_usd_per_day", num), unset}}
+          _ -> {:error, "Daily budget (routing.budget_usd_per_day) must be a number."}
+        end
+    end
+  end
+
+  # A single `routing.rules[tier]` / `routing.adapters[]` entry — the
+  # provider-agnostic `model_tier`/`thinking` abstraction `ByDifficulty` and
+  # `RoundRobin` know about, plus a raw `model` escape hatch for power users
+  # bypassing the abstraction (same precedent as `ByPriority`'s example).
+  # Blank fields are omitted rather than written empty.
+  defp routing_entry_fields(params) do
+    %{}
+    |> maybe_put_entry_field(params, "model_tier")
+    |> maybe_put_entry_field(params, "thinking")
+    |> maybe_put_entry_field(params, "model")
+  end
+
+  defp maybe_put_entry_field(map, params, key) do
+    case blank_to_nil(params[key]) do
+      nil -> map
+      v -> Map.put(map, key, v)
+    end
+  end
+
   # Builds the `review_gate.*` patch/unset pair: both fields are optional
   # positive integers with a difficulty-derived server default, so a blank
   # field unsets rather than writing an empty string (same pattern as
@@ -881,6 +1014,8 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     |> assign(:worker_env_keys, Workspace.worker_env_keys(ws))
     |> assign(:worker_env_values, Workspace.worker_env_map(ws))
     |> assign(:orders, standing_orders(ws))
+    |> assign(:routing_rules, routing_rules(ws))
+    |> assign(:routing_adapters, routing_adapters(ws))
     |> assign(:repo_overrides, repo_overrides(ws) |> Enum.sort())
     |> assign(:provider_overrides, provider_overrides(ws))
     |> assign(:model_tiers, model_tiers(ws))
@@ -977,6 +1112,35 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
       _ -> []
     end
   end
+
+  # `routing.rules` sorted by tier key ("D0".."D4" / "P0".."P4" sort
+  # naturally as strings; anything else falls in alongside).
+  defp routing_rules(ws) do
+    case cfg(ws, ["routing", "rules"]) do
+      m when is_map(m) ->
+        m
+        |> Enum.filter(fn {k, v} -> is_binary(k) and is_map(v) end)
+        |> Enum.sort_by(&elem(&1, 0))
+
+      _ ->
+        []
+    end
+  end
+
+  defp routing_adapters_raw(ws) do
+    case cfg(ws, ["routing", "adapters"]) do
+      list when is_list(list) -> list
+      _ -> []
+    end
+  end
+
+  defp routing_adapters(ws), do: ws |> routing_adapters_raw() |> Enum.with_index()
+
+  defp routing_entry_summary(entry) when is_map(entry) and map_size(entry) > 0 do
+    entry |> Enum.sort_by(&elem(&1, 0)) |> Enum.map_join(", ", fn {k, v} -> "#{k}=#{v}" end)
+  end
+
+  defp routing_entry_summary(_entry), do: "(empty)"
 
   defp cfg(ws, path, default \\ nil) do
     case get_in(ws.config || %{}, path) do
@@ -1295,6 +1459,24 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 options={Enum.map(@routing_policies, &{&1, &1})}
                 value={cfg(@workspace, ["routing", "policy"], "static")}
               />
+              <.input
+                type="select"
+                name="config[routing_base_policy]"
+                label="Budget base policy (routing.base_policy, by_budget only)"
+                options={[
+                  {"(unset — defaults to by_priority)", ""},
+                  {"by_priority", "by_priority"},
+                  {"by_difficulty", "by_difficulty"}
+                ]}
+                value={cfg(@workspace, ["routing", "base_policy"], "")}
+              />
+              <.input
+                type="text"
+                name="config[routing_budget_usd_per_day]"
+                label="Daily budget USD (routing.budget_usd_per_day, by_budget only)"
+                placeholder="e.g. 25"
+                value={cfg(@workspace, ["routing", "budget_usd_per_day"], "")}
+              />
               <label class="fieldset flex items-center gap-2 mt-6">
                 <input type="hidden" name="config[review_required]" value="false" />
                 <input
@@ -1442,6 +1624,146 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 <select name="repo_override[mode]" class="select select-sm">
                   <option :for={mode <- @review_automation_modes} value={mode}>{mode}</option>
                 </select>
+                <.button type="submit" class="btn btn-sm">
+                  <.icon name="hero-plus" class="size-4" /> Add
+                </.button>
+              </.form>
+            </div>
+
+            <div class="border-t border-base-300 pt-3">
+              <h3 class="font-semibold text-sm flex items-center gap-2">
+                Routing rules
+                <span class="text-base-content/40 font-normal">({length(@routing_rules)})</span>
+              </h3>
+              <p class="text-xs text-base-content/50 mt-1">
+                <code>routing.rules</code>
+                — per-tier override, keyed by priority (<code>P0</code>-<code>P4</code>) or difficulty
+                (<code>D0</code>-<code>D4</code>) depending on the routing policy above. Saving a key
+                that already exists replaces that rule wholesale.
+              </p>
+
+              <ul :if={@routing_rules != []} id="routing-rules" class="flex flex-col gap-1.5 mt-2">
+                <li
+                  :for={{key, rule} <- @routing_rules}
+                  class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+                >
+                  <code class="text-sm font-semibold">{key}</code>
+                  <span class="text-xs font-mono text-base-content/60 flex-1">
+                    {routing_entry_summary(rule)}
+                  </span>
+                  <button
+                    type="button"
+                    phx-click="rm_routing_rule"
+                    phx-value-key={key}
+                    class="btn btn-ghost btn-xs text-error shrink-0"
+                    aria-label={"Remove rule #{key}"}
+                    data-confirm={"Remove the routing.rules.#{key} entry?"}
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
+                </li>
+              </ul>
+
+              <.form
+                for={%{}}
+                as={:rule}
+                phx-submit="save_routing_rule"
+                class="flex flex-wrap gap-2 items-start mt-2"
+              >
+                <input
+                  type="text"
+                  name="rule[key]"
+                  placeholder="D4 / P0"
+                  class="input input-sm w-24"
+                  required
+                />
+                <input
+                  type="text"
+                  name="rule[model_tier]"
+                  placeholder="model_tier, e.g. premium"
+                  class="input input-sm flex-1"
+                />
+                <input
+                  type="text"
+                  name="rule[thinking]"
+                  placeholder="thinking, e.g. high"
+                  class="input input-sm flex-1"
+                />
+                <input
+                  type="text"
+                  name="rule[model]"
+                  placeholder="model (raw override, optional)"
+                  class="input input-sm flex-1"
+                />
+                <.button type="submit" class="btn btn-sm">
+                  <.icon name="hero-plus" class="size-4" /> Add / replace
+                </.button>
+              </.form>
+              <p :if={@routing_rule_error} class="text-sm text-error mt-1">
+                {@routing_rule_error}
+              </p>
+            </div>
+
+            <div class="border-t border-base-300 pt-3">
+              <h3 class="font-semibold text-sm flex items-center gap-2">
+                Round-robin adapters
+                <span class="text-base-content/40 font-normal">({length(@routing_adapters)})</span>
+              </h3>
+              <p class="text-xs text-base-content/50 mt-1">
+                <code>routing.adapters</code>
+                — ordered list of agent-config overrides cycled per dispatch (<code>round_robin</code> policy only).
+              </p>
+
+              <ul
+                :if={@routing_adapters != []}
+                id="routing-adapters"
+                class="flex flex-col gap-1.5 mt-2"
+              >
+                <li
+                  :for={{adapter, index} <- @routing_adapters}
+                  class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+                >
+                  <span class="badge badge-sm badge-ghost">{index}</span>
+                  <span class="text-xs font-mono text-base-content/60 flex-1">
+                    {routing_entry_summary(adapter)}
+                  </span>
+                  <button
+                    type="button"
+                    phx-click="rm_routing_adapter"
+                    phx-value-index={index}
+                    class="btn btn-ghost btn-xs text-error shrink-0"
+                    aria-label={"Remove adapter #{index}"}
+                    data-confirm={"Remove routing.adapters[#{index}]?"}
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
+                </li>
+              </ul>
+
+              <.form
+                for={%{}}
+                as={:adapter}
+                phx-submit="add_routing_adapter"
+                class="flex flex-wrap gap-2 items-start mt-2"
+              >
+                <input
+                  type="text"
+                  name="adapter[model_tier]"
+                  placeholder="model_tier, e.g. economy"
+                  class="input input-sm flex-1"
+                />
+                <input
+                  type="text"
+                  name="adapter[thinking]"
+                  placeholder="thinking, e.g. low"
+                  class="input input-sm flex-1"
+                />
+                <input
+                  type="text"
+                  name="adapter[model]"
+                  placeholder="model (raw override, optional)"
+                  class="input input-sm flex-1"
+                />
                 <.button type="submit" class="btn btn-sm">
                   <.icon name="hero-plus" class="size-4" /> Add
                 </.button>
