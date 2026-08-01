@@ -134,6 +134,75 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["review"]["required"] == true
     end
 
+    test "saves merge.* settings (auto_merge, pr_title_format, watchdog_max_polls, watch_pipeline, auto_sync_primary) through patch_config",
+         %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "merge_auto_merge" => "true",
+          "merge_pr_title_format" => "conventional_commit",
+          "merge_watchdog_max_polls" => "40",
+          "merge_watch_pipeline" => "true",
+          "merge_auto_sync_primary" => "true"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["merge"]["strategy"] == "direct"
+      assert reloaded.config["merge"]["auto_merge"] == true
+      assert reloaded.config["merge"]["pr_title_format"] == "conventional_commit"
+      assert reloaded.config["merge"]["watchdog_max_polls"] == "40"
+      assert reloaded.config["merge"]["watch_pipeline"] == true
+      assert reloaded.config["merge"]["auto_sync_primary"] == true
+    end
+
+    test "blank merge.pr_title_format/watchdog_max_polls unset rather than writing empty strings",
+         %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "merge" => %{
+              "strategy" => "direct",
+              "pr_title_format" => "conventional_commit",
+              "watchdog_max_polls" => "40",
+              "config" => %{"owner" => "acme", "repo" => "widgets"}
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "merge_pr_title_format" => "",
+          "merge_watchdog_max_polls" => "  "
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["merge"], "pr_title_format")
+      refute Map.has_key?(reloaded.config["merge"], "watchdog_max_polls")
+      assert reloaded.config["merge"]["auto_merge"] == false
+      assert reloaded.config["merge"]["watch_pipeline"] == false
+      assert reloaded.config["merge"]["auto_sync_primary"] == false
+      # Sibling merge.config (adapter-specific, set via `arb config set`) is
+      # untouched by the dashboard's merge.* patch.
+      assert reloaded.config["merge"]["config"] == %{"owner" => "acme", "repo" => "widgets"}
+    end
+
     test "renders agent.type and review_agent.type as an ordered precedence list", %{conn: conn} do
       ws =
         new_workspace(%{
