@@ -203,6 +203,117 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["merge"]["config"] == %{"owner" => "acme", "repo" => "widgets"}
     end
 
+    test "saves review_gate.* and review_automation.* settings through patch_config", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "review_gate_max_rounds" => "3",
+          "review_gate_timeout_ms" => "1800000",
+          "review_automation_default" => "propose",
+          "review_automation_auto_authors" => "alice, bob ,, carol"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["review_gate"]["max_rounds"] == "3"
+      assert reloaded.config["review_gate"]["timeout_ms"] == "1800000"
+      assert reloaded.config["review_automation"]["default"] == "propose"
+      assert reloaded.config["review_automation"]["auto_authors"] == ["alice", "bob", "carol"]
+    end
+
+    test "blank review_gate/review_automation fields unset rather than writing empty values", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "review_gate" => %{"max_rounds" => "3", "timeout_ms" => "1800000"},
+            "review_automation" => %{"default" => "propose", "auto_authors" => ["alice"]}
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "static",
+          "review_gate_max_rounds" => "",
+          "review_gate_timeout_ms" => "  ",
+          "review_automation_default" => "",
+          "review_automation_auto_authors" => ""
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["review_gate"] || %{}, "max_rounds")
+      refute Map.has_key?(reloaded.config["review_gate"] || %{}, "timeout_ms")
+      refute Map.has_key?(reloaded.config["review_automation"] || %{}, "default")
+      refute Map.has_key?(reloaded.config["review_automation"] || %{}, "auto_authors")
+    end
+
+    test "adds and removes review_automation.repo_overrides entries", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_repo_override]", %{
+        "repo_override" => %{"repo" => "acme/widgets", "mode" => "auto"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["review_automation"]["repo_overrides"] == %{"acme/widgets" => "auto"}
+
+      view
+      |> element("button[phx-click=rm_repo_override][phx-value-repo='acme/widgets']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["review_automation"]["repo_overrides"] == %{}
+    end
+
+    test "removes a review_automation.repo_overrides entry whose repo name contains a dot", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_repo_override]", %{
+        "repo_override" => %{"repo" => "acme/widgets.js", "mode" => "auto"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["review_automation"]["repo_overrides"] == %{
+               "acme/widgets.js" => "auto"
+             }
+
+      view
+      |> element("button[phx-click=rm_repo_override][phx-value-repo='acme/widgets.js']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["review_automation"]["repo_overrides"] == %{}
+    end
+
     test "renders agent.type and review_agent.type as an ordered precedence list", %{conn: conn} do
       ws =
         new_workspace(%{
@@ -306,7 +417,11 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       html =
         view
         |> form("form[phx-submit=set_worker_env]", %{
-          "worker_env" => %{"key" => "API_TOKEN", "value" => "tok-supersecret", "secret" => "true"}
+          "worker_env" => %{
+            "key" => "API_TOKEN",
+            "value" => "tok-supersecret",
+            "secret" => "true"
+          }
         })
         |> render_submit()
 
