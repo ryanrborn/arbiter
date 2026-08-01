@@ -33,6 +33,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   alias Arbiter.Agents.Routing
   alias Arbiter.Agents.SecurityPolicy
   alias Arbiter.Tasks.Workspace
+  alias Arbiter.Tasks.Workspace.Changes.ValidateConfig
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -54,6 +55,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
          |> assign(:merger_strategies, Workspace.valid_merger_strategies())
          |> assign(:agent_types, Agents.valid_agent_types())
          |> assign(:routing_policies, Routing.valid_policies())
+         |> assign(:review_automation_modes, ValidateConfig.valid_review_automation_modes())
          |> load_derived()}
 
       _ ->
@@ -82,15 +84,22 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   @impl true
   def handle_event("save_config", %{"config" => params}, socket) do
     {merge_patch, merge_unset} = merge_settings_patch(params)
+    {review_gate_patch, review_gate_unset} = review_gate_settings_patch(params)
+    {review_automation_patch, review_automation_unset} = review_automation_settings_patch(params)
 
-    patch = %{
-      "tracker" => %{"type" => params["tracker_type"]},
-      "merge" => Map.put(merge_patch, "strategy", params["merger_strategy"]),
-      "routing" => %{"policy" => params["routing_policy"]},
-      "review" => %{"required" => params["review_required"] == "true"}
-    }
+    patch =
+      %{
+        "tracker" => %{"type" => params["tracker_type"]},
+        "merge" => Map.put(merge_patch, "strategy", params["merger_strategy"]),
+        "routing" => %{"policy" => params["routing_policy"]},
+        "review" => %{"required" => params["review_required"] == "true"}
+      }
+      |> maybe_put_map("review_gate", review_gate_patch)
+      |> maybe_put_map("review_automation", review_automation_patch)
 
-    case patch_config(socket.assigns.workspace, patch, merge_unset) do
+    unset = merge_unset ++ review_gate_unset ++ review_automation_unset
+
+    case patch_config(socket.assigns.workspace, patch, unset) do
       {:ok, ws} ->
         {:noreply,
          socket
@@ -154,6 +163,50 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
 
       {:error, msg} ->
         {:noreply, assign(socket, :order_error, msg)}
+    end
+  end
+
+  # ---- review_automation.repo_overrides ----
+
+  def handle_event(
+        "add_repo_override",
+        %{"repo_override" => %{"repo" => repo, "mode" => mode}},
+        socket
+      ) do
+    repo = String.trim(repo || "")
+
+    if repo == "" do
+      {:noreply, assign(socket, :config_error, "Repo override name can't be empty.")}
+    else
+      case patch_config(
+             socket.assigns.workspace,
+             %{"review_automation" => %{"repo_overrides" => %{repo => mode}}},
+             []
+           ) do
+        {:ok, ws} ->
+          {:noreply,
+           socket
+           |> assign(:workspace, ws)
+           |> assign(:config_error, nil)
+           |> load_derived()}
+
+        {:error, msg} ->
+          {:noreply, assign(socket, :config_error, msg)}
+      end
+    end
+  end
+
+  def handle_event("rm_repo_override", %{"repo" => repo}, socket) do
+    case patch_config(
+           socket.assigns.workspace,
+           %{},
+           ["review_automation.repo_overrides.#{repo}"]
+         ) do
+      {:ok, ws} ->
+        {:noreply, socket |> assign(:workspace, ws) |> load_derived()}
+
+      {:error, msg} ->
+        {:noreply, assign(socket, :config_error, msg)}
     end
   end
 
@@ -381,6 +434,48 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     end
   end
 
+  # Builds the `review_gate.*` patch/unset pair: both fields are optional
+  # positive integers with a difficulty-derived server default, so a blank
+  # field unsets rather than writing an empty string (same pattern as
+  # `merge.pr_title_format`/`merge.watchdog_max_polls`).
+  defp review_gate_settings_patch(params) do
+    {patch, unset} =
+      case blank_to_nil(params["review_gate_max_rounds"]) do
+        nil -> {%{}, ["review_gate.max_rounds"]}
+        v -> {%{"max_rounds" => v}, []}
+      end
+
+    case blank_to_nil(params["review_gate_timeout_ms"]) do
+      nil -> {patch, unset ++ ["review_gate.timeout_ms"]}
+      v -> {Map.put(patch, "timeout_ms", v), unset}
+    end
+  end
+
+  # Builds the `review_automation.default`/`auto_authors` patch/unset pair
+  # (siblings `repo_overrides` are managed separately via add/rm_repo_override
+  # so they don't get clobbered by this form's submit). `auto_authors` is
+  # entered as a comma-separated string and split into a list, dropping blank
+  # entries.
+  defp review_automation_settings_patch(params) do
+    {patch, unset} =
+      case blank_to_nil(params["review_automation_default"]) do
+        nil -> {%{}, ["review_automation.default"]}
+        v -> {%{"default" => v}, []}
+      end
+
+    case blank_to_nil(params["review_automation_auto_authors"]) do
+      nil ->
+        {patch, unset ++ ["review_automation.auto_authors"]}
+
+      v ->
+        authors = v |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+        {Map.put(patch, "auto_authors", authors), unset}
+    end
+  end
+
+  defp maybe_put_map(patch, _key, empty) when empty == %{}, do: patch
+  defp maybe_put_map(patch, key, value), do: Map.put(patch, key, value)
+
   defp blank_to_nil(nil), do: nil
 
   defp blank_to_nil(s) when is_binary(s) do
@@ -425,6 +520,7 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
     |> assign(:worker_env_keys, Workspace.worker_env_keys(ws))
     |> assign(:worker_env_values, Workspace.worker_env_map(ws))
     |> assign(:orders, standing_orders(ws))
+    |> assign(:repo_overrides, repo_overrides(ws) |> Enum.sort())
   end
 
   defp standing_orders(ws) do
@@ -472,6 +568,20 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
   defp order_text(order), do: inspect(order)
 
   defp review_required?(ws), do: cfg(ws, ["review", "required"]) in [true, "true"]
+
+  defp repo_overrides(ws) do
+    case cfg(ws, ["review_automation", "repo_overrides"]) do
+      m when is_map(m) -> m
+      _ -> %{}
+    end
+  end
+
+  defp auto_authors_text(ws) do
+    case cfg(ws, ["review_automation", "auto_authors"]) do
+      list when is_list(list) -> Enum.join(list, ", ")
+      _ -> ""
+    end
+  end
 
   # Effective security posture for the worker agent (mode, sandbox, and
   # safe-default deny count) — read-only, set via `arb config set agent.security.*`.
@@ -694,6 +804,34 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
                 <span class="text-sm">Code review required before merge</span>
               </label>
               <.input
+                type="text"
+                name="config[review_gate_max_rounds]"
+                label="ReviewGate max rounds (review_gate.max_rounds)"
+                placeholder="default: varies by difficulty"
+                value={cfg(@workspace, ["review_gate", "max_rounds"], "")}
+              />
+              <.input
+                type="text"
+                name="config[review_gate_timeout_ms]"
+                label="ReviewGate per-round timeout ms (review_gate.timeout_ms)"
+                placeholder="default: 1200000"
+                value={cfg(@workspace, ["review_gate", "timeout_ms"], "")}
+              />
+              <.input
+                type="select"
+                name="config[review_automation_default]"
+                label="Reviewer dispatch mode (review_automation.default)"
+                options={[{"(unset)", ""} | Enum.map(@review_automation_modes, &{&1, &1})]}
+                value={cfg(@workspace, ["review_automation", "default"], "")}
+              />
+              <.input
+                type="text"
+                name="config[review_automation_auto_authors]"
+                label="Auto-approve authors (review_automation.auto_authors)"
+                placeholder="comma-separated PR authors, e.g. alice, bob"
+                value={auto_authors_text(@workspace)}
+              />
+              <.input
                 type="select"
                 name="config[merge_pr_title_format]"
                 label="PR title format (merge.pr_title_format)"
@@ -758,6 +896,58 @@ defmodule ArbiterWeb.WorkspaceDetailLive do
             <p class="text-xs text-base-content/50">
               Adapter-specific details (hosts, owner/repo, <code>credentials_ref</code>) are set with <code>arb config set</code>. Reference a secret below via <code>secret:&lt;key&gt;</code>.
             </p>
+
+            <div class="border-t border-base-300 pt-3">
+              <h3 class="font-semibold text-sm flex items-center gap-2">
+                Per-repo dispatch overrides
+                <span class="text-base-content/40 font-normal">({length(@repo_overrides)})</span>
+              </h3>
+              <p class="text-xs text-base-content/50 mt-1">
+                <code>review_automation.repo_overrides</code> — overrides the dispatch mode above for
+                a specific repo.
+              </p>
+
+              <ul :if={@repo_overrides != []} id="repo-overrides" class="flex flex-col gap-1.5 mt-2">
+                <li
+                  :for={{repo, mode} <- @repo_overrides}
+                  class="flex items-center gap-2 rounded-box border border-base-300 bg-base-100 px-3 py-2"
+                >
+                  <code class="text-sm flex-1">{repo}</code>
+                  <span class="badge badge-sm badge-ghost font-mono">{mode}</span>
+                  <button
+                    type="button"
+                    phx-click="rm_repo_override"
+                    phx-value-repo={repo}
+                    class="btn btn-ghost btn-xs text-error shrink-0"
+                    aria-label={"Remove override for #{repo}"}
+                    data-confirm={"Remove the review_automation override for #{repo}?"}
+                  >
+                    <.icon name="hero-trash" class="size-4" />
+                  </button>
+                </li>
+              </ul>
+
+              <.form
+                for={%{}}
+                as={:repo_override}
+                phx-submit="add_repo_override"
+                class="flex gap-2 items-start mt-2"
+              >
+                <input
+                  type="text"
+                  name="repo_override[repo]"
+                  placeholder="owner/repo"
+                  class="input input-sm flex-1"
+                  required
+                />
+                <select name="repo_override[mode]" class="select select-sm">
+                  <option :for={mode <- @review_automation_modes} value={mode}>{mode}</option>
+                </select>
+                <.button type="submit" class="btn btn-sm">
+                  <.icon name="hero-plus" class="size-4" /> Add
+                </.button>
+              </.form>
+            </div>
           </div>
         </section>
 
