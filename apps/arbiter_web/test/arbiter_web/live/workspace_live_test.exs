@@ -717,6 +717,177 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["agent"]["config"]["credentials_ref"] == "secret:anthropic_key"
     end
 
+    test "tracker adapter config shows fields for the persisted tracker type only", %{
+      conn: conn
+    } do
+      ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
+
+      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert html =~ "tracker_config[host]"
+      assert html =~ "tracker_config[project_key]"
+      refute has_element?(view, "input[name='tracker_config[owner]']")
+      refute has_element?(view, "input[name='tracker_config[repo]']")
+    end
+
+    test "changing tracker type in the config form live-updates the adapter fields shown", %{
+      conn: conn
+    } do
+      ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      html =
+        view
+        |> form("form[phx-submit=save_config]", %{"config" => %{"tracker_type" => "github"}})
+        |> render_change()
+
+      assert html =~ "tracker_config[owner]"
+      assert html =~ "tracker_config[repo]"
+      refute html =~ "tracker_config[host]"
+      refute html =~ "tracker_config[project_key]"
+    end
+
+    test "saves tracker.config.* fields for the current adapter type through patch_config", %{
+      conn: conn
+    } do
+      ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_tracker_config]", %{
+        "tracker_config" => %{
+          "type" => "jira",
+          "host" => "acme.atlassian.net",
+          "project_key" => "ARB",
+          "email" => "bot@acme.example",
+          "credentials_ref" => ""
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      tracker_config = reloaded.config["tracker"]["config"]
+
+      assert tracker_config["host"] == "acme.atlassian.net"
+      assert tracker_config["project_key"] == "ARB"
+      assert tracker_config["email"] == "bot@acme.example"
+    end
+
+    test "switching tracker type doesn't discard the other type's saved config", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "tracker" => %{
+              "type" => "jira",
+              "config" => %{
+                "host" => "acme.atlassian.net",
+                "project_key" => "ARB",
+                "credentials_ref" => "secret:jira"
+              }
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{"config" => %{"tracker_type" => "github"}})
+      |> render_submit()
+
+      view
+      |> form("form[phx-submit=save_tracker_config]", %{
+        "tracker_config" => %{
+          "type" => "github",
+          "owner" => "acme",
+          "repo" => "widgets",
+          # Left as-is (unchanged from the value the form pre-filled) —
+          # `credentials_ref` is one shared key in the flat `tracker.config`
+          # map, not a per-type value, so an explicit blank here would
+          # legitimately unset it. That's distinct from "switching type
+          # discarded it".
+          "credentials_ref" => "secret:jira"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      tracker_config = reloaded.config["tracker"]["config"]
+
+      assert reloaded.config["tracker"]["type"] == "github"
+      assert tracker_config["owner"] == "acme"
+      assert tracker_config["repo"] == "widgets"
+      # jira's host/project_key are distinct keys from github's owner/repo —
+      # switching types and saving github's fields must not discard them.
+      assert tracker_config["host"] == "acme.atlassian.net"
+      assert tracker_config["project_key"] == "ARB"
+      assert tracker_config["credentials_ref"] == "secret:jira"
+    end
+
+    test "tracker credentials_ref is a select over existing secret names, never a raw value field",
+         %{conn: conn} do
+      ws = new_workspace(%{config: %{"tracker" => %{"type" => "jira"}}})
+
+      {:ok, ws} =
+        Ash.update(ws, %{secrets: %{"jira_token" => "tok-not-echoed"}}, action: :update)
+
+      {:ok, view, html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      assert has_element?(view, "select[name='tracker_config[credentials_ref]']")
+      refute has_element?(view, "input[name='tracker_config[credentials_ref]']")
+      assert html =~ "secret:jira_token"
+      refute html =~ "tok-not-echoed"
+
+      view
+      |> form("form[phx-submit=save_tracker_config]", %{
+        "tracker_config" => %{"type" => "jira", "credentials_ref" => "secret:jira_token"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["tracker"]["config"]["credentials_ref"] == "secret:jira_token"
+    end
+
+    test "blank tracker.config fields unset rather than writing empty values", %{conn: conn} do
+      ws =
+        new_workspace(%{
+          config: %{
+            "tracker" => %{
+              "type" => "jira",
+              "config" => %{
+                "host" => "acme.atlassian.net",
+                "project_key" => "ARB",
+                "email" => "bot@acme.example",
+                "credentials_ref" => "secret:jira"
+              }
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_tracker_config]", %{
+        "tracker_config" => %{
+          "type" => "jira",
+          "host" => "acme.atlassian.net",
+          "project_key" => "ARB",
+          "email" => "  ",
+          "credentials_ref" => ""
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      tracker_config = reloaded.config["tracker"]["config"]
+
+      refute Map.has_key?(tracker_config, "email")
+      refute Map.has_key?(tracker_config, "credentials_ref")
+      assert tracker_config["host"] == "acme.atlassian.net"
+      assert tracker_config["project_key"] == "ARB"
+    end
+
     test "adds and removes per-provider tier_models overrides", %{conn: conn} do
       ws = new_workspace()
 
