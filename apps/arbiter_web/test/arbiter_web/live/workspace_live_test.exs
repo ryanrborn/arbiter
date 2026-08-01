@@ -165,6 +165,166 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["review"]["required"] == true
     end
 
+    test "saves routing.base_policy and routing.budget_usd_per_day through patch_config", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "by_budget",
+          "routing_base_policy" => "by_difficulty",
+          "routing_budget_usd_per_day" => "12.5"
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["routing"]["policy"] == "by_budget"
+      assert reloaded.config["routing"]["base_policy"] == "by_difficulty"
+      assert reloaded.config["routing"]["budget_usd_per_day"] == 12.5
+    end
+
+    test "blank routing.base_policy/budget_usd_per_day unset rather than writing empty values", %{
+      conn: conn
+    } do
+      ws =
+        new_workspace(%{
+          config: %{
+            "routing" => %{
+              "policy" => "by_budget",
+              "base_policy" => "by_difficulty",
+              "budget_usd_per_day" => 12.5
+            }
+          }
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_config]", %{
+        "config" => %{
+          "tracker_type" => "none",
+          "merger_strategy" => "direct",
+          "routing_policy" => "by_budget",
+          "routing_base_policy" => "",
+          "routing_budget_usd_per_day" => "  "
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["routing"]["policy"] == "by_budget"
+      refute Map.has_key?(reloaded.config["routing"], "base_policy")
+      refute Map.has_key?(reloaded.config["routing"], "budget_usd_per_day")
+    end
+
+    test "rejects a non-numeric routing.budget_usd_per_day", %{conn: conn} do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      html =
+        view
+        |> form("form[phx-submit=save_config]", %{
+          "config" => %{
+            "tracker_type" => "none",
+            "merger_strategy" => "direct",
+            "routing_policy" => "by_budget",
+            "routing_budget_usd_per_day" => "not-a-number"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ "must be a number"
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["routing"] || %{}, "budget_usd_per_day")
+    end
+
+    test "adds, edits, and removes routing.rules entries (D0..D4 keyed rules)", %{conn: conn} do
+      ws = new_workspace(%{config: %{"routing" => %{"policy" => "by_difficulty"}}})
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=save_routing_rule]", %{
+        "rule" => %{
+          "key" => "D4",
+          "model_tier" => "flagship",
+          "thinking" => "xhigh",
+          "model" => ""
+        }
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["routing"]["rules"]["D4"] == %{
+               "model_tier" => "flagship",
+               "thinking" => "xhigh"
+             }
+
+      # routing.policy is untouched by the rule sub-form.
+      assert reloaded.config["routing"]["policy"] == "by_difficulty"
+
+      # Editing replaces the rule wholesale rather than merging stale fields.
+      view
+      |> form("form[phx-submit=save_routing_rule]", %{
+        "rule" => %{"key" => "D4", "model_tier" => "premium", "thinking" => "", "model" => ""}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["routing"]["rules"]["D4"] == %{"model_tier" => "premium"}
+
+      view
+      |> element("button[phx-click=rm_routing_rule][phx-value-key='D4']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      refute Map.has_key?(reloaded.config["routing"]["rules"] || %{}, "D4")
+    end
+
+    test "adds and removes routing.adapters entries", %{conn: conn} do
+      ws = new_workspace(%{config: %{"routing" => %{"policy" => "round_robin"}}})
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_routing_adapter]", %{
+        "adapter" => %{"model_tier" => "economy", "thinking" => "", "model" => ""}
+      })
+      |> render_submit()
+
+      view
+      |> form("form[phx-submit=add_routing_adapter]", %{
+        "adapter" => %{"model_tier" => "premium", "thinking" => "high", "model" => ""}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["routing"]["adapters"] == [
+               %{"model_tier" => "economy"},
+               %{"model_tier" => "premium", "thinking" => "high"}
+             ]
+
+      view
+      |> element("button[phx-click=rm_routing_adapter][phx-value-index='0']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["routing"]["adapters"] == [
+               %{"model_tier" => "premium", "thinking" => "high"}
+             ]
+    end
+
     test "saves merge.* settings (auto_merge, pr_title_format, watchdog_max_polls, watch_pipeline, auto_sync_primary) through patch_config",
          %{conn: conn} do
       ws = new_workspace()
