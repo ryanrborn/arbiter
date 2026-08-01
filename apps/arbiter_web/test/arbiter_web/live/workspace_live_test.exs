@@ -287,6 +287,33 @@ defmodule ArbiterWeb.WorkspaceLiveTest do
       assert reloaded.config["review_automation"]["repo_overrides"] == %{}
     end
 
+    test "removes a review_automation.repo_overrides entry whose repo name contains a dot", %{
+      conn: conn
+    } do
+      ws = new_workspace()
+
+      {:ok, view, _html} = live(conn, ~p"/workspaces/#{ws.id}")
+
+      view
+      |> form("form[phx-submit=add_repo_override]", %{
+        "repo_override" => %{"repo" => "acme/widgets.js", "mode" => "auto"}
+      })
+      |> render_submit()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+
+      assert reloaded.config["review_automation"]["repo_overrides"] == %{
+               "acme/widgets.js" => "auto"
+             }
+
+      view
+      |> element("button[phx-click=rm_repo_override][phx-value-repo='acme/widgets.js']")
+      |> render_click()
+
+      {:ok, reloaded} = Ash.get(Workspace, ws.id)
+      assert reloaded.config["review_automation"]["repo_overrides"] == %{}
+    end
+
     test "renders agent.type and review_agent.type as an ordered precedence list", %{conn: conn} do
       ws =
         new_workspace(%{
