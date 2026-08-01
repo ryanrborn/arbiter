@@ -13,6 +13,11 @@ defmodule Arbiter.Tasks.WorkspaceTest do
       assert is_binary(ws.id)
     end
 
+    test "prefix defaults to \"ar\" when not specified" do
+      assert {:ok, ws} = Ash.create(Workspace, %{name: "prefix-default"})
+      assert ws.prefix == "ar"
+    end
+
     test "succeeds with tracker config and ignores a legacy vernacular key" do
       # Forward-safe: an existing workspace may still carry a `"vernacular"`
       # config key. It is no longer validated — it is accepted and stored as-is
