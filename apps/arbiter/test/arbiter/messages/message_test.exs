@@ -193,7 +193,12 @@ defmodule Arbiter.Messages.MessageTest do
         Message.send_mail(%{to_ref: "admiral", kind: :info, body: "legacy", workspace_id: @ws})
 
       {:ok, current} =
-        Message.send_mail(%{to_ref: "coordinator", kind: :info, body: "current", workspace_id: @ws})
+        Message.send_mail(%{
+          to_ref: "coordinator",
+          kind: :info,
+          body: "current",
+          workspace_id: @ws
+        })
 
       {:ok, _} = Message.mark_read(legacy)
       {:ok, _} = Message.mark_read(current)
@@ -207,7 +212,12 @@ defmodule Arbiter.Messages.MessageTest do
         Message.send_mail(%{to_ref: "admiral", kind: :info, body: "legacy", workspace_id: @ws})
 
       {:ok, _} =
-        Message.send_mail(%{to_ref: "coordinator", kind: :info, body: "current", workspace_id: @ws})
+        Message.send_mail(%{
+          to_ref: "coordinator",
+          kind: :info,
+          body: "current",
+          workspace_id: @ws
+        })
 
       assert {:ok, _, _, 0} = Message.clear_all("admiral", workspace_id: @ws)
       assert Message.inbox("coordinator", workspace_id: @ws) == []
@@ -301,7 +311,7 @@ defmodule Arbiter.Messages.MessageTest do
   end
 
   describe "clear_read/2" do
-    test "destroys only already-read mail addressed to to_ref, keeping unread" do
+    test "clears (soft) only already-read mail addressed to to_ref, keeping unread" do
       {:ok, read} =
         Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "read", workspace_id: @ws})
 
@@ -312,11 +322,13 @@ defmodule Arbiter.Messages.MessageTest do
 
       assert Message.clear_read("admiral") == {:ok, 1, 0, 1}
 
-      assert {:error, _} = Ash.get(Message, read.id)
-      assert {:ok, _} = Ash.get(Message, unread.id)
+      # Soft: the read row is retained (cleared_at stamped), not destroyed.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, read.id)
+      assert %DateTime{} = cleared_at
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, unread.id)
     end
 
-    test "leaves other recipients' read mail untouched" do
+    test "leaves other recipients' outstanding mail untouched" do
       {:ok, mine} =
         Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "a", workspace_id: @ws})
 
@@ -327,7 +339,213 @@ defmodule Arbiter.Messages.MessageTest do
       {:ok, _} = Message.mark_read(theirs)
 
       assert Message.clear_read("admiral") == {:ok, 1, 0, 0}
-      assert {:ok, _} = Ash.get(Message, theirs.id)
+      # theirs stays outstanding (read, not cleared).
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, theirs.id)
+    end
+  end
+
+  describe "three states: unread / outstanding / cleared" do
+    test "a fresh mailbox message is unread (read_at nil, cleared_at nil)" do
+      {:ok, m} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "fresh", workspace_id: @ws})
+
+      assert m.read_at == nil
+      assert m.cleared_at == nil
+      assert [%{body: "fresh"}] = Message.inbox("admiral", workspace_id: @ws)
+      assert Message.outstanding("admiral", workspace_id: @ws) == []
+    end
+
+    test "reading a body stamps read_at → outstanding; cleared_at stays nil" do
+      {:ok, m} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "seen", workspace_id: @ws})
+
+      {:ok, read} = Message.mark_read(m)
+      assert %DateTime{} = read.read_at
+      assert read.cleared_at == nil
+
+      # It drops out of the unread queue but is now outstanding.
+      assert Message.inbox("admiral", workspace_id: @ws) == []
+      assert [%{body: "seen"}] = Message.outstanding("admiral", workspace_id: @ws)
+    end
+
+    test "mark_cleared stamps cleared_at → cleared; leaves neither queue" do
+      {:ok, m} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "done", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(m)
+      {:ok, cleared} = Message.mark_cleared(m)
+
+      assert %DateTime{} = cleared.cleared_at
+      assert Message.inbox("admiral", workspace_id: @ws) == []
+      assert Message.outstanding("admiral", workspace_id: @ws) == []
+      # The row is retained and still fetchable — clear is soft, not destructive.
+      assert {:ok, %Message{body: "done"}} = Ash.get(Message, m.id)
+    end
+
+    test "mark_cleared is idempotent, mirroring mark_read" do
+      {:ok, m} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "x", workspace_id: @ws})
+
+      {:ok, first} = Message.mark_cleared(m)
+      {:ok, second} = Message.mark_cleared(first)
+
+      assert %DateTime{} = first.cleared_at
+      assert %DateTime{} = second.cleared_at
+    end
+
+    test "mark_cleared accepts an id" do
+      {:ok, m} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "byid", workspace_id: @ws})
+
+      {:ok, cleared} = Message.mark_cleared(m.id)
+      assert %DateTime{} = cleared.cleared_at
+    end
+  end
+
+  describe "cleared_at scoped to @mailbox_kinds (notifications unaffected)" do
+    test "a notification cannot be cleared — cleared_at is rejected" do
+      {:ok, n} = Message.notify(%{workspace_id: @ws, body: "event"})
+
+      assert {:error, %Ash.Error.Invalid{}} = Message.mark_cleared(n)
+      # Unchanged: still fetchable, still unconsumed.
+      assert {:ok, %Message{read_at: nil, cleared_at: nil}} = Ash.get(Message, n.id)
+    end
+
+    test "clear_all leaves notifications untouched" do
+      {:ok, n} = Message.notify(%{workspace_id: @ws, body: "hum"})
+
+      {:ok, _} =
+        Message.send_mail(%{to_ref: "admiral", kind: :info, body: "mail", workspace_id: @ws})
+
+      Message.clear_all("admiral", workspace_id: @ws)
+
+      assert {:ok, %Message{cleared_at: nil}} = Ash.get(Message, n.id)
+    end
+  end
+
+  describe "clear_read/2 is soft (stamps cleared_at, retains rows)" do
+    test "outstanding rows become cleared but remain retrievable" do
+      {:ok, read} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "outstanding",
+          workspace_id: @ws
+        })
+
+      {:ok, _} = Message.mark_read(read)
+
+      {:ok, unread} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "pending", workspace_id: @ws})
+
+      # 1 cleared, 0 unread cleared, 1 remaining unread.
+      assert Message.clear_read("admiral") == {:ok, 1, 0, 1}
+
+      # The row is retained (soft), with cleared_at stamped.
+      assert {:ok, %Message{cleared_at: cleared_at}} = Ash.get(Message, read.id)
+      assert %DateTime{} = cleared_at
+      # Unread pending row untouched.
+      assert {:ok, %Message{read_at: nil, cleared_at: nil}} = Ash.get(Message, unread.id)
+      # Cleared drops out of both queues.
+      assert Message.inbox("admiral", workspace_id: @ws) |> Enum.map(& &1.body) == ["pending"]
+      assert Message.outstanding("admiral", workspace_id: @ws) == []
+    end
+  end
+
+  describe "clear_all/2 is soft (stamps cleared_at on read + unread)" do
+    test "every mailbox row addressed to to_ref is cleared but retained" do
+      {:ok, read} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "r", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(read)
+
+      {:ok, unread} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "u", workspace_id: @ws})
+
+      assert {:ok, 1, 1, 0} = Message.clear_all("admiral", workspace_id: @ws)
+
+      assert {:ok, %Message{cleared_at: c1}} = Ash.get(Message, read.id)
+      assert {:ok, %Message{cleared_at: c2}} = Ash.get(Message, unread.id)
+      assert %DateTime{} = c1
+      assert %DateTime{} = c2
+      assert Message.inbox("admiral", workspace_id: @ws) == []
+      assert Message.outstanding("admiral", workspace_id: @ws) == []
+    end
+  end
+
+  describe "hard_purge/2 is the only destructive path" do
+    test "destroys cleared rows; leaves unread and outstanding intact" do
+      {:ok, cleared} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "gone", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(cleared)
+      {:ok, _} = Message.mark_cleared(cleared)
+
+      {:ok, outstanding} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "kept-out", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(outstanding)
+
+      {:ok, unread} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "kept-unread",
+          workspace_id: @ws
+        })
+
+      assert {:ok, 1} = Message.hard_purge("admiral", workspace_id: @ws)
+
+      # Only the cleared row is destroyed.
+      assert {:error, _} = Ash.get(Message, cleared.id)
+      assert {:ok, _} = Ash.get(Message, outstanding.id)
+      assert {:ok, _} = Ash.get(Message, unread.id)
+    end
+
+    test "clear_read never destroys — a cleared message is still retrievable afterwards" do
+      {:ok, m} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "keep", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(m)
+      {:ok, _, _, _} = Message.clear_read("admiral", workspace_id: @ws)
+
+      # Soft clear retained the row — hard_purge is the only path that removes it.
+      assert {:ok, %Message{}} = Ash.get(Message, m.id)
+    end
+  end
+
+  describe "backfill invariant (migration 20260803200744)" do
+    test "cleared_at = read_at leaves no historical read row 'outstanding'" do
+      # A pre-migration read row is shaped exactly like today's "outstanding"
+      # (read_at set, cleared_at nil). Seed both a read and an unread row, then
+      # run the migration's backfill statement verbatim.
+      {:ok, historical_read} =
+        Ash.create(Message, %{kind: :info, to_ref: "admiral", body: "old-read", workspace_id: @ws})
+
+      {:ok, _} = Message.mark_read(historical_read)
+
+      {:ok, historical_unread} =
+        Ash.create(Message, %{
+          kind: :info,
+          to_ref: "admiral",
+          body: "old-unread",
+          workspace_id: @ws
+        })
+
+      # Verbatim backfill from priv/repo/migrations/20260803200744_add_cleared_at_to_messages.exs
+      Arbiter.Repo.query!("UPDATE messages SET cleared_at = read_at WHERE read_at IS NOT NULL")
+
+      {:ok, read_after} = Ash.get(Message, historical_read.id)
+      {:ok, unread_after} = Ash.get(Message, historical_unread.id)
+
+      # The read row is now cleared, with cleared_at == read_at.
+      assert read_after.cleared_at == read_after.read_at
+      # The unread row is untouched — still pending.
+      assert unread_after.read_at == nil
+      assert unread_after.cleared_at == nil
+
+      # The decisive invariant: NO historical row lands in the outstanding queue.
+      assert Message.outstanding("admiral", workspace_id: @ws) == []
     end
   end
 

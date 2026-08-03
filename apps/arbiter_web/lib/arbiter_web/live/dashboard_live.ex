@@ -180,8 +180,9 @@ defmodule ArbiterWeb.DashboardLive do
     {:noreply, refresh_coordinator_inbox(socket)}
   end
 
-  # Drain the read tail of the Coordinator mailbox. Mirrors `arb inbox clear` /
-  # `DELETE /api/messages?to_ref=coordinator` — unread mail is left untouched.
+  # Soft-clear the outstanding tail of the Coordinator mailbox (stamps
+  # cleared_at; rows retained). Mirrors `arb inbox clear` /
+  # `DELETE /api/messages?to_ref=coordinator` — pending mail is left untouched.
   def handle_event("clear_coordinator", _params, socket) do
     _ = Message.clear_read(@coordinator_ref)
     {:noreply, refresh_coordinator_inbox(socket)}
@@ -548,18 +549,25 @@ defmodule ArbiterWeb.DashboardLive do
 
   # ---- coordinator mailbox ----
 
-  # Unread mailbox-family messages addressed to the Coordinator, fleet-wide
-  # (every workspace), oldest first — so the longest-waiting escalation sits
-  # at the top of the queue. Mirrors `arb inbox` (the Coordinator's unread view).
+  # The Coordinator mailbox, fleet-wide (every workspace), oldest first — so the
+  # longest-waiting item sits at the top of the queue. Two distinct figures:
+  #
+  #   * pending (unread)     — `inbox/2`: not yet seen. Mirrors `arb inbox`.
+  #   * outstanding          — `outstanding/2`: seen but not cleared. The queue
+  #                            of work that still owes an action; reading no
+  #                            longer empties it, so this is what "still open"
+  #                            actually means now that clear is soft.
   defp refresh_coordinator_inbox(socket) do
-    inbox =
+    {inbox, outstanding} =
       try do
-        Message.inbox(@coordinator_ref)
+        {Message.inbox(@coordinator_ref), Message.outstanding(@coordinator_ref)}
       rescue
-        _ -> []
+        _ -> {[], []}
       end
 
-    assign(socket, :coordinator_inbox, inbox)
+    socket
+    |> assign(:coordinator_inbox, inbox)
+    |> assign(:coordinator_outstanding_count, length(outstanding))
   end
 
   # ---- workspaces ----
@@ -1513,14 +1521,24 @@ defmodule ArbiterWeb.DashboardLive do
                 ]}>
                   {length(@coordinator_inbox)} unread
                 </span>
+                <span
+                  id="coordinator-mailbox-outstanding"
+                  class={[
+                    "badge badge-sm",
+                    if(@coordinator_outstanding_count == 0, do: "badge-ghost", else: "badge-info")
+                  ]}
+                  title="Seen but not yet cleared — the triage queue"
+                >
+                  {@coordinator_outstanding_count} outstanding
+                </span>
               </h2>
               <button
                 phx-click="clear_coordinator"
                 class="btn btn-xs btn-ghost gap-1"
-                data-confirm="Clear all already-read Coordinator mail? (unread is kept)"
-                title="Drain the read tail — already-read mail is destroyed, unread is kept"
+                data-confirm="Clear the outstanding (already-read) Coordinator tail? Rows are kept, just marked cleared. (unread is kept)"
+                title="Soft-clear the outstanding tail — already-read mail is marked cleared (retained), unread is kept"
               >
-                <.icon name="hero-trash" class="size-3.5" /> Clear read
+                <.icon name="hero-check-circle" class="size-3.5" /> Clear read
               </button>
             </div>
 
