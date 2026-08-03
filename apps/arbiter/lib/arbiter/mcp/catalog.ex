@@ -1227,7 +1227,29 @@ defmodule Arbiter.MCP.Catalog do
           "value" => %{
             "description" =>
               "Positive integer (or, for credential_watchdog_adapters, a list of agent-type " <>
-                "strings), or null to clear the override."
+                "strings), or null to clear the override.",
+            "oneOf" => [
+              %{
+                "type" => "null",
+                "description" => "Clear the override and fall back to default."
+              },
+              %{
+                "type" => "integer",
+                "minimum" => 1,
+                "description" =>
+                  "Positive integer for conductor_system_max_concurrent, " <>
+                    "credential_watchdog_interval_ms, or credential_watchdog_recovery_interval_ms."
+              },
+              %{
+                "type" => "array",
+                "items" => %{
+                  "type" => "string",
+                  "enum" => ["claude", "gemini", "codex"]
+                },
+                "description" =>
+                  "List of agent type strings for credential_watchdog_adapters (e.g., [\"claude\", \"gemini\"])."
+              }
+            ]
           }
         },
         "required" => ["key", "value"],

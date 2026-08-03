@@ -236,6 +236,59 @@ defmodule ArbiterWeb.MCP.PlugTest do
       assert result["structuredContent"]["config"]["agent"]["type"] == ["claude", "gemini"]
     end
 
+    test "workspace_config_set preserves legitimate string values (regression test: bd-7lmjc5)", ctx do
+      # workspace_config_set's schema explicitly allows string values.
+      # A client sending "5" or "true" as a legitimate string config value should NOT
+      # have it decoded to a number/boolean. This verifies the unwrap helper only
+      # unwraps structural types (list/map) for workspace_config_set, not scalars.
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "workspace_config_set",
+            "arguments" => %{"key" => "some.string.setting", "value" => "5"}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      # The value should be stored as the string "5", not the integer 5
+      assert result["structuredContent"]["config"]["some"]["string"]["setting"] == "5"
+    end
+
+    test "installation_config_set accepts a real JSON array value end-to-end", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "installation_config_set",
+            "arguments" => %{"key" => "credential_watchdog_adapters", "value" => ["claude", "gemini"]}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["value"] == ["claude", "gemini"]
+    end
+
+    test "installation_config_set accepts a real integer value end-to-end", ctx do
+      conn =
+        rpc(
+          ctx.conn,
+          ctx.coordinator_token,
+          req("tools/call", %{
+            "name" => "installation_config_set",
+            "arguments" => %{"key" => "conductor_system_max_concurrent", "value" => 5}
+          })
+        )
+
+      result = json_response(conn, 200)["result"]
+      assert result["isError"] == false
+      assert result["structuredContent"]["value"] == 5
+    end
+
     test "worker_dispatch without can_dispatch is a JSON-RPC not-permitted error", ctx do
       no_dispatch = Scope.mint_coordinator(ctx.ws.id, can_dispatch: false)
 
