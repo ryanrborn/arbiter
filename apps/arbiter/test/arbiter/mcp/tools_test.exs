@@ -148,6 +148,74 @@ defmodule Arbiter.MCP.ToolsTest do
       # Second check is empty — the first marked them read.
       assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
     end
+
+    test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ctx.ws.id))
+
+      # Create and read a message
+      {:ok, msg1} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "first"})
+
+      {:ok, _} = Tools.inbox_check(ctx.worker, %{})
+      assert_receive {:message_read, _}
+
+      # Create another unread message
+      {:ok, _msg2} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "second"})
+
+      assert_receive {:new_message, _}
+
+      # Get the pre-call state for comparison
+      {:ok, pre_call_msg1} = Ash.get(Message, msg1.id)
+
+      # Get the outstanding message (the first one, which is now read but uncleared)
+      assert {:ok, %{messages: [returned_msg], count: 1}} =
+               Tools.inbox_check(ctx.worker, %{"state" => "outstanding"})
+
+      assert returned_msg.body == "first"
+
+      # Verify the message was not mutated
+      {:ok, refreshed_msg1} = Ash.get(Message, msg1.id)
+
+      assert returned_msg.read_at == DateTime.to_iso8601(refreshed_msg1.read_at)
+      assert returned_msg.cleared_at == refreshed_msg1.cleared_at
+      assert refreshed_msg1.updated_at == pre_call_msg1.updated_at
+
+      # Verify no PubSub broadcasts fired
+      refute_receive {:message_read, _}, 100
+      refute_receive {:mailbox_cleared, _}, 100
+
+      # Verify the second (unread) message is still there
+      assert {:ok, %{messages: [unread_msg]}} =
+               Tools.inbox_check(ctx.worker, %{})
+
+      assert unread_msg.body == "second"
+    end
+
+    test "invalid state value is rejected", ctx do
+      {:ok, _} = Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "test"})
+
+      assert {:error, {kind, message}} =
+               Tools.inbox_check(ctx.worker, %{"state" => "invalid_state"})
+
+      assert kind == :invalid_args
+      assert message =~ "state"
+    end
+
+    test "default (omitted state) reproduces today's behaviour: returns unread, marks them read",
+         ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: ctx.task.id, body: "test"})
+
+      # Default behaviour: returns unread messages and marks them read
+      assert {:ok, %{messages: [msg], count: 1}} =
+               Tools.inbox_check(ctx.worker, %{})
+
+      assert msg.body == "test"
+
+      # Second call is empty
+      assert {:ok, %{count: 0}} = Tools.inbox_check(ctx.worker, %{})
+    end
   end
 
   describe "coordinator_inbox/2" do
@@ -204,6 +272,92 @@ defmodule Arbiter.MCP.ToolsTest do
                Catalog.call(ctx.worker, "coordinator_inbox", %{})
 
       assert message =~ "not permitted"
+    end
+
+    test "state: \"outstanding\" returns read-but-uncleared messages without mutating", ctx do
+      Phoenix.PubSub.subscribe(Arbiter.PubSub, Message.topic(ctx.ws.id))
+
+      # Create and read a message
+      {:ok, msg1} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "first"})
+
+      {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
+      assert_receive {:message_read, _}
+
+      # Create another unread message
+      {:ok, _msg2} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "second"})
+
+      assert_receive {:new_message, _}
+
+      # Get the pre-call state for comparison
+      {:ok, pre_call_msg1} = Ash.get(Message, msg1.id)
+
+      # Get the outstanding message (the first one, which is now read but uncleared)
+      assert {:ok, %{messages: [returned_msg], count: 1}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{"state" => "outstanding"})
+
+      assert returned_msg.body == "first"
+
+      # Verify the message was not mutated (read_at and cleared_at unchanged)
+      {:ok, refreshed_msg1} = Ash.get(Message, msg1.id)
+
+      assert returned_msg.read_at == DateTime.to_iso8601(refreshed_msg1.read_at)
+      assert returned_msg.cleared_at == refreshed_msg1.cleared_at
+      assert refreshed_msg1.updated_at == pre_call_msg1.updated_at
+
+      # Verify no PubSub broadcasts fired
+      refute_receive {:message_read, _}, 100
+      refute_receive {:mailbox_cleared, _}, 100
+
+      # Verify the second (unread) message is not included
+      assert {:ok, %{messages: [unread_msg]}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert unread_msg.body == "second"
+    end
+
+    test "state: \"outstanding\" with clear: true is rejected", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
+
+      {:ok, _} = Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      # Try to combine state: outstanding with clear: true
+      assert {:error, {kind, message}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{
+                 "state" => "outstanding",
+                 "clear" => true
+               })
+
+      assert kind == :invalid_args
+      assert message =~ "outstanding"
+    end
+
+    test "invalid state value is rejected", ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
+
+      assert {:error, {kind, message}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{"state" => "invalid_state"})
+
+      assert kind == :invalid_args
+      assert message =~ "state"
+    end
+
+    test "default (omitted state) reproduces today's behaviour: returns unread, marks them read",
+         ctx do
+      {:ok, _} =
+        Message.send_mail(%{workspace_id: ctx.ws.id, to_ref: "admiral", body: "test"})
+
+      # Default behaviour: returns unread messages and marks them read
+      assert {:ok, %{messages: [msg], count: 1}} =
+               Tools.coordinator_inbox(ctx.coordinator, %{})
+
+      assert msg.body == "test"
+
+      # Second call is empty
+      assert {:ok, %{count: 0}} = Tools.coordinator_inbox(ctx.coordinator, %{})
     end
   end
 
